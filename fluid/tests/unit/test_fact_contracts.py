@@ -113,7 +113,9 @@ def test_archive_forget_preserves_provenance_and_removes_retained_text(tmp_path)
     for i in range(MAX_MEMORIES):
         store.save_memory(f"Filler observation {i}")
     assert store.archived_memories()[0].provenance == "tool"
-    assert not store.search_memories("low-trust")
+    # Round 9: tool-provenance facts are searchable (Recall flags them).
+    hits = store.search_memories("low-trust")
+    assert hits and hits[0][0].provenance == "tool" and hits[0][1] is True
     assert store.delete_memory(first.id)
     assert "low-trust" not in (tmp_path / "memories.json").read_text()
 

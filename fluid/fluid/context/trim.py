@@ -36,7 +36,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from fluid.messages import Image, Message, Text, ToolResultBlock
+from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.store.base import SessionNode
 
 
@@ -161,15 +161,104 @@ def block_head(block: Any, limit: int = HEAD_EXCERPT_CHARS) -> str:
     return head[:limit] + ("…" if len(head) > limit else "")
 
 
-def _placeholder(node_id: str, chars: int, head: str = "", *, recall: bool = True) -> Text:
+_REF_RE = re.compile(r"_refs\[(\d+)\]")
+_LOADED_JSON_NAME_RE = re.compile(r'"name":\s*"([^"]+)"')
+_LOADED_IMPORT_RE = re.compile(r"^- ([A-Za-z0-9_]+): from tools\.", re.MULTILINE)
+_MAX_NAMED = 8
+
+
+def _full_text(block: Any) -> str:
+    parts: list[str] = []
+    for item in getattr(block, "content", None) or ():
+        text = getattr(item, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def describe_trimmed_call(call: Any, full_text: str) -> str:
+    """What a trimmed result WAS, in terms the model can act on.
+
+    Round 9: after a compaction the model re-ran Reads whose payloads were
+    still in the kernel as ``_refs``, and re-loaded the same four browser
+    tools eleven times because the placeholder said only "trimmed". So:
+
+    * a code-mode cell whose output named ``_refs[N]`` handles says those
+      handles still hold the results (the kernel keeps them across cells);
+    * a Read says which file and which lines were dropped;
+    * a ToolSearch restates the tool names it loaded — they are still
+      loaded; reloading costs the schema text again.
+    """
+    name = getattr(call, "name", None)
+    input = getattr(call, "input", None) or {}
+    if not isinstance(input, dict):
+        input = {}
+    leaf = str(name or "").split("__")[-1]
+    # Only a cell's own output names refs; a Read of a file that mentions
+    # ``_refs[3]`` in its text must not be mistaken for one.
+    is_cell = leaf == "run_python" or (call is None and "refs created this cell" in (full_text or ""))
+    refs = list(dict.fromkeys(_REF_RE.findall(full_text or ""))) if is_cell else []
+    if refs:
+        shown = ", ".join(f"_refs[{r}]" for r in refs[:_MAX_NAMED])
+        more = f" (+{len(refs) - _MAX_NAMED} more)" if len(refs) > _MAX_NAMED else ""
+        return (
+            f" The tool results this cell produced are still in the kernel as "
+            f"{shown}{more} (unless the kernel restarted since) — slice those "
+            f"before reaching for HistoryExpand or re-running the tools."
+        )
+    if leaf == "Read":
+        path = str(input.get("file_path") or "?")
+        offset = input.get("offset")
+        limit = input.get("limit")
+        try:
+            start = max(1, int(offset)) if offset is not None else None
+        except (TypeError, ValueError):
+            start = None
+        try:
+            count = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            count = None
+        if start is not None and count is not None:
+            window = f"lines {start}–{start + count - 1}"
+        elif start is not None:
+            window = f"from line {start}"
+        else:
+            window = "whole file"
+        return f" This was: read {path} {window} (dropped)."
+    if leaf == "ToolSearch":
+        query = str(input.get("query") or "")
+        names: list[str] = []
+        if query.startswith("select:"):
+            names = [n.strip().split("__")[-1] for n in query[len("select:"):].split(",") if n.strip()]
+        if not names:
+            names = _LOADED_IMPORT_RE.findall(full_text or "")
+        if not names:
+            names = [n.split("__")[-1] for n in _LOADED_JSON_NAME_RE.findall(full_text or "")]
+        names = list(dict.fromkeys(names))
+        if names:
+            shown = ", ".join(names[:_MAX_NAMED])
+            more = f" (+{len(names) - _MAX_NAMED} more)" if len(names) > _MAX_NAMED else ""
+            return (
+                f" This ToolSearch loaded: {shown}{more} — they are still "
+                f"loaded and callable; do not ToolSearch them again."
+            )
+        return f" This was a ToolSearch for {query!r}; its tools stay loaded."
+    return ""
+
+
+def _placeholder(
+    node_id: str, chars: int, head: str = "", *, recall: bool = True,
+    call: Any = None, full_text: str = "",
+) -> Text:
     excerpt = f' It began: "{head}"' if head else ""
+    what = describe_trimmed_call(call, full_text)
     route = (
         f'recover it verbatim with HistoryExpand("{node_id}") when any detail matters'
         if recall
         else "re-run the tool when any detail matters"
     )
     return Text(
-        f"[old tool result trimmed to save context — {chars} chars removed.{excerpt} "
+        f"[old tool result trimmed to save context — {chars} chars removed.{excerpt}{what} "
         f"The rest is NOT in context: do not reconstruct it from memory; {route}]"
     )
 
@@ -360,6 +449,14 @@ class ToolResultTrimmer:
         consumed = self._image_consumed if consumed is None else consumed
         if not trimmed and not consumed:
             return [n.message for n in nodes]
+        # The call behind each result, so a placeholder can say what the
+        # result was (see describe_trimmed_call).
+        calls: dict[str, Any] = {}
+        for node in nodes:
+            if node.message.role == "assistant":
+                for block in node.message.content:
+                    if isinstance(block, ToolUseBlock):
+                        calls[block.id] = block
         out: list[Message] = []
         for node in nodes:
             message = node.message
@@ -377,20 +474,23 @@ class ToolResultTrimmer:
                 if isinstance(block, ToolResultBlock) and key in trimmed:
                     # An image is not recoverable the way text is, so it does
                     # not get text's placeholder.
-                    render = (
-                        _image_placeholder
-                        if self._has_image(block)
-                        else _placeholder
-                    )
+                    if self._has_image(block):
+                        rendered = _image_placeholder(
+                            node.node_id, block_chars(block), block_head(block),
+                            recall=self.config.recall_tools,
+                        )
+                    else:
+                        rendered = _placeholder(
+                            node.node_id, block_chars(block), block_head(block),
+                            recall=self.config.recall_tools,
+                            call=calls.get(block.tool_use_id),
+                            full_text=_full_text(block),
+                        )
                     blocks.append(
                         ToolResultBlock(
                             tool_use_id=block.tool_use_id,
-                            content=[
-                                render(
-                                    node.node_id, block_chars(block), block_head(block),
-                                    recall=self.config.recall_tools,
-                                )
-                            ] + [Text(s.render()) for s in block.delivered_steers],
+                            content=[rendered]
+                            + [Text(s.render()) for s in block.delivered_steers],
                             is_error=block.is_error,
                             delivered_steers=block.delivered_steers,
                             delivery_metadata_version=block.delivery_metadata_version,

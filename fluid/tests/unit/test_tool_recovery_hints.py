@@ -258,8 +258,8 @@ async def test_grep_rejects_a_missing_root_cleanly(tmp_path) -> None:
     out = await registry.dispatch(
         "Grep", {"pattern": "x", "path": str(tmp_path / "nope" / "src")}, ctx
     )
-    assert out.is_error
-    assert out.text.startswith("path does not exist:")
+    assert out.is_error and out.soft_error and out.error_code == "missing_path"
+    assert out.text.startswith("(path missing:")
     # No "searched via rg under ..." header to mistake for a result.
     assert "searched via" not in out.text
 

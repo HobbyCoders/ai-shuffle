@@ -22,11 +22,12 @@ half an hour redoing work, with nothing durable left behind. So the harness
 detects the mistake MECHANICALLY instead of hoping for self-report: a
 not-found on a path the model constructed, a tool failing over and over, a
 re-read of content already delivered, a no-match search re-run with
-near-identical arguments. Each observation lands as a high-salience
-``friction`` journal entry (the same propose-then-curate convention Remember
-uses: a salient entry plus ``mark_urgent()``), carrying the mechanical facts
-and no interpretation — deciding what the facts MEAN is the synthesizer's job,
-not the detector's.
+near-identical arguments. Each observation lands as a ``friction`` journal
+entry carrying the mechanical facts and no interpretation — deciding what the
+facts MEAN is the synthesizer's job, not the detector's. Friction does NOT
+make the next synthesis pass urgent (round 9: that spent the daily inference
+budget on three-entry slices); it waits for the normal slice like any other
+entry, and only an explicit Remember pulls a pass forward.
 """
 
 from __future__ import annotations
@@ -244,25 +245,25 @@ def append_friction(
     synthesizer: Any | None,
     entries: list[dict[str, Any]],
 ) -> None:
-    """Write friction entries and flag the synthesizer urgent. Never raises.
+    """Write friction entries to the journal. Never raises.
 
-    The urgency flag is Remember's convention (``mark_urgent`` drops the
-    trigger threshold to "any new entries at all"), so the friction lands in
-    the very next pass — the one the turn's own ``assistant`` event kicks —
-    instead of waiting for the eighth journal entry. It deliberately does NOT
-    ``kick()``: a mid-turn pass would race the rest of the turn's evidence,
-    and the turn-end kick is moments away.
+    Friction used to ``mark_urgent()`` the synthesizer so it landed in the
+    very next pass. That was the wrong lever: nearly every turn produces
+    some friction, so every turn became an urgent pass over three to eight
+    entries, and the 48-call daily budget (``facts.MAX_INFERENCE_CALLS_PER_
+    DAY``) was gone by late morning with nothing to show. The synthesis
+    prompt itself says a single friction event is noise and only repeated
+    friction points at a durable fact — which is exactly what waiting for
+    the normal ``MIN_NEW_ENTRIES`` slice gives it. Urgency stays reserved
+    for an explicit Remember. This also deliberately does NOT ``kick()``: a
+    mid-turn pass would race the rest of the turn's evidence, and the
+    turn-end kick is moments away.
     """
     if skills is None or not entries:
         return
     for entry in entries:
         try:
             skills.journal_append(entry)
-        except Exception:
-            pass
-    if synthesizer is not None:
-        try:
-            synthesizer.mark_urgent()
         except Exception:
             pass
 

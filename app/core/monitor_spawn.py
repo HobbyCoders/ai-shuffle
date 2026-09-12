@@ -342,9 +342,9 @@ def _summary_budget() -> int:
     try:
         from app.core.config import settings
 
-        return max(120, int(getattr(settings, "monitor_summary_max_chars", 1000)))
+        return max(120, int(getattr(settings, "monitor_summary_max_chars", 4000)))
     except Exception:  # noqa: BLE001 — config must never break a completion
-        return 1000
+        return 4000
 
 
 def collapse_repeated_lines(lines: List[str]) -> List[str]:
@@ -414,8 +414,16 @@ def _verdict_lines(text: str, *, budget: int) -> List[str]:
     return picked
 
 
-def _summarize(lines: list, *, budget: Optional[int] = None) -> str:
+def _summarize(
+    lines: list, *, budget: Optional[int] = None, exit_code: Optional[int] = None
+) -> str:
     """The buffered output, capped at the wake-summary budget, TAIL-BIASED.
+
+    ``exit_code`` shapes the truncation notice: a run that exited 0 says so
+    and tells the reader the tail is optional. The round-9 audit found models
+    pulling 40-157 KB through TaskOutput AFTER the exit code was already
+    known, because the old notice ("TaskOutput has the full buffer") read as
+    an instruction.
 
     The cap is about what a WAKE TURN has to read, not about what is kept: the
     full buffer stays available through TaskOutput. Audited wake turns were
@@ -454,9 +462,13 @@ def _summarize(lines: list, *, budget: Optional[int] = None) -> str:
     kept = [line for line in kept if line not in tail]
     kept_text = "\n".join(kept)
     dropped = len(text) - len(tail) - len(kept_text)
+    if exit_code == 0:
+        notice = f"... [{dropped} chars truncated — exit 0; TaskOutput only if you need the tail] ..."
+    else:
+        notice = f"... [{dropped} chars truncated — TaskOutput(lines=N) for a longer tail] ..."
     return (
         (kept_text + "\n" if kept_text else "")
-        + f"... [{dropped} chars truncated — TaskOutput has the full buffer] ...\n"
+        + notice + "\n"
         + tail
     )
 
@@ -618,7 +630,7 @@ def settle_monitor_task(
     deliberate = recorded in _DELIBERATE_STATUSES and bool(reason)
     if deliberate:
         return "killed", _cause_line(reason, recorded_summary, serves=serves)
-    summary = _summarize(lines)
+    summary = _summarize(lines, exit_code=exit_code)
     if not summary:
         # Empty buffer usually means the command redirected into a log file;
         # the tail of that file is the result the parent was woken for.
@@ -730,7 +742,9 @@ def settle_inline_monitor_task(
         serves=False,
     )
     if task.lines:
-        output = _summarize(list(task.lines), budget=_INLINE_OUTPUT_MAX_CHARS)
+        output = _summarize(
+            list(task.lines), budget=_INLINE_OUTPUT_MAX_CHARS, exit_code=task.exit_code
+        )
         output += not_executable_hint(task.exit_code, output)
     return record_settled_status(session_id, task.task_id, status, output, serves=False)
 

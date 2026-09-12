@@ -183,7 +183,10 @@ export class Session {
    * plain viewport shot. Document coordinates are converted to the viewport
    * (what page.mouse expects) at act time by {@link toViewportPoint}.
    */
-  private lastScreenshot = { scale: 1, offsetX: 0, offsetY: 0 };
+  private lastScreenshot: {
+    scale: number; offsetX: number; offsetY: number;
+    kind: "viewport" | "region" | "full"; viewportW: number; viewportH: number;
+  } = { scale: 1, offsetX: 0, offsetY: 0, kind: "viewport", viewportW: 0, viewportH: 0 };
   /** Tail of the per-session serialization queue (see {@link runExclusive}). */
   private tail: Promise<unknown> = Promise.resolve();
 
@@ -679,13 +682,49 @@ export class Session {
     return [docX - scroll.x, docY - scroll.y];
   }
 
-  setLastScreenshot(mapping: { scale: number; offsetX: number; offsetY: number }): void {
+  setLastScreenshot(mapping: {
+    scale: number; offsetX: number; offsetY: number;
+    kind?: "viewport" | "region" | "full"; viewportW?: number; viewportH?: number;
+  }): void {
     this.screenshotValid = true;
     this.lastScreenshot = {
       scale: mapping.scale > 0 ? mapping.scale : 1,
       offsetX: mapping.offsetX,
       offsetY: mapping.offsetY,
+      kind: mapping.kind ?? "viewport",
+      viewportW: mapping.viewportW ?? 0,
+      viewportH: mapping.viewportH ?? 0,
     };
+  }
+
+  hasValidScreenshot(): boolean { return this.screenshotValid; }
+
+  /**
+   * Re-validate a stale VIEWPORT screenshot without a new capture when the
+   * view the model is looking at is still the view on screen: same viewport
+   * size, same scroll position. The pixel-to-document mapping of a viewport
+   * capture is a pure function of those two, so the model's coordinates still
+   * land where it aimed. Anything else (a scrolled page, a resized viewport,
+   * a region/full-page capture) returns false and the caller must re-aim.
+   */
+  async tryRevalidateViewportScreenshot(): Promise<boolean> {
+    if (this.screenshotValid) return true;
+    const last = this.lastScreenshot;
+    if (last.kind !== "viewport" || !last.viewportW || !last.viewportH) return false;
+    const page = this.requirePage();
+    let dims: { innerW: number; innerH: number; scrollX: number; scrollY: number };
+    try {
+      dims = await raceWithTimeout(page.evaluate(() => ({
+        innerW: window.innerWidth, innerH: window.innerHeight,
+        scrollX: window.scrollX, scrollY: window.scrollY,
+      })), 5000, "viewport check timed out");
+    } catch {
+      return false;
+    }
+    if (dims.innerW !== last.viewportW || dims.innerH !== last.viewportH) return false;
+    if (Math.abs(dims.scrollX - last.offsetX) > 1 || Math.abs(dims.scrollY - last.offsetY) > 1) return false;
+    this.screenshotValid = true;
+    return true;
   }
 
   /**

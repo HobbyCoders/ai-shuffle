@@ -66,7 +66,9 @@ def peer_rows(session_id: str | None) -> list[dict]:
             continue
         rows.append(
             {
-                "name": task.get("agent") or task["subject"] or target,
+                # The roster name fluid derived from the task (round 9), else
+                # the agent type, else the subject.
+                "name": task.get("name") or task.get("agent") or task["subject"] or target,
                 "ref": target,
                 "worker_session_id": target,
                 "task_id": target,
@@ -97,19 +99,31 @@ def make_message(supplier):
 
         session_id = supplier()
         address = str(data.get("to") or "").strip()
+        rows = peer_rows(session_id)
+        # Exact first: the task id (== worker session id), the name, or
+        # "name [ref]". Then case-insensitive on the name — models retype a
+        # slug they read as "Fix Flaky Login" (round 9).
         matches = [
-            r
-            for r in peer_rows(session_id)
-            if address
-            in {r["name"], r["worker_session_id"], f"{r['name']} [{r['ref']}]"}
+            r for r in rows
+            if address in {r["name"], r["worker_session_id"], r.get("task_id"),
+                           f"{r['name']} [{r['ref']}]"}
         ]
+        if not matches and address:
+            folded = address.casefold()
+            matches = [r for r in rows if str(r["name"]).casefold() == folded]
         if not matches:
             return ToolOutcome(
                 text=f"Unknown agent {address!r}; use ListAgents", is_error=True
             )
         if len(matches) != 1:
+            options = "; ".join(
+                f"{r['name']} [{r['ref']}] (task id {r.get('task_id') or r['worker_session_id']})" for r in matches
+            )
             return ToolOutcome(
-                text=f"Ambiguous agent {address!r}; use the name [ref] from ListAgents",
+                text=(
+                    f"Ambiguous agent {address!r}; address one by task id or "
+                    f"name [ref]: {options}"
+                ),
                 is_error=True,
             )
         row = matches[0]

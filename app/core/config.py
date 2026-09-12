@@ -439,6 +439,16 @@ class Settings(BaseSettings):
     fluid_memory_enabled: bool = True
     fluid_continual_model: Optional[str] = None
     fluid_skills_dir: Optional[str] = None
+    # Round-9 bounds passed to fluid when the vendored build has the seams
+    # (see harness_adapter._registry_bound_kwargs / _loop_bound_kwargs).
+    #   - fluid_external_call_timeout_seconds: cap on ONE MCP/inproc tool call.
+    #     Above browser_batch's worst case (20 × 15s waits) and Monitor's 120s
+    #     inline wait. Env: FLUID_EXTERNAL_CALL_TIMEOUT_SECONDS.
+    #   - fluid_turn_watchdog_seconds: a turn silent this long is ended by the
+    #     engine with an error instead of dying silently. Env:
+    #     FLUID_TURN_WATCHDOG_SECONDS.
+    fluid_external_call_timeout_seconds: int = 330
+    fluid_turn_watchdog_seconds: int = 900
 
     # Timeouts (milliseconds)
     hook_timeout_ms: int = 30_000
@@ -811,7 +821,7 @@ class Settings(BaseSettings):
     monitor_command_timeout_seconds: int = 1200  # 20 minutes
     # Bound the completion summary delivered with a wake; the full buffer remains available through TaskOutput.
     # MONITOR_SUMMARY_MAX_CHARS controls this budget.
-    monitor_summary_max_chars: int = 1000
+    monitor_summary_max_chars: int = 4000
     # Idle bound for a SERVING Monitor task (``serves``). Those are exempt from
     # the command budget by design — they are meant to stay up — and nothing
     # else bounded them: when a session's wake died, an audited runner carried

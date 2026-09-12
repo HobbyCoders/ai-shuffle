@@ -26,10 +26,13 @@ SPEC = ToolSpec(
         "same batch forms as add (retire a finished checklist in one call), "
         "'list' returns all notes, "
         "'clear' empties them. Notes live outside the context window; calling "
-        "Note is what brings them back into view. Before multi-step work, add "
-        "every current step in one call. When a step is finished, remove it. "
-        "Keep only notes that still matter; do not leave completed work in "
-        "the list, and do not mark items done in place."
+        "Note is what brings them back into view, and non-empty notes are "
+        "recited on every later turn, so they cost context while they exist. "
+        "For tasks under ~5 steps skip Note; a long or multi-turn plan is what "
+        "it is for. Add the steps in one call, and batch removals with "
+        "`texts` (retire several finished steps at once) rather than one call "
+        "per step. Keep only notes that still matter; do not leave completed "
+        "work in the list, and do not mark items done in place."
     ),
     input_schema={
         "type": "object",

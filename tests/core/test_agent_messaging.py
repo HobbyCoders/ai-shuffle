@@ -27,9 +27,9 @@ def runtime(monkeypatch):
     return registry, engines
 
 
-def worker(runtime, owner, worker_id, name="Helper"):
+def worker(runtime, owner, worker_id, name="Helper", roster_name=None):
     registry, engines = runtime
-    registry.start_task(owner, worker_id, "agent", "Investigate", agent=name)
+    registry.start_task(owner, worker_id, "agent", "Investigate", agent=name, name=roster_name)
     engine = SimpleNamespace(submit=AsyncMock())
     engines[worker_id] = SimpleNamespace(
         adapter=SimpleNamespace(engine=engine, provider_kind="openai_responses")
@@ -177,3 +177,46 @@ def test_missing_caller_and_non_agent_tasks_do_not_grant_access(runtime):
     registry.start_task("parent", "shell", "shell", "Run tests")
     assert messaging.peer_rows("parent") == []
     assert messaging.peer_rows(None) == []
+
+
+# ─── round 9: fluid's Task passes a per-task name; SendMessage resolves it ───
+
+
+@pytest.mark.parametrize("address", ["fix-flaky-login", "Fix-Flaky-Login", "worker-a", "fix-flaky-login [worker-a]"])
+async def test_worker_is_listed_and_addressed_by_its_task_name_or_task_id(runtime, address):
+    """Every worker used to be listed as its agent TYPE ("General Purpose"),
+    so a parent addressing one by what it was doing got "Unknown agent". The
+    roster now carries fluid's derived name; the task id always resolves."""
+    engine = worker(runtime, "parent", "worker-a", name="General Purpose", roster_name="fix-flaky-login")
+    rows = messaging.make_roster(lambda: "parent")({}, ToolCtx())
+    assert [(r["name"], r["task_id"]) for r in rows] == [("fix-flaky-login", "worker-a")]
+    result = await messaging.make_message(lambda: "parent")(
+        {"to": address, "message": "status?"}, ToolCtx()
+    )
+    assert not result.is_error, result.text
+    assert engine.submit.await_args.args[0].text == "status?"
+
+
+async def test_two_workers_with_one_name_are_told_apart_by_task_id(runtime):
+    worker(runtime, "parent", "worker-a", name="General Purpose", roster_name="review-diff")
+    worker(runtime, "parent", "worker-b", name="General Purpose", roster_name="review-diff")
+    send = messaging.make_message(lambda: "parent")
+    ambiguous = await send({"to": "review-diff", "message": "hi"}, ToolCtx())
+    assert ambiguous.is_error
+    assert "worker-a" in ambiguous.text and "worker-b" in ambiguous.text
+    assert not (await send({"to": "worker-b", "message": "hi"}, ToolCtx())).is_error
+
+
+def test_dispatch_forwards_the_name_to_the_registry(monkeypatch):
+    """The slug rides ``args["name"]`` from fluid, through the dispatcher's
+    ``roster_name`` kwarg, into the registry row's ``name`` (and its wire)."""
+    from app.core import task_registry as registry_module
+
+    registry = registry_module.TaskRegistry()
+    registry.start_task("parent", "w1", "agent", "Task · General Purpose",
+                        agent="General Purpose", name="fix-flaky-login")
+    wire = registry_module.to_wire(registry.get_task("parent", "w1"))
+    assert wire["agent"] == "General Purpose" and wire["name"] == "fix-flaky-login"
+    # Re-registration never clobbers a name already recorded.
+    registry.start_task("parent", "w1", "agent", "Task · General Purpose", name="other")
+    assert registry.get_task("parent", "w1")["name"] == "fix-flaky-login"

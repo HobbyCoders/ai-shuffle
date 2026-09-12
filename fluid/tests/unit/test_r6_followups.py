@@ -337,7 +337,12 @@ async def test_no_environment_section_means_no_reminder(git_repo: Path) -> None:
         include_skills=False, include_agents=False, include_plugins=False,
     ))
     loop = _loop(system=compiled.text, system_sections=compiled, ctx=ToolCtx(cwd=str(git_repo)))
-    assert await loop._environment_reminder() is None
+    note = await loop._environment_reminder()
+    # Round 9: the runtime facts ride their own block (first turn only), but
+    # the volatile date/git note stays tied to the environment section.
+    assert note is not None and "Runtime facts" in note
+    assert "Today's date:" not in note and "Current branch" not in note
+    assert await loop._environment_reminder() is None  # unchanged facts: nothing
     # And a host that passed a bare string (no sections at all) is left alone.
     assert await _loop(system="plain")._environment_reminder() is None
 

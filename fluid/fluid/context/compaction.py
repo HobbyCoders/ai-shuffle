@@ -248,11 +248,20 @@ def split_spans(nodes: list[SessionNode]) -> list[list[SessionNode]]:
     return spans
 
 
-def completed_segments(span: list[SessionNode], calls_per_segment: int = 8) -> list[list[SessionNode]]:
+def completed_segments(
+    span: list[SessionNode],
+    calls_per_segment: int = 8,
+    error_text_cap: int = 2_000,
+) -> list[list[SessionNode]]:
     """Bound long turns at completed call/result groups, not at textual markers.
 
     Only new results with complete typed delivery metadata qualify. Legacy
     tool text may contain a real steer whose provenance cannot be recovered.
+    An error result blocks a segment only when its text is longer than
+    ``error_text_cap`` (the digest quotes errors up to that cap verbatim, so
+    a short error loses nothing in digestion). Round 9: code-mode cells that
+    raise are error results, and treating every one as unsafe kept whole
+    mega-turns undigestible.
     """
     segments: list[list[SessionNode]] = []
     batch: list[SessionNode] = []
@@ -272,7 +281,9 @@ def completed_segments(span: list[SessionNode], calls_per_segment: int = 8) -> l
                 if block.tool_use_id not in pending:
                     safe = False
                 pending.discard(block.tool_use_id)
-                if block.is_error or block.delivery_metadata_version != 1:
+                if block.delivery_metadata_version != 1:
+                    safe = False
+                elif block.is_error and _error_text_len(block) > error_text_cap:
                     safe = False
         if node.message.role == "assistant":
             calls += 1
@@ -281,6 +292,10 @@ def completed_segments(span: list[SessionNode], calls_per_segment: int = 8) -> l
                 segments.append(batch)
             batch, calls, safe = [], 0, True
     return segments
+
+
+def _error_text_len(block: ToolResultBlock) -> int:
+    return sum(len(inner.text) for inner in block.content if isinstance(inner, Text))
 
 
 def strip_system_reminders(text: str) -> str:

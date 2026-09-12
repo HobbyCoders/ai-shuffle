@@ -46,9 +46,12 @@ def test_resolves_command_launcher_before_execution(repo, tmp_path, monkeypatch)
 
 def test_producer_records_command_revision_output_and_counts(repo, tmp_path):
     output = tmp_path / 'evidence'
+    (repo / 'changed.py').write_text('touched by this change')
     result = evidence.record(repo, output, command())
     assert result['exit_code'] == 0
     assert result['before'] == result['after'] == evidence.snapshot(repo)
+    # The hash is scoped to what the change touches, named path by path.
+    assert list(result['after']['paths']) == ['changed.py']
     assert result['command'][-1] == str(output / 'junit.xml')
     assert 'WARNING' in (output / 'output.log').read_text()
     assert evidence.check(repo, output, {'tests': 2, 'passed': 1, 'skipped': 1}) == result
@@ -58,18 +61,55 @@ def test_producer_records_command_revision_output_and_counts(repo, tmp_path):
         evidence.check(repo, output, {'warnings': 0})
 
 
-@pytest.mark.parametrize('kind', ['tracked', 'untracked', 'revision', 'during'])
-def test_rejects_changed_worktree(repo, tmp_path, kind):
+@pytest.mark.parametrize('kind', ['tracked', 'untracked', 'during'])
+def test_rejects_changed_touched_files_and_names_them(repo, tmp_path, kind):
+    """A file the change touches (uncommitted tracked edit, new untracked
+    file) must not move between the run and the check — and the rejection
+    says which file did."""
     output = tmp_path / 'evidence'
+    (repo / 'source.txt').write_text('edited before the run')
+    (repo / 'new.py').write_text('new')
     extra = "Path('source.txt').write_text('during'); " if kind == 'during' else ''
     evidence.record(repo, output, command(extra=extra))
     if kind == 'tracked':
-        (repo / 'source.txt').write_text('changed')
+        (repo / 'source.txt').write_text('changed again')
     elif kind == 'untracked':
-        (repo / 'new.py').write_text('new')
-    elif kind == 'revision':
-        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c', 'user.email=t@example.invalid', 'commit', '--allow-empty', '-m', 'new'], check=True, capture_output=True)
-    with pytest.raises(ValueError, match='Worktree changed'):
+        (repo / 'new.py').write_text('changed again')
+    expected = {'tracked': 'after verification: source.txt', 'untracked': 'after verification: new.py',
+                'during': 'during verification: source.txt'}[kind]
+    with pytest.raises(ValueError, match=expected):
+        evidence.check(repo, output)
+
+
+def test_sibling_edits_outside_the_touched_set_do_not_reject(repo, tmp_path):
+    """Round-9 F4: sibling subagents editing OTHER files in a shared
+    worktree — or an unrelated commit landing — used to reject a good run."""
+    output = tmp_path / 'evidence'
+    (repo / 'mine.py').write_text('my change')
+    evidence.record(repo, output, command())
+    (repo / 'source.txt').write_text('a sibling edited this')
+    (repo / 'sibling.py').write_text('a sibling added this')
+    subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c', 'user.email=t@example.invalid', 'commit', '--allow-empty', '-m', 'new'], check=True, capture_output=True)
+    assert evidence.check(repo, output)['counts']['passed'] == 1
+
+
+def test_committed_changes_since_the_base_are_in_scope(repo, tmp_path):
+    """``--base`` (default origin/main, then main) pulls the branch's own
+    commits into the touched set, so a post-verification edit to a file the
+    branch changed earlier is still caught."""
+    def git(*args):
+        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c', 'user.email=t@example.invalid', *args], check=True, capture_output=True)
+    git('branch', 'base-ref')
+    git('checkout', '-q', '-b', 'feature')
+    (repo / 'feature.py').write_text('committed on the branch')
+    git('add', 'feature.py')
+    git('commit', '-m', 'feature')
+    output = tmp_path / 'evidence'
+    result = evidence.record(repo, output, command(), base='base-ref')
+    assert result['after']['base'] == 'base-ref'
+    assert 'feature.py' in result['after']['paths']
+    (repo / 'feature.py').write_text('edited after verification')
+    with pytest.raises(ValueError, match='after verification: feature.py'):
         evidence.check(repo, output)
 
 

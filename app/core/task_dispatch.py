@@ -1549,6 +1549,11 @@ async def dispatch_task_tool(
         return {"ok": False, "error": credential_error}
 
     label = (args.get("label") or "").strip() or f"Task · {target_name}"
+    # fluid's Task (round 9) hands over ``name``: a short slug derived from
+    # the task ("fix-flaky-login") that the worker is listed and addressed
+    # by. Without it every worker was "General Purpose" and SendMessage by
+    # description failed with "Unknown agent".
+    roster_name = str(args.get("name") or "").strip()[:60] or None
     kwargs: Dict[str, Any] = dict(
         parent_session_id=root_session_id,
         context_session_id=caller_session_id,
@@ -1559,6 +1564,7 @@ async def dispatch_task_tool(
         prompt=prompt,
         label=label,
         agent_name=target_name,
+        roster_name=roster_name,
         launch_tool_use_id=launch_tool_use_id,
     )
     if system_prompt_append:

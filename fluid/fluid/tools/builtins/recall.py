@@ -113,6 +113,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 tags.append(f"key: {entry.key}")
             if entry.protected:
                 tags.append("explicit save")
+            if entry.provenance == "tool":
+                tags.append("harvested from tool output, unconfirmed — confirm with Remember if still true")
             if archived:
                 tags.append("archived")
             if entry.scope != "global":
@@ -143,9 +145,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if not lines:
         return ToolOutcome(
             text=(
-                f"No stored memory or skill matches {query!r}. This is recall "
-                "over learned facts only — absence here does not mean the "
-                "answer does not exist elsewhere."
+                f"No stored memory or skill matches {query!r}. Matching is "
+                "keyword-in-text, so try one or two broader words (the "
+                "tool or file name, not the whole question) before "
+                "concluding nothing is known. This is recall over learned "
+                "facts only — absence here does not mean the answer does not "
+                "exist elsewhere. Once you establish the fact this session, "
+                "Remember it so the next session finds it here."
             )
         )
     lines.append(

@@ -64,6 +64,23 @@ OnInputRequired = Callable[
 OnStop = Callable[[str], None]
 
 
+def _soft_external_error(spec: Any, outcome: Any) -> bool:
+    """Whether an MCP/inproc error result should come back as the call's
+    result text instead of aborting the cell.
+
+    Round 9: 99 "never attempted — the cell stopped at the error" aborts, a
+    third of them browser errors (a stale ref, a stale screenshot) that the
+    next call in the cell would have recovered from. Those are ordinary
+    results now; a timeout or an unreachable server still aborts, because
+    every later call in the cell would pay the same wait for nothing.
+    """
+    from fluid.tools.registry import FATAL_EXTERNAL_ERROR_CODES
+
+    if getattr(spec, "source", None) not in ("mcp", "inproc"):
+        return False
+    return getattr(outcome, "error_code", None) not in FATAL_EXTERNAL_ERROR_CODES
+
+
 class HostBridge:
     def __init__(
         self,
@@ -231,7 +248,7 @@ class HostBridge:
                     content_id=None, window_of=None,
                 )
 
-        if outcome.is_error and not outcome.soft_error:
+        if outcome.is_error and not outcome.soft_error and not _soft_external_error(spec, outcome):
             return HostReply(
                 error=outcome.text,
                 error_code=(

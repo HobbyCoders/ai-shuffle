@@ -509,11 +509,14 @@ class CliHost:
         agent_name = str(input.get("agent") or "").strip()
         definition = self._find_agent(agent_name, ctx)
         label = input.get("label") or agent_name or "subagent"
+        # The Task tool derives an addressable name from the description
+        # (round 9: every worker used to be named after its agent type).
+        name = str(input.get("name") or label)
         from fluid.swarm import current_launch
         launch = current_launch.get()
         worker = Worker(
             task_id=new_id("task"), kind="task", description=str(label),
-            name=str(label), definition=definition,
+            name=name, definition=definition,
             swarm_launch=launch if launch and launch.coordinator is self._swarm else None,
         )
         try:

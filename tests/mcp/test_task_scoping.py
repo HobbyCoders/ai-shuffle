@@ -125,7 +125,7 @@ def test_an_unknown_id_is_still_not_found(lineage):
     body = _call("TaskGet", {"task_id": "never-existed"})
 
     assert body["success"] is False
-    assert body["error"] == "task not found."
+    assert body["error"].startswith("task not found.")
     assert "owner_session_id" not in body
 
 

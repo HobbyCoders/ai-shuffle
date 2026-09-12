@@ -197,6 +197,11 @@ def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
     # kind keeps the exact shape it had.
     if record.get("agent"):
         wire["agent"] = record.get("agent")
+    # The name the worker is ADDRESSED by (SendMessage/ListAgents): fluid's
+    # Task derives a slug from the task ("fix-flaky-login") so two workers of
+    # one agent type are distinguishable. Additive, Task-tool workers only.
+    if record.get("name"):
+        wire["name"] = record.get("name")
     # The worker's provider/model label. It used to BE ``summary``, which made
     # every agent row in TaskList/TaskGet answer "OpenRouter · openai/gpt-5.6"
     # to the question "what is this task". The label is still worth having —
@@ -1009,8 +1014,12 @@ class TaskRegistry:
         tool_use_id: Optional[str] = None,
         agent: Optional[str] = None,
         model: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> None:
         """Register a new task (idempotent — if it already exists, update it).
+
+        ``name`` is the roster name a Task-tool worker is addressed by (see
+        ``to_wire``); ``agent`` stays the agent type's display name.
 
         Re-registering preserves the original ``started_at``. A fresh
         ``TaskStartedMessage`` for a CLEANLY-COMPLETED task is a genuine RESUME
@@ -1049,6 +1058,8 @@ class TaskRegistry:
                 existing["agent"] = agent
             if model and not existing.get("model"):
                 existing["model"] = model
+            if name and not existing.get("name"):
+                existing["name"] = name
             # Resume revival: a fresh start for a CLEANLY-COMPLETED task flips it
             # back to running (failures stay terminal — that's a stale leak).
             if existing.get("status") == "completed":
@@ -1080,6 +1091,8 @@ class TaskRegistry:
             "tool_use_id": tool_use_id,
             # Task-tool workers only: the agent's display name (see to_wire).
             "agent": agent,
+            # Task-tool workers only: the roster/address name (see to_wire).
+            "name": name,
             # Task-tool workers only: the "<provider> · <model>" label, kept out
             # of ``summary`` so summary can say what the task IS.
             "model": model,

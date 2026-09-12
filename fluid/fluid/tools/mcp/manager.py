@@ -48,7 +48,10 @@ class McpManager:
 
         client = self._clients.get(server)
         if client is None:
-            return ToolOutcome(text=f"MCP server not connected: {server}", is_error=True)
+            return ToolOutcome(
+                text=f"MCP server not connected: {server}", is_error=True,
+                error_code="unavailable",
+            )
         raw = await client.call_tool(
             tool, input, input_responses=input_responses, request_state=request_state
         )
@@ -73,6 +76,7 @@ class McpManager:
         )
         return ToolOutcome(
             text=raw.get("text", ""), is_error=raw.get("is_error", False), images=images,
+            error_code=raw.get("error_code"),
         )
 
     async def aclose(self) -> None:

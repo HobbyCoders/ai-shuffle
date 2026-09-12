@@ -53,10 +53,13 @@ from fluid.codemode.session import (
 from fluid.context.cache_plan import plan_cache
 from fluid.context.cache_probe import (
     CacheProbeConfig,
+    cache_read_report,
     diagnose_cache_miss,
     fingerprint_prefix,
     is_unexplained_miss,
     message_count,
+    system_change_detail,
+    system_text_of,
 )
 from fluid.context.compaction import (
     CompactionConfig,
@@ -94,9 +97,11 @@ from fluid.events.model import (
     ToolResult,
     ToolArgsDelta,
     ToolUse,
+    SubagentEvent,
     TurnComplete,
     TurnStarted,
     Usage,
+    WAKE_NOT_APPLICABLE,
 )
 from fluid.events.ops import (
     BackgroundTaskFinished,
@@ -157,6 +162,17 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 
 log = logging.getLogger(__name__)
 
+# Seconds of silence (no emitted event) after which the turn watchdog ends
+# the turn. Long enough for the slowest single tool call fluid allows (a
+# Bash call caps at 600 s, an MCP call at 75 s) plus room; short enough that
+# a hung turn is closed with its cost recorded within the hour.
+DEFAULT_TURN_WATCHDOG_SECONDS = 900.0
+# Header of the runtime-facts block (see _environment_reminder); the resume
+# path finds the last one sent by this exact text.
+_RUNTIME_FACTS_HEADER = (
+    "Runtime facts as of this message (worker-side, read-only checks; "
+    "shown on the first turn and again only when they change):\n"
+)
 _BACKGROUND_SPAWN_INTERRUPT_GRACE = 1.0
 
 # Opening words of the reflection nudge — a stable handle for tests and for
@@ -784,6 +800,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         journal: Any | None = None,
         max_model_calls_per_turn: int | None = 200,
         max_continuations_per_turn: int = 3,
+        turn_watchdog_seconds: float | None = DEFAULT_TURN_WATCHDOG_SECONDS,
         tool_arg_guard: ToolArgStreamGuard | None = None,
         trim: TrimConfig | None = None,
         compaction: CompactionConfig | None = None,
@@ -923,6 +940,31 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._reflection_nudged = False
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
+        # Turn watchdog (round 9): a turn whose active tool call never
+        # returned and whose stream made no progress sat until the host tore
+        # the engine down, with no terminal event and its cost unrecorded.
+        # ``_turn_progress_at`` moves on every emitted event; the watchdog
+        # task cancels the turn after ``turn_watchdog_seconds`` of silence
+        # that is not a human wait (a pending permission or question).
+        self.turn_watchdog_seconds = turn_watchdog_seconds
+        self._turn_progress_at = time.monotonic()
+        self._turn_cancel_reason: str | None = None
+        self._watchdog_task: asyncio.Task | None = None
+        # Peer messages that arrived while this session was parked on
+        # background tasks: delivered with the next wake (or user turn)
+        # instead of each waking the parent on its own.
+        self._queued_peer_messages: list[AgentMessage] = []
+        self._queued_peer_rehydrated = False
+        # Runtime-facts block bookkeeping (see _environment_reminder): the
+        # facts text last sent to the model, and whether this engine has
+        # already harvested them into the memory store.
+        self._runtime_facts_sent: str | None = None
+        self._runtime_facts_harvested = False
+        self._runtime_facts_rehydrated = False
+        # System text of the request in flight / the last completed one, for
+        # the cache probe's system diff (see _cache_probe_fields).
+        self._pending_system_text: str | None = None
+        self._prev_system_text: str | None = None
         self._pending_questions: dict[str, asyncio.Future] = {}
         # Mid-turn user steers and peer messages awaiting the next tool
         # result (see the Steer and AgentMessage ops).
@@ -1400,6 +1442,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             else:
                 if not op.wake:
                     raise RuntimeError("no turn is running; peer message was not delivered")
+                if not op.urgent and await self._queue_if_parked(replace(op, text=text)):
+                    return
                 from fluid.context.peer import format_peer_message
 
                 self._interrupted.clear()
@@ -1516,6 +1560,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         every lifecycle event) still surface their failures — losing one of
         those really does corrupt the record.
         """
+        self._turn_progress_at = time.monotonic()
         sequenced = await self.bus.publish(event)
         try:
             await self.store.append_event(event.session_id, sequenced)
@@ -1791,19 +1836,51 @@ class NativeLoop(BackgroundLifecycleMixin):
             raise
 
     async def _run_turn(self, op: UserTurn | Resume) -> None:
+        self._turn_cancel_reason = None
+        self._turn_progress_at = time.monotonic()
+        self._start_turn_watchdog()
         try:
             await self._run_turn_inner(op)
         except asyncio.CancelledError:
             if self._active_turn_id and not self._background_turn_terminal:
                 partial, cost = self._partial_usage(self._turn_usage)
-                await self._emit_terminal_with_park(Interrupted(
-                    session_id=self.session_id, turn_id=self._active_turn_id,
-                    message="engine closed" if self._background_closed else "turn cancelled",
-                    usage=partial, cost_usd=cost,
-                    num_model_calls=self._turn_model_calls,
-                ))
+                if self._background_closed:
+                    await self._emit_terminal_with_park(Interrupted(
+                        session_id=self.session_id, turn_id=self._active_turn_id,
+                        message="engine closed",
+                        usage=partial, cost_usd=cost,
+                        num_model_calls=self._turn_model_calls,
+                    ))
+                else:
+                    # Cancelled by something other than Engine.aclose (the
+                    # watchdog, or a host that cancelled the task): say so
+                    # as an error, then end the turn properly so the cost
+                    # accumulated so far reaches the session row.
+                    reason = self._turn_cancel_reason or "turn cancelled"
+                    await self._emit(ErrorEvent(
+                        session_id=self.session_id, turn_id=self._active_turn_id,
+                        message=reason, retriable=False,
+                        usage=partial, cost_usd=cost,
+                        num_model_calls=self._turn_model_calls,
+                    ))
+                    await self._emit_terminal_with_park(TurnComplete(
+                        session_id=self.session_id, turn_id=self._active_turn_id,
+                        stop_reason="error", num_model_calls=self._turn_model_calls,
+                        usage=partial, cost_usd=cost,
+                    ))
+                    if self._turn_cancel_reason is not None:
+                        # The watchdog cancelled us and the turn is now
+                        # properly terminated: finish the task normally so
+                        # a host awaiting wait_turn() sees a finished turn,
+                        # not a CancelledError it never asked for.
+                        current = asyncio.current_task()
+                        if current is not None:
+                            current.uncancel()
+                        self._active_turn_id = None
+                        return
             raise
         finally:
+            self._stop_turn_watchdog()
             # Covers early hook/Resume exits and cancellation before the
             # agent loop starts, as well as its normal terminal paths. Stop
             # must never leave queued peers or a failed write to a later turn.
@@ -1811,6 +1888,60 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._pending_steers.clear()
             self._pending_peer_write = None
             self._active_turn_id = None
+
+    def _start_turn_watchdog(self) -> None:
+        limit = self.turn_watchdog_seconds
+        if not limit or limit <= 0:
+            return
+        self._stop_turn_watchdog()
+        try:
+            self._watchdog_task = asyncio.get_running_loop().create_task(
+                self._turn_watchdog(float(limit)), name="fluid-turn-watchdog",
+            )
+        except RuntimeError:
+            self._watchdog_task = None
+
+    def _stop_turn_watchdog(self) -> None:
+        task, self._watchdog_task = self._watchdog_task, None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _human_wait_pending(self) -> bool:
+        """A permission or question is out to the user: silence is not a hang."""
+        for futures in (self._pending_permissions, getattr(self, "_pending_questions", {})):
+            for fut in list(futures.values()):
+                if not fut.done():
+                    return True
+        return False
+
+    async def _turn_watchdog(self, limit: float) -> None:
+        """Cancel the turn after ``limit`` seconds without any emitted event.
+
+        Polls at a quarter of the limit (at least once a second). A pending
+        permission or question resets the clock: waiting on a person is not
+        a hang. When it fires, the cancel reason names the silence so the
+        ErrorEvent the cancel path emits says why the turn ended.
+        """
+        interval = max(1.0, limit / 4)
+        while True:
+            await asyncio.sleep(interval)
+            if self._human_wait_pending():
+                self._turn_progress_at = time.monotonic()
+                continue
+            silent = time.monotonic() - self._turn_progress_at
+            if silent < limit:
+                continue
+            task = self._turn_task
+            if task is None or task.done() or task is asyncio.current_task():
+                return
+            self._turn_cancel_reason = (
+                f"turn watchdog: no tool result or stream progress for "
+                f"{silent:.0f}s (limit {limit:.0f}s); the turn was cancelled "
+                "so its cost is recorded and the session can continue"
+            )
+            log.warning("%s (turn %s)", self._turn_cancel_reason, self._active_turn_id)
+            task.cancel()
+            return
 
     async def _run_turn_inner(self, op: UserTurn | Resume) -> None:
         self._peer_delivery_sealed = False
@@ -1827,6 +1958,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._connect_mcp_once(sid, turn_id)
         await self._rehydrate_deferred_announced(sid, meta.head_node_id)
         await self._rehydrate_read_files(sid, meta.head_node_id)
+        await self._rehydrate_runtime_facts(sid, meta.head_node_id)
+        await self._rehydrate_queued_peer_messages(sid)
         await self._rehydrate_compaction(sid)
         await self._rehydrate_prefix_fingerprint(sid)
 
@@ -1885,6 +2018,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         env_note = await self._environment_reminder()
         if env_note is not None:
             content.append(Text(env_note))
+        queued = self._queued_peer_reminder()
+        if queued is not None:
+            content.append(Text(queued))
         # The node id is fixed before the TurnStart hooks run so TurnStarted
         # can name it; the node itself is only written once they allow the
         # prompt, so a blocked prompt never enters the session.
@@ -2020,6 +2156,36 @@ class NativeLoop(BackgroundLifecycleMixin):
             if text:
                 self._deferred_announced.update(parse_deferred_catalog(text))
 
+    async def _rehydrate_runtime_facts(self, sid: str, head_node_id: str | None) -> None:
+        """Seed the last-sent runtime facts from the stored transcript (once).
+
+        A fresh engine over an existing session would otherwise re-send the
+        runtime-facts block on its first turn even when nothing changed —
+        every park/wake is a fresh engine in the app, so that would be most
+        turns. The block's body is recovered from the newest user node that
+        carries it.
+        """
+        if self._runtime_facts_sent is not None or self._runtime_facts_rehydrated:
+            return
+        self._runtime_facts_rehydrated = True
+        if head_node_id is None:
+            return
+        try:
+            nodes = await self.store.load_path(sid, head_node_id)
+        except Exception:  # a store that cannot replay just re-sends once
+            return
+        for node in reversed(nodes):
+            if node.message.role != "user":
+                continue
+            for block in node.message.content:
+                text = getattr(block, "text", None)
+                if not isinstance(text, str) or _RUNTIME_FACTS_HEADER not in text:
+                    continue
+                start = text.index(_RUNTIME_FACTS_HEADER) + len(_RUNTIME_FACTS_HEADER)
+                end = text.find("\n</system-reminder>", start)
+                self._runtime_facts_sent = text[start:end if end >= 0 else None].strip("\n")
+                return
+
     async def _rehydrate_read_files(self, sid: str, head_node_id: str | None) -> None:
         """Seed the read-before-edit ledger from the stored transcript (once).
 
@@ -2065,18 +2231,143 @@ class NativeLoop(BackgroundLifecycleMixin):
         platform, shell, project manifests); the date and the git state change
         under a session and used to be compiled in with them, so every new day
         and every commit rewrote the prompt prefix and cost the cache. Only a
-        prompt compiled with an environment section gets the note — a host
-        that injects its own environment, or none, is left alone. Gathering
-        runs git, so it runs off the loop.
+        prompt compiled with an environment section gets the full note — a
+        host that injects its own environment keeps its date and git lines.
+        The RUNTIME facts (which Python has pytest, which packages lack
+        node_modules) are independent of that section: for any compiled
+        prompt they ride their own small block on the first turn and
+        whenever they change, because a host that suppressed the environment
+        section used to lose them too and its sessions re-discovered the same
+        facts by hand. A bare system string (no sections) still gets nothing. Gathering runs
+        git and stats the tree, so it runs off the loop. Either way the facts
+        are also harvested into the memory store (see
+        :func:`fluid.context.runtime_facts.harvest_environment_facts`).
         """
         sections = self.system_sections.sections if self.system_sections else ()
-        if not any(s.kind == "environment" for s in sections):
-            return None
+        has_env_section = any(s.kind == "environment" for s in sections)
         try:
-            return await asyncio.to_thread(environment_note, self.ctx.cwd)
+            note, facts = await asyncio.to_thread(
+                self._gather_environment, has_env_section
+            )
         except Exception:  # never let a git hiccup block a turn
             log.debug("environment note failed", exc_info=True)
             return None
+        if has_env_section:
+            return note
+        if self.system_sections is None:
+            # A bare system string (no compiled sections): the host did not
+            # go through compile_prompt and gets no reminders from fluid.
+            return None
+        if facts == self._runtime_facts_sent:
+            return None
+        self._runtime_facts_sent = facts
+        return f"<system-reminder>\n{_RUNTIME_FACTS_HEADER}{facts}\n</system-reminder>"
+
+    def _gather_environment(self, full: bool) -> tuple[str | None, str]:
+        """Thread-side half of :meth:`_environment_reminder`: the full note
+        when the prompt has an environment section, plus the runtime facts
+        text on their own for the change check. Also harvests the facts into
+        the memory store once per engine (file I/O, so it belongs here off
+        the loop)."""
+        from fluid.context.runtime_facts import runtime_facts
+
+        facts = runtime_facts(self.ctx.cwd)
+        note = environment_note(self.ctx.cwd) if full else None
+        self._harvest_runtime_facts()
+        return note, facts
+
+    def _harvest_runtime_facts(self) -> None:
+        """Write mechanically established environment facts to the memory
+        store, once per engine instance. Best-effort and silent."""
+        if self._runtime_facts_harvested:
+            return
+        self._runtime_facts_harvested = True
+        store = self.ctx.extra.get("memory_store") or self.ctx.extra.get("recall_store")
+        if store is None or not hasattr(store, "save_memory"):
+            return
+        from fluid.context.runtime_facts import (
+            harvest_environment_facts,
+            write_harvested_facts,
+        )
+
+        try:
+            facts = harvest_environment_facts(self.ctx.cwd)
+            write_harvested_facts(store, self.ctx.extra.get("memory_project"), facts)
+        except Exception:  # noqa: BLE001 — never let bookkeeping touch a turn
+            log.debug("runtime fact harvest failed", exc_info=True)
+
+    async def _queue_if_parked(self, op: AgentMessage) -> bool:
+        """Hold an idle-time peer message when the session is parked.
+
+        Parked on background work (typically the sender itself): the message
+        waits for the wake the completion brings instead of paying a turn
+        now to read an interim note. It is persisted as a
+        ``SubagentEvent(kind="progress")`` so a host that evicts the parked
+        engine and rebuilds it for the wake still delivers it (see
+        :meth:`_rehydrate_queued_peer_messages`). Returns False when the
+        session is not parked, in which case the caller wakes as usual.
+        """
+        async with self._background_lock:
+            await self._rehydrate_background_lifecycle_unlocked()
+            parked = bool(self._park_pending_ids())
+        if not parked:
+            return False
+        meta = await self._ensure_session()
+        self._queued_peer_messages.append(op)
+        await self._emit(SubagentEvent(
+            session_id=meta.session_id, turn_id=None,
+            task_id=f"peer:{op.sender}", kind="progress",
+            description=op.sender, summary=op.text,
+            wake=False, wake_disposition=WAKE_NOT_APPLICABLE,
+        ))
+        return True
+
+    async def _rehydrate_queued_peer_messages(self, sid: str) -> None:
+        """Recover peer messages queued while parked from the event log (once).
+
+        A ``progress`` SubagentEvent with a ``peer:`` task id is a queued
+        message; a later TurnStarted means it was delivered with that turn.
+        """
+        if self._queued_peer_rehydrated:
+            return
+        self._queued_peer_rehydrated = True
+        try:
+            events = await self.store.events_since(sid, 0)
+        except Exception:  # noqa: BLE001 — stores without replay degrade in memory
+            return
+        queued: list[AgentMessage] = []
+        for event in events:
+            if isinstance(event, TurnStarted):
+                queued.clear()
+            elif (
+                isinstance(event, SubagentEvent)
+                and event.kind == "progress"
+                and str(event.task_id).startswith("peer:")
+                and event.summary
+            ):
+                queued.append(AgentMessage(
+                    text=str(event.summary), sender=str(event.description or "peer"),
+                ))
+        if queued:
+            self._queued_peer_messages = queued + self._queued_peer_messages
+
+    def _queued_peer_reminder(self) -> str | None:
+        """Peer messages held while parked, rendered once for this turn."""
+        queued, self._queued_peer_messages = self._queued_peer_messages, []
+        if not queued:
+            return None
+        from fluid.context.peer import format_peer_message
+
+        parts = [
+            "<system-reminder>",
+            "Messages from other agents that arrived while this session was "
+            "parked (they were not delivered separately; a subagent's final "
+            "report is the completion below, if any):",
+        ]
+        for message in queued:
+            parts.append(format_peer_message(message.sender, message.text).strip())
+        parts.append("</system-reminder>")
+        return "\n\n".join(parts)
 
     def _deferred_catalog_reminder(self) -> str | None:
         """Announce known-but-unloaded tools, once per tool (name + one-liner).
@@ -3002,6 +3293,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                     endpoint=getattr(self.provider, "_base_url", None),
                 )
             self._prefix_fingerprint["_requested_at"] = str(time.time())
+            # The text behind the system hash, kept in-process so a change
+            # can be diffed against the previous request's text (across a
+            # park only the paragraph hashes survive, on the Usage event).
+            self._pending_system_text = system_text_of(request.system)
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             log.debug("prefix fingerprint failed", exc_info=True)
             self._prefix_fingerprint = None
@@ -3018,10 +3313,32 @@ class NativeLoop(BackgroundLifecycleMixin):
         # must not be blamed for the miss after next.
         self._history_rewrites = []
         out: dict[str, Any] = {"compaction_decision": dict(self._compactor.last_decision)}
+        try:
+            # Provider-reported cache reads next to the verdict, every call,
+            # so partial and full misses are told apart in the event log.
+            out["cache_read_report"] = cache_read_report(
+                usage,
+                input_includes_cached=not self.provider.caps.explicit_cache_breakpoints,
+            )
+        except Exception:  # noqa: BLE001 — instrumentation is never fatal
+            pass
         if fingerprint is None:
             return out
         self._prefix_fingerprint = None
         out["prefix_hashes"] = fingerprint
+        system_detail = None
+        try:
+            system_detail = system_change_detail(
+                self._prev_prefix_fingerprint, fingerprint,
+                current_text=self._pending_system_text or "",
+                previous_text=self._prev_system_text,
+                sections=[
+                    (s.kind, s.text) for s in self.system_sections.sections
+                ] if self.system_sections else None,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("system diff failed", exc_info=True)
+        self._prev_system_text, self._pending_system_text = self._pending_system_text, None
         previous_time = (self._prev_prefix_fingerprint or {}).get("_requested_at")
         try:
             if previous_time and fingerprint.get("_requested_at"):
@@ -3041,6 +3358,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 config=self._cache_probe,
                 history_rewrites=rewrites,
                 explicit_breakpoints=self.provider.caps.explicit_cache_breakpoints,
+                system_detail=system_detail,
             )
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             log.debug("cache-miss diagnosis failed", exc_info=True)

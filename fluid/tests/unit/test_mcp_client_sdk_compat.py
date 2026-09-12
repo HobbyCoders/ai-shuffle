@@ -177,7 +177,7 @@ async def test_call_timeout_reaches_the_session_read_timeout(monkeypatch):
 def test_timeout_defaults_and_bad_values():
     client = McpClient("fake", {"command": "noop", "connect_timeout": "abc", "call_timeout": -1})
     assert client.connect_timeout == 30
-    assert client.call_timeout == 120
+    assert client.call_timeout == 60
     assert client.shutdown_timeout == 5
 
 

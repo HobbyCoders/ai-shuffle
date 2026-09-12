@@ -398,7 +398,7 @@ def test_wake_summary_is_capped_at_about_a_kilobyte(monkeypatch):
 
     assert status == "error"
     assert len(summary) < 1200
-    assert "TaskOutput has the full buffer" in summary
+    assert "TaskOutput(lines=N) for a longer tail" in summary
 
 
 # ---------------------------------------------------------------------------

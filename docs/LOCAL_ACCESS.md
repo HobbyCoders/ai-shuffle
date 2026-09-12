@@ -42,6 +42,23 @@ header rewriting disabled. Headers cannot grant local authority. Use the normal
 desktop or Docker managed launcher so this boundary is installed;
 launching the bare ASGI app with a custom server does not grant local access.
 
+## Agent-browser preview access
+
+An agent session's browser tools cannot always present themselves as the local
+owner: they may run on another host, and a branch's Vite dev server adds
+forwarded headers that the local listener rejects on purpose. For that one
+case the harness mints a session-scoped preview token (`app/core/preview_access.py`)
+and names it in the session's "# Workspace facts" card. Opening
+`/api/v1/auth/preview-access?token=...&next=/` once sets an HttpOnly cookie
+that the rest of the visit rides on, including through the Vite proxy.
+
+The cookie is honoured only on the local listener from a private-network
+peer, only while the bound session exists, and expires on its own. It never
+grants the mutations that change ownership or reach: auth, pairing,
+credentials, settings, network, plugins and the internal control plane refuse
+unsafe methods on it. The remote listener ignores it entirely. It is not a
+login: the local owner boundary above is unchanged.
+
 ## Upgrading an existing installation
 
 1. Validate a matching database, configuration and durable-key backup. Stop old

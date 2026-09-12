@@ -12,6 +12,7 @@ import platform
 import subprocess
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, Dict, Any
 
 from app.db import database
@@ -1079,3 +1080,201 @@ def generate_turn_environment_note(
         f"{body}\n"
         "</system-reminder>"
     )
+
+
+# ─── "# Workspace facts" — the first-turn bootstrap card ─────────────────────
+#
+# The round-9 audit found the same environment facts rediscovered by probing in
+# 12+ sessions each: node_modules missing in a fresh worktree, which interpreter
+# has pytest, that the agent browser lives on another host, that the app's own
+# UI rejects proxied requests, that frontend/vite.config.ts does not exist.
+# This card states the ones that are TRUE for this worker, probed once per
+# process, rendered once per session, and never varying between turns (it sits
+# in the cached prompt prefix).
+
+WORKSPACE_FACTS_HEADER = "# Workspace facts"
+#: Hard ceiling on the card, in characters (~600 tokens).
+WORKSPACE_FACTS_MAX_CHARS = 2400
+
+
+def _package_dirs(cwd: Path) -> list:
+    """Directories under ``cwd`` (root and one level of the usual names) that
+    carry a package.json, as paths relative to ``cwd``."""
+    found = []
+    for rel in ("", "frontend", "browser-mcp", "tools", "desktop"):
+        directory = cwd / rel if rel else cwd
+        if (directory / "package.json").is_file():
+            found.append(rel or ".")
+    return found
+
+
+def _node_dependency_facts(cwd: Path) -> list:
+    """One line per package dir: whether its node_modules is installed."""
+    missing = []
+    present = []
+    for rel in _package_dirs(cwd):
+        directory = cwd / rel if rel != "." else cwd
+        (present if (directory / "node_modules" / ".bin").is_dir() else missing).append(rel)
+    lines = []
+    if missing:
+        lines.append(
+            "Node: node_modules MISSING in " + ", ".join(missing) + " — run `npm ci` "
+            "there before any dev server, build or test (never junction or copy "
+            "node_modules from another checkout)."
+        )
+    if present:
+        lines.append("Node: node_modules installed in " + ", ".join(present) + ".")
+    return lines
+
+
+def _interpreter_has_pytest(executable: str) -> bool:
+    """Whether ``executable`` can import pytest. Bounded subprocess; False on
+    any failure (a missing binary, a timeout, a broken install)."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [executable, "-c", "import pytest"],
+            capture_output=True, timeout=10, check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+_PYTEST_PROBE: dict = {}
+
+
+def pytest_interpreter() -> Optional[str]:
+    """The first interpreter that has pytest: this process's own, then the
+    conventional names on PATH. Probed once per process — the answer does not
+    change while the worker runs, and the card it feeds must not either."""
+    if "value" in _PYTEST_PROBE:
+        return _PYTEST_PROBE["value"]
+    import importlib.util
+    import shutil
+
+    found: Optional[str] = None
+    try:
+        if importlib.util.find_spec("pytest") is not None:
+            found = sys.executable
+    except (ImportError, ValueError):
+        found = None
+    if found is None:
+        names = ("python3", "python", "py") if os.name != "nt" else ("python", "py", "python3")
+        for name in names:
+            resolved = shutil.which(name)
+            if not resolved or os.path.normcase(resolved) == os.path.normcase(sys.executable):
+                continue
+            if _interpreter_has_pytest(resolved):
+                found = resolved
+                break
+    _PYTEST_PROBE["value"] = found
+    return found
+
+
+def _python_facts(cwd: Path, is_shuffle: bool) -> list:
+    exe = pytest_interpreter()
+    if exe is None:
+        return [
+            f"Python: no interpreter with pytest was found (this worker runs "
+            f"{sys.executable}); install pytest into a venv before running the "
+            "backend suite."
+        ]
+    own = os.path.normcase(exe) == os.path.normcase(sys.executable)
+    where = "this worker's own interpreter" if own else "on PATH"
+    line = f"Python: pytest is importable in `{exe}` ({where})."
+    if is_shuffle:
+        line += (
+            f" Backend suite: `PYTHONPATH=fluid {exe} -m pytest tests/ -q -p "
+            "no:cacheprovider` from the checkout root (PYTHONPATH=fluid is "
+            "required; pytest-timeout is not installed, so drop --timeout)."
+        )
+    return [line]
+
+
+def _is_ai_shuffle_checkout(cwd: Path) -> bool:
+    return (cwd / "app" / "preview.py").is_file() and (cwd / "fluid").is_dir()
+
+
+def _shuffle_facts(cwd: Path, app_port: Optional[int], preview_url: Optional[str]) -> list:
+    """Facts that are only true for an ai-shuffle checkout."""
+    lines = []
+    port = app_port or 8000
+    ui = (
+        f"This app: the worker listens on :{port} behind an owner-auth guard "
+        "that admits direct LAN peers only and rejects proxied/forwarded "
+        "requests."
+    )
+    if preview_url:
+        ui += (
+            f" To open its UI from the agent browser, navigate ONCE to "
+            f"{preview_url} (a token bound to this session; it sets the cookie "
+            "the rest of the visit uses, and the cookie also passes through a "
+            "branch's Vite dev proxy). Mutations of auth, credentials, "
+            "settings and network config are refused on that cookie."
+        )
+    lines.append(ui)
+    lines.append(
+        "Branch UI preview: build the frontend, run `python -m app.preview "
+        "stamp`, then start an isolated instance with AI_SHUFFLE_PREVIEW=1 on "
+        "another port (see the preview-branch skill). Never start a second "
+        "worker against the running instance's data dir."
+    )
+    vite = "frontend/vite.config.js" if (cwd / "frontend" / "vite.config.js").is_file() else None
+    if vite and not (cwd / "frontend" / "vite.config.ts").is_file():
+        lines.append(f"Frontend: the Vite config is `{vite}` — there is no vite.config.ts.")
+    if (cwd / "tests" / "pg_shim.py").is_file():
+        lines.append(
+            "Tests: tests/pg_shim.py cannot run `SET`; failures whose message "
+            "names SET syntax are pre-existing shim limits, not your change."
+        )
+    return lines
+
+
+def workspace_facts_card(
+    working_dir: str,
+    *,
+    browser_host: Optional[str] = None,
+    app_port: Optional[int] = None,
+    preview_url: Optional[str] = None,
+) -> str:
+    """The first-turn bootstrap card. Deterministic for a given worker and
+    session: every probe here is either filesystem state at render time or a
+    per-process cached answer, so re-rendering inside one session produces the
+    same bytes. Never raises."""
+    cwd = Path(working_dir or ".")
+    lines: list = []
+    try:
+        is_shuffle = _is_ai_shuffle_checkout(cwd)
+        lines.extend(_node_dependency_facts(cwd))
+        lines.extend(_python_facts(cwd, is_shuffle))
+        if browser_host:
+            lines.append(
+                "Agent browser: may run on a different host from this shell (it "
+                "does on the container and shared runners). Bind any server you "
+                f"start to 0.0.0.0 and open it at http://{browser_host}:<port> — "
+                "that address works whether the browser is local or not; "
+                "localhost only works when it is."
+            )
+        else:
+            lines.append(
+                "Agent browser: may run on a different host from this shell. Bind "
+                "servers to 0.0.0.0 and open them by this machine's LAN address, "
+                "which works whether the browser is local or not."
+            )
+        if is_shuffle:
+            lines.extend(_shuffle_facts(cwd, app_port, preview_url))
+    except Exception:  # noqa: BLE001 — a card never fails a session
+        logger.warning("workspace facts card failed", exc_info=True)
+    body = "\n".join(f"- {line}" for line in lines)
+    card = (
+        f"{WORKSPACE_FACTS_HEADER}\n"
+        "Probed once for this worker at session start; these hold for every "
+        "turn. Recall before re-probing anything not listed here, and Remember "
+        "what you establish.\n"
+        f"{body}"
+    )
+    if len(card) > WORKSPACE_FACTS_MAX_CHARS:
+        card = card[:WORKSPACE_FACTS_MAX_CHARS - 1].rstrip() + "…"
+    return card

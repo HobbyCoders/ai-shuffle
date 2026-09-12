@@ -124,12 +124,18 @@ itself rides along as `ToolCtx.extra["cli_host"]`).
   inline; `mode="background"` detaches and reports the child's final assistant
   text as the summary.
 - **ListAgents / SendMessage** address the workers the host is holding. A row
-  is `name [ref]` — `name` is Task's `label` (or the agent name) and `ref` the
-  tail of the task id, needed only when two live workers share a name; a child
-  also sees `main`, its parent. Delivery is one `AgentMessage` submit and the
-  receiving engine picks the channel: queued for its next tool result while a
-  turn runs, an ordinary user-role turn when it is idle (which is what wakes a
-  parked session). "Running" is never a precondition: a message to a worker
+  is `name [ref]` — `name` is the Task's `name` (derived from its label or
+  the first words of its prompt when not given, so two workers of one agent
+  type are told apart) and `ref` the tail of the task id, needed only when two
+  live workers share a name; the task id from the Task receipt resolves too,
+  and a child also sees `main`, its parent. Delivery is one `AgentMessage`
+  submit and the receiving engine picks the channel: queued for its next tool
+  result while a turn runs, an ordinary user-role turn when it is idle. An
+  idle receiver that is *parked on background tasks* does not wake for an
+  ordinary message: it is held (persisted as a `progress` SubagentEvent) and
+  delivered with the next wake or user turn, because an interim note from a
+  running subagent is not worth a turn of its own; `urgent=True` on the op
+  forces the wake. "Running" is never a precondition: a message to a worker
   that has already finished rebuilds it over its stored session — same agent
   definition, same prompt and tool restriction, its own transcript behind it —
   and the message becomes its next turn. The resume registers as a *new*

@@ -88,10 +88,11 @@ HONORED:
     default). The synthesizer is scoped with ``project_key_for(cwd)`` so a
     project-tagged Remember lands as that project's fact, not an install-global
     one — the same key the prompt compiler renders the ``# Memory`` snapshot
-    under. The loader's two ctx handles ride along: ``recall_store`` (the
-    Recall builtin's store) whenever the skill store exists, and
-    ``continual_journal`` (the Remember builtin's write path) when continual is
-    on. With continual on but no live ``CodeModeSession`` — code mode off, no
+    under. The loader's ctx handles ride along: ``recall_store`` (the Recall
+    builtin's store) and ``memory_store`` (the Remember builtin's ONLY write
+    path — it commits to the store directly; the pre-#1185 journal-based
+    ``continual_journal`` path is gone so the two cannot diverge again). With
+    continual on but no live ``CodeModeSession`` — code mode off, no
     registry, or a failed construction — a ``ToolJournal`` takes over the
     episodic recording, so the learner keeps seeing turns instead of silently
     starving behind a frozen ``# Memory`` snapshot. Construction is
@@ -334,6 +335,13 @@ class HarnessAdapter(ProviderAdapter):
         self._pending_question_id: Optional[str] = None
         self._is_delegated: bool = False
         self._provider_kind: Optional[str] = None
+        # "# Workspace facts" card, rendered ONCE per session (cached prefix).
+        self._workspace_card: Optional[str] = None
+        # Everything a prompt recompile needs (the Task roster refresh, see
+        # ``_refresh_task_roster``) — captured at connect, never rebuilt.
+        self._prompt_inputs: Optional[Dict[str, Any]] = None
+        # Fingerprint of the Task contract the registry/prompt currently carry.
+        self._task_roster_signature: Optional[str] = None
         # ─ translation state (see _translate) ─
         # Model reported by the current turn's TurnStarted (AssistantMessage.model).
         self._current_model: Optional[str] = None
@@ -690,18 +698,6 @@ class HarnessAdapter(ProviderAdapter):
                             ),
                         )
 
-                        def _remember(text: str, scope: Optional[str] = None) -> None:
-                            # The Remember builtin's write path: journal a
-                            # high-salience entry and pull the next synthesis
-                            # pass forward.
-                            entry: Dict[str, Any] = {"kind": "remember", "text": text}
-                            if scope:
-                                entry["scope"] = scope
-                            skills.journal_append(entry)
-                            synthesizer.mark_urgent()
-                            synthesizer.kick()
-
-                        native_ctx.extra.setdefault("continual_journal", _remember)
                     # Never for the chat lane. Code mode replaces the request
                     # schemas with its four-tool surface and hands the model a
                     # Python kernel — and fluid EXEMPTS those four from the CE12
@@ -756,18 +752,31 @@ class HarnessAdapter(ProviderAdapter):
             # git-backed environment block (subprocess + rglob) and runs the
             # agent discovery walk again — all synchronous disk/process IO,
             # so it runs off the loop.
-            compiled_prompt = await asyncio.to_thread(
-                self._compile_prompt_sections,
-                system, append_system, options, code_mode=codemode is not None,
-                codemode=codemode,
+            # The "# Workspace facts" card: probed once here, byte-stable for
+            # the rest of the session (it lives in the cached prefix).
+            self._workspace_card = await asyncio.to_thread(
+                self._build_workspace_card, options
+            )
+            self._prompt_inputs = {
+                "system": system,
+                "append_system": append_system,
+                "code_mode": codemode is not None,
+                "codemode": codemode,
                 # The session's real tool registry — the name set the T9 prompt
                 # filter is computed from (MCP bridge names included).
-                registry=self._registry,
+                "registry": self._registry,
                 # The capabilities this leg actually wired: a builtin whose
                 # host injection is missing (SendMessage without agent
                 # messaging) leaves the prompt's tool surface the way the
                 # engine drops it from the schemas — one surface, not two.
-                wired=_wired_capabilities(native_ctx),
+                "wired": _wired_capabilities(native_ctx),
+                "workspace_card": self._workspace_card,
+            }
+            compiled_prompt = await asyncio.to_thread(
+                self._compile_prompt_sections,
+                system, append_system, options,
+                **{k: v for k, v in self._prompt_inputs.items()
+                   if k not in ("system", "append_system")},
             )
             self._engine = NativeLoop(
                 provider=provider_client,
@@ -806,6 +815,11 @@ class HarnessAdapter(ProviderAdapter):
                 # promotion decisions, and keeps every original node available to
                 # HistorySearch/HistoryExpand, rewind, forks, and audit.
                 compaction=_compaction_config(),
+                # Turn watchdog (round 9): a turn whose node never produces a
+                # result is ended by fluid after this many seconds of silence
+                # instead of dying silently. Passed only when the vendored
+                # fluid has the seam.
+                **_loop_bound_kwargs(),
                 # Native legs have no Claude Code preset — they always run the
                 # fluid-compiled prompt: the profile's configured prompt as the
                 # base (a preset-shaped profile has none) with the append text
@@ -1310,6 +1324,7 @@ class HarnessAdapter(ProviderAdapter):
             raise RuntimeError("Adapter not connected")
         await self.reconcile_user_questions()
         self._mark_turn_floor()
+        await self._refresh_task_roster()
         if not self._is_delegated and self._options is not None and prompt.startswith("/"):
             from app.core.slash_commands import expand_native_command
 
@@ -1331,6 +1346,97 @@ class HarnessAdapter(ProviderAdapter):
         # tests pass the prompt string straight through (the loops normalize it),
         # so the cast bridges the vendor annotation without touching the value.
         await self._engine.submit(UserTurn(content=cast(Any, content)))
+
+    def _build_workspace_card(self, options: SessionOptions) -> Optional[str]:
+        """The "# Workspace facts" card for this native session, or None.
+
+        Native legs only. Runs the cheap probes in
+        :func:`app.core.environment.workspace_facts_card` and mints the
+        session-scoped preview-access URL (:mod:`app.core.preview_access`)
+        that lets the agent browser open this worker's own UI. Never raises.
+        """
+        if self._is_delegated:
+            return None
+        try:
+            from app.core.config import settings
+            from app.core.environment import workspace_facts_card
+            from app.core import preview_access
+            from app.core.mcp_config import _browser_loopback_host
+
+            browser_host = _browser_loopback_host(os.environ.get("BROWSER_LOOPBACK_HOST"))
+            preview_url = None
+            session_id = self._resolve_app_session_id()
+            if session_id and browser_host:
+                try:
+                    preview_url = preview_access.preview_url(
+                        session_id, browser_host, int(settings.port)
+                    )
+                except Exception:  # noqa: BLE001 — the card still renders
+                    logger.warning("[HarnessAdapter] preview access mint failed", exc_info=True)
+            return workspace_facts_card(
+                options.cwd or ".",
+                browser_host=browser_host,
+                app_port=int(settings.port),
+                preview_url=preview_url,
+            )
+        except Exception:  # noqa: BLE001 — a card never fails a session
+            logger.warning("[HarnessAdapter] workspace facts card failed", exc_info=True)
+            return None
+
+    async def _refresh_task_roster(self) -> bool:
+        """Re-read the subagent roster at turn start; re-install it if changed.
+
+        Round-9 finding F6: the Task contract and the "# Available agent
+        types" index were computed once at connect, so a user who enabled a
+        subagent mid-session got "No subagents are configured and runnable"
+        on every later turn of that session (aa7e2c10, a wasted inline turn).
+        The roster is a DB/provider question, so it is re-asked here — off
+        the loop — and only a CHANGED answer touches anything: the registry's
+        Task spec (what read_tool_docs and the schema show) and the compiled
+        prompt (the ``# Tools`` catalog entry). An unchanged roster leaves
+        the cached prefix byte-identical. True when something was re-installed.
+        Never raises.
+        """
+        if (
+            self._is_delegated
+            or self._engine is None
+            or self._registry is None
+            or self._options is None
+            or self._prompt_inputs is None
+            # No contract was installed at connect (a caller-built registry,
+            # or the install failed): there is nothing to keep in sync.
+            or self._task_roster_signature is None
+        ):
+            return False
+        try:
+            options = self._options
+            contract = await asyncio.to_thread(_native_task_contract, options)
+            if contract is None:
+                return False
+            signature = _task_roster_signature(contract)
+            if signature == self._task_roster_signature:
+                return False
+            _install_task_contract(self._registry, contract)
+            compiled = await asyncio.to_thread(
+                self._compile_prompt_sections,
+                self._prompt_inputs["system"], self._prompt_inputs["append_system"],
+                options,
+                **{k: v for k, v in self._prompt_inputs.items()
+                   if k not in ("system", "append_system")},
+            )
+            if compiled is not None:
+                self._engine.system = compiled.text
+                self._engine.system_sections = compiled
+            self._task_roster_signature = signature
+            logger.info(
+                "[HarnessAdapter] subagent roster changed mid-session; Task "
+                "contract and prompt re-installed (%d targets)",
+                len(getattr(contract, "targets", ()) or ()),
+            )
+            return True
+        except Exception:  # noqa: BLE001 — a refresh never fails a turn
+            logger.warning("[HarnessAdapter] task roster refresh failed", exc_info=True)
+            return False
 
     def _turn_context_note(self) -> Optional[str]:
         """The turn's volatile context: environment facts, then memory.
@@ -2330,6 +2436,12 @@ class HarnessAdapter(ProviderAdapter):
             return []
 
         if cls == "SubagentEvent":
+            if str(getattr(event, "task_id", "") or "").startswith("peer:"):
+                # A peer message fluid queued while the session was parked
+                # (round 9): persisted as ``kind="progress"`` with a ``peer:``
+                # id so the engine can rehydrate it. Engine-internal — never a
+                # task card, never a registry row.
+                return []
             if getattr(event, "worker_session_id", None):
                 # Host-owned ProviderAgent workers already stream through
                 # WorkerFeed/task_registry. Mirroring Fluid's receipt events would
@@ -2526,8 +2638,16 @@ class HarnessAdapter(ProviderAdapter):
         native: bool = True,
         registry: Any = None,
         wired: Optional[frozenset] = None,
+        workspace_card: Optional[str] = None,
     ) -> Any:
         """Run the fluid prompt compiler, keeping the labeled sections.
+
+        ``workspace_card`` is the app's "# Workspace facts" bootstrap card
+        (:func:`app.core.environment.workspace_facts_card`), rendered once at
+        connect. It is slotted as an ``environment`` section right after the
+        compiler's own env block — or where that block would have been when a
+        profile injects its own ``<env>`` — so the facts are present whether
+        or not fluid's environment section is.
 
         ``wired`` is the set of host capabilities on the leg's tool context
         (``ctx.extra`` keys plus the ones NativeLoop wires itself). Given it,
@@ -2650,6 +2770,21 @@ class HarnessAdapter(ProviderAdapter):
                         insert_at = position
                         break
                 sections.insert(insert_at, PromptSection(kind="agents", text=index))
+            if native and workspace_card:
+                # After fluid's environment section when there is one, else
+                # before the first extra block — the same slot either way, so
+                # a profile's own <env> never pushes the card around.
+                insert_at = len(sections)
+                for position, section in enumerate(sections):
+                    if section.kind == "extra":
+                        insert_at = position
+                        break
+                for position, section in enumerate(sections):
+                    if section.kind == "environment":
+                        insert_at = position + 1
+                sections.insert(
+                    insert_at, PromptSection(kind="environment", text=workspace_card)
+                )
             if native:
                 # Mid-turn steering, native leg only. A steer arrives INSIDE a
                 # tool result — the one channel the base prompt teaches the
@@ -2696,6 +2831,12 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=RECALL_BLOCK)
                 )
+                if permitted is None or {"Remember", "Recall"} <= permitted:
+                    # ... and WHEN to save/recall a fact (see MEMORY_BLOCK),
+                    # gated on the memory builtins the same way (ruling T9).
+                    sections.append(
+                        PromptSection(kind="extra", text=MEMORY_BLOCK)
+                    )
             if (options.extra or {}).get("github_connected") and (
                 permitted is None or "Bash" in permitted
             ):
@@ -2818,7 +2959,7 @@ class HarnessAdapter(ProviderAdapter):
         inproc_servers = _extra_opt(options, "inproc_servers") or []
         external_mcp = _external_mcp_servers(options.mcp_servers)
 
-        registry = ToolRegistry()
+        registry = ToolRegistry(**_registry_bound_kwargs())
         # Constraint: native legs (anthropic / openai_responses / openrouter)
         # get fluid's builtin Read/Grep/Write/Edit/Bash/Skill/Note as first-class
         # tools — without them a native session can only reach the app's bridged
@@ -2851,7 +2992,7 @@ class HarnessAdapter(ProviderAdapter):
                 )
             except ImportError:
                 pass  # older vendored fluid without the refinement seam
-            _amend_native_task_spec(registry, options)
+            self._task_roster_signature = _amend_native_task_spec(registry, options)
             # Same A13 split for Monitor: fluid owns its shape, the app owns
             # its supervision — and `wait_seconds` (the inline settle window)
             # is supervision, so the parameter is spliced onto the vendor spec
@@ -3091,6 +3232,51 @@ def _normalize_mcp_config_for_fluid(name: str, config: Any) -> Optional[Dict[str
 
 
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+
+
+def _accepts_kwarg(callable_obj: Any, name: str) -> bool:
+    """Whether ``callable_obj``'s signature takes ``name`` (or ``**kwargs``)."""
+    import inspect
+
+    try:
+        params = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _registry_bound_kwargs(registry_cls: Any = None) -> Dict[str, Any]:
+    """``external_call_timeout`` for :class:`ToolRegistry`, when it takes one.
+
+    fluid (round 9) bounds every MCP/inproc call under this timeout; its
+    default is 75s. The app raises it above any legitimate long block it
+    knows of: ``browser_batch`` can chain twenty 15s waits, Monitor's inline
+    ``wait_seconds`` runs to 120s, and computer-use screenshots on a busy
+    desktop take seconds each. Env: FLUID_EXTERNAL_CALL_TIMEOUT_SECONDS.
+    """
+    from app.core.config import settings
+
+    cls = registry_cls if registry_cls is not None else ToolRegistry
+    if not _accepts_kwarg(cls, "external_call_timeout"):
+        return {}
+    seconds = float(getattr(settings, "fluid_external_call_timeout_seconds", 330) or 330)
+    return {"external_call_timeout": seconds}
+
+
+def _loop_bound_kwargs(loop_cls: Any = None) -> Dict[str, Any]:
+    """``turn_watchdog_seconds`` for :class:`NativeLoop`, when it takes one.
+
+    Env: FLUID_TURN_WATCHDOG_SECONDS (default 900, fluid's own default).
+    """
+    from app.core.config import settings
+
+    cls = loop_cls if loop_cls is not None else NativeLoop
+    if not _accepts_kwarg(cls, "turn_watchdog_seconds"):
+        return {}
+    seconds = float(getattr(settings, "fluid_turn_watchdog_seconds", 900) or 900)
+    return {"turn_watchdog_seconds": seconds}
 
 
 def _fluid_setting_sources(options: Any) -> Optional[tuple]:
@@ -3546,8 +3732,9 @@ hits = Grep(pattern="usage", path="/repo/src").splitlines()
 for path in hits[:10]:
     print(path, Read(file_path=path)[:400])
 ```
-Wrap calls that may fail in try/except so one failure does not abort the \
-batch. The kernel is persistent: variables, imports and ResultRefs survive \
+Catch only MissingPathError, and only around discovery (a Read or Grep of \
+a path you guessed); other tool errors come back as results and do not abort \
+the cell, so do not wrap them. The kernel is persistent: variables, imports and ResultRefs survive \
 across cells, so build on earlier results instead of re-fetching. Independent \
 tool calls that you would otherwise issue one per turn belong in the same cell.
 
@@ -3607,11 +3794,23 @@ catalog: complete for the tools it documents in full, and read_tool_docs is \
 how you fill in a deferred one.
 
 ## Skills
-Two different things are called skills. The "# Available skills" list above is \
-instruction files, loaded through the Skill tool. The "Saved skills" that \
-list_tools reports are Python modules from your continual skill store, \
-imported with `from skills.<name> import <name>`. Once you have repeated a \
-workflow, save it as a skill."""
+Two different things are called skills, and you can create both.
+- Prose skills are the "# Available skills" list above: instruction files \
+loaded with `from tools.Skill import Skill`. To save a repeatable procedure \
+as one, Write `<project>/.fluid/skills/<name>/SKILL.md` with a frontmatter \
+`name:` and `description:` line followed by the steps; it appears under \
+"# Available skills" in later sessions on every worker that checks out the \
+project. This is the right home for anything that is a sequence of commands \
+and checks (a release procedure, how to preview a branch).
+- Python skills are the "Saved skills" that list_tools reports: modules in \
+your skill store, imported with `from skills.<name> import <name>`. Create \
+one with `save_skill(name=..., source=...)` (`from tools import save_skill`): \
+the module needs a docstring, a function named like the skill, and a pure \
+`_selftest()` that runs on inline \
+data with no tool calls; save_skill runs the self-test in a throwaway kernel \
+and rejects the module if it fails. `delete_skill(name=...)` removes one. \
+Use this form for pure helpers (parsers, formatters, calculations) you keep \
+rewriting, not for facts about the environment — those go to Remember."""
 
 # The list of reachable tool families in the opening sentence.
 _CODE_MODE_REACHABLE = (
@@ -3629,11 +3828,13 @@ def _code_mode_section() -> str:
     return CODE_MODE_SECTION
 
 
-# The four code-mode tools plus the skill-store pair describe themselves in the
-# model's own schema, so re-documenting them in the catalog would be dead prompt.
+# The four code-mode tools describe themselves in the model's own schema, so
+# re-documenting them in the catalog would be dead prompt. ``save_skill`` and
+# ``delete_skill`` are NOT in this set on purpose: they are projected into the
+# kernel, not the schema, and the round-9 audit found no session had ever
+# called save_skill because nothing the model could read named it.
 _CODE_MODE_CATALOG_SKIP = frozenset({
     "run_python", "list_tools", "search_tools", "read_tool_docs",
-    "save_skill", "delete_skill",
 })
 
 
@@ -3762,6 +3963,43 @@ _DEFERRED_CATALOG_HEADER = (
 )
 
 
+def _skill_store_tool_specs(codemode: Any) -> Dict[str, Any]:
+    """``{"save_skill": spec, "delete_skill": spec}`` for a session with a
+    skill store, or ``{}``.
+
+    fluid registers the pair in ``register_code_mode_tools`` (called from
+    ``NativeLoop.__init__``), i.e. after the app compiles its prompt. The
+    specs are read off a throwaway registry so the catalog carries fluid's
+    own text and schema rather than a copy that could drift. Best-effort:
+    any failure means the pair is simply absent, as before.
+    """
+    if getattr(codemode, "skills", None) is None:
+        return {}
+    try:
+        from fluid.codemode.session import register_code_mode_tools
+
+        scratch = ToolRegistry()
+        register_code_mode_tools(scratch, codemode)
+        out: Dict[str, Any] = {}
+        for name in ("save_skill", "delete_skill"):
+            spec = scratch.get(name)
+            if spec is not None:
+                out[name] = spec
+        return out
+    except Exception:  # noqa: BLE001 — the catalog is best-effort
+        logger.debug("[HarnessAdapter] skill-store tool specs unavailable", exc_info=True)
+        return {}
+
+
+# fluid's Skill description talks about "calling" the tool; in code mode the
+# only way to reach it is the import below, and the audit found models trying
+# the direct-tool form first (P7). Spliced onto the catalog entry only.
+_SKILL_CODE_MODE_NOTE = (
+    "In code mode reach it with `from tools.Skill import Skill` and "
+    "`Skill(name=\"<skill>\")` inside run_python."
+)
+
+
 def _code_mode_tool_sections(
     codemode: Any,
     permit=None,
@@ -3819,6 +4057,13 @@ def _code_mode_tool_sections(
     except Exception:  # noqa: BLE001 — a broken registry must not kill the turn
         logger.warning("[HarnessAdapter] code-mode tool catalog FAILED", exc_info=True)
         return []
+    # The skill-store pair is registered by NativeLoop (``register_code_mode_
+    # tools``), which runs AFTER this compile — so at connect the projection
+    # has no ``save_skill`` leaf and the catalog silently lacked it (round-9
+    # finding S1). Fetch the specs from a throwaway registration instead.
+    late_specs = (
+        _skill_store_tool_specs(codemode) if "save_skill" not in leaves else {}
+    )
 
     blocks: list[str] = []
     collapsed: list[str] = []
@@ -3826,8 +4071,8 @@ def _code_mode_tool_sections(
         # The registry when there is one; otherwise the projection, which knows
         # the tier itself once the vendored fluid carries it.
         deferred = _deferred_tool_names(registry, projection)
-    for leaf in leaves:
-        spec = projection.spec_for(leaf)
+    for leaf in [*leaves, *late_specs]:
+        spec = late_specs.get(leaf) or projection.spec_for(leaf)
         if spec is None or leaf in _CODE_MODE_CATALOG_SKIP:
             continue
         if getattr(spec, "name", None) in _CODE_MODE_CATALOG_SKIP:
@@ -3835,7 +4080,10 @@ def _code_mode_tool_sections(
         if permit is not None and not permit(getattr(spec, "name", None) or leaf):
             continue
         if getattr(spec, "name", None) in deferred:
-            collapsed.append(f"- {leaf}: {_catalog_one_liner(spec, leaf)}")
+            one_liner = _catalog_one_liner(spec, leaf)
+            if leaf == "Skill":
+                one_liner = f"{one_liner} {_SKILL_CODE_MODE_NOTE}"
+            collapsed.append(f"- {leaf}: {one_liner}")
             continue
         schema = getattr(spec, "input_schema", None) or {}
         props: dict = schema.get("properties") or {}
@@ -3858,6 +4106,8 @@ def _code_mode_tool_sections(
             f"`{leaf}({', '.join(params)})`",
         ]
         description = (getattr(spec, "description", "") or "").strip()
+        if leaf == "Skill":
+            description = (description + " " + _SKILL_CODE_MODE_NOTE).strip()
         if description:
             lines.append(description)
         if not getattr(spec, "code_mode_allowed", True):
@@ -3912,7 +4162,26 @@ couple of quick lookups beat asking the user to repeat themselves. Recalled \
 content is history, not live state: verify against the current files before \
 acting on it."""
 
+# Append fixed, cache-stable harness memory guidance wherever RECALL_BLOCK appears, including before the first
+# saved fact makes a Memory snapshot available.
+MEMORY_BLOCK = """# Durable memory
+Remember saves a durable fact for every later session on every worker of this \
+install. Save environment facts the moment you establish them: how the tests \
+are run and which interpreter has pytest, host and port conventions, a \
+dependency that is missing here, the address the agent browser reaches this \
+machine on, and any correction the user gives you. Recall is one cheap call; \
+make it BEFORE re-discovering an environment fact with probes, and whenever \
+the user refers to a convention you do not see in context. Saved facts arrive \
+as the "# Memory" reminder on the user turn, not in this system prompt; when \
+that reminder is absent the store is empty, not hidden. Note and Ledger are \
+per-session working state and never persist beyond this session — anything \
+worth keeping past it goes through Remember."""
+
 GITHUB_BLOCK = """# GitHub
+Open a PR only when repository files changed for the user's request; answer \
+questions and do local-config tasks (installing a skill, editing settings \
+under the home directory) directly, without a branch or a PR.
+
 The gh CLI is installed and authenticated on this machine. Reach GitHub \
 through it in Bash — pull requests (gh pr create/view/checks), issues (gh \
 issue), CI runs (gh run list / gh run watch), and API reads (gh api) — rather \
@@ -3973,22 +4242,34 @@ VERIFICATION_BLOCK = """# Verification
 A change the user will see is verified only when you have watched it work in \
 the running app — a real session, the real UI, driven through the browser \
 tools. Tests, fixtures and a green build show the code does what you wrote, \
-not that the user's problem is gone. Say what you actually exercised (which \
-page, which session, which command); if you never opened the app, write that \
-in the summary and in the PR body instead of calling it verified. A test count \
-is not a verification.
+not that the user's problem is gone. Say what you exercised (page, session, \
+command); if you never opened the app, write that in the summary and the PR \
+body instead of calling it verified. A test count is not a verification.
+
+Budget, per changed surface: one browser_navigate and one browser_snapshot \
+(filter="interactive" or scope_ref after the first full one), browser_eval to \
+read state, browser_act only for the interaction the change is about, and a \
+browser_screenshot only when layout or rendering IS the claim. Never \
+re-snapshot a page that did not change.
+
+Reaching the UI: the agent browser may run on another host, so bind any server \
+you start to 0.0.0.0 and open it at the address in "# Workspace facts". This \
+app's own UI rejects proxied requests (a branch's Vite dev proxy included): \
+open it ONCE at the preview-access URL in "# Workspace facts", which sets a \
+session-bound cookie the rest of the visit rides on, through the Vite proxy \
+too. For a branch build run `python -m app.preview stamp` and start an \
+isolated instance with AI_SHUFFLE_PREVIEW=1 (preview-branch skill); never \
+hand-roll a server or mount components by hand in browser_eval.
+
+An ops or performance question needs a measurement (GetAppLogs, GetAppErrors, \
+a probe, a metric) before a code change is proposed.
 
 A fixture that seeds the field your change reads proves only that the consumer \
-reads it. What populates that field in production is the half that breaks — so \
-drive the producing path too, with the state the real code writes, or report \
-the gap.
-
-Provider and model capabilities come from a live probe of the configured \
-provider on the user's own credential. Public docs describe someone else's \
-account, and the current serializer only repeats what this code already \
-assumes; neither is evidence.
-
-Change a rule that is shared — a CSS rule, a helper, a default — and verify \
+reads it: drive the producing path too, with the state the real code writes, \
+or report the gap. Provider and model capabilities come from a live probe of \
+the configured provider on the user's own credential. Public docs describe \
+someone else's account; the serializer repeats what the code assumes; neither \
+is evidence. Change a shared rule — CSS, a helper, a default — and verify \
 every surface it applies to, not just the one named in the report.
 
 Keep scratch fixtures and temp servers OUT of the typechecked and tested tree \
@@ -4221,13 +4502,13 @@ def _native_context_window(kind: str, options: SessionOptions) -> Optional[int]:
     return None
 
 
-def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> None:
-    """Replace Fluid's static Task spec with the provider-scoped app contract.
+def _native_task_contract(options: SessionOptions) -> Any:
+    """The provider-scoped Task contract for this session RIGHT NOW.
 
-    Fluid owns the bare tool and handler; AI Shuffle owns its profile registry
-    and provider bindings. The native and delegated surfaces therefore receive
-    the same eligible subagent roster and neither accepts model-authored
-    provider or model selection.
+    A DB + provider + disk question (``build_task_contract`` reads the
+    profile roster, ``discover_agents`` walks the cwd), asked at connect and
+    again at every turn start (``HarnessAdapter._refresh_task_roster``).
+    None when it cannot be built; never raises.
     """
     try:
         provider_id = (options.extra or {}).get("provider_id")
@@ -4247,30 +4528,76 @@ def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> 
         except Exception:  # noqa: BLE001 — DB roster still remains usable
             logger.debug("Could not discover file subagents for Task spec", exc_info=True)
             discovered_registry = {}
-        contract = build_task_contract(
+        return build_task_contract(
             profile_id,
             provider_id,
             file_subagent_targets(discovered_registry, options.model),
         )
-        import dataclasses
-
-        from fluid.tools.builtins.task import SPEC as _TASK_SPEC
-        from fluid.tools.builtins.task import handler as _task_handler
-
-        registry.register_builtin(
-            dataclasses.replace(
-                _TASK_SPEC,
-                description=contract.description,
-                input_schema=contract.input_schema,
-            ),
-            _task_handler,
+    except Exception:  # noqa: BLE001 — must never break session connect
+        logger.warning(
+            "[HarnessAdapter] failed to build the provider-scoped Task contract",
+            exc_info=True,
         )
+        return None
+
+
+def _task_roster_signature(contract: Any) -> str:
+    """A stable fingerprint of what the model can see of the roster."""
+    import json
+
+    return json.dumps(
+        {
+            "description": getattr(contract, "description", ""),
+            "schema": getattr(contract, "input_schema", {}),
+        },
+        sort_keys=True, default=str,
+    )
+
+
+def _install_task_contract(registry: ToolRegistry, contract: Any) -> None:
+    """Register fluid's Task handler under the app's contract text/schema."""
+    import dataclasses
+
+    from fluid.tools.builtins.task import SPEC as _TASK_SPEC
+    from fluid.tools.builtins.task import handler as _task_handler
+
+    registry.register_builtin(
+        dataclasses.replace(
+            _TASK_SPEC,
+            description=contract.description,
+            input_schema=contract.input_schema,
+        ),
+        _task_handler,
+    )
+
+
+def _amend_native_task_spec(
+    registry: ToolRegistry, options: SessionOptions
+) -> Optional[str]:
+    """Replace Fluid's static Task spec with the provider-scoped app contract.
+
+    Fluid owns the bare tool and handler; AI Shuffle owns its profile registry
+    and provider bindings. The native and delegated surfaces therefore receive
+    the same eligible subagent roster and neither accepts model-authored
+    provider or model selection.
+
+    Returns the installed contract's fingerprint (see
+    :func:`_task_roster_signature`) so the per-turn refresh can tell a changed
+    roster from an unchanged one, or None when nothing was installed.
+    """
+    try:
+        contract = _native_task_contract(options)
+        if contract is None:
+            return None
+        _install_task_contract(registry, contract)
+        return _task_roster_signature(contract)
     except Exception:  # noqa: BLE001 — must never break session connect
         logger.warning(
             "[HarnessAdapter] failed to install provider-scoped native Task "
             "spec; leaving the vendor spec as-is.",
             exc_info=True,
         )
+        return None
 
 
 # NOTE: the former ``_amend_native_mutation_specs`` (which overwrote fluid's

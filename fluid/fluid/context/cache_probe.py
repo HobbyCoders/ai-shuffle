@@ -25,6 +25,10 @@ __all__ = [
     "is_unexplained_miss",
     "checkpoint_positions",
     "message_count",
+    "system_text_of",
+    "system_paragraph_hashes",
+    "system_change_detail",
+    "cache_read_report",
 ]
 
 _DIGEST_BYTES = 8  # 16 hex chars — collision-irrelevant for a diff signal
@@ -111,6 +115,156 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+# ─── system-section diff support ─────────────────────────────────────────────
+#
+# Round 9: 21 misses were "prefix_changed changed=system" on the first call
+# after a park, and the hash alone could not say WHAT in the 21k-token system
+# section had changed. The fingerprint now also carries a per-paragraph hash
+# list (4 hex chars each, ~750 bytes for a 20k-token prompt), so the first
+# differing paragraph can be located even across a process boundary, and the
+# engine records that paragraph's text (up to SYSTEM_DIFF_HEAD_CHARS) with the
+# section it belongs to.
+
+SYSTEM_PARAGRAPHS_KEY = "_system_paragraphs"
+SYSTEM_DIFF_HEAD_CHARS = 300
+_PARAGRAPH_DIGEST_HEX = 4
+
+
+def system_text_of(system: Any) -> str:
+    """The system prompt as one text: a string as is, Anthropic-style blocks
+    joined on their ``text`` fields, anything else canonicalized."""
+    if system is None:
+        return ""
+    if isinstance(system, str):
+        return system
+    if isinstance(system, (list, tuple)):
+        parts = []
+        for block in system:
+            if isinstance(block, Mapping) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            else:
+                parts.append(_canonical(block))
+        return "\n\n".join(parts)
+    return _canonical(system)
+
+
+def _paragraphs(text: str) -> list[str]:
+    return text.split("\n\n") if text else []
+
+
+def system_paragraph_hashes(text: str) -> str:
+    """Space-separated short hashes, one per ``\\n\\n``-separated paragraph."""
+    out = []
+    for paragraph in _paragraphs(text):
+        h = hashlib.blake2b(digest_size=2)
+        h.update(paragraph.encode("utf-8", "replace"))
+        out.append(h.hexdigest()[:_PARAGRAPH_DIGEST_HEX])
+    return " ".join(out)
+
+
+def _section_of(index: int, sections: Sequence[tuple[str, str]] | None, text: str) -> str | None:
+    """Which compiled section paragraph ``index`` falls in, when the joined
+    section texts are exactly the prompt (otherwise ``None``)."""
+    if not sections:
+        return None
+    if "\n\n".join(s_text for _kind, s_text in sections) != text:
+        return None
+    cursor = 0
+    for kind, s_text in sections:
+        count = len(_paragraphs(s_text))
+        if index < cursor + count:
+            return kind
+        cursor += count
+    return None
+
+
+def system_change_detail(
+    previous: Mapping[str, str] | None,
+    current: Mapping[str, str],
+    *,
+    current_text: str,
+    previous_text: str | None = None,
+    sections: Sequence[tuple[str, str]] | None = None,
+) -> dict[str, Any] | None:
+    """Where the system section changed between two fingerprints.
+
+    Returns ``None`` when the system hashes match or neither fingerprint
+    carries paragraph hashes. Otherwise the first differing paragraph's
+    index, its section name (when the prompt was compiled from sections),
+    the head of the current paragraph, and the head of the previous one when
+    that text is still in this process. Across a park/wake only the previous
+    hashes survive (they ride the persisted Usage event), which still names
+    the paragraph position and the current text at it.
+    """
+    if previous is None or previous.get(SYSTEM_SEGMENT) == current.get(SYSTEM_SEGMENT):
+        return None
+    before = (previous.get(SYSTEM_PARAGRAPHS_KEY) or "").split()
+    after = (current.get(SYSTEM_PARAGRAPHS_KEY) or "").split()
+    if not before or not after:
+        return None
+    index = next((i for i, (a, b) in enumerate(zip(before, after)) if a != b), None)
+    if index is None:
+        index = min(len(before), len(after))
+    paragraphs = _paragraphs(current_text)
+    current_head = paragraphs[index][:SYSTEM_DIFF_HEAD_CHARS] if index < len(paragraphs) else ""
+    out: dict[str, Any] = {
+        "paragraph_index": index,
+        "paragraphs_before": len(before),
+        "paragraphs_after": len(after),
+        "current_head": current_head,
+    }
+    section = _section_of(index, sections, current_text)
+    if section is not None:
+        out["section"] = section
+    if previous_text is not None:
+        prev_paragraphs = _paragraphs(previous_text)
+        if index < len(prev_paragraphs):
+            out["previous_head"] = prev_paragraphs[index][:SYSTEM_DIFF_HEAD_CHARS]
+        elif len(before) != len(after):
+            out["previous_head"] = ""
+    return out
+
+
+def cache_read_report(
+    usage: Mapping[str, Any], *, input_includes_cached: bool
+) -> dict[str, Any]:
+    """The provider's own cached-token count next to the probe's verdict.
+
+    Recorded on EVERY call, hit or miss, so a partial hit (some prefix reused)
+    and a full miss (zero reused) are distinguishable in the event log without
+    re-deriving them from four usage counters. ``input_includes_cached`` says
+    which accounting the provider uses: OpenAI-shaped APIs count cached
+    tokens inside ``input_tokens``; Anthropic reports them alongside it.
+    """
+    def _int(key: str) -> int:
+        try:
+            return int(usage.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    input_tokens = _int("input_tokens")
+    cached = _int("cache_read_input_tokens") or _int("cache_read_tokens")
+    created = _int("cache_creation_input_tokens") or _int("cache_creation_tokens")
+    total = input_tokens if input_includes_cached else input_tokens + cached + created
+    fraction = round(cached / total, 3) if total > 0 else 0.0
+    if total < 1_000:
+        verdict = "small_prompt"
+    elif fraction >= 0.9:
+        verdict = "full_hit"
+    elif cached > 0:
+        verdict = "partial_hit"
+    else:
+        verdict = "no_cache_read"
+    return {
+        "provider_cached_tokens": cached,
+        "provider_cache_creation_tokens": created,
+        "prompt_tokens_total": total,
+        "cached_fraction": fraction,
+        "verdict": verdict,
+        "input_includes_cached": input_includes_cached,
+    }
+
+
 def _feed_block(h: Any, block: Any) -> None:
     # Field names and delimiters avoid ambiguous concatenations. Include full
     # image data, tool names and opaque reasoning, not length/head heuristics.
@@ -146,6 +300,7 @@ def fingerprint_prefix(
     out[TOOLS_SEGMENT] = _hash_text(tools_text)
 
     out["request"] = _hash_text(_canonical(request_identity or {}))
+    out[SYSTEM_PARAGRAPHS_KEY] = system_paragraph_hashes(system_text_of(system))
     out["_version"] = "normalized-v2"
     static_tokens = (len(_canonical(system or "")) + len(tools_text)) // 4
     out["_tokens_system"] = str(len(_canonical(system or "")) // 4)
@@ -241,8 +396,13 @@ def diagnose_cache_miss(
     config: CacheProbeConfig | None = None,
     history_rewrites: Sequence[Mapping[str, Any]] | None = None,
     explicit_breakpoints: bool = True,
+    system_detail: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Name the first prefix segment that changed, when a call missed cache.
+
+    ``system_detail`` (see :func:`system_change_detail`) is attached as
+    ``system_diff`` when the changed segment is the system section, so the
+    audit can read the varying fragment instead of a hash.
 
     Returns ``None`` unless the call actually looks like a miss worth naming
     (big fresh prompt, ~no cache read) — accounting noise stays out of the
@@ -403,6 +563,15 @@ def diagnose_cache_miss(
         )
     else:
         out["note"] = f"the {changed} section of the prompt changed"
+        if changed == SYSTEM_SEGMENT and system_detail:
+            out["system_diff"] = dict(system_detail)
+            where = system_detail.get("section")
+            head = str(system_detail.get("current_head") or "")[:80]
+            out["note"] += (
+                f" — first differing paragraph #{system_detail.get('paragraph_index')}"
+                + (f" in the {where} section" if where else "")
+                + (f': "{head}…"' if head else "")
+            )
     if rewrites:
         out["history_rewritten"] = rewrites
         out["note"] += f"; {_rewrite_phrase(rewrites)} since the last request"

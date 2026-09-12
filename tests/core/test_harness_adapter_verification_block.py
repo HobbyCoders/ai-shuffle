@@ -88,5 +88,7 @@ def test_the_block_is_fixed_text(tmp_path):
 
 
 def test_the_block_stays_short(tmp_path):
-    """It is prefix on every code session — a page of rules, not an essay."""
-    assert len(VERIFICATION_BLOCK) <= 2000
+    """It is prefix on every code session — a page of rules, not an essay.
+    Round 9 added the browser budget, how to reach the UI and the ops
+    measurement rule (~600 chars); the cap moves with them, once."""
+    assert len(VERIFICATION_BLOCK) <= 2600

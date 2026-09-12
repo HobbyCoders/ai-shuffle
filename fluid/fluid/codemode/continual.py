@@ -265,9 +265,49 @@ def _add_usage(total: dict[str, int], raw: dict) -> None:
                 total[key] = total.get(key, 0) + int(value)
                 break
 
+class SynthesisIncomplete(RuntimeError):
+    """The model call finished without a usable answer.
+
+    Raised by :meth:`Synthesizer._complete` when the stream stopped for
+    ``max_tokens`` or produced no text at all. Either way the slice was not
+    judged, so the caller must not advance the cursor: an empty completion
+    used to parse as "no tags" and count as a clean NO_CHANGES pass, which is
+    how ~557 passes wrote nothing while burning the daily budget.
+    """
+
+    def __init__(self, stop_reason: str | None, usage: dict[str, int], output_chars: int) -> None:
+        self.stop_reason = stop_reason
+        self.usage = dict(usage)
+        self.output_chars = output_chars
+        what = "no text" if output_chars == 0 else f"{output_chars} chars"
+        super().__init__(
+            f"synthesis returned {what} (stop_reason={stop_reason or 'unknown'}, "
+            f"output_tokens={usage.get('output_tokens', 0)})"
+        )
+
+
+class InferenceBudgetExhausted(RuntimeError):
+    """The store's daily inference-call budget is spent (see facts.py)."""
+
+
 # Journal previews are already trimmed at write time; cap the slice we show.
 MAX_ENTRIES_PER_PASS = 40
-MIN_NEW_ENTRIES = 8
+# A pass costs one of the day's 48 inference calls (facts.MAX_INFERENCE_CALLS_
+# PER_DAY), so it has to see a real slice: a turn writes its user prompt, its
+# assistant reply and a handful of cells, so 20 is roughly three turns of
+# evidence. At 8 the container spent the whole budget by late morning on
+# slices of three to eight entries.
+MIN_NEW_ENTRIES = 20
+# Output room for a pass. The old 4,096 cap was consumed by reasoning alone
+# on gpt-6-class models, so the stream ended ``incomplete`` with no text and
+# the pass counted as a clean NO_CHANGES. Overridable through the
+# constructor (``max_tokens``) for hosts that pin a smaller model.
+SYNTH_MAX_TOKENS = 16_000
+# Reasoning effort sent on every synthesis request. Low: the task is a
+# read-and-classify over a bounded journal, and the budget is calls per day,
+# not quality per call. Serializers map it per provider (Anthropic
+# output_config.effort, OpenAI-shaped reasoning.effort).
+SYNTH_EFFORT = "low"
 # Skill source shown per pass: skills the slice referenced are always shown
 # whole; the rest fill this budget most-used first and beyond it appear as an
 # index line only. Every pass used to re-send every skill's full source.
@@ -292,7 +332,8 @@ class Synthesizer:
         on_change: Any | None = None,  # callable(list[str]) -> None|Awaitable
         min_new_entries: int = MIN_NEW_ENTRIES,
         max_entries: int = MAX_ENTRIES_PER_PASS,
-        max_tokens: int = 4096,
+        max_tokens: int = SYNTH_MAX_TOKENS,
+        effort: str | None = SYNTH_EFFORT,
         pass_timeout: float = 180.0,
         close_timeout: float = 90.0,
         session_model: str | None = None,
@@ -316,7 +357,14 @@ class Synthesizer:
         self._min_new = max(1, min_new_entries)
         self._max_entries = max_entries
         self._max_tokens = max_tokens
+        self._effort = effort
         self._task: asyncio.Task | None = None
+        # UTC day (time // 86400) on which the daily budget was found spent.
+        # Until the day rolls over ``due()`` is False, so a kick per cell
+        # does not append hundreds of identical budget rows to the pass log.
+        self._budget_spent_day: int | None = None
+        # The last completion's stop reason, for the pass log.
+        self.last_stop_reason: str | None = None
         # A pass is one model call plus verification kernels; bound it so a
         # stalled stream can never wedge a turn or, worse, session close.
         self._pass_timeout = pass_timeout
@@ -343,6 +391,10 @@ class Synthesizer:
         self._urgent = True
 
     def due(self) -> bool:
+        if self._budget_spent_day is not None:
+            if int(time.time() // 86400) == self._budget_spent_day:
+                return False
+            self._budget_spent_day = None
         new = self._store.journal_count() - self._store.synth_cursor()
         if self._urgent and new >= 1:
             return True
@@ -391,6 +443,13 @@ class Synthesizer:
             changed = await asyncio.wait_for(self.run(), timeout=self._pass_timeout)
         except TimeoutError:
             self.last_error = f"synthesis pass exceeded {self._pass_timeout:.0f}s"
+            self._log_pass("synthesis", [], error=self.last_error)
+            return []
+        except InferenceBudgetExhausted as exc:
+            # The slice stays unconsumed (cursor untouched, journal lines
+            # retained by reap) and is retried once the UTC day rolls over.
+            self._budget_spent_day = int(time.time() // 86400)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             self._log_pass("synthesis", [], error=self.last_error)
             return []
         except Exception as exc:  # never let synthesis break the session
@@ -455,7 +514,22 @@ class Synthesizer:
                 # Unattributed legacy input may produce global facts, but must
                 # not be assigned to whichever project happens to run next.
                 self._project = project or "legacy:unassigned"
-                text, group_usage = await self._complete(self._prompt(group), _SYNTH_SYSTEM)
+                try:
+                    text, group_usage = await self._complete(self._prompt(group), _SYNTH_SYSTEM)
+                except SynthesisIncomplete as exc:
+                    # Not a verdict on the slice: leave the cursor where it
+                    # is so the next pass retries it, and log what came
+                    # back so an empty stream is never mistaken for
+                    # NO_CHANGES again.
+                    for key, value in exc.usage.items():
+                        usage[key] = usage.get(key, 0) + value
+                    self.last_error = str(exc)
+                    self._log_pass(
+                        "synthesis", changed, error=self.last_error,
+                        consumed=0, output_chars=exc.output_chars,
+                        usage=usage, stop_reason=exc.stop_reason,
+                    )
+                    return changed
                 for key, value in group_usage.items():
                     usage[key] = usage.get(key, 0) + value
                 if self._store._facts.snapshot().get("forgotten_before", 0) > forgotten_before:
@@ -477,6 +551,7 @@ class Synthesizer:
         self._log_pass(
             "synthesis", changed, error=self.last_error,
             consumed=len(entries), output_preview=text, usage=usage,
+            stop_reason=self.last_stop_reason,
         )
         return changed
 
@@ -489,6 +564,8 @@ class Synthesizer:
         consumed: int | None = None,
         output_preview: str | None = None,
         usage: dict[str, int] | None = None,
+        stop_reason: str | None = None,
+        output_chars: int | None = None,
     ) -> None:
         """Append one pass record to ``.synthesis-log.jsonl`` (best-effort).
 
@@ -508,8 +585,14 @@ class Synthesizer:
             record["usage"] = dict(usage)
         if error:
             record["error"] = error
-        if output_preview is not None:
+        if output_chars is not None:
+            record["output_chars"] = int(output_chars)
+        elif output_preview is not None:
             record["output_chars"] = len(output_preview)
+        if usage and "output_tokens" in usage:
+            record["output_tokens"] = int(usage["output_tokens"])
+        if stop_reason:
+            record["stop_reason"] = stop_reason
         path = self._store.root / ".synthesis-log.jsonl"
         try:
             with path.open("a", encoding="utf-8") as fh:
@@ -566,7 +649,15 @@ class Synthesizer:
             lines.append("(empty)")
         for s in skills:
             lines.append(f"- {s.name} (used {s.uses}x): {s.description}")
-        text, usage = await self._complete("\n".join(lines), _CONSOLIDATE_SYSTEM)
+        try:
+            text, usage = await self._complete("\n".join(lines), _CONSOLIDATE_SYSTEM)
+        except SynthesisIncomplete as exc:
+            self.last_error = str(exc)
+            self._log_pass(
+                "consolidation", [], error=self.last_error, usage=exc.usage,
+                output_chars=exc.output_chars, stop_reason=exc.stop_reason,
+            )
+            return []
         changed: list[str] = []
         for match in _MEMORY_RE.finditer(text or ""):
             memory_id, scope_attr, memory_text = match.groups()
@@ -705,10 +796,16 @@ class Synthesizer:
         Usage arrives on ``message_start`` and ``usage`` chunks; a later chunk
         restates a counter (Anthropic's final ``output_tokens``), so the last
         value per counter wins within the call before it is added to the
-        running totals.
+        running totals. The stop reason rides the same chunks (or
+        ``message_stop`` on chat-completions dialects); a ``max_tokens`` stop
+        or an empty text channel raises :class:`SynthesisIncomplete` — the
+        model never reached a verdict, so the caller must not treat the
+        result as NO_CHANGES.
         """
         if not self._store._facts.claim_inference_call():
-            raise RuntimeError("Daily inference-model budget reached; explicit memory saves remain available")
+            raise InferenceBudgetExhausted(
+                "Daily inference-model budget reached; explicit memory saves remain available"
+            )
         prompt = prompt[:32000]
         request = ProviderRequest(
             model=self._model,
@@ -716,21 +813,30 @@ class Synthesizer:
             system=system,
             tools=[],
             max_tokens=self._max_tokens,
+            effort=self._effort,
         )
         parts: list[str] = []
         raw: dict[str, Any] = {}
+        stop_reason: str | None = None
         async for chunk in self._provider.stream(request):
+            payload = chunk.payload or {}
             if chunk.kind == "text_delta":
-                parts.append(chunk.payload["text"])
-            elif chunk.kind in ("message_start", "usage"):
-                reported = (chunk.payload or {}).get("usage")
+                parts.append(payload["text"])
+            elif chunk.kind in ("message_start", "usage", "message_stop"):
+                reported = payload.get("usage")
                 if isinstance(reported, dict):
                     raw.update({k: v for k, v in reported.items() if v})
+                if payload.get("stop_reason"):
+                    stop_reason = str(payload["stop_reason"])
         usage: dict[str, int] = {}
         _add_usage(usage, raw)
         self.last_pass_usage = dict(usage)
+        self.last_stop_reason = stop_reason
         _add_usage(self.usage, raw)
-        return "".join(parts), usage
+        text = "".join(parts)
+        if stop_reason == "max_tokens" or not text.strip():
+            raise SynthesisIncomplete(stop_reason, usage, len(text))
+        return text, usage
 
     async def _apply(self, text: str, entries: list[dict] | None = None) -> list[str]:
         """Parse the model's output, verify candidates, apply what passes.

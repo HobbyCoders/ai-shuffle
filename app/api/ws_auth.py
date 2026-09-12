@@ -20,6 +20,17 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
         websocket.state.mobile_tool_principal = identity.principal(
             'admin', 'install', 'local-transport:' + owner_auth.settings.effective_instance_id)
         return True, None
+    if not token:
+        # The agent browser's session-scoped preview cookie (app.core.preview_access).
+        from app.core import preview_access
+        if preview_access.grant(websocket) is not None:
+            try:
+                owner_auth.same_origin(websocket)
+            except Exception:
+                return False, None
+            websocket.state.mobile_tool_principal = identity.principal(
+                'admin', 'install', 'local-transport:' + owner_auth.settings.effective_instance_id)
+            return True, None
     # Keep the legacy return contract; authority travels only on trusted state.
     websocket.state.mobile_tool_principal = None
     for candidate, ambient in ((token, False), (websocket.cookies.get('session'), True)):

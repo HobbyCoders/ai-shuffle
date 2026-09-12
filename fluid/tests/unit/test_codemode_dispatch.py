@@ -43,10 +43,12 @@ async def _run(registry, bridge, code, *, timeout=8):
 
 @pytest.mark.parametrize("tool_name,args", [
     ("Read", {"file_path": "absent.txt"}),
-    ("Grep", {"pattern": "needle", "path": "absent"}),
-    ("Glob", {"pattern": "*.py", "path": "absent"}),
 ])
 async def test_missing_discovery_requires_explicit_recovery(tmp_path, tool_name, args):
+    # Round 9: Grep and Glob on a missing path return "(path missing …)" as
+    # a soft result and the cell continues (tests/unit/test_audit_r9_harness);
+    # only Read keeps raising MissingPathError, because a Read's text is
+    # consumed as content directly.
     from fluid.tools.builtins import read, grep, glob, edit
     from fluid.tools.registry import ToolCtx
 

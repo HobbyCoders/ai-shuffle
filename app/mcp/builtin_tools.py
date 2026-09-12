@@ -76,8 +76,10 @@ def _monitor_description() -> str:
     return (
         "Run a long-running shell command in the background and be woken when "
         "it finishes. Returns a task_id immediately; when the command exits "
-        "you receive its exit code and an output summary as a notification in "
-        "a later turn. Read the buffer with TaskOutput, cancel with TaskStop.\n"
+        "you receive its exit code and an output summary (the last ~4,000 "
+        "chars, verdict lines rescued) as a notification in a later turn. "
+        "TaskOutput returns the last 150 lines by default (lines=N, "
+        "full=true for more); cancel with TaskStop.\n"
         "\n"
         "USE IT FOR ANY COMMAND EXPECTED TO OUTLAST A BASH CALL — a test "
         "suite, a build or type-check, an install, a CI wait, a deploy — not "
@@ -101,6 +103,46 @@ def _monitor_description() -> str:
     )
 
 
+def _running_task_rows(session_id: Optional[str]) -> List[Dict[str, Any]]:
+    """``[{task_id, kind, description}]`` for this session's running tasks."""
+    if not session_id:
+        return []
+    try:
+        from app.core.task_registry import task_registry
+
+        rows = []
+        for record in task_registry.get_active(session_id):
+            rows.append({
+                "task_id": record.get("id"),
+                "kind": record.get("kind"),
+                "description": str(record.get("subject") or record.get("summary") or "")[:120],
+            })
+        return rows
+    except Exception:  # noqa: BLE001 — a listing never breaks an error reply
+        logger.debug("running-task listing failed", exc_info=True)
+        return []
+
+
+def _task_not_found(tid: str, session_id: Optional[str]) -> Dict[str, Any]:
+    """The "task not found" reply, naming what IS running.
+
+    Round-9 finding F6: after a compaction dropped the Monitor receipt, models
+    invented eight-hex ids for TaskStop/TaskGet five times and got a bare
+    "task not found" each time, then spent a TaskList call to learn the real
+    ones. The candidates ride the error itself.
+    """
+    rows = _running_task_rows(session_id)
+    if rows:
+        listing = "; ".join(
+            f"{row['task_id']} ({row['kind']}) {row['description']}".rstrip()
+            for row in rows
+        )
+        message = f"task not found. Running tasks in this session: {listing}"
+    else:
+        message = "task not found. No tasks are running in this session."
+    return _err(message, task_id=tid, running_tasks=rows)
+
+
 def _err(message: str, **extra: Any) -> Dict[str, Any]:
     """Format an error tool result for the SDK MCP envelope."""
     import json as _json
@@ -115,6 +157,10 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
         "isError": True,
     }
 
+
+#: TaskOutput's default tail (lines). Enough for a test summary or a stack
+#: trace; the full buffer is opt-in (``full=true``).
+_TASK_OUTPUT_DEFAULT_LINES = 150
 
 #: Prepended to a TaskList/TaskGet result that carries no news. Polling these
 #: tools is the failure mode they invite: an audited parent called TaskList
@@ -576,16 +622,14 @@ async def stop_background_shell_task(
         return None
     from app.core.process_tree import kill_process_tree, survivor_warning
 
-    survivors: List[int] = []
-    if task.process is not None:
-        survivors = await kill_process_tree(
-            task.process, own_process_group=task.own_process_group
-        )
-    # Mark the task killed in the registry. The reader's completion path may also
-    # fire (with exit_code from terminate); the last write wins and both are
-    # terminal, so the surfaced status stays sane. Orphans do NOT keep the row
-    # running — the shell itself is gone and nothing would ever settle it — but
-    # they are reported to the caller.
+    # Attribute the stop and latch the wake suppression BEFORE the process is
+    # touched. The watcher polls ``is_running`` and settles the moment the
+    # process dies; when the registry writes came AFTER the kill, a fast
+    # settle read an unattributed exit and delivered an "error"/"killed"
+    # <task-notification> steer for a task the model had just stopped itself
+    # (round-9 finding F14, four sessions). Orphans do NOT keep the row
+    # running — the shell itself is gone and nothing would ever settle it —
+    # but they are reported to the caller.
     if session_id:
         from app.core.task_registry import (
             AGENT_STOP_REASON,
@@ -618,7 +662,13 @@ async def stop_background_shell_task(
             _registry_safe(
                 lambda: task_registry.suppress_wake(session_id, task_id)
             )
-            await _retire_stopped_shell(session_id, task_id)
+    survivors: List[int] = []
+    if task.process is not None:
+        survivors = await kill_process_tree(
+            task.process, own_process_group=task.own_process_group
+        )
+    if session_id and suppress_wake:
+        await _retire_stopped_shell(session_id, task_id)
     result: Dict[str, Any] = {
         "task_id": task_id,
         "kind": "shell",
@@ -1787,13 +1837,18 @@ def create_builtin_tools_server(
     @tool(
         "TaskOutput",
         "Read buffered stdout/stderr from a background task spawned by Monitor. "
-        "Optionally pass since_line to get only new lines.",
+        f"Returns the LAST {_TASK_OUTPUT_DEFAULT_LINES} lines by default; pass "
+        "lines=N for a different tail or full=true for the whole buffer (only "
+        "when the exit code and the summary did not already answer you). "
+        "since_line returns only lines after that index.",
         {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string"},
                 "since_line": {"type": "integer", "description": "Line index to start from (exclusive)."},
-                "tail": {"type": "integer", "description": "Return at most N most recent lines."},
+                "lines": {"type": "integer", "description": f"Return at most N most recent lines (default {_TASK_OUTPUT_DEFAULT_LINES})."},
+                "full": {"type": "boolean", "description": "Return every buffered line; overrides lines."},
+                "tail": {"type": "integer", "description": "Older spelling of lines."},
             },
             "required": ["task_id"],
         },
@@ -1866,24 +1921,41 @@ def create_builtin_tools_server(
                     return _ok(payload)
             if owner_session_id:
                 return _foreign_task_error(tid, owner_session_id)
-            return _err("task not found.", task_id=tid)
+            return _task_not_found(tid, session_id)
         lines = task.lines
         since = int(args.get("since_line") or 0)
         if since > 0:
             lines = lines[since:]
-        tail = args.get("tail")
-        if tail is not None:
-            try:
-                lines = lines[-int(tail):]
-            except (TypeError, ValueError):
-                pass
+        available = len(lines)
+        # Default to a tail. Round-9 finding F7: models pulled 40-157 KB
+        # buffers after the exit code was already known because the default
+        # was "everything". ``tail`` is the older spelling of ``lines``.
+        limit: Optional[int] = _TASK_OUTPUT_DEFAULT_LINES
+        if args.get("full"):
+            limit = None
+        else:
+            for key in ("lines", "tail"):
+                if args.get(key) is not None:
+                    try:
+                        limit = max(0, int(args[key]))
+                    except (TypeError, ValueError):
+                        pass
+                    break
+        if limit is not None and available > limit:
+            lines = lines[-limit:] if limit else []
         payload = {
             "task_id": tid,
             "running": task.is_running(),
             "exit_code": task.exit_code,
             "total_lines": len(task.lines),
+            "shown_lines": len(lines),
             "lines": lines,
         }
+        if len(lines) < available:
+            payload["note"] = (
+                f"Showing the last {len(lines)} of {available} lines. Pass "
+                "lines=N for a longer tail or full=true for the whole buffer."
+            )
         if relation == "lineage":
             payload["owner_session_id"] = owner_session_id
             payload["scope_note"] = _WORKER_TASK_SCOPE_NOTE
@@ -1921,7 +1993,7 @@ def create_builtin_tools_server(
                         kind=record.get("kind"),
                         status=record.get("status"),
                     )
-            return _err("task not found.", task_id=tid)
+            return _task_not_found(tid, session_id)
         if result.get("survivors"):
             # Never claim a stop the OS did not give us. The audited failure was
             # exactly this line answering success/running:false while port 8010
@@ -2043,7 +2115,7 @@ def create_builtin_tools_server(
         if record is None and shell is None:
             if owner_session_id and owner_session_id != session_id:
                 return _foreign_task_error(tid, owner_session_id)
-            return _err("task not found.", task_id=tid)
+            return _task_not_found(tid, session_id)
 
         out: Dict[str, Any] = {"task": record}
         if relation == "lineage":

@@ -1841,15 +1841,17 @@ async def test_native_leg_code_mode_failure_degrades_to_none(monkeypatch, tmp_pa
 
 @pytest.mark.asyncio
 async def test_native_leg_wires_recall_and_remember_handles(monkeypatch, tmp_path):
-    """The loader's two ctx handles ride the app's build too: recall_store
-    makes the Recall builtin visible, continual_journal the Remember builtin
-    (fluid gates both through requires_extra)."""
+    """The loader's ctx handles ride the app's build too: recall_store makes
+    the Recall builtin visible, memory_store the Remember builtin (fluid gates
+    both through requires_extra). The pre-#1185 ``continual_journal`` write
+    path is gone (round 9): Remember has exactly one path, the store."""
     from fluid.codemode.skills import SkillStore
 
     captured = await _connect_native_capturing(monkeypatch, tmp_path)
     ctx = captured["ctx"]
     assert isinstance(ctx.extra.get("recall_store"), SkillStore)
-    assert callable(ctx.extra.get("continual_journal"))
+    assert isinstance(ctx.extra.get("memory_store"), SkillStore)
+    assert "continual_journal" not in ctx.extra
     # Code mode is up, so IT carries the journal — no ToolJournal rides along
     # (NativeLoop would ignore one anyway; never double-journaled).
     assert captured["journal"] is None
@@ -1870,7 +1872,8 @@ async def test_continual_without_code_mode_gets_a_tool_journal(monkeypatch, tmp_
     assert isinstance(journal, ToolJournal)
     assert journal._synthesizer is not None
     # The remember/recall channels do not depend on code mode.
-    assert callable(captured["ctx"].extra.get("continual_journal"))
+    assert captured["ctx"].extra.get("memory_store") is not None
+    assert "continual_journal" not in captured["ctx"].extra
     assert captured["ctx"].extra.get("recall_store") is not None
 
 
@@ -1920,31 +1923,22 @@ async def test_synthesizer_is_project_scoped_and_announces(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_remember_channel_journals_and_kicks(monkeypatch, tmp_path):
-    """The continual_journal closure is Remember's write path: a high-salience
-    journal entry (scope preserved) plus an urgent synthesis kick."""
-    import json
+async def test_remember_has_exactly_one_write_path(monkeypatch, tmp_path):
+    """Round 9: the journal-based ``continual_journal`` closure (pre-#1185
+    Remember) is deleted so the two Remember paths can never diverge again.
+    With continual ON the ctx still carries no such key; the store IS the
+    write path and nothing in the app module mentions the old one."""
+    import inspect
 
-    from fluid.codemode.continual import Synthesizer
+    import app.core.provider.harness_adapter as ha
     from app.core.config import settings
 
-    kicked: list = []
-    monkeypatch.setattr(Synthesizer, "kick", lambda self: kicked.append(True))
-    monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr(settings, "fluid_continual", True)
     captured = await _connect_native_capturing(monkeypatch, tmp_path)
-
-    remember = captured["ctx"].extra["continual_journal"]
-    remember("the deploy runs from the blue box", "project")
-
-    lines = (
-        (tmp_path / "skills" / "journal.jsonl")
-        .read_text(encoding="utf-8").strip().splitlines()
-    )
-    entry = json.loads(lines[-1])
-    assert entry["kind"] == "remember"
-    assert entry["scope"] == "project"
-    assert "blue box" in entry["text"]
-    assert kicked
+    assert "continual_journal" not in captured["ctx"].extra
+    assert captured["ctx"].extra.get("memory_store") is not None
+    source = inspect.getsource(ha)
+    assert 'setdefault("continual_journal"' not in source
 
 
 # ─── Code-mode prompt rewrites ───────────────────────────────────────────────
@@ -6428,7 +6422,7 @@ def test_code_mode_section_carries_the_four_contracts():
     # (d) recall budget.
     assert "limit<=5" in text and "two unproductive queries" in text
     # The code-mode rule still ends the block (it is last for a reason).
-    assert text.rstrip().endswith("save it as a skill.")
+    assert text.rstrip().endswith("those go to Remember.")
 
 
 # ── native recoverable context policy ─────────────────────────────────────
@@ -6681,3 +6675,317 @@ async def test_error_event_with_no_calls_still_bills_zero():
     assert result.total_cost_usd == 0.0
     assert result.usage == {}
     assert result.num_turns == 0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Round-9 session audit (app half): prompt text, catalog, workspace card,
+# per-turn subagent roster.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def test_memory_block_says_what_remember_is_for():
+    """Item 1: the model saw no memory prose at all beyond two tool
+    descriptions, and the "# Memory" reminder does not render until a fact
+    exists. The block names the four things the audit wanted said."""
+    import app.core.provider.harness_adapter as ha
+
+    text = ha.MEMORY_BLOCK
+    # Not "# Memory": that heading is the per-turn snapshot's, and a cache test
+    # guards it out of the system prompt.
+    assert text.startswith("# Durable memory")
+    # What Remember is for: environment facts and corrections.
+    assert "pytest" in text and "host and port" in text
+    assert "dependency that is missing" in text and "correction the user gives" in text
+    # Recall is cheap and precedes re-discovery.
+    assert "Recall is one cheap call" in text and "BEFORE re-discovering" in text
+    # The reminder rides the user turn; absence means empty.
+    assert '"# Memory" reminder on the user turn' in text
+    assert "the store is empty, not hidden" in text
+    # Note/Ledger never persist.
+    assert "Note and Ledger are" in text and "never persist" in text
+
+
+@pytest.mark.asyncio
+async def test_memory_block_rides_with_the_recall_block(
+    monkeypatch, agent_workspace, _configured_db_settings
+):
+    import app.core.provider.harness_adapter as ha
+    from fluid.codemode.skills import SkillStore
+    monkeypatch.setattr("app.core.fluid_memory.session_memory",
+                        lambda *args: (SkillStore(agent_workspace / "memory"), "project:test"))
+
+    captured = await _connect_with_github(monkeypatch, agent_workspace, False)
+    system = captured["system"]
+    assert ha.RECALL_BLOCK in system and ha.MEMORY_BLOCK in system
+    assert system.index(ha.RECALL_BLOCK) < system.index(ha.MEMORY_BLOCK) < system.index("# Code mode")
+    kinds = [s.kind for s in captured["system_sections"].sections if s.text == ha.MEMORY_BLOCK]
+    assert kinds == ["extra"]
+
+
+@pytest.mark.asyncio
+async def test_memory_block_is_absent_without_a_recall_backend(
+    monkeypatch, agent_workspace, _db_less_settings
+):
+    import app.core.provider.harness_adapter as ha
+
+    captured = await _connect_with_github(monkeypatch, agent_workspace, False)
+    assert ha.MEMORY_BLOCK not in captured["system"]
+
+
+def test_code_mode_section_names_both_skill_paths_and_the_error_rule():
+    """Items 3a and 8b."""
+    import app.core.provider.harness_adapter as ha
+
+    text = ha.CODE_MODE_SECTION
+    # 3a: save_skill + the docstring/_selftest contract, and the prose path.
+    assert "save_skill(name=..., source=...)" in text
+    assert "_selftest()" in text and "docstring" in text
+    assert "`<project>/.fluid/skills/<name>/SKILL.md`" in text
+    assert "frontmatter" in text and '"# Available skills" in later sessions' in text
+    assert "delete_skill(name=...)" in text
+    # 8b: the try/except sentence that contradicted run_python is gone.
+    assert "Wrap calls that may fail in try/except" not in text
+    assert "Catch only MissingPathError" in text
+    assert "other tool errors come back as results and do not abort" in text
+
+
+def test_save_skill_and_delete_skill_are_documented_in_the_catalog():
+    """Item 3a: the audit found save_skill was skipped from the # Tools
+    catalog on the false premise that it describes itself in the schema."""
+    from types import SimpleNamespace
+
+    import app.core.provider.harness_adapter as ha
+
+    assert "save_skill" not in ha._CODE_MODE_CATALOG_SKIP
+    assert "delete_skill" not in ha._CODE_MODE_CATALOG_SKIP
+    assert "run_python" in ha._CODE_MODE_CATALOG_SKIP
+
+    class _Spec:
+        def __init__(self, name):
+            self.name = name
+            self.description = name + " does things."
+            self.input_schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+            self.code_mode_allowed = True
+
+    class _Projection:
+        def leaves(self):
+            return ["Read", "save_skill", "delete_skill", "run_python"]
+
+        def spec_for(self, leaf):
+            return _Spec(leaf)
+
+    codemode = SimpleNamespace(_projection=lambda: _Projection())
+    names = [name for _, name in ha._code_mode_tool_sections(codemode)]
+    assert names == ["Read", "save_skill", "delete_skill"]
+    text = "\n".join(t for t, _ in ha._code_mode_tool_sections(codemode))
+    assert "## save_skill" in text and "`from tools.save_skill import save_skill`" in text
+
+
+def test_skill_store_pair_is_documented_before_native_loop_registers_it(tmp_path):
+    """The app compiles the prompt BEFORE NativeLoop's register_code_mode_tools
+    puts save_skill/delete_skill on the registry, so a fresh session's
+    projection has no such leaf. The catalog fetches fluid's specs anyway."""
+    import app.core.provider.harness_adapter as ha
+    from fluid.codemode.session import CodeModeSession
+    from fluid.codemode.skills import SkillStore
+    from fluid.tools.builtins import register_builtins
+
+    registry = ha.ToolRegistry()
+    register_builtins(registry)
+    codemode = CodeModeSession(
+        registry, config=ha._codemode_kernel_config(), skills=SkillStore(tmp_path / "skills"),
+    )
+    assert "save_skill" not in list(codemode._projection().leaves())
+    sections = dict(ha._code_mode_tool_sections(codemode))
+    names = set(sections.values())
+    assert {"save_skill", "delete_skill"} <= names
+    entry = next(t for t in sections if "## save_skill\n" in t)
+    assert "_selftest()" in entry and "`from tools.save_skill import save_skill`" in entry
+    assert "- name (str, required)" in entry and "- source (str, required)" in entry
+    # The throwaway registration left the session's own registry untouched.
+    assert registry.get("save_skill") is None
+
+
+def test_skill_catalog_entry_says_how_it_is_reached_in_code_mode():
+    """Item 8e, both the full entry and the deferred one-liner."""
+    from types import SimpleNamespace
+
+    import app.core.provider.harness_adapter as ha
+
+    class _Spec:
+        def __init__(self, name):
+            self.name = name
+            self.description = "Load the full instructions of an installed skill by name."
+            self.input_schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+            self.code_mode_allowed = True
+
+    class _Projection:
+        def leaves(self):
+            return ["Skill", "Read"]
+
+        def spec_for(self, leaf):
+            return _Spec(leaf)
+
+    codemode = SimpleNamespace(_projection=lambda: _Projection())
+    full = dict(ha._code_mode_tool_sections(codemode))
+    skill_entry = next(t for t in full if t.lstrip("# Tools\n").startswith("## Skill\n") or "## Skill\n" in t)
+    assert "from tools.Skill import Skill" in skill_entry and 'Skill(name="<skill>")' in skill_entry
+    read_entry = next(t for t in full if "## Read\n" in t)
+    assert "Skill(name=" not in read_entry
+    deferred = ha._code_mode_tool_sections(codemode, deferred=frozenset({"Skill"}))
+    one_liners = deferred[-1][0]
+    assert "- Skill:" in one_liners and "from tools.Skill import Skill" in one_liners
+
+
+def test_github_block_limits_prs_to_repository_changes():
+    """Item 8c: local-config tasks and questions got branches and PRs."""
+    import app.core.provider.harness_adapter as ha
+
+    assert "Open a PR only when repository files changed for the user's request" in ha.GITHUB_BLOCK
+    assert "do local-config tasks" in ha.GITHUB_BLOCK
+
+
+def test_verification_block_has_a_budget_the_preview_flow_and_the_ops_rule():
+    """Items 4 and 8d."""
+    import app.core.provider.harness_adapter as ha
+
+    text = ha.VERIFICATION_BLOCK
+    # The core rule survives verbatim.
+    assert "verified only when you have watched it work in" in text
+    assert "A test count" in text and "is not a verification." in text
+    # The budget.
+    assert "one browser_navigate and one" in text and "browser_snapshot" in text
+    assert "browser_eval to read state" in text
+    assert "browser_screenshot only when layout or rendering IS the" in text
+    # How to reach the UI: LAN host, the preview-access URL, app.preview.
+    assert "bind any server you start to 0.0.0.0" in text
+    assert "preview-access URL" in text and '"# Workspace facts"' in text
+    assert "python -m app.preview stamp" in text and "AI_SHUFFLE_PREVIEW=1" in text
+    assert "never hand-roll a server" in text
+    # The ops/perf measurement rule.
+    assert "ops or performance question" in text
+    assert "GetAppLogs" in text and "GetAppErrors" in text
+    assert "before a code change is proposed" in text
+
+
+def test_workspace_card_is_slotted_as_an_environment_section():
+    """Item 2: the card lands whether or not the profile injects its own
+    <env> (which suppresses fluid's environment section), right where the
+    environment block sits — before the extras, after the env."""
+    import app.core.provider.harness_adapter as ha
+
+    card = "# Workspace facts\n- Node: node_modules MISSING in frontend"
+    with_env = ha.HarnessAdapter._compile_prompt_sections(
+        "BASE\n<env>\nWorking directory: /x\n</env>", None, _native_opts(),
+        workspace_card=card,
+    )
+    kinds = [(s.kind, s.text.split("\n", 1)[0]) for s in with_env.sections]
+    assert ("environment", "# Workspace facts") in kinds
+    assert not any(s.text.startswith("Here is useful information") for s in with_env.sections)
+
+    without_env = ha.HarnessAdapter._compile_prompt_sections(
+        "BASE", None, _native_opts(), workspace_card=card,
+    )
+    env_sections = [s for s in without_env.sections if s.kind == "environment"]
+    assert len(env_sections) == 2  # fluid's env, then the card
+    assert env_sections[-1].text == card
+    order = [s.kind for s in without_env.sections]
+    assert order.index("environment") < order.index("extra")
+
+    # The delegated leg never gets it.
+    delegated = ha.HarnessAdapter._compile_prompt_sections(
+        "BASE", None, _native_opts(), native=False, workspace_card=card,
+    )
+    assert card not in (delegated.text or "")
+
+
+@pytest.mark.asyncio
+async def test_native_connect_renders_the_card_once_and_reuses_it(monkeypatch, agent_workspace):
+    import app.core.provider.harness_adapter as ha
+    from app.core.environment import WORKSPACE_FACTS_HEADER
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_agents_options(agent_workspace))
+    system = _CapturingLoop.captured["system"]
+    assert WORKSPACE_FACTS_HEADER in system
+    assert adapter._workspace_card and adapter._workspace_card in system
+    # It is the recompile input too, so a roster refresh reuses the same bytes.
+    assert adapter._prompt_inputs["workspace_card"] == adapter._workspace_card
+
+
+def _roster_contract(with_reviewer):
+    from app.core.agent_provider_models import SubagentTarget, TaskContract
+
+    if not with_reviewer:
+        return TaskContract(
+            description=(
+                "Delegate a self-contained task. No subagents are configured and "
+                "runnable on this provider. Do not call Task until the "
+                "configuration changes."
+            ),
+            input_schema={"type": "object", "properties": {"prompt": {"type": "string"}},
+                          "required": ["prompt"], "additionalProperties": False},
+            targets=(),
+        )
+    target = SubagentTarget(id="reviewer", name="Reviewer", description="Checks diffs.", model="gpt-5.6-mini")
+    return TaskContract(
+        description="Delegate a self-contained task. Available subagents on this provider: reviewer (model: gpt-5.6-mini).",
+        input_schema={"type": "object", "properties": {"agent": {"type": "string", "enum": ["reviewer"]},
+                                                       "prompt": {"type": "string"}},
+                      "required": ["agent", "prompt"], "additionalProperties": False},
+        targets=(target,),
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_roster_is_recomputed_at_every_turn_start(monkeypatch, agent_workspace):
+    """Item 5 (finding F6): roster empty on turn 1, an agent is enabled, and
+    turn 2 sees it in the registry's Task spec AND in the compiled prompt —
+    without a new session. An unchanged roster leaves the prompt untouched."""
+    import app.core.provider.harness_adapter as ha
+    import app.core.agent_provider_models as agent_models
+
+    class _Loop(_CapturingLoop):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.system = kwargs.get("system")
+            self.system_sections = kwargs.get("system_sections")
+            self.submitted = []
+
+        async def submit(self, op):
+            self.submitted.append(op)
+
+    rosters = [_roster_contract(False)]
+    monkeypatch.setattr(agent_models, "build_task_contract",
+                        lambda *a, **k: rosters[-1])
+    monkeypatch.setattr(ha, "NativeLoop", _Loop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_agents_options(agent_workspace))
+    engine = adapter._engine
+    assert "No subagents are configured" in adapter._registry.get("Task").description
+    assert "No subagents are configured" in engine.system
+    first_signature = adapter._task_roster_signature
+    assert first_signature
+
+    # Turn 1: nothing changed → nothing re-installed, prompt byte-identical.
+    before = engine.system
+    await adapter.send_query("hello")
+    assert engine.system == before
+    assert adapter._task_roster_signature == first_signature
+
+    # The user enables a subagent mid-session.
+    rosters.append(_roster_contract(True))
+    await adapter.send_query("now use the reviewer")
+    task = adapter._registry.get("Task")
+    assert "reviewer (model: gpt-5.6-mini)" in task.description
+    assert task.input_schema["properties"]["agent"]["enum"] == ["reviewer"]
+    assert "reviewer (model: gpt-5.6-mini)" in engine.system
+    assert "No subagents are configured" not in engine.system
+    assert engine.system_sections.text == engine.system
+    assert adapter._task_roster_signature != first_signature
+    # The card did not move: same bytes in the recompiled prompt.
+    assert adapter._workspace_card in engine.system

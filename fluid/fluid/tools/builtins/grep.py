@@ -145,9 +145,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # reads like a search result and has been pasted back as a path.
     if not root.exists():
         note = missing_path_note(str(input.get("path") or ""), root)
+        # Soft in code mode: the cell gets this text as the call's result and
+        # keeps going (a search over a guessed directory is discovery, and a
+        # cell that also searched three real ones should not lose them).
+        # The JSON surface still sees is_error.
         return ToolOutcome(
-            text=f"path does not exist: {root}{note}", is_error=True,
-            error_code="missing_path",
+            text=f"(path missing: {root}{note or ' — no near match'})", is_error=True,
+            error_code="missing_path", soft_error=True,
         )
 
     rg = shutil.which("rg")

@@ -6,6 +6,12 @@
 
 export const SERVER_INSTRUCTIONS = `You control one web page through this browser server. Work in a loop: look, act, then look again only when something changed.
 
+TWO RULES BEFORE ANYTHING ELSE
+- Refs (e12) die on every navigation and after a major DOM change. browser_act tells you when (snapshot_stale: true); a stale_ref error means the same thing. Re-snapshot, then act — never retry the old ref.
+- Coordinates need a browser_screenshot taken AFTER the previous action or navigation, in the same batch of work. When the view has not moved the server re-captures for you; when it has, you get stale_screenshot with a fresh screenshot attached. Prefer refs; coordinates are the fallback.
+- browser_act scroll takes exactly one of ref or coordinate like every other kind. browser_wait conditions are exactly url, text, element (no selector condition; use element + selector).
+- After the first full browser_snapshot of a page, re-read with filter=interactive or scope_ref=eN. A Play-Console-sized page costs ~10k chars per full snapshot; 184 of them in one audited session was 1.8 MB of context.
+
 SHARED WORKSPACE
 - browser_status is always available, including during human control, and reports tabs, viewport, busy and pending takeover. Other tools reject with human_control while a viewer owns or requests control. Do not fight the viewer or spin retries; continue other work or ask for control to be returned.
 - browser_wait waits for condition=url with url, condition=text with text, or condition=element with ref or selector. Specify exactly one target. URL/text match=contains (default) or exact; text/element state=visible (default), hidden, attached, or detached. timeout_ms defaults to 5000 and is capped at 15000. A timed-out result is not success. Pending takeover interrupts waits.

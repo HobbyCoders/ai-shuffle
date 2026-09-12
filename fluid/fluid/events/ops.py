@@ -106,6 +106,11 @@ class AgentMessage(Op):
     sender: str
     id: str | None = None
     wake: bool = True
+    # A receiver that is parked on background tasks (a parent waiting for
+    # its subagents) queues an ordinary message until its next wake instead
+    # of waking for it, avoiding needless billed turns.
+    # ``urgent`` forces the wake anyway.
+    urgent: bool = False
 
 
 @dataclass(kw_only=True)

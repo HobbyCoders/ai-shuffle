@@ -222,8 +222,9 @@ def test_tool_journal_writes_friction_and_flags_salience(tmp_path) -> None:
     )
     kinds = [e["kind"] for e in store.journal_entries()]
     assert kinds == ["tool", FRICTION_KIND]
-    assert synth.urgent == 1
-    # Salience pulls the pass forward; it does not start one mid-turn.
+    # Round 9: friction no longer marks the pass urgent (it burned the daily
+    # budget on three-entry slices); it waits for the normal threshold.
+    assert synth.urgent == 0
     assert synth.kicks == 0
     assert journal.friction_count == 1
     journal.begin_turn()
@@ -271,28 +272,30 @@ async def test_a_friction_entry_is_carried_into_a_real_synthesis_pass(
 
     store = SkillStore(tmp_path)
     provider = _Provider()
-    synth = Synthesizer(provider, "m", store, min_new_entries=8)
+    synth = Synthesizer(provider, "m", store, min_new_entries=3)
     journal = ToolJournal(store, synth)
     journal.record_tool("Read", {"file_path": "/nope.py"},
                         "file not found: /nope.py", True)
-    # The turn ends: record_event kicks, and urgency makes the slice due.
+    # The turn ends: record_event kicks, and the slice meets the threshold.
     journal.record_event("assistant", "I could not find it.")
     await synth.drain()
-    assert provider.prompts, "urgency did not pull the pass forward"
+    assert provider.prompts, "the pass did not run"
     assert "[friction] Read" in provider.prompts[0]
     # Consumed, not stranded: the cursor moved past it.
     assert store.synth_cursor() == store.journal_count()
 
 
-def test_salience_makes_a_pass_due_immediately(tmp_path) -> None:
-    """The Remember convention, reused: urgent ⇒ one new entry is enough."""
+def test_friction_does_not_make_a_pass_due_immediately(tmp_path) -> None:
+    """Urgency is reserved for an explicit Remember; friction waits its turn."""
     store = SkillStore(tmp_path)
     synth = Synthesizer(object(), "m", store, min_new_entries=8)
     journal = ToolJournal(store, synth)
-    journal.record_tool("Read", {"file_path": "/a.py"}, "1\tcontents", False)
+    journal.record_tool("Read", {"file_path": "/a.py"}, "1	contents", False)
     assert not synth.due()  # one plain tool entry, threshold is 8
     journal.record_tool("Read", {"file_path": "/nope.py"},
                         "file not found: /nope.py", True)
+    assert not synth.due()
+    synth.mark_urgent()
     assert synth.due()
 
 
@@ -457,7 +460,7 @@ async def test_in_kernel_friction_is_journaled_after_its_cell(tmp_path) -> None:
     assert entry["signal"] == "path_not_found"
     assert entry["name"] == "Read"
     assert session.friction_count == 1
-    assert synth.urgent == 1
+    assert synth.urgent == 0  # round 9: friction is journaled, not urgent
     session.begin_turn()
     assert session.friction_count == 0
 

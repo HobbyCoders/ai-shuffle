@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 _RECEIPT = "fluid-runtime-provisioning.json"
 _KEYS = ("linked", "installed", "synced", "skipped", "errors")
@@ -129,3 +133,129 @@ def runtime_facts(cwd: str) -> str:
         lines.append("Dependency presence could not be inspected.")
     lines.append("Availability is not a successful test run. Missing dependencies require explicit setup; never copy credentials or assume shared links exist.")
     return "\n".join(lines)
+
+
+# ─── mechanical fact harvest ─────────────────────────────────────────────────
+#
+# The note above is per turn and per process; nothing carried it across
+# sessions, so every session re-discovered "no pytest in the worker Python"
+# and "this worktree has no node_modules" by hand (round 9: 6fb34af0,
+# 59e41e2f, 98490077, 80c82234 ...). The harvesters below turn the same
+# observations into FactStore entries with ``provenance="tool"`` and a stable
+# key, so a later session on the same project sees them in the # Memory
+# section (rendered with a "confirm with Remember" hint) without the model
+# or the synthesizer having to do anything.
+
+# Keys are stable per fact class so a re-harvest updates in place. They must
+# match facts.save's key pattern ``[a-zA-Z0-9_.:-]{1,96}``.
+_KEY_PYTEST = "env.pytest"
+_KEY_NODE_MODULES = "env.node_modules"
+_KEY_BROWSER_HOST = "env.browser_host"
+
+# The app's browser tools answer a loopback URL with "Browse http://<host>:
+# <port> instead" when they run on another machine; the host is the durable
+# part, the port is whatever server the session happened to start.
+_BROWSE_INSTEAD_RE = re.compile(r"[Bb]rowse\s+(https?://[^\s/]+)(?:[/\s]|$)[^\n]*?\binstead\b")
+_BROWSER_TOOL_RE = re.compile(r"(?:^|__)browser_[a-z_]+$")
+
+
+def _safe_key(suffix: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.:-]", "-", suffix)[:96]
+
+
+def harvest_environment_facts(cwd: str) -> list[tuple[str, str]]:
+    """``(key, text)`` facts a worker can establish without the model.
+
+    Only the facts worth a memory: a missing pytest (with where Python lives,
+    since that is the thing sessions get wrong), and package directories whose
+    node_modules are missing or empty. Text is deliberately free of dates and
+    counts so a re-harvest with the same state is a no-op save.
+    """
+    root = Path(cwd)
+    facts: list[tuple[str, str]] = []
+    try:
+        pytest_found = importlib.util.find_spec("pytest") is not None
+    except (ImportError, ValueError, AttributeError):
+        pytest_found = False
+    exe = sys.executable
+    if not pytest_found:
+        cli = shutil.which("pytest")
+        hint = f"; a pytest executable is on PATH at {cli}" if cli else (
+            "; run tests with a project venv or install pytest there first"
+        )
+        facts.append((_KEY_PYTEST, f"pytest is not importable from the worker Python {exe}{hint}."))
+    else:
+        facts.append((_KEY_PYTEST, f"pytest is importable from the worker Python {exe}."))
+    try:
+        packages = ([root] if (root / "package.json").is_file() else []) + [
+            child for child in sorted(root.iterdir())
+            if child.is_dir() and not child.name.startswith(".")
+            and child.name != "node_modules" and (child / "package.json").is_file()
+        ]
+    except OSError:
+        packages = []
+    missing: list[str] = []
+    for package in packages[:8]:
+        modules = package / "node_modules"
+        try:
+            empty = modules.is_dir() and next(modules.iterdir(), None) is None
+        except OSError:
+            empty = False
+        if not modules.is_dir() or empty:
+            missing.append(str(package.relative_to(root)) or ".")
+    if missing:
+        facts.append((
+            _KEY_NODE_MODULES,
+            "Node dependencies are missing in " + ", ".join(missing)
+            + " (run the package's install step in each fresh worktree before its scripts).",
+        ))
+    return facts
+
+
+def harvest_tool_facts(name: str, output: str) -> list[tuple[str, str]]:
+    """Facts a tool RESULT establishes mechanically (currently: browser host).
+
+    Only browser_* tool outputs are inspected, and only for the harness's own
+    "Browse <url> instead" redirection — that sentence means the browser runs
+    on a host other than the worker, which is the fact two sessions six
+    minutes apart each rediscovered and Remembered separately.
+    """
+    leaf = str(name or "").split("__")[-1]
+    if not _BROWSER_TOOL_RE.search(leaf) or not output:
+        return []
+    match = _BROWSE_INSTEAD_RE.search(output[:4000])
+    if not match:
+        return []
+    origin = match.group(1)
+    host = origin.split("://", 1)[-1].split(":", 1)[0]
+    if not host or host in ("localhost", "127.0.0.1", "0.0.0.0"):
+        return []
+    return [(
+        _KEY_BROWSER_HOST,
+        f"The browser tools run on another host: local servers must bind "
+        f"0.0.0.0 and be browsed via {origin.rsplit(':', 1)[0]}:<port> "
+        f"(loopback URLs are rewritten to this host).",
+    )]
+
+
+def write_harvested_facts(store, project: str | None, facts) -> list[str]:
+    """Save harvested facts as unprotected tool-provenance memories.
+
+    Same text under the same key is a no-op save, so calling this every turn
+    costs nothing once the state is recorded. A key the user has protected by
+    an explicit Remember is left alone (``save`` refuses to overwrite it, and
+    that refusal is the right answer). Returns the ids written; never raises.
+    """
+    written: list[str] = []
+    if store is None:
+        return written
+    for key, text in facts:
+        try:
+            saved = store.save_memory(
+                text, scope=project, provenance="tool", protected=False, key=_safe_key(key),
+            )
+        except Exception as exc:  # noqa: BLE001 — a fact is never worth a turn
+            _log.debug("runtime fact %s not saved: %s", key, exc)
+            continue
+        written.append(saved.id)
+    return written

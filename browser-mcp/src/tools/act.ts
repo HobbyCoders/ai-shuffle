@@ -9,8 +9,9 @@
 
 import type { Locator, Page } from "playwright-core";
 import { StaleRefError, type Session } from "../session.js";
-import { jsonResult, errorResult, type McpToolResult } from "./result.js";
+import { jsonResult, errorResult, text, type McpToolResult } from "./result.js";
 import { ACT_KINDS } from "../schemas.js";
+import { runScreenshot } from "./screenshot.js";
 
 type Kind = (typeof ACT_KINDS)[number];
 
@@ -67,6 +68,31 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
   const page = await session.ensurePage();
   const urlBefore = page.url();
 
+  // A coordinate against a stale screenshot used to be a bare stale_screenshot
+  // error, costing the model a screenshot call and another act (twelve such
+  // errors in one audited session set). Re-validate when the view has not
+  // moved; otherwise answer with a fresh screenshot attached so the next call
+  // can aim from it directly.
+  let screenshotRefreshed = false;
+  if (input.coordinate !== undefined && !session.hasValidScreenshot()) {
+    if (await session.tryRevalidateViewportScreenshot()) {
+      screenshotRefreshed = true;
+    } else {
+      const shot = await runScreenshot(session, {});
+      return {
+        isError: true,
+        content: [
+          text(
+            "stale_screenshot: the view changed since the last browser_screenshot, so " +
+              "those coordinates no longer point where you aimed. A fresh viewport " +
+              "screenshot is attached — re-issue the action with coordinates from it.",
+          ),
+          ...shot.content,
+        ],
+      };
+    }
+  }
+
   // Install the mutation watcher before acting so synchronous DOM changes made
   // during the action are captured, not just async settling.
   await session.beginWatch();
@@ -101,6 +127,7 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     dom_mutated: settle.domMutated,
     snapshot_stale: snapshotStale,
   };
+  if (screenshotRefreshed) body.screenshot_refreshed = true;
 
   if (snapshotStale) {
     const snap = await session.snapshot({ filter: "interactive" });

@@ -13,6 +13,8 @@ their bare names (``Read``, ``Edit``, ...).
 
 from __future__ import annotations
 
+import asyncio
+
 import hashlib
 import json
 import logging
@@ -311,12 +313,30 @@ def _normalize(result: Any) -> ToolOutcome:
 PROBE_TTL_S = 30.0
 PROBE_GRACE_S = 60.0
 
+# Hard ceiling on one external (MCP or in-process server) tool call as seen
+# from the registry, on top of the MCP client's own per-request deadline. The
+# client's deadline covers the wire; this one covers everything around it
+# (the actor queue, a wedged in-process handler) so a call can never hang the
+# turn. Slightly above the client default so the client's clearer message
+# wins when the wire is what stalled.
+DEFAULT_EXTERNAL_CALL_TIMEOUT_S = 75.0
+# error_code values a code-mode cell must NOT continue past (the tool did
+# not run); every other external error becomes the call's result text.
+FATAL_EXTERNAL_ERROR_CODES = frozenset({"tool_timeout", "unavailable"})
+
 
 class ToolRegistry:
-    def __init__(self, *, manager: McpManager | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        manager: McpManager | None = None,
+        external_call_timeout: float | None = DEFAULT_EXTERNAL_CALL_TIMEOUT_S,
+    ) -> None:
         self._entries: dict[str, _Entry] = {}
         self._loaded: set[str] = set()
         self._manager = manager or McpManager()
+        # Seconds one MCP/inproc dispatch may take; None or <=0 disables.
+        self.external_call_timeout = external_call_timeout
         # name -> (verdict, verdict_ts, last_true_ts)
         self._probe_cache: dict[str, tuple[bool, float, float]] = {}
         self._clock: Callable[[], float] = time.monotonic
@@ -521,10 +541,10 @@ class ToolRegistry:
                     server = entry.server
                 if entry.remote_name is not None:
                     tool = entry.remote_name  # the server knows only its own name
-                outcome = await self._manager.dispatch(
+                outcome = await self._bounded_external(name, self._manager.dispatch(
                     server, tool, input,
                     input_responses=input_responses, request_state=request_state,
-                )
+                ))
             else:
                 assert entry.handler is not None
                 call_input = input
@@ -533,7 +553,11 @@ class ToolRegistry:
                     # (AskUser): collected answers ride a reserved key so the
                     # handler's second dispatch can read them.
                     call_input = {**input, "__input_responses__": dict(input_responses)}
-                outcome = _normalize(await entry.handler(call_input, ctx))
+                call = entry.handler(call_input, ctx)
+                if entry.spec.source == "inproc":
+                    outcome = _normalize(await self._bounded_external(name, call))
+                else:
+                    outcome = _normalize(await call)
         except Exception as exc:  # keep tool errors in-context, never crash the loop
             text = scrub_error_text(f"{type(exc).__name__}: {exc}")
             if name in {"Bash", "Monitor"} and not raw_shell_output:
@@ -566,6 +590,31 @@ class ToolRegistry:
                     text = f"{text}\n\n{notice}"
                 outcome = replace(outcome, text=fence_untrusted(text, name))
         return outcome
+
+    async def _bounded_external(self, name: str, call: Any) -> Any:
+        """Await an MCP/inproc call under ``external_call_timeout``.
+
+        On expiry the call is cancelled and an ``is_error`` outcome with
+        ``error_code="tool_timeout"`` comes back — the transcript gets a
+        ToolResult either way, which is what a hung browser_snapshot never
+        produced.
+        """
+        limit = self.external_call_timeout
+        if not limit or limit <= 0:
+            return await call
+        try:
+            return await asyncio.wait_for(call, timeout=limit)
+        except TimeoutError:
+            return ToolOutcome(
+                text=(
+                    f"{name} did not return within {limit:g} s and was "
+                    "cancelled. The tool is hung or its target is not "
+                    "responding: do not simply re-issue the same call; try a "
+                    "different route or report it."
+                ),
+                is_error=True,
+                error_code="tool_timeout",
+            )
 
     async def aclose(self) -> None:
         await self._manager.aclose()

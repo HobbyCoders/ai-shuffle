@@ -112,8 +112,14 @@ def _glob(pattern: str, root: Path, limit: int = MAX_RESULTS) -> ToolOutcome:
     """Bounded glob walk. Runs on a thread — the walk can touch many paths."""
     head = f"globbed under {root}"
     if not root.exists():
+        from fluid.tools.builtins._util import missing_path_note
+
+        note = missing_path_note(str(root), root)
+        # Soft in code mode, like Grep: the text is the call's result and the
+        # cell continues. The JSON surface still sees is_error.
         return ToolOutcome(
-            text=f"path not found: {root}", is_error=True, error_code="missing_path",
+            text=f"(path missing: {root}{note or ' — no near match'})", is_error=True,
+            error_code="missing_path", soft_error=True,
         )
     # A pattern this compiler cannot honour is an error, not an empty listing:
     # "(no matches)" reads as a fact about the tree and gets acted on as one.

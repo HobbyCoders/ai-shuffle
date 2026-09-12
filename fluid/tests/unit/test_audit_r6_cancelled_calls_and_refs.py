@@ -192,8 +192,28 @@ def _bookkeeping_registry():
     async def note(args: dict) -> dict:
         return {"content": [{"type": "text", "text": "noted"}]}
 
-    registry = ToolRegistry()
-    registry.register_inproc(create_inproc_server("fs", [read, edit, note]))
+    return _as_builtins(ToolRegistry(), [read, edit, note])
+
+
+def _as_builtins(registry, tools):
+    """Round 9: in-process server errors are soft results in code mode, so
+    the deliberately failing Edit below is registered as a BUILTIN, whose
+    error still aborts the cell (what the manifest is for)."""
+    from fluid.tools.registry import ToolOutcome, ToolSpec
+
+    for t in tools:
+        async def handler(input, ctx, _fn=t.handler):
+            raw = await _fn(input)
+            text = "".join(
+                part.get("text", "") for part in raw.get("content", [])
+                if isinstance(part, dict)
+            )
+            return ToolOutcome(text=text, is_error=bool(raw.get("is_error") or raw.get("isError")))
+        registry.register_builtin(
+            ToolSpec(name=t.name, description=t.description,
+                     input_schema=t.input_schema, risk=t.risk),
+            handler,
+        )
     return registry
 
 

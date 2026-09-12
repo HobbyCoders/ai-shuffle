@@ -43,7 +43,7 @@ export const statusSchema: JsonSchema = { type: "object", properties: {}, additi
 export const waitSchema: JsonSchema = {
   type: "object", additionalProperties: false, required: ["condition"],
   properties: {
-    condition: { type: "string", enum: ["url", "text", "element"] },
+    condition: { type: "string", enum: ["url", "text", "element"], description: "Exactly one of url | text | element. There is no selector condition: use element with selector or ref." },
     url: { type: "string", description: "URL to match (contains by default)." },
     text: { type: "string", description: "Text of an element to wait for." },
     ref: { type: "string", description: "Current snapshot ref, alternative to selector." },
@@ -97,12 +97,12 @@ export const actSchema: JsonSchema = {
     },
     ref: {
       type: "string",
-      description: "Target element ref (e.g. e12). Provide exactly one of ref or coordinate; key may omit both to use active focus.",
+      description: "Target element ref (e.g. e12) from the CURRENT snapshot — refs expire on navigation and major DOM changes. Provide exactly one of ref or coordinate (scroll too); key may omit both to use active focus.",
     },
     coordinate: {
       type: "array",
       items: { type: "number" },
-      description: "Target [x,y] in the last screenshot's pixel space. Exactly one of ref or coordinate; key may omit both.",
+      description: "Target [x,y] in the pixel space of the last browser_screenshot, which must postdate the previous action/navigation. Exactly one of ref or coordinate; key may omit both.",
     },
     value: {
       type: "string",
@@ -120,7 +120,7 @@ export const actSchema: JsonSchema = {
     direction: {
       type: "string",
       enum: ["up", "down", "left", "right"],
-      description: "Scroll direction for kind=scroll.",
+      description: "Scroll direction for kind=scroll (scroll still targets exactly one of ref or coordinate).",
     },
     amount: {
       type: "integer",

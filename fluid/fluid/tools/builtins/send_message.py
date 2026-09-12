@@ -31,9 +31,13 @@ def describe(tools: frozenset[str] | None = None) -> str:
     has = (lambda name: tools is None or name in tools)
     discovery = (
         "Get names from ListAgents — every row leads with the `name [ref]` "
-        "you address it by."
+        "you address it by — or use the task id from the Task receipt "
+        "(`task_…`), which always resolves."
         if has("ListAgents")
-        else "Address an agent by the name it was started under."
+        else (
+            "Address an agent by the name it was started under, or by the "
+            "task id from the Task receipt."
+        )
     )
     spawn_note = (
         " A subagent you started with Task takes messages while it works AND "
@@ -90,8 +94,9 @@ SPEC = ToolSpec(
                 "type": "string",
                 "description": (
                     "Recipient: an agent name from ListAgents (with its "
-                    '" [ref]" only when disambiguation is needed), or "main" '
-                    "for the conversation that started you."
+                    '" [ref]" only when disambiguation is needed), the task '
+                    'id from the Task receipt, or "main" for the '
+                    "conversation that started you."
                 ),
             },
             "message": {
@@ -146,5 +151,46 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if inspect.isawaitable(result):
         result = await result
     if isinstance(result, ToolOutcome):
+        if result.is_error:
+            return await _with_roster(result, ctx)
         return result
     return ToolOutcome(text=str(result))
+
+
+async def _with_roster(outcome: ToolOutcome, ctx: ToolCtx) -> ToolOutcome:
+    """An undeliverable message names who IS reachable, with ids.
+
+    Round 9: "Unknown agent 'general-purpose'; use ListAgents" cost a round
+    trip every time, and the roster it pointed at listed every agent as
+    "General Purpose". The error now carries the live roster inline, task
+    ids included, so the retry can address one directly.
+    """
+    roster = (ctx.extra or {}).get("agent_roster")
+    if roster is None or "reachable:" in outcome.text.lower():
+        return outcome
+    try:
+        rows = roster({}, ctx)
+        if inspect.isawaitable(rows):
+            rows = await rows
+    except Exception:  # noqa: BLE001 — the original error still stands
+        return outcome
+    if not isinstance(rows, list):
+        return outcome
+    lines = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "(unnamed)")
+        ref = row.get("ref")
+        task_id = row.get("task_id")
+        head = f"{name} [{ref}]" if ref else name
+        if task_id:
+            head += f" (task id {task_id})"
+        lines.append(f"- {head} — {row.get('status') or 'unknown'}")
+    if not lines:
+        return outcome
+    return ToolOutcome(
+        text=outcome.text.rstrip() + "\nAgents you can address right now (name, or task id):\n"
+        + "\n".join(lines),
+        is_error=True, ui=outcome.ui,
+    )

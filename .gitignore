@@ -122,5 +122,9 @@ scripts/unraid-lab/lab_manifest.jsonl
 .stub-upstream-ca/
 stub-requests.jsonl
 /.fluid
+# Repo-level prose skills are committed; the rest of .fluid stays local.
+!/.fluid/
+/.fluid/*
+!/.fluid/skills/
 /.live-monitor
 /.codex

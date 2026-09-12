@@ -19,6 +19,23 @@ from app.db.base import get_db
 
 RECOVERY_PREFIX = 'shr_'
 
+#: Headers whose mere presence marks a request as proxied. Shared with
+#: ``app.core.preview_access`` so the preview door cannot be looser than this.
+PROXY_HEADERS = ('forwarded', 'x-forwarded-for', 'x-forwarded-host',
+                 'x-forwarded-proto', 'cf-connecting-ip', 'cf-ray')
+
+# Loopback, RFC1918, Tailscale CGNAT and ULA: the owner's own network.
+# Tailscale addresses (CGNAT 100.64.0.0/10) are part of the owner's own
+# network: the worker is reached directly, never through the internet.
+_PRIVATE_NETWORKS = tuple(ipaddress.ip_network(n) for n in
+                          ('127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
+                           '100.64.0.0/10', '::1/128', 'fc00::/7'))
+
+
+def is_private_address(address):
+    """Whether an ``ipaddress`` object lies on the owner's own network."""
+    return any(address in network for network in _PRIVATE_NETWORKS)
+
 
 def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
@@ -74,24 +91,18 @@ def local_access(request):
     if (not settings.shuffle_local_access
             or getattr(request, 'scope', {}).get('shuffle.ingress') != 'local'
             or request.headers.get('authorization')
-            or any(h in request.headers for h in ('forwarded', 'x-forwarded-for',
-                       'x-forwarded-host', 'x-forwarded-proto', 'cf-connecting-ip', 'cf-ray'))):
+            or any(h in request.headers for h in PROXY_HEADERS)):
         return False
-    # Tailscale addresses (CGNAT 100.64.0.0/10) are part of the owner's own
-    # network: the worker is reached directly, never through the internet.
-    networks = tuple(ipaddress.ip_network(n) for n in
-                     ('127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10',
-                      '::1/128', 'fc00::/7'))
     try:
         peer = ipaddress.ip_address(request.client.host)
-        if not any(peer in network for network in networks):
+        if not is_private_address(peer):
             return False
         hostname = urlsplit('http://' + request.headers.get('host', '')).hostname
         if not hostname:
             return False
         try:
             address = ipaddress.ip_address(hostname)
-            host_ok = any(address in network for network in networks)
+            host_ok = is_private_address(address)
         except ValueError:
             names = {'localhost', socket.gethostname().lower(), socket.gethostname().lower() + '.local'}
             names.update(x.strip().lower() for x in settings.shuffle_local_hostnames.split(',') if x.strip())
@@ -161,8 +172,7 @@ def revoke_local_session(token):
 def loopback_request(request):
     """Reject proxy headers too: a local tunnel connector is not a local operator."""
     if (getattr(request, 'scope', {}).get('shuffle.ingress') != 'local' or
-            any(h in request.headers for h in ('forwarded', 'x-forwarded-for', 'x-forwarded-host',
-                                               'x-forwarded-proto', 'cf-connecting-ip', 'cf-ray'))):
+            any(h in request.headers for h in PROXY_HEADERS)):
         return False
     try:
         host = urlsplit('http://' + request.headers.get('host', '')).hostname

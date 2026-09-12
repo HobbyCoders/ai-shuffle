@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from typing import Any
 
 from fluid.tools.fragments import DONT_PREDICT_PENDING, END_TURN_ON_BACKGROUND, SWARM_ROUTING
@@ -142,6 +143,15 @@ SPEC = ToolSpec(
                 "type": "string",
                 "description": "Short display label for progress UI.",
             },
+            "name": {
+                "type": "string",
+                "description": (
+                    "Name the subagent is listed under in ListAgents and "
+                    "addressed by in SendMessage. Derived from label/prompt "
+                    "when omitted (a short slug); the task id in the receipt "
+                    "addresses it too."
+                ),
+            },
         },
         "required": ["agent", "prompt"],
     },
@@ -153,12 +163,46 @@ SPEC = ToolSpec(
 )
 
 
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+_SLUG_WORDS = 4
+_SLUG_MAX = 40
+
+
+def agent_name_for(input: dict[str, Any]) -> str:
+    """A short, addressable name for the agent a Task starts.
+
+    Round 9: every subagent was listed as "General Purpose" (its agent
+    TYPE), so SendMessage by description failed with "Unknown agent" and
+    two same-type agents were indistinguishable. The name is the explicit
+    ``name`` when given, else the first few words of the label or prompt as
+    a slug (``fix-flaky-login-test``). The host appends the task id's short
+    ref when two agents collide, so the slug does not have to be unique.
+    """
+    explicit = str(input.get("name") or "").strip()
+    if explicit:
+        return explicit[:_SLUG_MAX]
+    source = str(input.get("label") or "").strip() or str(input.get("prompt") or "").strip()
+    first_line = source.splitlines()[0] if source else ""
+    words = [w for w in _SLUG_RE.split(first_line.lower()) if w][:_SLUG_WORDS]
+    slug = "-".join(words)[:_SLUG_MAX].strip("-")
+    return slug or str(input.get("agent") or "subagent")
+
+
+def _spawn_receipt_text(receipt: BackgroundTaskReceipt, name: str) -> str:
+    return (
+        f"Background task {receipt.task_id} started as agent '{name}'. "
+        f"Address it with SendMessage(to='{name}') or by its task id; "
+        "its report arrives in a later turn."
+    )
+
+
 def _background_outcome(result: Any, input: dict[str, Any]) -> ToolOutcome:
+    name = agent_name_for(input)
     if isinstance(result, ToolOutcome):
         return result
     if isinstance(result, BackgroundTaskReceipt):
         return ToolOutcome(
-            text=f"Background task {result.task_id} started.",
+            text=_spawn_receipt_text(result, name),
             background_task=result,
         )
     if isinstance(result, dict) and result.get("task_id"):
@@ -175,7 +219,7 @@ def _background_outcome(result: Any, input: dict[str, Any]) -> ToolOutcome:
             text=str(
                 result.get("text")
                 or result.get("message")
-                or f"Background task {receipt.task_id} started."
+                or _spawn_receipt_text(receipt, name)
             ),
             ui=result.get("ui", result),
             is_error=bool(result.get("is_error", False)),
@@ -201,6 +245,9 @@ async def _dispatch_and_register(
     44% of its workers, and any host trusting fluid's accounting sees an idle
     session with research still running.
     """
+    # The host receives the derived name so its roster and its SendMessage
+    # resolution can address the agent by what it is doing.
+    input = {**input, "name": agent_name_for(input)}
     outcome = _background_outcome(await dispatch(input, ctx), input)
     receipt = outcome.background_task
     if receipt is None or outcome.is_error:

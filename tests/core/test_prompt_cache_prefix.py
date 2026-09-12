@@ -142,7 +142,12 @@ def test_memory_snapshot_rides_the_turn_instead(tmp_path, memory_store, memory_s
     adapter._options = SessionOptions(model="fake-model", cwd=str(tmp_path), extra={"app_session_id": memory_session_id})
     adapter._is_delegated = delegated
 
-    assert adapter._memory_snapshot() is None  # empty store costs nothing
+    # An empty store renders fluid's short placeholder (audit round 9: a fresh
+    # install never mentioned memory), still on the turn, never in the prefix.
+    placeholder = adapter._memory_snapshot()
+    assert placeholder is not None
+    assert "# Memory" in placeholder and "no saved facts yet" in placeholder
+    assert "ops/deploy.sh" not in placeholder
 
     memory_store.save_memory("the deploy script lives in ops/deploy.sh")
     snapshot = adapter._memory_snapshot()
@@ -216,4 +221,9 @@ async def test_send_query_is_unchanged_without_an_app_env_block(tmp_path):
 
     await adapter.send_query("do the thing")
 
-    assert engine.ops[0].content == "do the thing"
+    content = engine.ops[0].content
+    assert content.startswith("do the thing")
+    assert "<env>" not in content
+    # The only other rider is the memory reminder, which is not an env block
+    # (fluid renders a placeholder for an empty store since audit round 9).
+    assert content.replace("do the thing", "", 1).strip().startswith("<system-reminder>") or content == "do the thing"

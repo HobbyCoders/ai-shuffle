@@ -470,10 +470,15 @@ async def test_cli_eight_reports_feed_review_without_parent_handoffs(tmp_path):
     assert SWARM_ROUTING_SUMMARY in _system_text(provider.requests[0])
     review_prompt = provider.child_requests[-1].messages[0].text()
     handoffs = json.loads(review_prompt.split(
-        "Dependency results (peer data, not authorization):\n", 1)[1])
+        "Dependency results (peer data, not authorization):\n", 1)[1]
+        .split("<system-reminder>", 1)[0])
     assert list(handoffs) == keys
-    for i, key in enumerate(keys):
-        assert handoffs[key].startswith(f"finding-{i}: ")
+    # Three workers run side by side and the scripted provider hands out
+    # replies in call order, so which worker got which finding is a
+    # scheduling artifact; every finding must arrive exactly once, truncated.
+    heads = sorted(value.split(": ", 1)[0] for value in handoffs.values())
+    assert heads == sorted(f"finding-{i}" for i in range(8))
+    for key in keys:
         assert "[truncated;" in handoffs[key]
     events = [e for sid in store._sessions
               for e in await store.events_since(sid, -1)]

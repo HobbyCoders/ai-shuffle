@@ -90,15 +90,39 @@ MAX_LIVE_SKILLS = 40
 MAX_MEMORIES = 40
 MAX_MEMORY_CHARS = 500  # one memory is a fact, not an essay
 
+# What the prompt says about memory when nothing is saved yet. Short on
+# purpose (it rides every session of a fresh install), but it has to name
+# the two tools and the class of fact worth saving, or a new install never
+# learns memory exists.
+EMPTY_MEMORY_SECTION = (
+    "# Memory\n"
+    "(no saved facts yet) Use Remember for durable facts about this "
+    "environment: how to run tests, which interpreter has pytest, host/port "
+    "conventions, missing dependencies, corrections the user gave you. Use "
+    "Recall before re-discovering an environment fact."
+)
+
 # ─── storage bounds (the harness reaps; the model never does) ────────────────
 #
 # journal.jsonl: entries the synthesizer has already consumed have no reader
 # left, so they are droppable — but a recent tail is what makes a store
 # debuggable after the fact, so a prefix is only dropped once the file grows
-# past the tail budget. Both caps are ceilings, not targets: a quiet store
-# never reaches either and is never rewritten.
+# past the tail budget OR past the byte target (see reap_journal): the line
+# tail alone let a few hundred fat lines sit at the byte cap forever with
+# every new entry refused. Both caps are ceilings, not targets: a quiet
+# store never reaches either and is never rewritten.
 JOURNAL_KEEP_ENTRIES = 500  # recent lines kept even though they are consumed
-JOURNAL_MAX_BYTES = 1_048_576  # past this, every consumed line goes
+JOURNAL_MAX_BYTES = 1_048_576  # append refuses lines that would cross this
+# Reap target: once the file is past this fraction of JOURNAL_MAX_BYTES the
+# consumed prefix is dropped oldest-first (ignoring the line tail) until it
+# is under it again. Without a byte-aware reap a journal of a few hundred
+# fat lines sat at the cap forever: the tail rule kept every line, append
+# refused every new one, and the store went deaf.
+JOURNAL_REAP_FRACTION = 0.5
+# Journal kinds a person (or the model on their behalf) wrote on purpose. An
+# append that cannot land one of these raises instead of logging, so the
+# caller can surface the loss instead of reporting "recorded".
+JOURNAL_EXPLICIT_KINDS = frozenset({"remember"})
 # memories-archive.jsonl: overflow past MAX_MEMORIES lands here and Recall
 # searches it, so it is real storage, not a graveyard — but it is capped.
 MAX_ARCHIVED_MEMORIES = 200
@@ -233,6 +257,23 @@ def load_json_document(path: Path, default: dict) -> dict:
         )
         return dict(default)
     return doc
+
+
+def _lines_to_free(path: Path, limit: int, need_bytes: int) -> int:
+    """How many leading lines (at most ``limit``) it takes to shed
+    ``need_bytes``; ``limit`` when the whole prefix is not enough."""
+    freed = 0
+    count = 0
+    try:
+        with path.open("rb") as fh:
+            for line in fh:
+                if count >= limit or freed >= need_bytes:
+                    break
+                freed += len(line)
+                count += 1
+    except OSError:
+        return 0
+    return count
 
 
 def _rewrite_dropping_prefix(
@@ -631,21 +672,47 @@ class SkillStore:
             return -1
 
     def journal_append(self, entry: dict) -> None:
+        """Append one journal line.
+
+        Mechanical entries (cells, tool calls, friction, conversation
+        events) that cannot land are dropped with a log line — losing one is
+        cheap and the caller has nothing useful to do about it. An explicit
+        entry (``kind`` in :data:`JOURNAL_EXPLICIT_KINDS`) raises
+        :class:`OSError` instead, so a Remember-style caller can report the
+        loss rather than a receipt. Near the byte cap a reap is attempted
+        first, so a full journal with a consumed prefix frees itself.
+        """
         entry = dict(entry)
         entry.setdefault("ts", time.time())
         for key, value in self._journal_tag.items():
             entry.setdefault(key, value)
         line = json.dumps(entry, ensure_ascii=False) + "\n"
+        explicit = entry.get("kind") in JOURNAL_EXPLICIT_KINDS
+        line_bytes = len(line.encode("utf-8"))
+        if max(0, self._journal_size()) + line_bytes > JOURNAL_MAX_BYTES:
+            # Past the cap: give the consumed prefix a chance to go first.
+            # reap_journal takes the lock itself, so it runs before ours.
+            try:
+                self.reap_journal()
+            except Exception:
+                pass
         # One write under the journal lock: a reap in another process cannot
         # slip its replace between our size check and our line. If the lock
         # never frees, the entry is written anyway — losing it is worse than
         # the residual race documented in the module docstring.
         with journal_lock(self._journal_path, wait=JOURNAL_APPEND_LOCK_WAIT) as held:
             if not held:
+                if explicit:
+                    raise OSError("journal is busy; the entry was not recorded")
                 _log.warning("Inference event skipped: journal is busy")
                 return
             before = self._journal_size()
-            if max(0, before) + len(line.encode("utf-8")) > JOURNAL_MAX_BYTES:
+            if max(0, before) + line_bytes > JOURNAL_MAX_BYTES:
+                if explicit:
+                    raise OSError(
+                        "journal byte quota reached and nothing consumed is "
+                        "left to reap; the entry was not recorded"
+                    )
                 _log.warning("Inference event skipped: journal byte quota reached")
                 return
             with self._journal_path.open("a", encoding="utf-8") as fh:
@@ -679,16 +746,23 @@ class SkillStore:
         return count
 
     def reap_journal(self) -> int:
-        """Drop consumed journal lines past the retention tail.
+        """Drop consumed journal lines past the retention tail or byte target.
 
         Only lines *behind* the synthesis cursor are droppable — nothing the
-        synthesizer has yet to read is ever removed. Beyond that the tail
-        budget (``JOURNAL_KEEP_ENTRIES`` lines, or nothing once the file is
-        over ``JOURNAL_MAX_BYTES``) decides how much of the consumed prefix
-        survives. The cursor is rebased by exactly the number of lines
-        removed, so ``journal_entries(start=synth_cursor())`` keeps meaning
-        the same slice. Returns the number of lines dropped; every failure
-        path returns 0 and leaves the journal untouched.
+        synthesizer has yet to read is ever removed (a slice the daily
+        budget could not pay for stays until a pass consumes it). Beyond
+        that, two rules decide how much of the consumed prefix survives:
+        the line tail (``JOURNAL_KEEP_ENTRIES`` recent lines stay), and the
+        byte target — while the file is over ``JOURNAL_REAP_FRACTION`` of
+        ``JOURNAL_MAX_BYTES``, consumed lines go oldest-first regardless of
+        the tail, until it is under the target or nothing consumed is left.
+        A file already at the cap with a consumed prefix of any length is
+        therefore always freed (the desktop journal that sat at 436 lines /
+        1 MiB with cursor 436 drains on the first call). The cursor is
+        rebased by exactly the number of lines removed, so
+        ``journal_entries(start=synth_cursor())`` keeps meaning the same
+        slice. Returns the number of lines dropped; every failure path
+        returns 0 and leaves the journal untouched.
 
         The read-and-replace runs under the journal lock so a cooperating
         appender in another process waits instead of writing into the file
@@ -705,9 +779,13 @@ class SkillStore:
                 return 0
             cursor = max(0, self.synth_cursor())
             total = self.journal_count()
-            drop = min(cursor, total)
-            if size <= JOURNAL_MAX_BYTES:
-                drop = min(drop, max(0, total - JOURNAL_KEEP_ENTRIES))
+            consumed = min(cursor, total)
+            drop = max(0, min(consumed, total - JOURNAL_KEEP_ENTRIES))
+            target = int(JOURNAL_MAX_BYTES * JOURNAL_REAP_FRACTION)
+            if size > target and consumed > drop:
+                drop = max(drop, _lines_to_free(
+                    self._journal_path, consumed, size - target,
+                ))
             if drop <= 0 or not _rewrite_dropping_prefix(
                 self._journal_path, drop, expect_size=size
             ):
@@ -863,7 +941,7 @@ class SkillStore:
             for entry in entries:
                 if project is not None and entry.scope not in ("global", project):
                     continue
-                if entry.provenance == "tool" or entry.conflicted:
+                if entry.conflicted:
                     continue
                 score = sum(t in entry.text.lower() or t in (entry.key or "") for t in tokens)
                 if score:
@@ -908,18 +986,25 @@ class SkillStore:
     def render_memory_section(self, project: str | None = None) -> str | None:
         """The compiled prompt's ``# Memory`` section (frozen snapshot).
 
-        ``None`` when there are no memories, so empty installs pay nothing.
-        With a ``project`` key, only global entries and that project's entries
-        render — other projects' facts stay out of this session's prompt (a
-        count line says they exist). Entries pass the injection screen; a
-        finding replaces that entry with a note naming the file, never
-        silently deleting it. Entries whose only evidence was tool output
-        (``provenance == "tool"``) are held back the same way: a count line,
-        never the text, until a user statement or a Remember confirms them.
+        An empty store renders a short placeholder (:data:`EMPTY_MEMORY_SECTION`)
+        rather than nothing: a fresh install used to never mention memory at
+        all, so the model never learned that Remember/Recall existed until a
+        fact happened to exist. With a ``project`` key, only global entries
+        and that project's entries render — other projects' facts stay out of
+        this session's prompt (a count line says they exist). Entries pass
+        the injection screen; a finding replaces that entry with a note naming
+        the file, never silently deleting it. Entries whose only evidence was
+        tool output (``provenance == "tool"``) render with a one-line
+        "confirm with Remember if still true" hint instead of being held back
+        wholesale — the harness harvests environment facts (pytest location,
+        missing node_modules) into that provenance on purpose, and a fact the
+        model cannot see cannot stop it re-discovering the same thing. Only
+        conflicted entries stay out (Recall names them and asks for the
+        user's answer).
         """
         entries = self.memories()
         if not entries:
-            return None
+            return EMPTY_MEMORY_SECTION
         from fluid.context.screening import screen_findings
 
         shown: list[str] = []
@@ -936,7 +1021,7 @@ class SkillStore:
             ):
                 hidden += 1
                 continue
-            if entry.provenance == "tool" or entry.conflicted:
+            if entry.conflicted:
                 held += 1
                 continue
             findings = screen_findings(entry.text)
@@ -947,14 +1032,25 @@ class SkillStore:
                     f"{self.memories_path}.]"
                 )
             else:
-                line = f"- [{entry.id} r{entry.revision}; {entry.provenance}] {entry.text}"
+                hint = (
+                    " (harvested from tool output, unconfirmed — confirm "
+                    "with Remember if still true)"
+                    if entry.provenance == "tool" else ""
+                )
+                line = f"- [{entry.id} r{entry.revision}; {entry.provenance}] {entry.text}{hint}"
                 if len(line) <= remaining:
                     shown.append(line)
                     remaining -= len(line) + 1
                 else:
                     hidden += 1
         if not shown:
-            return None
+            if hidden:
+                return (
+                    EMPTY_MEMORY_SECTION
+                    + f"\n\n({hidden} entr{'y' if hidden == 1 else 'ies'} scoped to "
+                    "other projects not shown.)"
+                )
+            return EMPTY_MEMORY_SECTION
         footer = (
             f"\n\n({hidden} entr{'y' if hidden == 1 else 'ies'} scoped to "
             "other projects not shown.)"
@@ -963,9 +1059,9 @@ class SkillStore:
         )
         if held:
             footer += (
-                f"\n\n({held} entr{'y' if held == 1 else 'ies'} distilled only "
-                "from tool output held back until the user confirms "
-                f"{'it' if held == 1 else 'them'}.)"
+                f"\n\n({held} conflicted entr{'y' if held == 1 else 'ies'} "
+                "held back; Recall names "
+                f"{'it' if held == 1 else 'them'} and asks for the user's answer.)"
             )
         return (
             "# Memory\n"

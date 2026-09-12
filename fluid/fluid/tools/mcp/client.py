@@ -36,7 +36,11 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 DEFAULT_CONNECT_TIMEOUT_S = 30.0
-DEFAULT_CALL_TIMEOUT_S = 120.0
+# One tools/call. Round 9: a browser_snapshot that never answered held a
+# turn until the host tore the engine down (no ToolResult, no terminal
+# event, the turn's cost never recorded). 60 s is generous for any tool
+# that is answering at all; a server that needs longer sets call_timeout.
+DEFAULT_CALL_TIMEOUT_S = 60.0
 DEFAULT_SHUTDOWN_TIMEOUT_S = 5.0
 
 
@@ -341,6 +345,9 @@ class McpClient:
             "images": [],
             "is_error": True,
             "structured": None,
+            # Lets the code-mode bridge keep a timeout fatal to the cell
+            # while ordinary tool errors (a stale ref) become soft results.
+            "error_code": "tool_timeout",
         }
 
     # ─── Public API ──────────────────────────────────────────────────────

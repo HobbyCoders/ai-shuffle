@@ -50,7 +50,7 @@ export interface ToolDefinition {
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   { name: "browser_status", description: "Current shared browser tabs, viewport, busy state and agent/human control. Available during human control; never creates a page.", inputSchema: statusSchema,
     run: async session => jsonResult(session.workspaceStatus?.() ?? { available: true, control: { owner: "agent", viewer_id: null, pending_viewer_id: null }, busy: session.busy, ...(await session.workspaceMetadata()) }) },
-  { name: "browser_wait", description: "Bounded wait for URL, text, or ref/selector element state (visible, hidden, attached, detached). Default 5s, maximum 15s; interrupted by human takeover.", inputSchema: waitSchema,
+  { name: "browser_wait", description: "Bounded wait. condition is exactly one of url | text | element — there is no selector condition: for a CSS selector pass condition=element with selector=... (or ref=...). Element state: visible (default), hidden, attached, detached. Default 5s, maximum 15s; interrupted by human takeover.", inputSchema: waitSchema,
     run: (session, input) => runWait(session, input as unknown as WaitInput) },
   {
     name: "browser_navigate",
@@ -63,7 +63,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "browser_snapshot",
     description:
-      "Return the page's accessibility tree as refs you can act on. Use filter=interactive to shrink it, scope_ref to zoom into a subtree.",
+      "Return the page's accessibility tree as refs you can act on. Refs expire on every navigation and after a major DOM change (browser_act reports snapshot_stale: true when that happened) — never reuse refs across those. Take ONE full snapshot per page, then use filter=interactive or scope_ref=eN to re-read only the part that changed; a large page re-snapshotted in full each time costs thousands of tokens per call.",
     inputSchema: snapshotSchema,
     run: (session, input) =>
       runSnapshot(
@@ -74,14 +74,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "browser_act",
     description:
-      "Perform one action (click/type/fill/key/hover/scroll/select/drag/dblclick) on a ref or coordinate. Key may omit a target to use active focus. Returns a terse change summary.",
+      "Perform one action (click/type/fill/key/hover/scroll/select/drag/dblclick) on exactly one of ref or coordinate — scroll included; only key may omit both to use the focused element. Refs expire on navigation and after a major DOM change (take a new snapshot). Coordinates are in the pixel space of the last browser_screenshot and need one taken since the previous action or navigation: if that screenshot is stale the server re-captures the viewport itself when the view is unchanged, otherwise it returns stale_screenshot with a fresh screenshot attached for you to re-aim from. Returns a terse change summary.",
     inputSchema: actSchema,
     run: (session, input) => runAct(session, input as unknown as ActInput),
   },
   {
     name: "browser_screenshot",
     description:
-      "Capture the viewport (or a region / full page). Downscaled JPEG; the returned pixel dimensions define the coordinate space for browser_act.",
+      "Capture the viewport (or a region / full page). Downscaled JPEG; the returned pixel dimensions define the coordinate space for browser_act. Any action, navigation, tab or viewport change invalidates it for coordinate use. Use it only when layout or rendering is the question — snapshots are cheaper and give refs.",
     inputSchema: screenshotSchema,
     run: (session, input) => runScreenshot(session, input as ScreenshotInput),
   },

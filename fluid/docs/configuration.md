@@ -402,7 +402,7 @@ MCP servers connected at session start. Their tools appear as
 | `url` | http: the server endpoint. |
 | `headers` | http: a table of request headers sent with every call (an `Authorization` bearer token, say). |
 | `connect_timeout` | Seconds allowed for the transport to open and the handshake to finish (default 30). A server that misses it is reported as a non-fatal error and the session runs without it. |
-| `call_timeout` | Seconds allowed for one tool call, and for any other request to the server (default 120). A call that misses it returns an error result to the model; the connection stays up. |
+| `call_timeout` | Seconds allowed for one tool call, and for any other request to the server (default 60). A call that misses it returns an error result to the model; the connection stays up. The engine's registry adds its own 75 s ceiling around every MCP and in-process call so a wedged transport can never hold a turn. |
 | `trust_annotations` | `true` lets a tool's own `readOnlyHint` count: the tool runs without a prompt under `on_write`. Off by default, since the hint is the server's word about itself; a `destructiveHint` always counts. |
 | `shutdown_timeout` | Seconds to wait for the server to stop at session end before it is abandoned (default 5). |
 

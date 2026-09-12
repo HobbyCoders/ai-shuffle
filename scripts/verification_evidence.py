@@ -3,12 +3,24 @@
 Run: python scripts/verification_evidence.py run --output /outside/repo/run-1 -- pytest --junitxml={junit}
 Check: python scripts/verification_evidence.py check /outside/repo/run-1 --tests 12 --passed 12
 
-The checker never executes a recorded command. It detects stale worktrees,
-failed/timed-out runs, artifact changes and inconsistent JUnit counts. Evidence
-is unsigned local data, not an attestation against a malicious author. Ignored
-files, dependencies, external services and browser observations are out of scope.
-No warning-count or general PR-claim verification is provided. Use `check && gh
-...` for an explicit local write gate; direct gh usage is not intercepted.
+The checker never executes a recorded command. It detects changes to the files
+the change touches, failed/timed-out runs, artifact changes and inconsistent
+JUnit counts. Evidence is unsigned local data, not an attestation against a
+malicious author. Ignored files, dependencies, external services and browser
+observations are out of scope. No warning-count or general PR-claim
+verification is provided. Use `check && gh ...` for an explicit local write
+gate; direct gh usage is not intercepted.
+
+Scope of the staleness check (round-9 change). The hash covers the paths the
+change touches — every path that differs from the base ref (``--base``,
+default origin/main, then main), every uncommitted tracked change, and every
+untracked non-ignored file — as they stood when the run was recorded. It does
+NOT cover the rest of the worktree: sibling agents editing other files in a
+shared worktree used to trip "Worktree changed during or after verification"
+on runs that were perfectly good, and the model re-ran whole suites. A file the
+verification command reads but the change does not touch is therefore out of
+scope; that is deliberate, since determining a command's read set is not cheap.
+A rejection names the files that changed.
 """
 from __future__ import annotations
 
@@ -32,17 +44,64 @@ def git(cwd, *args):
     return subprocess.check_output(['git', *args], cwd=cwd, stderr=subprocess.PIPE)
 
 
-def snapshot(cwd):
+DEFAULT_BASES = ('origin/main', 'main')
+
+
+def _resolve_base(root, base):
+    """The base ref to diff against, or None when none of the candidates exist."""
+    candidates = (base,) if base else DEFAULT_BASES
+    for candidate in candidates:
+        try:
+            git(root, 'rev-parse', '--verify', '--quiet', candidate + '^{commit}')
+            return candidate
+        except subprocess.CalledProcessError:
+            continue
+    return None
+
+
+def touched_paths(root, base=None):
+    """The paths this change touches, relative to ``root``, sorted.
+
+    Committed changes since the merge-base with ``base`` (when a base ref
+    resolves), uncommitted tracked changes, and untracked non-ignored files.
+    """
+    names = set()
+    resolved = _resolve_base(root, base)
+    if resolved:
+        try:
+            merge_base = git(root, 'merge-base', resolved, 'HEAD').decode().strip()
+            names.update(git(root, 'diff', '--name-only', '-z', merge_base, 'HEAD').decode('utf-8').split('\0'))
+        except subprocess.CalledProcessError:
+            pass
+    names.update(git(root, 'diff', '--name-only', '-z', 'HEAD').decode('utf-8').split('\0'))
+    names.update(git(root, 'ls-files', '--others', '--exclude-standard', '-z').decode('utf-8').split('\0'))
+    return sorted(name for name in names if name), resolved
+
+
+def _hash_paths(root, names):
+    """``{path: sha256 | '<missing>'}`` for the working-tree content of ``names``."""
+    out = {}
+    for name in names:
+        path = root / name
+        out[name] = digest(path.read_bytes()) if path.is_file() else '<missing>'
+    return out
+
+
+def snapshot(cwd, base=None, paths=None):
+    """The state of the touched files. ``paths`` re-hashes a recorded set."""
     root = Path(git(cwd, 'rev-parse', '--show-toplevel').decode().strip()).resolve()
     revision = git(root, 'rev-parse', 'HEAD').decode().strip()
-    changes = hashlib.sha256(git(root, 'diff', '--binary', '--no-ext-diff', '--no-textconv', 'HEAD'))
-    # A clean index is not enough: include nonignored untracked source/tests.
-    for name in sorted(git(root, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0')):
-        if name:
-            path = root / name.decode('utf-8')
-            changes.update(name + b'\0')
-            changes.update(path.read_bytes())
-    return {'worktree': str(root), 'revision': revision, 'changes_sha256': changes.hexdigest()}
+    if paths is None:
+        paths, base = touched_paths(root, base)
+    return {'worktree': str(root), 'revision': revision, 'base': base,
+            'paths': _hash_paths(root, paths)}
+
+
+def changed_paths(before, after):
+    """Paths whose recorded hash differs between two snapshots of one set."""
+    names = set(before.get('paths', {})) | set(after.get('paths', {}))
+    return sorted(name for name in names
+                  if before.get('paths', {}).get(name) != after.get('paths', {}).get(name))
 
 
 def junit_counts(path):
@@ -90,9 +149,9 @@ def _terminate_tree(process):
         process.wait(timeout=10)
 
 
-def record(cwd, output, command, timeout=600):
+def record(cwd, output, command, timeout=600, base=None):
     cwd = Path(cwd).resolve()
-    before = snapshot(cwd)
+    before = snapshot(cwd, base)
     output = Path(output).resolve()
     if output.is_relative_to(Path(before['worktree'])):
         raise ValueError('Evidence must be outside the worktree')
@@ -121,14 +180,14 @@ def record(cwd, output, command, timeout=600):
         except OSError as exc:
             log.write(str(exc).encode('utf-8'))
             exit_code = 127
-    after = snapshot(cwd)
+    after = snapshot(cwd, before['base'], paths=list(before['paths']))
     counts, error = None, None
     try:
         counts = junit_counts(output / 'junit.xml')
     except (OSError, ValueError, ET.ParseError) as exc:
         error = str(exc)
     artifacts = {name: digest((output / name).read_bytes()) for name in ('output.log', 'junit.xml') if (output / name).is_file()}
-    evidence = dict(version=1, scope='JUnit test execution only', command=command, cwd=str(cwd),
+    evidence = dict(version=2, scope='JUnit test execution only', command=command, cwd=str(cwd),
                     started_at=started, finished_at=time.time(), timeout_seconds=timeout,
                     exit_code=exit_code, timed_out=timed_out, before=before, after=after,
                     counts=counts, junit_error=error, artifacts=artifacts)
@@ -139,12 +198,22 @@ def record(cwd, output, command, timeout=600):
 def check(cwd, output, claims=None):
     output = Path(output)
     evidence = json.loads((output / 'evidence.json').read_text(encoding='utf-8'))
-    if evidence.get('version') != 1 or evidence.get('scope') != 'JUnit test execution only':
+    if evidence.get('version') != 2 or evidence.get('scope') != 'JUnit test execution only':
         raise ValueError('Unsupported evidence format/scope')
     if evidence.get('exit_code') != 0 or evidence.get('timed_out') is not False:
         raise ValueError('Command failed or timed out')
-    if evidence['before'] != evidence['after'] or evidence['after'] != snapshot(cwd):
-        raise ValueError('Worktree changed during or after verification')
+    before, after = evidence['before'], evidence['after']
+    if set(before.get('paths', {})) != set(after.get('paths', {})):
+        raise ValueError('Evidence is inconsistent: touched path set differs between snapshots')
+    during = changed_paths(before, after)
+    if during:
+        raise ValueError('Touched files changed during verification: ' + ', '.join(during))
+    now = snapshot(cwd, after.get('base'), paths=list(after['paths']))
+    if now['worktree'] != after.get('worktree'):
+        raise ValueError('Evidence was recorded in a different worktree')
+    since = changed_paths(after, now)
+    if since:
+        raise ValueError('Touched files changed after verification: ' + ', '.join(since))
     for name in ('output.log', 'junit.xml'):
         if digest((output / name).read_bytes()) != evidence['artifacts'].get(name):
             raise ValueError(f'Artifact changed: {name}')
@@ -166,6 +235,7 @@ def main():
     run = commands.add_parser('run')
     run.add_argument('--output', required=True)
     run.add_argument('--timeout', type=float, default=600)
+    run.add_argument('--base', help='Base ref the change is measured against (default: origin/main, then main).')
     run.add_argument('command', nargs=argparse.REMAINDER)
     verify = commands.add_parser('check')
     verify.add_argument('output')
@@ -175,13 +245,19 @@ def main():
     try:
         if args.action == 'run':
             command = args.command[1:] if args.command[:1] == ['--'] else args.command
-            evidence = record(args.cwd, args.output, command, args.timeout)
+            evidence = record(args.cwd, args.output, command, args.timeout, base=args.base)
             print(str(Path(args.output).resolve() / 'evidence.json'))
             check(args.cwd, args.output)
         else:
             claims = {key: getattr(args, key) for key in ('tests', 'passed', 'skipped') if getattr(args, key) is not None}
             evidence = check(args.cwd, args.output, claims)
-        print(json.dumps({'scope': evidence['scope'], 'counts': evidence['counts']}))
+        touched = sorted(evidence.get('after', {}).get('paths', {}))
+        summary = {'scope': evidence['scope'], 'counts': evidence['counts'], 'touched_paths': touched}
+        if not touched:
+            # Nothing touched: the run verified the base itself, which is fine,
+            # but say so rather than implying a change was covered.
+            summary['note'] = 'No touched paths relative to the base; the run covered an unchanged tree.'
+        print(json.dumps(summary))
         return 0
     except (OSError, ValueError, KeyError, ET.ParseError, subprocess.SubprocessError) as exc:
         print(f'Evidence rejected: {exc}')

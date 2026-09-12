@@ -78,6 +78,7 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
 
   let clip: Clip | undefined;
   let fullPage = false;
+  const kind: "viewport" | "region" | "full" = input.region ? "region" : input.full_page ? "full" : "viewport";
   let offsetX = 0;
   let offsetY = 0;
   let width: number;
@@ -175,7 +176,7 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
           JPEG_QUALITY,
         ] as [string, number, number, number],
       ), 5000, "screenshot encoding timed out");
-      session.setLastScreenshot({ scale: factor, offsetX, offsetY });
+      session.setLastScreenshot({ scale: factor, offsetX, offsetY, kind, viewportW: pageDims.innerW, viewportH: pageDims.innerH });
       return {
         content: [
           { type: "image", data: shrunk, mimeType: "image/jpeg" },
@@ -198,7 +199,7 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
     };
   }
 
-  session.setLastScreenshot({ scale: 1, offsetX, offsetY });
+  session.setLastScreenshot({ scale: 1, offsetX, offsetY, kind, viewportW: pageDims.innerW, viewportH: pageDims.innerH });
   return {
     content: [
       { type: "image", data, mimeType: "image/jpeg" },

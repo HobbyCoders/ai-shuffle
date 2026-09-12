@@ -1626,6 +1626,7 @@ async def dispatch_worker(
     system_prompt_append: Optional[str] = None,
     tool_allowlist: Optional[List[str]] = None,
     agent_name: Optional[str] = None,
+    roster_name: Optional[str] = None,
     worker_session_id: Optional[str] = None,
     first_frame_seconds: Optional[float] = None,
     max_wall_seconds: Optional[float] = None,
@@ -1913,6 +1914,7 @@ async def dispatch_worker(
         model=f"{provider_tag} · {model_tag}",
         tool_use_id=launch_key,
         agent=agent_name,
+        name=roster_name,
     )
     if nested:
         # A SECOND row, on the session that dispatched it (audit finding D).
@@ -1930,6 +1932,7 @@ async def dispatch_worker(
             model=f"{provider_tag} · {model_tag}",
             tool_use_id=launch_key,
             agent=agent_name,
+            name=roster_name,
         )
 
     # Ownership of this worker's terminal, for the parent's notification lanes.

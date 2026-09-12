@@ -511,7 +511,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         if count > 1 and not replace_all:
             return ToolOutcome(
                 text=f"old_string is not unique ({count} matches); pass replace_all or add context",
-                is_error=True,
+                is_error=True, soft_error=True,
             )
         spans = _spans_of(content, old, replace_all)
         rejected = _window_rejection(ctx, path, spans)
@@ -533,7 +533,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             if count > 1 and not replace_all:
                 return ToolOutcome(
                     text=f"old_string is not unique ({count} matches); pass replace_all or add context",
-                    is_error=True,
+                    is_error=True, soft_error=True,
                 )
             stripped_new = _strip_line_prefixes(new)
             repl = stripped_new if stripped_new is not None else new
@@ -569,7 +569,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         if len(runs) > 1 and not replace_all:
             return ToolOutcome(
                 text=f"old_string is not unique ({len(runs)} matches); pass replace_all or add context",
-                is_error=True,
+                is_error=True, soft_error=True,
             )
         chosen = runs if replace_all else runs[:1]
         span = len(old_lines)
@@ -594,4 +594,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     diag_lines = _strip_trailing_blank(
         (stripped_old if stripped_old is not None else old).split("\n")
     )
-    return ToolOutcome(text=_diagnose(file_lines, diag_lines), is_error=True)
+    # Soft in code mode (round 9): "old_string not found" is a result the
+    # cell can read and react to; aborting the cell lost every later call in
+    # it. The text says the edit did NOT land; nothing on disk changed.
+    return ToolOutcome(
+        text="Edit NOT applied — " + _diagnose(file_lines, diag_lines),
+        is_error=True, soft_error=True,
+    )

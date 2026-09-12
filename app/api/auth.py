@@ -4,6 +4,7 @@ Authentication API routes
 
 import os
 import hashlib
+import time
 import subprocess
 import logging
 import uuid as _uuid
@@ -11,8 +12,9 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
+from fastapi.responses import RedirectResponse
 
-from app.core import owner_auth
+from app.core import owner_auth, preview_access
 from app.core.auth import (
     auth_service,
     is_github_authenticated_cached,
@@ -167,6 +169,19 @@ def require_auth(request: Request) -> str:
         request.state.auth_token = 'local-owner'
         return 'local-owner'
 
+    # The agent browser's session-scoped preview cookie (app.core.preview_access):
+    # LAN peer on the local listener (a LAN dev proxy in between is fine — the
+    # token is the credential), a live session behind the token, and never a
+    # request that changes ownership or credentials.
+    preview = preview_access.grant(request)
+    if preview is not None:
+        if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+            owner_auth.same_origin(request)
+        request.state.is_admin = True
+        request.state.api_user = None
+        request.state.auth_token = 'preview:' + preview.session_id
+        return request.state.auth_token
+
     # Log what auth methods were attempted
     has_cookie = token is not None
     has_bearer = api_key is not None
@@ -297,7 +312,15 @@ async def get_auth_status(request: Request, response: Response = None):
             username = paired_client.get("device_name") or "Paired device"
 
     local = owner_auth.local_access(request) and not is_paired_authenticated
-    if local:
+    preview_grant = None if (local or is_paired_authenticated) else preview_access.grant(request)
+    if preview_grant is not None:
+        # The agent browser holding this session's preview cookie sees the UI
+        # exactly as the local owner does; the mutation limits are enforced by
+        # require_auth per request, not by hiding anything here.
+        local = True
+        is_admin_authenticated = True
+        username = 'Preview (agent browser)'
+    elif local:
         is_admin_authenticated = True
         username = 'Local owner'
         # A direct LAN browser knows Docker's published host/port; the container
@@ -387,6 +410,30 @@ async def configure_local_install(request: Request, _: str = Depends(require_adm
     await run_sync(owner_auth.configure_installation)
     await run_sync(_audit_owner_action, request, audit_service.AuditEventType.INSTALLATION_SETUP, 'local_setup')
     return {'status': 'ok'}
+
+
+@router.get("/preview-access", include_in_schema=False)
+async def preview_access_redirect(request: Request):
+    """Turn a session-scoped preview token into the cookie the UI rides on.
+
+    The agent browser opens this URL once; every later request of the visit
+    carries the HttpOnly cookie and is admitted by ``require_auth`` under the
+    limits documented in :mod:`app.core.preview_access`. The token is accepted
+    from the query string HERE and nowhere else.
+    """
+    token = request.query_params.get(preview_access.QUERY_PARAM)
+    if not preview_access.transport_ok(request):
+        raise HTTPException(403, 'Preview access is only honoured on the local network listener.')
+    found = preview_access.verify(token)
+    if found is None:
+        raise HTTPException(403, 'Preview token is invalid, expired, or bound to a session that no longer exists.')
+    target = preview_access.safe_next(request.query_params.get('next'))
+    response = RedirectResponse(target, status_code=303)
+    response.set_cookie(
+        preview_access.COOKIE_NAME, token, max_age=max(1, found.expires_at - int(time.time())),
+        httponly=True, samesite='lax', path='/',
+    )
+    return response
 
 
 @router.post("/logout")

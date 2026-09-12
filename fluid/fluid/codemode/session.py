@@ -36,6 +36,7 @@ calls.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -67,10 +68,15 @@ _RUN_PYTHON_DESC = (
     "kernel; from inside a cell, `dir(tools)` lists what is mounted. Then "
     "`from tools import Read, Edit` and call them as plain synchronous "
     "functions (`import tools; tools.Read(...)` also works) — each call is "
-    "permission-gated on the host. For independent discovery, catch the "
-    "prebound MissingPathError around each missing Read/Grep/Glob candidate; "
-    "keep dependent parsing and edits in the successful branch. Never "
-    "continue past permission denials, cancellation or failed mutations. Saved skills (reusable helpers that persist "
+    "permission-gated on the host. Catch only MissingPathError around "
+    "discovery (a Read whose path may not exist); other errors now return as "
+    "results and do not abort the cell: Grep/Glob on a missing path return "
+    "'(path missing …)', an Edit whose old_string does not match returns "
+    "'Edit NOT applied …', and an MCP tool error (a stale browser ref) "
+    "returns its error text — read each result before depending on it. "
+    "Permission denials, cancellation and tool timeouts still abort the "
+    "cell; do not wrap calls in try/except to get past those. "
+    "Saved skills (reusable helpers that persist "
     "across sessions) import via `from skills import <name>`; persist a new one "
     "with the save_skill tool when you notice a reusable pattern. The kernel "
     "refuses sockets, direct file and directory access, subprocesses and "
@@ -171,6 +177,19 @@ class _HumanWait:
 _JOURNAL_STDOUT_CAP = 1500
 _JOURNAL_VALUE_CAP = 300
 _JOURNAL_EVENT_CAP = 2000  # user/assistant conversation events
+# Cell source was the one uncapped field: a few hundred cells carrying
+# multi-kilobyte scripts filled the 1 MiB journal on their own. The
+# synthesizer reads code for its shape, not its bulk.
+_JOURNAL_CODE_CAP = 2000
+
+
+def _cap_code(code: str) -> str:
+    """Journal form of a cell's source: whole when short, else the head plus
+    a marker naming how much was dropped."""
+    if len(code) <= _JOURNAL_CODE_CAP:
+        return code
+    dropped = len(code) - _JOURNAL_CODE_CAP
+    return code[:_JOURNAL_CODE_CAP] + f"\n# [... {dropped} more chars not journaled]"
 
 # Images produced by in-kernel tool calls ride out on the cell's tool result.
 # Capped so one loop over a directory of screenshots can't blow up the request.
@@ -499,6 +518,23 @@ class CodeModeSession:
                 reply = await bridge.on_host_call(
                     name, kwargs, tool_use_id=tool_use_id
                 )
+            except asyncio.CancelledError:
+                # The kernel's per-call ceiling (or the turn's watchdog)
+                # cancelled this call. The ToolUse above already went out;
+                # without a matching ToolResult the transcript shows a call
+                # that never returned and the audit reads it as a dead turn.
+                try:
+                    await loop._emit(ToolResult(
+                        session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
+                        name=name, is_error=True,
+                        output=(
+                            f"{name} was cancelled before it returned (per-call "
+                            "ceiling or turn watchdog); the cell stops here."
+                        ),
+                    ))
+                except Exception:  # noqa: BLE001 — the cancel must still land
+                    pass
+                raise
             finally:
                 if stamped:
                     extra.pop("in_kernel_call", None)
@@ -522,6 +558,22 @@ class CodeModeSession:
                     self._friction_pending.extend(
                         self._friction.observe(name, kwargs, out, is_error)
                     )
+                except Exception:
+                    pass
+                # Facts a tool result establishes on its own (the browser
+                # host) go straight to the memory store, tool-provenance,
+                # so the next session does not rediscover them.
+                try:
+                    from fluid.context.runtime_facts import (
+                        harvest_tool_facts,
+                        write_harvested_facts,
+                    )
+
+                    harvested = harvest_tool_facts(name, out)
+                    if harvested:
+                        write_harvested_facts(
+                            self._skills, (extra or {}).get("memory_project"), harvested,
+                        )
                 except Exception:
                     pass
             await loop._emit(ToolResult(
@@ -579,7 +631,7 @@ class CodeModeSession:
             error_lines = (result.error or "").strip().splitlines()
             self._skills.journal_append({
                 "kind": "cell",
-                "code": code,
+                "code": _cap_code(code),
                 "stdout": result.stdout[:_JOURNAL_STDOUT_CAP],
                 "value": result.value_repr[:_JOURNAL_VALUE_CAP],
                 "error": error_lines[-1] if error_lines else None,
