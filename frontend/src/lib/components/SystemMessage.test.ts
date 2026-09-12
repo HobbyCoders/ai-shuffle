@@ -177,72 +177,19 @@ describe('SystemMessage — task_updated / task_notification', () => {
 });
 
 describe('SystemMessage — provider_retry', () => {
-	it('renders a counting "Retrying" row with a spinner', () => {
+	it.each([
+		undefined,
+		{},
+		{ attempt: 3, max_attempts: 10, reason: 'empty response from provider', model: 'ox-alpha' },
+		{ attempt: 1, max_attempts: 10, settled: true },
+		{ attempt: 3, max_attempts: 10, model: 'ox-alpha', settled: true }
+	])('renders no row for a transient retry: %j', (systemData) => {
 		const { container } = render(SystemMessage, {
-			props: {
-				message: makeMessage({
-					systemSubtype: 'provider_retry',
-					systemData: {
-						attempt: 3,
-						max_attempts: 10,
-						reason: 'empty response from provider',
-						delay_seconds: 4,
-						model: 'ox-alpha'
-					}
-				})
-			}
+			props: { message: makeMessage({ systemSubtype: 'provider_retry', systemData }) }
 		});
 
-		expect(screen.getByText('Retrying')).toBeTruthy();
-		expect(container.textContent).toContain('attempt 3 of 10');
-		expect(container.textContent).toContain('ox-alpha');
-		// Work in flight: spinner, never a settled check or cross.
-		expect(container.querySelector('.animate-spin')).not.toBeNull();
-		expect(container.querySelector('.text-green-500')).toBeNull();
-		expect(container.querySelector('.text-red-500')).toBeNull();
-	});
-
-	it('falls back to "?" when the attempt counters are missing', () => {
-		const { container } = render(SystemMessage, {
-			props: {
-				message: makeMessage({ systemSubtype: 'provider_retry', systemData: {} })
-			}
-		});
-
-		expect(container.textContent).toContain('attempt ? of ?');
-	});
-
-	it('reads as a recovered row once the turn settles it', () => {
-		const { container } = render(SystemMessage, {
-			props: {
-				message: makeMessage({
-					systemSubtype: 'provider_retry',
-					systemData: { attempt: 3, max_attempts: 10, model: 'ox-alpha', settled: true }
-				})
-			}
-		});
-
-		expect(screen.getByText('Retried')).toBeTruthy();
-		expect(container.textContent).toContain('recovered after 3 retries');
-		expect(container.textContent).toContain('ox-alpha');
-		// Finished work: the green check replaces the spinner, and there is
-		// nothing to retry.
-		expect(container.querySelector('.animate-spin')).toBeNull();
-		expect(container.querySelector('.text-green-500')).not.toBeNull();
-		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
-	});
-
-	it('says "retry" in the singular when only one attempt was spent', () => {
-		const { container } = render(SystemMessage, {
-			props: {
-				message: makeMessage({
-					systemSubtype: 'provider_retry',
-					systemData: { attempt: 1, max_attempts: 10, settled: true }
-				})
-			}
-		});
-
-		expect(container.textContent).toContain('recovered after 1 retry');
+		expect(container.textContent).toBe('');
+		expect(container.children).toHaveLength(0);
 	});
 });
 

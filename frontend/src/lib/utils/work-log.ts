@@ -14,6 +14,7 @@
  *   never disappear behind a fold.
  */
 import type { ChatMessage } from '$lib/stores/types';
+import { isTransientProviderRetry } from '$lib/utils/provider-retry';
 import { displayToolName } from './tool-icons';
 import { isSwarmTool, parseSwarm, resolveSwarm, type SwarmSnapshot } from './swarm';
 
@@ -170,26 +171,12 @@ function isSettledSubagent(msg: ChatMessage): boolean {
 	return msg.type === 'subagent' && (msg.agentStatus === 'completed' || msg.agentStatus === 'error');
 }
 
-/**
- * A `provider_retry` card that has nothing left to say or offer.
- *
- * Transient retries are routine: a turn can rack up a dozen of them, and once
- * they are over they carry no more signal than a finished tool call, so they
- * belong inside the turn's fold rather than scattered down the transcript. A
- * card is finished when the reducer stamped `settled` (the retries recovered or
- * the turn ended), or when an `exhausted` card has since been `recovered` or
- * `superseded` and no longer owns a Retry button.
- *
- * Anything else — a live attempt counter, an exhausted card still offering the
- * button, a resume in flight — is active or actionable and keeps its own row.
- * A card with no `systemData` yet is a first attempt: active.
- */
+/** A terminal retry failure folds only after recovery or supersession. */
 export function isFoldableRetryCard(msg: ChatMessage): boolean {
 	if (msg.systemSubtype !== 'provider_retry') return false;
 	if (msg.type !== 'system' && msg.role !== 'system') return false;
 	const data = msg.systemData as Record<string, unknown> | undefined;
 	if (!data) return false;
-	if (data.settled === true) return true;
 	return data.exhausted === true && (data.recovered === true || data.superseded === true);
 }
 
@@ -643,7 +630,11 @@ export function buildTranscriptModel(
 		}
 		// Empty assistant placeholders intentionally have no visual row. Keeping them
 		// in this model can split the final live tool run and hide its active tail.
-		if (isAssistantPhantom(message) || swarmOwned.has(message)) return;
+		if (
+			isAssistantPhantom(message) ||
+			swarmOwned.has(message) ||
+			isTransientProviderRetry(message)
+		) return;
 		if (message.id) {
 			if (seen.has(message.id)) return;
 			seen.add(message.id);

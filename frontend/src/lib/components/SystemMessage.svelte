@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { ChatMessage } from '$lib/stores/types';
+	import { isTransientProviderRetry } from '$lib/utils/provider-retry';
 	import { Marked } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { parseSwarm } from '$lib/utils/swarm';
@@ -678,11 +679,10 @@
 			}
 
 			case 'provider_retry': {
-				// The engine got an empty 200 back and is re-sending the same
-				// request. One card counts the attempts up (the reducer
-				// replaces it in place), so this row reads as live progress,
-				// not a stack of ten warnings.
-				const attempt = data.attempt ?? '?';
+				// Keep automatic retries silent, including recovered history rows.
+				if (isTransientProviderRetry(message)) {
+					return { title: '', content: '', badge: '', badgeColor: '', hidden: true };
+				}
 				const maxAttempts = data.max_attempts ?? '?';
 				const retryModel = typeof data.model === 'string' ? data.model : '';
 				if (data.exhausted) {
@@ -704,28 +704,7 @@
 						compact: true
 					};
 				}
-				if (data.settled) {
-					// The turn reached its end without exhausting the cap, so the
-					// retries worked. The row stops counting and reports what it
-					// cost — a settled outcome, no spinner and no Retry button.
-					let recovered = `Empty response from the provider — recovered after ${attempt} ${attempt === 1 ? 'retry' : 'retries'}`;
-					if (retryModel) recovered += ` · ${retryModel}`;
-					return {
-						title: 'Retried',
-						content: recovered,
-						badge: 'retry',
-						badgeColor: 'green',
-						compact: true
-					};
-				}
-				const base = `Empty response from the provider — retrying (attempt ${attempt} of ${maxAttempts})`;
-				return {
-					title: 'Retrying',
-					content: retryModel ? `${base} · ${retryModel}` : base,
-					badge: 'retry',
-					badgeColor: 'amber',
-					compact: true
-				};
+				return { title: '', content: '', badge: '', badgeColor: '', hidden: true };
 			}
 
 			case 'plugin_warning': {
@@ -810,10 +789,7 @@
 			message.systemSubtype === 'task_notification'
 	);
 
-	// A retry row is work in flight, not a settled outcome: it takes the
-	// spinner the running-task rows use instead of a check or a cross. Once
-	// the attempts are spent the turn is over, so the spinner gives way to the
-	// settled cross and the row offers a way back.
+	// Only exhausted retries show a failure row and a manual Retry button.
 	const retryExhausted = $derived(
 		message.systemSubtype === 'provider_retry' &&
 			!!(message.systemData as Record<string, unknown> | undefined)?.exhausted
@@ -834,16 +810,7 @@
 	const retrySuperseded = $derived(
 		retryExhausted && !!(message.systemData as Record<string, unknown> | undefined)?.superseded
 	);
-	// The reducer stamps `settled` on any terminal turn event, so a card that
-	// counted a few attempts and then got its answer stops spinning and takes
-	// the green check the other finished compact rows use.
-	const retrySettled = $derived(
-		message.systemSubtype === 'provider_retry' &&
-			!!(message.systemData as Record<string, unknown> | undefined)?.settled
-	);
-	const isProviderRetry = $derived(
-		message.systemSubtype === 'provider_retry' && !retryExhausted && !retrySettled
-	);
+
 	// The way back stays on offer until the session genuinely recovers, or the
 	// user moves on. A resume that fails again re-arms it.
 	const canRetry = $derived(retryExhausted && !retryRecovered && !retrySuperseded);
@@ -1072,7 +1039,7 @@
 		<div class="w-full sys-flat">
 			<div class="compact-summary sys-row w-full flex items-center gap-2 min-w-0">
 				<!-- Status icon matching tool message pattern -->
-				{#if isProviderRetry || retryResuming}
+				{#if retryResuming}
 					<!-- Still in flight: spinner, not a settled check/cross. A
 					     spent card whose resume is running spins again so the
 					     wait for the provider is visible. -->

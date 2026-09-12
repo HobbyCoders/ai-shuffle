@@ -404,15 +404,14 @@ describe('buildDisplayItems — settled turns', () => {
 		expect(fold.durationLabel).toBe('Worked');
 	});
 
-	it('folds a settled retry card instead of stranding it beside the turn', () => {
+	it('omits a settled retry card even from expanded work', () => {
 		const settledRetry = retryCard({ settled: true, attempt: 3 });
 		const items = buildDisplayItems([user('go'), tool(), settledRetry, text('done')], SETTLED);
 		const fold = items.find((item) => item.kind === 'work_log');
 		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
 
-		expect(fold.folded.map((entry) => entry.message.id)).toContain(settledRetry.id);
-		expect(fold.sequence.find((entry) => entry.message.id === settledRetry.id)?.hiddenWhenCollapsed)
-			.toBe(true);
+		expect(fold.folded.map((entry) => entry.message.id)).not.toContain(settledRetry.id);
+		expect(fold.sequence.find((entry) => entry.message.id === settledRetry.id)).toBeUndefined();
 		expect(collapsedVisibleMessages(items).some((message) => message.id === settledRetry.id))
 			.toBe(false);
 		expect(items.some((item) => item.kind === 'message' && item.message.id === settledRetry.id))
@@ -546,17 +545,17 @@ describe('buildDisplayItems — live turn', () => {
 		expect(items.some((item) => item.kind === 'message' && item.message.content === 'waiting on background work')).toBe(true);
 	});
 
-	it('keeps settled retry cards visible until the turn finishes', () => {
+	it('omits settled retry cards while the turn is live', () => {
 		const messages = [user('go'), tool(), retryCard({ settled: true, attempt: 2 }), tool()];
-		expect(collapsedVisibleMessages(buildDisplayItems(messages, LIVE))).toEqual(messages);
+		expect(collapsedVisibleMessages(buildDisplayItems(messages, LIVE))).toEqual([messages[0], messages[1], messages[3]]);
 	});
 
-	it('keeps an active retry card out of the live run', () => {
+	it('omits an active retry card from the live run', () => {
 		const activeRetry = retryCard();
 		const items = buildDisplayItems([user('go'), tool(), activeRetry, tool()], LIVE);
 
 		expect(items.some((item) => item.kind === 'message' && item.message.id === activeRetry.id))
-			.toBe(true);
+			.toBe(false);
 		for (const item of items) {
 			if (item.kind !== 'work_log') continue;
 			expect([...item.folded, ...item.tail].map((entry) => entry.message.id))
@@ -583,6 +582,42 @@ describe('buildDisplayItems — live turn', () => {
 		expect(collapsedVisibleMessages(settled)).toEqual([messages[0], messages.at(-1)]);
 	});
 
+});
+
+describe('provider retries from wire events', () => {
+	it.each([true, false])('hides automatic retries with grouping=%s but keeps terminal errors', (groupingEnabled) => {
+		let state = initialState();
+		let seq = 0;
+		const apply = (type: string, fields: Record<string, unknown> = {}) => {
+			state = reduce(state, {
+				type, id: `retry-event-${++seq}`, seq, session_id: 'retry-test',
+				created_at: '2026-09-11T10:00:00Z', ...fields
+			} as WireEvent);
+			return buildDisplayItems(state.messages, { isStreaming: state.isStreaming, groupingEnabled });
+		};
+		apply('message.user', { content: 'go', turn_id: 'turn-1' });
+		apply('turn.started', { turn_id: 'turn-1' });
+		const retry = (attempt: number) => apply('system.note', {
+			subtype: 'provider_retry',
+			data: { attempt, max_attempts: 10, reason: 'empty response from provider', delay_seconds: 1 }
+		});
+		expect(retry(1)).toHaveLength(1);
+		expect(retry(2)).toHaveLength(1);
+		expect(state.messages.some((m) => m.systemSubtype === 'provider_retry')).toBe(true);
+		apply('assistant.text_delta', { text: 'Done.' });
+		const completed = apply('turn.completed');
+		expect(completed).toHaveLength(2);
+		expect(collapsedVisibleMessages(completed).map((m) => m.content)).toEqual(['go', 'Done.']);
+		// Reload uses the same retained messages, with no retry-only disclosure.
+		expect(buildDisplayItems(structuredClone(state.messages), { isStreaming: false, groupingEnabled }))
+			.toEqual(completed);
+
+		apply('message.user', { content: 'again', turn_id: 'turn-2' });
+		apply('turn.started', { turn_id: 'turn-2' });
+		retry(10);
+		const failed = apply('turn.aborted', { reason: 'error', message: 'empty response, giving up' });
+		expect(collapsedVisibleMessages(failed).some((m) => m.systemData?.exhausted === true)).toBe(true);
+	});
 });
 
 describe('work folds from wire events', () => {
