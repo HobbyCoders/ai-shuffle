@@ -164,6 +164,8 @@ class PrStateResponse(BaseModel):
     current_branch: Optional[str] = None
     has_github: bool = False
     open_pr: Optional[OpenPrInfo] = None
+    # Original head of the latest merged PR, not the squash commit on the base.
+    merged_head_sha: Optional[str] = None
     # True when GitHub could not be asked this cycle (gh offline, rate-limited,
     # timed out). Never cached as a negative result.
     pr_lookup_failed: bool = False

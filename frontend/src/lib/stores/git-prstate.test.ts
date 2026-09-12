@@ -107,6 +107,24 @@ beforeEach(() => {
 });
 
 describe('git store — prState', () => {
+	it('keeps a merged head when GitHub fails without a server-side cached answer', async () => {
+		mocks.getPrState.mockResolvedValue(prState(7, { open_pr: null, merged_head_sha: 'a'.repeat(40) }));
+		await git.loadRepository('proj-1', false, 'ses-1');
+		mocks.getPrState.mockResolvedValue(failedLookup());
+		await git.refreshPrState(true);
+		expect(git.current.prState?.merged_head_sha).toBe('a'.repeat(40));
+		expect(git.current.prStateStale).toBe(true);
+	});
+
+	it('accepts a server-cached merged head over a previously open PR', async () => {
+		await git.loadRepository('proj-1', false, 'ses-1');
+		mocks.getPrState.mockResolvedValue({ ...failedLookup(), served_stale: true, merged_head_sha: 'a'.repeat(40) });
+		await git.refreshPrState(true);
+		expect(git.current.prState?.open_pr).toBeNull();
+		expect(git.current.prState?.merged_head_sha).toBe('a'.repeat(40));
+	});
+
+
 	it('loads prState in the initial parallel batch', async () => {
 		await git.loadRepository('proj-1', false, 'ses-1');
 

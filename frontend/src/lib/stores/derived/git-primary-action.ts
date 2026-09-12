@@ -22,6 +22,8 @@ export type PrimaryGitAction = 'commit' | 'finish' | 'create-pr' | 'clean';
 export interface PrimaryActionInput {
 	/** Uncommitted working-tree changes (drives the Commit button). */
 	hasChanges: boolean;
+	/** Current HEAD is already included in a merged PR. */
+	isHeadMerged?: boolean;
 	/** An open PR's head matches the current branch (from /git/pr-state). */
 	hasOpenPr: boolean;
 	/** GitHub mergeability: true/false/null(unknown). Only false blocks Finish. */
@@ -52,6 +54,7 @@ export function computePrimaryAction(input: PrimaryActionInput): PrimaryGitActio
 	if (hasChanges) return 'commit';
 
 	if (hasOpenPr) return 'finish';
+	if (input.isHeadMerged) return 'clean';
 
 	if (!isOnDefaultBranch && !needsPull && (commitsAhead > 0 || differsFromBase)) {
 		return 'create-pr';

@@ -233,6 +233,31 @@ afterEach(() => {
 // ── Visibility matrix ───────────────────────────────────────────────────────
 
 describe('GitHeaderActions button visibility', () => {
+	it('hides merged work and restores actions as the same branch gets new work', async () => {
+		const sha = 'a'.repeat(40);
+		const snapshot = {
+			status: { current_branch: 'feature/x', default_branch: 'main', ahead: 1,
+				differs_from_base: true, is_git_repo: true, head_commit: sha.slice(0, 12) },
+			prState: { current_branch: 'feature/x', open_pr: null, merged_head_sha: sha },
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 }
+		};
+		setSnapshot(snapshot);
+		renderHeader();
+		expect(screen.queryByText('Create PR')).toBeNull();
+		expect(screen.queryByText('Ship It')).toBeNull();
+
+		setSnapshot({ ...snapshot, diffStats: { additions: 1, deletions: 0, files_changed: 1 } });
+		await tick();
+		expect(screen.getByText('Commit')).toBeTruthy();
+		expect(screen.getByText('Ship It')).toBeTruthy();
+
+		setSnapshot({ ...snapshot, status: { ...snapshot.status, head_commit: 'b'.repeat(12) } });
+		await tick();
+		expect(screen.getByText('Create PR')).toBeTruthy();
+		expect(screen.getByText('Ship It')).toBeTruthy();
+	});
+
+
 	// Note: main buttons carry a count badge (e.g. "Push 2"), so their accessible
 	// name isn't a clean label — query the label text; query chevrons by aria-label.
 	it('shows Commit (with chevron) and Ship It for a dirty feature branch', () => {

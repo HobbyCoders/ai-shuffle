@@ -956,6 +956,7 @@ export interface RawPrState {
     current_branch?: string | null;
     has_github?: boolean;
     open_pr?: OpenPrInfo | null;
+    merged_head_sha?: string | null;
     pr_lookup_failed?: boolean;
     /** Companion flag: `open_pr` is a last-known-good value the server served
      *  past its TTL because the refresh failed. */
@@ -970,6 +971,8 @@ export interface PrState {
     current_branch: string | null;
     has_github: boolean;
     open_pr: OpenPrInfo | null;
+    /** Original head of the latest merged PR for this branch. */
+    merged_head_sha?: string | null;
     /**
      * True when the backend could NOT complete the GitHub PR lookup this cycle
      * (gh unavailable / rate limited / errored). A failed lookup is NOT the
@@ -992,6 +995,7 @@ export function transformPrState(raw: RawPrState): PrState {
         current_branch: raw.current_branch ?? null,
         has_github: raw.has_github ?? false,
         open_pr: raw.open_pr ?? null,
+        merged_head_sha: raw.merged_head_sha ?? null,
         lookup_failed: Boolean(raw.pr_lookup_failed ?? raw.lookup_failed ?? raw.lookupFailed ?? false),
         served_stale: Boolean(raw.stale ?? false)
     };
@@ -1005,6 +1009,7 @@ export function prStateEqual(a: PrState | null, b: PrState | null): boolean {
     if (
         a.current_branch !== b.current_branch ||
         a.has_github !== b.has_github ||
+        a.merged_head_sha !== b.merged_head_sha ||
         a.lookup_failed !== b.lookup_failed ||
         a.served_stale !== b.served_stale
     ) {

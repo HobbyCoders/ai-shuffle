@@ -103,6 +103,64 @@ def pr_client(pr_app, mock_git_service, mock_github_service):
             yield client
 
 
+
+
+class TestMergedHead:
+    SHA = "a" * 40
+
+    def merged(self):
+        pr = _pr()
+        pr.state = "MERGED"
+        pr.head_sha = self.SHA
+        return pr
+
+    def test_returns_original_head_from_branch_filtered_merged_lookup(self, pr_client, mock_github_service):
+        mock_github_service.list_pulls.side_effect = [[], [self.merged()]]
+        data = pr_client.get("/api/v1/projects/p1/git/pr-state").json()
+        assert data["merged_head_sha"] == self.SHA
+        assert data["open_pr"] is None
+        assert data["pr_lookup_failed"] is False
+        mock_github_service.list_pulls.assert_called_with("o/r", state="merged", head="feat/x", limit=1)
+
+    def test_open_pr_takes_priority_without_merged_lookup(self, pr_client, mock_github_service):
+        data = pr_client.get("/api/v1/projects/p1/git/pr-state").json()
+        assert data["open_pr"]["number"] == 7
+        assert data["merged_head_sha"] is None
+        assert mock_github_service.list_pulls.call_count == 1
+
+    def test_unmerged_branch_has_no_merged_head(self, pr_client, mock_github_service):
+        mock_github_service.list_pulls.return_value = []
+        data = pr_client.get("/api/v1/projects/p1/git/pr-state").json()
+        assert data["merged_head_sha"] is None
+        assert data["pr_lookup_failed"] is False
+
+    def test_failed_merged_lookup_preserves_cached_head(self, pr_client, mock_github_service):
+        mock_github_service.list_pulls.side_effect = [[], [self.merged()]]
+        pr_client.get("/api/v1/projects/p1/git/pr-state")
+        _expire_all()
+        mock_github_service.list_pulls.side_effect = [[], GitHubCliError("offline")]
+        data = pr_client.get("/api/v1/projects/p1/git/pr-state").json()
+        assert data["merged_head_sha"] == self.SHA
+        assert data["stale"] is True
+        assert data["pr_lookup_failed"] is True
+
+    def test_failed_merged_lookup_is_not_cached_as_no_pr(self, pr_client, mock_github_service):
+        mock_github_service.list_pulls.side_effect = [[], GitHubCliError("offline")]
+        data = pr_client.get("/api/v1/projects/p1/git/pr-state").json()
+        assert data["pr_lookup_failed"] is True
+        assert not gitops._pr_state_cache
+
+    def test_new_open_pr_replaces_merged_head_after_refresh(self, pr_client, mock_github_service):
+        mock_github_service.list_pulls.side_effect = [[], [self.merged()]]
+        pr_client.get("/api/v1/projects/p1/git/pr-state")
+        _expire_all()
+        mock_github_service.list_pulls.side_effect = None
+        mock_github_service.list_pulls.return_value = [_pr(number=9)]
+        data = pr_client.get("/api/v1/projects/p1/git/pr-state").json()
+        assert data["open_pr"]["number"] == 9
+        assert data["merged_head_sha"] is None
+
+
 class TestPrStateEndpoint:
     def test_open_pr_matched_to_current_branch(self, pr_client):
         resp = pr_client.get("/api/v1/projects/p1/git/pr-state")
@@ -131,6 +189,7 @@ class TestPrStateEndpoint:
             "current_branch": None,
             "has_github": False,
             "open_pr": None,
+            "merged_head_sha": None,
             "pr_lookup_failed": False,
             "stale": False,
         }
@@ -142,6 +201,7 @@ class TestPrStateEndpoint:
             "current_branch": "feat/x",
             "has_github": False,
             "open_pr": None,
+            "merged_head_sha": None,
             "pr_lookup_failed": False,
             "stale": False,
         }

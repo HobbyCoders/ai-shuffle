@@ -16,6 +16,7 @@
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
+	import { isCurrentHeadMerged } from '$lib/stores/derived/merged-pr';
 	import { computePrimaryAction, finishBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
 	import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
 	import type {
@@ -149,6 +150,7 @@
 	// the snapshot is the fallback so the value can never disagree with the rest
 	// of the decision inputs.
 	const openPr = $derived(openPR ?? snapshot.openPr);
+	const isHeadMerged = $derived(!openPr && isCurrentHeadMerged(snapshot.status, snapshot.prState));
 
 	// Upstream tracking branch state (for push/pull buttons)
 	const currentBranchInfo = $derived(snapshot.branches.find(b => b.current));
@@ -161,13 +163,13 @@
 	const isDiverged = $derived(commitsAheadUpstream > 0 && commitsBehindUpstream > 0 && hasUpstream);
 	const needsPull = $derived(commitsBehindUpstream > 0 && hasUpstream);
 	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream && !needsPull);
-	const canCreatePR = $derived(!hasChanges && commitsAhead > 0 && !isOnDefaultBranch && !needsPull);
 
 	// Primary action decision (Commit / Finish / Create PR / clean placeholder)
 	// extracted into a pure, unit-tested helper — the template renders its result.
 	const computedPrimaryAction = $derived(
 		computePrimaryAction({
 			hasChanges,
+			isHeadMerged,
 			hasOpenPr: !!openPr,
 			isMergeable: openPr?.mergeable ?? null,
 			commitsAhead,
@@ -225,6 +227,7 @@
 	const computedShowShipIt = $derived(computeShowShipIt({
 		isRepoConfirmed,
 		hasChanges,
+		isHeadMerged,
 		branchDiffersFromBase,
 		isOnDefaultBranch,
 		needsPull,

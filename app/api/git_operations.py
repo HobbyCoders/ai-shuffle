@@ -1058,7 +1058,9 @@ async def get_pr_state(
     *session_id*; with neither, the main project checkout is used. Returns the
     open PR whose head is the current branch (with GitHub's lazy ``mergeable``
     verdict — None means still computing) so the UI can decide between
-    Create-PR / Finish("Merge PR #N") / clean states. Degrades gracefully:
+    Create-PR / Finish("Merge PR #N") / clean states. When no open PR exists,
+    includes the latest merged PR's original head so squash-merged work is not
+    offered for shipping again. Degrades gracefully:
     no git repo or no GitHub remote just yields ``has_github=False``.
 
     Failure is reported, never invented (finding G2). If GitHub cannot be
@@ -1085,6 +1087,7 @@ async def get_pr_state(
         "current_branch": branch,
         "has_github": False,
         "open_pr": None,
+        "merged_head_sha": None,
         "pr_lookup_failed": False,
         "stale": False,
     }
@@ -1102,6 +1105,16 @@ async def get_pr_state(
             result["has_github"] = True
             try:
                 pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, branch)
+                if pr is None:
+                    merged = await asyncio.to_thread(
+                        github_service.list_pulls, repo, state="merged", head=branch, limit=1
+                    )
+                    if (
+                        merged
+                        and merged[0].head_branch == branch
+                        and merged[0].state.lower() == "merged"
+                    ):
+                        result["merged_head_sha"] = merged[0].head_sha
             except Exception as e:  # noqa: BLE001 — GitHubCliError, or anything else
                 # Couldn't ask gh — PR state is unknown for this cycle. has_github
                 # stays True because the repo IS known: a PR hiccup must not take
@@ -1137,6 +1150,7 @@ async def get_pr_state(
     stale = _stale_pr_state(cache_key)
     if stale is not None:
         result["open_pr"] = stale.get("open_pr")
+        result["merged_head_sha"] = stale.get("merged_head_sha")
         result["has_github"] = result["has_github"] or bool(stale.get("has_github"))
         result["stale"] = True
     return PrStateResponse(**result)

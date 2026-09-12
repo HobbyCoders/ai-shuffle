@@ -25,6 +25,8 @@ export interface ShipItVisibilityInput {
 	isRepoConfirmed: boolean;
 	/** Uncommitted working-tree changes (staged/unstaged additions or deletions). */
 	hasChanges: boolean;
+	/** Current HEAD is already included in a merged PR. */
+	isHeadMerged?: boolean;
 	/** Branch carries real committed content over its base branch
 	 *  (a three-dot base...HEAD diff is non-empty). Commit count alone is not
 	 *  enough — see module docstring. */
@@ -63,5 +65,5 @@ export function computeShowShipIt(input: ShipItVisibilityInput): boolean {
 	if (isOnDefaultBranch || needsPull) return false;
 
 	// Something to ship = uncommitted work OR committed content the base lacks.
-	return hasChanges || branchDiffersFromBase;
+	return hasChanges || (!input.isHeadMerged && branchDiffersFromBase);
 }

@@ -589,13 +589,13 @@ function _keepPreviousPrState(
 	// The backend serves its own last-known-good value when it can (stale=true).
 	// Prefer it: it is at least as fresh as ours and matches the branch it
 	// was cached for.
-	if (incoming?.open_pr) return incoming;
-	if (!previous?.open_pr) return incoming ?? previous;
+	if (incoming?.open_pr || incoming?.merged_head_sha) return incoming;
+	if (!previous?.open_pr && !previous?.merged_head_sha) return incoming ?? previous;
 	const branch = incoming?.current_branch ?? currentBranch ?? null;
 	if (branch && previous.current_branch && branch !== previous.current_branch) {
 		// The old PR belongs to another branch — showing it would be worse than
 		// showing nothing.
-		return incoming ?? { ...previous, open_pr: null, lookup_failed: true };
+		return incoming ?? { ...previous, open_pr: null, merged_head_sha: null, lookup_failed: true };
 	}
 	return { ...previous, lookup_failed: true, served_stale: false };
 }

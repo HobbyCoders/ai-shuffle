@@ -106,6 +106,7 @@ class PullRequest:
     created_at: str
     updated_at: str
     mergeable: Optional[bool] = None
+    head_sha: Optional[str] = None
 
 
 @dataclass
@@ -436,7 +437,7 @@ class GitHubService:
                 '--repo', repo,
                 '--state', state,
                 '--limit', str(limit),
-                '--json', 'number,title,body,state,headRefName,baseRefName,author,url,createdAt,updatedAt,mergeable',
+                '--json', 'number,title,body,state,headRefName,headRefOid,baseRefName,author,url,createdAt,updatedAt,mergeable',
             ]
             if head:
                 cmd.extend(['--head', head])
@@ -467,7 +468,8 @@ class GitHubService:
                 url=pr_data.get('url', ''),
                 created_at=pr_data.get('createdAt', ''),
                 updated_at=pr_data.get('updatedAt', ''),
-                mergeable=_parse_mergeable(pr_data.get('mergeable'))
+                mergeable=_parse_mergeable(pr_data.get('mergeable')),
+                head_sha=pr_data.get('headRefOid'),
             ))
 
         return pulls

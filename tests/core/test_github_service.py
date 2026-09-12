@@ -58,6 +58,7 @@ def sample_pr_data():
         "body": "This PR fixes the auth bug",
         "state": "OPEN",
         "headRefName": "fix-auth-bug",
+        "headRefOid": "a" * 40,
         "baseRefName": "main",
         "author": {"login": "testuser"},
         "url": "https://github.com/owner/repo/pull/42",
@@ -542,6 +543,8 @@ class TestListPulls:
             assert pr.number == 42
             assert pr.title == "Fix bug in authentication"
             assert pr.head_branch == "fix-auth-bug"
+            assert pr.head_sha == "a" * 40
+            assert "headRefOid" in mock_run.call_args[0][0][mock_run.call_args[0][0].index("--json") + 1]
             assert pr.base_branch == "main"
             assert pr.author == "testuser"
 
