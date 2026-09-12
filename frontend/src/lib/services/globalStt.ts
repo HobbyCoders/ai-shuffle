@@ -173,6 +173,18 @@ let outputSink: ((text: string) => void) | null = null;
 // been written, so outputSink is not called again.
 let liveSink: VoiceInputSink | null = null;
 
+function settleSink(discard = false): void {
+	const sink = liveSink;
+	liveSink = null;
+	outputSink = null;
+	try {
+		if (discard) sink?.onDiscard?.();
+		else sink?.onCommit();
+	} catch (error) {
+		console.error('[GlobalSTT] Could not settle dictation draft:', error);
+	}
+}
+
 // Auto-stop timers.
 let silenceTimer: ReturnType<typeof setTimeout> | null = null;
 let noSpeechTimer: ReturnType<typeof setTimeout> | null = null;
@@ -359,7 +371,7 @@ function pushLiveText(state: GlobalSttState): void {
 		// A consumer that throws (unmounted editor, detached node) must not take
 		// the recording down with it.
 		console.warn('[GlobalSTT] Live sink failed:', error);
-		liveSink = null;
+		settleSink();
 	}
 }
 
@@ -384,6 +396,7 @@ async function startLiveRecording(myRun: number): Promise<boolean> {
 
 	if (!capability.supported) {
 		if (!capability.realtime_only) return false;
+		settleSink();
 		globalSttState.update((s) => ({ ...s, mode: 'idle', isPreparing: false,
 			isRecording: false, error: capability.reason || 'This model requires live transcription.' }));
 		return true;
@@ -490,6 +503,7 @@ async function stopLiveRecording(reason: 'user' | 'dropped' = 'user'): Promise<v
 	const session = streamSession;
 	streamSession = null;
 	if (!session) {
+		settleSink();
 		globalSttState.update((s) => ({ ...s, isRecording: false, mode: 'idle' }));
 		return;
 	}
@@ -539,9 +553,7 @@ async function stopLiveRecording(reason: 'user' | 'dropped' = 'user'): Promise<v
 		playEarcon('error');
 	} finally {
 		if (isCurrentRun(myRun)) {
-			liveSink?.onCommit();
-			liveSink = null;
-			outputSink = null;
+			settleSink();
 			globalSttState.update((s) => ({
 				...s,
 				isTranscribing: false,
@@ -595,14 +607,18 @@ async function startRecording(source: GlobalSttState['source']): Promise<void> {
 			const seconds = settings.voice_input_silence_seconds ?? 5;
 			silenceStopMs = (Number.isInteger(seconds) && seconds >= 1 && seconds <= 60 ? seconds : 5) * 1000;
 		} catch {
-			if (isCurrentRun(myRun)) globalSttState.update((s) => ({ ...s, isPreparing: false,
-				error: 'Could not load voice input settings. Try again.' }));
+			if (isCurrentRun(myRun)) {
+				settleSink();
+				globalSttState.update((s) => ({ ...s, isPreparing: false,
+					error: 'Could not load voice input settings. Try again.' }));
+			}
 			return;
 		}
 	}
 
 	// Live first; batch is the fallback for models that can't stream.
 	if (await startLiveRecording(myRun)) {
+		if (isCurrentRun(myRun) && !get(globalSttState).isRecording) settleSink();
 		return;
 	}
 	if (!isCurrentRun(myRun)) return;
@@ -672,6 +688,7 @@ async function startRecording(source: GlobalSttState['source']): Promise<void> {
 		mediaStream?.getTracks().forEach((track) => track.stop());
 		mediaRecorder = null;
 		mediaStream = null;
+		settleSink();
 		console.error('[GlobalSTT] Failed to start recording:', error);
 		const err = error as { name?: string; message?: string };
 
@@ -706,6 +723,7 @@ async function stopRecording(): Promise<void> {
 	stopAudioMonitoring();
 
 	if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+		settleSink();
 		globalSttState.update((s) => ({ ...s, isRecording: false, mode: 'idle' }));
 		return;
 	}
@@ -717,6 +735,7 @@ async function stopRecording(): Promise<void> {
 	// Check minimum recording duration
 	const recordingDuration = Date.now() - recordingStartTime;
 	if (recordingDuration < MIN_RECORDING_DURATION) {
+		settleSink();
 		globalSttState.update((s) => ({
 			...s,
 			isRecording: false,
@@ -769,6 +788,7 @@ async function stopRecording(): Promise<void> {
 		await transcribeAndOutput(audioBlob, myRun);
 	} catch (error: unknown) {
 		if (!isCurrentRun(myRun)) return;
+		settleSink();
 		const err = error as { message?: string };
 		globalSttState.update((s) => ({
 			...s,
@@ -948,9 +968,7 @@ async function transcribeAndOutput(audioBlob: Blob, myRun: number): Promise<void
 		playEarcon('error');
 	} finally {
 		if (isCurrentRun(myRun)) {
-			liveSink?.onCommit();
-			liveSink = null;
-			outputSink = null;
+			settleSink();
 			globalSttUpload.set(null);
 			globalSttState.update((s) => ({
 				...s,
@@ -1101,8 +1119,7 @@ function cleanup(): void {
 	mediaStream = null;
 	audioChunks = [];
 
-	outputSink = null;
-	liveSink = null;
+	settleSink();
 	clearAutoStop();
 	runId++;
 	globalSttState.set(initialState);
@@ -1136,10 +1153,7 @@ export function cancelVoiceInput({ discard = true }: { discard?: boolean } = {})
 	const wasRecording = get(globalSttState).isRecording;
 	runId++;
 	clearAutoStop();
-	if (discard) liveSink?.onDiscard?.();
-	else liveSink?.onCommit();
-	liveSink = null;
-	outputSink = null;
+	settleSink(discard);
 
 	uploadRequest?.abort();
 	uploadRequest = null;

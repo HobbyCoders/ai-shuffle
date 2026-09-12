@@ -16,6 +16,10 @@ import { resourceSync } from '$lib/services/resource-sync';
 const settings = (voice = 'marin', minutes = 60) => ({ voice_mode_enabled: true,
  voice_model: 'gpt-live-1', voice_voice: voice, voice_provider_id: null,
  voice_max_call_minutes: minutes, voice_app_tools_enabled: false,
+ voice_input_model:'fal-ai/whisper', voice_input_models:[
+  {id:'fal-ai/whisper',name:'Whisper (Large v3)',provider:'fal-ai'},
+  {id:'openai/gpt-4o-mini-transcribe',name:'GPT-4o mini Transcribe',provider:'openai'}
+ ],
  model_details: { model: 'gpt-live-1', transport: 'stream' as const,
   voices: ['marin', 'cedar'].map(id => ({id, label: id})), runtime_settings: [],
   prompts: [{label: 'Voice agent', text: 'Actual server prompt'}], prompt_note: 'Runtime context is appended.',
@@ -45,6 +49,33 @@ async function mountSection(appToolsEnabled = false) {
 
 
 describe('GPT Live voice settings', () => {
+ it('saves the microphone/global model without editing the media picker or call model', async () => {
+  const view = await mountSection();
+  transport.put.mockImplementation(async (_path, patch) => ({...settings(),...patch}));
+  const select = screen.getByLabelText('Transcription model') as HTMLSelectElement;
+  expect(select.value).toBe('fal-ai/whisper');
+  expect(select.closest('[aria-label="Voice transcription"]')).not.toBeNull();
+  await fireEvent.change(select, {target:{value:'openai/gpt-4o-mini-transcribe'}});
+  await waitFor(()=>expect(transport.put).toHaveBeenCalledWith('/settings/voice', {voice_input_model:'openai/gpt-4o-mini-transcribe'}));
+  await waitFor(()=>expect(select.value).toBe('openai/gpt-4o-mini-transcribe'));
+  view.unmount(); render(VoiceSection);
+  expect((await screen.findByLabelText('Transcription model') as HTMLSelectElement).value).toBe('openai/gpt-4o-mini-transcribe');
+ });
+ it('keeps the selected model after a rejected save', async () => {
+  await mountSection();
+  transport.put.mockRejectedValue({detail:'Model not supported'});
+  await fireEvent.change(screen.getByLabelText('Transcription model'),{target:{value:'openai/gpt-4o-mini-transcribe'}});
+  await waitFor(()=>expect((screen.getByLabelText('Transcription model') as HTMLSelectElement).value).toBe('fal-ai/whisper'));
+ });
+ it('separates transcription and calls into cards and removes runtime settings', async () => {
+  await mountSection();
+  const transcription = screen.getByRole('heading', {name:'Voice transcription'}).closest('.set-group');
+  const calls = screen.getByRole('heading', {name:'Voice calls'}).closest('.set-group');
+  expect(transcription).not.toBe(calls);
+  expect(transcription?.contains(screen.getByLabelText('Composer microphone mode'))).toBe(true);
+  expect(calls?.contains(screen.getByRole('radio', {name:'marin'}))).toBe(true);
+  expect(screen.queryByText('Model runtime settings')).toBeNull();
+ });
  it('defaults to Auto, saves the timeout, and hides it in Toggle mode', async () => {
   const view = await mountSection();
   expect((screen.getByLabelText('Silence timeout (seconds)') as HTMLInputElement).value).toBe('5');
@@ -70,7 +101,7 @@ describe('GPT Live voice settings', () => {
   await mountSection();
   expect(screen.getByRole('button', {name:'Play marin voice preview'})).toBeTruthy();
   expect(screen.getByRole('button', {name:'Play cedar voice preview'})).toBeTruthy();
-  expect(screen.getAllByRole('combobox')).toHaveLength(1);
+  expect(screen.getAllByRole('combobox')).toHaveLength(2);
   expect(screen.getByRole('combobox', {name:'Composer microphone mode'})).toBeTruthy();
   expect(transport.get.mock.calls.map(([path]) => path)).toEqual(['/settings/voice']);
  });

@@ -22,7 +22,7 @@
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { composerSuggestion, suggestionKey, hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
-	import { cancelVoiceInput, globalSttState } from '$lib/services/globalStt';
+	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration } from '$lib/stores/session/session-init';
@@ -186,6 +186,7 @@
 	// was already cleared and we don't want to overwrite it with stale text.
 	// Check the store imperatively (get()) since $effects don't run during teardown.
 	onDestroy(() => {
+		detachComposerDictation(editorRef?.getEditor());
 		if (!ownsComposer()) return;
 		if (messageSent) return;
 		const currentSessionId = get(activeSession).sessionId;
@@ -229,12 +230,8 @@
 		const newSessionId = $activeSession.sessionId;
 		if (!ownsComposer()) return;
 		if (newSessionId !== prevSessionId) {
-			// Keep speech already visible in its original draft, then invalidate
-			// pending interim/final callbacks before the shared editor changes owner.
-			if (get(globalSttState).source === 'composer') {
-				editorRef?.commitDictation();
-				cancelVoiceInput({ discard: false });
-			}
+			// Move capture off the shared editor before replacing its document.
+			detachComposerDictation(editorRef?.getEditor());
 			// Persist the LEAVING session's draft from the live editor before we
 			// overwrite it. Reading the editor directly (not the debounced store
 			// draft) guarantees the text follows the session it was typed in,
@@ -254,6 +251,7 @@
 			plainTextValue = '';
 			editorRef?.setContent(newDraft);
 		}
+		attachComposerDictation(editorRef?.getEditor(), newSessionId);
 	});
 
 	// Restore a removed user prompt back into the editor so the user can edit or
@@ -1050,6 +1048,7 @@
 
 						<TiptapEditor
 							bind:this={editorRef}
+							onBeforeDestroy={detachComposerDictation}
 							placeholder={composerPlaceholder}
 							suggestion={ghostReply}
 							initialContent={initialComposerDraft}
@@ -1142,6 +1141,11 @@
 							onLiveCommit={handleLiveCommit}
 							onLiveDiscard={handleLiveDiscard}
 							getOwner={() => get(activeSession).sessionId}
+							sessionId={$activeSession.sessionId}
+							onStart={() => {
+								const editor = editorRef?.getEditor();
+								if (editor) startComposerDictation(editor, get(activeSession).sessionId);
+							}}
 							disabled={!$anyCredential || isUploading}
 							bind:isRecording
 							bind:isTranscribing

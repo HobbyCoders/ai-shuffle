@@ -124,8 +124,8 @@ def capability_env(monkeypatch):
 
     monkeypatch.setattr(
         stt_realtime.database,
-        "get_system_setting",
-        lambda name: state["model"] if name == "stt_model" else None,
+        "get_or_create_system_setting",
+        lambda name, default_factory: state["model"] or default_factory(),
     )
     from app.api import settings_audio
 

@@ -116,7 +116,8 @@ def _resolve_capability() -> Dict[str, Any]:
     """Whether the configured STT model can stream. Synchronous - use run_sync."""
     from app.api.settings_audio import STT_MODELS, _resolve_openai_api_key
 
-    model_id = database.get_system_setting("stt_model") or "fal-ai/whisper"
+    from app.core.voice_input_settings import get_voice_input_model
+    model_id = get_voice_input_model()
     entry = STT_MODELS.get(model_id) or {}
     info = REALTIME_STT_MODELS.get(model_id)
     display = entry.get("name") or model_id
@@ -137,7 +138,7 @@ def _resolve_capability() -> Dict[str, Any]:
             "realtime_only": bool(entry.get("realtime_only")),
             "reason": (
                 f"{display} transcribes uploaded audio only. Pick an OpenAI STT "
-                f"model in Settings > Audio for live transcription."
+                f"model in Settings > Voice > Voice transcription for live transcription."
             ),
         }
 

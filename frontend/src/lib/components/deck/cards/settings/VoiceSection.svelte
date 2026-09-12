@@ -22,7 +22,7 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
-	import { AudioLines, Play, Square, LoaderCircle } from 'lucide-svelte';
+	import { AudioLines, Mic, Play, Square, LoaderCircle } from 'lucide-svelte';
 	import VoiceModelOptions from './VoiceModelOptions.svelte';
 	import {
 		previewVoice,
@@ -170,7 +170,7 @@
 
 <div class="set-group" data-testid="voice-section">
 	<div class="set-grouphead">
-		<h3><AudioLines />Voice</h3>
+		<h3><Mic />Voice transcription</h3>
 	</div>
 
 	{#if loading}
@@ -178,10 +178,31 @@
 	{:else if !settings}
 		<div class="set-row"><div class="lab"><p class="msg err">{error || 'Voice settings unavailable.'}</p></div></div>
 	{:else}
-		<section class="transcription-settings" aria-labelledby="transcription-heading">
+		<section aria-label="Voice transcription">
 			<div class="voice-intro">
-				<h3 id="transcription-heading">Voice transcription</h3>
-				<p>Choose how the microphone button in the chat composer finishes dictation. These settings do not change voice calls or the global voice-input shortcut.</p>
+				<p>Dictate into your chat draft. Voice calls and the global shortcut use separate controls.</p>
+			</div>
+			<div class="set-row transcription-model-row">
+				<div class="lab"><h4>Transcription model</h4><p>Used by the chat microphone and global voice input. Separate from Fal.ai Audio to Text.</p></div>
+				<div class="ctl">
+					<select class="sel transcription-model" aria-label="Transcription model" value={settings.voice_input_model ?? ''}
+						disabled={saving || !settings.voice_input_models?.length}
+						onchange={async (e) => {
+							const select = e.currentTarget;
+							if (!await save({ voice_input_model: select.value })) select.value = settings?.voice_input_model ?? '';
+						}}>
+						{#if !settings.voice_input_models?.some(model => model.id === settings?.voice_input_model)}
+							<option value={settings.voice_input_model ?? ''}>{settings.voice_input_model || 'Model selection unavailable'}</option>
+						{/if}
+						{#each ['openai', 'fal-ai'] as provider}
+							<optgroup label={provider === 'openai' ? 'OpenAI' : 'Fal.ai'}>
+								{#each settings.voice_input_models?.filter(model => model.provider === provider) ?? [] as model}
+									<option value={model.id}>{model.name}</option>
+								{/each}
+							</optgroup>
+						{/each}
+					</select>
+				</div>
 			</div>
 			<div class="set-row">
 				<div class="lab"><h4>Composer microphone mode</h4><p>Auto finishes after silence. Toggle keeps recording until you press the microphone again.</p></div>
@@ -195,7 +216,7 @@
 			</div>
 			{#if (settings.voice_input_mode ?? 'auto') === 'auto'}
 				<div class="set-row">
-					<div class="lab"><h4>Silence timeout (seconds)</h4><p>Finish dictation after this much silence following speech (1–60 seconds). Live transcription can appear while you speak.</p></div>
+					<div class="lab"><h4>Silence timeout (seconds)</h4><p>Wait 1–60 seconds after speech before finishing.</p></div>
 					<div class="ctl">
 						<input type="number" min="1" max="60" step="1" class="inp minutes" aria-label="Silence timeout (seconds)"
 							value={pendingSilence ?? String(settings.voice_input_silence_seconds ?? 5)} disabled={saving}
@@ -205,7 +226,12 @@
 				</div>
 			{/if}
 		</section>
-		<div class="voice-intro"><h3>Voice conversation</h3></div>
+	{/if}
+</div>
+
+{#if settings && !loading}
+	<div class="set-group" aria-label="Voice calls">
+		<div class="set-grouphead"><h3><AudioLines />Voice calls</h3></div>
 		<div class="set-row">
 			<div class="lab">
 				<h4>Enable voice mode</h4>
@@ -226,7 +252,7 @@
 
 		<div class="voice-intro">
 			<h4>GPT Live</h4>
-			<p>Natural conversation, with quick questions answered directly. Tasks use your chat composer's selected model. Your configured OpenAI API provider funds voice calls.</p>
+			<p>Uses your OpenAI API provider. Tasks use the model selected in your chat composer.</p>
 		</div>
 		<fieldset class="voice-picker" disabled={saving || !details}>
 			<legend>Choose a voice</legend>
@@ -242,7 +268,7 @@
 			</div>
 		</fieldset>
 		{#if previewError}<p class="msg err" role="alert">{previewError}</p>{/if}
-		<p class="preview-status" role="status">{previewLoading ? 'Generating a short GPT Live sample…' : previewing ? 'Playing voice preview' : ''}</p>
+		{#if previewing}<p class="preview-status" role="status">{previewLoading ? 'Generating sample…' : 'Playing voice preview'}</p>{/if}
 
 		<div class="set-row">
 			<div class="lab">
@@ -267,40 +293,32 @@
 		</div>
 
 
-		<div class="set-row">
-			<div class="lab">
-				<p>{details?.preview_note ?? 'Model details are unavailable. Update the server to load model-specific voices, runtime settings and prompts.'}</p>
-				<p>Changes apply to new calls. Existing sessions keep their original model, voice and provider.</p>
-				<p>Model availability depends on your provider account. Catalog listings do not guarantee voice-session access.</p>
-			</div>
-		</div>
-		{#if details}
-			{#if settings.voice_options}
+		<p class="call-note">Changes apply to new calls.</p>
+		{#if details && settings.voice_options}
+			<details class="advanced-voice">
+				<summary>Conversation prompts</summary>
 				{#key settings.voice_model}
 					<VoiceModelOptions options={settings.voice_options} {details} {saving} onSave={patch => save({voice_options:patch, voice_options_model:settings!.voice_model})} />
 				{/key}
-			{/if}
-			<div class="model-details" data-testid="voice-model-details">
-				<h4>Model runtime settings</h4>
-				<p>Effective saved configuration. Editable values above and system-managed transport values are shown here.</p>
-				<dl>
-					{#each details.runtime_settings as setting}
-						<div><dt>{setting.label}</dt><dd>{setting.value}</dd></div>
-					{/each}
-				</dl>
-
-			</div>
+			</details>
 		{/if}
 
 		{#if error}<div class="set-row"><div class="lab"><p class="msg err">{error}</p></div></div>{/if}
 		{#if success}<div class="set-row"><div class="lab"><p class="msg ok">{success}</p></div></div>{/if}
-	{/if}
-</div>
+	</div>
+{/if}
 
 <style>
+	.transcription-model { width: 230px; max-width: 100%; }
+	@media (max-width: 600px) {
+		.transcription-model-row { flex-direction: column; align-items: stretch; }
+		.transcription-model-row .ctl, .transcription-model { width: 100%; }
+	}
 	.voice-intro { padding: 16px 14px; }
-	.voice-intro h4, .voice-intro h3 { margin: 0 0 6px; }
-	.transcription-settings { border-bottom: 1px solid var(--border); }
+	.voice-intro h4 { margin: 0 0 6px; }
+	.call-note { padding: 0 14px 14px; margin: 0; color: var(--text-3); font-size: 12px; }
+	.advanced-voice { border-top: 1px solid var(--border); padding: 14px; }
+	.advanced-voice summary { cursor: pointer; font-size: 13px; font-weight: 500; }
 	.voice-intro p { margin: 0; color: var(--text-3); font-size: 13px; line-height: 1.6; }
 	.voice-picker { border: 0; padding: 0 14px; margin: 0; min-width: 0; }
 	.voice-picker legend { font-size: 13px; font-weight: 500; margin-bottom: 10px; }
@@ -321,14 +339,5 @@
 		width: 110px;
 	}
 
-	.model-details { padding: 16px; border-top: 1px solid var(--border); min-width: 0; }
-	.model-details h4 { margin: 0 0 8px; font-size: 14px; }
-	.model-details p { color: var(--muted-foreground); font-size: 12px; line-height: 1.6; margin: 0 0 12px; }
-	dl { margin: 0 0 24px; }
-	dl div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
-	dt { color: var(--muted-foreground); }
-	dd { margin: 0; overflow-wrap: anywhere; }
-	@media (max-width: 480px) {
-		dl div { grid-template-columns: minmax(0, 1fr); gap: 4px; }
-	}
+
 </style>

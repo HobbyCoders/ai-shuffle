@@ -549,6 +549,8 @@ class VoiceSettingsResponse(BaseModel):
     voice_voice: str
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: int
+    voice_input_model: str = "fal-ai/whisper"
+    voice_input_models: list[dict] = Field(default_factory=list)
     voice_input_mode: str = "auto"
     voice_input_silence_seconds: int = 5
     # Compatibility field for older clients; app tools are no longer a preference.
@@ -569,6 +571,7 @@ class VoiceSettingsUpdateRequest(BaseModel):
     voice_voice: Optional[str] = None
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: Optional[int] = None
+    voice_input_model: Optional[str] = None
     voice_input_mode: Optional[str] = None
     voice_input_silence_seconds: Optional[int] = Field(default=None, strict=True, ge=1, le=60)
     voice_options: Optional[dict] = None
@@ -617,6 +620,8 @@ def get_voice_settings() -> dict:
     if max_minutes <= 0:
         max_minutes = DEFAULT_VOICE_MAX_CALL_MINUTES
 
+    from app.core.voice_input_settings import get_voice_input_model
+
     input_mode = database.get_system_setting("voice_input_mode")
     if input_mode not in ("auto", "toggle"):
         input_mode = "auto"
@@ -644,6 +649,7 @@ def get_voice_settings() -> dict:
         "voice_voice": voice,
         "voice_provider_id": provider_id,
         "voice_max_call_minutes": max_minutes,
+        "voice_input_model": get_voice_input_model(),
         "voice_input_mode": input_mode,
         "voice_input_silence_seconds": silence_seconds,
         "voice_app_tools_enabled": True,
@@ -653,7 +659,15 @@ def get_voice_settings() -> dict:
 
 def _voice_settings_response(value: dict) -> VoiceSettingsResponse:
     from app.core.voice_models import model_details
-    return VoiceSettingsResponse(**value, model_details=model_details(value["voice_model"], value.get("voice_options")))
+    from app.api.settings_audio import STT_MODELS, _model_provider
+    return VoiceSettingsResponse(
+        **value,
+        voice_input_models=[
+            {"id": model_id, "name": info["name"], "provider": _model_provider(model_id, info)}
+            for model_id, info in STT_MODELS.items()
+        ],
+        model_details=model_details(value["voice_model"], value.get("voice_options")),
+    )
 
 
 @router.get("/voice", response_model=VoiceSettingsResponse)
@@ -681,6 +695,10 @@ async def update_voice_settings(
         """Validate the complete provider/model/voice combination before writing."""
 
         supplied = request.model_fields_set
+        if "voice_input_model" in supplied:
+            from app.api.settings_audio import STT_MODELS
+            if request.voice_input_model not in STT_MODELS:
+                raise HTTPException(400, "Choose a supported voice transcription model.")
         current = get_voice_settings()
         if "voice_input_mode" in supplied and request.voice_input_mode not in ("auto", "toggle"):
             raise HTTPException(400, "voice_input_mode must be auto or toggle")
@@ -732,7 +750,7 @@ async def update_voice_settings(
             database.set_system_setting(VOICE_MAX_CALL_MINUTES_KEY, str(minutes))
         if "voice_mode_enabled" in supplied:
             database.set_system_setting(VOICE_MODE_ENABLED_KEY, "true" if request.voice_mode_enabled else "false")
-        for key in ("voice_input_mode", "voice_input_silence_seconds"):
+        for key in ("voice_input_model", "voice_input_mode", "voice_input_silence_seconds"):
             if key in supplied:
                 database.set_system_setting(key, str(getattr(request, key)))
         return get_voice_settings()

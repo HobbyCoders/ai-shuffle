@@ -19,6 +19,8 @@
 import { apiBase, withAuth, wsUrl } from '$lib/api/runtime';
 import { browser } from '$app/environment';
 import { SttTranscript } from './sttTranscript';
+import { resourceSync } from './resource-sync';
+import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 
 // ============================================================================
 // Types
@@ -139,10 +141,11 @@ registerProcessor('pcm-chunker', PcmChunker);
 let capabilityCache: { at: number; value: SttCapability } | null = null;
 
 // Long, because the cache is invalidated on the events that actually change the
-// answer: both settings call sites call `invalidateSttCapability`, and a 4003 /
+// answer: settings/provider changes invalidate the cache, and a 4003 /
 // 4004 close does the same for a model changed on another device. A short TTL
 // only bought a round trip on the critical path of nearly every press.
 const CAPABILITY_TTL_MS = 5 * 60_000;
+let capabilityRevision = 0;
 
 /**
  * Ask the backend whether the configured STT model can stream. Cached briefly
@@ -153,19 +156,25 @@ export async function fetchSttCapability(force = false): Promise<SttCapability> 
 		return capabilityCache.value;
 	}
 
+	const revision = capabilityRevision;
 	const response = await fetch(`${apiBase()}/settings/transcribe/stream/capability`, withAuth({ }));
 	if (!response.ok) {
 		throw new Error(`Capability check failed (${response.status})`);
 	}
 	const value = (await response.json()) as SttCapability;
-	capabilityCache = { at: Date.now(), value };
+	if (revision === capabilityRevision) capabilityCache = { at: Date.now(), value };
 	return value;
 }
 
 /** Drop the cached probe — call after the STT model setting changes. */
 export function invalidateSttCapability(): void {
+	capabilityRevision++;
 	capabilityCache = null;
 }
+
+// Apply local/remote settings and account changes to the next recording.
+resourceSync.subscribe(['settings'], invalidateSttCapability);
+sessionOwnerBoundary.subscribe(invalidateSttCapability);
 
 // ============================================================================
 // Audio helpers

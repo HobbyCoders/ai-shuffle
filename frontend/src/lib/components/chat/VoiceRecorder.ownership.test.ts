@@ -13,8 +13,11 @@ vi.mock('$lib/services/keyboard', () => ({ registerShortcut: vi.fn() }));
 vi.mock('$lib/stores/hotkeyPreferences.svelte', () => ({ hotkeyPreferences: {} }));
 vi.mock('$lib/utils/earcon', () => ({ playEarcon: vi.fn(), primeEarcons: vi.fn(), setEarconsEnabled: vi.fn() }));
 vi.mock('$lib/services/sttStream', () => ({ fetchSttCapability: mocks.capability, startSttStream: mocks.start, SttUnsupportedError: class extends Error {} }));
-import { cancelVoiceInput } from '$lib/services/globalStt';
+import { cancelVoiceInput, globalSttState } from '$lib/services/globalStt';
+import { get } from 'svelte/store';
+import { startComposerDictation, detachComposerDictation, composerDictation } from '$lib/services/composerDictation';
 import VoiceRecorder from './VoiceRecorder.svelte';
+import TiptapEditor from './TiptapEditor.svelte';
 
 describe('rendered recorder with live editor ownership', () => {
 	let editor: Editor;
@@ -48,6 +51,38 @@ describe('rendered recorder with live editor ownership', () => {
 		handlers.onTranscript?.('private words');
 		await tick();
 	}
+	it('hands off dictation inside the editor teardown before losing its view', async () => {
+		cleanup(); editor.destroy();
+		const mounted = render(TiptapEditor, {initialContent:'original',onBeforeDestroy:detachComposerDictation});
+		await tick(); editor = mounted.component.getEditor()!;
+		startComposerDictation(editor, 'session-a'); await tick(); await tick();
+		handlers.onTranscript?.('first words');
+		mounted.unmount(); await tick();
+		expect(get(composerDictation)).toEqual({sessionId:'session-a',attached:false});
+		expect(() => handlers.onTranscript?.('continued after destruction')).not.toThrow();
+		cancelVoiceInput({discard:false});
+		expect(get(globalSttState).isRecording).toBe(false);
+	});
+	it('does not show another draft as recording and survives recorder teardown', async () => {
+		cleanup();
+		render(VoiceRecorder, {sessionId:'session-a', onTranscription:vi.fn(), onStart:()=>startComposerDictation(editor,'session-a')});
+		await start();
+		detachComposerDictation(editor);
+		cleanup();
+		editor.destroy();
+		render(VoiceRecorder, {sessionId:'session-b', onTranscription:vi.fn(), onStart:vi.fn()});
+		await tick();
+		const other = screen.getByRole('button', {name:'Start voice input'}) as HTMLButtonElement;
+		expect(other.classList.contains('recording')).toBe(false);
+		expect(other.classList.contains('transcribing')).toBe(false);
+		expect(other.disabled).toBe(true);
+		expect(get(globalSttState).isRecording).toBe(true);
+		expect(get(composerDictation)).toEqual({sessionId:'session-a',attached:false});
+		handlers.onTranscript?.('continued after unmount');
+		cancelVoiceInput({discard:false});
+		await tick();
+		expect(other.disabled).toBe(false);
+	});
 	it('Escape discards only speech without a separate discard button', async () => {
 		await start();
 		editor.commands.insertContentAt(1, 'My ');

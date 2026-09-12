@@ -22,6 +22,7 @@
 
 import { apiBase, withAuth } from './runtime';
 import { api, type ApiError } from './client';
+import { invalidateSttCapability } from '$lib/services/sttStream';
 import { resourceSync } from '$lib/services/resource-sync';
 import { sessionOwnerBoundary, sessionOwnerEpoch } from '$lib/stores/session-owner';
 
@@ -77,12 +78,14 @@ export interface VoiceModelDetails {
 export interface VoiceSettings {
 	/** Absent only when talking to an older server. Never guess its voice list. */
 	model_details?: VoiceModelDetails;
+	voice_input_models?: Array<{ id: string; name: string; provider: string }>;
 	voice_options?: VoiceOptions;
 	voice_mode_enabled: boolean;
 	voice_model: string;
 	voice_voice: string;
 	voice_provider_id: string | null;
 	voice_max_call_minutes: number;
+	voice_input_model?: string;
 	voice_input_mode?: 'auto' | 'toggle';
 	voice_input_silence_seconds?: number;
 	/** May the voice agent manage automations, hooks, agents, MCP servers and connectors directly? */
@@ -98,6 +101,7 @@ export interface VoiceSettingsUpdate {
 	voice_voice?: string;
 	voice_provider_id?: string | null;
 	voice_max_call_minutes?: number;
+	voice_input_model?: string;
 	voice_input_mode?: 'auto' | 'toggle';
 	voice_input_silence_seconds?: number;
 	voice_app_tools_enabled?: boolean;
@@ -235,6 +239,7 @@ export async function saveVoiceSettings(patch: VoiceSettingsUpdate): Promise<Voi
 	const revision = settingsRevision, owner = sessionOwnerEpoch();
 	const updated = await api.put<VoiceSettings>('/settings/voice', patch);
 	if (owner !== sessionOwnerEpoch()) throw expiredSettingsRequest();
+	if ('voice_input_model' in patch) invalidateSttCapability();
 	// A peer may have committed while this write's response was in flight.
 	// Its invalidation can also trigger a GET before our PUT commits; discard
 	// that precommit read rather than treating it as the settled write result.

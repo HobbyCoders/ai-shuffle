@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from app.db import database
 from app.db.async_database import run_sync
+from app.core.voice_input_settings import get_voice_input_model
 from app.api.auth import require_admin, require_auth
 from app.api.settings_crypto import get_decrypted_api_key
 from app.api.settings_media import get_model_params
@@ -801,8 +802,12 @@ async def update_stt_model(
     if not model:
         raise HTTPException(status_code=400, detail="Model cannot be empty")
 
-    # One isolated write — one thread hop, no closure needed.
-    await run_sync(database.set_system_setting, "stt_model", model)
+    def _write() -> None:
+        # Preserve the pre-split microphone choice before editing audio-to-text.
+        get_voice_input_model()
+        database.set_system_setting("stt_model", model)
+
+    await run_sync(_write)
     return {"success": True, "model": model}
 
 
@@ -939,7 +944,7 @@ async def transcribe_audio(
     # body read (``await file.read()``) and the size/format validation that can
     # reject it sit before this, so it cannot share a closure with anything above.
     def _load_stt() -> tuple[str, str | None, str | None]:
-        stt_model = database.get_system_setting("stt_model") or "fal-ai/whisper"
+        stt_model = get_voice_input_model()
         fal_key = get_decrypted_api_key("fal_api_key")
         openai_key = _resolve_openai_api_key()
         return stt_model, fal_key, openai_key
@@ -948,7 +953,7 @@ async def transcribe_audio(
     if STT_MODELS.get(stt_model, {}).get("realtime_only"):
         raise HTTPException(
             status_code=400,
-            detail="GPT Live Transcribe requires live microphone streaming. Check the live connection or select a file transcription model in Audio settings.",
+            detail="GPT Live Transcribe requires live microphone streaming. Check the live connection or select a file-capable model in Settings > Voice > Voice transcription.",
         )
     provider = _model_provider(stt_model, STT_MODELS.get(stt_model))
 

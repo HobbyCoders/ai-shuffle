@@ -78,5 +78,12 @@ export function createLiveDictation(editor: Editor) {
 		commit();
 	}
 
-	return { write, commit, discard, destroy() { editor.off('transaction', mapEdits); commit(); } };
+	return { write, commit, discard,
+		moveTo(next: Editor) {
+			editor.off('transaction', mapEdits);
+			editor = next;
+			editor.on('transaction', mapEdits);
+		},
+		destroy() { editor.off('transaction', mapEdits); commit(); }
+	};
 }

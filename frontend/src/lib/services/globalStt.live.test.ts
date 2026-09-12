@@ -13,6 +13,17 @@ import { cancelVoiceInput, globalSttState, toggleVoiceInput } from './globalStt'
 import { playEarcon } from '$lib/utils/earcon';
 
 describe('composer live transcription delivery', () => {
+	it.each(['commit', 'discard'])('clears busy state even when a stale %s callback throws', async action => {
+		const fail = () => { throw new Error('Editor was destroyed'); };
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		toggleVoiceInput(vi.fn(), {onText:vi.fn(), onCommit:fail, onDiscard:fail});
+		await vi.advanceTimersByTimeAsync(0);
+		if (action === 'discard') cancelVoiceInput();
+		else { toggleVoiceInput(vi.fn()); await vi.advanceTimersByTimeAsync(0); }
+		expect(get(globalSttState)).toMatchObject({isRecording:false, isTranscribing:false, isPreparing:false});
+		expect(log).toHaveBeenCalled();
+		log.mockRestore();
+	});
 	let handlers: SttStreamHandlers;
 	let session: { stop: ReturnType<typeof vi.fn>; abort: ReturnType<typeof vi.fn>; getText: ReturnType<typeof vi.fn> };
 	beforeEach(() => {

@@ -13,6 +13,7 @@
 	 * button press to finish recording.
 	 */
 	import { onDestroy } from 'svelte';
+	import { composerDictation } from '$lib/services/composerDictation';
 	import Banner from '$lib/components/Banner.svelte';
 	import {
 		globalSttState,
@@ -34,6 +35,8 @@
 		onLiveDiscard?: () => void;
 		/** Read synchronously so navigation invalidates callbacks before effects run. */
 		getOwner?: () => unknown;
+		sessionId?: string | null;
+		onStart?: () => void;
 		disabled?: boolean;
 		isRecording?: boolean;
 		isTranscribing?: boolean;
@@ -45,20 +48,25 @@
 		onLiveCommit,
 		onLiveDiscard,
 		getOwner,
+		sessionId,
+		onStart,
 		disabled = false,
 		isRecording = $bindable(false),
 		isTranscribing = $bindable(false)
 	}: Props = $props();
 
-	// Mirror the shared state onto the bindable props ChatInput already reads.
+	const ownsInput = $derived($globalSttState.source === 'composer' &&
+		(!$composerDictation || ($composerDictation.attached && $composerDictation.sessionId === sessionId)));
+	const busyElsewhere = $derived(!ownsInput && ($globalSttState.isPreparing || $globalSttState.isRecording || $globalSttState.isTranscribing));
+	// Other sessions remain usable while the shared microphone is occupied.
 	$effect(() => {
-		isRecording = $globalSttState.isRecording;
+		isRecording = ownsInput && $globalSttState.isRecording;
 	});
 	$effect(() => {
-		isTranscribing = $globalSttState.isTranscribing;
+		isTranscribing = ownsInput && $globalSttState.isTranscribing;
 	});
 
-	const isPreparing = $derived($globalSttState.isPreparing);
+	const isPreparing = $derived(ownsInput && $globalSttState.isPreparing);
 	const audioLevel = $derived($globalSttAudio.level);
 	const expanded = $derived(isRecording || isTranscribing || isPreparing);
 
@@ -80,13 +88,15 @@
 		});
 	});
 
+	let alive = true;
 	function toggleRecording() {
 		if (isRecording) {
 			toggleVoiceInput(onTranscription);
 			return;
 		}
+		if (onStart) { onStart(); return; }
 		const owner = getOwner?.();
-		const isCurrent = () => !getOwner || getOwner() === owner;
+		const isCurrent = () => alive && (!getOwner || getOwner() === owner);
 		toggleVoiceInput((text) => { if (isCurrent()) onTranscription(text); }, onLiveText ? {
 			onText: (text) => { if (isCurrent()) onLiveText?.(text); },
 			onCommit: () => { if (isCurrent()) onLiveCommit?.(); },
@@ -114,6 +124,8 @@
 	// microphone open with nowhere to put its text. Navigation keeps words
 	// already visible in the draft; only Escape discards them.
 	onDestroy(() => {
+		alive = false;
+		if (onStart) return; // The session-owned sink survives this button.
 		const state = $globalSttState;
 		if (state.source === 'composer' && (state.isRecording || state.isPreparing || state.isTranscribing)) {
 			cancelVoiceInput({ discard: false });
@@ -121,7 +133,7 @@
 	});
 </script>
 
-{#if $globalSttState.source === 'composer' && $globalSttState.error}
+{#if ownsInput && $globalSttState.error}
 	<Banner
 		severity="error"
 		message={$globalSttState.error}
@@ -135,7 +147,7 @@
 	<button
 		type="button"
 		onclick={toggleRecording}
-		disabled={disabled || isTranscribing || isPreparing}
+		disabled={disabled || busyElsewhere || isTranscribing || isPreparing}
 		class="voice-btn"
 		class:preparing={isPreparing}
 		class:recording={isRecording}

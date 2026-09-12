@@ -1,16 +1,21 @@
 <script lang="ts">
-	import { Mic, LoaderCircle, X } from 'lucide-svelte';
+	import { Mic, LoaderCircle, Square, X } from 'lucide-svelte';
+	import { composerDictation } from '$lib/services/composerDictation';
+	import { sessions } from '$lib/stores/app-data.svelte';
 	import {
 		globalSttState,
 		globalSttAudio,
 		globalSttUpload,
 		cancelVoiceInput,
+		triggerToggle,
 		clearError
 	} from '$lib/services/globalStt';
 
 	const state = $derived($globalSttState);
 	const busy = $derived(state.isPreparing || state.isRecording || state.isTranscribing);
-	const visible = $derived(state.source === 'global' && (busy || !!state.error));
+	const backgroundComposer = $derived(state.source === 'composer' && !!$composerDictation && !$composerDictation.attached);
+	const ownerTitle = $derived($sessions.find(s => s.id === $composerDictation?.sessionId)?.title || 'Chat draft');
+	const visible = $derived((state.source === 'global' || backgroundComposer) && (busy || !!state.error));
 	const transcript = $derived([...state.segments, state.partial].join(' ').trim());
 	const label = $derived(state.isPreparing ? 'Getting microphone ready…'
 		: state.isRecording ? 'Listening…'
@@ -36,7 +41,7 @@
 
 {#if visible}
 	<!-- Keep the focused field and caret in place for automatic insertion. -->
-	<aside class="global-voice-input" aria-label="Global voice input">
+	<aside class="global-voice-input" aria-label={backgroundComposer ? 'Background voice input' : 'Global voice input'}>
 		<div class="heading">
 			<div class="status" role="status">
 				{#if state.isPreparing || state.isTranscribing}
@@ -46,10 +51,14 @@
 				{/if}
 				<strong>{label}</strong>
 			</div>
+			{#if state.isRecording}
+				<button type="button" onclick={triggerToggle} aria-label="Finish voice input" title="Finish dictation"><Square size={16} /></button>
+			{/if}
 			<button type="button" onclick={dismiss} aria-label={busy ? 'Discard voice input' : 'Dismiss voice input error'} title={busy ? 'Discard (Esc)' : 'Dismiss (Esc)'}>
 				<X size={16} />
 			</button>
 		</div>
+		{#if backgroundComposer}<p class="hint">Saving to {ownerTitle}. You can keep browsing.</p>{/if}
 		{#if state.error}
 			<p class="error" role="alert">{state.error}</p>
 		{/if}
@@ -59,7 +68,7 @@
 					<span style:height="{Math.max(3, Math.min(1, band) * 28)}px"></span>
 				{/each}
 			</div>
-			<p class="hint">Speak naturally. Finishes automatically when you stop talking.</p>
+			<p class="hint">Speak naturally. Use Finish to end dictation.</p>
 		{:else if state.isPreparing}
 			<p class="hint">You can start speaking when “Listening” appears.</p>
 		{:else if state.isTranscribing}

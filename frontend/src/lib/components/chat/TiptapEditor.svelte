@@ -22,6 +22,7 @@
 		onUserInput?: () => void;
 		onKeyDown?: (event: KeyboardEvent) => boolean | void;
 		onFocusChange?: (focused: boolean) => void;
+		onBeforeDestroy?: (editor: Editor) => void;
 	}
 
 	let {
@@ -32,7 +33,8 @@
 		onTextChange,
 		onUserInput,
 		onKeyDown,
-		onFocusChange
+		onFocusChange,
+		onBeforeDestroy
 	}: Props = $props();
 
 	let editorElement = $state<HTMLDivElement | null>(null);
@@ -85,6 +87,8 @@
 	});
 
 	onDestroy(() => {
+		// Parent refs may already be cleared. Hand off capture before destruction.
+		if (editor && !editor.isDestroyed) onBeforeDestroy?.(editor);
 		if (boundElement) {
 			boundElement.removeEventListener('keydown', handleEditorKeyDown, true);
 			boundElement.removeEventListener('beforeinput', handleUserInput);
@@ -94,7 +98,9 @@
 			boundElement.removeEventListener('drop', handleUserInput);
 		}
 		liveDictation?.destroy();
+		liveDictation = null;
 		editor?.destroy();
+		editor = null;
 	});
 
 	// Update TipTap's placeholder when the prop changes (e.g. when profile changes)
