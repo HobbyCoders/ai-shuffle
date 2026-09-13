@@ -4,8 +4,8 @@
 	 * grouped by category (conflicts, staged, modified, untracked), with actions
 	 * to stage/unstage/discard files and view diffs.
 	 *
-	 * When `reviewMode` is true, the panel widens to show a file sidebar + inline
-	 * side-by-side DiffViewer with per-file Accept / Decline actions.
+	 * Review mode uses a continuous diff list with an optional file tree and
+	 * per-file staging/discard actions.
 	 */
 	import {
 		X, ChevronDown, ChevronRight,
@@ -16,7 +16,7 @@
 	import { git, changedFiles, changedFilesLoading } from '$lib/stores/git.svelte';
 	import type { FileChangeInfo } from '$lib/api/git';
 	import { platform } from '$lib/stores/platform.svelte';
-	import DiffViewer from './DiffViewer.svelte';
+	import ReviewDiffPanel from './ReviewDiffPanel.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { notify } from '$lib/stores/notifications';
 
@@ -136,19 +136,9 @@
 	let reviewSelectedFile = $state<FileChangeInfo | null>(null);
 	let reviewActionInFlight = $state(false);
 
-	// Flat ordered list for keyboard nav in review mode
+	// Keep review ordering consistent with the classic status groups.
 	const flatFiles = $derived([...conflicts, ...staged, ...modified, ...untracked]);
 
-	// Auto-select first file when review mode opens and files load
-	$effect(() => {
-		if (reviewMode && open && flatFiles.length > 0 && !reviewSelectedFile) {
-			reviewSelectedFile = flatFiles[0];
-		}
-	});
-
-	function selectReviewFile(file: FileChangeInfo) {
-		reviewSelectedFile = file;
-	}
 
 	async function reviewAccept() {
 		if (!reviewSelectedFile || reviewActionInFlight) return;
@@ -314,19 +304,6 @@
 			return;
 		}
 
-		// Arrow key navigation in review mode
-		if (reviewMode && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
-			e.preventDefault();
-			if (flatFiles.length === 0) return;
-			const curIdx = reviewSelectedFile
-				? flatFiles.findIndex(f => f.file === reviewSelectedFile!.file)
-				: -1;
-			let nextIdx = curIdx;
-			if (e.key === 'ArrowDown') nextIdx = Math.min(curIdx + 1, flatFiles.length - 1);
-			else nextIdx = Math.max(curIdx - 1, 0);
-			reviewSelectedFile = flatFiles[nextIdx];
-			pendingConfirm = null;
-		}
 	}
 
 	// ── Shell ───────────────────────────────────────────────────────────
@@ -436,7 +413,7 @@
 				<button
 					class="action-btn"
 					title="View diff"
-					onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
+					onclick={() => onViewDiff(file)}
 				>
 					<Eye size={14} strokeWidth={1.5} />
 				</button>
@@ -460,7 +437,7 @@
 				<button
 					class="action-btn"
 					title="View diff"
-					onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
+					onclick={() => onViewDiff(file)}
 				>
 					<Eye size={14} strokeWidth={1.5} />
 				</button>
@@ -485,7 +462,7 @@
 				<button
 					class="action-btn"
 					title="View diff"
-					onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
+					onclick={() => onViewDiff(file)}
 				>
 					<Eye size={14} strokeWidth={1.5} />
 				</button>
@@ -570,23 +547,7 @@
 <!-- ═══════════════════════════════════════════════════════════════════
      REVIEW MODE: file sidebar + inline diff + accept/decline footer
      ═══════════════════════════════════════════════════════════════════ -->
-{#snippet reviewFileItem(file: FileChangeInfo)}
-	{@const isActive = reviewSelectedFile?.file === file.file}
-	<button
-		class="review-file-item"
-		class:review-file-active={isActive}
-		onclick={() => selectReviewFile(file)}
-		title={file.file}
-	>
-		{@render statusIcon(file.status)}
-		<span class="review-file-name">
-			<span class="file-basename">{basename(file.file)}</span>
-			{#if dirname(file.file)}
-				<span class="file-dirname">{dirname(file.file)}</span>
-			{/if}
-		</span>
-	</button>
-{/snippet}
+
 
 {#snippet fileListContent()}
 	{#if $changedFilesLoading && totalCount === 0}
@@ -611,11 +572,7 @@
 			{#if !isSectionCollapsed('conflicts')}
 				<div class="section-files">
 					{#each conflicts as file (file.file)}
-						{#if reviewMode}
-							{@render reviewFileItem(file)}
-						{:else}
-							{@render fileRow(file, 'conflict')}
-						{/if}
+						{@render fileRow(file, 'conflict')}
 					{/each}
 				</div>
 			{/if}
@@ -626,11 +583,7 @@
 			{#if !isSectionCollapsed('staged')}
 				<div class="section-files">
 					{#each staged as file (file.file)}
-						{#if reviewMode}
-							{@render reviewFileItem(file)}
-						{:else}
-							{@render fileRow(file, 'staged')}
-						{/if}
+						{@render fileRow(file, 'staged')}
 					{/each}
 				</div>
 			{/if}
@@ -641,11 +594,7 @@
 			{#if !isSectionCollapsed('modified')}
 				<div class="section-files">
 					{#each modified as file (file.file)}
-						{#if reviewMode}
-							{@render reviewFileItem(file)}
-						{:else}
-							{@render fileRow(file, 'modified')}
-						{/if}
+						{@render fileRow(file, 'modified')}
 					{/each}
 				</div>
 			{/if}
@@ -656,11 +605,7 @@
 			{#if !isSectionCollapsed('untracked')}
 				<div class="section-files">
 					{#each untracked as file (file.file)}
-						{#if reviewMode}
-							{@render reviewFileItem(file)}
-						{:else}
-							{@render fileRow(file, 'untracked')}
-						{/if}
+						{@render fileRow(file, 'untracked')}
 					{/each}
 				</div>
 			{/if}
@@ -698,10 +643,11 @@
 				<div class="resize-handle-bar"></div>
 			</div>
 		{/if}
+		{#if !reviewMode}
 		<!-- Header -->
 		<div class="panel-header">
 			<div class="panel-header-left">
-				<h2 class="panel-title">{reviewMode ? 'Review Changes' : 'Changed Files'}</h2>
+				<h2 class="panel-title">Changed Files</h2>
 				{#if totalCount > 0}
 					<span class="total-badge">{totalCount}</span>
 				{/if}
@@ -715,34 +661,14 @@
 			</button>{/if}
 		</div>
 
-		{#if reviewMode}
-			<!-- ═══ Review layout: sidebar + diff viewport ═══ -->
-			<div class="review-body">
-				<!-- File sidebar -->
-				<div class="review-sidebar">
-					{@render fileListContent()}
-				</div>
+		{/if}
 
-				<!-- Diff viewport -->
-				<div class="review-viewport">
-					{#if reviewSelectedFile}
-						{#key reviewSelectedFile.file}
-							<DiffViewer
-								{projectId}
-								file={reviewSelectedFile}
-								onClose={() => { reviewSelectedFile = null; }}
-								mode="unified"
-								embedded
-							/>
-						{/key}
-					{:else if !isEmpty}
-						<div class="review-viewport-empty">
-							<FileText size={32} strokeWidth={1} />
-							<span>Select a file to view its diff</span>
-						</div>
-					{/if}
-				</div>
-			</div>
+		{#if reviewMode}
+			<ReviewDiffPanel
+				{projectId} files={flatFiles} loading={$changedFilesLoading}
+				selected={reviewSelectedFile} onSelect={(file) => { reviewSelectedFile = file; }}
+				{onClose} {embedded}
+			/>
 
 			<!-- Accept / Decline footer -->
 			{#if reviewSelectedFile}
@@ -977,120 +903,9 @@
 	   REVIEW MODE LAYOUT
 	   ═══════════════════════════════════════════════════════════════════ */
 
-	.review-body {
-		display: flex;
-		flex: 1;
-		min-height: 0;
-		overflow: hidden;
-	}
-
-	/* ─── Review sidebar (file list) ──────────────────────────────── */
-	.review-sidebar {
-		width: 220px;
-		min-width: 180px;
-		flex-shrink: 0;
-		overflow-y: auto;
-		overflow-x: hidden;
-		overscroll-behavior: contain;
-		border-right: 1px solid color-mix(in oklch, var(--border) 30%, transparent);
-		background: color-mix(in oklch, var(--popover) 60%, transparent);
-	}
-
-	.review-sidebar::-webkit-scrollbar { width: 4px; }
-	.review-sidebar::-webkit-scrollbar-track { background: transparent; }
-	.review-sidebar::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
-
-	@media (max-width: 639px) {
-		.review-body { flex-direction: column; }
-		.review-sidebar {
-			width: 100%;
-			min-width: 0;
-			max-height: 30vh;
-			border-right: none;
-			border-bottom: 1px solid color-mix(in oklch, var(--border) 30%, transparent);
-			flex-shrink: 0;
-		}
-	}
-
-	@container (max-width: 599px) {
-		.review-body { flex-direction: column; }
-		.review-sidebar { width: 100%; min-width: 0; max-height: 30%; border-right: none; border-bottom: 1px solid var(--border); }
-		.review-footer { flex-wrap: wrap; }
-	}
-
-	/* ─── Review file item (clickable row in sidebar) ──────────────── */
-	.review-file-item {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		width: 100%;
-		padding: 5px 10px 5px 20px;
-		min-height: 30px;
-		background: transparent;
-		border: none;
-		cursor: pointer;
-		text-align: left;
-		transition: background 80ms ease;
-	}
-
-	.review-file-item:hover {
-		background: color-mix(in oklch, var(--border) 30%, transparent);
-	}
-
-	.review-file-active {
-		background: var(--selection-bg);
-		box-shadow: inset 2px 0 0 color-mix(in oklch, var(--selection) 60%, transparent);
-	}
-
-	.review-file-active:hover {
-		background: color-mix(in oklch, var(--border) 60%, transparent);
-	}
-
-	@media (pointer: coarse) {
-		.review-file-item { min-height: 44px; }
-	}
-
-	.review-file-name {
-		display: flex;
-		flex-direction: column;
-		gap: 0;
-		min-width: 0;
-		overflow: hidden;
-	}
-
-	/* ─── Review viewport (diff area) ──────────────────────────────── */
-	.review-viewport {
-		flex: 1;
-		min-width: 0;
-		min-height: 0;
-		overflow: auto;
-		background: var(--background);
-	}
-
-	.review-viewport::-webkit-scrollbar { width: 6px; height: 6px; }
-	.review-viewport::-webkit-scrollbar-track { background: transparent; }
-	.review-viewport::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: calc(var(--radius) - 6px); }
-	.review-viewport::-webkit-scrollbar-corner { background: transparent; }
-
-	.review-viewport-empty {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 10px;
-		height: 100%;
-		min-height: 200px;
-		padding: 2rem;
-		text-align: center;
-		color: var(--border);
-	}
-
-	.review-viewport-empty span {
-		font-size: 0.8125rem;
-		color: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
-	}
-
 	/* ─── Review footer (Accept / Decline) ─────────────────────────── */
+	@container (max-width: 420px) { .review-footer { flex-wrap: wrap; gap: 6px; padding: 8px; } .review-footer-info { flex-basis: 100%; } }
+
 	.review-footer {
 		display: flex;
 		align-items: center;

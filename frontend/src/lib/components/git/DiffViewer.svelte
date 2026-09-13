@@ -10,10 +10,13 @@
 	 * When `embedded` is true, the header is hidden (used inside ChangedFilesPanel review mode).
 	 */
 	import { ArrowLeft, FileText, Loader2 } from 'lucide-svelte';
+	import { onMount } from 'svelte';
+	import { highlightToInnerHtml, onHighlighterReady, resolveShikiLang } from '$lib/utils/shiki';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { git } from '$lib/stores/git.svelte';
 	import * as gitApi from '$lib/api/git';
-	import { parseDiff, toSideBySide, countChanges, shouldRefetchDiff, effectiveDiffMode } from '$lib/utils/diff-parser';
-	import type { ParsedDiff, SideBySidePair } from '$lib/utils/diff-parser';
+	import { parseDiff, toSideBySide, countChanges, effectiveDiffMode } from '$lib/utils/diff-parser';
+	import type { DiffLine, ParsedDiff, SideBySidePair } from '$lib/utils/diff-parser';
 
 	interface Props {
 		projectId: string;
@@ -23,9 +26,12 @@
 		mode?: 'unified' | 'side-by-side';
 		/** When true, hides the header bar (for embedding inside another panel) */
 		embedded?: boolean;
+		continuous?: boolean;
+		wrap?: boolean;
+		refreshKey?: number;
 	}
 
-	let { projectId, file, onClose, mode = 'unified', embedded = false }: Props = $props();
+	let { projectId, file, onClose, mode = 'unified', embedded = false, continuous = false, wrap = false, refreshKey = 0 }: Props = $props();
 
 	let diffResponse = $state<gitApi.FileDiffResponse | null>(null);
 	let parsedDiff = $state<ParsedDiff | null>(null);
@@ -39,8 +45,29 @@
 	// Effective mode: auto-downgrade to unified on mobile
 	const resolvedMode = $derived(effectiveDiffMode(mode, viewportWidth));
 
-	// Track previous file to avoid re-fetching same file during streaming
-	let prevFileKey = $state<string | null>(null);
+	// Stable primitive identity avoids refetches on status polling.
+	const requestKey = $derived(JSON.stringify([projectId, file.file, file.category, git.current.worktreeId, git.current.sessionId, refreshKey]));
+
+	const lineKey = (line: DiffLine) => `${line.type}:${line.oldLineNumber}:${line.newLineNumber}`;
+	let highlightVersion = $state(0);
+	onMount(() => onHighlighterReady(() => { highlightVersion++; }));
+	const highlighted = $derived.by(() => {
+		highlightVersion;
+		const result = new Map<string, string>();
+		const lang = resolveShikiLang(file.file.split('.').pop());
+		if (!continuous || !parsedDiff || !lang) return result;
+		for (const hunk of parsedDiff.hunks) {
+			// Tokenize each side separately so removed code cannot change the new side's syntax.
+			for (const excluded of ['addition', 'deletion']) {
+				const lines = hunk.lines.filter(line => line.type !== 'header' && line.type !== excluded);
+				const html = highlightToInnerHtml(lines.map(line => line.content).join('\n'), lang);
+				if (!html) continue;
+				const rendered = html.split('\n');
+				lines.forEach((line, i) => { if (rendered[i]) result.set(lineKey(line), sanitizeHtml(rendered[i])); });
+			}
+		}
+		return result;
+	});
 
 	const statusLabel = $derived(getStatusLabel(file.status));
 	const statusColor = $derived(getStatusColor(file.status));
@@ -55,6 +82,8 @@
 		for (const hunk of parsedDiff.hunks) {
 			flat.push(...hunk.lines);
 		}
+
+		if (continuous) return flat;
 
 		// Identify runs of context lines and collapse them
 		const result: CompactLine[] = [];
@@ -116,24 +145,16 @@
 	}
 
 	$effect(() => {
-		const f = file; // track
-		const fileKey = `${f.file}::${f.category}`;
-
-		// Skip re-fetch if same file+category (prevents flash during streaming)
-		if (fileKey === prevFileKey) return;
-		prevFileKey = fileKey;
-
+		const [project, path, category, worktreeId, sessionId] = JSON.parse(requestKey);
+		let disposed = false;
 		loading = true;
 		error = null;
 		diffResponse = null;
 		parsedDiff = null;
 		sideBySidePairs = [];
-
-		const worktreeId = git.current.worktreeId ?? undefined;
-		const sessionId = git.current.sessionId ?? undefined;
-
-		gitApi.getFileDiff(projectId, f.file, f.category === 'staged', worktreeId, sessionId)
+		gitApi.getFileDiff(project, path, category === 'staged', worktreeId ?? undefined, sessionId ?? undefined)
 			.then(resp => {
+				if (disposed) return;
 				diffResponse = resp;
 				if (!resp.is_binary && resp.diff) {
 					const parsed = parseDiff(resp.diff);
@@ -143,15 +164,21 @@
 				loading = false;
 			})
 			.catch(e => {
+				if (disposed) return;
 				error = e?.detail || e?.message || 'Failed to load diff';
 				loading = false;
 			});
+		return () => { disposed = true; };
 	});
 </script>
 
 <svelte:window onresize={() => { viewportWidth = window.innerWidth; }} />
 
-<div class="flex flex-col h-full bg-background text-foreground">
+{#snippet sourceLine(line: DiffLine | null)}
+	{#if line}{#if highlighted.has(lineKey(line))}<span class="syntax">{@html highlighted.get(lineKey(line))!}</span>{:else}{line.content}{/if}{/if}
+{/snippet}
+
+<div class="diff-viewer flex flex-col h-full bg-background text-foreground" class:continuous class:wrap>
 	<!-- Sticky Header (hidden when embedded) -->
 	{#if !embedded}
 		<header class="sticky top-0 z-10 flex items-center gap-3 px-4 py-3 bg-(--background)/95 backdrop-blur-xs border-b border-border min-h-[52px]">
@@ -214,26 +241,26 @@
 					{#each sideBySidePairs as pair}
 						{#if pair.type === 'header'}
 							<div class="sbs-row sbs-header">
-								<div class="sbs-header-cell">{pair.left?.content ?? ''}</div>
+								<div class="sbs-header-cell">{@render sourceLine(pair.left)}</div>
 							</div>
 						{:else if pair.type === 'context'}
 							<div class="sbs-row">
 								<div class="sbs-gutter">{pair.left?.oldLineNumber ?? ''}</div>
-								<div class="sbs-cell sbs-cell-ctx">{pair.left?.content ?? ''}</div>
+								<div class="sbs-cell sbs-cell-ctx">{@render sourceLine(pair.left)}</div>
 								<div class="sbs-divider"></div>
 								<div class="sbs-gutter">{pair.right?.newLineNumber ?? ''}</div>
-								<div class="sbs-cell sbs-cell-ctx">{pair.right?.content ?? ''}</div>
+								<div class="sbs-cell sbs-cell-ctx">{@render sourceLine(pair.right)}</div>
 							</div>
 						{:else}
 							<div class="sbs-row">
 								<div class="sbs-gutter sbs-gutter-del">{pair.left?.oldLineNumber ?? ''}</div>
 								<div class="sbs-cell" class:sbs-cell-del={pair.left !== null} class:sbs-cell-blank={pair.left === null}>
-									{#if pair.left}<span class="sbs-prefix del-prefix">-</span><span class="sbs-del-text">{pair.left.content}</span>{/if}
+									{#if pair.left}<span class="sbs-prefix del-prefix">-</span><span class="sbs-del-text">{@render sourceLine(pair.left)}</span>{/if}
 								</div>
 								<div class="sbs-divider"></div>
 								<div class="sbs-gutter sbs-gutter-add">{pair.right?.newLineNumber ?? ''}</div>
 								<div class="sbs-cell" class:sbs-cell-add={pair.right !== null} class:sbs-cell-blank={pair.right === null}>
-									{#if pair.right}<span class="sbs-prefix add-prefix">+</span><span class="sbs-add-text">{pair.right.content}</span>{/if}
+									{#if pair.right}<span class="sbs-prefix add-prefix">+</span><span class="sbs-add-text">{@render sourceLine(pair.right)}</span>{/if}
 								</div>
 							</div>
 						{/if}
@@ -268,7 +295,7 @@
 							<div class="gutter-col diff-gutter-blank"></div>
 							<div class="gutter-col diff-gutter-add">{line.newLineNumber}</div>
 							<div class="flex-1 px-3 font-mono text-sm diff-text-add whitespace-pre">
-								<span class="diff-prefix-add select-none mr-1">+</span>{line.content}
+								<span class="diff-prefix-add select-none mr-1">+</span>{@render sourceLine(line)}
 							</div>
 						</div>
 					{:else if line.type === 'deletion'}
@@ -276,7 +303,7 @@
 							<div class="gutter-col diff-gutter-del">{line.oldLineNumber}</div>
 							<div class="gutter-col diff-gutter-blank"></div>
 							<div class="flex-1 px-3 font-mono text-sm diff-text-del whitespace-pre">
-								<span class="diff-prefix-del select-none mr-1">-</span>{line.content}
+								<span class="diff-prefix-del select-none mr-1">-</span>{@render sourceLine(line)}
 							</div>
 						</div>
 					{:else}
@@ -284,7 +311,7 @@
 							<div class="gutter-col diff-gutter-ctx">{line.oldLineNumber}</div>
 							<div class="gutter-col diff-gutter-ctx">{line.newLineNumber}</div>
 							<div class="flex-1 px-3 font-mono text-sm text-muted-foreground whitespace-pre">
-								<span class="diff-gutter-ctx select-none mr-1">&nbsp;</span>{line.content}
+								<span class="diff-gutter-ctx select-none mr-1">&nbsp;</span>{@render sourceLine(line)}
 							</div>
 						</div>
 					{/if}
@@ -301,6 +328,24 @@
 </div>
 
 <style>
+
+	.syntax :global(span) { color: var(--shiki-light, inherit); }
+	:global(.dark) .syntax :global(span) { color: var(--shiki-dark, inherit); }
+	/* Continuous review surface: compact neutral code, tinted change rows. */
+	.continuous { height: auto; min-width: 0; }
+	.continuous .diff-scroll-container { flex: none; }
+	.continuous .gutter-col { width: 3rem; min-width: 3rem; font-size: 11px; line-height: 22px; }
+	.continuous .diff-content :global(.font-mono) { font-size: 12px; line-height: 22px; }
+	.continuous .diff-text-add, .continuous .diff-text-del,
+	.continuous .sbs-del-text, .continuous .sbs-add-text { color: var(--foreground); }
+	.continuous .diff-line-add { background: color-mix(in srgb, var(--success) 10%, transparent); }
+	.continuous .diff-line-del { background: color-mix(in srgb, var(--destructive) 10%, transparent); }
+	.continuous .diff-line-header, .continuous .sbs-header-cell { background: var(--muted); color: var(--muted-foreground); }
+	.continuous .diff-header-text { color: var(--muted-foreground); }
+	.wrap .diff-content, .wrap .sbs-diff { min-width: 0; width: 100%; }
+	.wrap .diff-content :global(.whitespace-pre) { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+	.wrap .sbs-row { grid-template-columns: 3rem minmax(0, 1fr) 1px 3rem minmax(0, 1fr); }
+	.wrap .sbs-cell { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 	/* ─── Unified mode gutters ─────────────────────────────────────── */
 	.gutter-col {
 		width: 3.5rem;
