@@ -28,8 +28,8 @@
 	<h1 class="hero-heading">Let's talk</h1>
 
 	<p class="hero-subline">
-		A plain conversation, with web search and fetch. No repository and no worktree — the only files
-		it can open are the ones you attach.
+		Ask questions, search the web, or work with attachments. The assistant can ask for temporary
+		access to a folder or SSH machine through a private card. No repository or worktree is attached.
 	</p>
 </div>
 

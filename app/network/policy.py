@@ -76,6 +76,7 @@ _LOCAL_SETTING_PATTERNS = [
         r"^cluster_",
         r"^mobile_",
         r"^credential_key_state",
+        r"^chat_connection:",
         r"^claude_active_account(:|$)",
         r"^encryption_salt$",
         r"^owner_preference_identity$",

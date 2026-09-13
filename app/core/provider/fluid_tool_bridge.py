@@ -227,6 +227,10 @@ SERVER_RISK_MAPS: Mapping[str, Mapping[str, str]] = {
     "ai-tools": AI_TOOLS_RISK_MAP,
     "computer-use": COMPUTER_USE_RISK_MAP,
     "provider-agent": PROVIDER_AGENT_RISK_MAP,
+    "chat-access": {
+        "RequestChatAccess": "safe", "ChatResources": "safe", "ChatListFiles": "safe", "ChatReadFile": "safe",
+        "ChatWriteFile": "write", "ChatRunCommand": "write",
+    },
 }
 
 SERVER_DEFAULT_RISK: Mapping[str, str] = {

@@ -1024,6 +1024,10 @@ async def attach_voice_call(
         app_tools = await run_sync(
             _voice_app_tools, session_row.get("project_id"),
         )
+        from app.mcp.chat_access_sdk import create_chat_access_server, GUIDANCE
+        from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+        app_tools.extend(recorded_sdk_server_tools(create_chat_access_server(session_id)))
+        instructions_override = f"{instructions_override}\n\n{GUIDANCE}"
 
     # A browser call opens with a greeting; a native session must stay silent
     # until the user speaks (its mode appendix says so), so it never greets.

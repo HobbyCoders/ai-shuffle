@@ -681,8 +681,19 @@ def build_options_from_profile(
     # and the fail-fast rebind guard (so neither re-fetches). None outside the
     # session_id branch (e.g. override / project-only spawns).
     session_row = None
+    if session_id:
+        try:
+            session_row = database.get_session(session_id)
+        except Exception:
+            session_row = None
 
-    if overrides.get("cwd"):
+    if session_mode_of(session_row) == "chat":
+        # Do not resolve/materialize a stale project binding before choosing the
+        # chat cwd. Even spawning a Chat session must not perform repository work.
+        project = None
+        working_dir = str(ensure_chat_uploads_dir())
+        working_dir_source = "chat uploads"
+    elif overrides.get("cwd"):
         # Override takes highest priority - used by agent engine for worktrees
         working_dir = overrides.get("cwd")
         working_dir_source = "override"
@@ -696,11 +707,6 @@ def build_options_from_profile(
         # path, so resolve_cwd materializes the checkout (git worktree add) and
         # lazily self-heals project_v2_id + sessions.branch off the legacy
         # project_id / worktree_branch. Fetch the session row ONCE.
-        try:
-            session_row = database.get_session(session_id)
-        except Exception:  # noqa: BLE001 — a lookup failure falls through to workspace
-            session_row = None
-
         from app.core import project_resolver
 
         # RACE GUARD (D5), first half. A branch session created FROM ANOTHER
@@ -987,7 +993,7 @@ def build_options_from_profile(
 
     # Inject app-config system prompt instructions when the picker permits the
     # app_config group and the session is an admin one (ruling T5).
-    if _app_config_permitted(config) and not api_user_id:
+    if session_mode != "chat" and _app_config_permitted(config) and not api_user_id:
         from app.mcp.app_config_sdk import APP_CONFIG_SYSTEM_PROMPT
         if isinstance(final_system_prompt, dict):
             current_append = final_system_prompt.get("append", "")
@@ -1360,6 +1366,8 @@ def build_options_from_profile(
     except Exception:
         computer_use_enabled = False
         logger.exception("Failed to read the computer-use global toggle")
+    if session_mode == "chat":
+        computer_use_enabled = False
     if computer_use_enabled:
         try:
             from app.mcp.computer_use.scaling import computer_use_available
@@ -1373,6 +1381,13 @@ def build_options_from_profile(
         except Exception:
             computer_use_enabled = False
             logger.exception("Failed to evaluate computer-use availability")
+
+    from app.core.session_modes import CHAT_MODE_RESOURCE_TOOLS
+    private_access_names = [
+        name for name in CHAT_MODE_RESOURCE_TOOLS
+        if tool_permitted(name, access.allowed, access.disallowed)
+    ] if session_id else []
+    mcp_allowed_tools.extend(private_access_names)
 
     # Build final allowed_tools list:
     # - When sdk_tools is set (preset), built-in tools are handled by the preset.
@@ -1445,6 +1460,23 @@ def build_options_from_profile(
         tool_env=ai_tool_env,
         session_id=session_id,
     ) or {}
+
+    if private_access_names:
+        from app.mcp.chat_access_sdk import create_chat_access_server, GUIDANCE, CHAT_GUIDANCE
+        mcp_servers_dict["chat-access"] = create_chat_access_server(session_id)
+        guidance = GUIDANCE
+        if session_mode == "chat":
+            guidance = CHAT_GUIDANCE + guidance
+            # Chat must not inherit the repository-development preset.
+            if isinstance(final_system_prompt, dict):
+                final_system_prompt = final_system_prompt.get("append", "")
+        if isinstance(final_system_prompt, dict):
+            final_system_prompt = {
+                **final_system_prompt,
+                "append": f"{final_system_prompt.get('append', '')}\n\n{guidance}",
+            }
+        else:
+            final_system_prompt = f"{final_system_prompt or ''}\n\n{guidance}"
 
     # Add app-config MCP server for admin sessions whose picker permits it (T5)
     if app_config_enabled:
@@ -1533,6 +1565,11 @@ def build_options_from_profile(
             _base = str(final_system_prompt) if final_system_prompt else ""
             final_system_prompt = f"{_base}\n\n{COMPUTER_USE_GUIDANCE}" if _base else COMPUTER_USE_GUIDANCE
 
+    if session_mode == "chat":
+        # Do not spawn project/user MCP processes just to hide their tools.
+        mcp_servers_dict = {name: server for name, server in mcp_servers_dict.items()
+                            if name in {"builtins", "chat-access"}}
+
     # Build options with all ClaudeAgentOptions fields
     # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically
     # The SDK handles finding Claude properly on all platforms
@@ -1561,7 +1598,7 @@ def build_options_from_profile(
         fork_session=config.get("fork_session", False),
 
         # Settings loading
-        setting_sources=config.get("setting_sources"),
+        setting_sources=[] if session_mode == "chat" else config.get("setting_sources"),
 
         # MCP servers - pass all registered MCP servers directly to the SDK
         # This ensures tools from MCP servers are available regardless of
@@ -1601,7 +1638,7 @@ def build_options_from_profile(
         # Plugins - load from enabled_plugins in profile config
         # Each plugin path is resolved relative to workspace_dir if relative
         # Pass setting_sources to avoid duplicating plugins that Claude Code auto-loads
-        plugins=_build_plugins_list(
+        plugins=[] if session_mode == "chat" else _build_plugins_list(
             config.get("enabled_plugins"),
             config.get("setting_sources")
         ),

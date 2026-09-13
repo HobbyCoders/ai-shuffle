@@ -125,7 +125,12 @@ describe('ChatModeHero — projectless by construction', () => {
 		expect(stripComments(hero)).not.toMatch(/GroupedSelector|WorkspaceSelector|onSelectProject/);
 	});
 
-	it('says what the lane can reach', () => {
-		expect(hero.toLowerCase()).toMatch(/web search and fetch/);
+	it('describes web, attachments, and explicitly requested private access', () => {
+		const content = stripComments(hero).toLowerCase().replace(/\s+/g, ' ');
+		expect(content).toContain('search the web');
+		expect(content).toContain('attachments');
+		expect(content).toContain('ask for temporary access');
+		expect(content).toContain('folder or ssh machine through a private card');
+		expect(content).toContain('no repository or worktree is attached');
 	});
 });

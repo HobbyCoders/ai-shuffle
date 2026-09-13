@@ -92,6 +92,7 @@ MUTATION_DENY_PREFIXES = (
     "/api/v1/connectors",
     "/api/v1/webhooks",
     "/api/v1/computer-use",
+    "/api/v1/chat-access",
 )
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
