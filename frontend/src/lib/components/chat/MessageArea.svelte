@@ -1750,7 +1750,7 @@
 	});
 </script>
 
-<div class="transcript-shell">
+<div class="transcript-shell" class:has-turn-nav={turnNavigationItems.length >= 2}>
 <div
 	bind:this={containerRef}
 	onscroll={handleScroll}
@@ -2119,6 +2119,16 @@
 		.chat-column {
 			padding: 18px 14px 0;
 			gap: 18px;
+		}
+	}
+
+	/* Match TurnNavigator's visibility. Reserve its hit area even when a wide
+	   window contains a narrow chat pane; keep the usual centering once it fits. */
+	@media (min-width: 640px) and (pointer: fine) {
+		.has-turn-nav .chat-column {
+			width: calc(100% - 40px);
+			margin-left: max(40px, calc((100% - 768px) / 2));
+			padding-left: 24px;
 		}
 	}
 
