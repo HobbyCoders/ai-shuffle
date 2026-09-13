@@ -168,6 +168,11 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
 
         entries: List[ProviderUsageEntry] = []
         for row in rows:
+            # Usage history can outlive a provider (including an in-flight poll
+            # finishing after deletion). Only configured accounts belong here;
+            # fal.ai is configured separately and has no model-provider row.
+            if row["provider_id"] not in names and row["provider_id"] != FAL_USAGE_PROVIDER_ID:
+                continue
             # Retired OAuth fallback snapshots are not Platform billing accounts.
             if row["provider_id"] == OPENAI_API_USAGE_PROVIDER_ID:
                 continue

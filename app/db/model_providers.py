@@ -403,7 +403,9 @@ def delete_model_provider(provider_id: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM model_providers WHERE id = %s", (provider_id,))
-        return cursor.rowcount > 0
+        deleted = cursor.rowcount > 0
+        cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
+        return deleted
 
 
 def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[ModelProviderRow]:

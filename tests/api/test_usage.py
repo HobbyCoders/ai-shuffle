@@ -259,6 +259,11 @@ class TestUsageLimitsProviders:
         from app.db import database as db
         from app.db.async_database import run_sync
 
+        db.create_model_provider(
+            provider_id="progressive-grok", name="grok", provider_type="grok",
+            base_url="https://example.test",
+        )
+
         monitor = provider_usage.ProviderUsageMonitor()
         saved, release = asyncio.Event(), asyncio.Event()
 
@@ -312,6 +317,11 @@ class TestUsageLimitsProviders:
         from app.db import database as db
         from app.db.provider_usage_snapshots import record_provider_usage_failure
 
+        db.create_model_provider(
+            provider_id="prov-openai", name="openai", provider_type="openai",
+            base_url="https://example.test",
+        )
+
         fetched = int(time.time() * 1000)
         if balance is not None:
             db.upsert_provider_usage_snapshot(
@@ -346,6 +356,19 @@ class TestUsageLimitsProviders:
     def test_retired_oauth_snapshot_hidden_without_merging_real_providers(self, balance, configured):
         from app.db import database as db
         from app.db.provider_usage_snapshots import record_provider_usage_failure
+
+        db.create_model_provider(
+            provider_id="prov-chatgpt", name="chatgpt", provider_type="chatgpt",
+            base_url="https://example.test",
+        )
+        db.create_model_provider(
+            provider_id="prov-openai", name="openai", provider_type="openai",
+            base_url="https://example.test",
+        )
+        db.create_model_provider(
+            provider_id="prov-openai-2", name="openai", provider_type="openai",
+            base_url="https://example.test",
+        )
 
         fetched = int(time.time() * 1000)
         db.upsert_provider_usage_snapshot(
@@ -430,9 +453,39 @@ class TestUsageLimitsProviders:
         _assert_claude_fields_unchanged(body)
         assert body["providers"] == []
 
-    def test_deleted_provider_returns_with_null_name(self):
-        """A snapshot whose provider registry row is gone still surfaces, with
-        ``provider_name`` = None (the join simply misses)."""
+    @pytest.mark.parametrize("provider_type", ["grok", "chatgpt", "openrouter", "openai"])
+    def test_account_deletion_removes_usage_and_hides_late_poll(self, provider_type):
+        from app.api.model_providers import router as providers_router
+        from app.api.auth import require_admin
+        from app.db import database as db
+
+        db.create_model_provider(
+            provider_id="removed-account", name="Removed account",
+            provider_type=provider_type, base_url="https://example.test",
+        )
+
+        def save_snapshot():
+            db.upsert_provider_usage_snapshot(
+                "removed-account", provider_type, "SuperGrok",
+                [{"type": "seven_day", "utilization": 0}],
+                {"balance_remaining": 20}, {}, int(time.time() * 1000),
+            )
+
+        save_snapshot()
+        client = _client()
+        client.app.include_router(providers_router)
+        client.app.dependency_overrides[require_admin] = lambda: "admin"
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            assert len(client.get("/api/v1/usage/limits").json()["providers"]) == 1
+            assert client.delete("/api/v1/model-providers/removed-account").status_code == 200
+            assert db.get_all_provider_usage_snapshots() == []
+            assert client.get("/api/v1/usage/limits").json()["providers"] == []
+            save_snapshot()  # An already-running upstream request completes late.
+            assert client.get("/api/v1/usage/limits").json()["providers"] == []
+
+    def test_deleted_provider_is_not_returned(self):
+        """Old snapshots and late poll results must not resurrect an account."""
         from app.db import database as db
 
         db.upsert_provider_usage_snapshot(
@@ -447,13 +500,16 @@ class TestUsageLimitsProviders:
 
         assert resp.status_code == 200
         providers = resp.json()["providers"]
-        assert len(providers) == 1
-        assert providers[0]["provider_id"] == "prov-orphan"
-        assert providers[0]["provider_name"] is None
+        assert providers == []
 
     def test_raw_never_in_response(self):
         """The debug ``raw`` blob must never appear in any providers[] entry."""
         from app.db import database as db
+
+        db.create_model_provider(
+            provider_id="prov-raw", name="chatgpt", provider_type="chatgpt",
+            base_url="https://example.test",
+        )
 
         db.upsert_provider_usage_snapshot(
             provider_id="prov-raw", provider_type="chatgpt", plan_type="pro",
@@ -479,6 +535,23 @@ class TestUsageLimitsProviders:
         OpenAI snapshots without a displayable credits blob stay hidden too;
         SuperGrok subscription snapshots (provider_type='grok') are included."""
         from app.db import database as db
+
+        db.create_model_provider(
+            provider_id="prov-openai", name="openai", provider_type="openai",
+            base_url="https://example.test",
+        )
+        db.create_model_provider(
+            provider_id="prov-xai", name="xai", provider_type="xai",
+            base_url="https://example.test",
+        )
+        db.create_model_provider(
+            provider_id="prov-or", name="openrouter", provider_type="openrouter",
+            base_url="https://example.test",
+        )
+        db.create_model_provider(
+            provider_id="prov-grok", name="grok", provider_type="grok",
+            base_url="https://example.test",
+        )
 
         db.upsert_provider_usage_snapshot(
             provider_id="prov-openai", provider_type="openai", plan_type=None,
@@ -516,6 +589,11 @@ class TestUsageLimitsProviders:
         the per-minute requests/tokens windows are stripped so the popover
         headlines remaining credits."""
         from app.db import database as db
+
+        db.create_model_provider(
+            provider_id="prov-openai", name="openai", provider_type="openai",
+            base_url="https://example.test",
+        )
 
         db.upsert_provider_usage_snapshot(
             provider_id="prov-openai", provider_type="openai", plan_type=None,
