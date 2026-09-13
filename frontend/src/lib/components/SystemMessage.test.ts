@@ -38,6 +38,16 @@ afterEach(() => {
 	cleanup();
 });
 
+it('labels peer receipts as automatically delivered, without an Interrupt action', () => {
+	render(SystemMessage, { message: makeMessage({ systemSubtype: 'agent_message', systemData: {
+		sender: 'child', content: 'The regression test passes.', delivery: 'delivered',
+	} }) });
+	expect(screen.getByText('Agent message')).toBeTruthy();
+	expect(screen.getByText('Delivered automatically')).toBeTruthy();
+	expect(screen.queryByRole('button', { name: /interrupt/i })).toBeNull();
+});
+
+
 describe('SystemMessage — task_updated / task_notification', () => {
 	it('shows the "Task" label, a status chip, and the description summary', () => {
 		const { container } = render(SystemMessage, {

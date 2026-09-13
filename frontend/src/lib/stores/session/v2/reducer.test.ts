@@ -36,6 +36,56 @@ function fold(events: WireEvent[]) {
 	return reduceAll(events);
 }
 
+
+
+describe('voice transcript alongside a working chat agent', () => {
+	it('does not steal the live turn, close its text or settle its tasks', () => {
+		const events = [
+			ev('turn.started', { turn_id: 'chat-turn', profile_id: 'coding' }),
+			ev('assistant.text_delta', { turn_id: 'chat-turn', text: 'Checking ' }),
+			ev('subagent.started', { turn_id: 'chat-turn', task_id: 'child', description: 'Check profiles', agent_name: 'Helper' }),
+			ev('turn.started', { turn_id: 'voice-1' }),
+			ev('message.user', { turn_id: 'voice-1', content: 'How is it going?' }),
+			ev('message.assistant', { turn_id: 'voice-1', content: 'The helper is checking profiles.', model: 'gpt-live-1' }),
+			ev('turn.completed', { turn_id: 'voice-1' }),
+		];
+		const state = fold(events);
+		expect(state.liveTurnId).toBe('chat-turn');
+		expect(state.liveTurnProfileId).toBe('coding');
+		expect(state.isStreaming).toBe(true);
+		expect(state.messages.find(m => m.type === 'subagent')?.agentStatus).toBe('running');
+		expect(state.messages.filter(m => m.type === 'text').map(m => m.content)).toEqual([
+			'Checking ', 'How is it going?', 'The helper is checking profiles.',
+		]);
+	});
+
+	it('a spoken exchange does not unpark background work or overwrite its usage', () => {
+		const before = fold([
+			ev('turn.started', { turn_id: 'work' }),
+			ev('turn.usage', { usage: { input_tokens: 123 } }),
+			ev('turn.parked'),
+		]);
+		const after = reduce(reduce(before, ev('turn.started', { turn_id: 'voice-2' })), ev('turn.completed', { turn_id: 'voice-2', usage: {} }));
+		expect(after.parked).toBe(true);
+		expect(after.usage).toEqual({ input_tokens: 123 });
+		expect(after.liveTurnId).toBe(before.liveTurnId);
+	});
+
+	it('speech and backend text remain separate when their events alternate', () => {
+		const state = fold([
+			ev('turn.started', { turn_id: 'work' }),
+			ev('assistant.text_delta', { turn_id: 'work', text: 'Backend ' }),
+			ev('turn.started', { turn_id: 'voice-3' }),
+			ev('message.assistant', { turn_id: 'voice-3', content: 'Spoken update.' }),
+			ev('turn.completed', { turn_id: 'voice-3' }),
+			ev('assistant.text_delta', { turn_id: 'work', text: 'result.' }),
+		]);
+		expect(state.messages.map(m => m.content)).toEqual(['Backend result.', 'Spoken update.']);
+		expect(state.messages[0].streaming).toBe(true);
+		expect(state.messages[1].streaming).toBe(false);
+	});
+});
+
 // ─── Turn lifecycle ─────────────────────────────────────────────────────────
 
 describe('turn lifecycle', () => {

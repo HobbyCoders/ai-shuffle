@@ -813,6 +813,14 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 	const withSeq = seq > state.lastSeq ? { ...state, lastSeq: seq } : state;
 	state = withSeq;
 
+	// Voice transcripts use synthetic turns for persistence, not execution.
+	// They can arrive while a chat turn is streaming or parked on agents:
+	// their lifecycle must never replace its Stop target or settle its tasks.
+	const voiceTranscript = str(event.turn_id).startsWith('voice-');
+	if (voiceTranscript && ['turn.started', 'turn.completed', 'turn.aborted'].includes(event.type)) {
+		return state;
+	}
+
 	switch (event.type) {
 		// ── Turn lifecycle ──────────────────────────────────────────────
 		case 'turn.started': {
@@ -1306,6 +1314,16 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		// ── Closed assistant message (never merges/opens a stream) ───────
 		case 'message.assistant': {
 			const content = str(event.content);
+			if (voiceTranscript) {
+				// Speech is a separate closed bubble, not the end (or recovery) of
+				// the backend's current text/thinking stream.
+				return appendMessage(state, {
+					id: event.id, role: 'assistant', type: 'text', content,
+					streaming: false, turnId: str(event.turn_id),
+					timestamp: stampTs(event, createdAt) || undefined,
+					...(str(event.model) ? { metadata: { model: str(event.model) } } : {}),
+				}, seq);
+			}
 			const kind = str(event.kind) === 'thinking' ? 'thinking' : 'text';
 			// Quiet-pump suppression, closed / no-delta path (R8 replay parity):
 			// a closed assistant text arriving while we watch the live pump turn is

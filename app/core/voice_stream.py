@@ -137,7 +137,7 @@ def commentary_chunks(text: str):
         yield chunk
 
 
-async def delegate_to_selected_model(session_id: str, transcript: str) -> str:
+async def delegate_to_selected_model(session_id: str, transcript: str, on_submitted=None) -> str:
     from app.core import turn_manager
     from app.core.provider_agent import validate_provider_model
     from app.core.query_options import decode_provider_model
@@ -169,6 +169,11 @@ async def delegate_to_selected_model(session_id: str, transcript: str) -> str:
         # context for the engine without adding a second giant user bubble.
         payload={"user_message_already_recorded": True},
     )
+    if on_submitted is not None:
+        # The call-wide event subscriber follows progress, parking and later
+        # wakes. Do not hold the handoff open or lose results after ten minutes.
+        await on_submitted(turn_id)
+        return ""
     settled = await turn_manager.wait_settled(turn_id, timeout=600)
     if settled is None or settled["state"] == "parked":
         return "Work is continuing in chat. No final result is available yet."
@@ -198,6 +203,11 @@ class VoiceStream:
         self.delegations: set[str] = set()
         self.delegation_task: asyncio.Task | None = None
         self.send_lock = asyncio.Lock()
+        self.flush_lock = asyncio.Lock()
+        self.last_caption_role = None
+        self.progress = None
+        self.transcript_seq = 0
+        self.delegated_seq = 0
 
     @property
     def is_live(self):
@@ -226,17 +236,26 @@ class VoiceStream:
 
     async def flush(self):
         from app.core.turn_recorder import record_voice_exchange
-        user, assistant = self.pending["user"], self.pending["assistant"]
-        self.pending = {"user": "", "assistant": ""}
-        if user or assistant:
-            self.caption_ids["user"] += 1
-            self.caption_ids["assistant"] += 1
-            await record_voice_exchange(self.session_id, user or None, assistant or None, model=self.config["model"])
+        # Checkpoint, handoff and speaker changes can flush concurrently. Keep
+        # their durable turns in arrival order, including during barge-in.
+        async with self.flush_lock:
+            user, assistant = self.pending["user"], self.pending["assistant"]
+            self.pending = {"user": "", "assistant": ""}
+            if user or assistant:
+                self.caption_ids["user"] += 1
+                self.caption_ids["assistant"] += 1
+                await record_voice_exchange(self.session_id, user or None, assistant or None, model=self.config["model"])
 
     async def caption(self, role: str, delta: str, offset: int = 0):
         if not delta:
             return
-        self.transcript.append({"role": role, "text": delta, "offset_ms": offset})
+        # Do not combine overlapping speakers into a user-first ten-second
+        # bucket: it reverses assistant speech that arrived before a barge-in.
+        if self.last_caption_role is not None and role != self.last_caption_role:
+            await self.flush()
+        self.last_caption_role = role
+        self.transcript_seq += 1
+        self.transcript.append({"role": role, "text": delta, "offset_ms": offset, "seq": self.transcript_seq})
         self.pending[role] += delta
         self.last_caption_at = time.monotonic()
         await self.emit({"type": "caption", "role": role, "id": f"{role}:{self.caption_ids[role]}", "delta": delta})
@@ -245,12 +264,12 @@ class VoiceStream:
         if len(self.pending[role]) >= 2000:
             await self.flush()
 
-    async def run_delegation(self, delegation_id: str):
+    async def run_delegation(self, delegation_id: str, entries=None):
         try:
             # Keep the read loop free. Group partial captions into readable
             # turns; the Live delegation event itself carries no task text.
             conversation = []
-            for entry in self.transcript:
+            for entry in (self.transcript if entries is None else entries):
                 if conversation and conversation[-1]["role"] == entry["role"]:
                     conversation[-1]["text"] += entry["text"]
                 else:
@@ -258,11 +277,18 @@ class VoiceStream:
             context = "Live conversation context (only the latest new request needs action):\n" + "".join(
                 f"{entry['role']}: {entry['text'].strip()}\n" for entry in conversation
             )
-            if not any(e["role"] == "user" and e["text"].strip() for e in self.transcript):
+            if not any(e["role"] == "user" and e["text"].strip() for e in conversation):
                 result = "The backend has not received your request. Please repeat it."
             else:
                 await self.flush()
-                result = await delegate_to_selected_model(self.session_id, context)
+                if self.progress is not None:
+                    async def submitted(turn_id):
+                        await self.progress.submitted(turn_id, delegation_id)
+                    result = await delegate_to_selected_model(self.session_id, context, on_submitted=submitted)
+                    if not result:
+                        return  # Progress and final results arrive on the event stream.
+                else:
+                    result = await delegate_to_selected_model(self.session_id, context)
             # Live appends have a 500-token ceiling. <=400 UTF-8 bytes is a
             # conservative bound even without the provider's tokenizer.
             for content in commentary_chunks(result or "The chat task returned no result."):
@@ -336,7 +362,11 @@ class VoiceStream:
                         await self.send({"type": "session.commentary.append", "delegation_id": did,
                                          "content": "The backend is busy with another task. Ask the user to repeat this new request after it finishes."})
                     else:
-                        self.delegation_task = asyncio.create_task(self.run_delegation(did))
+                        # Capture only speech since the previous handoff, before
+                        # yielding. The chat already owns the earlier history.
+                        entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
+                        self.delegated_seq = self.transcript_seq
+                        self.delegation_task = asyncio.create_task(self.run_delegation(did, entries))
                         _workers.add(self.delegation_task)
                         self.delegation_task.add_done_callback(_workers.discard)
                 elif kind in ("error", "session.error"):
@@ -418,6 +448,10 @@ class VoiceStream:
                         history = ([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": seed}]}] if seed else [])
                         if seed:
                             self.transcript.append({"role": "history", "text": seed, "offset_ms": 0})
+                        if self.options["delegation_type"] != "responses":
+                            from app.core.voice_progress import VoiceProgress
+                            self.progress = VoiceProgress(self.session_id, self.send)
+                            await self.progress.open()
                         await self.start_live(history)
                     else:
                         await self.prime_fal()
@@ -426,6 +460,8 @@ class VoiceStream:
                     await run_sync(database.set_session_active, self.session_id, True)
                     await self.emit({"type": "ready", "model": self.config["model"], "sample_rate": 24000})
                     tasks = [asyncio.create_task(self.receive_browser()), asyncio.create_task(self.receive_upstream()), asyncio.create_task(self.checkpoint())]
+                    if self.progress is not None:
+                        tasks.append(asyncio.create_task(self.progress.run()))
                     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                     for task in done:
                         task.result()
@@ -449,6 +485,8 @@ class VoiceStream:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if self.progress is not None:
+                self.progress.close()
             await self.close()
             await self.flush()
             if calls.get(self.session_id) is self:
@@ -468,4 +506,4 @@ def state(session_id: str) -> dict | None:
     if not call:
         return None
     return {"active": not call.closed, "connected": call.connected, "started_at": call.started_at,
-            "model": call.config["model"], "active_tasks": int(bool(call.delegation_task and not call.delegation_task.done()))}
+            "model": call.config["model"], "active_tasks": call.progress.active_count if call.progress is not None else int(bool(call.delegation_task and not call.delegation_task.done()))}

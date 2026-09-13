@@ -541,6 +541,13 @@
 				};
 			}
 
+			case 'agent_message':
+				return {
+					title: 'Agent message', content: String(data.content || ''),
+					badge: data.delivery === 'delivered' ? 'Delivered automatically' : 'Agent message',
+					badgeColor: 'gray', compact: true,
+				};
+
 			case 'task_updated':
 			case 'task_notification': {
 				// Quiet-pump step notification: an internal step of a still-RUNNING

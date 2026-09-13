@@ -1703,6 +1703,16 @@ class SessionRuntime:
             if not isinstance(steer, dict):
                 continue
             row_id = steer.get("id")
+            if not row_id and steer.get("from") and steer.get("text"):
+                # Peer messages have no queued-user row. Their engine receipt
+                # proves delivery; publish that fact for chat/voice observers
+                # rather than silently dropping it or asking the user to interrupt.
+                await recorder.on_event({
+                    "type": "system", "subtype": "agent_message",
+                    "data": {"sender": str(steer["from"]),
+                             "content": str(steer["text"]), "delivery": "delivered"},
+                })
+                continue
             if not row_id:
                 logger.info(
                     "SessionRuntime: steer delivered for %s with no queue id — "
