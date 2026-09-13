@@ -28,6 +28,7 @@ from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
 from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
     DEFAULT_STREAM_DEADLINE_S,
+    StreamDiagnostics,
     StreamDeadlineExceeded,
     deadline_error_payload,
     is_closed_client_error,
@@ -153,16 +154,20 @@ class OpenAIResponsesClient:
             while True:
                 yielded = False
                 client, owned = self._pick_client(owned)
+                diagnostics = StreamDiagnostics(
+                    self.name, self._base_url, request.model, attempt + 1
+                )
                 try:
                     headers = await self._headers()
                     trace_request("openai_responses", body)
                     async with client.stream(
                         "POST", self._base_url, json=body, headers=headers
                     ) as resp:
+                        diagnostics.received_headers(resp)
                         if resp.status_code == 200:
                             normalizer = ResponsesStreamNormalizer()
                             events = with_deadline(
-                                sse_events(resp.aiter_lines()), self._stream_deadline
+                                sse_events(diagnostics.lines()), self._stream_deadline
                             )
                             async for event_name, data in events:
                                 for chunk in normalizer.consume(event_name, data):
@@ -219,6 +224,10 @@ class OpenAIResponsesClient:
                     )
                     return
                 except httpx.TransportError as exc:
+                    evidence = diagnostics.failure(
+                        exc, yielded=yielded,
+                        retrying=not yielded and attempt < self._retry.transport_retries,
+                    )
                     # Pre-stream connection failures retry; mid-stream ones
                     # don't (chunks were already delivered downstream).
                     if not yielded and attempt < self._retry.transport_retries:
@@ -227,7 +236,11 @@ class OpenAIResponsesClient:
                         continue
                     yield StreamChunk(
                         "error",
-                        {"message": f"{type(exc).__name__}: {exc}", "retriable": False},
+                        {
+                            "message": f"{type(exc).__name__}: {exc}",
+                            "retriable": False,
+                            "transport_failure": evidence,
+                        },
                     )
                     return
         finally:

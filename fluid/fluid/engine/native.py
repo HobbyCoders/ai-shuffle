@@ -3607,6 +3607,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if payload.get("stop_reason"):
                     stop_reason = payload["stop_reason"]
             elif chunk.kind == "error":
+                if payload.get("transport_failure"):
+                    usage_totals["transport_failure"] = payload["transport_failure"]
                 if payload.get("provider_requests"):
                     usage_totals["provider_requests"] = payload["provider_requests"]
                 # No ErrorEvent here — _agent_loop decides whether this error

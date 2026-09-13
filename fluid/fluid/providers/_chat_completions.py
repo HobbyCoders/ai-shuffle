@@ -40,6 +40,7 @@ from fluid.providers._retry import (
 from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
     DEFAULT_STREAM_DEADLINE_S,
+    StreamDiagnostics,
     StreamDeadlineExceeded,
     deadline_error_payload,
     is_closed_client_error,
@@ -502,6 +503,9 @@ async def stream_chat_completions(
         while True:
             yielded = False
             client = pick_client()
+            diagnostics = StreamDiagnostics(
+                "chat_completions", url, str(body.get("model", "")), attempt + 1
+            )
             call_deadline = (
                 time.monotonic() + stream_deadline
                 if stream_deadline and stream_deadline > 0
@@ -512,6 +516,7 @@ async def stream_chat_completions(
                 async with client.stream(
                     "POST", url, json=body, headers=request_headers
                 ) as resp:
+                    diagnostics.received_headers(resp)
                     attempt_meta = {
                         "attempt": attempt + 1,
                         "status": resp.status_code,
@@ -556,7 +561,7 @@ async def stream_chat_completions(
                         )
                         return
                     normalizer = ChatCompletionsNormalizer()
-                    events = sse_events(resp.aiter_lines()).__aiter__()
+                    events = sse_events(diagnostics.lines()).__aiter__()
                     starved = False
                     awaiting_first = True
                     # message_start is held until the first chunk after it,
@@ -700,6 +705,10 @@ async def stream_chat_completions(
                 )
                 return
             except httpx.TransportError as exc:
+                evidence = diagnostics.failure(
+                    exc, yielded=yielded,
+                    retrying=not yielded and attempt < retry.transport_retries,
+                )
                 # Pre-stream connection failures retry; mid-stream ones
                 # don't (chunks were already delivered downstream).
                 if attempts and attempts[-1].get("attempt") == attempt + 1:
@@ -718,6 +727,7 @@ async def stream_chat_completions(
                     with_request_evidence({
                         "message": f"{type(exc).__name__}: {exc}",
                         "retriable": False,
+                        "transport_failure": evidence,
                     }),
                 )
                 return

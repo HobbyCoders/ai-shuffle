@@ -16,9 +16,15 @@ Two failures the per-operation httpx timeout cannot see:
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import re
 import time
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any, TypeVar
+
+import httpx
 
 # Generous by design: this is a runaway guard, not a latency budget. A long
 # reasoning call on a slow provider must never trip it, so it sits far above
@@ -26,6 +32,79 @@ from typing import Any, TypeVar
 DEFAULT_STREAM_DEADLINE_S = 900.0
 
 T = TypeVar("T")
+log = logging.getLogger(__name__)
+
+
+class StreamDiagnostics:
+    """Bounded transport evidence; never retain body, URL path, or auth headers."""
+
+    def __init__(self, provider: str, url: str, model: str, attempt: int) -> None:
+        parsed = httpx.URL(url)
+        self.identity = {
+            "request_id": uuid.uuid4().hex,
+            "provider": provider,
+            "host": parsed.host,
+            "port": parsed.port,
+            "scheme": parsed.scheme,
+            "model": model[:160],
+            "attempt": attempt,
+        }
+        self.started = time.monotonic()
+        self.response: httpx.Response | None = None
+        self.headers_after: float | None = None
+        self.last_line_at: float | None = None
+        self.lines_received = 0
+
+    def received_headers(self, response: httpx.Response) -> None:
+        self.response = response
+        self.headers_after = time.monotonic() - self.started
+
+    async def lines(self) -> AsyncIterator[str]:
+        assert self.response is not None
+        async for line in self.response.aiter_lines():
+            self.last_line_at = time.monotonic()
+            self.lines_received += 1
+            yield line
+
+    def failure(
+        self, exc: httpx.TransportError, *, yielded: bool, retrying: bool
+    ) -> dict[str, Any]:
+        now = time.monotonic()
+        response = self.response
+        evidence = {
+            **self.identity,
+            "exception_type": type(exc).__name__,
+            "incomplete_chunked_read": "incomplete chunked read" in str(exc).lower(),
+            "elapsed_seconds": round(now - self.started, 3),
+            "headers_after_seconds": (
+                round(self.headers_after, 3) if self.headers_after is not None else None
+            ),
+            "last_line_age_seconds": (
+                round(now - self.last_line_at, 3) if self.last_line_at is not None else None
+            ),
+            "lines_received": self.lines_received,
+            "chunks_delivered": yielded,
+            "retrying": retrying,
+            "status": response.status_code if response is not None else None,
+            "http_version": response.http_version if response is not None else None,
+            "bytes_received": response.num_bytes_downloaded if response is not None else 0,
+        }
+        # Correlation headers only. Reject arbitrary text and cap their length;
+        # never include cookies, authorization, response bodies, or exception text.
+        if response is not None:
+            evidence["response_ids"] = {
+                key: value for key in ("x-request-id", "request-id", "cf-ray", "x-amzn-trace-id")
+                if (value := response.headers.get(key))
+                and re.fullmatch(r"[A-Za-z0-9_.:;=/-]{1,160}", value)
+            }
+        chain = []
+        current: BaseException | None = exc
+        while current is not None and len(chain) < 5:
+            chain.append(type(current).__name__)
+            current = current.__cause__ or current.__context__
+        evidence["exception_chain"] = chain
+        log.warning("Provider transport failure: %s", json.dumps(evidence, sort_keys=True))
+        return evidence
 
 
 class StreamDeadlineExceeded(Exception):

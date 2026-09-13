@@ -2339,6 +2339,12 @@ class HarnessAdapter(ProviderAdapter):
             }
             if event.raw:
                 usage.update(event.raw)
+                if failure := event.raw.get("transport_failure"):
+                    logger.warning(
+                        "[HarnessAdapter] Provider transport failure engine_session=%s turn=%s: %s",
+                        event.session_id, event.turn_id, json.dumps(failure, sort_keys=True),
+                        extra={"session_id": self._resolve_app_session_id()},
+                    )
             # Per-call context breakdown (fluid >= baf8be0). Set after ``raw``
             # so a stray raw key cannot shadow the real snapshot. Absent rather
             # than None when the engine could not take one, so downstream
