@@ -3,8 +3,8 @@
 	 * StudioTopBar - desktop top bar for the main panel (Studio Noir shell).
 	 *
 	 * Sidebar toggle + breadcrumbs (`project › session title`) on the left; the
-	 * caller's action snippet (git actions, chat utilities) and the account
-	 * badge on the right. It replaces the old AppTopBar tab row: page navigation
+	 * caller's action snippet (git actions, chat utilities) on the right.
+	 * It replaces the old AppTopBar tab row: page navigation
 	 * now lives in the sidebar's workspace nav.
 	 *
 	 * The notification bell used to sit here too. It now lives only in the
@@ -17,8 +17,6 @@
 	 */
 	import type { Snippet } from 'svelte';
 	import { PanelLeft, ChevronRight } from 'lucide-svelte';
-	import { isAdmin, username } from '$lib/stores/auth.svelte';
-	import { ACCOUNT_CHANGED_EVENT, getAccountConnection, getAccountDisplay } from '$lib/api/account';
 	import SessionTitleMenu from './SessionTitleMenu.svelte';
 
 	interface Props {
@@ -45,79 +43,6 @@
 		onOpenProject,
 		actions
 	}: Props = $props();
-
-	let shuffleName = $state('');
-	const accountName = $derived(shuffleName || ($username ?? '').trim());
-
-	$effect(() => {
-		// Account metadata is owner-only; paired guests keep their device name.
-		if (!$isAdmin) { shuffleName = ''; return; }
-		let stopped = false;
-		let version = 0;
-		let pending = false;
-		let again = false;
-		let delay = 30_000;
-		let nextRefresh = 0;
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		function schedule() {
-			clearTimeout(timer);
-			if (!stopped && !document.hidden) timer = setTimeout(refresh, Math.max(0, nextRefresh - Date.now()));
-		}
-		async function refresh() {
-			if (stopped || document.hidden || pending) return;
-			if (Date.now() < nextRefresh) { schedule(); return; }
-			clearTimeout(timer);
-			pending = true;
-			const request = version;
-			try {
-				const connection = await getAccountConnection();
-				if (stopped || request !== version) return;
-				const profile = connection.signed_in && connection.profile_ready !== false
-					? await getAccountDisplay() : null;
-				if (!stopped && request === version) shuffleName = profile?.account.username.trim() ?? '';
-				delay = 30_000;
-			} catch {
-				if (!stopped && request === version) shuffleName = '';
-				delay = Math.min(delay * 2, 300_000);
-			} finally {
-				pending = false;
-				nextRefresh = Date.now() + delay;
-				if (again) { again = false; nextRefresh = 0; }
-				schedule();
-			}
-		}
-		function accountChanged() {
-			version++;
-			shuffleName = '';
-			nextRefresh = 0;
-			delay = 30_000;
-			if (pending) again = true;
-			else void refresh();
-		}
-		function visibilityChanged() {
-			if (document.hidden) clearTimeout(timer);
-			else void refresh();
-		}
-		void refresh();
-		window.addEventListener(ACCOUNT_CHANGED_EVENT, accountChanged);
-		window.addEventListener('focus', refresh);
-		document.addEventListener('visibilitychange', visibilityChanged);
-		return () => {
-			stopped = true;
-			clearTimeout(timer);
-			window.removeEventListener(ACCOUNT_CHANGED_EVENT, accountChanged);
-			window.removeEventListener('focus', refresh);
-			document.removeEventListener('visibilitychange', visibilityChanged);
-		};
-	});
-
-	const initials = $derived.by(() => {
-		const name = accountName;
-		if (!name) return '·';
-		const parts = name.split(/[\s._-]+/).filter(Boolean);
-		const letters = parts.length > 1 ? parts[0][0] + parts[1][0] : name.slice(0, 2);
-		return letters.toUpperCase();
-	});
 </script>
 
 <header class="topbar">
@@ -153,8 +78,6 @@
 		{#if actions}
 			{@render actions()}
 		{/if}
-		<div class="tb-sep" aria-hidden="true"></div>
-		<span class="tb-avatar" title={accountName || 'Account'}>{initials}</span>
 	</div>
 </header>
 
@@ -216,22 +139,6 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		flex: none;
-	}
-
-	.tb-sep { width: 1px; height: 20px; background: var(--border); }
-
-	.tb-avatar {
-		width: 26px;
-		height: 26px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		font-size: 10.5px;
-		font-weight: 600;
-		background: linear-gradient(155deg, oklch(0.42 0.05 200), oklch(0.28 0.03 250));
-		color: var(--foreground);
-		box-shadow: 0 0 0 1px var(--border);
 		flex: none;
 	}
 
