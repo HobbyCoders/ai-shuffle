@@ -5,7 +5,8 @@ import { get } from 'svelte/store';
 import { activeSession } from '$lib/stores/active-session';
 import { appMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 import ControlsDock from './ControlsDock.svelte';
-import { loadVoiceSettings } from '$lib/api/voice';
+import { loadVoiceSettings, type VoiceSessionConfig } from '$lib/api/voice';
+import { resourceSync } from '$lib/services/resource-sync';
 import '../../test-stubs/composer-dom';
 import { api, getUsageLimits } from '$lib/api/client';
 import { getModels, hydrateModelRegistry } from '$lib/constants/models';
@@ -97,6 +98,94 @@ describe('ControlsDock split controls', () => {
   renderDock();
   await waitFor(() => expect((screen.getByRole('button', { name: /^Model:/ }) as HTMLButtonElement).disabled).toBe(false));
   expect(screen.queryByRole('button', { name: 'Model: GPT Live 1' })).toBeNull();
+  request.mockRestore();
+ });
+ it('does not reload the voice binding on transcript or model selection updates', async () => {
+  const request = vi.spyOn(api, 'get').mockResolvedValue({ voice_model: 'gpt-live-1' });
+  await loadVoiceSettings(true);
+  setLane('voice');
+  activeSession.setModelOverride('sonnet');
+  renderDock();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Model: Sonnet' })).toBeTruthy());
+  const labels: string[] = [];
+  const button = screen.getByRole('button', { name: 'Model: Sonnet' });
+  const observer = new MutationObserver(() => labels.push(button.getAttribute('aria-label') ?? ''));
+  observer.observe(button, { attributes: true, attributeFilter: ['aria-label'] });
+  try {
+   activeSession.addSystemMessage('Voice transcript updated');
+   await tick();
+   await new Promise(resolve => setTimeout(resolve, 0));
+   expect(labels).toEqual([]);
+   activeSession.setModelOverride('opus');
+   await tick();
+   await new Promise(resolve => setTimeout(resolve, 0));
+   expect(labels).toEqual(['Model: Opus']);
+   expect(get(activeSession).modelOverride).toBe('opus');
+  } finally {
+   observer.disconnect();
+   request.mockRestore();
+  }
+ });
+ it('keeps a pinned voice session stable through updates and a settings refresh', async () => {
+  let resolveConfig!: (config: VoiceSessionConfig) => void;
+  const request = vi.spyOn(api, 'get').mockImplementation(path => path.endsWith('/config')
+   ? new Promise(resolve => { resolveConfig = resolve; }) : Promise.resolve({}));
+  activeSession.switchSession('voice-binding');
+  await waitFor(() => expect(get(activeSession).sessionId).toBe('voice-binding'));
+  activeSession.reconcileSessionMode([{ id: 'voice-binding', mode: 'voice' }]);
+  activeSession.setModelOverride('sonnet');
+  renderDock();
+  await waitFor(() => expect(resolveConfig).toBeTypeOf('function'));
+  resolveConfig({ model: 'gpt-live-1', voice: 'alloy', provider_id: 'voice-provider' });
+  const button = await screen.findByRole('button', { name: 'Model: Sonnet' });
+  const configCalls = () => request.mock.calls.filter(([path]) => path.endsWith('/config')).length;
+  expect(configCalls()).toBe(1);
+  await fireEvent.click(button);
+  activeSession.addSystemMessage('Voice transcript updated');
+  activeSession.setModelOverride('opus');
+  await tick();
+  expect(screen.getByRole('listbox', { name: 'Model' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Model: Opus' })).toBeTruthy();
+  expect(configCalls()).toBe(1);
+  resourceSync.invalidate(['settings']);
+  await waitFor(() => expect(configCalls()).toBe(2));
+  expect(screen.getByRole('button', { name: 'Model: Opus' })).toBeTruthy();
+  expect(screen.getByRole('listbox', { name: 'Model' })).toBeTruthy();
+  resolveConfig({ model: 'gpt-realtime-2.1', voice: 'alloy', provider_id: 'voice-provider' });
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Model: GPT Realtime 2.1' }) as HTMLButtonElement).disabled).toBe(true));
+  expect(screen.queryByRole('listbox', { name: 'Model' })).toBeNull();
+  expect(get(activeSession).modelOverride).toBe('opus');
+  activeSession.reconcileSessionMode([{ id: 'voice-binding', mode: 'code' }]);
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Model: Opus' }) as HTMLButtonElement).disabled).toBe(false));
+  request.mockRestore();
+ });
+ it('discards a pending voice config when switching sessions or leaving voice mode', async () => {
+  const pending = new Map<string, (config: VoiceSessionConfig) => void>();
+  const request = vi.spyOn(api, 'get').mockImplementation(path => path.endsWith('/config')
+   ? new Promise(resolve => { pending.set(path, resolve); }) : Promise.resolve({}));
+  activeSession.switchSession('voice-old');
+  await waitFor(() => expect(get(activeSession).sessionId).toBe('voice-old'));
+  activeSession.reconcileSessionMode([{ id: 'voice-old', mode: 'voice' }]);
+  renderDock();
+  await waitFor(() => expect(pending.has('/voice/sessions/voice-old/config')).toBe(true));
+  activeSession.switchSession('voice-new');
+  await waitFor(() => expect(get(activeSession).sessionId).toBe('voice-new'));
+  activeSession.reconcileSessionMode([{ id: 'voice-new', mode: 'voice' }]);
+  activeSession.setModelOverride('sonnet');
+  await waitFor(() => expect(pending.has('/voice/sessions/voice-new/config')).toBe(true));
+  pending.get('/voice/sessions/voice-new/config')!({ model: 'gpt-live-1', voice: 'alloy', provider_id: null });
+  await screen.findByRole('button', { name: 'Model: Sonnet' });
+  pending.get('/voice/sessions/voice-old/config')!({ model: 'gpt-live-1', voice: 'alloy', provider_id: null, options: { delegation_type: 'responses' } });
+  await tick();
+  expect((screen.getByRole('button', { name: 'Model: Sonnet' }) as HTMLButtonElement).disabled).toBe(false);
+  resourceSync.invalidate(['settings']);
+  await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/config')).length).toBe(3));
+  activeSession.reconcileSessionMode([{ id: 'voice-new', mode: 'chat' }]);
+  await tick();
+  pending.get('/voice/sessions/voice-new/config')!({ model: 'gpt-realtime-2.1', voice: 'alloy', provider_id: null });
+  await tick();
+  expect((screen.getByRole('button', { name: 'Model: Sonnet' }) as HTMLButtonElement).disabled).toBe(false);
+  expect(get(activeSession).modelOverride).toBe('sonnet');
   request.mockRestore();
  });
  it('does not label a fresh provider-only composer with the bundled Sonnet default', async () => {

@@ -205,13 +205,23 @@
 	let voiceRevision = $state(0);
 	watchResources(['settings'], () => { voiceRevision++; });
 	const voiceLane = $derived($activeSession.mode === 'voice');
+	// Depend on the binding, not the whole store: transcript/usage updates
+	// must not clear and reload the voice engine (or close the model picker).
+	const voiceSessionId = $derived($activeSession.sessionId);
+	let configSessionId: string | null | undefined;
 	const modelLocked = $derived(voiceLane && (!voiceEngine || !usesDelegation(voiceEngine, voiceOptions)));
 	$effect(() => {
-		const id = $activeSession.sessionId;
+		const id = voiceSessionId;
 		const voice = voiceLane;
 		void voiceRevision;
 		let stale = false;
-		voiceEngine = null;
+		// Retain the resolved binding during a settings refresh, but never
+		// carry it into another session or out of the voice lane.
+		if (!voice || id !== configSessionId) {
+			voiceEngine = null;
+			voiceOptions = undefined;
+		}
+		configSessionId = id;
 		if (voice) {
 			const request = id ? getVoiceSessionConfig(id) : loadVoiceSettings().then(s => ({model:s.voice_model,options:s.voice_options}));
 			void request.then(config => {
