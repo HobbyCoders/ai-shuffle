@@ -197,8 +197,10 @@ def resolve_local_checkout(
     """The ``checkouts`` row materializing this session's project on THIS runner,
     honoring ``session.branch`` (base checkout when no branch), or ``None``.
 
-    ``None`` is the honest "not on this device" state — the project exists only on
-    other runners (adopt surfaces the 409). Pure lookup: it does not materialize.
+    Prefer a row whose directory exists when an older checkout has moved.
+    ``None`` means no matching row on this runner. If all directories are gone,
+    retain the oldest row for metadata callers; ``resolve_existing_cwd`` rejects
+    its missing path. This lookup never materializes a checkout.
     """
     project = resolve_project_v2(session_row)
     if not project:
@@ -206,9 +208,23 @@ def resolve_local_checkout(
     if runner_id is None:
         runner_id = settings.effective_instance_id
     branch = _effective_branch(session_row)
-    return checkouts_db.get_checkout_with_legacy_fallback(
-        project["id"], runner_id, branch=branch
+    return _local_checkout(project["id"], runner_id, branch=branch)
+
+
+def _local_checkout(
+    project_id: str, runner_id: str, branch: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    # A moved checkout leaves the old row behind. Prefer an existing directory
+    # among this runner's candidates, without falling back to another branch.
+    rows = checkouts_db.list_checkouts_with_legacy_fallback(
+        project_id, runner_id, branch=branch
     )
+    for row in rows:
+        path = row.get("path")
+        if path and os.path.isdir(path):
+            return row
+    # Metadata callers still need the recorded checkout when its folder is gone.
+    return rows[0] if rows else None
 
 
 def has_local_base_checkout(
@@ -222,18 +238,16 @@ def has_local_base_checkout(
     before transferring ownership. Requiring an already-existing BRANCH checkout
     here would reject sessions whose branches can be recovered from the remote.
 
-    True iff ``resolve_project_v2`` resolves, its base ``checkouts`` row (branch
-    NULL, legacy-fallback honored) exists, AND that row's ``path`` is a directory
-    on this runner's disk. Pure read — never materializes.
+    True iff ``resolve_project_v2`` resolves and any matching base checkout
+    (branch NULL, legacy-fallback honored) has a directory on this runner's disk.
+    Pure read — never materializes.
     """
     project = resolve_project_v2(session_row)
     if not project:
         return False
     if runner_id is None:
         runner_id = settings.effective_instance_id
-    row = checkouts_db.get_checkout_with_legacy_fallback(
-        project["id"], runner_id, branch=None
-    )
+    row = _local_checkout(project["id"], runner_id)
     if not row:
         return False
     path = row.get("path")

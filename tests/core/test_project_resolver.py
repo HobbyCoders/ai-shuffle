@@ -460,3 +460,56 @@ def test_has_local_base_checkout_wrong_runner_false(mock_db, tmp_path):
     assert project_resolver.has_local_base_checkout(
         {"id": "hb6", "project_v2_id": pv2["id"]}
     ) is False
+
+@pytest.mark.parametrize("branch", [None, "feature-x"])
+@pytest.mark.parametrize("runner", [RUNNER, ""])
+def test_moved_checkout_resolves_existing_candidate(mock_db, monkeypatch, tmp_path, branch, runner):
+    from app.api import git_helpers
+
+    pv2 = projects_v2.upsert_project("git:moved", name="Moved")
+    old_path = tmp_path / "old"
+    live_path = tmp_path / "live"
+    old_path.mkdir()
+    live_path.mkdir()
+    # Use the production writer: registering the new path retains the old row.
+    old = checkouts_db.upsert_checkout(pv2["id"], runner, str(old_path), branch=branch)
+    live = checkouts_db.upsert_checkout(pv2["id"], runner, str(live_path), branch=branch)
+    mock_db.cursor().execute(
+        "UPDATE checkouts SET created_at = %s WHERE id = %s",
+        ("2000-01-01", old["id"]),
+    )
+    old_path.rmdir()
+    session = {"id": "moved-session", "project_v2_id": pv2["id"], "branch": branch}
+    monkeypatch.setattr(git_helpers.database, "get_session", lambda sid: session)
+    monkeypatch.setattr(
+        project_resolver.checkout_manager, "ensure_checkout",
+        lambda *a, **kw: pytest.fail("Read must not materialize a checkout"),
+    )
+    assert project_resolver.resolve_local_checkout(session)["id"] == live["id"]
+    assert project_resolver.resolve_existing_cwd(session) == str(live_path)
+    if branch is None:
+        assert project_resolver.has_local_base_checkout(session)
+    git_helpers.invalidate_working_dir_cache()
+    try:
+        assert git_helpers.get_working_dir("legacy-project", session_id=session["id"]) == str(live_path)
+    finally:
+        git_helpers.invalidate_working_dir_cache()
+    assert len(checkouts_db.list_checkouts(pv2["id"])) == 2
+
+
+def test_missing_branch_does_not_use_live_base_or_other_runner(mock_db, tmp_path):
+    pv2 = projects_v2.upsert_project("git:isolated", name="Isolated")
+    checkouts_db.upsert_checkout(pv2["id"], RUNNER, str(tmp_path))
+    checkouts_db.upsert_checkout(pv2["id"], "other", str(tmp_path), branch="feature-x")
+    session = {"project_v2_id": pv2["id"], "branch": "feature-x"}
+    assert project_resolver.resolve_existing_cwd(session) is None
+
+
+def test_missing_exact_runner_does_not_use_live_legacy_candidate(mock_db, tmp_path):
+    pv2 = projects_v2.upsert_project("git:precedence", name="Precedence")
+    missing = checkouts_db.upsert_checkout(pv2["id"], RUNNER, str(tmp_path / "missing"))
+    checkouts_db.upsert_checkout(pv2["id"], "", str(tmp_path))
+    session = {"project_v2_id": pv2["id"]}
+    assert project_resolver.resolve_local_checkout(session)["id"] == missing["id"]
+    assert project_resolver.resolve_existing_cwd(session) is None
+    assert not project_resolver.has_local_base_checkout(session)
