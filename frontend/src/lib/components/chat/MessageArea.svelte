@@ -1421,6 +1421,35 @@
 		};
 	});
 
+	// Follow rendered height, not just the last message's data. Tool results,
+	// work-log folds and asynchronous Markdown can lay out after the content
+	// effect's scroll, without changing the viewport or last-message signal.
+	$effect(() => {
+		if (!chatColumnRef || !containerRef || !isMounted) return;
+		let raf: number | null = null;
+		const observer = new ResizeObserver(() => {
+			if (raf !== null) return;
+			raf = requestAnimationFrame(async () => {
+				raf = null;
+				if (!containerRef) return;
+				if (currentTurnAnchorId) {
+					scheduleCurrentTurnAnchorMaintenance();
+					return;
+				}
+				refreshLatestTurnTailReserve();
+				await tick();
+				// Upward input can release following while the layout work is queued.
+				if (shouldAutoScroll) scrollToBottom();
+				updateJumpToLatestVisibility();
+			});
+		});
+		observer.observe(chatColumnRef);
+		return () => {
+			observer.disconnect();
+			if (raf !== null) cancelAnimationFrame(raf);
+		};
+	});
+
 	// Re-pin to the bottom once a late-loading image/video actually decodes.
 	//
 	// Screenshots (tool results) and generated media render via {@html} with no

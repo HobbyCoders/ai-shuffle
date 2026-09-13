@@ -85,6 +85,36 @@ describe('isNearBottom', () => {
 });
 
 describe('nextStickToBottom', () => {
+	it('keeps following when a content collapse clamps the viewport to the new bottom', () => {
+		expect(nextStickToBottom(true, metrics(BOTTOM), metrics(BOTTOM - 300, 1700))).toBe(true);
+	});
+
+	it('keeps following when the composer shrinks and the viewport grows', () => {
+		expect(nextStickToBottom(true, metrics(BOTTOM), metrics(BOTTOM - 100, 2000, 700))).toBe(true);
+	});
+
+	it('does not treat upward scroll anchoring during collapse as reader intent', () => {
+		expect(nextStickToBottom(true, metrics(BOTTOM - 100), metrics(BOTTOM - 400, 1700))).toBe(true);
+	});
+
+	it('does not resume a paused reader when collapse clamps to the bottom', () => {
+		expect(nextStickToBottom(false, metrics(BOTTOM - 100), metrics(BOTTOM - 300, 1700))).toBe(false);
+	});
+
+	it('resumes on a downward return to the new bottom when the old gap was zero', () => {
+		// Upward input released following, but its scroll event was swallowed by
+		// the programmatic guard. Growth then left the cached metrics at the old bottom.
+		expect(nextStickToBottom(false, metrics(BOTTOM), metrics(BOTTOM + 300, 2300))).toBe(true);
+	});
+
+	it('does not release when reflow moves upward while increasing the bottom gap', () => {
+		expect(nextStickToBottom(true, metrics(BOTTOM), metrics(BOTTOM - 25, 3000, 812))).toBe(true);
+	});
+
+	it('preserves a wheel/touch release during the same reflow', () => {
+		expect(nextStickToBottom(false, metrics(BOTTOM), metrics(BOTTOM - 25, 3000, 812))).toBe(false);
+	});
+
 	it('releases on a single upward notch inside the near-bottom band', () => {
 		expect(nextStickToBottom(true, metrics(BOTTOM), metrics(BOTTOM - 40))).toBe(false);
 	});

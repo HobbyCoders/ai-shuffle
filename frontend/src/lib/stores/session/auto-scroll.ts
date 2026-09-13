@@ -150,16 +150,23 @@ export function nextStickToBottom(
 	const nearThreshold = opts.nearBottomThreshold ?? NEAR_BOTTOM_THRESHOLD;
 	const upDelta = opts.userScrollUpMinDelta ?? USER_SCROLL_UP_MIN_DELTA;
 
-	// Direction takes priority over proximity: a small scroll-up must not be
-	// undone just because the reader is still inside the near-bottom band.
+	// Reflow, content-visibility estimates and viewport resizing can move the
+	// scroll position in either direction. Only infer upward intent against
+	// unchanged geometry; wheel/touch intent still releases during reflow.
+	const layoutUnchanged = prev.scrollHeight === next.scrollHeight
+		&& prev.clientHeight === next.clientHeight;
+	const previousGap = distanceFromBottom(prev);
+	const nextGap = distanceFromBottom(next);
 	const scrolledUpBy = prev.scrollTop - next.scrollTop;
-	if (scrolledUpBy >= upDelta) return false;
+	if (layoutUnchanged && scrolledUpBy >= upDelta) return false;
 
 	// Once released (including by wheel/touch intent), only a downward return
 	// can resume following. Stationary/upward events and layout changes near
 	// the bottom are not permission to take the viewport back from the reader.
+	// The cached gap may still be zero if growth did not emit a scroll event.
+	// A downward arrival at the actual bottom must resume in that case too.
 	const returningDown = next.scrollTop > prev.scrollTop
-		&& distanceFromBottom(next) < distanceFromBottom(prev);
+		&& (nextGap < previousGap || nextGap <= 1);
 	if (isNearBottom(next, nearThreshold) && (current || returningDown)) return true;
 
 	// Downward / sideways / sub-threshold movement away from the bottom: don't
