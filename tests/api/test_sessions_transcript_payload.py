@@ -322,9 +322,9 @@ class TestGetSessionPagination:
 
 
 class TestLiveEndpointPayload:
-    def _live(self, api_client, query=""):
+    def _live(self, api_client, query="", session_fields=None):
         client, mock_db = api_client
-        mock_db.get_session.return_value = dict(SESSION_ROW)
+        mock_db.get_session.return_value = {**SESSION_ROW, **(session_fields or {})}
         transcript, _ = _store_transcript(6)
         transcript[1]["toolInput"] = {"content": "w" * 30_000}
         with patch("app.core.message_resolver.resolve_working_dir", return_value="/w"), \
@@ -354,6 +354,21 @@ class TestLiveEndpointPayload:
         tool_msg = [m for m in body["messages"] if m.get("toolInput")][0]
         assert len(tool_msg["toolInput"]["content"]) < 3000
         assert tool_msg["metadata"]["toolInputTruncated"] is True
+
+    @pytest.mark.parametrize("project_id,project_v2_id", [
+        ("ai-shuffle", "pv2-local"),
+        (None, "pv2-remote"),
+        (None, None),
+    ])
+    def test_metadata_only_snapshot_restores_project_identity(self, api_client, project_id, project_v2_id):
+        response = self._live(api_client, "?include_messages=false", {
+            "project_id": project_id,
+            "project_v2_id": project_v2_id,
+        })
+        assert response.status_code == 200
+        meta = response.json()["session_meta"]
+        assert meta["project_id"] == project_id
+        assert meta["project_v2_id"] == project_v2_id
 
     def test_metadata_only_snapshot_still_reports_a_window(self, api_client):
         body = self._live(api_client, "?include_messages=false").json()

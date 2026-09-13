@@ -52,7 +52,7 @@
 	 *       | 'slow_down' | 'complete', provider? } (terminal failure = HTTP 400)
 	 *   • DELETE /model-providers/{id}               → draft cleanup
 	 */
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, untrack } from 'svelte';
 	import { Loader2, Copy, Check, ExternalLink, AlertCircle } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import {
@@ -83,9 +83,9 @@
 
 	let { onDone, onCancel, onBusyChange, existingProviderId, onConnected }: Props = $props();
 
-	// Draft mode owns (creates + deletes) the row; reconnect mode does not.
-	// A non-reactive const is fine — props don't change post-mount here.
-	const ownsRow = !existingProviderId;
+	// Ownership belongs to this enrollment, not later prop updates.
+	const initialProviderId = untrack(() => existingProviderId);
+	const ownsRow = !initialProviderId;
 
 	type Phase = 'create' | 'starting' | 'awaiting' | 'finishing' | 'error';
 
@@ -300,9 +300,9 @@
 	}
 
 	onMount(() => {
-		if (existingProviderId) {
+		if (initialProviderId) {
 			// RECONNECT: reuse the existing row, skip create, go straight to device/start.
-			providerId = existingProviderId;
+			providerId = initialProviderId;
 			startDevice();
 		} else {
 			createDraft();

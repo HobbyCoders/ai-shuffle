@@ -629,9 +629,13 @@ class HarnessAdapter(ProviderAdapter):
             try:
                 from app.core.config import settings
 
-                if settings.fluid_code_mode or settings.fluid_continual or settings.fluid_memory_enabled:
+                app_session_id = self._resolve_app_session_id()
+                # Auxiliary requests have no memory owner or learning journal.
+                if app_session_id and (
+                    settings.fluid_code_mode or settings.fluid_continual or settings.fluid_memory_enabled
+                ):
                     from app.core.fluid_memory import session_memory
-                    skills, memory_project = session_memory(self._resolve_app_session_id(), options.cwd)
+                    skills, memory_project = session_memory(app_session_id, options.cwd)
                     try:
                         # Opportunistic lifecycle pass, mirroring fluid's own
                         # loader (interval-gated, deterministic, archive-not-
@@ -646,7 +650,7 @@ class HarnessAdapter(ProviderAdapter):
                     native_ctx.extra.setdefault("recall_store", skills)
                     native_ctx.extra.setdefault("memory_store", skills)
                     native_ctx.extra.setdefault("memory_project", memory_project)
-                    skills.journal_context(session_id=self._resolve_app_session_id(), project=memory_project)
+                    skills.journal_context(session_id=app_session_id, project=memory_project)
                     synthesizer = None
                     if settings.fluid_continual:
                         # Materialized HERE rather than letting NativeLoop
@@ -1416,6 +1420,17 @@ class HarnessAdapter(ProviderAdapter):
             signature = _task_roster_signature(contract)
             if signature == self._task_roster_signature:
                 return False
+            from app.core.agent_provider_models import available_subagents
+
+            declared = await asyncio.to_thread(
+                available_subagents,
+                (options.extra or {}).get("profile_id"),
+                (options.extra or {}).get("provider_id"),
+            )
+            options.extra["declared_agents"] = [
+                {"name": target.name, "description": target.description}
+                for target in declared
+            ]
             _install_task_contract(self._registry, contract)
             compiled = await asyncio.to_thread(
                 self._compile_prompt_sections,
@@ -1478,7 +1493,10 @@ class HarnessAdapter(ProviderAdapter):
             return None
         try:
             from app.core.fluid_memory import session_memory
-            store, project = session_memory(self._resolve_app_session_id(), self._options.cwd)
+            app_session_id = self._resolve_app_session_id()
+            if not app_session_id:
+                return None
+            store, project = session_memory(app_session_id, self._options.cwd)
             section = store.render_memory_section(project)
             if not section:
                 return None
@@ -3970,36 +3988,16 @@ _DEFERRED_CATALOG_HEADER = (
 
 
 def _skill_store_tool_specs(codemode: Any) -> Dict[str, Any]:
-    """``{"save_skill": spec, "delete_skill": spec}`` for a session with a
-    skill store, or ``{}``.
-
-    fluid registers the pair in ``register_code_mode_tools`` (called from
-    ``NativeLoop.__init__``), i.e. after the app compiles its prompt. The
-    specs are read off a throwaway registry so the catalog carries fluid's
-    own text and schema rather than a copy that could drift. Best-effort:
-    any failure means the pair is simply absent, as before.
-    """
+    """Persistence specs without registering tools before the engine is built."""
     if getattr(codemode, "skills", None) is None:
         return {}
-    try:
-        from fluid.codemode.session import register_code_mode_tools
+    from fluid.codemode.session import skill_store_tool_specs
 
-        scratch = ToolRegistry()
-        register_code_mode_tools(scratch, codemode)
-        out: Dict[str, Any] = {}
-        for name in ("save_skill", "delete_skill"):
-            spec = scratch.get(name)
-            if spec is not None:
-                out[name] = spec
-        return out
-    except Exception:  # noqa: BLE001 — the catalog is best-effort
-        logger.debug("[HarnessAdapter] skill-store tool specs unavailable", exc_info=True)
-        return {}
+    return skill_store_tool_specs()
 
 
-# fluid's Skill description talks about "calling" the tool; in code mode the
-# only way to reach it is the import below, and the audit found models trying
-# the direct-tool form first (P7). Spliced onto the catalog entry only.
+# The deferred one-liner omits the import guidance at the end of Skill's
+# description. Keep that guidance visible even when its full spec is deferred.
 _SKILL_CODE_MODE_NOTE = (
     "In code mode reach it with `from tools.Skill import Skill` and "
     "`Skill(name=\"<skill>\")` inside run_python."
@@ -4112,8 +4110,6 @@ def _code_mode_tool_sections(
             f"`{leaf}({', '.join(params)})`",
         ]
         description = (getattr(spec, "description", "") or "").strip()
-        if leaf == "Skill":
-            description = (description + " " + _SKILL_CODE_MODE_NOTE).strip()
         if description:
             lines.append(description)
         if not getattr(spec, "code_mode_allowed", True):
@@ -4555,6 +4551,7 @@ def _task_roster_signature(contract: Any) -> str:
         {
             "description": getattr(contract, "description", ""),
             "schema": getattr(contract, "input_schema", {}),
+            "targets": [target.as_dict() for target in getattr(contract, "targets", ())],
         },
         sort_keys=True, default=str,
     )

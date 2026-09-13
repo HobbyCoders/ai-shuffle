@@ -118,8 +118,14 @@ async def _fake_provider_client(kind, options):
     return object(), None
 
 
-async def _connect(monkeypatch, tmp_path, model: str):
+async def _connect(monkeypatch, tmp_path, model: str, *, owned: bool = True):
     import app.core.provider.harness_adapter as ha
+    from app.db import database
+
+    extra = {"fluid_provider": "openai_responses"}
+    if owned:
+        session = database.create_session("guidance-session", "default", model=model)
+        extra["app_session_id"] = session["id"]
 
     monkeypatch.setattr(ha, "NativeLoop", _CtxLoop)
     monkeypatch.setattr(ha, "Synthesizer", _CapturingSynthesizer)
@@ -129,10 +135,20 @@ async def _connect(monkeypatch, tmp_path, model: str):
         SessionOptions(
             model=model,
             cwd=str(tmp_path),
-            extra={"fluid_provider": "openai_responses"},
+            extra=extra,
         )
     )
     return _CapturingSynthesizer.kwargs
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_request_does_not_start_guidance_synthesis(
+    monkeypatch, tmp_path, install
+):
+    _skills, home = install
+    _write_guidance(home, "glm", "Verify writes by reading them back.")
+
+    assert await _connect(monkeypatch, tmp_path, GLM, owned=False) == {}
 
 
 @pytest.mark.asyncio

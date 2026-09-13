@@ -7,7 +7,7 @@
 	 *   • DRAFT (default): CREATES a placeholder `grok` row on mount and OWNS it.
 	 *   • RECONNECT: reuses an existing row; bail paths NEVER delete the row.
 	 */
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, untrack } from 'svelte';
 	import { Loader2, Copy, Check, ExternalLink, AlertCircle } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import {
@@ -29,7 +29,9 @@
 
 	let { onDone, onCancel, onBusyChange, existingProviderId, onConnected }: Props = $props();
 
-	const ownsRow = !existingProviderId;
+	// Ownership belongs to this enrollment, not later prop updates.
+	const initialProviderId = untrack(() => existingProviderId);
+	const ownsRow = !initialProviderId;
 
 	type Phase = 'create' | 'starting' | 'awaiting' | 'finishing' | 'error';
 
@@ -209,8 +211,8 @@
 	}
 
 	onMount(() => {
-		if (existingProviderId) {
-			providerId = existingProviderId;
+		if (initialProviderId) {
+			providerId = initialProviderId;
 			startDevice();
 		} else {
 			createDraft();

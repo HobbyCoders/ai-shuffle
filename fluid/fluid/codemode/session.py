@@ -691,6 +691,45 @@ class CodeModeSession:
 
 # ── registration ──────────────────────────────────────────────────────────
 
+def skill_store_tool_specs() -> dict[str, ToolSpec]:
+    """Persistence tool specs, available before a code-mode session is registered."""
+    return {
+        "save_skill": ToolSpec(
+            name="save_skill",
+            description=(
+                "Persist a reusable Python skill module across sessions. It "
+                "is imported with `from skills import <name>` in the run_python kernel. Module "
+                "docstring required (first line = one-sentence description); "
+                "define a function named like the skill. Include a pure "
+                "_selftest() (inline fixture data, no tool calls) — it runs "
+                "before the skill is accepted, and again whenever the source "
+                "changes."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "snake_case identifier"},
+                    "source": {"type": "string", "description": "full module source"},
+                },
+                "required": ["name", "source"],
+            },
+            risk="write",
+            source=SKILLS_SOURCE,
+        ),
+        "delete_skill": ToolSpec(
+            name="delete_skill",
+            description="Delete a persistent skill by name.",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+            risk="write",
+            source=SKILLS_SOURCE,
+        ),
+    }
+
+
 def register_code_mode_tools(
     registry: ToolRegistry,
     session: CodeModeSession,
@@ -822,42 +861,6 @@ def register_code_mode_tools(
             return ToolOutcome(text=f"skill {name!r} deleted")
         return ToolOutcome(text=f"no such skill: {name!r}", is_error=True)
 
-    registry.register_builtin(
-        ToolSpec(
-            name="save_skill",
-            description=(
-                "Persist a reusable Python skill module across sessions. It "
-                "is imported with `from skills import <name>` in the run_python kernel. Module "
-                "docstring required (first line = one-sentence description); "
-                "define a function named like the skill. Include a pure "
-                "_selftest() (inline fixture data, no tool calls) — it runs "
-                "before the skill is accepted, and again whenever the source "
-                "changes."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "snake_case identifier"},
-                    "source": {"type": "string", "description": "full module source"},
-                },
-                "required": ["name", "source"],
-            },
-            risk="write",
-            source=SKILLS_SOURCE,
-        ),
-        _save_skill,
-    )
-    registry.register_builtin(
-        ToolSpec(
-            name="delete_skill",
-            description="Delete a persistent skill by name.",
-            input_schema={
-                "type": "object",
-                "properties": {"name": {"type": "string"}},
-                "required": ["name"],
-            },
-            risk="write",
-            source=SKILLS_SOURCE,
-        ),
-        _delete_skill,
-    )
+    specs = skill_store_tool_specs()
+    registry.register_builtin(specs["save_skill"], _save_skill)
+    registry.register_builtin(specs["delete_skill"], _delete_skill)

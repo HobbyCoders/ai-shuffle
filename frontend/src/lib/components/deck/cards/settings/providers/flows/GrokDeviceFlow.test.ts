@@ -72,6 +72,27 @@ beforeEach(() => {
 
 afterEach(() => cleanup());
 
+describe('GrokDeviceFlow — enrollment ownership', () => {
+	it.each([null, 'prov-9'])('keeps the original row and ownership after prop updates (%s)', async (existingProviderId) => {
+		mocks.createModelProvider.mockResolvedValue({ id: 'draft-1' });
+		const onCancel = vi.fn();
+		const { findByText, rerender } = render(GrokDeviceFlow, {
+			props: { existingProviderId, onDone: vi.fn(), onCancel }
+		});
+		await findByText('Cancel');
+		await rerender({ existingProviderId: existingProviderId ? null : 'prov-other' });
+		await fireEvent.click(await findByText('Cancel'));
+		await waitFor(() => expect(onCancel).toHaveBeenCalledOnce());
+		expect(mocks.xaiDeviceStart).toHaveBeenCalledExactlyOnceWith(existingProviderId ?? 'draft-1');
+		if (existingProviderId) {
+			expect(mocks.createModelProvider).not.toHaveBeenCalled();
+			expect(mocks.deleteModelProvider).not.toHaveBeenCalled();
+		} else {
+			expect(mocks.deleteModelProvider).toHaveBeenCalledExactlyOnceWith('draft-1');
+		}
+	});
+});
+
 describe('GrokDeviceFlow — reconnect mode (existingProviderId)', () => {
 	it('mount starts device on the existing row and does NOT create one', async () => {
 		render(GrokDeviceFlow, {

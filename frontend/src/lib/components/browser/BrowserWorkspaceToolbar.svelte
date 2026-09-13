@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Plus, X, RotateCw, Settings2 } from 'lucide-svelte';
+	import { Plus, X, RotateCw, Settings2, MicOff } from 'lucide-svelte';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import {
 		ownsControl,
@@ -31,6 +31,8 @@
 			((workspace.control.owner === 'human' && !owner) ||
 				(!!workspace.control.pending_viewer_id && !pending)),
 	);
+	const activeUrl = $derived(workspace?.tabs.find((tab) => tab.id === workspace.active_tab_id)?.url ?? '');
+	const captureAlternative = $derived(/^https?:\/\//i.test(activeUrl) ? activeUrl : null);
 	let customWidth = $state(1280);
 	let customHeight = $state(800);
 	let error = $state('');
@@ -125,10 +127,22 @@
 				: ''}</span
 		>
 
+		{#if connected && workspace?.available && (owner || pending)}
+			<button class="return-control" onclick={() => onCommand('release', {})}>Return control</button>
+		{/if}
 	</div>
 	<details class="viewport" bind:this={settingsEl}>
-		<summary aria-label="Browser settings" title="Viewport and browser settings"><Settings2 size={15} /></summary>
+		<summary aria-label="Browser settings" title="Viewport settings and microphone limitations"><Settings2 size={15} /><MicOff size={14} aria-label="Microphone capture unsupported" /></summary>
 		<div class="viewport-content">
+			<section class="capture-limits" aria-label="Microphone limitations">
+				<strong>Microphone capture is unsupported in this panel.</strong>
+				<p>The agent browser runs on its worker, which may be another machine. It does not use this device’s microphone. Desktop app microphone permissions are separate.</p>
+				{#if captureAlternative}
+					<a href={captureAlternative} target="_blank" rel="noopener noreferrer">Open this page in your normal browser to use your microphone</a>
+				{:else}
+					<p>Open the site in your normal browser to use your microphone.</p>
+				{/if}
+			</section>
 			<label
 				>Size <select
 					aria-label="Viewport preset"
@@ -213,6 +227,9 @@
 	.viewport { position: static; }
 	.viewport-content { position: absolute; top: 70px; right: 5px; width: min(340px, calc(100% - 10px)); box-sizing: border-box; z-index: 30; background: var(--background); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px #0003; padding: 12px !important; }
 	.ownership-label { display: none; }
+	.capture-limits { display: grid; gap: 6px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+	.capture-limits a { color: var(--primary); text-decoration: underline; }
+	.return-control { font-size: 11px; }
 
 	button,
 	input,
@@ -319,7 +336,7 @@
 		display: grid;
 		gap: 9px;
 	}
-	.viewport-content > label:first-child {
+	.viewport-content > label {
 		display: flex;
 		align-items: center;
 		gap: 8px;

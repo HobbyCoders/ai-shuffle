@@ -273,10 +273,23 @@ async def test_skill_miss_list_honours_setting_sources(tmp_path, monkeypatch) ->
         (skill_dir / "SKILL.md").write_text(
             f"---\nname: {name}\ndescription: d\n---\nbody\n", encoding="utf-8",
         )
-    cwd = str(tmp_path / "proj")
+    child = tmp_path / "proj" / "nested"
+    child.mkdir()
+    cwd = str(child)
     both = await handler({"name": "nope"}, ToolCtx(cwd=cwd))
     assert "global_only" in both.text and "project_only" in both.text
     project = await handler(
         {"name": "nope"}, ToolCtx(cwd=cwd, extra={"setting_sources": ("project",)}),
     )
     assert "project_only" in project.text and "global_only" not in project.text
+    assert str(home / ".fluid" / "skills") in both.text
+    assert str(home / ".fluid" / "plugins") in both.text
+    assert str(tmp_path / "proj" / ".fluid" / "skills") in project.text
+    assert str(tmp_path / "proj" / ".agents" / "skills") in project.text
+    assert str(child / ".fluid" / "skills") in project.text
+    assert str(home / ".fluid") not in project.text
+    disabled = await handler(
+        {"name": "nope"}, ToolCtx(cwd=cwd, extra={"setting_sources": ()}),
+    )
+    assert "(none discovered)" in disabled.text
+    assert "Searched roots: (none — disabled by setting_sources)" in disabled.text

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -62,6 +62,72 @@ test('preview rejects missing, relative, shared or invalid settings', () => {
     { SHUFFLE_PREVIEW_ROOT: path.join(repo, 'data') }, { SHUFFLE_PREVIEW_PYTHON: '' }, { SHUFFLE_PREVIEW_PORT: '0' },
     { SHUFFLE_PREVIEW_PROTECTED_PORT: '65536' }, { SHUFFLE_PREVIEW_PORT: '18001' }]) {
     assert.throws(() => previewOptions({ ...base, ...override }, repo));
+  }
+});
+
+test('failed protection explains recovery, preserves its cause and removes only the empty root', async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), 'shuffle-source-preview-'));
+  const root = path.join(parent, 'fresh');
+  const cause = new Error('SetAccessControl: Attempted to perform an unauthorized operation.');
+  try {
+    await assert.rejects(reservePreviewRoot(root, async directory => {
+      assert.equal(directory, root);
+      assert.equal((await lstat(directory)).isDirectory(), true);
+      throw cause;
+    }), error => {
+      assert.equal(error.cause, cause);
+      assert.ok(error.message.includes(root));
+      assert.match(error.message, /SHUFFLE_PREVIEW_ROOT.*new, nonexistent child/);
+      assert.match(error.message, /aborted before writing credentials/);
+      assert.match(error.message, /Do not relax credential permissions/);
+      assert.match(error.message, /empty preview directory was removed/);
+      assert.ok(error.message.includes(cause.message));
+      if (process.platform === 'win32') assert.match(error.message, /LocalAppData\/Temp/);
+      return true;
+    });
+    await assert.rejects(lstat(root), { code: 'ENOENT' });
+    // A failed attempt must not block retrying the same unused name.
+    await reservePreviewRoot(root);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test('failed protection never recursively deletes files added to the new root', async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), 'shuffle-source-preview-'));
+  const root = path.join(parent, 'fresh');
+  try {
+    await assert.rejects(reservePreviewRoot(root, async directory => {
+      await writeFile(path.join(directory, 'sentinel'), 'preserve');
+      throw new Error('protection denied');
+    }), /preview directory remains; inspect it/);
+    assert.equal(await readFile(path.join(root, 'sentinel'), 'utf8'), 'preserve');
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test('reservation refuses existing files and directory links without protecting their targets', async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), 'shuffle-source-preview-'));
+  const target = path.join(parent, 'target');
+  const link = path.join(parent, 'link');
+  const file = path.join(parent, 'sentinel');
+  try {
+    await mkdir(target);
+    await writeFile(file, 'preserve');
+    await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+    for (const root of [file, link, path.join(parent, 'missing', 'child')]) {
+      await assert.rejects(reservePreviewRoot(root, () => assert.fail('must not protect existing paths')), {
+        code: root.endsWith('child') ? 'ENOENT' : 'EEXIST',
+      });
+    }
+    assert.equal(await readFile(file, 'utf8'), 'preserve');
+    assert.equal((await lstat(link)).isSymbolicLink(), true);
+    assert.equal((await lstat(target)).isDirectory(), true);
+  } finally {
+    // Remove the junction itself, never recurse through its target on Windows.
+    await rm(link, { force: true });
+    await rm(parent, { recursive: true, force: true });
   }
 });
 

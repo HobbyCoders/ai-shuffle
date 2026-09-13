@@ -251,6 +251,8 @@
 			active = false;
 			clearTimeout(releaseTimer);
 			controlRequest = null;
+			controlGeneration++;
+			releasingControl = false;
 			scope.close();
 			if (operation === scope) operation = null;
 			submitting = false;
@@ -290,7 +292,28 @@
 		});
 	}
 	let controlRequest: Promise<void> | null = null;
+	let controlGeneration = 0;
+	let releasingControl = false;
 	let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+	async function releaseControl() {
+		const scope = operation;
+		if (!scope || !viewerId || releasingControl) return;
+		const runtimeId = workspace?.runtime_id;
+		checkOwner();
+		if (!humanControl && workspace?.control.pending_viewer_id !== viewerId) return;
+		releasingControl = true;
+		controlGeneration++;
+		clearTimeout(releaseTimer);
+		keyboardOpen = false;
+		try {
+			await acknowledged(scope, 'release', {});
+			await scope.wait(() => !!workspace && workspace.runtime_id === runtimeId &&
+				workspace.control.viewer_id !== viewerId && workspace.control.pending_viewer_id !== viewerId,
+				'Control has not been returned yet. Try again.');
+		} finally {
+			if (operation === scope) releasingControl = false;
+		}
+	}
 	function noteInteraction() {
 		clearTimeout(releaseTimer);
 		releaseTimer = setTimeout(() => {
@@ -300,6 +323,8 @@
 	}
 	async function ensureControl() {
 		const scope = operation;
+		const generation = controlGeneration;
+		if (releasingControl) throw new Error('Control is being returned. Wait before interacting again.');
 		if (!scope || !streamOpen) throw new Error('Browser is reconnecting. Try again.');
 		checkOwner();
 		if (!humanControl) {
@@ -313,6 +338,7 @@
 			await controlRequest;
 		}
 		if (operation !== scope) throw new Error('Browser panel changed. Try again.');
+		if (generation !== controlGeneration) throw new Error('Browser control was returned. Interact again to take control.');
 		noteInteraction();
 	}
 	function pickFiles(field: { id: string }) {
@@ -344,6 +370,7 @@
 		const identity = frameIdentity;
 		commandError = '';
 		try {
+			if (op === 'release') { await releaseControl(); return; }
 			await ensureControl();
 			if (operation !== scope || frameIdentity !== identity) return;
 			if (!sendIdentified({ type: 'workspace-command', op, args })) throw new Error('Command not sent. Check the connection and try again.');
@@ -562,12 +589,14 @@
 
 	async function browse(address?: string) {
 		const scope = operation;
-		if (submitting || navigationPending || !scope) return;
+		if (submitting || navigationPending || releasingControl || !scope) return;
+		const generation = controlGeneration;
 		const sid = sessionId;
 		const draft = addressDraft;
 		const assertCurrent = () => {
 			if (operation !== scope || scope.controller.signal.aborted || sessionId !== sid || !open)
 				throw new Error('Browser panel closed.');
+			if (generation !== controlGeneration) throw new Error('Browser control was returned. Try the address again.');
 		};
 		submitting = true;
 		commandError = '';

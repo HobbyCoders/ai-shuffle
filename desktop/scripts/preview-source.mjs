@@ -45,10 +45,26 @@ export function previewOptions(env = process.env, repo = sourceRoot) {
   };
 }
 
-export async function reservePreviewRoot(root) {
+export async function reservePreviewRoot(root, protectDirectory = privateDirectory) {
   // Non-recursive, exclusive mkdir refuses an existing directory or symlink.
+  // Keep creation outside the catch: never clean up a root we did not create.
   await fs.mkdir(root, { mode: 0o700 });
-  await privateDirectory(root);
+  try {
+    await protectDirectory(root);
+  } catch (cause) {
+    let cleanup = 'The empty preview directory was removed.';
+    try {
+      // No credentials have been written. Never recursively remove a root,
+      // even if another process added files while protection was attempted.
+      await fs.rmdir(root);
+    } catch {
+      cleanup = 'The preview directory remains; inspect it before removing it or choose a different new path.';
+    }
+    const guidance = process.platform === 'win32'
+      ? 'Windows may allow directory creation but deny setting its owner or private ACL. Set SHUFFLE_PREVIEW_ROOT to a new, nonexistent child of your user-owned LocalAppData/Temp directory. For a custom parent, check its ownership and ACL permissions.'
+      : 'Set SHUFFLE_PREVIEW_ROOT to a new, nonexistent child of a user-owned temporary directory and check the parent permissions.';
+    throw new Error(`Could not secure preview root (${root}); preview startup was aborted before writing credentials. ${guidance} Do not relax credential permissions. ${cleanup} Original error: ${cause.message}`, { cause });
+  }
 }
 
 export async function startPreview(env = process.env) {

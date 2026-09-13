@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fluid.context.instructions import Skill, discover_skills, parse_frontmatter
+from fluid.context.instructions import Skill, discover_skills, parse_frontmatter, skill_search_roots
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 
@@ -79,7 +79,9 @@ SPEC = ToolSpec(
         "loaded instructions in place of your default approach. Plugin "
         "skills are listed as '<plugin>:<name>'; either spelling resolves "
         "while it is unambiguous. Calling with an unknown name returns the "
-        "list of known skills."
+        "list of known skills and the searched roots. In code mode reach it "
+        "with `from tools.Skill import Skill` and `Skill(name=\"<skill>\")` "
+        "inside run_python."
     ),
     input_schema={
         "type": "object",
@@ -119,8 +121,15 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 is_error=True,
             )
         known = ", ".join(sorted(s.name for s in skills)) or "(none discovered)"
+        roots = [str(root) for root, _ in skill_search_roots(
+            ctx.cwd, include_global=user_on, include_project=project_on,
+        )]
+        if user_on:
+            roots.append(str(Path.home() / ".fluid" / "plugins"))
+        searched = ", ".join(roots) or "(none — disabled by setting_sources)"
         return ToolOutcome(
-            text=f"unknown skill: {name}. Available: {known}", is_error=True
+            text=f"unknown skill: {name}. Available: {known}. Searched roots: {searched}",
+            is_error=True,
         )
     try:
         raw = Path(match.path).read_text(encoding="utf-8")

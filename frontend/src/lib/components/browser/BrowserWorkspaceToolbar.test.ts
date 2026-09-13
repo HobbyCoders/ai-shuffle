@@ -49,9 +49,11 @@ describe('shared workspace toolbar', () => {
 			true,
 		);
 		expect(view.getByText('Another viewer controls')).toBeTruthy();
+		expect(view.queryByRole('button', { name: 'Return control' })).toBeNull();
 		expect(onCommand).not.toHaveBeenCalled();
 	});
-	it('shows pending control without manual ownership buttons', () => {
+	it('allows the pending viewer to cancel without requesting another takeover', async () => {
+		const onCommand = vi.fn();
 		const view = render(BrowserWorkspaceToolbar, {
 			workspace: {
 				...state,
@@ -60,10 +62,36 @@ describe('shared workspace toolbar', () => {
 			},
 			viewerId: 'v',
 			connected: true,
-			onCommand: vi.fn(),
+			onCommand,
 		});
 		expect(view.getByText(/Requesting control/)).toBeTruthy();
-		expect(view.queryByText('Return control')).toBeNull();
+		await fireEvent.click(view.getByRole('button', { name: 'Return control' }));
+		expect(onCommand).toHaveBeenCalledWith('release', {});
 		expect(view.queryByText('Take control')).toBeNull();
+	});
+	it('explains microphone limits and links to the active page in a normal browser', async () => {
+		const onCommand = vi.fn();
+		const view = render(BrowserWorkspaceToolbar, {
+			workspace: { ...state, active_tab_id: 'a', tabs: [{ id: 'a', title: 'Voice', url: 'https://voice.test', current: true }] },
+			viewerId: 'v', connected: true, onCommand,
+		});
+		await fireEvent.click(view.getByLabelText('Browser settings'));
+		expect(view.getByText('Microphone capture is unsupported in this panel.')).toBeTruthy();
+		expect(view.getByText(/worker, which may be another machine/)).toBeTruthy();
+		expect(view.getByText(/Desktop app microphone permissions are separate/)).toBeTruthy();
+		const link = view.getByRole('link', { name: 'Open this page in your normal browser to use your microphone' });
+		expect(link.getAttribute('href')).toBe('https://voice.test');
+		expect(link.getAttribute('target')).toBe('_blank');
+		expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+		expect(onCommand).not.toHaveBeenCalled();
+	});
+	it.each(['javascript:alert(1)', 'file:///private', 'chrome://settings'])('does not link to an unsafe capture alternative: %s', async (url) => {
+		const view = render(BrowserWorkspaceToolbar, {
+			workspace: { ...state, active_tab_id: 'a', tabs: [{ id: 'a', title: 'Page', url, current: true }] },
+			viewerId: 'v', connected: true, onCommand: vi.fn(),
+		});
+		await fireEvent.click(view.getByLabelText('Browser settings'));
+		expect(view.queryByRole('link')).toBeNull();
+		expect(view.getByText('Open the site in your normal browser to use your microphone.')).toBeTruthy();
 	});
 });

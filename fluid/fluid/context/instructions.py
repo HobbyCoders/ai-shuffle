@@ -600,6 +600,23 @@ def _commands_in(base: Path, scope: str) -> dict[str, Command]:
     return out
 
 
+def skill_search_roots(
+    cwd: str | os.PathLike[str], *, include_global: bool = True,
+    include_project: bool = True,
+) -> list[tuple[Path, str]]:
+    """Skill directories in discovery order, paired with their setting scope."""
+    roots: list[tuple[Path, str]] = []
+    if include_project:
+        for directory in _walk_up_dirs(Path(cwd)):
+            roots.extend((
+                (directory / ".agents" / "skills", "project"),
+                (directory / ".fluid" / "skills", "project"),
+            ))
+    if include_global:
+        roots.append((Path.home() / ".fluid" / "skills", "global"))
+    return roots
+
+
 def discover_skills(
     cwd: str | os.PathLike[str],
     *,
@@ -621,15 +638,15 @@ def discover_skills(
     to reuse an already-discovered list). Provider homes are never read.
     """
     by_name: dict[str, Skill] = {}
-    if include_project:
-        for directory in _walk_up_dirs(Path(cwd)):
-            # Outermost → cwd, so an inner directory's entry replaces an outer
-            # one's; ``.fluid`` is applied after ``.agents`` so it wins in-place.
-            by_name.update(_skills_in(directory / ".agents" / "skills", "project"))
-            by_name.update(_skills_in(directory / ".fluid" / "skills", "project"))
-    if include_global:
-        for name, skill in _skills_in(Path.home() / ".fluid" / "skills", "global").items():
-            by_name.setdefault(name, skill)
+    for root, scope in skill_search_roots(
+        cwd, include_global=include_global, include_project=include_project,
+    ):
+        found = _skills_in(root, scope)
+        if scope == "project":
+            by_name.update(found)
+        else:
+            for name, skill in found.items():
+                by_name.setdefault(name, skill)
     out = [by_name[name] for name in sorted(by_name)]
     if include_plugins:
         from fluid.context.plugins import plugin_skills

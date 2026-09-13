@@ -16,6 +16,8 @@ SHARED WORKSPACE
 - browser_status is always available, including during human control, and reports tabs, viewport, busy and pending takeover. Other tools reject with human_control while a viewer owns or requests control. Do not fight the viewer or spin retries; continue other work or ask for control to be returned.
 - browser_wait waits for condition=url with url, condition=text with text, or condition=element with ref or selector. Specify exactly one target. URL/text match=contains (default) or exact; text/element state=visible (default), hidden, attached, or detached. timeout_ms defaults to 5000 and is capped at 15000. A timed-out result is not success. Pending takeover interrupts waits.
 - Human input, navigation, tab changes and viewport changes invalidate screenshots and refs. A stale_screenshot response requires a new browser_screenshot before using coordinates again.
+- To finish a sign-in handoff, ask the user to choose Return control in the Browser panel and wait for Agent control before resuming. A chat reply alone does not release browser ownership. Never override genuine human control.
+- Microphone capture is unsupported in the built-in Browser panel: it has no site-permission approval flow. Ask the user to open the page in their normal browser and approve microphone access there. The agent browser runs on its browser-host worker, not necessarily the user's device; it does not forward the viewer's microphone. Desktop app microphone permissions are separate. Do not auto-grant permissions or use blanket permission flags.
 
 REFS AND SNAPSHOTS
 - browser_snapshot returns the page as a YAML accessibility tree. Actionable elements carry a ref like [ref=e12].

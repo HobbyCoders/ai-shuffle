@@ -46,6 +46,14 @@ describe("tool descriptions state the contract", () => {
   it("browser_screenshot: invalidated by any action; layout only", () => {
     expect(desc("browser_screenshot")).toMatch(/Any action, navigation, tab or viewport change invalidates it/);
   });
+  it("explains viewer handoff and unsupported capture without granting permissions", () => {
+    expect(SERVER_INSTRUCTIONS).toContain("choose Return control in the Browser panel and wait for Agent control");
+    expect(SERVER_INSTRUCTIONS).toContain("A chat reply alone does not release browser ownership");
+    expect(SERVER_INSTRUCTIONS).toContain("Microphone capture is unsupported");
+    expect(SERVER_INSTRUCTIONS).toContain("normal browser and approve microphone access there");
+    expect(SERVER_INSTRUCTIONS).toContain("browser-host worker, not necessarily the user's device");
+    expect(SERVER_INSTRUCTIONS).toContain("Do not auto-grant permissions");
+  });
   it("server instructions open with the two rules", () => {
     const head = SERVER_INSTRUCTIONS.slice(0, 1400);
     expect(head).toMatch(/TWO RULES BEFORE ANYTHING ELSE/);

@@ -1721,7 +1721,7 @@ async def test_connect_native_leg_passes_builtin_registry_to_native_loop(monkeyp
 # ─── Native-leg code-mode + continual harness ────────────────────────────────
 
 
-async def _connect_native_capturing(monkeypatch, tmp_path, model="gpt-4o"):
+async def _connect_native_capturing(monkeypatch, tmp_path, model="gpt-4o", app_session_id="app-native"):
     """Connect a native leg over a fake NativeLoop and return its kwargs.
 
     ``data_dir`` is pointed at tmp_path so the skill store (which mkdirs its
@@ -1756,9 +1756,73 @@ async def _connect_native_capturing(monkeypatch, tmp_path, model="gpt-4o"):
 
     adapter = ha.HarnessAdapter()
     await adapter.connect(
-        SessionOptions(model=model, extra={"fluid_provider": "openai_responses"})
+        SessionOptions(model=model, extra={
+            "fluid_provider": "openai_responses", "app_session_id": app_session_id,
+        })
     )
     return captured
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_request_completes_without_memory_setup(monkeypatch, tmp_path, caplog):
+    from unittest.mock import Mock
+    from app.core import fluid_memory
+    from app.core.config import settings
+
+    for name in ("fluid_code_mode", "fluid_continual", "fluid_memory_enabled"):
+        monkeypatch.setattr(settings, name, True)
+    memory = Mock(side_effect=ValueError("Cannot resolve memory ownership without a session"))
+    monkeypatch.setattr(fluid_memory, "session_memory", memory)
+    adapter = await _connect_native(monkeypatch, MemoryStore(), tmp_path)
+    try:
+        await adapter.send_query("Generate a branch name for this task")
+        events = await _collect(adapter)
+        assert isinstance(events[-1], ResultMessage)
+        assert events[-1].stop_reason == "end_turn"
+        assert any(
+            block.text == "fresh reply"
+            for event in events if isinstance(event, AssistantMessage)
+            for block in event.content if isinstance(block, TextBlock)
+        )
+        memory.assert_not_called()
+        assert "setup FAILED" not in caplog.text
+        assert "memory snapshot failed" not in caplog.text
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_native_call_skips_session_owned_setup(monkeypatch, tmp_path, caplog):
+    from unittest.mock import Mock
+    from app.core import fluid_memory
+    from app.core.config import settings
+
+    for name in ("fluid_code_mode", "fluid_continual", "fluid_memory_enabled"):
+        monkeypatch.setattr(settings, name, True)
+    memory = Mock(side_effect=AssertionError("auxiliary request has no memory owner"))
+    monkeypatch.setattr(fluid_memory, "session_memory", memory)
+    captured = await _connect_native_capturing(monkeypatch, tmp_path, app_session_id=None)
+    assert captured["codemode"] is None
+    assert captured["journal"] is None
+    assert "memory_store" not in captured["ctx"].extra
+    assert "recall_store" not in captured["ctx"].extra
+    memory.assert_not_called()
+    assert "setup FAILED" not in caplog.text
+
+
+@pytest.mark.parametrize("delegated", [False, True])
+def test_auxiliary_memory_snapshot_has_no_default_owner(monkeypatch, caplog, delegated):
+    from unittest.mock import Mock
+    from app.core import fluid_memory
+
+    adapter = HarnessAdapter()
+    adapter._options = SessionOptions(model="gpt-4o")
+    adapter._is_delegated = delegated
+    memory = Mock(side_effect=AssertionError("auxiliary request has no memory owner"))
+    monkeypatch.setattr(fluid_memory, "session_memory", memory)
+    assert adapter._memory_snapshot() is None
+    memory.assert_not_called()
+    assert "memory snapshot failed" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -4325,8 +4389,9 @@ async def test_monitor_receipt_commands_the_park(monkeypatch, tmp_path):
     outcome = await _injected_monitor_spawn()({"command": "npm test"}, object())
 
     assert "Monitoring started (task mon-p1)." in outcome.text
-    assert "End the turn now" in outcome.text
-    assert "woken when it comes to rest" in outcome.text
+    assert "Then end the turn, unless you have genuinely disjoint work" in outcome.text
+    assert "completion wakes the session when the command exits" in outcome.text
+    assert "Do not sleep or poll waiting for it" in outcome.text
 
 
 @pytest.mark.asyncio
@@ -4357,7 +4422,8 @@ async def test_monitor_receipt_survives_fluids_outcome_normalizer(
     input_ = {"command": "npm test"}
     rendered = fluid_monitor._receipt_from(await spawner(input_, object()), input_)
 
-    assert "End the turn now" in rendered.text
+    assert "Then end the turn, unless you have genuinely disjoint work" in rendered.text
+    assert "Do not sleep or poll waiting for it" in rendered.text
     assert rendered.background_task is not None
     assert rendered.background_task.task_id == "mon-p2"
 
@@ -5513,7 +5579,7 @@ def agent_workspace(tmp_path, monkeypatch):
 
 
 def _agents_options(cwd, declared=None, disallowed_tools=None):
-    extra = {"fluid_provider": "openai_responses"}
+    extra = {"fluid_provider": "openai_responses", "app_session_id": "agents-session"}
     if declared is not None:
         extra["declared_agents"] = declared
     return SessionOptions(
@@ -6802,8 +6868,14 @@ def test_skill_store_pair_is_documented_before_native_loop_registers_it(tmp_path
     entry = next(t for t in sections if "## save_skill\n" in t)
     assert "_selftest()" in entry and "`from tools.save_skill import save_skill`" in entry
     assert "- name (str, required)" in entry and "- source (str, required)" in entry
-    # The throwaway registration left the session's own registry untouched.
+    # Public specs are available without registering anything on the session.
     assert registry.get("save_skill") is None
+    from fluid.codemode.session import register_code_mode_tools, skill_store_tool_specs
+    specs = skill_store_tool_specs()
+    assert set(specs) == {"save_skill", "delete_skill"}
+    register_code_mode_tools(registry, codemode)
+    for name, spec in specs.items():
+        assert registry.get(name) == spec
 
 
 def test_skill_catalog_entry_says_how_it_is_reached_in_code_mode():
@@ -6815,7 +6887,8 @@ def test_skill_catalog_entry_says_how_it_is_reached_in_code_mode():
     class _Spec:
         def __init__(self, name):
             self.name = name
-            self.description = "Load the full instructions of an installed skill by name."
+            from fluid.tools.builtins.skill import SPEC
+            self.description = SPEC.description if name == "Skill" else "Read a file."
             self.input_schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
             self.code_mode_allowed = True
 
@@ -6958,13 +7031,16 @@ async def test_subagent_roster_is_recomputed_at_every_turn_start(monkeypatch, ag
             self.submitted.append(op)
 
     rosters = [_roster_contract(False)]
-    monkeypatch.setattr(agent_models, "build_task_contract",
-                        lambda *a, **k: rosters[-1])
+    monkeypatch.setattr(agent_models, "available_subagents",
+                        lambda *a, **k: list(rosters[-1].targets))
+    monkeypatch.setattr("fluid.context.agents.discover_agents", lambda *a, **k: [])
     monkeypatch.setattr(ha, "NativeLoop", _Loop)
     monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
 
     adapter = ha.HarnessAdapter()
-    await adapter.connect(_agents_options(agent_workspace))
+    options = _agents_options(agent_workspace)
+    options.extra["app_session_id"] = "roster-session"
+    await adapter.connect(options)
     engine = adapter._engine
     assert "No subagents are configured" in adapter._registry.get("Task").description
     assert "No subagents are configured" in engine.system
@@ -6981,11 +7057,29 @@ async def test_subagent_roster_is_recomputed_at_every_turn_start(monkeypatch, ag
     rosters.append(_roster_contract(True))
     await adapter.send_query("now use the reviewer")
     task = adapter._registry.get("Task")
-    assert "reviewer (model: gpt-5.6-mini)" in task.description
+    assert "reviewer" in task.description and "gpt-5.6-mini" in task.description
     assert task.input_schema["properties"]["agent"]["enum"] == ["reviewer"]
-    assert "reviewer (model: gpt-5.6-mini)" in engine.system
+    assert "- Reviewer: Checks diffs." in engine.system
+    agents = [section.text for section in engine.system_sections.sections if section.kind == "agents"]
+    assert len(agents) == 1
+    assert "- Reviewer: Checks diffs." in agents[0]
     assert "No subagents are configured" not in engine.system
     assert engine.system_sections.text == engine.system
     assert adapter._task_roster_signature != first_signature
     # The card did not move: same bytes in the recompiled prompt.
     assert adapter._workspace_card in engine.system
+
+    rosters.append(dataclasses.replace(
+        rosters[-1], targets=(dataclasses.replace(rosters[-1].targets[0], description="Checks security."),),
+    ))
+    await adapter.send_query("use the updated reviewer")
+    assert "- Reviewer: Checks security." in engine.system
+    assert "- Reviewer: Checks diffs." not in engine.system
+    unchanged = engine.system
+    await adapter.send_query("again")
+    assert engine.system == unchanged
+
+    rosters.append(_roster_contract(False))
+    await adapter.send_query("reviewer disabled")
+    assert "- Reviewer:" not in engine.system
+    assert "No subagents are configured" in engine.system

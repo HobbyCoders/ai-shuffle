@@ -93,7 +93,8 @@
 	});
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+<!-- Native copy buttons emit clicks for Enter/Space too; a key handler here would copy twice. -->
+<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 <div class="docs-content prose" bind:this={contentEl} onclick={handleContentClick}>
 	{@html sanitizeHtml(renderedHtml)}
 </div>

@@ -68,6 +68,8 @@ interface LiveSnapshot {
 		cache_read_tokens?: number;
 	};
 	session_meta?: {
+		project_id?: string | null;
+		project_v2_id?: string | null;
 		model?: string | null;
 		provider_id?: string | null;
 		effort?: string | null;
@@ -685,6 +687,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	 * session the user already left.
 	 */
 	async function applyMetadataSnapshot(sessionId: string, generation: number) {
+		const initialProject = getState().project;
+		const initialProjectV2Id = getState().projectV2Id;
 		const initialFolders = getState().workspaceProjectIds;
 		const initialModel = getState().modelOverride;
 		const initialEffort = getState().effortLevelOverride;
@@ -735,6 +739,19 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		const meta = snap.session_meta;
 		if (meta) {
+			// Deep links can open before the sidebar row arrives. Restore the
+			// durable project alongside its branch, including remote-only/null IDs.
+			// Do not replace a project selection made while the request was in flight.
+			if ((meta.project_id !== undefined || meta.project_v2_id !== undefined)
+				&& getState().project === initialProject
+				&& getState().projectV2Id === initialProjectV2Id) {
+				Object.assign(patch, resolveSessionProject({
+					projectId: meta.project_id,
+					projectV2Id: meta.project_v2_id,
+					ephemeralProject: initialProject,
+					ephemeralProjectV2Id: initialProjectV2Id,
+				}));
+			}
 			// No sidebar row (hidden child/deep link), or a reload whose saved
 			// binding predates hydration. Fill holes without replacing an unsent
 			// selection or an edit made while this request was in flight.

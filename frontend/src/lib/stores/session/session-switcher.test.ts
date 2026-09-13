@@ -213,6 +213,74 @@ describe('session navigation closes header dropdowns', () => {
 	});
 });
 
+describe('session-switcher · authoritative project hydration', () => {
+	beforeEach(() => {
+		_mockSessions.current = [];
+		vi.mocked(api.get).mockReset().mockResolvedValue(null);
+	});
+
+	it('reopens a worktree by deep link without a sidebar row or ephemeral cache', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: {
+			project_id: 'ai-shuffle', project_v2_id: 'pv2-local',
+			worktree_id: null, worktree_branch: 'fix/reopened-worktree', worktree_deleted: false,
+		} });
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
+		expect(ephemeralStore.has('new-worktree')).toBe(false);
+		await switcher.switchSession('new-worktree');
+		await vi.waitFor(() => expect(getState().project).toBe('ai-shuffle'));
+		expect(getState()).toMatchObject({
+			projectV2Id: 'pv2-local', worktreeBranch: 'fix/reopened-worktree', worktreeDeleted: false,
+		});
+		expect(_mockSessions.current).toEqual([]);
+		switcher.destroy();
+	});
+
+	it.each([
+		{ project_id: 'ai-shuffle', project_v2_id: 'pv2-local', project: 'ai-shuffle', projectV2Id: 'pv2-local' },
+		{ project_id: null, project_v2_id: 'pv2-remote', project: '', projectV2Id: 'pv2-remote' },
+		{ project_id: null, project_v2_id: null, project: '', projectV2Id: null },
+	])('corrects stale persisted project state on reload ($project_v2_id)', async (row) => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: row });
+		const { switcher, getState } = makeSwitcher(fullState({ project: 'stale', projectV2Id: 'pv2-stale' }));
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState()).toMatchObject({ project: row.project, projectV2Id: row.projectV2Id });
+		switcher.destroy();
+	});
+
+	it('preserves project state when older metadata omits project fields', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { worktree_branch: 'fix/branch' } });
+		const { switcher, getState } = makeSwitcher(fullState({ project: 'ai-shuffle', projectV2Id: 'pv2-local' }));
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState()).toMatchObject({ project: 'ai-shuffle', projectV2Id: 'pv2-local' });
+		switcher.destroy();
+	});
+
+	it('keeps a project selected while metadata was in flight', async () => {
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState, deps } = makeSwitcher(fullState());
+		await switcher.switchSession('new-worktree');
+		deps.update(s => ({ ...s, project: 'edited', projectV2Id: 'pv2-edited' }));
+		resolve({ session_meta: { project_id: 'ai-shuffle', project_v2_id: 'pv2-local' } });
+		await Promise.resolve();
+		expect(getState()).toMatchObject({ project: 'edited', projectV2Id: 'pv2-edited' });
+		switcher.destroy();
+	});
+
+	it('ignores the previous visit response after leaving and reopening the same session', async () => {
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState } = makeSwitcher(fullState());
+		await switcher.switchSession('new-worktree');
+		await switcher.switchSession('session-C', 'other');
+		await switcher.switchSession('new-worktree', 'current', null, null, 'pv2-current');
+		resolve({ session_meta: { project_id: 'stale', project_v2_id: 'pv2-stale' } });
+		await Promise.resolve();
+		expect(getState()).toMatchObject({ sessionId: 'new-worktree', project: 'current', projectV2Id: 'pv2-current' });
+		switcher.destroy();
+	});
+});
+
 describe('session-switcher · authoritative binding hydration', () => {
 	beforeEach(() => {
 		_mockSessions.current = [];
