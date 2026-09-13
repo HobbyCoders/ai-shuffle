@@ -3,11 +3,10 @@
  import { swarms } from '$lib/stores/swarms';
  import { isSwarmActive, parseSwarm, resolveSwarm, swarmStages } from '$lib/utils/swarm';
  import { openSessionLink } from '$lib/services/session-navigation';
- let { sessionId, input, result, status }: {
+ let { sessionId, input, result, status, expanded = $bindable(false) }: {
   sessionId?: string | null; input?: Record<string, unknown>; result?: string;
-  status: 'running' | 'complete' | 'error';
+  status: 'running' | 'complete' | 'error'; expanded?: boolean;
  } = $props();
- let expanded = $state(false);
  let confirming = $state(false);
  let cancelling = $state(false);
  let cancelError = $state('');

@@ -23,6 +23,8 @@
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { STREAM_DEBUG } from '$lib/utils/debug-log';
 	import UserMessage from './UserMessage.svelte';
+	import { agentDelivery } from '$lib/utils/agent-delivery';
+	import ActiveSwarms from './ActiveSwarms.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import TurnActivity from './TurnActivity.svelte';
 	import TurnNavigator from './TurnNavigator.svelte';
@@ -1897,6 +1899,7 @@
 			<!-- In-flight background tasks: a collapsible line pinned to the history
 			     tail (spinner + "N running tasks"; expands to a |__ tree with per-task
 			     stop). Renders nothing when there are no tasks. -->
+			<ActiveSwarms sessionId={$activeSession.sessionId} />
 			<ActiveTasks tasks={$activeSession.activeTasks ?? []} onStop={handleStopTask} />
 
 			<!-- Responsive room belongs only to the live edge, never historical turns. -->
@@ -1939,7 +1942,10 @@
 <!-- The one dispatch table: message → component. Shared with WorkLogGroup so a
      folded row renders exactly as it would inline. -->
 {#snippet messageBody(message: ChatMessage, messageIndex: number)}
-	{#if message.type === 'command'}
+	{@const delivery = agentDelivery(message)}
+	{#if delivery}
+		<ToolUseMessage name="Agent message" input={{ label: delivery.sender }} result={delivery.content} status="complete" />
+	{:else if message.type === 'command'}
 		<!-- Slash command invocation (e.g., /commit, /ralph-loop) -->
 		<CommandMessage
 			commandName={message.commandName || message.content}

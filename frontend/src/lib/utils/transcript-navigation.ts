@@ -1,4 +1,5 @@
 import type { ChatMessage } from '$lib/stores/types';
+import { agentDelivery } from './agent-delivery';
 
 export interface UserTurnNavigationItem {
 	id: string;
@@ -37,7 +38,7 @@ export function splitTurnPreview(content: string): { title: string; preview: str
 }
 
 export function isNavigableUserTurn(message: ChatMessage): boolean {
-	return message.role === 'user' && message.type !== 'command';
+	return message.role === 'user' && message.type !== 'command' && !agentDelivery(message);
 }
 
 export function deriveUserTurnNavigationItems(messages: ChatMessage[]): UserTurnNavigationItem[] {

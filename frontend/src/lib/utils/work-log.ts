@@ -14,6 +14,7 @@
  *   never disappear behind a fold.
  */
 import type { ChatMessage } from '$lib/stores/types';
+import { agentDelivery } from './agent-delivery';
 import { isTransientProviderRetry } from '$lib/utils/provider-retry';
 import { displayToolName } from './tool-icons';
 import { isSwarmTool, parseSwarm, resolveSwarm, type SwarmSnapshot } from './swarm';
@@ -453,7 +454,7 @@ function splitTurns(messages: Positioned[]): Positioned[][] {
 	let current: Positioned[] = [];
 	let currentTurnId: string | undefined;
 	for (const entry of messages) {
-		if (entry.message.role === 'user') {
+		if (entry.message.role === 'user' && !agentDelivery(entry.message)) {
 			const turnId = entry.message.turnId;
 			const steeredIntoCurrentTurn = !!turnId && turnId === currentTurnId && current.length > 0;
 			if (!steeredIntoCurrentTurn) {
@@ -621,7 +622,7 @@ export function buildTranscriptModel(
 			const count = promptCounts.get(key) ?? 0;
 			promptOccurrence[index] = count;
 			promptCounts.set(key, count + 1);
-			if (message.id) latestUserTurnId = message.id;
+			if (message.id && !agentDelivery(message)) latestUserTurnId = message.id;
 		} else if (message.type === 'subagent') {
 			subagentToolIds.add(message.toolId ?? NO_TOOL_ID);
 		}
@@ -659,7 +660,7 @@ export function buildTranscriptModel(
 
 		// Never infer a fold for preamble/history records that are not associated
 		// with a user turn. Real and reloaded v2 transcripts both have user boundaries.
-		const userIndex = turn.findIndex((entry) => entry.message.role === 'user');
+		const userIndex = turn.findIndex((entry) => entry.message.role === 'user' && !agentDelivery(entry.message));
 		if (userIndex < 0) {
 			emitWithSystemGroups(turn, items);
 			return;
@@ -711,7 +712,7 @@ export function buildTranscriptModel(
 	items.forEach((item, itemIndex) => {
 		if (item.kind !== 'message') return;
 		const { message } = item;
-		if (message.id && message.role === 'user' && message.type !== 'command') {
+		if (message.id && message.role === 'user' && message.type !== 'command' && !agentDelivery(message)) {
 			if (!itemIndexByTurnId.has(message.id)) itemIndexByTurnId.set(message.id, itemIndex);
 		}
 	});
