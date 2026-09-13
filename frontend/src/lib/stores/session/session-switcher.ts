@@ -17,6 +17,7 @@ import type { ExecutionMode, Task } from '../types';
 import { api } from '$lib/api/client';
 import { composerPreferences, resolveComposerProject } from '../composer-preferences';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
+import { openHeaderDropdown } from '../header-dropdowns';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
@@ -476,6 +477,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) {
 		const generation = ++_switchGeneration;
 		const state = getState();
+		// The header stays mounted across sessions; its popovers must not follow.
+		if (state.sessionId !== sessionId) openHeaderDropdown.set(null);
 		// eslint-disable-next-line no-console
 		if (STREAM_DEBUG) console.log(`[AS] switchSession CALLED gen=${generation} from=${state.sessionId} to=${sessionId} visibility=${typeof document !== 'undefined' ? document.visibilityState : 'n/a'}`);
 
@@ -768,6 +771,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	}
 
 	function newChat() {
+		openHeaderDropdown.set(null);
 		++_switchGeneration;
 		const state = getState();
 		const leavingSessionId = state.sessionId;

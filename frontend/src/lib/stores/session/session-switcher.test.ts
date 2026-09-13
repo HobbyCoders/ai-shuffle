@@ -11,6 +11,8 @@ import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
 import { appMode } from '../sessionMode.svelte';
 import { api } from '$lib/api/client';
+import { get } from 'svelte/store';
+import { openDropdown, openHeaderDropdown } from '../header-dropdowns';
 
 // session-switcher looks up the session row in appData to tailor the load-error
 // message for remote (cross-install) sessions (B4). Mock it so tests can seed the
@@ -158,6 +160,58 @@ function makeSwitcher(initial: ActiveSessionState) {
 	const switcher = createSessionSwitcher(deps);
 	return { switcher, getState, ephemeralStore, deps };
 }
+
+describe('session navigation closes header dropdowns', () => {
+	const dropdowns = [
+		'profile', 'branch', 'workspace-folders', 'sheet-workspace-folders',
+		'sheet-profile', 'sheet-branch', 'runner', 'notifications', 'session-title',
+		'git-commit', 'git-push', 'git-pull', 'git-pr', 'git-finish', 'git-shipit',
+	] as const;
+
+	beforeEach(() => {
+		openHeaderDropdown.set(null);
+		_mockSessions.current = [];
+		vi.mocked(api.get).mockReset().mockResolvedValue(null);
+	});
+
+	it.each(dropdowns)('closes %s before the destination session loads and keeps it closed on return', async (id) => {
+		const { switcher, getState } = makeSwitcher(fullState());
+		openDropdown(id);
+		const switching = switcher.switchSession('session-B', 'proj-A');
+		expect(getState().sessionId).toBe('session-B');
+		expect(get(openHeaderDropdown)).toBeNull();
+		await switching;
+		await switcher.switchSession('session-A', 'proj-A');
+		expect(get(openHeaderDropdown)).toBeNull();
+		switcher.destroy();
+	});
+
+	it.each(dropdowns)('closes %s when starting a new chat', (id) => {
+		const { switcher, getState } = makeSwitcher(fullState());
+		openDropdown(id);
+		switcher.newChat();
+		expect(getState().sessionId).toBeNull();
+		expect(get(openHeaderDropdown)).toBeNull();
+		switcher.destroy();
+	});
+
+	it('closes a composer dropdown when navigating from a new chat to a session', async () => {
+		const { switcher } = makeSwitcher(fullState({ sessionId: null }));
+		openDropdown('profile');
+		await switcher.switchSession('session-B', 'proj-A');
+		expect(get(openHeaderDropdown)).toBeNull();
+		switcher.destroy();
+	});
+
+	it('preserves an open menu when reloading the same session', async () => {
+		const { switcher } = makeSwitcher(fullState());
+		openDropdown('git-shipit');
+		await switcher.switchSession('session-A', 'proj-A');
+		expect(get(openHeaderDropdown)).toBe('git-shipit');
+		openHeaderDropdown.set(null);
+		switcher.destroy();
+	});
+});
 
 describe('session-switcher · authoritative binding hydration', () => {
 	beforeEach(() => {
