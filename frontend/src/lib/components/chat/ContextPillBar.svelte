@@ -70,6 +70,8 @@
 	const isEmptyState = $derived($activeSession.messages.length === 0);
 
 	const isWorktreeSession = $derived(!!($activeSession.worktreeId || $activeSession.worktreeBranch));
+	// Auto naming starts before the session has a worktree ID or branch.
+	const isWorktreeSelected = $derived(isWorktreeSession || $activeSession.isCreatingWorktree);
 
 	// Interactive branch chip in an active chat. Remote / degraded sessions show
 	// read-only context instead.
@@ -330,9 +332,9 @@
 		{#if $activeSession.project && !badge?.degraded}
 			<span
 				class="ctx-chip readonly wt-indicator"
-				title={isWorktreeSession ? 'Runs in an isolated git worktree' : 'Runs in the main checkout'}
+				title={isWorktreeSelected ? 'Runs in an isolated git worktree' : 'Runs in the main checkout'}
 			>
-				<span class="ctx-chip-cb" class:checked={isWorktreeSession} aria-hidden="true">
+				<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true">
 					<Check size={9} strokeWidth={2.6} />
 				</span>
 				<span class="ctx-chip-label">worktree</span>
