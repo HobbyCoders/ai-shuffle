@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -114,70 +113,6 @@ def create_schema(cursor) -> None:
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_ops_record ON sync_ops(collection, record_id)")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sync_hub_receipts (
-            hub_scope TEXT NOT NULL,
-            origin_device_id TEXT NOT NULL,
-            incarnation INTEGER NOT NULL,
-            seq BIGINT NOT NULL,
-            PRIMARY KEY (hub_scope, origin_device_id, incarnation, seq)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sync_object_outbox (
-            hub_scope TEXT PRIMARY KEY,
-            object_id TEXT NOT NULL,
-            descriptor JSONB NOT NULL,
-            payload TEXT NOT NULL,
-            last_ingest_id BIGINT NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sync_cloud_inbox (
-            hub_scope TEXT NOT NULL,
-            entry_id TEXT NOT NULL,
-            ops JSONB NOT NULL,
-            PRIMARY KEY(hub_scope,entry_id)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sync_cloud_blobs (
-            hub_scope TEXT NOT NULL,
-            hash TEXT NOT NULL,
-            descriptor JSONB NOT NULL,
-            PRIMARY KEY(hub_scope,hash)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sync_blob_outbox (
-            hub_scope TEXT NOT NULL,
-            hash TEXT NOT NULL,
-            ordinal INTEGER NOT NULL,
-            descriptor JSONB NOT NULL,
-            payload TEXT NOT NULL,
-            committed BOOLEAN NOT NULL DEFAULT FALSE,
-            PRIMARY KEY(hub_scope,hash,ordinal)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sync_archive_outbox (
-            hub_scope TEXT PRIMARY KEY,
-            descriptor JSONB NOT NULL,
-            payload TEXT NOT NULL,
-            cursor_end BIGINT NOT NULL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sync_checkpoint_outbox (
-            hub_scope TEXT NOT NULL,
-            ordinal INTEGER NOT NULL,
-            descriptor JSONB NOT NULL,
-            payload TEXT NOT NULL,
-            committed BOOLEAN NOT NULL DEFAULT FALSE,
-            PRIMARY KEY(hub_scope,ordinal)
-        )
-    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_records (
             collection TEXT NOT NULL,
@@ -643,32 +578,6 @@ def ops_after_ingest(ingest_id: int, *, limit: int = 200, _conn=None) -> List[Tu
 
 def own_watermark(cursor, device_id: str, incarnation: int) -> int:
     return next_origin_seq(cursor, device_id, incarnation) - 1
-
-
-def record_hub_receipt(cursor, hub_scope: str, env: Mapping[str, Any]) -> None:
-    """Record exact cloud identities, including out-of-order pending operations.
-
-    Called in the same transaction as applying/stashing the downloaded envelope.
-    A watermark alone is unsafe: the hub can contain holes in an origin stream.
-    """
-    cursor.execute("""INSERT INTO sync_hub_receipts (hub_scope, origin_device_id, incarnation, seq)
-                      VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING""",
-                   (hub_scope, env["origin_device_id"], env["origin_incarnation"], env["origin_seq"]))
-
-
-def hub_ops_after_ingest(ingest_id: int, hub_scope: str, *, limit: int = 200) -> list[tuple[int, dict | None]]:
-    """Walk a bounded log page, omitting ciphertext for exact cloud receipts.
-
-    Keep known entries in the page as None so the uploader can advance past them
-    without repeatedly scanning an increasingly large acknowledged tail.
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""SELECT o.ingest_id, CASE WHEN r.seq IS NULL THEN o.envelope ELSE NULL END AS envelope
-                          FROM sync_ops o LEFT JOIN sync_hub_receipts r ON r.hub_scope=%s
-                          AND r.origin_device_id=o.origin_device_id AND r.incarnation=o.incarnation AND r.seq=o.seq
-                          WHERE o.ingest_id > %s ORDER BY o.ingest_id LIMIT %s""", (hub_scope, ingest_id, limit))
-        return [(int(row["ingest_id"]), _load(row["envelope"])) for row in cursor.fetchall()]
 
 
 def local_watermarks(_conn=None) -> Dict[str, Dict[str, int]]:

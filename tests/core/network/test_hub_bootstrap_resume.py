@@ -1,14 +1,16 @@
-"""Interrupted account/recovery enrollment resumes without replacing local identity."""
+# ruff: noqa: F811
+"""Interrupted account enrollment resumes without replacing local identity."""
 import json
 
-import pytest
+import httpx
 
-from app.db import database, network as store
+from app.db import database
+from app.db import network as store
 from app.network import engine, hub, recovery
-from tests.core.network.test_hub import fake, workers, _signed_in  # noqa: F401
+from tests.core.network.test_hub import _signed_in, fake, workers  # noqa: F401
 
 
-def prepare(workers, fake, mode):
+def prepare(workers, fake, monkeypatch):
     a, b = workers("a"), workers("b")
     with a.active():
         engine.create_network("Home", device_name="A")
@@ -18,62 +20,45 @@ def prepare(workers, fake, mode):
         hub.register()
         key = recovery.create()["recovery_key"]
         hub._upload_recovery()
-        hub.push_once()
-    if mode == "approval":
-        with b.active():
-            _signed_in(fake, b)
-            hub.register()
-        with a.active():
-            _signed_in(fake, a)
-            hub.approve_device(b.device_id, fingerprint_confirmed=True)
-            hub.push_once()
+    with b.active():
+        _signed_in(fake, b)
+        hub.register()
+    with a.active():
+        _signed_in(fake, a)
+        hub.approve_device(b.device_id, fingerprint_confirmed=True)
+    from tests.core.network.test_transport import ServedBy
+    served = ServedBy(a, "https://a.example.com")
+    fake.approvals[b.device_id]["issuer"]["endpoints"] = [served.base_url]
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=served.transport(), **kwargs))
     return a, b, key
 
 
-@pytest.mark.parametrize("mode", ["approval", "recovery"])
-async def test_partial_feed_resumes_after_restart_without_reapproval_or_recovery_key(workers, fake, monkeypatch, mode):
-    a, b, key = prepare(workers, fake, mode)
-    call = hub._call
-    monkeypatch.setattr(hub, "PULL_BATCH", 1)
-
-    def interrupted(method, suffix, *args, **kwargs):
-        if suffix.startswith("feed?cursor=") and not suffix.startswith("feed?cursor=0&"):
-            raise hub.HubError("Connection interrupted during initial feed")
-        return call(method, suffix, *args, **kwargs)
-
+async def test_peer_snapshot_resumes_after_restart_without_reapproval(workers, fake, monkeypatch):
+    _, b, key = prepare(workers, fake, monkeypatch)
+    copy = hub._bootstrap_from_peers
+    async def interrupted(*args):
+        raise hub.HubError("Peer interrupted")
     with b.active():
         _signed_in(fake, b)
         original_identity = engine.identity_mod.load().public_summary()
-        monkeypatch.setattr(hub, "_call", interrupted)
-        if mode == "recovery":
-            with pytest.raises(recovery.RecoveryError, match="interrupted"):
-                await recovery.unlock_from_hub(key, device_name="B")
-        else:
-            assert await hub._loop_body() is False
+        monkeypatch.setattr(hub, "_bootstrap_from_peers", interrupted)
+        assert await hub._loop_body() is False
         assert engine.context().bootstrap_state == "syncing"
         marker = store.get_join(hub._bootstrap_id())
-        assert marker["role"] == "hub_bootstrap"
-        assert key not in json.dumps(marker), "the resume record must not store the recovery key"
-        assert len(b.sql("SELECT * FROM sync_ops")) > 0, "interruption follows an applied feed page"
-        # Simulate process-local state being lost while the private DB remains.
+        assert key not in json.dumps(marker)
         engine.reset_for_tests()
         hub.reset_for_tests()
-        monkeypatch.setattr(hub, "_call", call)
+        monkeypatch.setattr(hub, "_bootstrap_from_peers", copy)
         assert await hub._loop_body() is True
-        ctx = engine.context()
-        assert ctx.bootstrap_state == "ready"
-        assert ctx.identity.public_summary() == original_identity
-        assert ctx.member(a.device_id).status == "active"
-        assert ctx.member(b.device_id).status == "active"
+        assert engine.context().identity.public_summary() == original_identity
+        assert engine.context().bootstrap_state == "ready"
         assert database.get_system_setting("tts_model") == "voice-to-resume"
         assert store.get_join(hub._bootstrap_id()) is None
-        # A further pass is ordinary sync and does not install another identity.
-        await hub._loop_body()
-        assert engine.context().identity.public_summary() == original_identity
 
 
 async def test_marker_is_durable_before_network_state_is_installed(workers, fake, monkeypatch):
-    _, b, _ = prepare(workers, fake, "approval")
+    _, b, _ = prepare(workers, fake, monkeypatch)
     enroll = engine.enroll_from_response
 
     def interrupted(*args, **kwargs):
@@ -94,14 +79,16 @@ async def test_marker_is_durable_before_network_state_is_installed(workers, fake
 
 
 async def test_resume_waits_for_same_account_connection(workers, fake, monkeypatch):
-    _, b, _ = prepare(workers, fake, "approval")
-    replay = hub._replay_feed_from_start
-    monkeypatch.setattr(hub, "_replay_feed_from_start", lambda: (_ for _ in ()).throw(hub.HubError("Offline")))
+    _, b, _ = prepare(workers, fake, monkeypatch)
+    replay = hub._bootstrap_from_peers
+    async def offline(*args):
+        raise hub.HubError("Offline")
+    monkeypatch.setattr(hub, "_bootstrap_from_peers", offline)
     with b.active():
         _signed_in(fake, b)
         assert await hub._loop_body() is False
         marker = store.get_join(hub._bootstrap_id())
-        monkeypatch.setattr(hub, "_replay_feed_from_start", replay)
+        monkeypatch.setattr(hub, "_bootstrap_from_peers", replay)
         fake.servers["current"] = None
         assert await hub._loop_body() is False
         fake.servers["current"] = "different-server"
@@ -116,8 +103,8 @@ async def test_resume_waits_for_same_account_connection(workers, fake, monkeypat
         assert engine.context().bootstrap_state == "ready"
 
 
-async def test_hub_does_not_complete_direct_invite_snapshot(workers, fake):
-    _, b, _ = prepare(workers, fake, "approval")
+async def test_hub_does_not_complete_direct_invite_snapshot(workers, fake, monkeypatch):
+    _, b, _ = prepare(workers, fake, monkeypatch)
     response = fake.approvals[b.device_id]
     with b.active():
         _signed_in(fake, b)
@@ -131,10 +118,3 @@ async def test_hub_does_not_complete_direct_invite_snapshot(workers, fake):
         assert store.get_join("direct-invite")["response"] == response
         assert store.get_join(hub._bootstrap_id()) is None
         assert not any("feed?" in call[2] for call in fake.calls[before:])
-
-
-@pytest.fixture(autouse=True)
-def explicit_cloud_backup(monkeypatch):
-    """These tests exercise the optional cloud transport."""
-    from app.network import backup
-    monkeypatch.setattr(backup, "enabled", lambda: True)

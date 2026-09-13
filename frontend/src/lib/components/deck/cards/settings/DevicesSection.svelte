@@ -11,7 +11,7 @@
 	 * install switches to the account's settings by itself.
 	 */
 	import { onMount } from 'svelte';
-	import { AlertTriangle, Check, Globe, KeyRound, Loader2, MonitorSmartphone, Pencil, Plus, Server, ShieldCheck, ShieldOff, Smartphone, Trash2, X } from 'lucide-svelte';
+	import { AlertTriangle, Check, Globe, Loader2, MonitorSmartphone, Pencil, Plus, Server, ShieldCheck, ShieldOff, Smartphone, Trash2, X } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { getErrorMessage } from '$lib/api/client';
 	import { isAdmin } from '$lib/stores/auth.svelte';
@@ -21,7 +21,7 @@
 	import { accountRegistrations, type AccountDeviceRow } from './account-devices';
 	import { listInstalls, renameInstall, deleteInstall, setInstallApproval, type Install } from '$lib/api/installs';
 	import {
-		adoptAccountNetwork, createNetwork, getNetworkStatus, renameNetworkMember, revokeNetworkMember, unlockWithRecoveryKey, setCloudBackup,
+		adoptAccountNetwork, createNetwork, getNetworkStatus, renameNetworkMember, revokeNetworkMember,
 		type NetworkMember, type NetworkStatus
 	} from '$lib/api/network';
 	import { NETWORK_STATE_HINTS, NETWORK_STATE_LABELS, deriveNetworkState, relativeTime } from '$lib/api/network-status';
@@ -35,14 +35,6 @@
 
 	// ── Data ────────────────────────────────────────────────────────────────
 	let status = $state<NetworkStatus | null>(null);
-	let savingBackup = $state(false);
-	async function toggleBackup() {
-		if (!status) return;
-		savingBackup = true;
-		try { status = { ...status, hub: await setCloudBackup(!status.hub?.backup_enabled) }; }
-		catch (e) { error = getErrorMessage(e, 'Could not change cloud backup'); }
-		finally { savingBackup = false; }
-	}
 	let accountProfile = $state<AccountProfile | null>(null);
 	let accountPanel: AccountPanel;
 	let accountInventoryReady = $state(false);
@@ -69,8 +61,6 @@
 	let revokedNotice = $state<string | null>(null);
 	let adopting = $state(false);
 	let startingFresh = $state(false);
-	let recoveryInput = $state('');
-	let unlocking = $state(false);
 	let stopped = false;
 	let statusTimer: ReturnType<typeof setTimeout> | null = null;
 	let clientsTimer: ReturnType<typeof setInterval> | null = null;
@@ -98,7 +88,6 @@
 	const waitingOnAccount = $derived(!enrolled && !status?.enrollment && Boolean(status?.hub?.linked) && status?.hub?.status === 'pending');
 	const switchingToAccount = $derived(enrolled && Boolean(status?.hub?.linked) && status?.hub?.status === 'conflict');
 	const accountWorkers = $derived((status?.hub?.account_network?.devices ?? []).filter((d) => d.status === 'active' && d.kind !== 'consumer'));
-	const recoveryAvailable = $derived(Boolean(status?.hub?.account_network?.recovery_available));
 
 	// ── Loading ─────────────────────────────────────────────────────────────
 	onMount(() => {
@@ -292,16 +281,6 @@
 		finally { adopting = false; }
 	}
 
-	async function unlock() {
-		unlocking = true; error = '';
-		try {
-			const result = await unlockWithRecoveryKey(recoveryInput);
-			recoveryInput = '';
-			flash(`Restored ${result.network?.name || 'your settings'}`);
-			await loadStatus();
-		} catch (e) { error = getErrorMessage(e, 'The recovery key was not accepted'); }
-		finally { unlocking = false; }
-	}
 
 	function openProviders() {
 		document.getElementById('providers-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -356,15 +335,7 @@
 				{:else}
 					<p>This worker is admitted as soon as another worker on your account is online.</p>
 				{/if}
-				{#if recoveryAvailable && $isAdmin}
-					<details>
-						<summary><KeyRound size={13} /> No other worker available? Use your recovery key</summary>
-						<div class="row">
-							<input class="inp mono" bind:value={recoveryInput} placeholder="A1-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-X" autocomplete="off" spellcheck="false" aria-label="Recovery key" />
-							<button type="button" class="btn sm primary" onclick={unlock} disabled={unlocking || recoveryInput.trim().length < 20}>{unlocking ? 'Restoring…' : 'Restore'}</button>
-						</div>
-					</details>
-				{/if}
+
 			</div>
 		{:else}
 			<div class="notice">
@@ -387,26 +358,14 @@
 		</div>
 	{/if}
 	{#if stale && status}<p class="stale" role="status"><AlertTriangle size={13} /> The worker did not answer the last status check; showing saved data.</p>{/if}
-	{#if enrolled && status?.hub?.linked}
+	{#if status?.startup_sync?.status === 'offline' || status?.startup_sync?.status === 'partial'}
+		<p class="stale" role="status"><AlertTriangle size={13} /> {status.startup_sync.reason || 'Startup sync could not reach every worker. Showing saved data while sync retries.'}</p>
+	{/if}
+	{#if enrolled}
 		<div class="notice" role="status">
-			{#if status.hub.backup_enabled === false}
-				<h4>Sync directly between workers</h4>
-				<p>Your data stays on your workers. They catch up automatically when they can reach each other. If no other worker is online, this worker keeps your changes until one returns.</p>
-				<p>Cloud backup is off. Restoring after losing every worker requires a separate backup.</p>
-			{:else if status.hub.remote_durability === 'pending' || (status.hub.backlog ?? 0) > 0}
-				<h4>Saved on this worker · cloud backup pending</h4>
-				<p>{status.hub.backlog ?? 0} changes and {status.hub.files_pending_backup ?? 0} files are waiting for cloud backup. Keep this worker running until backup completes so offline devices can catch up.</p>
-			{:else if status.hub.remote_durability === 'committed'}
-				<h4>Cloud backup up to date</h4>
-			{:else}
-				<h4>Checking cloud backup</h4>
-			{/if}
-			{#if (status.hub.incoming_pending ?? 0) > 0}<p>{status.hub.incoming_pending} downloaded changes are waiting for missing updates from another worker.</p>{/if}
-			{#if status.hub.last_error}<p class="error">{status.hub.last_error}</p>{/if}
-			{#if $isAdmin && status.hub.backup_enabled !== undefined}
-				<p>Optional cloud backup uploads an encrypted copy from this worker and uses shared storage and transfer allowances. Turning it off keeps existing cloud copies.</p>
-				<button type="button" class="btn sm" disabled={savingBackup} onclick={toggleBackup}>{status.hub.backup_enabled ? 'Turn off cloud backup' : 'Enable cloud backup on this worker'}</button>
-			{/if}
+			<h4>Sync directly between workers</h4>
+			<p>Your data stays on your workers. Desktop checks for updates before opening. Workers keep syncing while they are running; if another worker is offline, they catch up when it returns.</p>
+			{#if status?.hub?.last_error}<p class="error">{status.hub.last_error}</p>{/if}
 		</div>
 	{/if}
 	{#if revokedNotice}
@@ -590,7 +549,7 @@
 	.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--foreground); font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer; }
 	.btn:hover:not(:disabled) { background: var(--hover-overlay); }
 	.btn:disabled { opacity: .5; cursor: default; }
-	.btn:focus-visible, .inp:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.btn:focus-visible, .inp:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.btn.add { flex-shrink: 0; min-height: 36px; padding: 6px 10px; color: var(--primary); }
 	.btn.sm { min-height: 34px; padding: 6px 10px; }
 	.btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
@@ -602,7 +561,6 @@
 	.notice.error-notice { border-color: color-mix(in oklch, var(--destructive) 40%, var(--border)); }
 	.notice h4 { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; font-weight: 600; }
 	.notice p, .confirm p, .load-error p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted-foreground); overflow-wrap: anywhere; }
-	.notice details summary { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted-foreground); cursor: pointer; min-height: 32px; }
 	.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 	.inp { box-sizing: border-box; min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); font: inherit; font-size: 13px; }
 	.inp.mono { flex: 1 1 220px; font-family: var(--font-mono); font-size: 12px; }

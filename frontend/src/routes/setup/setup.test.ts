@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock('$app/navigation', () => ({ goto: mocks.goto }));
 vi.mock('$lib/api/network', () => ({ getNetworkStatus: mocks.getStatus, createNetwork: mocks.create,
-	startEnrollment: mocks.enroll, cancelEnrollment: mocks.cancel, unlockWithRecoveryKey: mocks.unlock }));
+	startEnrollment: mocks.enroll, cancelEnrollment: mocks.cancel }));
 vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, post: mocks.post, patch: mocks.patch, delete: mocks.delete },
 	getErrorMessage: (e: { detail?: string; message?: string }, fallback: string) => e.detail || e.message || fallback }));
 vi.mock('$lib/api/auth', () => ({ getWorkspaceConfig: mocks.workspace, setWorkspaceConfig: mocks.saveWorkspace,
@@ -175,7 +175,7 @@ describe('first-run setup', () => {
 		expect((await screen.findByText(/already syncs settings between/, {}, { timeout: 5000 })).textContent).toContain('Office PC');
 		expect(screen.queryByText(/fingerprint/i)).toBeNull();
 		expect(screen.queryByText(/Pending approvals/)).toBeNull();
-		expect(screen.getByRole('button', { name: /Use your recovery key/ })).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /Use your recovery key/ })).toBeNull();
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue setup' }));
 		await screen.findByLabelText('Or type a path manually');
 		expect(mocks.create).not.toHaveBeenCalled(); expect(mocks.unlock).not.toHaveBeenCalled();
@@ -192,17 +192,6 @@ describe('first-run setup', () => {
 		expect((await screen.findByLabelText('Or type a path manually') as HTMLInputElement).value).toBe('D:\\Work');
 	});
 
-	it('unlocks with the recovery key when no other worker can admit this one', async () => {
-		connection = { ...disconnected, signed_in: true, status: 'connected' };
-		status = { ...fresh(), hub: { linked: true, registered: false, status: 'pending', account_network: { network_id: 'n', name: null, founder_device_id: 'x', devices: [], recovery_available: true } } };
-		mocks.unlock.mockImplementation(async () => { status = enrolled(); return { restored: true, network: status.network }; });
-		render(Setup);
-		await fireEvent.click(await screen.findByRole('button', { name: /Use your recovery key/ }));
-		await fireEvent.input(screen.getByLabelText('Recovery key'), { target: { value: 'A1-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-A' } });
-		await fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
-		expect(mocks.unlock).toHaveBeenCalledWith('A1-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-A', 'My worker');
-		expect(await screen.findByText(/This worker now syncs settings with/)).toBeTruthy();
-	});
 
 	it('joins from an invite link without a fingerprint checkbox and keeps this machine local', async () => {
 		render(Setup); await fireEvent.click(await screen.findByRole('button', { name: /Use a worker invite/ }));

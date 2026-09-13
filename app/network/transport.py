@@ -65,6 +65,7 @@ class PeerLink:
         self.last_error: str | None = None
         self.backoff_until = 0.0
         self.failures = 0
+        self._sync_lock = asyncio.Lock()
 
     def update_endpoints(self, endpoints: list[str]) -> None:
         """Learn endpoints without dropping the one that is answering right now."""
@@ -130,24 +131,44 @@ class PeerLink:
         self.base_url = None
         raise PeerError(last or "unreachable")
 
-    async def sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext) -> dict:
+    async def sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, catch_up: bool = False) -> dict:
+        async with self._sync_lock:
+            return await self._sync_once(client, ctx, catch_up=catch_up)
+
+    async def _sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, catch_up: bool) -> dict:
         """Full exchange with this peer. Returns a small summary."""
         await self.authenticate(client, ctx)
-        marks = await asyncio.to_thread(store.local_watermarks)
-        exchange = await self._request(client, "POST", "/api/v1/network/peer/exchange", json_body={
-            "watermarks": marks, "limit": BATCH_LIMIT, "incarnation": ctx.identity.incarnation,
-            "endpoints": engine._own_endpoints(), "capabilities": _capabilities(), "version": settings.version,
-        })
         summary: dict[str, Any] = {"received": 0, "sent": 0}
-        if exchange.get("snapshot_required"):
-            summary["received"] += await self.receive_state(client, ctx)
-            ctx = engine.require_context()
-        ops = exchange.get("ops") or []
-        if ops:
-            result = await asyncio.to_thread(engine.apply_batch, ops)
-            summary["received"] = result.applied
-            summary["apply"] = result.as_dict()
-        theirs = exchange.get("watermarks") or {}
+        target = None
+        while True:
+            marks = await asyncio.to_thread(store.local_watermarks)
+            exchange = await self._request(client, "POST", "/api/v1/network/peer/exchange", json_body={
+                "watermarks": marks, "limit": BATCH_LIMIT, "incarnation": ctx.identity.incarnation,
+                "flush": catch_up and target is None,
+                "endpoints": engine._own_endpoints(), "capabilities": _capabilities(), "version": settings.version,
+            })
+            theirs = exchange.get("watermarks") or {}
+            if catch_up and target is None and not exchange.get("flushed"):
+                raise PeerError("Update this worker to support startup sync")
+            if target is None:
+                # Catch up to a fixed frontier, not a continuously moving writer.
+                target = {origin: dict(streams) for origin, streams in theirs.items() if origin != ctx.device_id}
+            if exchange.get("snapshot_required"):
+                summary["received"] += await self.receive_state(client, ctx)
+                summary["snapshot_required"] = True
+                ctx = engine.require_context()
+            ops = exchange.get("ops") or []
+            if ops:
+                result = await asyncio.to_thread(engine.apply_batch, ops)
+                summary["received"] += result.applied
+                summary["apply"] = result.as_dict()
+            current = await asyncio.to_thread(store.local_watermarks)
+            caught_up = all(int(current.get(origin, {}).get(str(inc), 0)) >= int(seq)
+                            for origin, streams in target.items() for inc, seq in streams.items())
+            if not catch_up or caught_up:
+                break
+            if current == marks:
+                raise PeerError("Peer sync could not fill missing updates")
         _detect_rollback(ctx, theirs)
         their_endpoints = exchange.get("endpoints") or []
         await asyncio.to_thread(store.touch_member, self.device_id, capabilities=exchange.get("capabilities"),

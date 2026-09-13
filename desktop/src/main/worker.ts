@@ -46,6 +46,8 @@ export type WorkerPhase = 'idle' | 'starting' | 'ready' | 'stopping' | 'stopped'
 
 export interface WorkerState {
 	phase: WorkerPhase;
+	startupStep?: 'syncing';
+	syncStatus?: string;
 	port: number;
 	url: string;
 	pid: number | null;
@@ -237,6 +239,36 @@ export function fetchHealth(port: number, pathname = '/health', timeoutMs = 2500
 }
 
 
+/** Owner-only launch barrier, also used when attaching to a running local worker. */
+export function syncBeforeOpen(port: number): Promise<{ status: string }> {
+	return new Promise((resolve, reject) => {
+		const req = http.request({
+			host: '127.0.0.1', port, path: '/api/v1/network/startup-sync', method: 'POST',
+			timeout: 65_000, headers: { accept: 'application/json', 'content-length': '0' }
+		}, (res) => {
+			let body = '';
+			res.setEncoding('utf8');
+			res.on('error', reject);
+			res.on('data', (chunk) => {
+				body += chunk;
+				if (body.length > 4096) req.destroy(new Error('Startup sync response too large'));
+			});
+			res.on('end', () => {
+				if (res.statusCode !== 200) return reject(new Error(`Startup sync failed (${res.statusCode}). Update the worker and try again.`));
+				try {
+					const reply = JSON.parse(body);
+					if (!['synced', 'offline', 'partial', 'not_enrolled'].includes(reply.status)) throw new Error('Invalid startup sync response');
+					resolve(reply);
+				} catch (error) { reject(error); }
+			});
+		});
+		req.on('timeout', () => req.destroy(new Error('Startup sync did not respond in time. Try again.')));
+		req.on('error', reject);
+		req.end();
+	});
+}
+
+
 /** Authenticated, loopback-only control of the child we launched. Never a renderer API. */
 export function requestLifecycle(port: number, token: string, action: 'active-sessions' | 'stop-sessions'): Promise<Record<string, unknown>> {
 	return new Promise((resolve, reject) => {
@@ -334,7 +366,7 @@ export class WorkerSupervisor extends EventEmitter {
 	private async doStart(): Promise<WorkerState> {
 		if (this._state.phase === 'starting' || this._state.phase === 'ready') return this.state;
 		this.stopping = false;
-		this.set({ phase: 'starting', error: null, exitCode: null, pid: null, external: false });
+		this.set({ phase: 'starting', startupStep: undefined, syncStatus: undefined, error: null, exitCode: null, pid: null, external: false });
 
 		const port = this.opts.port ?? DEFAULT_PORT;
 		const protectedPort = this.opts.protectedPort ?? PROTECTED_PORT;
@@ -343,7 +375,8 @@ export class WorkerSupervisor extends EventEmitter {
 			const health = await fetchHealth(port);
 			if (this.stopping) return this.state;
 			if (health.ok && health.service === 'ai-shuffle') {
-				this.set({ phase: 'ready', external: true, port, url: `http://127.0.0.1:${port}`, startedAt: new Date().toISOString() });
+				this.set({ external: true, port, url: `http://127.0.0.1:${port}`, startedAt: new Date().toISOString() });
+				await this.finishStartup(port);
 				return this.state;
 			}
 		}
@@ -403,7 +436,7 @@ export class WorkerSupervisor extends EventEmitter {
 			if (this.child !== child || this.state.phase !== 'starting') return this.state;
 			const ready = await fetchHealth(port, '/health/ready', 2000);
 			if (ready.ok) {
-				this.set({ phase: 'ready' });
+				await this.finishStartup(port);
 				return this.state;
 			}
 			await sleep(700);
@@ -453,6 +486,19 @@ export class WorkerSupervisor extends EventEmitter {
 			throw new Error('Invalid active-session response');
 		}
 		return reply.active_sessions as number;
+	}
+
+	private async finishStartup(port: number): Promise<void> {
+		this.set({ startupStep: 'syncing' });
+		try {
+			const result = await syncBeforeOpen(port);
+			if (this.stopping || this._state.phase !== 'starting') return;
+			this.log(`startup sync: ${result.status}`);
+			this.set({ phase: 'ready', startupStep: undefined, syncStatus: result.status });
+		} catch (error) {
+			if (this.stopping || this._state.phase !== 'starting') return;
+			this.set({ phase: 'failed', startupStep: undefined, error: error instanceof Error ? error.message : String(error) });
+		}
 	}
 
 	private lifecycleRequest(action: 'active-sessions' | 'stop-sessions'): Promise<Record<string, unknown>> {

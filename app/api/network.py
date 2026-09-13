@@ -95,6 +95,7 @@ class TokenRequest(BaseModel):
 
 
 class ExchangeRequest(BaseModel):
+    flush: bool = False
     watermarks: Dict[str, Dict[str, int]] = Field(default_factory=dict)
     limit: int = Field(default=500, ge=1, le=2000)
     lane: Optional[str] = None
@@ -108,9 +109,7 @@ class OpsRequest(BaseModel):
     ops: List[Dict[str, Any]] = Field(default_factory=list, max_length=2000)
 
 
-class RecoveryUnlock(BaseModel):
-    recovery_key: str = Field(min_length=20, max_length=64)
-    device_name: Optional[str] = Field(default=None, max_length=100)
+
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +135,7 @@ def _status() -> dict:
                  "peers": transport.link_status(), "conflicts": len(store.list_conflicts(limit=1000))},
         "recovery": recovery.status(),
         "hub": _hub_status(),
+        "startup_sync": _startup_sync_status(),
         "blobs": _blob_status(),
     })
     return base
@@ -147,6 +147,11 @@ def _blob_status() -> dict:
         return blobs.blob_status()
     except Exception:  # noqa: BLE001
         return {"missing": 0, "bytes_missing": 0}
+
+
+def _startup_sync_status() -> dict | None:
+    from app.network import startup_sync
+    return startup_sync.status()
 
 
 def _hub_status() -> dict:
@@ -294,17 +299,6 @@ async def create_recovery(_: str = Depends(require_admin)) -> dict:
         return await run_sync(recovery.create)
     except engine.NotEnrolled as exc:
         raise HTTPException(409, str(exc)) from exc
-
-
-@router.post("/recovery/unlock")
-async def unlock_with_recovery(body: RecoveryUnlock, _: str = Depends(require_admin)) -> dict:
-    """Restore a network on a fresh worker from the hub replica with the recovery key."""
-    if engine.context() is not None:
-        raise HTTPException(409, "This worker already belongs to a network")
-    try:
-        return await recovery.unlock_from_hub(body.recovery_key, device_name=body.device_name)
-    except recovery.RecoveryError as exc:
-        raise HTTPException(400, str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +470,8 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
     transport.note_contact(device_id)
 
     def _work():
+        if body.flush:
+            engine.scan_all(strict=True)
         store.touch_member(device_id, capabilities=body.capabilities or None, endpoints=body.endpoints or None,
                            version=body.version, incarnation=body.incarnation)
         ops = store.ops_since(body.watermarks, limit=body.limit, lane=body.lane, exclude_origin=device_id)
@@ -483,7 +479,7 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
                 "key_version": ctx.key_version, "incarnation": ctx.identity.incarnation,
                 "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),
                 "version": settings.version, "snapshot_required": store.requires_snapshot(body.watermarks, exclude_origin=device_id),
-                "peer_state": 1}
+                "peer_state": 1, "flushed": body.flush}
 
     return await run_sync(_work)
 
@@ -574,18 +570,10 @@ async def peer_snapshot(collection: Optional[str] = None, offset: int = 0,
     return await run_sync(engine.snapshot_chunk, collection, max(0, offset))
 
 
-class BackupPreference(BaseModel):
-    enabled: bool
-
-
-@router.put("/backup")
-async def configure_backup(body: BackupPreference, _: str = Depends(require_admin)) -> dict:
-    from app.network import backup
-    try:
-        await run_sync(backup.configure, body.enabled)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return await run_sync(_hub_status)
+@router.post("/startup-sync")
+async def desktop_startup_sync(_: str = Depends(require_admin)) -> dict:
+    from app.network import startup_sync
+    return await startup_sync.synchronize()
 
 
 @router.post("/peer/state")

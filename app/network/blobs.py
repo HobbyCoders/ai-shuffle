@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import time
 from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
@@ -24,7 +23,6 @@ from app.network import engine, transport
 logger = logging.getLogger(__name__)
 
 MAX_BLOB_BYTES = 256 * 1024 * 1024
-_cloud_retry: dict[tuple[str, str], float] = {}
 
 
 def sha256(data: bytes) -> str:
@@ -163,9 +161,6 @@ async def fetch_missing(limit: int = 20) -> int:
                 if await run_sync(store_fetched, blob["hash"], data):
                     fetched += 1
                     break
-            else:
-                if await _fetch_cloud(blob["hash"]):
-                    fetched += 1
     return fetched
 
 
@@ -195,28 +190,7 @@ async def fetch_one(hash_value: str) -> bool:
             if data is not None:
                 if await run_sync(store_fetched, hash_value, data):
                     return True
-    return await _fetch_cloud(hash_value)
-
-
-async def _fetch_cloud(hash_value: str) -> bool:
-    from app.network import backup, cloud_blobs, hub
-    if not await run_sync(backup.enabled):
-        return False
-    try:
-        state = await run_sync(hub._hub_state)
-        if not (state.get("object_sync") or {}).get("direct_read"):
-            return False
-        scope = await run_sync(hub._ensure_hub_scope)
-        key = (scope, hash_value)
-        if time.monotonic() < _cloud_retry.get(key, 0):
-            return False
-        if len(_cloud_retry) >= 1000:
-            _cloud_retry.clear()
-        _cloud_retry[key] = time.monotonic() + 60
-        return await run_sync(cloud_blobs.fetch_one, hub, scope, hash_value)
-    except (hub.HubError, RuntimeError, ValueError):
-        logger.debug("Cloud file is not available yet")
-        return False
+    return False
 
 
 def blob_status() -> Dict[str, Any]:

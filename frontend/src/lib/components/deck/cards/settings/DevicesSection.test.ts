@@ -49,26 +49,17 @@ beforeEach(() => {
 	api.get.mockImplementation(async (path: string) => reads(path));
 });
 afterEach(() => { cleanup(); resourceSync.clear(); vi.useRealTimers(); });
-it('defaults to peer sync and only enables cloud backup on an explicit click', async () => {
-	status.hub = { linked: true, backup_enabled: false, sync_mode: 'peers', remote_durability: 'local_only' };
-	api.put.mockResolvedValue({ linked: true, backup_enabled: true, remote_durability: 'pending', backlog: 3 });
+it('offers only direct worker sync, including when an old worker reports backup enabled', async () => {
+	status.hub = { linked: true, sync_mode: 'peers', ...{ backup_enabled: true } };
 	render(DevicesSection);
 	expect(await screen.findByText('Sync directly between workers')).toBeTruthy();
-	expect(screen.queryByText('Cloud backup up to date')).toBeNull();
+	expect(screen.queryByRole('button', { name: /cloud backup/i })).toBeNull();
 	expect(api.put).not.toHaveBeenCalled();
-	await fireEvent.click(screen.getByRole('button', { name: 'Enable cloud backup on this worker' }));
-	expect(api.put).toHaveBeenCalledWith('/network/backup', { enabled: true });
-	expect(await screen.findByText('Saved on this worker · cloud backup pending')).toBeTruthy();
 });
-it('distinguishes pending local changes and files from acknowledged cloud durability', async () => {
-	status.hub = { linked: true, remote_durability: 'pending', backlog: 3, files_pending_backup: 2 };
+it('explains when startup opened saved data because workers were unavailable', async () => {
+	status.startup_sync = { status: 'offline', reason: 'Other workers are offline. Showing saved data.' };
 	render(DevicesSection);
-	expect(await screen.findByText('Saved on this worker · cloud backup pending')).toBeTruthy();
-	expect(screen.getByText(/3 changes and 2 files/)).toBeTruthy();
-	expect(screen.queryByText('Cloud backup up to date')).toBeNull();
-	status = { ...status, hub: { linked: true, remote_durability: 'committed', backlog: 0, files_pending_backup: 0 } };
-	resourceSync.invalidate(['network']);
-	expect(await screen.findByText('Cloud backup up to date')).toBeTruthy();
+	expect(await screen.findByText('Other workers are offline. Showing saved data.')).toBeTruthy();
 });
 function row(key: string): HTMLElement {
 	const el = document.querySelector(`[data-device-key="${key}"]`);
@@ -125,7 +116,7 @@ it('shows devices that are joining right now instead of an approval queue', asyn
 	expect(screen.queryByRole('button', { name: /Approve|Reject/ })).toBeNull();
 });
 
-it('explains waiting on the account and offers the recovery key without any approval step', async () => {
+it('explains waiting for an account worker without offering cloud restoration', async () => {
 	status = { device: { device_id: 'self', fingerprint }, enrolled: false, platform: 'linux', version: '1.0', instance_id: 'self', enrollment: null, hub: { linked: true, registered: false, status: 'pending', account_network: { network_id: 'n', name: null, founder_device_id: 'other', devices: [{ device_id: 'other', name: 'Office PC', platform: 'windows', kind: 'worker', status: 'active' }], recovery_available: true } } };
 	installs = [];
 	api.post.mockResolvedValue({ restored: true, network: { name: 'Home' } });
@@ -133,9 +124,8 @@ it('explains waiting on the account and offers the recovery key without any appr
 	expect((await screen.findByText(/already syncs settings between/)).textContent).toContain('Office PC');
 	expect(screen.getByText('Joining')).toBeTruthy();
 	expect(screen.queryByText(/fingerprint/i)).toBeNull();
-	await fireEvent.input(screen.getByLabelText('Recovery key'), { target: { value: 'A1-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-A' } });
-	await fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
-	expect(api.post).toHaveBeenCalledWith('/network/recovery/unlock', { recovery_key: 'A1-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-A' });
+	expect(screen.queryByLabelText('Recovery key')).toBeNull();
+	expect(api.post).not.toHaveBeenCalled();
 });
 
 it('shows the automatic switch to the account settings with no choice to keep separate ones', async () => {

@@ -225,7 +225,8 @@ async def start() -> List[asyncio.Task]:
 
 
 async def stop() -> None:
-    from app.network import transport, hub
+    from app.network import transport, hub, startup_sync
+    await startup_sync.stop()
     await transport.stop()
     try:
         await hub.stop()

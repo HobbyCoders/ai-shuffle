@@ -137,25 +137,11 @@ export interface AccountNetworkInfo {
 
 export interface HubStatus {
 	linked: boolean;
-	backup_enabled?: boolean;
 	sync_mode?: 'peers';
 	server_id?: string | null;
 	registered?: boolean;
 	status?: string | null;
-	cursor?: number;
-	pushed_ingest_id?: number;
-	backlog?: number;
-	files_pending_backup?: number;
-	incoming_pending?: number;
-	remote_durability?: 'local_only' | 'pending' | 'committed';
-	cloud_storage?: 'objects' | 'feed';
-	batch_due_at?: number | null;
-	recovery_checkpoint?: string | null;
-	recovery_checkpoint_at?: number | null;
-	last_push_at?: string | null;
-	last_pull_at?: string | null;
 	last_error?: string | null;
-	quota?: Record<string, unknown> | null;
 	pending_devices?: HubPendingDevice[];
 	/** Present while this worker waits on the account (status pending) or clashes with it (conflict). */
 	account_network?: AccountNetworkInfo | null;
@@ -175,14 +161,11 @@ export interface NetworkStatus {
 	sync?: SyncStatus;
 	recovery?: RecoveryStatus;
 	hub?: HubStatus;
+	startup_sync?: { status: string; reason?: string | null; peers?: number } | null;
 }
 
 export async function getNetworkStatus(): Promise<NetworkStatus> {
 	return api.get<NetworkStatus>('/network/status', { cache: 'no-store' });
-}
-
-export async function setCloudBackup(enabled: boolean): Promise<HubStatus> {
-	return api.put<HubStatus>('/network/backup', { enabled });
 }
 
 // ─── Create / members ────────────────────────────────────────────────────────
@@ -289,11 +272,6 @@ export async function createRecoveryKey(): Promise<CreatedRecoveryKey> {
 }
 
 /** Restore the account's network onto this fresh worker with the recovery key (admin, signed in). */
-export async function unlockWithRecoveryKey(recoveryKey: string, deviceName?: string): Promise<{ restored: boolean; network: NetworkSummary }> {
-	const body: Record<string, string> = { recovery_key: recoveryKey.trim() };
-	if (deviceName?.trim()) body.device_name = deviceName.trim();
-	return api.post<{ restored: boolean; network: NetworkSummary }>('/network/recovery/unlock', body);
-}
 
 // ─── Inviting another worker (this worker is the inviter) ───────────────────
 

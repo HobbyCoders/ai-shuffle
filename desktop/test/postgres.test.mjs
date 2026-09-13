@@ -438,7 +438,14 @@ test('generated supervisor connection is handed off atomically BEFORE worker spa
 			return child;
 		} },
 		'node:net': { createServer: () => ({ once() {}, listen(_options, callback) { callback(); }, close(callback) { callback(); } }) },
-		'node:http': { get: (_options, callback) => {
+		'node:http': { request: (_options, callback) => {
+			const request = new EventEmitter(); request.destroy = () => {};
+			request.end = () => queueMicrotask(() => {
+				const response = new EventEmitter(); response.statusCode = 200; response.setEncoding = () => {};
+				callback(response); response.emit('data', JSON.stringify({ status: 'synced' })); response.emit('end');
+			});
+			return request;
+		}, get: (_options, callback) => {
 			const request = new EventEmitter(); request.destroy = () => {};
 			queueMicrotask(() => {
 				const response = new EventEmitter(); response.statusCode = 200; response.setEncoding = () => {};

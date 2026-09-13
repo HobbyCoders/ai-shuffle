@@ -184,11 +184,6 @@ def apply(manifest: dict, directory: Path, publisher: str) -> int:
             chunk = json.loads((directory / f"{index}.json").read_bytes())
             applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn)
         engine.adopt_watermarks(manifest["watermarks"], ctx=trusted, _conn=conn)
-        if applied:
-            updated = store.get_state(conn)
-            hub_state = dict(updated.get("hub") or {})
-            hub_state["peer_state_revision"] = int(hub_state.get("peer_state_revision", 0)) + 1
-            store.update_state(_conn=conn, hub=hub_state)
     engine.load_context()
     engine._notify([(c, "", "upsert") for c in finished])
     return applied

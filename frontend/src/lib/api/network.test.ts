@@ -40,8 +40,7 @@ import {
 	rejectJoin,
 	renameNetworkMember,
 	revokeNetworkMember,
-	startEnrollment,
-	unlockWithRecoveryKey
+	startEnrollment
 } from './network';
 
 beforeEach(() => {
@@ -116,16 +115,6 @@ describe('recovery key', () => {
 		expect(created.recovery_key).toBe('A1-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE-F');
 	});
 
-	it('POSTs unlock with the trimmed key and an optional device name', async () => {
-		api.post.mockResolvedValue({ restored: true, network: {} });
-		await unlockWithRecoveryKey('  A1-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE-F ', 'Studio');
-		expect(api.post).toHaveBeenCalledWith('/network/recovery/unlock', {
-			recovery_key: 'A1-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE-F',
-			device_name: 'Studio'
-		});
-		await unlockWithRecoveryKey('A1-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE-F');
-		expect(api.post).toHaveBeenLastCalledWith('/network/recovery/unlock', { recovery_key: 'A1-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE-F' });
-	});
 });
 
 describe('inviting (this worker is the inviter)', () => {

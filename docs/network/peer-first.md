@@ -38,23 +38,29 @@ Every page request checks active membership; a generation change expires the
 transfer. Deletions, membership history, and key rotations remain part of sync.
 This release does not automatically delete local operation history or cloud data.
 
-## Optional backup and recovery
+## Desktop startup and recovery
 
-Cloud backup defaults off, including on upgrade. Settings > Devices offers an
-explicit per-worker opt-in. This preference is local: enabling it on one worker
-does not turn every other worker into an uploader. Disabling backup stops the
-cloud feed and file fallback while preserving prepared uploads and stored copies.
-The existing R2 path and its storage/upload/operation allowances remain available
-for opted-in workers. Those allowances do not limit peer sync.
+Desktop keeps its startup screen open while its worker checks account admission,
+refreshes known peer addresses, and exchanges updates with paired workers. This
+also happens when desktop attaches to a worker that is already running. Each
+reachable peer is read through the watermark advertised at the start of the
+exchange, including additional operation pages or a verified state snapshot.
+The first exchange asks the peer to publish pending edits before advertising its
+watermark. Referenced file bytes are fetched before the check reports success.
+Older peers without this handshake are reported as incomplete; update all workers.
 
-A state received from a peer invalidates the optional backup's previous state
-coverage, even if no original log operations were copied. Backup is not reported
-as current until a verified checkpoint exists and covers that state.
+The startup check has a 60-second budget. Account discovery gets up to 15 seconds;
+peer transfers run concurrently with a 30-second limit per peer. Offline or
+incomplete checks open saved local data and report that state in Devices. Normal
+background sync continues. A failed startup API request stays on the desktop
+error screen so the user can retry.
 
-Cloud recovery remains an explicit recovery-key action for existing backups.
-In peer mode a new worker needs an existing worker online. If every device copy
-is permanently lost, peer sync cannot recreate it. Use a separate backup or an
-explicitly enabled cloud backup when that recovery guarantee is needed.
+Cloud backup, cloud file fallback, and cloud restore are no longer available.
+The account hub handles discovery and membership, not worker data. Historical
+cloud storage and migration tables are left intact; this change does not delete
+existing stored copies. New workers need an existing worker online. If every
+worker copy is permanently lost, peer sync cannot recover it. Keep a separate
+backup of the worker's data for that case.
 
 Upgrade all workers for the new state and encrypted-file transfer routes. The
 old signed operation exchange and invite snapshot routes remain readable for
@@ -95,4 +101,4 @@ resume after restart, third-device forwarding without original operations,
 conflicting offline changes, key rotation and revoked-device denial, encrypted
 attachment transfer, tampered/incomplete pages, and zero cloud payload traffic in
 default mode. Real PostgreSQL tests exercise concurrent capture and atomic rollback.
-The existing cloud suite explicitly opts in and continues testing recovery.
+Startup tests cover multi-page peer catch-up, repeat desktop launches, and bounded offline fallback.

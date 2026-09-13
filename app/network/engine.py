@@ -272,8 +272,8 @@ def leave_network() -> dict:
     with get_db() as conn:
         cursor = conn.cursor()
         store.lock_state(cursor)  # Same lock order as in-flight hub receipt transactions.
-        for table in ("sync_hub_receipts", "sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
-                      "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records", "sync_object_outbox", "sync_checkpoint_outbox", "sync_archive_outbox", "sync_cloud_blobs", "sync_blob_outbox", "sync_cloud_inbox",
+        for table in ("sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
+                      "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
                       "network_joins", "network_member_names", "network_members"):
             cursor.execute(f"DELETE FROM {table}")
         cursor.execute("DELETE FROM sync_blobs WHERE present = FALSE")
@@ -572,7 +572,7 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
     return published
 
 
-def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = True) -> int:
+def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = True, strict: bool = False) -> int:
     ctx = ctx or context()
     if ctx is None:
         return 0
@@ -583,12 +583,16 @@ def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = Tr
             total += scan_collection(name, ctx=ctx)
         except Exception:  # noqa: BLE001
             logger.warning("Scan of %s failed", name, exc_info=True)
+            if strict:
+                raise
     if include_catalog:
         try:
             from app.network import catalog
             total += catalog.publish_owned(ctx=ctx)
         except Exception:  # noqa: BLE001
             logger.warning("Catalog publish failed", exc_info=True)
+            if strict:
+                raise
         for module_name in ("memory_records", "plugins_sync"):
             try:
                 import importlib
@@ -596,6 +600,8 @@ def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = Tr
                 total += module.publish(ctx=ctx)
             except Exception:  # noqa: BLE001
                 logger.warning("%s publish failed", module_name, exc_info=True)
+                if strict:
+                    raise
     if total:
         kick()
     return total

@@ -1,39 +1,10 @@
-"""Account sync: this worker's side of the hub's per-network feed.
-
-The account hub (a Cloudflare Worker with D1; see docs/network/hub-api.md)
-stores ciphertext and cursors only. A
-worker signed into the account:
-
-- registers its device in the account's network (``register``); the first
-  worker to sign in founds the account's network, later ones are admitted
-  by whichever member is online (``admit_pending_devices``) or unlock with
-  the recovery key when every other worker is off
-- pushes every operation in its log in ingest order (``push``); the hub
-  deduplicates on (origin, incarnation, seq)
-- pulls the feed from its cursor (``pull``) and applies it like any peer
-  delivery; the same operation over LAN and hub applies once
-- admits devices that registered through the account (``approve_device``)
-  by handing the hub a join response wrapped to that device's keys. Signing
-  in to the account is the authorization; no one compares fingerprints.
-
-A worker that already has its own network and signs in to an account whose
-network was founded elsewhere is answered ``conflict`` by the hub; the
-account always wins, so the loop adopts the account's network at once
-(``adopt_account_network``): the local network bookkeeping is replaced and
-local-only rows are merged into the account's. A worker signed in to an
-account is therefore always in that account's network; there is no second
-state to manage.
-
-Quota errors stop cloud durability, never LAN sync: the backlog is shown
-in the status and retried.
-"""
+"""Account registration and admission; data travels directly between workers."""
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
 import logging
-import sys
 import time
 from typing import Any, Dict, List, Optional
 
@@ -44,13 +15,11 @@ from app.core.config import settings
 from app.db import mobile_hub as binding_store
 from app.db import network as store
 from app.db.async_database import run_sync
-from app.network import backup, checkpoints, cloud_blobs, crypto, engine, identity as identity_mod, membership, object_sync
+from app.network import crypto, engine, membership
+from app.network import identity as identity_mod
 
 logger = logging.getLogger(__name__)
 
-PUSH_BATCH = 200
-PULL_BATCH = 500
-FEED_MAX_BYTES = 8 * 1024 * 1024
 LOOP_IDLE_SECONDS = 15.0
 LOOP_ACTIVE_SECONDS = 1.0
 APPROVAL_POLL_SECONDS = 5.0
@@ -61,18 +30,13 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 _state: Dict[str, Any] = {"linked": False}
 _recovery_upload_due = False
 _bootstrap_lock: Optional[asyncio.Lock] = None
-_object_poll_at: dict[str, float] = {}
-_object_work_at: dict[str, float] = {}
+_pass_lock: Optional[asyncio.Lock] = None
 _directory_poll_at: dict[str, float] = {}
 DIRECTORY_POLL_SECONDS = 240.0
 
 
 class HubError(RuntimeError):
     pass
-
-
-class UploadBlocked(HubError):
-    """Durable upload cooldown; reading and admitting devices may continue."""
 
 
 # ---------------------------------------------------------------------------
@@ -131,13 +95,13 @@ def _save_hub_state(*, _expected_scope: str | None = None, **fields) -> dict:
             return {}
         current = dict(state.get("hub") or {})
         for key, value in fields.items():
-            current[key] = max(int(current.get(key) or 0), int(value)) if key in ("cursor", "pushed_ingest_id", "archive_cursor") else value
+            current[key] = value
         store.update_state(_conn=conn, hub=current)
         return current
 
 
 def _ensure_hub_scope() -> str:
-    """Receipts belong to this binding and network, never a different account."""
+    """Registration belongs to this account binding and network."""
     binding = _binding()
     if binding is None:
         raise HubError("This worker is not signed in to a Shuffle account")
@@ -151,9 +115,8 @@ def _ensure_hub_scope() -> str:
         previous = current.get("binding_scope")
         if previous != scope:
             if previous is not None:
-                current.update(cursor=0, pushed_ingest_id=0, upload_blocked=None, quota=None,
-                               registered=False, registered_name=None, object_sync=None, object_batch_due=None,
-                               checkpoint_id=None, checkpoint_cursor=0, checkpoint_last_at=0, archive_cursor=0, restored_checkpoint=None)
+                current = {"registered": False}
+
             current["binding_scope"] = scope
             store.update_state(_conn=conn, hub=current)
     return scope
@@ -162,34 +125,13 @@ def _ensure_hub_scope() -> str:
 def status() -> dict:
     binding = _binding()
     hub_state = _hub_state() if store.get_state() else {}
-    cloud = backup.enabled()
-    backlog = _backlog(hub_state) if cloud else 0
-    file_backlog = cloud_blobs.pending_count(hub_state.get("binding_scope", "")) if hub_state and cloud else 0
-    incoming = object_sync.inbox_count(hub_state.get("binding_scope", "")) if hub_state.get("object_sync") and cloud else 0
     return {
         "linked": binding is not None,
-        "backup_enabled": cloud,
         "sync_mode": "peers",
         "server_id": binding.get("server_id") if binding else None,
         "registered": bool(hub_state.get("registered")),
         "status": hub_state.get("status") or _state.get("status"),
-        "cursor": hub_state.get("cursor", 0),
-        "pushed_ingest_id": hub_state.get("pushed_ingest_id", 0),
-        "backlog": backlog,
-        "files_pending_backup": file_backlog,
-        "incoming_pending": incoming,
-        "last_push_at": hub_state.get("last_push_at"),
-        "last_pull_at": hub_state.get("last_pull_at"),
-        "last_error": _state.get("last_error") or ("Account upload quota exceeded; cloud backlog kept" if cloud and hub_state.get("upload_blocked") else None),
-        "quota": _current_quota(hub_state.get("quota")),
-        "upload_blocked": hub_state.get("upload_blocked"),
-        "cloud_storage": "objects" if (hub_state.get("object_sync") or {}).get("writes") else "feed",
-        "remote_durability": "local_only" if binding is None or not cloud else "pending" if (
-            not hub_state.get("registered") or backlog or file_backlog or incoming or not hub_state.get("checkpoint_id")
-            or int(hub_state.get("backed_up_peer_revision", 0)) != int(hub_state.get("peer_state_revision", 0))) else "committed",
-        "batch_due_at": hub_state.get("object_batch_due"),
-        "recovery_checkpoint": hub_state.get("checkpoint_id"),
-        "recovery_checkpoint_at": hub_state.get("checkpoint_last_at"),
+        "last_error": _state.get("last_error"),
         "pending_devices": _state.get("pending_devices") or [],
         "account_network": _state.get("account_network"),
     }
@@ -200,23 +142,6 @@ def forget_network() -> None:
     for key in ("status", "pending_devices", "account_network", "last_error", "enrollment_poll"):
         _state.pop(key, None)
 
-
-def _backlog(hub_state: dict) -> int:
-    try:
-        with store.get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""SELECT COUNT(*) AS n FROM sync_ops o WHERE ingest_id > %s
-                              AND NOT EXISTS (SELECT 1 FROM sync_hub_receipts r WHERE r.hub_scope=%s
-                                AND r.origin_device_id=o.origin_device_id AND r.incarnation=o.incarnation AND r.seq=o.seq)""",
-                           (int(hub_state.get("pushed_ingest_id", 0) or 0), hub_state.get("binding_scope", "")))
-            return int(cursor.fetchone()["n"])
-    except Exception:  # noqa: BLE001
-        return 0
-
-
-# ---------------------------------------------------------------------------
-# Registration, approval, recovery
-# ---------------------------------------------------------------------------
 
 def register() -> dict:
     """Tell the hub about this device and learn where the network stands."""
@@ -242,7 +167,7 @@ def register() -> dict:
     if ctx is not None:
         _save_hub_state(registered=result.get("status") != "conflict", status=result.get("status"),
                         registered_name=body["device"]["name"],
-                        network_hub_id=result.get("network_hub_id"), quota=result.get("quota"))
+                        network_hub_id=result.get("network_hub_id"))
     return result
 
 
@@ -263,6 +188,24 @@ def _account_network(info: Optional[dict]) -> Optional[dict]:
     return {"network_id": info.get("network_id"), "name": info.get("name"),
             "founder_device_id": info.get("founder_device_id"), "devices": devices,
             "recovery_available": bool(info.get("recovery"))}
+
+
+def refresh_peer_endpoints() -> None:
+    """Account URLs are routing hints, never a grant of network membership."""
+    ctx = engine.context()
+    if _binding() is None or ctx is None:
+        return
+    info = _call("GET", "", None, max_bytes=1 << 20)
+    if info.get("network_id") != ctx.network_id:
+        return
+    for device in info.get("devices") or []:
+        member = ctx.member(device.get("device_id"))
+        if member is None or member.status != membership.STATUS_ACTIVE or member.device_id == ctx.device_id:
+            continue
+        endpoints = device.get("endpoints")
+        if isinstance(endpoints, list) and endpoints and all(isinstance(url, str) for url in endpoints):
+            existing = (store.get_member(member.device_id) or {}).get("endpoints") or []
+            store.touch_member(member.device_id, endpoints=list(dict.fromkeys(endpoints + existing)))
 
 
 def pending_devices() -> List[dict]:
@@ -356,7 +299,6 @@ def _upload_recovery() -> None:
         _recovery_upload_due = False
         return
     _call("POST", "recovery", {"recovery": wrap})
-    _save_hub_state(checkpoint_last_at=0)
     _recovery_upload_due = False
 
 
@@ -403,33 +345,12 @@ async def adopt_account_network(*, device_name: Optional[str] = None) -> dict:
     return {"adopted": True, "status": result.get("status")}
 
 
-async def restore_with_recovery(recovery_key_text: str, *, device_name: str | None = None) -> dict:
-    """Fresh worker, every other worker off: unlock with the recovery key and replay the feed."""
-    from app.network import recovery as recovery_mod
-    info = await asyncio.to_thread(_call, "GET", "", None, max_bytes=1 << 20)
-    wrap = info.get("recovery")
-    if not wrap:
-        raise HubError("This account's network has no recovery key on file")
-    response = recovery_mod.response_from_wrap(
-        recovery_key_text, wrap, name=info.get("name"), founder_device_id=info["founder_device_id"],
-        generation=int(info.get("generation") or 0), membership_records=[], device_name=device_name)
-    await _bootstrap_from_hub(response, device_name=device_name, cloud_restore=True)
-    kick()
-    return {"restored": True, "network": engine.require_context().summary()}
-
-
 def _bootstrap_id() -> str:
     return "hub-bootstrap:" + identity_mod.load().device_id
 
 
-async def _bootstrap_from_hub(response: dict | None = None, *, device_name: str | None = None, cloud_restore: bool = False) -> bool:
-    """Persist hub provenance before enrollment, then safely retry the initial feed.
-
-    Direct-invite snapshots have their own joiner records and must never be
-    completed from a possibly partial hub feed. This separate local record also
-    closes the crash window between installing network state and starting replay.
-    Its admission response contains device-wrapped keys, never the recovery key.
-    """
+async def _bootstrap_from_hub(response: dict | None = None, *, device_name: str | None = None) -> bool:
+    """Persist account admission and resume a verified peer snapshot after restart."""
     global _bootstrap_lock
     if _bootstrap_lock is None:
         _bootstrap_lock = asyncio.Lock()
@@ -448,7 +369,7 @@ async def _bootstrap_from_hub(response: dict | None = None, *, device_name: str 
                 "id": _bootstrap_id(), "role": "hub_bootstrap", "status": "syncing",
                 "device_id": identity_mod.load().device_id,
                 "name": device_name or engine._default_device_name(),
-                "response": {"admission": response, "binding": binding_identity, "cloud_restore": cloud_restore},
+                "response": {"admission": response, "binding": binding_identity},
             })
         saved = marker.get("response") or {}
         if (marker.get("role") != "hub_bootstrap" or marker.get("device_id") != identity_mod.load().device_id
@@ -463,13 +384,7 @@ async def _bootstrap_from_hub(response: dict | None = None, *, device_name: str 
         if ctx.bootstrap_state == engine.BOOTSTRAP_SYNCING:
             if not (await run_sync(_hub_state)).get("registered"):
                 await asyncio.to_thread(register)
-            if saved.get("cloud_restore") or await run_sync(backup.enabled):
-                probe = await asyncio.to_thread(_call, "GET", "feed?cursor=0&limit=1&protocol=2", max_bytes=FEED_MAX_BYTES)
-                if (probe.get("object_sync") or {}).get("direct_read") and not (await asyncio.to_thread(_hub_state)).get("restored_checkpoint"):
-                    await asyncio.to_thread(checkpoints.restore, sys.modules[__name__], await asyncio.to_thread(_ensure_hub_scope))
-                await asyncio.to_thread(_replay_feed_from_start)
-            else:
-                await _bootstrap_from_peers(admission)
+            await _bootstrap_from_peers(admission)
             await asyncio.to_thread(engine.finish_bootstrap)
         elif ctx.bootstrap_state != engine.BOOTSTRAP_READY:
             raise HubError("Settings sync is not ready to resume")
@@ -480,152 +395,15 @@ async def _bootstrap_from_hub(response: dict | None = None, *, device_name: str 
         return True
 
 
-def _replay_feed_from_start() -> None:
-    scope = _ensure_hub_scope()
-    while True:
-        poll = {}
-        pull_once(poll)
-        if not poll.get("more"):
-            break
-    if object_sync.inbox_count(scope) or store.pending_holes():
-        raise HubError("Cloud restoration is waiting for missing signed operations or network keys")
-    _save_hub_state(_expected_scope=scope, registered=True, status="active")
-
-
-# ---------------------------------------------------------------------------
-# Push and pull
-# ---------------------------------------------------------------------------
-
-def _current_quota(value: dict | None) -> dict | None:
-    if value is None:
-        return None
-    quota = dict(value)
-    reset = quota.get("daily_upload_reset_at")
-    if reset and time.time() * 1000 >= reset:
-        quota["daily_upload_bytes"] = 0
-    return quota
-
-
-def _save_quota(quota: dict, scope: str) -> None:
-    blocked = _hub_state().get("upload_blocked")
-    fields = {"quota": quota}
-    if blocked:
-        previous = blocked.get("quota") or {}
-        used, limit = {"ops": ("ops", "limit"), "stored_bytes": ("bytes", "bytes_limit"),
-                       "daily_upload": ("daily_upload_bytes", "daily_upload_limit")}.get(blocked["reason"], (None, None))
-        if (used and quota.get(limit) is not None and previous.get(limit) is not None
-                and quota[limit] - quota.get(used, 0) > previous[limit] - previous.get(used, 0)):
-            fields["upload_blocked"] = None
-    _save_hub_state(_expected_scope=scope, **fields)
-
-
-def _block_upload(result: dict, scope: str) -> None:
-    quota = result.get("quota") or {}
-    reason = result.get("quota_reason")
-    if not reason:
-        # Older hubs return only quota_exceeded. Retry conservatively without
-        # assuming a failed response acknowledged any prefix of the batch.
-        reason = "ops" if quota.get("limit") is not None and quota.get("ops", 0) >= quota["limit"] else "quota"
-        if reason == "quota" and quota.get("bytes_limit") and quota.get("bytes", 0) >= quota["bytes_limit"]:
-            reason = "stored_bytes"
-        if reason == "quota" and quota.get("daily_upload_limit") and quota.get("daily_upload_bytes", 0) >= quota["daily_upload_limit"]:
-            reason = "daily_upload"
-    now = time.time()
-    retry_at = now + 3600  # Re-probe permanent/legacy limits hourly, never every wake.
-    if reason == "daily_upload":
-        retry_at = (quota.get("daily_upload_reset_at") or (int(now // 86400) + 1) * 86400000) / 1000
-    if reason == "concurrent_upload":
-        retry_at = now + LOOP_IDLE_SECONDS
-    _save_hub_state(_expected_scope=scope, quota=quota, upload_blocked={"reason": reason, "retry_at": retry_at, "quota": quota})
-    raise UploadBlocked("Account upload quota exceeded; cloud backlog kept")
-
-
-def push_once() -> int:
-    """Send the next batch of our log to the hub. Returns how many went."""
-    if not backup.enabled():
-        return 0
-    scope = _ensure_hub_scope()
-    hub_state = _hub_state()
-    blocked = hub_state.get("upload_blocked")
-    if (hub_state.get("object_sync") or {}).get("writes") or object_sync._outbox(scope):
-        if blocked and time.time() < blocked["retry_at"]:
-            raise UploadBlocked("Account upload quota exceeded; cloud backlog kept")
-        try:
-            return object_sync.push(sys.modules[__name__], scope, hub_state)
-        except object_sync.ObjectError as exc:
-            raise HubError(str(exc)) from exc
-    pushed = int(hub_state.get("pushed_ingest_id", 0) or 0)
-    batch = store.hub_ops_after_ingest(pushed, scope, limit=PUSH_BATCH)
-    if not batch:
-        if hub_state.get("upload_blocked"):
-            _save_hub_state(_expected_scope=scope, upload_blocked=None)
-        return 0
-    ops = [env for _, env in batch if env is not None]
-    if ops:
-        blocked = hub_state.get("upload_blocked")
-        if blocked and time.time() < blocked["retry_at"]:
-            raise UploadBlocked("Account upload quota exceeded; cloud backlog kept")
-        result = _call("POST", "ops", {"ops": ops}, max_bytes=65536, timeout=30)
-        if result.get("quota_exceeded"):
-            _block_upload(result, scope)
-        _save_hub_state(_expected_scope=scope, last_push_at=time.time(), quota=result.get("quota"), upload_blocked=None)
-    _save_hub_state(_expected_scope=scope, pushed_ingest_id=batch[-1][0])
-    return len(batch)
-
-
-def pull_once(poll: dict | None = None) -> int:
-    scope = _ensure_hub_scope()
-    hub_state = _hub_state()
-    cursor = int(hub_state.get("cursor", 0) or 0)
-    suffix = f"feed?cursor={cursor}&limit={PULL_BATCH}&protocol=2" + ("&include_pending=1" if poll is not None else "")
-    page = _call("GET", suffix, max_bytes=FEED_MAX_BYTES, timeout=60)
-    if poll is not None:
-        poll["more"] = bool(page.get("more"))
-    if isinstance(page.get("object_sync"), dict):
-        _state["object_mode"] = True
-        if page["object_sync"] != hub_state.get("object_sync"):
-            _save_hub_state(_expected_scope=scope, object_sync=page["object_sync"])
-    if poll is not None and isinstance(page.get("pending_devices"), list):
-        poll["devices"] = page["pending_devices"]
-        _state["pending_devices"] = page["pending_devices"]
-    if isinstance(page.get("quota"), dict):
-        _save_quota(page["quota"], scope)
-    ops = page.get("ops") or []
-    applied = 0
-    if "entries" in page:
-        try:
-            for entry in page["entries"]:
-                applied += object_sync.pull_entry(sys.modules[__name__], scope, entry)
-                _save_hub_state(_expected_scope=scope, cursor=int(entry["cursor"]), last_pull_at=time.time())
-            applied += object_sync.drain_inbox(scope)
-        except Exception as exc:
-            raise HubError("Could not verify or persist cloud bundle; cursor retained") from exc
-    elif ops and isinstance(page.get("object_sync"), dict):
-        # The compatibility bridge still needs durable dependency staging when
-        # direct signing is temporarily unavailable during a rollout/rollback.
-        try:
-            applied += object_sync.pull_entry(sys.modules[__name__], scope, {"cursor": page["cursor"], "ops": ops})
-        except Exception as exc:
-            raise HubError("Could not persist cloud operations; feed cursor kept") from exc
-    elif ops:
-        try:
-            result = engine.apply_batch(ops, hub_scope=scope)
-        except Exception as exc:
-            raise HubError("Could not persist cloud operations; feed cursor kept") from exc
-        applied = result.applied
-        if applied:
-            engine.kick()
-    new_cursor = int(page.get("cursor", cursor))
-    if new_cursor != cursor or ops:
-        _save_hub_state(_expected_scope=scope, cursor=new_cursor, last_pull_at=time.time())
-    return applied
-
-
-# ---------------------------------------------------------------------------
-# Loop
-# ---------------------------------------------------------------------------
-
 async def _loop_body() -> bool:
+    global _pass_lock
+    if _pass_lock is None:
+        _pass_lock = asyncio.Lock()
+    async with _pass_lock:
+        return await _account_pass()
+
+
+async def _account_pass() -> bool:
     """One pass. Returns True when there is more to do soon."""
     global _recovery_upload_due
     if _binding() is None:
@@ -645,9 +423,8 @@ async def _loop_body() -> bool:
             # Signed in but not enrolled: register, then either found the
             # account's network (nobody has yet) or wait to be admitted by an
             # online member.
-            peer_mode = not await run_sync(backup.enabled)
             binding_key = tuple((_binding() or {}).get(k) for k in ("hub_url", "server_id"))
-            pending = _state.get("enrollment_poll") if peer_mode else None
+            pending = _state.get("enrollment_poll")
             if pending and pending["binding"] == binding_key:
                 if time.monotonic() < pending["next"]:
                     return False
@@ -656,8 +433,7 @@ async def _loop_body() -> bool:
                 pending["next"] = time.monotonic() + pending["delay"]
             else:
                 result = await asyncio.to_thread(register)
-                if peer_mode:
-                    _state["enrollment_poll"] = {"binding": binding_key, "result": result,
+                _state["enrollment_poll"] = {"binding": binding_key, "result": result,
                                                  "delay": 15, "next": time.monotonic() + 15}
             if result.get("status") == "approved" or result.get("response"):
                 response = result.get("response") or await asyncio.to_thread(_await_approval_sync)
@@ -695,58 +471,15 @@ async def _loop_body() -> bool:
         recovery_wrap = (await run_sync(store.get_state) or {}).get("recovery") or {}
         if _recovery_upload_due or (recovery_wrap.get("stale") and not recovery_wrap.get("hub_tombstoned")):
             await asyncio.to_thread(_upload_recovery)
-        if ctx.bootstrap_state == engine.BOOTSTRAP_READY and not await run_sync(backup.enabled):
+        if ctx.bootstrap_state == engine.BOOTSTRAP_READY:
             scope = hub_state.get("binding_scope", "")
             if time.monotonic() >= _directory_poll_at.get(scope, 0):
                 _directory_poll_at[scope] = time.monotonic() + DIRECTORY_POLL_SECONDS
                 await asyncio.to_thread(admit_pending_devices)
+                await asyncio.to_thread(refresh_peer_endpoints)
             _state["last_error"] = None
             return False
-        if ctx.bootstrap_state == engine.BOOTSTRAP_READY:
-            sent = received = 0
-            checkpoint_work = False
-            errors = []
-            poll = {}
-            try:
-                sent = await asyncio.to_thread(push_once)
-            except HubError as exc:
-                errors.append(str(exc))
-            try:
-                scope = hub_state.get("binding_scope", "")
-                if hub_state.get("object_sync") and time.monotonic() < _object_poll_at.get(scope, 0):
-                    poll["devices"] = []
-                else:
-                    received = await asyncio.to_thread(pull_once, poll)
-                    _object_poll_at[scope] = time.monotonic() + (0 if poll.get("more") else 60)
-            except HubError as exc:
-                errors.append(str(exc))
-            try:
-                # Devices that signed in to this account are admitted here.
-                admitted = await asyncio.to_thread(admit_pending_devices, poll.get("devices"))
-                if admitted:
-                    sent += await asyncio.to_thread(push_once)
-            except HubError as exc:
-                errors.append(str(exc))
-            current = await asyncio.to_thread(_hub_state)
-            scope = current.get("binding_scope", "")
-            if ((current.get("object_sync") or {}).get("writes") and not current.get("upload_blocked")
-                    and time.monotonic() >= _object_work_at.get(scope, 0)):
-                _object_work_at[scope] = time.monotonic() + 60
-                try:
-                    checkpoint_work = await asyncio.to_thread(cloud_blobs.publish_once, sys.modules[__name__],
-                                                              await asyncio.to_thread(_ensure_hub_scope))
-                    if not checkpoint_work:
-                        checkpoint_work = await asyncio.to_thread(checkpoints.publish_once, sys.modules[__name__],
-                                                                  await asyncio.to_thread(_ensure_hub_scope))
-                    if not checkpoint_work and current.get("checkpoint_id"):
-                        checkpoint_work = await asyncio.to_thread(object_sync.archive_once, sys.modules[__name__],
-                                                                  await asyncio.to_thread(_ensure_hub_scope))
-                    if checkpoint_work:
-                        _object_work_at[scope] = time.monotonic() + 5
-                except (HubError, object_sync.ObjectError) as exc:
-                    errors.append(str(exc))
-            _state["last_error"] = "; ".join(dict.fromkeys(errors))[:200] or None
-            return checkpoint_work or sent >= PUSH_BATCH or received >= PULL_BATCH
+
     except HubError as exc:
         _state["last_error"] = str(exc)[:200]
         logger.debug("Hub sync: %s", exc)
@@ -766,8 +499,7 @@ async def loop() -> None:
             raise
         busy = busy or False
         try:
-            active_wait = 5.0 if _state.get("object_mode") else LOOP_ACTIVE_SECONDS
-            await asyncio.wait_for(_wake.wait(), timeout=active_wait if busy else LOOP_IDLE_SECONDS)
+            await asyncio.wait_for(_wake.wait(), timeout=LOOP_ACTIVE_SECONDS if busy else LOOP_IDLE_SECONDS)
         except asyncio.TimeoutError:
             pass
         _wake.clear()
@@ -804,13 +536,12 @@ async def stop() -> None:
 
 
 def reset_for_tests() -> None:
-    global _recovery_upload_due, _bootstrap_lock
+    global _recovery_upload_due, _bootstrap_lock, _pass_lock
     _state.clear()
     _state["linked"] = False
     _recovery_upload_due = False
     _bootstrap_lock = None
-    _object_poll_at.clear()
-    _object_work_at.clear()
+    _pass_lock = None
     _directory_poll_at.clear()
 
 

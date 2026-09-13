@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from app.db import network as store
-from app.network import backup, engine, hub, peer_snapshot, transport
+from app.network import engine, hub, peer_snapshot, transport
 from tests.core.network.harness import join
 from tests.core.network.test_transport import (  # noqa: F401
     ServedBy,
@@ -78,15 +78,14 @@ async def test_peer_mode_never_uploads_or_polls_cloud_data(workers, monkeypatch)
         monkeypatch.setattr(hub, '_recovery_upload_due', False)
         for _ in range(60):
             await hub._loop_body()
-        assert calls == [('GET', 'pending')]
-        assert hub.push_once() == 0
-        assert backup.enabled() is False
-        assert hub.status()['remote_durability'] == 'local_only'
-        assert hub.status()['backlog'] == 0
-        backup.configure(True)
-        assert backup.enabled() is True
-        backup.configure(False)
-        assert backup.enabled() is False
+        assert calls == [('GET', 'pending'), ('GET', '')]
+        assert hub.status()['sync_mode'] == 'peers'
+        assert 'backup_enabled' not in hub.status()
+        # A legacy enabled preference cannot reactivate removed transports.
+        hub._save_hub_state(backup_enabled=True)
+        await hub._loop_body()
+        assert calls == [('GET', 'pending'), ('GET', '')]
+
 
 
 async def test_account_bootstrap_waits_then_copies_peer_without_cloud_feed(workers, monkeypatch):
@@ -161,7 +160,7 @@ async def test_direct_attachments_are_encrypted_and_survive_source_offline(worke
         assert blobs.read_local(digest) == data
         # Cloud fallback is forbidden unless this worker explicitly enables it.
         monkeypatch.setattr(hub, '_call', lambda *a, **k: pytest.fail('Unexpected cloud request'))
-        assert not await blobs._fetch_cloud('0' * 64)
+        assert not await blobs.fetch_one('0' * 64)
 
 
 async def test_snapshot_merge_keeps_conflicting_offline_edit(workers):

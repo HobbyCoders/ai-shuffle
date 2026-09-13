@@ -20,7 +20,7 @@
 		completeOnboarding
 	} from '$lib/api/auth';
 	import { getErrorMessage, type WorkspaceConfig } from '$lib/api/client';
-	import { createNetwork, getNetworkStatus, unlockWithRecoveryKey, type NetworkStatus } from '$lib/api/network';
+	import { createNetwork, getNetworkStatus, type NetworkStatus } from '$lib/api/network';
 	import SetupProgress from '$lib/components/SetupProgress.svelte';
 	import GitHubConnection from '$lib/components/GitHubConnection.svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
@@ -28,7 +28,7 @@
 	import AccountPanel from '$lib/components/deck/cards/settings/AccountPanel.svelte';
 	import JoinNetworkPanel from '$lib/components/deck/cards/settings/JoinNetworkPanel.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
-	import { Check, FolderOpen, Loader2, Plus, KeyRound, AlertTriangle, ChevronLeft } from 'lucide-svelte';
+	import { Check, FolderOpen, Loader2, Plus, AlertTriangle, ChevronLeft } from 'lucide-svelte';
 
 	// ── Steps ────────────────────────────────────────────────────────────────
 	type SetupStep = 'start' | 'workspace' | 'providers';
@@ -52,8 +52,6 @@
 	let networkBusy = $state(false);
 	let networkError = $state('');
 	let workerName = $state('My worker');
-	let recoveryKeyInput = $state('');
-	let showRecovery = $state(false);
 	let networkPoll: ReturnType<typeof setInterval> | null = null;
 
 	let workspaceConfig = $state<WorkspaceConfig | null>(null);
@@ -63,7 +61,6 @@
 	const linked = $derived(Boolean(networkStatus?.hub?.linked));
 	const waitingOnAccount = $derived(!enrolled && linked && networkStatus?.hub?.status === 'pending');
 	const accountWorkers = $derived((networkStatus?.hub?.account_network?.devices ?? []).filter((d) => d.status === 'active' && d.kind !== 'consumer').map((d) => d.name || 'a worker'));
-	const recoveryAvailable = $derived(Boolean(networkStatus?.hub?.account_network?.recovery_available));
 	const enrollmentPending = $derived(!enrolled && (networkStatus?.enrollment?.status === 'pending' || networkStatus?.enrollment?.status === 'syncing'));
 
 	function stopNetworkPoll() { if (networkPoll) clearInterval(networkPoll); networkPoll = null; }
@@ -94,16 +91,6 @@
 		} finally { networkBusy = false; }
 	}
 
-	async function unlockWithRecovery() {
-		networkBusy = true; networkError = '';
-		try {
-			await unlockWithRecoveryKey(recoveryKeyInput, workerName.trim() || undefined);
-			recoveryKeyInput = ''; showRecovery = false;
-			await refreshNetwork();
-		} catch (e: unknown) {
-			networkError = getErrorMessage(e, 'The recovery key was not accepted');
-		} finally { networkBusy = false; }
-	}
 
 	function finishStartStep() {
 		stopNetworkPoll();
@@ -267,20 +254,7 @@
 									<p class="text-sm text-muted-foreground">
 										{#if accountWorkers.length}Your account already syncs settings between {accountWorkers.join(', ')}. This worker joins as soon as one of them is online; you can keep going with setup meanwhile.{:else}This worker joins as soon as another worker on your account is online; you can keep going with setup meanwhile.{/if}
 									</p>
-									{#if recoveryAvailable}
-										{#if showRecovery}
-											<div class="flex gap-2">
-												<input type="text" bind:value={recoveryKeyInput} class="input flex-1 text-sm font-mono" placeholder="A1-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-X" autocomplete="off" spellcheck="false" aria-label="Recovery key" />
-												<button type="button" onclick={unlockWithRecovery} class="btn btn-primary px-4" disabled={networkBusy || recoveryKeyInput.trim().length < 20}>
-													{#if networkBusy}<Loader2 size={14} strokeWidth={2} class="animate-spin" />{:else}Restore{/if}
-												</button>
-											</div>
-										{:else}
-											<button type="button" onclick={() => (showRecovery = true)} class="btn btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2">
-												<KeyRound size={16} strokeWidth={1.5} /> No other worker available? Use your recovery key
-											</button>
-										{/if}
-									{/if}
+
 								</div>
 							{:else if linked}
 								<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Connecting this worker to your account…</div>

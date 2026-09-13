@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from app.db import network as store
 from app.db.base import get_db
-from app.network import crypto, engine, identity as identity_mod, membership
+from app.network import crypto, engine
 
 logger = logging.getLogger(__name__)
 
@@ -107,37 +107,3 @@ def unwrap(recovery_key_text: str, wrap: Dict[str, Any]) -> bytes:
         return crypto.unwrap_key_with_recovery(raw, network_id, wrap["wrapped"])
     except (crypto.CryptoError, KeyError, TypeError) as exc:
         raise RecoveryError("Recovery key does not open this network") from exc
-
-
-def response_from_wrap(recovery_key_text: str, wrap: Dict[str, Any], *, name: Optional[str],
-                       founder_device_id: str, generation: int, membership_records: list,
-                       keyring_wraps: Optional[Dict[str, Any]] = None, device_name: Optional[str] = None) -> dict:
-    """Build a join-style response for a device that proved the recovery key."""
-    ident = identity_mod.load()
-    network_key = unwrap(recovery_key_text, wrap)
-    network_id = wrap["network_id"]
-    key_version = int(wrap.get("key_version", 1))
-    certificate = membership.issue_recovery_certificate(
-        network_id=network_id, network_key=network_key, signing_private=ident.signing_private,
-        encryption_public=ident.encryption_public, name=device_name or engine._default_device_name(),
-        kind=membership.KIND_WORKER, generation=generation + 1)
-    keyring = {str(key_version): crypto.wrap_key(ident.encryption_public, network_key)}
-    return {
-        "network_id": network_id, "name": name, "founder_device_id": founder_device_id,
-        "generation": generation + 1, "key_version": key_version, "keyring": keyring,
-        "certificate": certificate, "membership_records": list(membership_records or []),
-        "members": [], "legacy_instance_map": {}, "issuer": {},
-    }
-
-
-async def unlock_from_hub(recovery_key_text: str, *, device_name: Optional[str] = None) -> dict:
-    """Restore this worker into the account's network using the hub replica."""
-    from app.network import hub
-    try:
-        crypto.parse_recovery_key(recovery_key_text)
-    except crypto.CryptoError as exc:
-        raise RecoveryError(str(exc)) from exc
-    try:
-        return await hub.restore_with_recovery(recovery_key_text, device_name=device_name)
-    except hub.HubError as exc:
-        raise RecoveryError(str(exc)) from exc

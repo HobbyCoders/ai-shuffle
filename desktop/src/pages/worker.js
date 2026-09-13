@@ -71,8 +71,10 @@
     slowTimer = setTimeout(() => { slowTimer = null; slow = true; if (lastState) renderState(lastState); }, 60_000);
    }
    status.section.dataset.mode = slow ? 'slow' : 'starting';
-   status.heading.textContent = slow ? 'Startup is taking longer than usual' : retrying ? 'Starting again' : 'Getting things ready';
-   status.detail.textContent = slow
+   status.heading.textContent = state.startupStep === 'syncing' ? 'Syncing your devices' : slow ? 'Startup is taking longer than usual' : retrying ? 'Starting again' : 'Getting things ready';
+   status.detail.textContent = state.startupStep === 'syncing'
+    ? 'Checking your other workers for updates before opening. Unavailable workers will catch up later.'
+    : slow
     ? 'AI Shuffle is still preparing your local worker. The first start can take a few minutes. You can check startup diagnostics below while you wait.'
     : pg?.phase === 'starting' ? 'Preparing your local database.' : 'Starting your local worker.';
    return;
