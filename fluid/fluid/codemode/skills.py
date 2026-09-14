@@ -73,8 +73,9 @@ import os
 import re
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -91,6 +92,26 @@ _JOURNAL_METRICS = {
     "explicit_busy_failures": 0, "explicit_quota_failures": 0,
 }
 _JOURNAL_SATURATED_AT: float | None = None
+
+# Session and network consumers construct separate SkillStores for the same
+# journal. Keep their retry/log windows together, bounded per Python process.
+_JOURNAL_BACKOFF_LIMIT = 512
+_JOURNAL_BACKOFF_LOCK = threading.Lock()
+_JOURNAL_BACKOFF: OrderedDict[tuple[str, str], tuple[float, int]] = OrderedDict()
+
+
+def _journal_window_count(path: str, kind: str, interval: float) -> int:
+    """Count an event; return its batch only when this journal's window opens."""
+    key = (path, kind)
+    with _JOURNAL_BACKOFF_LOCK:
+        now = time.monotonic()
+        previous, count = _JOURNAL_BACKOFF.pop(key, (float("-inf"), 0))
+        count += 1
+        emit = count if now - previous >= interval else 0
+        _JOURNAL_BACKOFF[key] = (now, 0) if emit else (previous, count)
+        while len(_JOURNAL_BACKOFF) > _JOURNAL_BACKOFF_LIMIT:
+            _JOURNAL_BACKOFF.popitem(last=False)
+        return emit
 
 
 def _journal_event(event: str, count: int = 1) -> None:
@@ -500,9 +521,7 @@ class SkillStore:
         self._journal_bytes = -1
         # Stamped onto every journal entry (see journal_context).
         self._journal_tag: dict[str, str] = {}
-        self._journal_warning_at: dict[str, float] = {}
-        self._journal_skipped: dict[str, int] = {}
-        self._journal_reap_retry_at = 0.0
+        self._journal_backoff_key = os.path.normcase(os.path.realpath(self._journal_path))
 
     def journal_context(
         self, *, session_id: str | None = None, agent: str | None = None,
@@ -707,13 +726,9 @@ class SkillStore:
 
     def _journal_skip(self, reason: str) -> None:
         _journal_event("skipped_quota" if reason == "journal byte quota reached" else "skipped_busy")
-        self._journal_skipped[reason] = self._journal_skipped.get(reason, 0) + 1
-        now = time.monotonic()
-        if now - self._journal_warning_at.get(reason, float("-inf")) >= 60:
-            _log.warning("Inference event skipped: %s (%d skipped since last warning)",
-                         reason, self._journal_skipped[reason])
-            self._journal_warning_at[reason] = now
-            self._journal_skipped[reason] = 0
+        count = _journal_window_count(self._journal_backoff_key, reason, 60)
+        if count:
+            _log.warning("Inference event skipped: %s (%d skipped since last warning)", reason, count)
 
     def journal_append(self, entry: dict) -> None:
         """Append one journal line.
@@ -733,20 +748,16 @@ class SkillStore:
         line = json.dumps(entry, ensure_ascii=False) + "\n"
         explicit = entry.get("kind") in JOURNAL_EXPLICIT_KINDS
         line_bytes = len(line.encode("utf-8"))
-        if max(0, self._journal_size()) + line_bytes > JOURNAL_MAX_BYTES:
+        if (max(0, self._journal_size()) + line_bytes > JOURNAL_MAX_BYTES
+                and (explicit or _journal_window_count(self._journal_backoff_key, "reap", 15))):
             # Past the cap: give the consumed prefix a chance to go first.
-            # reap_journal takes the lock itself, so it runs before ours.
-            now = time.monotonic()
-            if explicit or now >= self._journal_reap_retry_at:
-                try:
-                    self.reap_journal()
-                except Exception:
-                    pass
-                self._journal_reap_retry_at = now + 15
+            # Reaping is best effort and takes its own lock; the quota check
+            # below still refuses entries when nothing could be freed.
+            with suppress(Exception):
+                self.reap_journal()
         # One write under the journal lock: a reap in another process cannot
-        # slip its replace between our size check and our line. If the lock
-        # never frees, the entry is written anyway — losing it is worse than
-        # the residual race documented in the module docstring.
+        # slip its replace between our size check and our line. A busy lock
+        # drops counted mechanical events; explicit entries raise instead.
         with journal_lock(self._journal_path, wait=JOURNAL_APPEND_LOCK_WAIT) as held:
             if not held:
                 if explicit:
