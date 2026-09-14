@@ -16,14 +16,14 @@ class AccessDenied(ValueError):
     pass
 
 
-def confined_open(root: int, path: str, flags: int) -> int:
+def confined_open(root: int, path: str, flags: int, mode: int = 0) -> int:
     # Linux openat2, on the architectures where its syscall number is 437.
     # Unlike a prefix check or O_NOFOLLOW alone, this also blocks bind mounts
     # and kernel magic links. There is deliberately no weaker fallback.
     class OpenHow(ctypes.Structure):
         _fields_ = [("flags", ctypes.c_uint64), ("mode", ctypes.c_uint64),
                     ("resolve", ctypes.c_uint64)]
-    how = OpenHow(flags | os.O_CLOEXEC, 0, 0x01 | 0x02 | 0x04 | 0x08)
+    how = OpenHow(flags | os.O_CLOEXEC, mode, 0x01 | 0x02 | 0x04 | 0x08)
     libc = ctypes.CDLL(None, use_errno=True)
     libc.syscall.restype = ctypes.c_long
     fd = libc.syscall(ctypes.c_long(437), ctypes.c_int(root),

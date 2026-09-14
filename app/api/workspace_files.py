@@ -185,31 +185,18 @@ async def upload_file(
         target_dir = workspace
     await authorize_workspace_path(request, target_dir)
 
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    safe_filename = Path(file.filename).name
+    safe_filename = Path(file.filename or "upload").name
     if not safe_filename or safe_filename.startswith('.'):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid filename"
-        )
-
-    file_path = target_dir / safe_filename
-
-    if file_path.exists():
-        stem = file_path.stem
-        suffix = file_path.suffix
-        counter = 1
-        while file_path.exists():
-            file_path = target_dir / f"{stem}_{counter}{suffix}"
-            counter += 1
-
+        raise HTTPException(status_code=400, detail="Invalid filename")
     # Outside the try: an over-cap read raises HTTPException(413), and the
     # blanket handler below would otherwise relabel it as a 500 "Failed to save
     # file" — the one message that tells the user nothing about what to change.
     content = await _read_upload_within_limit(file)
     try:
-        file_path.write_bytes(content)
+        from app.core.confined_files import upload
+        file_path = await run_sync(upload, workspace, path, safe_filename, content)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid upload path")
     except Exception:
         logger.exception("Failed to save uploaded file")
         raise HTTPException(

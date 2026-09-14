@@ -77,7 +77,8 @@ def control_root():
 def status():
     root = control_root()
     result = {"allow_updates": mirror_policy(), "update_all_workers": all_workers(), "supported": root is not None,
-              "phase": "idle", "version": None, "error": None}
+              "phase": "idle", "version": None, "error": None,
+              "running_version": os.environ.get("GIT_SHA") if root else None}
     if root:
         try:
             saved = json.loads((root / "status.json").read_text())

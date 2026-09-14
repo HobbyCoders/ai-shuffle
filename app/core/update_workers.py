@@ -9,10 +9,12 @@ import uuid
 from collections import OrderedDict
 
 from app.core import application_updates as updates
+from app.core import update_progress as progress
 from app.db.async_database import run_sync
 from app.network import control, engine, membership, runners
 
 _receipts = OrderedDict()
+_dispatch_lock = asyncio.Lock()
 
 
 def local_action(action, request_id):
@@ -49,7 +51,8 @@ def local_action(action, request_id):
             updates.enqueue(action)
         except ValueError as exc:
             reason = str(exc)
-    result = {"accepted": reason is None, "reason": reason or "Request queued", "phase": state["phase"]}
+    result = {"accepted": reason is None, "reason": reason or "Request queued", "phase": state["phase"],
+              "version": state.get("version")}
     _receipts[request_id] = (time.monotonic() + 60, result)
     while len(_receipts) > 256:
         _receipts.popitem(last=False)
@@ -78,10 +81,10 @@ async def _remote(row, body):
         result = await asyncio.wait_for(control.call(row["device_id"], "application-update", body, timeout=3), timeout=5)
         if not isinstance(result, dict):
             raise ValueError("Invalid peer update response")
-        fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "percent", "message", "error")
+        fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error")
         return {key: result[key] for key in fields if key in result}
     except Exception:
-        return {"accepted": False, "reason": "Worker unavailable or does not support application updates",
+        return {"accepted": None, "reason": "Worker unavailable or does not support application updates",
                 "supported": False, "phase": "unsupported"}
 
 
@@ -90,26 +93,46 @@ async def snapshot():
     listing = await run_sync(runners.directory)
     rows = [{"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker", "is_self": True,
              "online": True, **local}]
-    if local["update_all_workers"]:
+    operation = await run_sync(progress.load)
+    tracked = {row["device_id"] for row in operation["workers"]} if operation else set()
+    if local["update_all_workers"] or tracked:
         semaphore = asyncio.Semaphore(8)
         async def read(row):
             if not row["online"]:
                 return {**row, "supported": False, "phase": "unsupported", "reason": "Offline; not queued"}
             async with semaphore:
                 return {**row, **await _remote(row, {"operation": "status"})}
-        rows.extend(await asyncio.gather(*(read(row) for row in listing["runners"] if not row["is_self"])))
+        rows.extend(await asyncio.gather(*(read(row) for row in listing["runners"]
+                                          if not row["is_self"] and (local["update_all_workers"] or row["device_id"] in tracked))))
     # Only return display fields, never peer endpoints/certificates.
-    fields = ("device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version", "percent", "message", "error", "reason")
+    fields = ("device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error", "reason")
     return {"allow_updates": local["allow_updates"], "update_all_workers": local["update_all_workers"],
+            "operation": await run_sync(progress.observe, operation, rows),
             "workers": [{key: row.get(key) for key in fields} for row in rows]}
 
 
 async def dispatch(action):
+    async with _dispatch_lock:
+        return await _dispatch(action)
+
+
+async def _dispatch(action):
+    if action not in ("check", "download", "install"):
+        raise ValueError("Unknown update action")
     if not await run_sync(updates.allowed):
         raise ValueError("Application updates are disabled in Account settings")
+    operation = await run_sync(progress.load)
+    if operation and operation["phase"] != "complete":
+        previous = await snapshot()
+        if previous.get("operation") and previous["operation"]["phase"] == "waiting":
+            raise ValueError("Waiting on workers to finish the previous update")
     listing = await run_sync(runners.directory)
     all_workers = await run_sync(updates.all_workers)
     request_id = uuid.uuid4().hex
+    self_row = {"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker"}
+    if action == "install":
+        targets = [row for row in listing["runners"] if all_workers and not row["is_self"] and row["online"]]
+        await run_sync(progress.begin, request_id, [*targets, self_row])
     results = []
     if all_workers:
         semaphore = asyncio.Semaphore(8)
@@ -118,10 +141,20 @@ async def dispatch(action):
                 result = {"accepted": False, "reason": "Offline; not queued"}
             else:
                 async with semaphore:
+                    if action == "install":
+                        state = await _remote(row, {"operation": "status"})
+                        await run_sync(progress.record, request_id, row["device_id"], target_version=state.get("version"))
                     result = await _remote(row, {"operation": "action", "action": action, "request_id": request_id, "expires_at": time.time() + 10})
+                    if action == "install":
+                        await run_sync(progress.record, request_id, row["device_id"], result=result)
             return {"device_id": row["device_id"], "device_name": row["device_name"], **result}
         results = await asyncio.gather(*(send(row) for row in listing["runners"] if not row["is_self"]))
     # Queue the initiating worker LAST so its restart cannot strand the fanout.
+    if action == "install":
+        state = await run_sync(updates.status)
+        await run_sync(progress.record, request_id, self_row["device_id"], target_version=state.get("version"))
     local = local_action(action, request_id)
-    results.append({"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker", **local})
+    if action == "install":
+        await run_sync(progress.record, request_id, self_row["device_id"], result=local)
+    results.append({**self_row, **local})
     return {"scope": "all" if all_workers else "current", "results": results}
