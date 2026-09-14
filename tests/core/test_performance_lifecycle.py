@@ -126,17 +126,25 @@ def test_process_scope_cache_and_cpu_accounting(monkeypatch):
     assert second["groups"]["database"]["private_commit_mib"] == .5
     assert module.collect_process_metrics()["scope"] == "backend_tree"
 
-def test_managed_database_attribution_rejects_stale_or_foreign_pid(tmp_path, monkeypatch):
+@pytest.mark.parametrize("layout", ["container", "preview", "installed_desktop"])
+def test_managed_database_attribution_rejects_stale_or_foreign_pid(tmp_path, monkeypatch, layout):
     import psutil
     from app.core import config, process_metrics as module
-    data = tmp_path / "postgres" / "data"
+    cluster_root = tmp_path / "desktop-user-data" if layout == "installed_desktop" else tmp_path
+    data = cluster_root / "postgres" / "data"
     data.mkdir(parents=True)
     pidfile = data / "postmaster.pid"
-    monkeypatch.setattr(config, "settings", SimpleNamespace(effective_data_dir=tmp_path, get_database_connection=lambda: {"port": 5432}))
+    data_root = tmp_path if layout == "container" else tmp_path / "stable-app-data"
+    monkeypatch.delenv("AI_SHUFFLE_ENV_FILE", raising=False)
+    if layout == "installed_desktop":
+        monkeypatch.setenv("AI_SHUFFLE_ENV_FILE", str(cluster_root / "worker" / ".env"))
+    monkeypatch.setattr(config, "settings", SimpleNamespace(effective_data_dir=data_root, get_database_connection=lambda: {"port": 5432}))
     process = SimpleNamespace(name=lambda: "postgres.exe", create_time=lambda: 1000)
     monkeypatch.setattr(psutil, "Process", lambda pid: process)
     pidfile.write_text(f"42\n{data}\n1000\n5432\n", encoding="utf-8")
     assert module._managed_database_process(psutil) is process
+    pidfile.write_text(f"42\n{data}\n1000\n5433\n", encoding="utf-8")
+    assert module._managed_database_process(psutil) is None
     pidfile.write_text(f"42\n{data}\n1\n5432\n", encoding="utf-8")
     assert module._managed_database_process(psutil) is None
     pidfile.write_text(f"42\n{tmp_path}\n1000\n5432\n", encoding="utf-8")

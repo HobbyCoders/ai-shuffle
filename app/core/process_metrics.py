@@ -41,9 +41,16 @@ def _managed_database_process(psutil):
     except (OSError, ValueError, KeyError, RuntimeError):
         return None
     root = settings.effective_data_dir.resolve()
-    # Container clusters are below DATA_DIR; desktop/preview clusters are its
-    # sibling. Verify the supervisor's port as well as the PID's data directory.
-    for data in (root / "postgres" / "data", root.parent / "postgres" / "data"):
+    # Container clusters are below DATA_DIR; isolated previews use its sibling.
+    # Installed desktop keeps DATA_DIR at the stable user location, separately
+    # from userData/postgres. Its supervisor sets userData/worker/.env explicitly.
+    candidates = [root / "postgres" / "data", root.parent / "postgres" / "data"]
+    env_file = Path(os.environ.get("AI_SHUFFLE_ENV_FILE", ""))
+    if env_file.is_absolute() and env_file.name == ".env" and env_file.parent.name == "worker":
+        candidates.append(env_file.parent.parent.resolve() / "postgres" / "data")
+    # A path hint alone never establishes attribution: validate port, cluster,
+    # process type and start time against the existing private descriptor.
+    for data in dict.fromkeys(candidates):
         try:
             lines = (data / "postmaster.pid").read_text(encoding="utf-8").splitlines()
             if len(lines) < 4 or Path(lines[1]).resolve() != data or int(lines[3]) != port:
