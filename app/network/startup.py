@@ -149,10 +149,11 @@ def _install_resource_hook() -> None:
 
     def emit(resource, scope, arguments, before, result):
         original(resource, scope, arguments, before, result)
-        if policy.collections_for_resource(resource):
+        collections = policy.collections_for_resource(resource)
+        if collections:
             try:
                 from app.network import transport
-                transport.request_scan()
+                transport.request_scan([collection.name for collection in collections])
             except Exception:  # noqa: BLE001
                 pass
 
