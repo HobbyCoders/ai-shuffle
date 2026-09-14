@@ -33,13 +33,21 @@ _IS_DIR_CACHE_MAX = 256
 _is_dir_cache: Dict[str, Tuple[bool, float]] = {}
 
 
-def _is_dir_cached(path: str) -> bool:
-    """``Path(path).is_dir()`` memoized for ``_IS_DIR_TTL_SECONDS``."""
+def _is_dir_cached(path: str, *, checkout: bool = False) -> bool:
+    """Memoize directory presence, requiring Git metadata for branch checkouts."""
     now = time.monotonic()
-    hit = _is_dir_cache.get(path)
+    key = f"git:{path}" if checkout else path
+    hit = _is_dir_cache.get(key)
     if hit is not None and (now - hit[1]) < _IS_DIR_TTL_SECONDS:
         return hit[0]
-    result = Path(path).is_dir()
+    if checkout:
+        from app.core.checkout_manager import _dir_is_worktree
+
+        # Windows can leave an empty directory after git removes its metadata
+        # but fails to unlink a locked cwd. That directory is not a checkout.
+        result = _dir_is_worktree(path)
+    else:
+        result = Path(path).is_dir()
     if len(_is_dir_cache) >= _IS_DIR_CACHE_MAX:
         # Opportunistic prune: drop expired entries; if everything is somehow
         # fresh, clear outright (correctness is unaffected — it's a cache).
@@ -48,7 +56,7 @@ def _is_dir_cached(path: str) -> bool:
             _is_dir_cache.pop(k, None)
         if len(_is_dir_cache) >= _IS_DIR_CACHE_MAX:
             _is_dir_cache.clear()
-    _is_dir_cache[path] = (result, now)
+    _is_dir_cache[key] = (result, now)
     return result
 
 
@@ -111,7 +119,7 @@ def _worktree_deleted(
         rows = checkouts_db.list_active_checkouts(pv2_id, me, branch)
         if rows:
             return not any(
-                _is_dir_cached(r["path"]) for r in rows if r.get("path")
+                _is_dir_cached(r["path"], checkout=bool(branch)) for r in rows if r.get("path")
             )
         # V2 branch sessions have no legacy path. Ship It archives their last
         # checkout, so falling through to the legacy "unknown path" result

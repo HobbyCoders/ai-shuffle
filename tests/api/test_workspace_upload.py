@@ -152,3 +152,61 @@ def test_an_upload_under_the_cap_still_lands(workspace_client, monkeypatch):
 
     body = _upload(client, name="small.png", body=b"x" * 512).json()
     assert Path(body["full_path"]).read_bytes() == b"x" * 512
+
+@pytest.mark.parametrize("producer", ["workspace", "project"])
+def test_upload_does_not_overwrite_a_hardlinked_destination(workspace_client, producer):
+    import os
+    from app.api.projects import _perform_project_upload
+    client, workspace = workspace_client
+    outside = workspace.parent / (workspace.name + "-outside.txt")
+    outside.write_bytes(b"outside marker")
+    uploads = workspace / CHAT_UPLOADS_DIRNAME
+    uploads.mkdir()
+    os.link(outside, uploads / "notes.txt")
+    try:
+        if producer == "workspace":
+            response = _upload(client, name="notes.txt", body=b"new attachment")
+            assert response.status_code == 200
+            body = response.json()
+        else:
+            body = _perform_project_upload({"path": str(workspace)}, filename="notes.txt",
+                                           path=CHAT_UPLOADS_DIRNAME, content=b"new attachment")
+        assert body["filename"] == "notes_1.txt"
+        assert Path(body["full_path"]).read_bytes() == b"new attachment"
+        assert outside.read_bytes() == b"outside marker"
+    finally:
+        outside.unlink()
+
+
+def test_project_upload_rejects_sibling_project_traversal(workspace_client):
+    from app.api.projects import _perform_project_upload
+    from fastapi import HTTPException
+    _, workspace = workspace_client
+    project = workspace / "project"
+    project.mkdir()
+    with pytest.raises((ValueError, HTTPException)):
+        _perform_project_upload({"path": str(project)}, path="../sibling",
+                                filename="file.txt", content=b"bad")
+    assert not (workspace / "sibling" / "file.txt").exists()
+
+@pytest.mark.parametrize("producer", ["workspace", "project"])
+def test_upload_dangling_destination_through_actual_producer(workspace_client, producer):
+    from app.api.projects import _perform_project_upload
+    client, workspace = workspace_client
+    uploads = workspace / CHAT_UPLOADS_DIRNAME
+    uploads.mkdir()
+    outside = workspace.parent / (workspace.name + "-absent.txt")
+    try:
+        (uploads / "notes.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"File symlink creation unavailable: {exc}")
+    if producer == "workspace":
+        response = _upload(client, name="notes.txt", body=b"new attachment")
+        assert response.status_code == 200
+        body = response.json()
+    else:
+        body = _perform_project_upload({"path": str(workspace)}, filename="notes.txt",
+                                       path=CHAT_UPLOADS_DIRNAME, content=b"new attachment")
+    assert body["filename"] == "notes_1.txt"
+    assert Path(body["full_path"]).read_bytes() == b"new attachment"
+    assert not outside.exists()

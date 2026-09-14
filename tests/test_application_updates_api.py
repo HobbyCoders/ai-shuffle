@@ -11,6 +11,7 @@ from app.core import application_updates as updates
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     from app.core import update_workers
+    monkeypatch.setattr(update_workers.progress, "_path", lambda: tmp_path / "progress.json")
     monkeypatch.setattr(update_workers.runners, "directory", lambda: {"self_device_id": None, "runners": []})
     update_workers._receipts.clear()
     app = FastAPI()

@@ -3070,6 +3070,18 @@ class HarnessAdapter(ProviderAdapter):
                 ", ".join(recorded),
             )
 
+        if _session_mode(options) == "chat":
+            from dataclasses import replace
+            from fluid.tools.builtins.read import SPEC as read_spec
+            from app.core.attachment_read import DELEGATED_READ, read_attachment
+
+            # Replace native Read; the delegated CLI's builtin is denied outright.
+            # Both runtimes execute the same handle-confined reader, even when a
+            # permission policy auto-approves the call.
+            name = "Read" if native else DELEGATED_READ
+            registry.register_builtin(replace(read_spec, name=name), read_attachment)
+            builtins_registered = True
+
         for server in inproc_servers:
             registry.register_inproc(server)
         # External MCP servers are a NATIVE-leg concern only (ruling PA5). The
@@ -3400,6 +3412,11 @@ def _delegated_disallowed(options: SessionOptions) -> list:
     from app.core.tool_access import tool_permitted
 
     banned = set(DELEGATED_BANNED_TOOLS) | set(options.disallowed_tools or ())
+    if _session_mode(options) == "chat":
+        # Withholding auto-approval is insufficient: the CLI also auto-approves
+        # cwd reads. Only our bundled, handle-confined attachment reader is safe.
+        banned.update({"Read", "Bash", "Grep", "Glob", "Write", "Edit", "NotebookEdit",
+                       "Task", "Agent", "Skill", "ToolSearch"})
 
     surface = _tool_allowlist(options)
     if surface:
@@ -3456,34 +3473,13 @@ def _session_mode(options: SessionOptions) -> str:
 def _chat_mode_rules(options: SessionOptions) -> Optional[list]:
     """fluid permission rules that fence the chat lane's ``Read`` — or None.
 
-    This is the NATIVE leg's half of the path ceiling, and it exists because the
-    policy axis alone would never consult anybody: fluid's ``Read`` is
-    ``risk="safe"``, a chat session is pinned to ``permission_mode 'default'``
-    (approval policy ``on_write``), and ``_policy_decision`` auto-allows a safe
-    tool under that policy. No permission event is emitted, so the app's
-    ``can_use_tool`` — and with it ``chat_mode_read_permitted`` — is never
-    reached. A RULE is checked before the policy (``PermissionEngine.decide``
-    matches rules first), so it is the only thing that can move that decision.
+    The native permission rule is defense in depth. The registry also replaces
+    Read with the handle-confined attachment reader, so a path replacement or
+    hard link cannot evade enforcement after permission matching.
 
-    Two rules per fenced tool, and the order is the whole design — fluid's
-    ``match_rule`` is LAST-match-wins:
-
-    1. ``deny`` for every call, unconditionally.
-    2. ``allow`` for a path under the uploads glob, which overrides rule 1 for
-       exactly the files the user attached to this chat.
-
-    Rule 1 is ``deny`` rather than ``ask`` deliberately, even though an ask
-    would reach the app callback and get the same answer from the real
-    predicate. An ask has to be answered by somebody, and the app only builds
-    that callback for sessions with a live socket (``query_engine`` gates it on
-    ``broadcast_func``); a spawn without one would park the turn on a prompt
-    nobody can see instead of refusing the read. A ceiling that turns into a
-    hang when the responder is missing is not a ceiling. fluid's own path
-    matching rejects traversal and requires the symlink-resolved target to
-    match rule 2 independently of its lexical spelling. This is a preflight,
-    not race-safe confinement: Read opens the path separately, and hard links
-    are not distinguished here. The delegated CLI has its own read approvals;
-    these native rules do not apply to that runtime.
+    Deny is followed by an in-directory allow (last-match-wins). Denied paths
+    never park on an approval prompt. Delegated sessions disable the CLI's Read
+    and expose only the same broker through the bundled tool server.
     """
     if _session_mode(options) != "chat":
         return None
@@ -3502,28 +3498,14 @@ def _chat_mode_rules(options: SessionOptions) -> Optional[list]:
 def _delegated_allowed(options: SessionOptions) -> Optional[list]:
     """``--allowed-tools`` for the delegated (claude CLI) leg.
 
-    Normally the session's whole surface, because on this leg the flag GRANTS
-    rather than restricts (the restriction is the complement in
-    ``_delegated_disallowed``). The chat lane is the exception: the pinned CLI
-    treats a BARE name in this flag as a blanket pre-approval and says so itself
-    — "Bare allowedTools entries auto-approve the whole tool before the callback
-    is consulted" — so granting ``Read`` here would retire the read fence before
-    it ever ran. Withholding the name leaves the tool perfectly callable (it is
-    still absent from ``--disallowed-tools``, which is what would remove it);
-    it just falls through to ``--permission-prompt-tool``, i.e. to the app
-    callback, which is where ``chat_mode_read_permitted`` lives.
-
-    The other half of that fence is the session cwd: the CLI auto-approves reads
-    inside its working directory without prompting either, and a chat session's
-    working directory IS the uploads folder (see ``query_options``), so the two
-    shortcuts now cover the same set of files rather than the whole workspace.
+    Chat disables the CLI builtin Read, including its cwd auto-approval path.
+    Its bundled attachment reader is safe to grant: confinement is enforced
+    inside the tool rather than by the CLI permission callback.
     """
     surface = _tool_allowlist(options)
     if surface is None or _session_mode(options) != "chat":
         return surface
-    from app.core.session_modes import CHAT_MODE_READ_TOOLS
-
-    granted = [name for name in surface if name not in CHAT_MODE_READ_TOOLS]
+    granted = [name for name in surface if name != "Read"]
     # An emptied grant must not degrade to "grant everything": ``_build_argv``
     # omits the flag entirely for a falsy list, and on this leg the surface wall
     # is ``--disallowed-tools``, which is built from the untouched surface.
@@ -3544,6 +3526,10 @@ def _tool_allowlist(options: SessionOptions) -> Optional[list]:
     if not raw:
         return None
     names = [str(t).strip() for t in raw if str(t).strip()]
+    if _session_mode(options) == "chat" and "Read" in names:
+        from app.core.attachment_read import DELEGATED_READ
+        if DELEGATED_READ not in names:
+            names.append(DELEGATED_READ)
     return names or None
 
 

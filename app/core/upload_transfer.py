@@ -144,20 +144,6 @@ def lift_paths_to_blobs(
     return blob_ids
 
 
-def _unique_target(target_dir: Path, filename: str) -> Path:
-    """``<dir>/<name>`` with ``_1``/``_2`` suffixes on collision — the same
-    de-duplication ``_perform_project_upload`` applies."""
-    safe = Path(filename).name or "upload"
-    path = target_dir / safe
-    if not path.exists():
-        return path
-    stem, suffix = path.stem, path.suffix
-    counter = 1
-    while path.exists():
-        path = target_dir / f"{stem}_{counter}{suffix}"
-        counter += 1
-    return path
-
 
 def materialize_blobs_for_turn(
     blob_ids: List[str], working_dir: str
@@ -180,7 +166,6 @@ def materialize_blobs_for_turn(
         return {}
 
     target_dir = Path(working_dir) / UPLOADS_SUBDIR
-    target_dir.mkdir(parents=True, exist_ok=True)
 
     mapping: Dict[str, str] = {}
     for blob_id in blob_ids:
@@ -204,9 +189,9 @@ def materialize_blobs_for_turn(
                 f"Attachment '{filename}' was already consumed and is no longer "
                 f"on disk at {existing} — resend the file."
             )
-        dest = _unique_target(target_dir, filename)
         try:
-            dest.write_bytes(data)
+            from app.core.confined_files import upload
+            dest = upload(Path(working_dir), UPLOADS_SUBDIR, Path(filename).name or "upload", data)
         except Exception as exc:  # noqa: BLE001
             raise UploadLiftError(
                 f"Could not write attachment '{filename}' to {target_dir}: {exc}"

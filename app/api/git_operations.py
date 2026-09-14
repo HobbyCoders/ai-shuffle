@@ -410,19 +410,76 @@ async def _release_session_cwd(session_id: Optional[str]) -> bool:
             await asyncio.wait_for(
                 asyncio.shield(asyncio.gather(*executions, return_exceptions=True)), 10,
             )
-        logger.info("cleanup: releasing settled requesting session %s", session_id)
+        logger.info("cleanup: releasing settled session %s", session_id)
         await get_session_pool().remove(session_id)
     except Exception:
         logger.warning("cleanup: session %s did not release; retaining checkout", session_id, exc_info=True)
         return False
     try:
+        from app.core import browser_runtime
         from app.mcp.builtin_tools import stop_session_background_shells
 
+        # The browser actor belongs to the app, not the engine pool. Its MCP
+        # subprocess retains the session cwd even after the engine disconnects.
+        await browser_runtime.close_session(session_id)
         await stop_session_background_shells(session_id, require_stopped=True)
     except Exception:
-        logger.debug("cleanup: shell reap failed for %s", session_id, exc_info=True)
+        logger.warning("cleanup: browser or shell did not stop for %s", session_id, exc_info=True)
         return False
     return True
+
+
+async def _release_checkout_sessions(
+    project_id: str, working_dir: str, session_id: Optional[str],
+) -> bool:
+    """Release every local engine using this directory, including idle siblings."""
+    from app.core.project_resolver import resolve_existing_cwd
+    from app.core.session_pool import get_session_pool
+    from app.db import database
+    from app.db.checkouts import get_checkout_by_path
+    from app.db.sessions import list_sessions_for_cleanup
+
+    target = Path(working_dir).resolve()
+
+    def inside(cwd):
+        return bool(cwd) and Path(cwd).resolve().is_relative_to(target)
+
+    def persisted_users():
+        checkout = get_checkout_by_path(working_dir)
+        result = set()
+        for session in list_sessions_for_cleanup(
+            project_id, checkout["project_id"] if checkout else None
+        ):
+            if session.get("worktree_id"):
+                from app.core.project_utils import get_worktree_working_dir
+
+                worktree = database.get_worktree(session["worktree_id"])
+                cwd = get_worktree_working_dir(worktree) if worktree else None
+            else:
+                cwd = resolve_existing_cwd(session)
+            if inside(cwd):
+                result.add(session["id"])
+        return result
+
+    try:
+        session_ids = await asyncio.to_thread(persisted_users)
+        # Runtime cwd wins over a moved/deleted session row. Include nested cwd
+        # paths: a shell or engine need not sit at the checkout root to lock it.
+        for sid, state in get_session_pool().items():
+            if inside(getattr(state.connect_options, "cwd", None)):
+                session_ids.add(sid)
+        if session_id:
+            session_ids.add(session_id)
+        # Recheck before closing anything; do not interrupt another user's turn.
+        if any(sid != session_id and _session_is_busy(sid) for sid in session_ids):
+            return False
+        for sid in sorted(session_ids):
+            if not await _release_session_cwd(sid):
+                return False
+        return True
+    except Exception:
+        logger.warning("cleanup: could not release checkout users at %s", working_dir, exc_info=True)
+        return False
 
 
 async def _cleanup_linked_worktree(
@@ -464,7 +521,7 @@ async def _cleanup_linked_worktree(
     except Exception:
         logger.debug("cleanup: could not stamp head_sha for %s", working_dir, exc_info=True)
 
-    if await _release_session_cwd(session_id) is False:
+    if not await _release_checkout_sessions(op.project_id, working_dir, session_id):
         return False
 
     ok = await run_git(git_service.remove_worktree, main_dir, working_dir, True)
@@ -485,7 +542,8 @@ async def _cleanup_linked_worktree(
     try:
         from app.api.git_helpers import invalidate_working_dir_cache
 
-        invalidate_working_dir_cache(project_id=op.project_id, session_id=session_id)
+        # Sibling sessions and legacy project aliases can cache the same cwd.
+        invalidate_working_dir_cache()
     except Exception:
         logger.debug("Could not invalidate working-dir cache after cleanup", exc_info=True)
 

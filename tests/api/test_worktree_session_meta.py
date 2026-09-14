@@ -36,6 +36,10 @@ def pin_runner(monkeypatch):
 
 def _patch(monkeypatch, existing=None, resolver=None):
     FakePath.existing = set(existing or [])
+    monkeypatch.setattr(
+        "app.core.checkout_manager._dir_is_worktree",
+        lambda path: str(path) in FakePath.existing,
+    )
     # The TTL stat cache is module-level state — never let it leak across tests.
     wsm._is_dir_cache.clear()
     _resolver = resolver or (lambda wt: f"/abs/{wt['worktree_path']}")
@@ -289,6 +293,19 @@ def test_local_checkout_disk_exists_is_not_deleted(monkeypatch):
     )
     meta = enrich_session_worktree_meta(_local_v2_session(pv2), None)
     assert meta["worktree_deleted"] is False
+
+
+def test_partial_cleanup_directory_is_not_a_checkout(monkeypatch, tmp_path):
+    from app.core import checkout_manager
+
+    wsm._is_dir_cache.clear()
+    pv2 = projects_v2.upsert_project("local:partial-cleanup", "Partial cleanup")
+    checkouts_db.upsert_checkout(pv2["id"], ME, str(tmp_path), branch="feat/foo")
+    assert not checkout_manager._dir_is_worktree(str(tmp_path))
+    assert enrich_session_worktree_meta(_local_v2_session(pv2), None)["worktree_deleted"]
+    (tmp_path / ".git").write_text("gitdir: /repo/.git/worktrees/feature")
+    wsm._is_dir_cache.clear()
+    assert not enrich_session_worktree_meta(_local_v2_session(pv2), None)["worktree_deleted"]
 
 
 def test_local_checkout_disk_missing_is_deleted(monkeypatch):

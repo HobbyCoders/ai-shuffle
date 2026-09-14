@@ -102,6 +102,24 @@ async def test_failure_not_replayed_then_recovers(fake):
 
 
 @pytest.mark.asyncio
+async def test_cleanup_releases_browser_actor_created_outside_engine_pool(fake, monkeypatch):
+    from app.api.git_operations import _release_session_cwd
+    from app.core import session_pool, session_runtime
+    from app.mcp import builtin_tools
+
+    await runtime.start("runtime-test")
+    token = registry.issue_token("runtime-test")
+    monkeypatch.setattr(session_pool, "get_session_pool", lambda: SimpleNamespace(remove=AsyncMock()))
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: None)
+    monkeypatch.setattr(session_runtime, "active_executions", lambda: {})
+    monkeypatch.setattr(builtin_tools, "stop_session_background_shells", AsyncMock())
+    assert await _release_session_cwd("runtime-test")
+    assert fake[0].closed
+    assert "runtime-test" not in runtime._runtimes
+    assert not registry.verify_token("runtime-test", token)
+
+
+@pytest.mark.asyncio
 async def test_delete_and_shutdown_close_actor_and_token(fake):
     await runtime.start("runtime-test")
     token = registry.issue_token("runtime-test")
