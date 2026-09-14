@@ -235,3 +235,18 @@ def test_purge_old_drops_stale_blob_rows(mock_db, project, project_dir):
     assert removed == 1
     assert upload_blobs_db.get_blob(stale) is None
     assert upload_blobs_db.get_blob(fresh) is not None
+
+def test_materialization_does_not_write_through_existing_hardlink(mock_db, project, project_dir, tmp_path):
+    import os
+    ids = upload_transfer.lift_paths_to_blobs([_stage(project_dir)], project, "sess-1")
+    receiver = tmp_path / "receiver"
+    (receiver / "uploads").mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"outside marker")
+    os.link(outside, receiver / "uploads" / "notes.txt")
+    mapping = upload_transfer.materialize_blobs_for_turn(ids, str(receiver))
+    assert outside.read_bytes() == b"outside marker"
+    from pathlib import Path
+    destination = Path(next(iter(mapping.values())))
+    assert destination.name == "notes_1.txt"
+    assert destination.read_bytes() == b"hello"

@@ -10,9 +10,9 @@ that passed its own unit tests.
   ``on_write`` policy a chat session runs on, emitting no permission event at
   all — so the native leg needs a RULE, which is checked before the policy.
 * the pinned claude CLI auto-approves a BARE name in ``--allowed-tools``, and
-  separately auto-approves any read inside its working directory, both before
-  the permission-prompt tool is consulted — so the delegated leg needs the name
-  withheld from that grant and the working directory pointed at the fence.
+  separately auto-approves reads inside its working directory. Its builtin Read
+  must be disabled and replaced with the same handle-confined broker used by
+  native execution; permission matching alone cannot close the race.
 
 Every test here therefore asserts against the object the runtime will actually
 consult, not against our own helper's return value.
@@ -167,10 +167,7 @@ async def test_native_read_execution_rejects_outside_symlink(workspace, tmp_path
     except (OSError, NotImplementedError):
         pytest.skip("symlinks unavailable")
 
-    from fluid.tools.builtins import register_builtins
-
-    registry = ToolRegistry()
-    register_builtins(registry)
+    registry = await HarnessAdapter()._build_registry(_options("chat"), native=True)
     loop = NativeLoop(provider=SimpleNamespace(name="test", caps=ProviderCaps()),
                       store=MemoryStore(), model="test", registry=registry,
                       permissions=_engine_for("chat"), ctx=ToolCtx(cwd=str(workspace)),
@@ -186,6 +183,53 @@ async def test_native_read_execution_rejects_outside_symlink(workspace, tmp_path
             assert "permitted attachment marker" in outcome.text
 
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [True, False])
+async def test_uploaded_attachment_and_hardlink_through_actual_registry(workspace, tmp_path, native):
+    import os
+    from types import SimpleNamespace
+    from app.core.confined_files import upload
+    from app.core.attachment_read import DELEGATED_READ
+    from fluid.engine.native import NativeLoop
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.providers.base import ProviderCaps
+    from fluid.store.base import MemoryStore
+    from fluid.tools.registry import ToolCtx
+
+    attachment = upload(workspace.parent, workspace.name, "notes.txt", b"uploaded marker")
+    outside = tmp_path / "private.txt"
+    outside.write_text("outside marker")
+    os.link(outside, workspace / "hard.txt")
+    options = _options("chat")
+    registry = await HarnessAdapter()._build_registry(options, native=native)
+    ctx = ToolCtx(cwd=str(workspace))
+    if native:
+        loop = NativeLoop(provider=SimpleNamespace(name="test", caps=ProviderCaps()),
+            store=MemoryStore(), model="test", registry=registry,
+            permissions=_engine_for("chat"), ctx=ctx, allowed_tools=_tool_allowlist(options),
+            claude_settings=False, claude_plugins=False, claude_agents=False)
+        async def call(path):
+            return await loop._gated_call("session", "turn", "Read", path.name, {"file_path": str(path)})
+    else:
+        loop = DelegatedLoop(store=MemoryStore(), model="test", registry=registry,
+            allowed_tools=_delegated_allowed(options), disallowed_tools=_delegated_disallowed(options),
+            cwd=str(workspace))
+        assert not loop._bridge_tool_permitted("Read")
+        assert loop._bridge_tool_permitted(DELEGATED_READ)
+        assert registry.get("Read") is None
+        async def call(path):
+            return await registry.dispatch(DELEGATED_READ, {"file_path": str(path)}, ctx)
+    good = await call(attachment)
+    assert not good.is_error
+    assert "uploaded marker" in good.text
+    for path in (outside, workspace / "hard.txt"):
+        denied = await call(path)
+        assert denied.is_error
+        assert "outside marker" not in denied.text
+
+
 # =============================================================================
 # Delegated leg: what the claude CLI is handed on its command line
 # =============================================================================
@@ -199,17 +243,17 @@ def test_read_is_withheld_from_the_cli_grant_for_chat(workspace):
     assert "Read" in (_tool_allowlist(opts) or [])
 
 
-def test_withholding_the_grant_does_not_remove_the_tool(workspace):
-    """Read has to stay CALLABLE — it just has to ask. The thing that would
-    remove it is ``--disallowed-tools``, and the complement is still computed
-    from the untouched surface."""
+def test_cli_builtin_read_is_removed_but_broker_stays_callable(workspace):
+    """The CLI must not auto-approve its own unsafe cwd reader."""
     opts = _options("chat")
     with patch(
         "app.core.cli_tool_surface.cached_cli_tools",
         return_value=["Read", "Bash", "Grep", "WebSearch", "WebFetch"],
     ):
         banned = _delegated_disallowed(opts)
-    assert "Read" not in banned
+    assert "Read" in banned
+    assert "mcp__attachments__Read" not in banned
+    assert "mcp__attachments__Read" in _delegated_allowed(opts)
     assert "Bash" in banned and "Grep" in banned
 
 
@@ -218,12 +262,10 @@ def test_code_sessions_keep_the_whole_grant(workspace):
     assert _delegated_allowed(opts) == _tool_allowlist(opts)
 
 
-def test_an_emptied_grant_degrades_to_none_not_to_everything(workspace):
-    """``_build_argv`` omits the flag for a falsy list, and an omitted
-    ``--allowed-tools`` is not the same as an empty one."""
+def test_read_only_surface_grants_only_the_broker(workspace):
     opts = _options("chat")
     opts.tool_allowlist = ["Read"]
-    assert _delegated_allowed(opts) is None
+    assert _delegated_allowed(opts) == ["mcp__attachments__Read"]
 
 
 @pytest.mark.parametrize(

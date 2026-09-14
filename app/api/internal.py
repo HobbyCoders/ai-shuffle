@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field
 class DesktopUpdateState(BaseModel):
     phase: Literal["idle", "checking", "available", "downloading", "ready", "error", "unsupported"]
     version: str | None = Field(default=None, max_length=64)
+    running_version: str | None = Field(default=None, max_length=64)
     percent: float | None = Field(default=None, ge=0, le=100)
     error: str | None = Field(default=None, max_length=4096)
     message: str | None = Field(default=None, max_length=4096)

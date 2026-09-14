@@ -641,35 +641,17 @@ def _perform_project_upload(
     # Build target directory path using Path joining (avoid mixed slashes on Windows)
     base = Path(base_project_path)
     if path:
-        target_dir = validate_project_path(str(base / path), allow_create=True)
+        validate_project_path(str(base / path), allow_create=True)
     else:
         # Default to uploads subdirectory to keep project root clean
-        target_dir = validate_project_path(str(base / "uploads"), allow_create=True)
+        validate_project_path(str(base / "uploads"), allow_create=True)
 
-    # Ensure directory exists
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    # Sanitize filename
+    from app.core.confined_files import upload
     safe_filename = Path(filename).name
     if not safe_filename or safe_filename.startswith('.'):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid filename"
-        )
-
-    # Full file path
-    file_path = target_dir / safe_filename
-
-    # Handle duplicate filenames by adding counter
-    if file_path.exists():
-        stem = file_path.stem
-        suffix = file_path.suffix
-        counter = 1
-        while file_path.exists():
-            file_path = target_dir / f"{stem}_{counter}{suffix}"
-            counter += 1
-
-    file_path.write_bytes(content)
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    file_path = upload(get_project_working_dir_as_path(base_project_path),
+                       path or "uploads", safe_filename, content)
 
     # Return relative path for reference (relative to the effective base path)
     base_path = get_project_working_dir_as_path(base_project_path)

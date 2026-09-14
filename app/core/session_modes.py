@@ -88,7 +88,8 @@ CHAT_MODE_RESOURCE_TOOLS: List[str] = [
     )
 ]
 CHAT_MODE_TOOL_SURFACE: List[str] = [
-    "WebSearch", "WebFetch", "Read", *CHAT_MODE_MEMORY_TOOLS, *CHAT_MODE_RESOURCE_TOOLS
+    "WebSearch", "WebFetch", "Read", "mcp__attachments__Read",
+    *CHAT_MODE_MEMORY_TOOLS, *CHAT_MODE_RESOURCE_TOOLS
 ]
 
 # Where the chat lane's attachments land, under the workspace root. ONE shared
@@ -104,7 +105,7 @@ CHAT_UPLOADS_DIRNAME = "chat-uploads"
 # rather than on "everything that is not a web tool". Public because the two
 # real enforcement points (the fluid rule pair and the CLI's withheld grant)
 # have to name the same tools this predicate gates.
-CHAT_MODE_READ_TOOLS = frozenset({"Read"})
+CHAT_MODE_READ_TOOLS = frozenset({"Read", "mcp__attachments__Read"})
 
 # Names a chat session must be denied OUTRIGHT rather than merely left off the
 # allow list. fluid's code mode exempts its own four surface tools from the CE12
@@ -219,7 +220,8 @@ def chat_uploads_dir() -> Path:
     """
     from app.core.config import settings
 
-    return (settings.effective_workspace_dir / CHAT_UPLOADS_DIRNAME).resolve()
+    # Never let replacing chat-uploads itself redefine the authorized root.
+    return settings.effective_workspace_dir.resolve() / CHAT_UPLOADS_DIRNAME
 
 
 def ensure_chat_uploads_dir() -> Path:
