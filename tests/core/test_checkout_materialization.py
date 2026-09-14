@@ -329,11 +329,18 @@ def test_branch_recovered_from_origin_fetches(
     assert fetches
 
 
-def test_branch_missing_everywhere_returns_none(project, tmp_path, workspace_root):
+@pytest.mark.parametrize("empty_remnant", [False, True])
+def test_branch_missing_everywhere_returns_none(project, tmp_path, workspace_root, empty_remnant):
     # Not local, not on origin, not an intentional new branch → honest None
     # (the pre-fix bug silently fabricated an empty branch off the base HEAD).
     remote, seed, base = _make_repo_with_origin(tmp_path)
     checkouts_db.upsert_checkout(project["id"], RUNNER, str(base))
+    if empty_remnant:
+        dest = checkout_manager._branch_checkout_path(str(base), "ghost-branch")
+        dest.mkdir(parents=True)
+        checkouts_db.upsert_checkout(
+            project["id"], RUNNER, str(dest), branch="ghost-branch"
+        )
     assert checkout_manager.ensure_checkout(
         project, branch="ghost-branch", runner_id=RUNNER
     ) is None
@@ -374,7 +381,8 @@ def test_deleted_branch_restored_from_recorded_head_sha(
     assert (Path(path) / "resume.txt").read_text(encoding="utf-8") == "from-tip\n"
 
 
-def test_deleted_branch_restored_from_pull_ref(project, tmp_path, workspace_root):
+@pytest.mark.parametrize("remnant", ["missing", "empty", "nonempty", "unrecorded"])
+def test_deleted_branch_restored_from_pull_ref(project, tmp_path, workspace_root, remnant):
     """GitHub keeps pull/N/head after deleting the branch; fetch that refspec
     restores the local branch so the worktree can rematerialize."""
     remote, seed, base = _make_repo_with_origin(tmp_path)
@@ -392,6 +400,15 @@ def test_deleted_branch_restored_from_pull_ref(project, tmp_path, workspace_root
     # Simulate GitHub's surviving PR ref after branch delete.
     _git(remote, "update-ref", "refs/pull/42/head", sha)
     _git(seed, "push", "origin", ":feat/pr-head")
+    dest = checkout_manager._branch_checkout_path(str(base), "feat/pr-head")
+    if remnant != "missing":
+        dest.mkdir(parents=True)
+        if remnant != "unrecorded":
+            checkouts_db.upsert_checkout(
+                project["id"], RUNNER, str(dest), branch="feat/pr-head"
+            )
+        if remnant == "nonempty":
+            (dest / "keep.txt").write_text("do not remove", encoding="utf-8")
 
     from app.db.sessions import latest_pr_number_for_branch
     from unittest.mock import patch
@@ -403,6 +420,12 @@ def test_deleted_branch_restored_from_pull_ref(project, tmp_path, workspace_root
             project, branch="feat/pr-head", runner_id=RUNNER
         )
 
+    if remnant in {"nonempty", "unrecorded"}:
+        assert path is None
+        lookup.assert_not_called()
+        if remnant == "nonempty":
+            assert (dest / "keep.txt").read_text(encoding="utf-8") == "do not remove"
+        return
     assert path is not None
     assert (Path(path) / "pr.txt").read_text(encoding="utf-8") == "pr-tip\n"
     lookup.assert_called_once_with("feat/pr-head", project["id"])

@@ -113,6 +113,11 @@ def _worktree_deleted(
             return not any(
                 _is_dir_cached(r["path"]) for r in rows if r.get("path")
             )
+        # V2 branch sessions have no legacy path. Ship It archives their last
+        # checkout, so falling through to the legacy "unknown path" result
+        # would undo worktree_deleted on the next metadata refresh.
+        if branch and not path:
+            return True
 
     return _legacy_path_deleted(session, worktree, path)
 

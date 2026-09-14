@@ -443,17 +443,23 @@ async def _cleanup_linked_worktree(
         logger.warning("Could not resolve main repo for linked worktree %s", working_dir)
         return False
 
+    # The operation's route may use a legacy project id, while checkouts are
+    # keyed by project_v2_id. Resolve the unique local row before deletion.
+    checkout_project_id = op.project_id
     # Record the tip before the worktree (and then the branch) go away so the
     # next send can restore the branch and rematerialize the checkout.
     try:
         from app.db import checkouts as checkouts_db
         from app.db.async_database import run_sync
 
+        checkout = await run_sync(checkouts_db.get_checkout_by_path, working_dir)
+        if checkout:
+            checkout_project_id = checkout["project_id"]
         rev = git_service._run_git(working_dir, ["rev-parse", "HEAD"], timeout=10)
         if rev.returncode == 0 and (rev.stdout or "").strip():
             await run_sync(
                 checkouts_db.set_head_sha_for_path,
-                working_dir, rev.stdout.strip(), project_id=op.project_id,
+                working_dir, rev.stdout.strip(), project_id=checkout_project_id,
             )
     except Exception:
         logger.debug("cleanup: could not stamp head_sha for %s", working_dir, exc_info=True)
@@ -472,7 +478,7 @@ async def _cleanup_linked_worktree(
         from app.db.checkouts import archive_checkout_by_path
         from app.db.async_database import run_sync
 
-        await run_sync(archive_checkout_by_path, op.project_id, working_dir)
+        await run_sync(archive_checkout_by_path, checkout_project_id, working_dir)
     except Exception:
         logger.debug("Could not archive checkout at %s", working_dir, exc_info=True)
 

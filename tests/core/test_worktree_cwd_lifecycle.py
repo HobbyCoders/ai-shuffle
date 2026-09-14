@@ -33,17 +33,23 @@ def record_cleanup_tip(project, checkout):
     return sha
 
 
-@pytest.mark.parametrize("obstruction", ["empty", "file", "unknown"])
+@pytest.mark.parametrize("obstruction", ["empty", "file", "no_saved_tip"])
 def test_partial_cleanup_recovery(project, base_checkout, workspace_root, obstruction):
     checkout = make_checkout(project)
-    if obstruction != "unknown":
-        sha = record_cleanup_tip(project, checkout)
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
+    if obstruction != "no_saved_tip":
+        record_cleanup_tip(project, checkout)
+    else:
+        # Older cleanup can leave a recorded path without a saved SHA. The
+        # surviving local branch still supplies the exact tip for recovery.
+        row = checkouts_db.get_checkout(project["id"], RUNNER, branch="fix/cwd-lock")
+        assert row["path"] == str(checkout) and not row["head_sha"]
     _git(base_checkout, "worktree", "remove", "--force", str(checkout))
     checkout.mkdir()
     if obstruction == "file":
         (checkout / "keep.txt").write_text("do not delete", encoding="utf-8")
     result = checkout_manager.ensure_checkout(project, runner_id=RUNNER, branch="fix/cwd-lock")
-    if obstruction == "empty":
+    if obstruction in {"empty", "no_saved_tip"}:
         assert result == str(checkout)
         assert (checkout / ".git").is_file()
         assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip() == sha

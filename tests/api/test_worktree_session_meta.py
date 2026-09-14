@@ -302,6 +302,113 @@ def test_local_checkout_disk_missing_is_deleted(monkeypatch):
     assert meta["worktree_deleted"] is True
 
 
+@pytest.mark.parametrize("archive", [False, True])
+def test_local_v2_without_active_checkout_is_deleted(monkeypatch, archive):
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    if archive:
+        checkouts_db.upsert_checkout(
+            pv2["id"], ME, "/work/feat/foo", branch="feat/foo"
+        )
+        # The same write used by Ship It's linked-checkout cleanup.
+        checkouts_db.archive_checkout_by_path(pv2["id"], "/work/feat/foo")
+    # The base repo still exists; it must not become this session's Git target.
+    checkouts_db.upsert_checkout(pv2["id"], ME, "/work/repo")
+    meta = enrich_session_worktree_meta(_local_v2_session(pv2), None)
+    assert meta["worktree_deleted"] is True
+    assert meta["worktree_branch"] == "feat/foo"
+    assert meta["execution_mode"] == "worktree"
+
+
+def test_local_v2_queued_recreation_is_not_deleted(monkeypatch):
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    _queue(pv2, runner=ME)
+    meta = enrich_session_worktree_meta(_local_v2_session(pv2), None)
+    assert meta["worktree_deleted"] is False
+
+
+def test_local_v2_archived_checkout_with_legacy_path_still_checks_disk(monkeypatch):
+    _patch(monkeypatch, existing={"/abs/.worktrees/feat/foo"})
+    pv2 = _pv2()
+    checkouts_db.upsert_checkout(
+        pv2["id"], ME, "/work/feat/foo", branch="feat/foo"
+    )
+    checkouts_db.archive_checkout_by_path(pv2["id"], "/work/feat/foo")
+    meta = enrich_session_worktree_meta(
+        _local_v2_session(pv2, worktree_path=".worktrees/feat/foo"), None
+    )
+    assert meta["worktree_deleted"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_route", [False, True])
+@pytest.mark.parametrize("empty_remnant", [False, True])
+async def test_ship_cleanup_metadata_survives_history_reload(
+    monkeypatch, tmp_path, legacy_route, empty_remnant
+):
+    import subprocess
+    from app.api.git_operations import Operation, _do_cleanup
+    from app.core import checkout_manager, project_resolver
+
+    wsm._is_dir_cache.clear()
+    monkeypatch.setattr(settings, "instance_id", ME)
+    repo = tmp_path / "repo"
+    checkout = checkout_manager._branch_checkout_path(str(repo), "feat/foo")
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], check=True, capture_output=True, text=True
+        )
+
+    git("init", "-b", "main", str(repo))
+    git(
+        "-C", str(repo), "-c", "user.name=Test", "-c",
+        "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "Initial",
+    )
+    git("-C", str(repo), "worktree", "add", "-b", "feat/foo", str(checkout))
+    (checkout / "feature.txt").write_text("preserved tip", encoding="utf-8")
+    git("-C", str(checkout), "add", "feature.txt")
+    git(
+        "-C", str(checkout), "-c", "user.name=Test", "-c",
+        "user.email=test@example.invalid", "commit", "-m", "Feature",
+    )
+    tip = git("-C", str(checkout), "rev-parse", "HEAD").stdout.strip()
+    pv2 = _pv2()
+    checkouts_db.upsert_checkout(pv2["id"], ME, str(repo))
+    checkouts_db.upsert_checkout(pv2["id"], ME, str(checkout), branch="feat/foo")
+    session = _local_v2_session(pv2)
+    assert enrich_session_worktree_meta(session, None)["worktree_deleted"] is False
+
+    op = Operation(
+        project_id="legacy-project" if legacy_route else pv2["id"],
+        kind="ship", steps=[],
+    )
+    await _do_cleanup(op, str(checkout), None, "feat/foo", "main", None)
+
+    assert op.result["worktree_deleted"] is True
+    assert not checkout.exists()
+    assert (repo / ".git").is_dir()
+    assert not checkouts_db.list_active_checkouts(pv2["id"], ME, "feat/foo")
+    # History hydration recomputes metadata rather than using the operation result.
+    assert enrich_session_worktree_meta(dict(session), None)["worktree_deleted"] is True
+    recorded = checkouts_db.get_checkout(pv2["id"], ME, branch="feat/foo")
+    assert recorded["head_sha"] == tip
+    assert recorded["status"] == "archived"
+    git("-C", str(repo), "reflog", "expire", "--expire=now", "--all")
+    if empty_remnant:
+        checkout.mkdir()
+
+    # The same resolver used on the next send restores the exact feature tip.
+    resumed = project_resolver.resolve_cwd(dict(session))
+    assert resumed == str(checkout)
+    assert git("-C", resumed, "rev-parse", "HEAD").stdout.strip() == tip
+    assert (checkout / "feature.txt").read_text(encoding="utf-8") == "preserved tip"
+    assert git("-C", str(repo), "branch", "--show-current").stdout.strip() == "main"
+    wsm._is_dir_cache.clear()
+    assert enrich_session_worktree_meta(dict(session), None)["worktree_deleted"] is False
+
+
 def test_checkout_resolver_error_falls_back_to_not_deleted(monkeypatch):
     _patch(monkeypatch, existing=set())
     pv2 = _pv2()

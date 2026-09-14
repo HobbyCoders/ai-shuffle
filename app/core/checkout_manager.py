@@ -137,7 +137,7 @@ def _branch_checkout_path(base_dir: str, branch: str) -> Path:
 
 def _is_empty_cleanup_remnant(path: str, row: Optional[Dict[str, Any]]) -> bool:
     """Allow Git to reuse an empty recorded checkout, never remove its contents."""
-    if not row or not row.get("head_sha") or not row.get("path"):
+    if not row or not row.get("path"):
         return False
     if os.path.normcase(os.path.abspath(path)) != os.path.normcase(
         os.path.abspath(_resolve_checkout_path(row["path"]))
@@ -536,8 +536,9 @@ def _ensure_branch_checkout(
                     )
                 return resolved
             # A Windows cwd lock can leave an empty directory after Git removes
-            # its contents. The pre-cleanup SHA proves this is a known checkout.
-            # Git can reuse that empty directory without deleting it.
+            # its contents. The recorded path identifies this checkout even if
+            # older cleanup failed to save its SHA. Git can reuse it without
+            # deletion; the branch plan below still requires a recoverable tip.
             if not _is_empty_cleanup_remnant(resolved, row):
                 logger.warning(
                     "checkout_manager: %s exists but is not a worktree; refusing to touch it",
