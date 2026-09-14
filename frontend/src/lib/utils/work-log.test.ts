@@ -8,6 +8,7 @@ import { initialState, reduce, type WireEvent } from '$lib/stores/session/v2/red
 import {
 	buildDisplayItems,
 	buildTranscriptModel,
+	createTranscriptModelBuilder,
 	hasLinkedSubagent,
 	userPromptOccurrenceAt,
 	formatDuration,
@@ -18,6 +19,57 @@ import {
 	type DisplayItem,
 	type WorkLogEntry
 } from './work-log';
+
+describe('streaming model reuse', () => {
+	it.each([60, 600, 1800])('does not reread settled fields for a tail delta after %i messages', count => {
+		const build = createTranscriptModelBuilder();
+		const history = Array.from({length: count}, (_, i) => text(`History ${i}`));
+		const prompt = user('Continue');
+		const tail = msg({type:'text', content:'Hello', streaming:true});
+		const messages = [...history, prompt, tail];
+		const options = {isStreaming:true, groupingEnabled:true};
+		const before = build(messages, options);
+		let reads = 0;
+		for (const m of history) {
+			const content = m.content;
+			Object.defineProperty(m, 'content', {configurable:true, get:() => {reads++; return content;}});
+		}
+		const next = [...history, prompt, {...tail, content:'Hello world'}];
+		const after = build(next, options);
+		expect(reads).toBe(0);
+		expect(after.items[0]).toBe(before.items[0]);
+		expect(after).toEqual(buildTranscriptModel(next, options));
+	});
+	it('invalidates the fast path on options, session, Swarm and metadata changes', () => {
+		const build = createTranscriptModelBuilder();
+		const messages = [user('Question'), msg({type:'text',content:'Hello',streaming:true})];
+		const options = {isStreaming:true, groupingEnabled:true, sessionId:'s1'};
+		for (const patch of [{sessionId:'s2'}, {groupingEnabled:false}, {latestTurnUnsettled:false},
+			{swarms:[{id:'workflow',session_id:'s1',tasks:[]} as unknown as SwarmSnapshot]}]) {
+			const before = build(messages, options);
+			const changed = {...options,...patch};
+			const actual = build([...messages.slice(0,-1), {...messages.at(-1)!,content:'updated'}], changed);
+			expect(actual).toEqual(buildTranscriptModel([...messages.slice(0,-1), {...messages.at(-1)!,content:'updated'}], changed));
+			expect(actual.items[0]).not.toBe(before.items[0]);
+		}
+		build(messages, options);
+		const metadata = [...messages.slice(0,-1), {...messages.at(-1)!,metadata:{input_tokens:123}}];
+		expect(build(metadata, options)).toEqual(buildTranscriptModel(metadata, options));
+		expect(build(metadata, options).lastAssistantMetadata).toEqual({input_tokens:123});
+	});
+	it('rebuilds for historical changes, metadata and settlement', () => {
+		const build = createTranscriptModelBuilder();
+		let messages = [user('Question'), tool(), msg({type:'text',content:'Hello',streaming:true})];
+		let options = {isStreaming:true, groupingEnabled:true};
+		build(messages, options);
+		for (const patch of [{content:'changed'}, {metadata:{input_tokens:123}}, {streaming:false}]) {
+			messages = messages.map((m,i) => i === 1 ? {...m,toolResult:'late result'} : i === 2 ? {...m,...patch} : m);
+			expect(build(messages, options)).toEqual(buildTranscriptModel(messages, options));
+		}
+		options = {...options, isStreaming:false};
+		expect(build(messages, options)).toEqual(buildTranscriptModel(messages, options));
+	});
+});
 
 let seq = 0;
 function msg(over: Partial<ChatMessage>): ChatMessage {
@@ -879,13 +931,12 @@ describe('transcript model lookups', () => {
 				const itemIndex = model.itemIndexByTurnId.get(prompt.id!);
 				expect(itemIndex).toBeDefined();
 				const item = model.items[itemIndex!];
-				if (prompt === steer && groupingEnabled && !isStreaming) {
-					expect(item.kind).toBe('work_log');
-					if (item.kind !== 'work_log') throw new Error('Expected work log');
-					expect(item.sequence.find(entry => entry.message.id === prompt.id)?.hiddenWhenCollapsed).toBe(false);
-				} else {
-					expect(item.kind === 'message' && item.message.id).toBe(prompt.id);
-				}
+				// Every prompt, including a same-turn steer, remains independently
+				// navigable without expanding a settled work disclosure.
+				expect(item.kind).toBe('message');
+				if (item.kind !== 'message') throw new Error('Expected navigable prompt');
+				expect(item.message).toBe(prompt);
+				expect(item.index).toBe(messages.indexOf(prompt));
 			}
 		}
 	});

@@ -600,6 +600,48 @@ export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions
  * every message, so the prompt-occurrence counter and the subagent-linked tool
  * ids ride along on it: O(N) once instead of O(N) per row per fold.
  */
+/** Per-view cache for the common immutable streaming-tail update. Historical
+ * identity, lifecycle, metadata, and Swarm changes all take the full builder.
+ * Never cache by message id: completed tools and late Swarm association can
+ * change earlier rows, even while the final assistant paragraph streams.
+ */
+export function createTranscriptModelBuilder() {
+	let previous: { messages: ChatMessage[]; options: BuildOptions; model: TranscriptModel } | undefined;
+	return (messages: ChatMessage[], options: BuildOptions): TranscriptModel => {
+		const old = previous;
+		const tail = messages.at(-1);
+		const oldTail = old?.messages.at(-1);
+		const lastItem = old?.model.items.at(-1);
+		const swarms = options.swarms ?? [];
+		const oldSwarms = old?.options.swarms ?? [];
+		const sameOptions = old && options.sessionId === old.options.sessionId
+			&& options.isStreaming === old.options.isStreaming
+			&& options.latestTurnUnsettled === old.options.latestTurnUnsettled
+			&& options.groupingEnabled === old.options.groupingEnabled
+			&& swarms.length === oldSwarms.length && swarms.every((s, i) => s === oldSwarms[i]);
+		let model: TranscriptModel;
+		if (sameOptions && (options.latestTurnUnsettled ?? options.isStreaming)
+			&& tail && oldTail && tail.streaming && oldTail.streaming
+			&& tail.role === 'assistant' && ['text', 'thinking'].includes(tail.type ?? '')
+			&& tail.content && oldTail.content
+			&& lastItem?.kind === 'message' && lastItem.message === oldTail
+			&& lastItem.index === messages.length - 1
+			&& messages.length === old.messages.length
+			&& messages.every((message, i) => i === messages.length - 1 || message === old.messages[i])
+			&& Object.keys(tail).length === Object.keys(oldTail).length
+			&& Object.keys(tail).every(key => key === 'content'
+				|| tail[key as keyof ChatMessage] === oldTail[key as keyof ChatMessage])) {
+			const items = old.model.items.slice();
+			items[items.length - 1] = { ...lastItem, message: tail };
+			model = { ...old.model, items };
+		} else {
+			model = buildTranscriptModel(messages, options);
+		}
+		previous = { messages, options, model };
+		return model;
+	};
+}
+
 export function buildTranscriptModel(
 	messages: ChatMessage[],
 	options: BuildOptions
