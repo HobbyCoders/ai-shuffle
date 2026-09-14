@@ -43,12 +43,18 @@
 			// Keep the persisted mode check; retries must not expose private controls
 			// for an unverified session or bypass endpoint authorization.
 			if (!verified) {
-				const session = await api.get<{mode: string}>(`/sessions/${encodeURIComponent(sessionId)}`);
+				const session = await api.get<{mode: string; is_remote?: boolean}>(`/sessions/${encodeURIComponent(sessionId)}`);
 				if (!alive) return;
-				enabled = session.mode == null || ['code', 'chat', 'voice'].includes(session.mode);
+				// Mirrored conversations can run remotely, but private grants stay
+				// on the owner. Do not probe this worker's private-access endpoint.
+				enabled = !session.is_remote && (session.mode == null || ['code', 'chat', 'voice'].includes(session.mode));
 				verified = true;
 			}
-			if (!enabled) return;
+			if (!enabled) {
+				data = {grants: [], actions: [], requests: [], saved_connections: [], vault_available: false};
+				error = '';
+				return;
+			}
 			const next = await api.get<typeof data>(base);
 			if (!alive) return;
 			data = next;
@@ -73,16 +79,19 @@
 			clearTimeout(timer);
 			if (!document.hidden) void refresh();
 		};
-		const unsubscribe = resourceSync.subscribe(['chat-access', `chat-access:${sessionId}`], resume);
-		document.addEventListener('visibilitychange', resume);
-		window.addEventListener('online', resume);
+		const reverify = () => { verified = false; resume(); };
+		const unsubscribe = resourceSync.subscribe(
+			['chat-access', `chat-access:${sessionId}`, 'sessions', `sessions:${sessionId}`], reverify
+		);
+		document.addEventListener('visibilitychange', reverify);
+		window.addEventListener('online', reverify);
 		void refresh();
 		return () => {
 			alive = false;
 			clearTimeout(timer);
 			unsubscribe();
-			document.removeEventListener('visibilitychange', resume);
-			window.removeEventListener('online', resume);
+			document.removeEventListener('visibilitychange', reverify);
+			window.removeEventListener('online', reverify);
 		};
 	});
 	async function revoke(id: string) {

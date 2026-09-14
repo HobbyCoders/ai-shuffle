@@ -20,6 +20,32 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); resourceSync.clear(); vi.useRealTimers(); });
 describe('private-access recovery and live invalidations', () => {
+ it.each(['code', 'chat', 'voice', null])('does not request local grants for a remote %s session', async (mode) => {
+  m.get.mockResolvedValue({mode, is_remote: true});
+  render(ChatAccess, {sessionId: 'remote'}); await flush();
+  await vi.advanceTimersByTimeAsync(300_000);
+  resourceSync.invalidate(['chat-access:remote']); await vi.advanceTimersByTimeAsync(100);
+  expect(accessCalls()).toHaveLength(0);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.queryByLabelText('Temporary access in this conversation')).toBeNull();
+ });
+ it('rechecks ownership when a remote session is adopted and clears private state when moved away', async () => {
+  let remote = true;
+  m.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? {mode: 'code', is_remote: remote} : snapshot);
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  expect(accessCalls()).toHaveLength(0);
+  remote = false;
+  snapshot = {...empty(), grants:[{id:'g1',label:'Local folder',kind:'folder',target:'folder',expires_at:9999999999,writable:false}]};
+  resourceSync.invalidate(['sessions']); await vi.advanceTimersByTimeAsync(100); await tick();
+  expect(accessCalls()).toHaveLength(1);
+  expect(screen.getByText('Local folder')).toBeTruthy();
+  remote = true;
+  resourceSync.invalidate(['sessions']); await vi.advanceTimersByTimeAsync(100); await tick();
+  expect(screen.queryByText('Local folder')).toBeNull();
+  await vi.advanceTimersByTimeAsync(300_000);
+  expect(accessCalls()).toHaveLength(1);
+ });
+
  it('uses slow empty recovery, wakes on scoped events, and polls pending approvals promptly', async () => {
   render(ChatAccess, { sessionId: 's1' }); await flush();
   await vi.advanceTimersByTimeAsync(29_999);
@@ -67,6 +93,7 @@ describe('private-access recovery and live invalidations', () => {
    throw { status: 403, detail: 'Denied' };
   });
   render(ChatAccess, {sessionId: 's1'}); await flush();
+  expect(screen.getByRole('alert').textContent).toBe('Denied');
   await vi.advanceTimersByTimeAsync(299_999); expect(accessCalls()).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(1); expect(accessCalls()).toHaveLength(2);
   m.get.mockResolvedValue(empty());
