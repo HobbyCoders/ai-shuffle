@@ -256,7 +256,15 @@
 	}
 
 	function selectWorktree(wt: Worktree) {
-		activeSession.selectWorktreeBranch(wt.branch_name, wt.id);
+		if (wt.resource_kind === 'checkout') {
+			// Canonical checkouts are resolved on the selected runner at send time.
+			// Their ck IDs must never become legacy sessions.worktree_id values.
+			activeSession.setWorktreeBranch(wt.branch_name);
+			activeSession.setWorktreeMode('new');
+			activeSession.setWorktreeCreateNewBranch(false);
+		} else {
+			activeSession.selectWorktreeBranch(wt.branch_name, wt.id);
+		}
 		showBranchDropdown = false;
 	}
 

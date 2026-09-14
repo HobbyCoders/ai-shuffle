@@ -2483,3 +2483,77 @@ class TestRequestValidation:
                         )
 
         assert response.status_code == 422
+
+@pytest.fixture
+def canonical_checkout(tmp_path, monkeypatch):
+    import subprocess
+    from app.core.config import settings
+    from app.core.checkout_manager import ensure_checkout
+    from app.db import checkouts, database, projects_v2
+    from app.api import common
+    # These cases exercise the real resolver, not this module's legacy mocks.
+    monkeypatch.setattr(common, "database", database)
+    monkeypatch.setattr(type(settings), "effective_instance_id", property(lambda self: "list-local"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+    git("init", "-b", "main")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial")
+    project = projects_v2.upsert_project("local:list-canonical", "Canonical")
+    checkouts.upsert_checkout(project["id"], "list-local", str(repo))
+    path = ensure_checkout(project, "feature/list", create_new_branch=True)
+    assert path is not None
+    (Path(path) / "change.txt").write_text("actual worktree change")
+    return project, path
+
+
+def test_canonical_list_uses_materialized_checkouts_and_local_scope(app, canonical_checkout):
+    from app.db import checkouts, database
+    from app.api.git_worktrees import _worktree_status_cache
+    project, path = canonical_checkout
+    checkouts.upsert_checkout(project["id"], "other-worker", path, branch="foreign")
+    local = checkouts.get_checkout_by_path(path, project_id=project["id"])
+    database.create_session("list-resumed", "default", project_v2_id=project["id"],
+                            worktree_branch="feature/list", target_instance_id="list-local")
+    _worktree_status_cache.clear()
+    response = TestClient(app).get(f"/api/v1/projects/{project['id']}/git/worktrees")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["total"] == 1
+    row = data["worktrees"][0]
+    assert row["id"] == row["checkout_id"] == local["id"]
+    assert row["runner_id"] == "list-local"
+    assert row["repository_id"] is None
+    assert row["resource_kind"] == "checkout"
+    assert row["legacy_lifecycle_supported"] is False
+    assert row["exists"] is True
+    assert row["git_status"]["untracked"] == ["change.txt"]
+    assert [s["id"] for s in row["sessions"]] == ["list-resumed"]
+    # A canonical ID must not accidentally reach the legacy cleanup manager.
+    with patch("app.api.git_worktrees.worktree_manager.cleanup_worktree", new_callable=AsyncMock) as cleanup:
+        denied = TestClient(app).delete(f"/api/v1/projects/{project['id']}/git/worktrees/{local['id']}")
+        assert denied.status_code == 404
+        cleanup.assert_not_called()
+
+
+def test_canonical_list_origin_access_and_remote_only(app, canonical_checkout, monkeypatch):
+    from app.api import common
+    from app.core.project_resolver import resolve_project_v2
+    from app.db import database, projects_v2
+    project, path = canonical_checkout
+    database.create_project("assigned", "Assigned", None, path)
+    assigned = resolve_project_v2({"project_id": "assigned"})
+    monkeypatch.setattr(common, "get_api_user_from_request", lambda request: {"project_id": "assigned"})
+    client = TestClient(app)
+    assert client.get(f"/api/v1/projects/{project['id']}/git/worktrees").status_code == 403
+    assert client.get(f"/api/v1/projects/{assigned['id']}/git/worktrees").status_code == 200
+    monkeypatch.setattr(common, "get_api_user_from_request", lambda request: None)
+    remote = projects_v2.upsert_project("local:remote-only-list", "Remote only")
+    from app.db import checkouts
+    checkouts.upsert_checkout(remote["id"], "other-worker", path, branch="foreign")
+    response = client.get(f"/api/v1/projects/{remote['id']}/git/worktrees")
+    assert response.status_code == 200
+    assert response.json() == {"worktrees": [], "total": 0}
+    assert client.get("/api/v1/projects/pv2-missing/git/worktrees").status_code == 404
+

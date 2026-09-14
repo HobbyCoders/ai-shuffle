@@ -5,7 +5,7 @@ Extracted from app.api.git to keep route handlers and data models separate.
 """
 
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_serializer
 
@@ -367,9 +367,14 @@ class WorktreeGitStatus(BaseModel):
 
 
 class WorktreeInfo(BaseModel):
-    """Worktree information"""
+    """Legacy worktree or canonical runner checkout; IDs are not interchangeable."""
     id: str
-    repository_id: str
+    repository_id: Optional[str] = None
+    checkout_id: Optional[str] = None
+    resource_kind: Literal["worktree", "checkout"] = "worktree"
+    legacy_lifecycle_supported: bool = True
+    project_id: Optional[str] = None
+    runner_id: Optional[str] = None
     session_id: Optional[str] = None  # Deprecated - use sessions list
     branch_name: str
     worktree_path: str

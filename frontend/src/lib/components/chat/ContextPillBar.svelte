@@ -33,7 +33,6 @@
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
-	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git, gitStatus } from '$lib/stores/git.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
@@ -236,7 +235,7 @@
 	<span class="ctx-sep" aria-hidden="true"></span>
 
 	{#if isEmptyState}
-		{#if $githubAuthenticated}
+		{#if $activeSession.project || $activeSession.projectV2Id}
 			<ExecutionModeBar {sheetMode}>
 				{#snippet between()}
 					{@render repoChip()}

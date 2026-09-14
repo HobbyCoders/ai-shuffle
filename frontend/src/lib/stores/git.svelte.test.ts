@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => ({
 	fetchRemote: vi.fn(),
 	commitChanges: vi.fn(),
 	pushCommits: vi.fn(),
+	pullFromRemote: vi.fn(),
 	stageFiles: vi.fn()
 }));
 
@@ -96,6 +97,36 @@ beforeEach(() => {
 	mocks.getPrState.mockResolvedValue(prState());
 	// Background remote fetch is fire-and-forget; keep it inert.
 	mocks.fetchRemote.mockRejectedValue(new Error('no remote'));
+});
+
+describe('git store — selected worker without a session', () => {
+	it('targets both status and pull, isolating same-branch caches by worker', async () => {
+		const a = { workerId: 'worker-a', branch: 'main' };
+		const b = { workerId: 'worker-b', branch: 'main' };
+		git.setWorkerTarget(a);
+		mocks.getGitStatus.mockResolvedValue(status({ current_branch: 'main', behind: 0 }));
+		await git.loadRepository('canonical-project');
+		git.setWorkerTarget(b);
+		mocks.getGitStatus.mockResolvedValue(status({ current_branch: 'main', behind: 1 }));
+		await git.loadRepository('canonical-project');
+		expect(mocks.getGitStatus).toHaveBeenLastCalledWith('canonical-project', undefined, undefined, b);
+		expect(git.current.status?.behind).toBe(1);
+		const target = git.captureTarget();
+		const pending = deferred<any>();
+		mocks.pullFromRemote.mockReturnValue(pending.promise);
+		const pull = git.pull('merge', false, target);
+		expect(mocks.pullFromRemote).toHaveBeenCalledWith('canonical-project', { strategy: 'merge', auto_stash: false }, undefined, b);
+		git.setWorkerTarget(a);
+		git.restoreCacheImmediate('canonical-project');
+		expect(git.current.status?.behind).toBe(0);
+		mocks.getGitStatus.mockResolvedValue(status({ current_branch: 'main', behind: 0 }));
+		await git.loadRepository('canonical-project');
+		expect(git.current.status?.behind).toBe(0);
+		pending.resolve({ status: status({ behind: 5 }), diff_stats: null });
+		await pull;
+		expect(git.current.status?.behind).toBe(0);
+		expect(mocks.getWorktrees).not.toHaveBeenCalled();
+	});
 });
 
 describe('git store — cleaned-up / reused worktree', () => {
