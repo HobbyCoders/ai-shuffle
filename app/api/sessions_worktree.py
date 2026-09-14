@@ -319,7 +319,9 @@ async def _create_remote_branch_session(
             "profile_id": profile_id,
             "project_id": body.project_id or None,
             "project_v2_id": pv2["id"],
-            "title": "",
+            # The owner receives this row before first-message persistence below.
+            # Give it the title now so its catalog cannot overwrite ours with "".
+            "title": derive_session_title(prompt or ""),
             "api_user_id": api_user_id,
             "is_active": True,
             "target_instance_id": target_instance_id,

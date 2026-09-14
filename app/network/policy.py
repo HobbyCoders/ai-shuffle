@@ -318,6 +318,12 @@ _register(Collection(
     notes="Session catalog. Owner-ordered: only the owner device publishes."))
 
 _register(Collection(
+    name="session_runtime", table="network_session_runtime", keys=("session_id",),
+    fields=("session_id", "owner_device_id", "state", "updated_at"),
+    mode=MODE_OWNER_ORDERED, resource="sessions", priority=92,
+    notes="Read-only owner runtime summary; never materialized into execution tables."))
+
+_register(Collection(
     name="session_tags", table="session_tags", keys=("session_id", "tag_id"),
     fields=("session_id", "tag_id", "created_at"), mode=MODE_OWNER_ORDERED, resource="sessions", priority=91))
 

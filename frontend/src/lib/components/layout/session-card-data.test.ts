@@ -47,6 +47,20 @@ function session(over: Partial<Session> = {}): Session {
 	};
 }
 
+describe('owner runtime state', () => {
+	it.each([
+		['working', 'working'], ['parked', 'parked'], ['permission', 'needs_permission'],
+		['question', 'has_question'], ['idle', 'done'], ['offline', 'offline'], ['unknown', 'unknown'],
+	] as const)('%s is authoritative over stale viewer state', (remoteRuntimeState, expected) => {
+		expect(deriveStatus({ remoteRuntimeState, streaming: true, backgroundWork: true,
+			parked: true, attention: { count: 1, kind: 'permission' }, isActive: true })).toBe(expected);
+	});
+	it('keeps git stage independent after a remote turn settles', () => {
+		expect(deriveStatus({ remoteRuntimeState: 'idle', streaming: true,
+			attention: null, isActive: true, prState: 'open' })).toBe('pr');
+	});
+});
+
 describe('liveProjectKeys', () => {
 	it('collects local ids, link groups, origins, and v2 ids', () => {
 		const keys = liveProjectKeys(
@@ -77,6 +91,11 @@ describe('isRemovedProjectSession', () => {
 			origin: 'git:other.git',
 			project_v2_id: 'pv2-remote',
 		}), live)).toBe(false);
+	});
+
+	it('keeps a named remote project without a checkout on the viewer', () => {
+		expect(isRemovedProjectSession(session({ is_remote: true, project_id: null,
+			project_v2_id: 'pv2-remote', origin: 'git:remote.git', project_name: 'Remote' }), new Set())).toBe(false);
 	});
 
 	it('hides a chat whose project is gone from both catalogs', () => {

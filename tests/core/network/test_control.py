@@ -113,6 +113,49 @@ def test_quiet_catalog_uses_one_query_and_finds_later_appends(workers):
                 cur, worker.device_id, recent_only=True, include_held=True, unpublished_only=True)
 
 
+@pytest.mark.parametrize("source, initial, prompt, expected", [
+    ("worktree", "", "Fix remote session titles", "Fix remote session titles"),
+    ("user", "   ", "Name this remote chat", "Name this remote chat"),
+    ("user", "My custom title", "Do not rename me", "My custom title"),
+    ("user", "", "   ", ""),
+    ("wakeup", "", "Internal wake message", ""),
+])
+async def test_remote_first_turn_titles_owner_and_survives_catalog_sync(
+    workers, monkeypatch, source, initial, prompt, expected,
+):
+    from app.core import turn_manager
+    from app.db import turns
+
+    a, b = workers("a"), workers("b")
+    served = ServedBy(a, "http://a.local:8000")
+    real_async = httpx.AsyncClient
+
+    def async_client(*args, **kwargs):
+        kwargs["transport"] = served.transport()
+        return real_async(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", async_client)
+    monkeypatch.setattr(turn_manager, "_kick", lambda sid: None)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with b.active():
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        await control.call(a.device_id, "sessions", {
+            "session": {"id": "remote-title", "title": initial, "profile_id": "default"},
+        })
+        await control.submit_turn(a.device_id, "remote-title", source=source,
+                                  prompt=prompt, profile_id="default")
+    with a.active():
+        assert database.get_session("remote-title")["title"] == expected
+        assert turns.get_queued_turns("remote-title")[0]["prompt"] == prompt
+        catalog.publish_owned()
+    converge([a, b])
+    with b.active():
+        assert database.get_session("remote-title")["title"] == expected
+        assert engine.scan_all() == 0  # the mirror cannot publish its own title
+
+
 def test_placement_treats_own_device_id_as_me(workers):
     """A pin on our own device id resolves exactly like a pin on our instance id."""
     a = workers("a")

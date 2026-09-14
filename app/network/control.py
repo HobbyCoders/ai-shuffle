@@ -249,8 +249,21 @@ async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     row = _require_owned(session_id)
     payload = dict(body.get("payload") or {})
     payload.setdefault("forwarded_by_device", from_device)
+    # Forwarded turns bypass the chat WebSocket's first-message title backfill.
+    # Only the owner can persist a title that survives catalog replication.
+    source = str(body.get("source") or "user")
+    prompt = body.get("prompt")
+    if source in {"user", "worktree"} and isinstance(prompt, str) and not (row.get("title") or "").strip():
+        from app.core.session_title import derive_session_title
+        from app.db import database
+        title = derive_session_title(prompt)
+        if title:
+            await run_sync(database.update_session, session_id=session_id, title=title)
+            from app.core.sync_engine import sync_engine
+            await sync_engine.broadcast_session_updated(
+                session_id=session_id, updates={"title": title}, source_device_id=None)
     turn_id = await turn_manager.submit_async(
-        session_id, str(body.get("source") or "user"), prompt=body.get("prompt"),
+        session_id, source, prompt=prompt,
         profile_id=body.get("profile_id"), project_id=row.get("project_id") or None,
         overrides=_turn_overrides(body.get("overrides")), payload=payload or None)
     return {"turn_id": turn_id, "session_id": session_id}

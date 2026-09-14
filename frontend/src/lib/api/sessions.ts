@@ -28,6 +28,8 @@ export interface Session {
 	parked_task_kind?: string | null;
 	/** Running durable tasks, including non-park-gating Monitor commands. */
 	has_running_tasks?: boolean;
+	/** Read-only state sampled on the owning worker, never local runner state. */
+	remote_runtime_state?: 'working' | 'parked' | 'permission' | 'question' | 'idle' | 'offline' | 'unknown' | null;
 	is_active: boolean;
 	api_user_id?: string | null;
 	api_user_name?: string | null;

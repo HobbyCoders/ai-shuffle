@@ -391,6 +391,7 @@
 					session: s,
 					openPr: !!(branch && prSet?.has(branch)),
 					status: deriveStatus({
+						remoteRuntimeState: s.is_remote ? s.remote_runtime_state ?? 'unknown' : null,
 						streaming: isStreaming(s.id),
 						backgroundWork: !!s.has_running_tasks,
 						parked: !!s.parked_task_kind,

@@ -20,7 +20,9 @@ export type SessionCardStatus =
 	| 'pr'
 	| 'pr_merged'
 	| 'done'
-	| 'idle';
+	| 'idle'
+	| 'offline'
+	| 'unknown';
 
 export const STATUS_LABELS: Record<SessionCardStatus, string> = {
 	working: 'Working',
@@ -31,7 +33,9 @@ export const STATUS_LABELS: Record<SessionCardStatus, string> = {
 	pr: 'PR Opened',
 	pr_merged: 'PR Merged',
 	done: 'Done',
-	idle: 'Idle'
+	idle: 'Idle',
+	offline: 'Offline',
+	unknown: 'Status unavailable'
 };
 
 /**
@@ -52,7 +56,9 @@ export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
 	pr: 'Done',
 	pr_merged: 'Done',
 	done: 'Done',
-	idle: 'Idle'
+	idle: 'Idle',
+	offline: 'Offline',
+	unknown: 'Status unavailable'
 };
 
 export const RUNTIME_STATUS_TONES: Record<SessionCardStatus, StatusTone> = {
@@ -64,7 +70,9 @@ export const RUNTIME_STATUS_TONES: Record<SessionCardStatus, StatusTone> = {
 	pr: 'muted',
 	pr_merged: 'muted',
 	done: 'muted',
-	idle: 'muted'
+	idle: 'muted',
+	offline: 'muted',
+	unknown: 'muted'
 };
 
 /** Statuses that park the row on a prompt — they get the amber warning glyph
@@ -102,6 +110,7 @@ export function isLiveStatus(status: SessionCardStatus): boolean {
  * the session is still Active.
  */
 export function deriveStatus(input: {
+	remoteRuntimeState?: Session['remote_runtime_state'];
 	streaming: boolean;
 	backgroundWork?: boolean;
 	parked?: boolean;
@@ -110,6 +119,21 @@ export function deriveStatus(input: {
 	prState?: 'open' | 'merged' | 'closed' | null;
 	isActive: boolean;
 }): SessionCardStatus {
+	// A mirror has no local leases/jobs. Owner state also clears stale local
+	// streaming/attention maps when the remote turn settles.
+	if (input.remoteRuntimeState) {
+		switch (input.remoteRuntimeState) {
+			case 'working': return 'working';
+			case 'parked': return 'parked';
+			case 'permission': return 'needs_permission';
+			case 'question': return 'has_question';
+			case 'offline': return 'offline';
+			case 'unknown': return 'unknown';
+			case 'idle':
+				return deriveStatus({ ...input, remoteRuntimeState: null,
+					streaming: false, backgroundWork: false, parked: false, attention: null });
+		}
+	}
 	if (input.attention && input.attention.count > 0) {
 		return input.attention.kind === 'question' ? 'has_question' : 'needs_permission';
 	}
@@ -417,6 +441,9 @@ export function liveProjectKeys(
  * Ungrouped chats (no project) stay visible.
  */
 export function isRemovedProjectSession(s: Session, liveKeys: Set<string>): boolean {
+	// Remote checkouts stay on their owner. A missing local checkout catalog
+	// entry cannot prove deletion of a named, replicated shared project.
+	if (s.is_remote && s.project_v2_id && s.project_name) return false;
 	const key = projectKey(s);
 	if (key === UNGROUPED_PROJECT) return false;
 	if (liveKeys.has(key)) return false;

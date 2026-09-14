@@ -680,6 +680,8 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         my_device = _runners.self_device_id()
     except Exception:  # noqa: BLE001
         my_device = None
+    from app.network.session_runtime import for_sessions, STATES
+    runtime = for_sessions([s["id"] for s in sessions if s.get("owner_device_id") != my_device])
     for session in sessions:
         inst = session.get("instance_id")
         owner_device = session.get("owner_device_id")
@@ -707,6 +709,12 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
             # ride the shared DB (runs lease + pending_interactions), which needs
             # no ``base_url``. Offline owner → history stays readable but read-only.
             session["controllable"] = bool(online and install)
+            summary = runtime.get(session["id"], {})
+            state = summary.get("state")
+            session["remote_runtime_state"] = (
+                "offline" if not online else
+                state if summary.get("owner_device_id") == owner_device and state in STATES else "unknown"
+            )
         else:
             # Local or legacy (NULL instance_id): always controllable from here.
             session["device_name"] = my_install.get("device_name") if my_install else None
@@ -735,6 +743,8 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
                 origin = legacy_origin
         if pv2_id:
             session["project_v2_id"] = pv2_id
+            if not session.get("project_name"):
+                session["project_name"] = pv2_by_id.get(pv2_id, {}).get("name")
         if origin:
             session["origin"] = origin
 

@@ -81,6 +81,8 @@ def publish_owned(*, ctx: Optional[engine.NetworkContext] = None) -> int:
     published = 0
     published += engine.scan_collection("sessions", ctx=ctx, owner_only=True)
     published += _publish_held_sessions(ctx)
+    from app.network.session_runtime import publish_owned as publish_runtime
+    published += publish_runtime(ctx)
     published += _publish_child_rows("session_tags", ctx)
     published += _publish_child_rows("pending_interactions", ctx)
     published += publish_events(ctx=ctx, recent_only=True)

@@ -48,6 +48,15 @@ def _load(value: Any, default=None):
 # ---------------------------------------------------------------------------
 
 def create_schema(cursor) -> None:
+    # Owner-produced display state only: never runner leases or executable work.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS network_session_runtime (
+            session_id TEXT PRIMARY KEY,
+            owner_device_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS network_state (
             id INTEGER PRIMARY KEY DEFAULT 1,

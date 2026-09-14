@@ -287,10 +287,37 @@ async def test_first_turn_hands_off_no_kick_with_a_claim_wake(project):
         resp = await _create(project, _body(prompt="do the thing"))
 
     assert resp.query_started is True
+    # Title exists at creation, before the (mocked) local first-message backfill.
+    # The row sent to an independent owner must not contain a blank title.
+    assert _row(resp.session_id)["title"] == "do the thing"
     # The durable queued row IS the hand-off; the wake is latency only.
     assert submit.call_args.kwargs["no_kick"] is True
     assert submit.call_args.kwargs["profile_id"] == "default"
     p.notify.assert_called_once()
+
+
+async def test_remote_create_sends_title_in_owner_payload(project):
+    from types import SimpleNamespace
+    from app.network import control, engine, git as network_git
+
+    _give_peer_a_base_checkout(project)
+    with _Patches(), patch.object(
+        engine, "context", return_value=SimpleNamespace(device_id="local-device")
+    ), patch.object(
+        network_git, "device_id", return_value="remote-device"
+    ), patch.object(
+        network_git, "enqueue", new=AsyncMock()
+    ), patch.object(
+        control, "call", new=AsyncMock()
+    ) as create_owner, patch.object(
+        control, "submit_turn", new=AsyncMock()
+    ):
+        resp = await _create(project, _body(prompt="Fix remote session titles"))
+
+    device, action, payload = create_owner.call_args.args
+    assert (device, action) == ("remote-device", "sessions")
+    assert payload["session"]["id"] == resp.session_id
+    assert payload["session"]["title"] == "Fix remote session titles"
 
 
 async def test_the_no_profile_sentinel_never_rides_a_remote_turn(project):
