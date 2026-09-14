@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_serializer
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
+from app.core import preview_access
 from app.core.preference_identity import request_preference_identity
 from app.db.settings import PreferenceConflict
 
@@ -47,6 +48,15 @@ class AllPreferencesResponse(BaseModel):
 def get_user_identity(request: Request) -> tuple[str, str]:
     """Use the same verified identity as the global sync subscription."""
     return request_preference_identity(request)
+
+
+def require_preference_write(request: Request, token: str = Depends(require_auth)) -> str:
+    # Preview UI interactions must not broadcast an agent's temporary layout
+    # choices to the owner's other windows/workers. Check the cookie even when
+    # require_auth admitted the browser as a direct LAN owner first.
+    if preview_access.grant(request) is not None:
+        raise HTTPException(403, "Agent previews cannot change account preferences.")
+    return token
 
 
 @router.get("/all")
@@ -97,7 +107,7 @@ async def set_preference(
     key: str,
     body: PreferenceValue,
     only_if_missing: bool = False,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_preference_write)
 ) -> PreferenceResponse:
     """Set a preference value"""
     user_type, user_id = get_user_identity(request)
@@ -122,7 +132,7 @@ async def set_preference_post(
     key: str,
     body: PreferenceValue,
     only_if_missing: bool = False,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_preference_write)
 ) -> PreferenceResponse:
     """Set a preference value via POST.
 
@@ -150,7 +160,7 @@ async def set_preference_post(
 async def delete_preference(
     request: Request,
     key: str,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_preference_write)
 ) -> dict:
     """Delete a preference"""
     user_type, user_id = get_user_identity(request)

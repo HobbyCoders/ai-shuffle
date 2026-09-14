@@ -34,7 +34,9 @@ Threat model, and what the token is NOT:
   reach: every unsafe-method request under :data:`MUTATION_DENY_PREFIXES`
   (auth, pairing, credentials, settings, network, plugins, ...) is refused
   even with a valid cookie. Cross-site mutations are refused by the same
-  ``same_origin`` check the local owner is held to.
+  ``same_origin`` check the local owner is held to. Account-preference writes
+  are also refused by the preferences API, even if the browser independently
+  qualifies as a direct LAN owner; test clicks must not sync to the user's UI.
 * The URL that carries the token lands in the session's system prompt (the
   "# Workspace facts" card) and therefore in transcripts. That is accepted:
   the token is useless off the LAN, dies with the session, and can do nothing
