@@ -163,16 +163,16 @@ async def _route_project_git(endpoint, values, worker_id, branch):
     ))
     if endpoint.__name__ not in _PROJECT_ACTIONS:
         raise HTTPException(409, "This Git action requires a session on the selected worker")
+    ctx = engine.context()
+    from app.core.config import settings
+    local = ctx.device_id if ctx else settings.effective_instance_id
     try:
-        target = await run_sync(network_git.device_id, worker_id)
+        target = local if worker_id == "local" else await run_sync(network_git.device_id, worker_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     params = jsonable_encoder({k: v for k, v in values.items() if k not in {"request", "token"}})
     params["project_id"] = identity["project_v2"]["id"]
     payload = {"action": endpoint.__name__, "project_id": params["project_id"], "branch": branch, "params": params}
-    ctx = engine.context()
-    from app.core.config import settings
-    local = ctx.device_id if ctx else settings.effective_instance_id
     try:
         result = (await handle_project_git(payload, local) if target == local else
                   await control.call(target, "project-git", payload,
@@ -254,4 +254,3 @@ async def handle_project_git(body, from_device):
         return {"status": 422, "detail": jsonable_encoder(exc.errors(), custom_encoder={ValueError: str})}
     except HTTPException as exc:
         return {"status": exc.status_code, "detail": exc.detail}
-

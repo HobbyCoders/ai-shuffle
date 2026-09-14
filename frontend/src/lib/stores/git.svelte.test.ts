@@ -100,6 +100,13 @@ beforeEach(() => {
 });
 
 describe('git store — selected worker without a session', () => {
+	it('loads canonical worktrees for the local worker scope', async () => {
+		const target = { workerId: 'local', branch: 'feature/native' };
+		git.setWorkerTarget(target);
+		await git.loadRepository('canonical-project');
+		expect(mocks.getGitStatus).toHaveBeenLastCalledWith('canonical-project', undefined, undefined, target);
+		expect(mocks.getWorktrees).toHaveBeenCalledWith('canonical-project');
+	});
 	it('targets both status and pull, isolating same-branch caches by worker', async () => {
 		const a = { workerId: 'worker-a', branch: 'main' };
 		const b = { workerId: 'worker-b', branch: 'main' };

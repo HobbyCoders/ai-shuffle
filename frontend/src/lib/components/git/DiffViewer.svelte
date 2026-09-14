@@ -46,7 +46,7 @@
 	const resolvedMode = $derived(effectiveDiffMode(mode, viewportWidth));
 
 	// Stable primitive identity avoids refetches on status polling.
-	const requestKey = $derived(JSON.stringify([projectId, file.file, file.category, git.current.worktreeId, git.current.sessionId, refreshKey]));
+	const requestKey = $derived(JSON.stringify([projectId, file.file, file.category, git.current.worktreeId, git.current.sessionId ?? git.current.workerTarget, refreshKey]));
 
 	const lineKey = (line: DiffLine) => `${line.type}:${line.oldLineNumber}:${line.newLineNumber}`;
 	let highlightVersion = $state(0);

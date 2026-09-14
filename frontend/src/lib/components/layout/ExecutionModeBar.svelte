@@ -257,8 +257,10 @@
 
 	function selectWorktree(wt: Worktree) {
 		if (wt.resource_kind === 'checkout') {
-			// Canonical checkouts are resolved on the selected runner at send time.
-			// Their ck IDs must never become legacy sessions.worktree_id values.
+			// The worktree list contains only this runner's checkouts. Clear any
+			// previous runner/legacy selection before staging the logical branch.
+			activeSession.setDeviceIntent(null);
+			activeSession.clearWorktreeSelection();
 			activeSession.setWorktreeBranch(wt.branch_name);
 			activeSession.setWorktreeMode('new');
 			activeSession.setWorktreeCreateNewBranch(false);

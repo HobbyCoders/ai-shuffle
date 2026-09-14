@@ -2556,4 +2556,3 @@ def test_canonical_list_origin_access_and_remote_only(app, canonical_checkout, m
     assert response.status_code == 200
     assert response.json() == {"worktrees": [], "total": 0}
     assert client.get("/api/v1/projects/pv2-missing/git/worktrees").status_code == 404
-

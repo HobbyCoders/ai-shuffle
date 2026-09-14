@@ -280,7 +280,8 @@
 	let showInitRepoModal = $state(false);
 
 	// Visibility is scoped, so switching sessions cannot show another checkout's diff.
-	const panelScope = $derived(activeTab?.sessionId ? sessionPanelKey(activeTab.sessionId) : null);
+	const panelScope = $derived(activeTab?.sessionId ? sessionPanelKey(activeTab.sessionId)
+		: activeProject ? `draft:${JSON.stringify([activeProject, selectedWorkerTarget, activeWorktreeId])}` : null);
 	const activeSidePanel = $derived(sidePanel.forScope(panelScope));
 	function openDiffPanel() {
 		sidePanel.open(panelScope, 'changes');
@@ -313,8 +314,8 @@
 			: null
 	);
 	const activeSessionId = $derived(activeTab?.sessionId ?? null);
-	const selectedWorkerTarget = $derived(!activeSessionId && activeTab?.deviceIntent
-		? { workerId: activeTab.deviceIntent.id, branch: activeTab.worktreeBranch || activeTab.selectedWorktreeBranch || null }
+	const selectedWorkerTarget = $derived(!activeSessionId && (activeTab?.deviceIntent || (activeTab?.projectV2Id && !activeTab.project))
+		? { workerId: activeTab?.deviceIntent?.id ?? 'local', branch: activeTab?.worktreeBranch || activeTab?.selectedWorktreeBranch || null }
 		: null);
 	// Session-scoped Git requests are executed by the owning worker.
 	const activeIsRemote = $derived(

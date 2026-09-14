@@ -206,6 +206,21 @@ async def test_sessionless_worker_status_and_real_pull(worker_repositories):
         await control.handle("project-git", payload("ship"), from_device="worker-a")
 
 
+def test_local_canonical_scope_does_not_call_a_peer(worker_repositories, monkeypatch):
+    project, a, b, git_at = worker_repositories
+    application = FastAPI()
+    application.include_router(git.router)
+    application.dependency_overrides[require_auth] = lambda: "authorized-viewer"
+    call = AsyncMock()
+    monkeypatch.setattr(control, "call", call)
+    with TestClient(application) as client:
+        response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local&checkout_branch=main")
+    assert response.status_code == 200, response.text
+    assert response.json()["behind"] == 1
+    assert response.json()["untracked"] == []
+    call.assert_not_called()
+
+
 def test_sessionless_worker_forwarding_access_and_offline(worker_repositories, monkeypatch):
     from app.api import common
     from app.network import git as network_git
@@ -231,4 +246,3 @@ def test_sessionless_worker_forwarding_access_and_offline(worker_repositories, m
     response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=worker-other")
     assert response.status_code == 403
     call.assert_not_called()
-

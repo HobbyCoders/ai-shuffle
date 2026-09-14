@@ -489,7 +489,7 @@ async function _loadCore(
 			const [branches, graphResponse, worktrees, diffStats, changedFilesResp, prState] = await Promise.all([
 				gitApi.getBranches(projectId, true, worktreeId, undefined, requestScope),
 				gitApi.getCommitGraph(projectId, 50, undefined, requestScope),
-				(_remoteSessions.has(sessionId ?? "") || typeof requestScope === 'object') ? Promise.resolve([]) : gitApi.getWorktrees(projectId).catch((e) => {
+				(_remoteSessions.has(sessionId ?? "") || (typeof requestScope === 'object' && requestScope.workerId !== 'local')) ? Promise.resolve([]) : gitApi.getWorktrees(projectId).catch((e) => {
 					// This legacy project-level list is optional. A resumed v2
 					// session can have a healthy checkout without a legacy project.
 					console.warn('Failed to load worktree list:', e);
@@ -1059,7 +1059,7 @@ export const git = {
 	},
 
 	async loadWorktrees() {
-		if (!_state.projectId || _state.workerTarget || _remoteSessions.has(_state.sessionId ?? "")) return;
+		if (!_state.projectId || (_state.workerTarget && _state.workerTarget.workerId !== 'local') || _remoteSessions.has(_state.sessionId ?? "")) return;
 		const key = _loadedKey;
 
 		const seq = _nextSeq();
