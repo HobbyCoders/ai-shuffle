@@ -480,7 +480,7 @@ def test_certificate_issued_after_revocation_point_is_withdrawn_on_revocation(wo
 # NET-17: challenges are per member and bounded per member
 # ---------------------------------------------------------------------------
 
-def test_challenges_are_issued_per_member_and_bounded(workers):
+def test_challenges_are_issued_per_member_and_bounded(workers, monkeypatch):
     from fastapi import HTTPException
     a, b, c = workers("a"), workers("b"), workers("c")
     with a.active():
@@ -491,6 +491,11 @@ def test_challenges_are_issued_per_member_and_bounded(workers):
         with pytest.raises(HTTPException) as refused:
             tokens.new_challenge("dev_" + "0" * 24)
         assert refused.value.status_code == 403
+        # Force a tied Windows clock and descending nonce order. Eviction must
+        # follow issuance order, not the random challenge's lexical value.
+        monkeypatch.setattr(tokens.time, "monotonic", lambda: 1000.0)
+        nonces = iter(bytes([value]) * 32 for value in range(60, 40, -1))
+        monkeypatch.setattr(tokens.secrets, "token_bytes", lambda size: next(nonces))
         kept = tokens.new_challenge(c.device_id)
         first = tokens.new_challenge(b.device_id)
         for _ in range(tokens.CHALLENGES_PER_DEVICE):

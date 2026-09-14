@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import HtmlPreviews from './HtmlPreviews.svelte';
+import { registerShortcut } from '$lib/services/keyboard';
 import { loadHtmlPreview } from '$lib/utils/htmlPreview';
 
 vi.mock('$lib/utils/htmlPreview', async (original) => ({
@@ -93,6 +94,25 @@ describe('HTML preview cards', () => {
 		expect(view.container.querySelector('iframe')!.classList.contains('mobile')).toBe(true);
 		await fireEvent.click(view.getByRole('button', { name: 'Expand HTML preview' }));
 		expect(within(view.getByRole('dialog')).getByRole('button', { name: 'Mobile' }).getAttribute('aria-pressed')).toBe('true');
+	});
+
+	it('leaves Escape to native dialog cancellation instead of the global shortcut', async () => {
+		load.mockResolvedValue('<p>Preview</p>');
+		const view = render(HtmlPreviews, { content });
+		await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull());
+		await fireEvent.click(view.getByRole('button', { name: 'Expand HTML preview' }));
+		const dialog = view.getByRole('dialog') as HTMLDialogElement;
+		const action = vi.fn();
+		const shortcut = registerShortcut({id: 'test-escape', key: 'Escape', description: 'Close app surface', category: 'general', action});
+		try {
+			const event = new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true});
+			within(dialog).getByRole('button', {name: 'Mobile'}).dispatchEvent(event);
+			expect(action).not.toHaveBeenCalled();
+			expect(event.defaultPrevented).toBe(false);
+			// jsdom does not perform the browser's native cancel default.
+			dialog.close();
+			await waitFor(() => expect(view.container.querySelectorAll('iframe')).toHaveLength(1));
+		} finally { shortcut.unregister(); }
 	});
 
 	it('labels icon controls and keeps the sandbox explanation available', async () => {

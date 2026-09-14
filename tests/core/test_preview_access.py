@@ -52,6 +52,34 @@ def _request(path="/", method="GET", *, peer="10.0.0.200", port=8000, ingress="l
 # ─── token mechanics ─────────────────────────────────────────────────────────
 
 
+def test_concurrent_first_use_publishes_one_key(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    barrier = Barrier(8)
+    original = preview_access.secrets.token_hex
+
+    def fresh(size):
+        value = original(size)
+        barrier.wait(timeout=10)
+        return value
+
+    monkeypatch.setattr(preview_access.secrets, "token_hex", fresh)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        tokens = list(pool.map(lambda _: preview_access.mint(SESSION), range(8)))
+    assert all(preview_access.verify(token) is not None for token in tokens)
+    assert not list(preview_access._key_path().parent.glob("preview-access-*.tmp"))
+
+
+def test_invalid_existing_key_is_not_rotated():
+    path = preview_access._key_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("invalid", encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid preview access key"):
+        preview_access.mint(SESSION)
+    assert path.read_text(encoding="utf-8") == "invalid"
+
+
 def test_mint_and_verify_round_trip():
     token = preview_access.mint(SESSION)
     found = preview_access.verify(token)

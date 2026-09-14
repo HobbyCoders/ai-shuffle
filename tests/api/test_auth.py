@@ -118,6 +118,18 @@ async def _auth_status(claude_authenticated: bool = False, session_token: str | 
         return await auth_api.get_auth_status(request)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("local", [False, True])
+async def test_auth_status_reports_preview_limit_even_for_local_owner(mock_db, local):
+    from app.api import auth as auth_api
+    from app.core.preview_access import Grant
+    with patch.object(auth_api.owner_auth, "local_access", return_value=local), \
+         patch.object(auth_api.preview_access, "grant", return_value=Grant("preview-session", 9999999999)):
+        status = await _auth_status()
+    assert status["authenticated"] is True
+    assert status["preview_access"] is True
+
+
 class TestAuthStatusAnyCredential:
     """``has_any_credential`` = claude subscription OR a configured provider."""
 

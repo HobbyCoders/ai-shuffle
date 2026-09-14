@@ -57,7 +57,10 @@ def new_challenge(device_id: str) -> str:
         now = time.monotonic()
         for stale in [c for c, (exp, _d) in _challenges.items() if exp <= now]:
             _challenges.pop(stale, None)
-        mine = sorted((exp, c) for c, (exp, d) in _challenges.items() if d == device_id)
+        # Sort only by expiry: Python's stable sort preserves issuance order
+        # when Windows gives several calls the same monotonic timestamp.
+        mine = sorted(((exp, c) for c, (exp, d) in _challenges.items() if d == device_id),
+                      key=lambda item: item[0])
         while len(mine) >= CHALLENGES_PER_DEVICE:
             _exp, oldest = mine.pop(0)
             _challenges.pop(oldest, None)

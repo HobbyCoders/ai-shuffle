@@ -316,8 +316,8 @@ async def get_auth_status(request: Request, response: Response = None):
             username = paired_client.get("device_name") or "Paired device"
 
     local = owner_auth.local_access(request) and not is_paired_authenticated
-    preview_grant = None if (local or is_paired_authenticated) else preview_access.grant(request)
-    if preview_grant is not None:
+    preview_grant = preview_access.grant(request)
+    if preview_grant is not None and not (local or is_paired_authenticated):
         # The agent browser holding this session's preview cookie sees the UI
         # exactly as the local owner does; the mutation limits are enforced by
         # require_auth per request, not by hiding anything here.
@@ -370,6 +370,7 @@ async def get_auth_status(request: Request, response: Response = None):
     return {
         "authenticated": is_admin_authenticated or is_paired_authenticated,
         "local_access": local,
+        "preview_access": preview_grant is not None,
         "auth_mode": 'local' if local else 'account',
         "owner_linked": owner_auth.linked_binding() is not None,
         "credential_storage": owner_auth.storage_status(),

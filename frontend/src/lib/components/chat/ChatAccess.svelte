@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
+	import { auth } from '$lib/stores/auth.svelte';
 	import { resourceSync } from '$lib/services/resource-sync';
 	import PrivateAccessRequest from './PrivateAccessRequest.svelte';
 	let { sessionId }: { sessionId: string } = $props();
@@ -36,6 +37,16 @@
 	const base = untrack(() => `/chat-access/${encodeURIComponent(sessionId)}`);
 	async function refresh() {
 		if (!alive || document.hidden) return;
+		// Preview cookies cannot use private resources, even on the owner's PC.
+		// This is a capability limit, not a failure of the conversation.
+		if (auth.current.status?.preview_access) {
+			clearTimeout(timer);
+			enabled = false;
+			verified = true;
+			data = {grants: [], actions: [], requests: [], saved_connections: [], vault_available: false};
+			error = '';
+			return;
+		}
 		if (refreshing) { dirty = true; return; }
 		clearTimeout(timer);
 		refreshing = true;

@@ -2,11 +2,24 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api, getErrorMessage: (error: Error) => error.message }));
+const updateAuth = vi.hoisted(() => ({current: {status: {preview_access: false}}}));
+vi.mock('$lib/stores/auth.svelte', () => ({auth: updateAuth}));
 import DesktopUpdateButton from './DesktopUpdateButton.svelte';
 const worker = { device_id:'local', device_name:'Current worker', online:true, supported:true, allow_updates:true, phase:'available', version:'abc123' };
 const state = { allow_updates:true, update_all_workers:false, workers:[worker] };
-beforeEach(() => { vi.resetAllMocks(); api.get.mockResolvedValue(state); api.post.mockResolvedValue({results:[{device_name:'Current worker',accepted:true,reason:'Request queued'}]}); });
+beforeEach(() => { updateAuth.current.status.preview_access = false; vi.resetAllMocks(); api.get.mockResolvedValue(state); api.post.mockResolvedValue({results:[{device_name:'Current worker',accepted:true,reason:'Request queued'}]}); });
 afterEach(cleanup);
+it('does not poll or show update controls in an agent preview', async () => {
+ vi.useFakeTimers();
+ try {
+  updateAuth.current.status.preview_access = true;
+  render(DesktopUpdateButton);
+  await vi.advanceTimersByTimeAsync(60_000);
+  window.dispatchEvent(new Event('application-update-policy'));
+  expect(api.get).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button')).toBeNull();
+ } finally { cleanup(); vi.useRealTimers(); }
+});
 it.each(['idle','unsupported','error'])('hides %s without a known update', async phase => {
  api.get.mockResolvedValue({...state,workers:[{...worker,phase,version:null}]});
  render(DesktopUpdateButton); await waitFor(()=>expect(api.get).toHaveBeenCalledOnce());

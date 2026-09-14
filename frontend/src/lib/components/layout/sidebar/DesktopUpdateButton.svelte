@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { Download, RefreshCw, LoaderCircle, CircleAlert } from 'lucide-svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
+	import { auth } from '$lib/stores/auth.svelte';
 
 	type Worker = { device_id: string; device_name: string; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; percent?: number; message?: string; error?: string; reason?: string };
 	type Snapshot = { allow_updates: boolean; update_all_workers: boolean; workers: Worker[] };
@@ -29,6 +30,7 @@
 		return `${scope}: ${ready ? 'Update ready. Click to install and restart.' : 'Update available. Click to download.'} ${reports}`;
 	});
 	async function refresh() {
+		if (auth.current.status?.preview_access) { snapshot = null; return; }
 		if (reading) return;
 		reading = true;
 		try {

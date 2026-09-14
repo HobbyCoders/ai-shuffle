@@ -67,6 +67,10 @@ export async function reservePreviewRoot(root, protectDirectory = privateDirecto
   }
 }
 
+export function previewUrl(base) {
+  return new URL('/', base).href;
+}
+
 export async function startPreview(env = process.env) {
   const options = previewOptions(env);
   const binaries = resolvePostgresBinaries({ packaged: false, resourcesPath: '', env });
@@ -108,7 +112,7 @@ export async function startPreview(env = process.env) {
     const response = await fetch(`${state.url}/api/preview`, { signal: AbortSignal.timeout(5000) });
     if (!response.ok) throw new Error(`Preview identity returned HTTP ${response.status}`);
     const identity = await response.json();
-    console.log(JSON.stringify({ url: `${state.url}/chat`, identity, stop_file: path.join(options.root, 'stop') }));
+    console.log(JSON.stringify({ url: previewUrl(state.url), identity, stop_file: path.join(options.root, 'stop') }));
     await stopped;
     if (worker.state.phase === 'failed') throw new Error('Preview worker stopped unexpectedly; inspect its private log');
   } finally {

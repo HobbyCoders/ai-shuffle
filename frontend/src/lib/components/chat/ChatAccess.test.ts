@@ -3,6 +3,8 @@ import { cleanup, render, screen, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 const m = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), delete: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api: m, getErrorMessage: (e: {detail?: string}) => e.detail ?? 'Unavailable' }));
+const accessAuth = vi.hoisted(() => ({current: {status: {preview_access: false}}}));
+vi.mock('$lib/stores/auth.svelte', () => ({auth: accessAuth}));
 import ChatAccess from './ChatAccess.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
 const empty = () => ({ requests: [], actions: [], grants: [], saved_connections: [], vault_available: false });
@@ -14,12 +16,20 @@ function hidden(value: boolean) {
  document.dispatchEvent(new Event('visibilitychange'));
 }
 beforeEach(() => {
- vi.useFakeTimers(); vi.clearAllMocks(); hidden(false); snapshot = empty();
+ vi.useFakeTimers(); vi.clearAllMocks(); hidden(false); snapshot = empty(); accessAuth.current.status.preview_access = false;
  m.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? { mode: 'code' } : snapshot);
  m.post.mockResolvedValue({}); m.delete.mockResolvedValue({});
 });
 afterEach(() => { cleanup(); resourceSync.clear(); vi.useRealTimers(); });
 describe('private-access recovery and live invalidations', () => {
+ it('does not poll owner-only access or render errors in a session preview', async () => {
+  accessAuth.current.status.preview_access = true;
+  render(ChatAccess, {sessionId: 'preview'}); await flush();
+  resourceSync.invalidate(['sessions', 'chat-access:preview']);
+  await vi.advanceTimersByTimeAsync(600_000); hidden(true); hidden(false); await flush();
+  expect(m.get).not.toHaveBeenCalled();
+  expect(screen.queryByRole('alert')).toBeNull();
+ });
  it.each(['code', 'chat', 'voice', null])('does not request local grants for a remote %s session', async (mode) => {
   m.get.mockResolvedValue({mode, is_remote: true});
   render(ChatAccess, {sessionId: 'remote'}); await flush();

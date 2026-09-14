@@ -4,10 +4,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
-import { previewOptions, reservePreviewRoot, stopPreview } from '../scripts/preview-source.mjs';
+import { previewOptions, previewUrl, reservePreviewRoot, stopPreview } from '../scripts/preview-source.mjs';
 const require = createRequire(import.meta.url);
 const { buildWorkerEnv } = require('../dist/main/worker.js');
 const repo = path.join(tmpdir(), 'checkout');
+test('preview opens the frontend root, not the retired chat route', () => {
+  for (const base of ['http://127.0.0.1:18100', 'http://127.0.0.1:18100/']) {
+    assert.equal(previewUrl(base), 'http://127.0.0.1:18100/');
+  }
+});
 
 for (const workerFails of [false, true]) {
   test(`preview shutdown handles void stop and cleans up (workerFails=${workerFails})`, async () => {

@@ -51,6 +51,7 @@ import ipaddress
 import logging
 import os
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass
 from hashlib import sha256
@@ -112,25 +113,40 @@ def _key_path() -> Path:
     return Path(settings.effective_data_dir) / KEY_FILE
 
 
+def _read_key(path: Path) -> bytes:
+    raw = path.read_text(encoding="utf-8").strip()
+    if len(raw) < 64:
+        raise ValueError("Invalid preview access key")
+    return bytes.fromhex(raw)
+
+
 def _key() -> bytes:
-    """The per-install signing key, created on first use (0600, best effort)."""
+    """Publish one complete key without replacing another process's key."""
     path = _key_path()
     try:
-        raw = path.read_text(encoding="utf-8").strip()
-        if len(raw) >= 64:
-            return bytes.fromhex(raw)
-    except (OSError, ValueError):
+        return _read_key(path)
+    except FileNotFoundError:
         pass
     fresh = secrets.token_hex(32)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(fresh, encoding="utf-8")
+    fd, name = tempfile.mkstemp(prefix="preview-access-", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
     try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    os.replace(tmp, path)
-    return bytes.fromhex(fresh)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(fresh)
+        # Both operations publish a complete file without replacing a winner.
+        # Windows rename is exclusive; POSIX rename would overwrite. Avoid a
+        # second Windows hard link whose cleanup could race a reader's handle.
+        try:
+            if os.name == "nt":
+                os.rename(tmp, path)
+            else:
+                os.link(tmp, path)
+        except FileExistsError:
+            pass
+        return _read_key(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _sign(payload: str) -> str:

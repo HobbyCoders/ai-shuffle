@@ -135,7 +135,9 @@
 	{/if}
 </section>
 
-<dialog bind:this={dialog} onclose={() => expanded = false} aria-label={`Expanded HTML preview: ${filename}`}>
+<dialog bind:this={dialog} onclose={() => expanded = false}
+	onkeydown={(event) => { if (event.key === 'Escape') event.stopPropagation(); }}
+	aria-label={`Expanded HTML preview: ${filename}`}>
 	{#if expanded}
 		{@render toolbar(true)}
 		{@render canvas(true)}
