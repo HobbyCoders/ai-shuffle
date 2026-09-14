@@ -787,6 +787,64 @@ async def test_interrupted_turn_falls_back_to_provider_estimate() -> None:
     assert "cost_usd" not in ev.usage
 
 
+@pytest.mark.parametrize("completed_tool", [False, True])
+async def test_interrupted_transport_keeps_partial_output_without_replaying_tools(completed_tool):
+    from fluid.messages import Text, ToolUseBlock
+    calls = []
+
+    @tool("touch", "Record a side effect", {"type": "object", "properties": {}})
+    async def touch(args):
+        calls.append(args)
+        return {"content": [{"type": "text", "text": "executed once"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("test", [touch]))
+    partial = _text("Partial answer")[:3] + [
+        StreamChunk("block_start", {"index": 1, "block_type": "tool_use", "tool_name": "mcp__test__touch", "tool_use_id": "aborted"}),
+        StreamChunk("tool_args_delta", {"index": 1, "partial_json": "{}" if completed_tool else '{"unfinished":'}),
+    ]
+    if completed_tool:
+        partial.append(StreamChunk("block_stop", {"index": 1}))
+    evidence = {"chunks_delivered": True, "exception_type": "RemoteProtocolError", "retrying": False}
+    partial.append(StreamChunk("error", {
+        # A transport exception's raw text must not trigger context retries.
+        "message": "RemoteProtocolError: context window incomplete chunked read",
+        "retriable": False, "transport_failure": evidence,
+    }))
+    provider = ScriptedProvider([
+        _tool("executed", "mcp__test__touch", "{}"), partial, _text("Continued safely"),
+    ])
+    store = MemoryStore()
+    loop = NativeLoop(provider=provider, store=store, model="test", registry=registry,
+                      permissions=PermissionEngine("never_ask"))
+    try:
+        await loop.submit(UserTurn(content="Start"))
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        assert provider.calls == 2
+        assert calls == [{}]
+        events = loop.bus.log(loop.session_id)
+        error = next(e for e in events if isinstance(e, ErrorEvent))
+        assert "connection was interrupted" in error.message
+        assert "RemoteProtocolError" not in error.message
+        assert not error.retriable
+        assert any(isinstance(e, Usage) and e.raw.get("transport_failure") == evidence for e in events)
+        results = [e for e in events if isinstance(e, ToolResult) and e.tool_use_id == "aborted"]
+        assert len(results) == int(completed_tool)
+        if completed_tool:
+            assert results[0].is_error and "not executed" in results[0].output
+        path = await store.load_path(loop.session_id)
+        assert any(n.message.text() == "Partial answer" for n in path)
+        uses = [b for n in path for b in n.message.content if isinstance(b, ToolUseBlock)]
+        assert [b.id for b in uses] == (["executed", "aborted"] if completed_tool else ["executed"])
+        await loop.submit(UserTurn(content="Continue"))
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        assert provider.calls == 3
+        assert calls == [{}]
+        assert any(m.text() == "Partial answer" for m in provider.requests[-1].messages)
+    finally:
+        await loop.aclose()
+
+
 async def test_provider_error_turn_reports_accumulated_cost() -> None:
     """The costed first call plus the failed call's partial tokens both land on
     the ErrorEvent that ends the turn."""

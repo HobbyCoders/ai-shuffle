@@ -154,6 +154,60 @@ async def test_real_incomplete_chunked_read():
         await server.wait_closed()
 
 
+async def test_native_turn_preserves_real_truncated_stream_and_does_not_retry():
+    from fluid.engine.native import NativeLoop
+    from fluid.events import ErrorEvent, UserTurn, Usage
+    from fluid.store.base import MemoryStore
+
+    requests = []
+
+    async def handle(reader, writer):
+        try:
+            requests.append(await reader.readuntil(b"\r\n\r\n"))
+            payload = start("responses") + event("response.output_item.added", {
+                "item": {"id": "msg_partial", "type": "message"},
+            }) + event("response.output_text.delta", {
+                "item_id": "msg_partial", "delta": "Keep this partial answer.",
+            })
+            writer.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                         b"Content-Type: text/event-stream\r\n\r\n")
+            writer.write(f"{len(payload):x}\r\n".encode() + payload + b"\r\n")
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        async with httpx.AsyncClient(trust_env=False) as http:
+            client = OpenAIResponsesClient(
+                api_key="test", base_url=f"http://127.0.0.1:{port}/responses",
+                http_client=http, retry=RetryPolicy(base_delay=0),
+            )
+            store = MemoryStore()
+            loop = NativeLoop(provider=client, store=store, model="test")
+            try:
+                await loop.submit(UserTurn(content="Start"))
+                await asyncio.wait_for(loop.wait_turn(), 5)
+                assert len(requests) == 1
+                events = loop.bus.log(loop.session_id)
+                error = next(e for e in events if isinstance(e, ErrorEvent))
+                assert "connection was interrupted" in error.message
+                assert not error.retriable
+                evidence = next(e.raw["transport_failure"] for e in events
+                                if isinstance(e, Usage) and "transport_failure" in e.raw)
+                assert evidence["incomplete_chunked_read"]
+                assert evidence["chunks_delivered"] and not evidence["retrying"]
+                assert any(n.message.text() == "Keep this partial answer."
+                           for n in await store.load_path(loop.session_id))
+            finally:
+                await loop.aclose()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
 async def _collect(source):
     return [chunk async for chunk in source]
 

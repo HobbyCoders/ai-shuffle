@@ -1141,10 +1141,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._session is None:
             resumed = False
             if self._session_id is not None:
-                self._session = await self.store.get_session(self._session_id)
-                if self._session is not None:
+                session = await self.store.get_session(self._session_id)
+                if session is not None:
+                    await self._seed_bus_seq(session.session_id)
+                    self._session = session
                     resumed = True
-                    await self._seed_bus_seq(self._session.session_id)
             if self._session is None:
                 self._session = await self.store.create_session(
                     self._session_id, cwd=self.ctx.cwd
@@ -1357,14 +1358,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         otherwise the maximum is taken from a full ``events_since`` read.
         """
         last_event_seq = getattr(self.store, "last_event_seq", None)
-        try:
-            if callable(last_event_seq):
-                last = int(await last_event_seq(sid))
-            else:
-                events = await self.store.events_since(sid, 0)
-                last = max((e.seq for e in events), default=0)
-        except Exception:  # a store that cannot replay: numbering starts fresh
-            return
+        # Failure must abort resume: starting at zero would silently collide
+        # with durable events in stores that deduplicate by (session_id, seq).
+        if callable(last_event_seq):
+            last = int(await last_event_seq(sid))
+        else:
+            events = await self.store.events_since(sid, 0)
+            last = max((e.seq for e in events), default=0)
         self.bus.seed(sid, last)
 
     @property
@@ -2776,9 +2776,45 @@ class NativeLoop(BackgroundLifecycleMixin):
                         continue
                 # The failed call's usage was folded in above (before the
                 # escalation decision) — snapshot it, don't re-fold.
+                if result.usage.get("transport_failure"):
+                    # Keep visible text and completed tool requests for a later
+                    # user-directed continuation. Incomplete arguments and opaque
+                    # reasoning envelopes are not safe provider history.
+                    completed_ids = {tu["tool_use_id"] for tu in result.tool_uses}
+                    content = [
+                        block for block in result.message.content
+                        if isinstance(block, Text) or (
+                            isinstance(block, ToolUseBlock) and block.id in completed_ids
+                        )
+                    ]
+                    if content:
+                        node = SessionNode(
+                            node_id=new_id("node"), parent_id=parent.node_id,
+                            message=Message(role="assistant", content=content),
+                        )
+                        await self.store.append(sid, node)
+                        parent = node
+                    aborted = []
+                    for tu in result.tool_uses:
+                        text = "Tool not executed: the provider connection was interrupted before the response finished."
+                        await self._emit(ToolResult(
+                            session_id=sid, turn_id=turn_id,
+                            tool_use_id=tu["tool_use_id"], name=tu["name"],
+                            output=text, is_error=True,
+                        ))
+                        aborted.append(ToolResultBlock(
+                            tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
+                        ))
+                    if aborted:
+                        node = SessionNode(
+                            node_id=new_id("node"), parent_id=parent.node_id,
+                            message=Message(role="user", content=aborted),
+                        )
+                        await self.store.append(sid, node)
+                        parent = node
                 partial, partial_cost = self._partial_usage(total_usage)
                 await self._emit_terminal_with_park(ErrorEvent(
-                    session_id=sid, turn_id=turn_id,
+                    session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                     message=result.error_message or "provider error",
                     retriable=result.error_retriable,
                     usage=partial, cost_usd=partial_cost,
@@ -3619,12 +3655,24 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # is terminal or recoverable (context overflow → forced trim
                 # + one retry) before surfacing it.
                 status = payload.get("status")
+                transport_failure = payload.get("transport_failure")
+                error_message = str(payload.get("message", payload))
+                if transport_failure:
+                    # Raw exception text stays out of user messaging and cannot
+                    # accidentally activate a context-overflow retry. Transport
+                    # clients already exhausted safe pre-stream retries.
+                    error_message = (
+                        "The provider connection was interrupted before the response finished. "
+                        "The response may be incomplete. No automatic replay was attempted. "
+                        "Review any completed actions before asking to continue."
+                    )
                 return _CallResult(
                     message=self._assemble_message(blocks, request.model),
+                    tool_uses=tool_uses,
                     usage=usage_totals,
                     stop_reason="error",
-                    error_message=str(payload.get("message", payload)),
-                    error_retriable=bool(payload.get("retriable")),
+                    error_message=error_message,
+                    error_retriable=False if transport_failure else bool(payload.get("retriable")),
                     error_status=status if isinstance(status, int) else None,
                     native_stop_reason=native_stop_reason,
                 )

@@ -368,6 +368,53 @@ async def test_failed_writes_do_not_publish_phantom_events(mock_db, monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["native", "delegated"])
+@pytest.mark.parametrize("indexed", [True, False])
+async def test_resume_sequence_read_failure_blocks_producer_until_retry(mock_db, monkeypatch, engine, indexed):
+    from fluid.engine.native import NativeLoop
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.events.model import TurnComplete
+
+    def make_loop(store):
+        if engine == "native":
+            return NativeLoop(provider=object(), store=store, model="test", session_id="resume-failure")
+        return DelegatedLoop(store=store, model="test", session_id="resume-failure")
+
+    original = make_loop(PgFluidStore())
+    resumed = None
+    try:
+        await original._ensure_session()
+        await original._emit(TurnComplete(session_id="resume-failure", stop_reason="end_turn", num_model_calls=1))
+        persisted = await PgFluidStore().last_event_seq("resume-failure")
+        store = PgFluidStore()
+        if not indexed:
+            monkeypatch.setattr(store, "last_event_seq", None)
+        lookup = "last_event_seq" if indexed else "events_since"
+        real_lookup = getattr(store, lookup)
+
+        async def fail(*args):
+            raise OSError("sequence lookup unavailable")
+
+        monkeypatch.setattr(store, lookup, fail)
+        resumed = make_loop(store)
+        for _ in range(2):
+            with pytest.raises(OSError, match="sequence lookup unavailable"):
+                await resumed._ensure_session()
+            assert resumed._session is None
+            assert not resumed.bus.log("resume-failure")
+        monkeypatch.setattr(store, lookup, real_lookup)
+        await resumed._ensure_session()
+        event = await resumed._emit(TurnComplete(session_id="resume-failure", stop_reason="end_turn", num_model_calls=1))
+        assert event.seq == persisted + 1
+        replay = await PgFluidStore().events_since("resume-failure", 0)
+        assert [e.seq for e in replay] == list(range(1, event.seq + 1))
+    finally:
+        await original.aclose()
+        if resumed is not None:
+            await resumed.aclose()
+
+
+@pytest.mark.asyncio
 async def test_failed_load_is_retryable(mock_db, monkeypatch):
     await PgFluidStore().create_session("retry")
     resumed = PgFluidStore()

@@ -50,6 +50,52 @@ def _tool(name: str, marker: str = ""):
     )
 
 
+def test_real_chat_access_tools_have_serializable_provider_schemas():
+    import json
+    from app.mcp.chat_access_sdk import create_chat_access_server
+    from fluid.providers.base import ProviderRequest
+    from fluid.messages import Message, Text
+    from fluid.providers.openai_responses.serialize import build_request_body
+
+    registry = ToolRegistry()
+    register_recorded_sdk_servers(registry, {"chat-access": create_chat_access_server("schema-test")})
+    request = registry.get("mcp__chat-access__RequestChatAccess")
+    assert request.input_schema == {
+        "type": "object", "properties": {"kind": {"type": "string"}, "purpose": {"type": "string"}},
+        "required": ["kind", "purpose"],
+    }
+    wire = build_request_body(ProviderRequest(
+        model="test", messages=[Message(role="user", content=[Text("hello")])],
+        tools=[{"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
+               for tool in registry.list_tools()],
+    ))
+    encoded = json.dumps(wire)
+    assert "RequestChatAccess" in encoded and "ChatWriteFile" in encoded
+
+
+def test_shorthand_schema_matches_pinned_sdk_semantics():
+    from typing import TypedDict, NotRequired
+    from app.core.provider.fluid_tool_bridge import sdk_tool_to_inproc
+
+    Arguments = TypedDict("Arguments", {"path": str, "limit": NotRequired[int]})
+
+    sdk_tool = _tool("Example")
+    sdk_tool.input_schema = {"names": list[str], "flag": bool, "count": int, "rate": float}
+    schema = sdk_tool_to_inproc(sdk_tool).input_schema
+    assert schema["properties"] == {
+        "names": {"type": "array", "items": {"type": "string"}},
+        "flag": {"type": "boolean"}, "count": {"type": "integer"}, "rate": {"type": "number"},
+    }
+    assert schema["required"] == ["names", "flag", "count", "rate"]
+    sdk_tool.input_schema = Arguments
+    assert sdk_tool_to_inproc(sdk_tool).input_schema == {
+        "type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
+        "required": ["path"],
+    }
+    sdk_tool.input_schema = {"type": "object", "additionalProperties": False}
+    assert sdk_tool_to_inproc(sdk_tool).input_schema is sdk_tool.input_schema
+
+
 def test_patch_sdk_server_records_tools():
     tools = [_tool("Monitor"), _tool("CronDelete")]
     cfg = {"type": "sdk", "name": "builtins", "instance": _Instance()}

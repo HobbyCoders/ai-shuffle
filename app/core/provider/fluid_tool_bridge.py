@@ -26,12 +26,28 @@ worked example (``bridge_builtins_tools``) proving the pattern for
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable, List, Mapping, Optional
+from typing import Any, Iterable, List, Mapping, Optional, is_typeddict
 
 from fluid.tools.inproc import InprocServer, InprocTool, create_inproc_server
 from fluid.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _input_schema(schema: Any) -> dict:
+    # The pinned SDK accepts both JSON Schema and Python annotation shorthand.
+    # Its server normalizes the latter for list_tools, but recorded @tool
+    # objects retain the raw types. Match that conversion at this bridge too.
+    from claude_agent_sdk import _python_type_to_json_schema
+
+    if isinstance(schema, dict):
+        if isinstance(schema.get("type"), str):
+            return schema
+        properties = {name: _python_type_to_json_schema(value) for name, value in schema.items()}
+        return {"type": "object", "properties": properties, "required": list(properties)}
+    if is_typeddict(schema):
+        return _python_type_to_json_schema(schema)
+    return {"type": "object"}
 
 
 def sdk_tool_to_inproc(sdk_tool: Any, *, risk: str = "safe") -> InprocTool:
@@ -51,7 +67,7 @@ def sdk_tool_to_inproc(sdk_tool: Any, *, risk: str = "safe") -> InprocTool:
     return InprocTool(
         name=name,
         description=getattr(sdk_tool, "description", "") or "",
-        input_schema=getattr(sdk_tool, "input_schema", None) or {"type": "object"},
+        input_schema=_input_schema(getattr(sdk_tool, "input_schema", None)),
         handler=handler,
         risk=risk,
     )
