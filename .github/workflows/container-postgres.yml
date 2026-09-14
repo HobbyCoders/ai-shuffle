@@ -67,6 +67,11 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Image provenance for application updates
+        id: source
+        run: echo "sequence=$(git rev-list --first-parent --count HEAD)" >> "$GITHUB_OUTPUT"
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v2
         with:
@@ -80,7 +85,9 @@ jobs:
           tags: ai-shuffle:postgres-candidate
           load: true
           push: false
-          build-args: GIT_SHA=${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            APPLICATION_SEQUENCE=${{ steps.source.outputs.sequence }}
       - name: Validate embedded-only Compose configuration
         run: docker compose config --quiet
       - name: Verify actual container lifecycle and UI

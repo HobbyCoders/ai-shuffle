@@ -183,7 +183,13 @@ def _git_op_handler():
 # Handlers that live in modules imported lazily (they pull in the session
 # runtime). One table serves both dispatch and ``known_action`` so a new
 # action cannot be reachable in one and unknown to the other.
+def _application_update_handler():
+    from app.core.update_workers import peer_action
+    return peer_action
+
+
 _LAZY_HANDLERS = {
+    "application-update": _application_update_handler,
     "rewind": _rewind_handler,
     "session-git": _session_git_handler,
     "git-state": _git_state_handler,

@@ -45,6 +45,28 @@ try {
   }
   await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'More', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Account', exact: true }).click();
+  const updates = page.getByRole('switch', { name: 'Allow updates', exact: true });
+  await updates.waitFor();
+  const policyUrl = 'http://127.0.0.1:8000/api/v1/settings/application-updates';
+  const initialPolicy = await (await context.request.get(policyUrl)).json();
+  assert.equal(initialPolicy.allow_updates, true, 'Updates must default on');
+  assert.equal(initialPolicy.supported, true, 'Candidate image must start the application updater');
+  assert.equal(initialPolicy.update_all_workers, false, 'Fleet updates are opt-in');
+  const scopeChanged = page.waitForResponse(response => response.url() === policyUrl && response.request().method() === 'PUT');
+  await page.getByRole('switch', { name: 'Update all workers', exact: true }).click();
+  assert.equal((await scopeChanged).status(), 200);
+  assert.equal((await (await context.request.get(policyUrl)).json()).update_all_workers, true);
+  const changed = page.waitForResponse(response => response.url() === policyUrl && response.request().method() === 'PUT');
+  await updates.click();
+  assert.equal((await changed).status(), 200);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.getByText('Application updates are paused. Your current version will keep running.', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('switch', { name: 'Allow updates', exact: true }).isChecked(), false);
+  const enabled = page.waitForResponse(response => response.url() === policyUrl && response.request().method() === 'PUT');
+  await page.getByRole('switch', { name: 'Allow updates', exact: true }).click();
+  assert.equal((await enabled).status(), 200);
+  assert.equal((await (await context.request.get(policyUrl)).json()).allow_updates, true);
   await page.getByRole('button', { name: 'Providers', exact: true }).click();
   const account = page.getByRole('region', { name: 'Shuffle account', exact: true });
   const login = account.getByRole('button', { name: 'Sign in', exact: true });

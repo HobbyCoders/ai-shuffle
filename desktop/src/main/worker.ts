@@ -331,13 +331,13 @@ export function syncBeforeOpen(port: number): Promise<{ status: string }> {
 
 
 /** Authenticated, loopback-only control of the child we launched. Never a renderer API. */
-export function requestLifecycle(port: number, token: string, action: 'active-sessions' | 'stop-sessions'): Promise<Record<string, unknown>> {
+export function requestLifecycle(port: number, token: string, action: 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge', state?: object): Promise<Record<string, unknown>> {
 	return new Promise((resolve, reject) => {
 		const req = http.request({
 			host: '127.0.0.1', port, path: `/api/v1/internal/desktop/${action}`,
-			method: action === 'active-sessions' ? 'GET' : 'POST',
+			method: action === 'stop-sessions' || action === 'update-bridge' ? 'POST' : 'GET',
 			timeout: action === 'active-sessions' ? 3000 : 30_000,
-			headers: { authorization: `Bearer ${token}`, accept: 'application/json' }
+			headers: { authorization: `Bearer ${token}`, accept: 'application/json', 'content-type': 'application/json' }
 		}, (res) => {
 			let body = '';
 			res.setEncoding('utf8');
@@ -353,7 +353,7 @@ export function requestLifecycle(port: number, token: string, action: 'active-se
 		});
 		req.on('timeout', () => req.destroy(new Error('Worker did not respond in time')));
 		req.on('error', reject);
-		req.end();
+		req.end(state ? JSON.stringify(state) : undefined);
 	});
 }
 
@@ -577,6 +577,17 @@ export class WorkerSupervisor extends EventEmitter {
 	}
 
 	/** Only work owned by this app will be stopped; attached workers stay up. */
+	async exchangeUpdateState(state: object): Promise<Record<string, unknown>> {
+		if (this._state.external || this._state.phase !== 'ready') return {};
+		return this.lifecycleRequest('update-bridge', state);
+	}
+
+	async updatesAllowed(): Promise<boolean> {
+		if (this._state.external || this._state.phase !== 'ready') return false;
+		const reply = await this.lifecycleRequest('update-policy');
+		return reply.allow_updates === true;
+	}
+
 	async activeSessionCount(): Promise<number> {
 		if (this._state.external || this._state.phase !== 'ready') return 0;
 		const reply = await this.lifecycleRequest('active-sessions');
@@ -599,8 +610,8 @@ export class WorkerSupervisor extends EventEmitter {
 		}
 	}
 
-	private lifecycleRequest(action: 'active-sessions' | 'stop-sessions'): Promise<Record<string, unknown>> {
-		return requestLifecycle(this._state.port, this.lifecycleToken, action);
+	private lifecycleRequest(action: 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge', state?: object): Promise<Record<string, unknown>> {
+		return requestLifecycle(this._state.port, this.lifecycleToken, action, state);
 	}
 
 	async stop(): Promise<void> {

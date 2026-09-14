@@ -73,6 +73,7 @@ if (!(await free(profile?.port ?? 8000)) || !(await free(profile?.protectedPort 
     let lastMessage;
     // Older installed source managers acquired updates through check().
     await (updates.download ?? updates.check).call(updates, (percent, message) => { if (message !== lastMessage) { console.log(message); lastMessage = message; } }, true);
+    await updates.prepareInstall?.();
     selected = await updates.select();
   }
 }

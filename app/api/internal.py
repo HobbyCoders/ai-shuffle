@@ -30,6 +30,35 @@ def require_desktop(request):
         raise HTTPException(status_code=403, detail="Desktop lifecycle access denied")
 
 
+@router.get("/desktop/update-policy")
+async def desktop_update_policy(request: Request):
+    require_desktop(request)
+    from app.core.application_updates import mirror_policy
+    from app.db.async_database import run_sync
+    return {"allow_updates": await run_sync(mirror_policy)}
+
+
+from typing import Literal
+from pydantic import BaseModel, Field
+
+
+class DesktopUpdateState(BaseModel):
+    phase: Literal["idle", "checking", "available", "downloading", "ready", "error", "unsupported"]
+    version: str | None = Field(default=None, max_length=64)
+    percent: float | None = Field(default=None, ge=0, le=100)
+    error: str | None = Field(default=None, max_length=4096)
+    message: str | None = Field(default=None, max_length=4096)
+    # No policy fields: the native heartbeat cannot overwrite account preferences.
+
+
+@router.post("/desktop/update-bridge")
+async def desktop_update_bridge(body: DesktopUpdateState, request: Request):
+    require_desktop(request)
+    from app.core.application_updates import desktop_exchange
+    from app.db.async_database import run_sync
+    return await run_sync(desktop_exchange, body.model_dump())
+
+
 _shutdown_task = None
 
 

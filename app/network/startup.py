@@ -206,6 +206,9 @@ def _on_applied(touched) -> None:
             continue
         if collection == "system_settings":
             database.invalidate_system_setting_memo(record_id)
+            if record_id == "allow_updates":
+                from app.core.application_updates import mirror_policy
+                mirror_policy()
         if coll is not None and coll.resource:
             resources.add(coll.resource)
         if collection in ("membership", "presence"):

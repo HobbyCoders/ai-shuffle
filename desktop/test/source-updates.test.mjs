@@ -202,6 +202,28 @@ test('DESK-02: a failed first boot stays blocked until a newer download or insta
  const saved=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.equal(saved.blocked,undefined);assert.deepEqual(saved.failed,[A]);
  await f.release(A);await assert.rejects(u.download(),/failed to start/,'the failed revision stays refused after the block clears');
 });
+test('UI downloads stay staged even with a legacy launcher until explicit install is approved',async t=>{
+ const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
+ u.stageDownloads();await f.release(B);await u.download();
+ let saved=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+ assert.equal(saved.staged,B);assert.equal(saved.pending,undefined);
+ u=f.create();await u.load();u.stageDownloads();assert.equal((await u.select()).revision,A);assert.equal(u.pendingVersion,B);
+ await fs.writeFile(path.join(f.root,'allow-updates.json'),JSON.stringify({allow_updates:false}));
+ await assert.rejects(u.prepareInstall(),/disabled/);
+ await fs.writeFile(path.join(f.root,'allow-updates.json'),JSON.stringify({allow_updates:true}));
+ await u.prepareInstall();await u.cancelInstall();
+ saved=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.equal(saved.staged,B);assert.equal(saved.pending,undefined);
+ await u.prepareInstall();u=f.create();await u.load();assert.equal((await u.select()).revision,B);
+});
+test('disabled account policy blocks downloads and cancels staged activation on offline restart',async t=>{
+ const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
+ await f.release(B);await u.download();
+ await fs.writeFile(path.join(f.root,'allow-updates.json'),JSON.stringify({allow_updates:false}));
+ await assert.rejects(u.download(),/disabled/);
+ u=f.create();await u.load();assert.equal(u.pendingVersion,null);assert.equal((await u.select()).revision,A);
+ await fs.writeFile(path.join(f.root,'allow-updates.json'),JSON.stringify({allow_updates:true}));
+ assert.equal((await u.download()).kind,'ready');
+});
 test('public source requests omit credentials and reject off-origin URLs and redirects',async()=>{
  const module={exports:{}};const requests=[];
  vm.runInNewContext(await fs.readFile(new URL('../dist/main/source-auth.js',import.meta.url),'utf8'),{

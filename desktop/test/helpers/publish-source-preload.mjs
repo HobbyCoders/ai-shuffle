@@ -16,6 +16,9 @@ let saved,mainCalls=0;
 const events=[];
 const asset={id:123,name:revision+'.zip',size:bytes.length,state:'uploaded',digest:'sha256:'+createHash('sha256').update(bytes).digest('hex')};
 cp.execFileSync=(exe,args)=>{
+ if(exe==='git' && args[0]==='rev-list') return '42\n';
+ if(exe==='git' && args[1]==='--is-shallow-repository') return 'false\n';
+ if(exe==='python' && args[0]==='docker/update_contract.py') return 'b'.repeat(64)+'\n';
  if(exe==='gh') { events.push('reuse');fs.writeFileSync(path.join(root,asset.name),bytes);return ''; }
  if(!args.includes('d1')||!args.includes('--remote'))throw Error('Unexpected external command');
  if(args.includes('--file'))throw Error('Bulk file imports emit progress outside JSON and must not be used for small publisher queries');

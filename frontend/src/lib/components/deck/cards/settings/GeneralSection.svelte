@@ -1,5 +1,7 @@
 <script lang="ts">
-	import { Palette, FolderOpen } from 'lucide-svelte';
+	import { Palette, FolderOpen, RefreshCw } from 'lucide-svelte';
+	import { isAdmin } from '$lib/stores/auth.svelte';
+	import ApplicationUpdates from './ApplicationUpdates.svelte';
 	import { theme, themePreference, currentPresetId, themePresets } from '$lib/stores/theme.svelte';
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import type { WorkspaceValidation } from '$lib/api/client';
@@ -62,6 +64,13 @@
 		</div>
 	</div>
 </div>
+
+{#if $isAdmin}
+	<div class="set-group">
+		<div class="set-grouphead"><h3><RefreshCw />Application updates</h3></div>
+		<ApplicationUpdates />
+	</div>
+{/if}
 
 <!-- Workspace -->
 <div class="set-group">

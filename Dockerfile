@@ -180,7 +180,10 @@ COPY --chown=appuser:appuser .env.example .
 
 # Copy entrypoint + browser (Chromium supervisor) helper scripts
 COPY entrypoint.sh /entrypoint.sh
-COPY --chown=appuser:appuser docker/container_runtime.py ./docker/container_runtime.py
+COPY docker/container_runtime.py docker/application_updates.py docker/update_contract.py ./docker/
+COPY Dockerfile entrypoint.sh ./
+COPY docker/start-chrome.sh docker/chrome-supervisor.sh docker/chrome-doctor.sh ./docker/
+COPY desktop/build/application-update-key.pem ./docker/application-update-key.pem
 COPY docker/start-chrome.sh /usr/local/bin/start-chrome
 COPY docker/chrome-supervisor.sh /usr/local/bin/chrome-supervisor
 COPY docker/chrome-doctor.sh /usr/local/bin/chrome-doctor
@@ -195,6 +198,10 @@ RUN chown appuser:appuser /app
 # "container restarted but old image is still running" (mismatch). Falls back
 # to boot-time-only detection (landed_unverified) if this file is absent.
 ARG GIT_SHA=unknown
+# Production publishing supplies a first-parent ordinal. Ad-hoc/lab images
+# without provenance remain pinned instead of silently following main.
+ARG APPLICATION_SEQUENCE=0
+RUN python docker/update_contract.py /app "$GIT_SHA" "$APPLICATION_SEQUENCE" > /app/docker/image.json
 ENV GIT_SHA=$GIT_SHA
 LABEL org.opencontainers.image.revision=$GIT_SHA
 RUN printf '%s\n' "$GIT_SHA" > /app/GIT_SHA

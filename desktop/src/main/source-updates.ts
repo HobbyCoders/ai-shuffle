@@ -32,7 +32,7 @@ export interface SourceApplication {
   node: string;
   electron: string;
 }
-interface SourceState { active?: string; previous?: string; pending?: string; booting?: string; blocked?: boolean; failed?: string[] }
+interface SourceState { active?: string; previous?: string; pending?: string; staged?: string; booting?: string; blocked?: boolean; failed?: string[] }
 export type SourceProgress = (percent: number | null, message: string) => void;
 export type SourceCheck = { kind: 'current' | 'available' | 'ready'; version?: string };
 
@@ -50,11 +50,27 @@ export class SourceUpdates {
   private state: SourceState = {};
   private running: string | null = null;
   private checking = false;
+  private explicitActivation = false;
+  /** UI downloads must not activate on ordinary exits, including older EXE launchers. */
+  stageDownloads(): void { this.explicitActivation = true; }
+  async prepareInstall(): Promise<void> {
+    if (!await this.updatesAllowed()) throw new Error('Application updates are disabled in Account settings');
+    if (!this.state.staged) return;
+    this.state.pending = this.state.staged;
+    delete this.state.staged;
+    await this.save();
+  }
+  async cancelInstall(): Promise<void> {
+    if (!this.explicitActivation || !this.state.pending || this.state.booting) return;
+    this.state.staged = this.state.pending;
+    delete this.state.pending;
+    await this.save();
+  }
   private writes: Promise<void> = Promise.resolve();
   private readonly request: typeof fetch;
   constructor(readonly options: SourceOptions) { this.request = options.fetch ?? ((url) => publicSourceFetch(String(url))); }
   get version(): string | null { return this.running ?? this.state.active ?? this.options.baseline?.revision ?? null; }
-  get pendingVersion(): string | null { return this.state.pending ?? null; }
+  get pendingVersion(): string | null { return this.state.staged ?? this.state.pending ?? null; }
   get hasSourceState(): boolean { return !!(this.state.active || this.state.pending || this.state.blocked); }
   /** A failed first boot with nothing newer staged: no source build may run, so the installer's bundled baseline does. */
   get blocked(): boolean { return !!this.state.blocked && !this.state.pending; }
@@ -73,7 +89,7 @@ export class SourceUpdates {
     try {
       this.state = JSON.parse(await fs.readFile(path.join(this.options.root, 'state.json'), 'utf8'));
       if (!this.state || typeof this.state !== 'object' || Array.isArray(this.state)) throw new Error('Invalid source update state');
-      for (const field of ['active', 'previous', 'pending', 'booting'] as const) {
+      for (const field of ['active', 'previous', 'pending', 'staged', 'booting'] as const) {
         if (this.state[field] !== undefined && (typeof this.state[field] !== 'string' || !REVISION.test(this.state[field]!))) throw new Error('Invalid installed revision');
       }
       if (this.state.failed !== undefined && (!Array.isArray(this.state.failed) || this.state.failed.some(v => typeof v !== 'string' || !REVISION.test(v)))) throw new Error('Invalid failed revisions');
@@ -81,12 +97,26 @@ export class SourceUpdates {
     // A crashed first boot may already have migrated the database. Never roll
     // application code back automatically over that possibly changed database.
     if (this.state.booting) await this.failed();
+    // The worker mirrors the synced policy for offline launcher selection.
+    if (this.state.pending && !await this.updatesAllowed()) {
+      delete this.state.pending;
+      await this.save();
+    }
+  }
+  private async updatesAllowed(): Promise<boolean> {
+    try {
+      const policy = JSON.parse(await fs.readFile(path.join(this.options.root, 'allow-updates.json'), 'utf8'));
+      return policy.allow_updates === true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+      throw new Error('Cannot read application update policy');
+    }
   }
   /** A newer milestone installer may supersede older healthy source code, and a block left by older failed boots. */
   async useNewerBaseline(): Promise<void> {
     const baseline = this.options.baseline;
     if (!baseline || this.state.booting) return;
-    const revisions = [this.state.active, this.state.pending].filter((value): value is string => !!value);
+    const revisions = [this.state.active, this.state.pending, this.state.staged].filter((value): value is string => !!value);
     if (!revisions.length && !this.state.blocked) return;
     for (const revision of revisions) {
       const manifest = verifySourceManifest(await fs.readFile(path.join(this.directory(revision), 'release.json'), 'utf8'), this.options.publicKey);
@@ -104,7 +134,7 @@ export class SourceUpdates {
       }
     }
     this.state.previous = this.state.active ?? this.state.previous;
-    delete this.state.active; delete this.state.pending; delete this.state.blocked;
+    delete this.state.active; delete this.state.pending; delete this.state.staged; delete this.state.blocked;
     await this.save();
   }
   private async lock(): Promise<() => Promise<void>> {
@@ -141,9 +171,10 @@ export class SourceUpdates {
     return this.update(true, progress, interactive);
   }
   private async update(download: boolean, progress: SourceProgress, interactive: boolean): Promise<SourceCheck> {
+    if (!await this.updatesAllowed()) throw new Error('Application updates are disabled in Account settings');
     if (this.checking) throw new Error('An application update is already running');
     if (this.state.booting) return { kind: 'current' };
-    if (this.state.pending) return { kind: 'ready', version: this.state.pending.slice(0, 12) };
+    if (this.pendingVersion) return { kind: 'ready', version: this.pendingVersion.slice(0, 12) };
     this.checking = true;
     let unlock: (() => Promise<void>) | undefined;
     try {
@@ -197,8 +228,10 @@ export class SourceUpdates {
       const target = this.directory(manifest.revision);
       if ([this.state.active, this.state.previous].includes(manifest.revision)) throw new Error('Cannot overwrite a retained application version');
       await removeSourceDirectory(target); await fs.rename(stage, target);
-      this.state.pending = manifest.revision;
-      try { await this.save(); } catch (error) { delete this.state.pending; throw error; }
+      if (!await this.updatesAllowed()) throw new Error('Updates were disabled while preparing; no update was activated');
+      const field = this.explicitActivation ? 'staged' : 'pending';
+      this.state[field] = manifest.revision;
+      try { await this.save(); } catch (error) { delete this.state[field]; throw error; }
     } finally { await removeSourceDirectory(stage); }
   }
   async application(revision: string): Promise<SourceApplication> {

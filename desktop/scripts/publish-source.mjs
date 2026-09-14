@@ -57,7 +57,11 @@ try {
  }
  if (!size || size > 512 * 1024 ** 2) throw new Error('Invalid source ZIP size');
  const sha256 = hash.digest('hex'), sequence = Date.now();
- const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size }));
+ const containerSequence = Number(execFileSync('git', ['rev-list', '--first-parent', '--count', revision], { encoding: 'utf8' }).trim());
+ if (!Number.isSafeInteger(containerSequence) || containerSequence <= 1 || execFileSync('git', ['rev-parse', '--is-shallow-repository'], { encoding: 'utf8' }).trim() !== 'false') throw Error('Container publishing requires complete main history');
+ const runtime = execFileSync('python', ['docker/update_contract.py'], { encoding: 'utf8' }).trim();
+ if (!/^[a-f0-9]{64}$/.test(runtime)) throw Error('Invalid container runtime contract');
+ const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size, container: { sequence: containerSequence, runtime } }));
  const signature = sign(null, payload, key);
  if (!verify(null, payload, await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8'), signature)) throw new Error('Signing key does not match launcher trust key');
  const signed = JSON.stringify({ payload: payload.toString('base64'), signature: signature.toString('base64') });

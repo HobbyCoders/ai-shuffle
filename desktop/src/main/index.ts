@@ -60,6 +60,7 @@ async function main(): Promise<void> {
 	const managed = managedContext();
 	const applications = managed?.updates ?? installedContext()?.updates ?? null;
 	const installedExecutable = managed?.host?.executable ?? installedContext()?.executable;
+	if (applications) process.env.SHUFFLE_UPDATE_POLICY_FILE = path.join(applications.options.root, 'allow-updates.json');
 	if (applications) updater.useApplications(applications, installedExecutable, installedLaunchArgs(process.argv.slice(1), app.commandLine.getSwitchValue('remote-debugging-port')).filter(arg => arg.startsWith('--')));
 
 	app.on('second-instance', () => window.focus());
@@ -195,6 +196,9 @@ async function main(): Promise<void> {
 		}
 	};
 
+	updater.setPolicy(() => supervisor?.updatesAllowed() ?? Promise.resolve(false));
+	updater.setBridge(state => supervisor?.exchangeUpdateState(state) ?? Promise.resolve({}),
+		async () => !!supervisor && await supervisor.activeSessionCount() === 0);
 	registerIpc({ window, updater, worker });
 	updater.subscribe((state) => window.send('desktop:update-state', state));
 	nativeTheme.on('updated', () => window.send('desktop:native-theme', { dark: nativeTheme.shouldUseDarkColors }));

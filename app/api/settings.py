@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_admin, require_auth
+from app.api.settings_updates import updates_router
 from app.core.ai_tools import AI_TOOLS
 from app.core.query_engine import DEFAULT_SECURITY_INSTRUCTIONS
 
@@ -69,6 +70,7 @@ router.include_router(audio_router)
 router.include_router(stt_stream_router)
 router.include_router(media_router)
 router.include_router(credentials_router)
+router.include_router(updates_router)
 
 
 # ============================================================================

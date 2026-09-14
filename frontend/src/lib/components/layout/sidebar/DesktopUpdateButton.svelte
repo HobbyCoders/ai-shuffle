@@ -1,58 +1,56 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { Download, RefreshCw, LoaderCircle, CircleAlert } from 'lucide-svelte';
-	import { desktop, type DesktopUpdateState } from '$lib/services/desktop';
+	import { api, getErrorMessage } from '$lib/api/client';
 
-	let update = $state<DesktopUpdateState | null>(null);
+	type Worker = { device_id: string; device_name: string; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; percent?: number; message?: string; error?: string; reason?: string };
+	type Snapshot = { allow_updates: boolean; update_all_workers: boolean; workers: Worker[] };
+	type Receipt = { results: { device_name: string; accepted: boolean; reason: string }[] };
+	let snapshot = $state<Snapshot | null>(null);
 	let pending = $state(false);
 	let requestError = $state('');
-	const ready = $derived(update?.phase === 'ready');
-	const error = $derived(requestError || update?.error || '');
-	const visible = $derived(!!desktop && !!update && (
-		['available', 'downloading', 'ready'].includes(update.phase) ||
-		(!!update.version && (update.phase === 'error' || update.phase === 'checking'))
-	));
-	const busy = $derived(pending || update?.phase === 'downloading' || update?.phase === 'checking');
-	const action = $derived(ready ? 'Update and restart' : 'Download update');
+	let receipt = $state('');
+	let active = false;
+	let reading = false;
+	const eligible = $derived(snapshot?.workers.filter(w => w.supported && w.online && w.allow_updates) ?? []);
+	const downloading = $derived(eligible.some(w => ['checking', 'downloading'].includes(w.phase)));
+	const available = $derived(eligible.some(w => ['available', 'error'].includes(w.phase) && !!w.version));
+	const ready = $derived(!available && !downloading && eligible.some(w => w.phase === 'ready'));
+	const error = $derived(requestError || eligible.find(w => w.error)?.error || '');
+	const visible = $derived(!!snapshot?.allow_updates && (ready || available || downloading || !!receipt || !!requestError));
+	const busy = $derived(pending || downloading);
+	const action = $derived(ready ? 'Update and restart' : available ? 'Download update' : 'Check for updates');
+	const scope = $derived(snapshot?.update_all_workers ? 'All online workers' : 'Current worker');
 	const status = $derived.by(() => {
-		if (error) return `${error} Click to retry ${ready ? 'the restart' : 'the download'}.`;
-		if (pending && ready) return 'Restarting AI Shuffle…';
-		if (update?.phase === 'checking') return 'Checking for updates…';
-		if (update?.phase === 'downloading' || pending) {
-			const progress = update?.percent == null ? '' : ` (${Math.round(update.percent)}%)`;
-			return `${update?.message || 'Downloading update…'}${progress}`;
-		}
-		return ready ? 'Update ready. Click to install and restart AI Shuffle.' : 'Update available. Click to download.';
+		const reports = snapshot?.workers.map(w => `${w.device_name}: ${w.reason || w.error || w.message || w.phase}`).join('; ') ?? '';
+		if (error) return `${scope}: ${error}. ${reports}`;
+		if (receipt) return `${scope}: ${receipt}. ${reports}`;
+		if (busy) return `${scope}: ${ready ? 'Restarting…' : 'Preparing updates…'} ${reports}`;
+		return `${scope}: ${ready ? 'Update ready. Click to install and restart.' : 'Update available. Click to download.'} ${reports}`;
 	});
-
-	onMount(() => {
-		if (!desktop) return;
-		let active = true;
-		let receivedEvent = false;
-		const unsubscribe = desktop.updates.onState((next) => {
-			if (!active) return;
-			receivedEvent = true;
-			update = next;
-			requestError = '';
-		});
-		void desktop.updates.getState().then((initial) => {
-			if (active && !receivedEvent) update = initial;
-		}).catch(() => { /* A later updater event can restore status without a header alert. */ });
-		return () => { active = false; unsubscribe(); };
-	});
-
-	async function activate() {
-		if (!desktop || busy) return;
-		pending = true;
-		requestError = '';
+	async function refresh() {
+		if (reading) return;
+		reading = true;
 		try {
-			if (ready) await desktop.updates.install();
-			else await desktop.updates.download();
-		} catch (cause) {
-			requestError = cause instanceof Error ? cause.message : String(cause);
-		} finally {
-			pending = false;
-		}
+			const next = await api.get<Snapshot>('/settings/application-updates/workers');
+			if (active) snapshot = next;
+		} catch { /* Unavailable/older workers must not enable an unsafe fallback. */ }
+		finally { reading = false; }
+	}
+	onMount(() => {
+		active = true; void refresh();
+		const timer = setInterval(refresh, 5000);
+		window.addEventListener('application-update-policy', refresh);
+		return () => { active = false; clearInterval(timer); window.removeEventListener('application-update-policy', refresh); };
+	});
+	async function activate() {
+		if (busy || !snapshot?.allow_updates) return;
+		pending = true; requestError = ''; receipt = '';
+		try {
+			const result = await api.post<Receipt>('/settings/application-updates', { action: ready ? 'install' : available ? 'download' : 'check' });
+			receipt = result.results.map(w => `${w.device_name}: ${w.reason}`).join('; ');
+		} catch (cause) { requestError = getErrorMessage(cause, 'Could not request application update'); }
+		finally { pending = false; void refresh(); }
 	}
 </script>
 
@@ -64,7 +62,7 @@
 		type="button"
 		onclick={activate}
 		disabled={busy}
-		aria-label={update?.phase === 'checking' ? 'Checking for updates' : busy ? (ready ? 'Restarting AI Shuffle' : 'Downloading update') : action}
+		aria-label={busy ? (ready ? 'Restarting AI Shuffle' : 'Downloading update') : action}
 		title={status}
 		aria-busy={busy}
 	>

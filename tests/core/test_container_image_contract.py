@@ -18,7 +18,9 @@ def test_docker_bundles_one_supported_postgres_major():
 def test_docker_supervisor_owns_signals_and_persistent_storage():
     image = (ROOT / "Dockerfile").read_text()
     assert 'ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]' in image
-    assert "COPY --chown=appuser:appuser docker/container_runtime.py ./docker/container_runtime.py" in image
+    assert "COPY docker/container_runtime.py docker/application_updates.py docker/update_contract.py ./docker/" in image
+    assert "COPY desktop/build/application-update-key.pem ./docker/application-update-key.pem" in image
+    assert "ARG APPLICATION_SEQUENCE=0" in image
     assert 'VOLUME ["/data"]' in image
     assert "ENV DATA_DIR=/data" in image
     assert "EXPOSE 5432" not in image

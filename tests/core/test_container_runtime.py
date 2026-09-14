@@ -263,7 +263,7 @@ def test_run_probes_the_application_port(settings_factory, monkeypatch):
     monkeypatch.setenv("START_CHROME", "0")
     monkeypatch.setattr(runtime.subprocess, "Popen", lambda *args, **kwargs: Mock())
     seen = {}
-    monkeypatch.setattr(runtime, "watch", lambda app, db, chrome, monitor=None: seen.update(url=monitor.url) or 0)
+    monkeypatch.setattr(runtime, "watch", lambda app, db, chrome, monitor=None, updates=None, restart=None: seen.update(url=monitor.url) or 0)
     monkeypatch.setattr(runtime, "shutdown", Mock())
     runtime.STOP.clear()
     assert runtime.run(cfg, "run") == 0

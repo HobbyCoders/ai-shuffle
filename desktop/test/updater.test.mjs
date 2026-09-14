@@ -24,6 +24,31 @@ function source(overrides = {}) { return {
 }; }
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 
+test('worker bridge performs one-shot downloads and refuses expired or busy restarts', async () => {
+ const {updater,calls}=fixture();let request={};const seen=[];
+ updater.useApplications(source());
+ updater.setBridge(async state=>{seen.push(state.phase);const next=request;request={};return next;},async()=>false);
+ await updater.check();updater.start();await new Promise(setImmediate);
+ request={action:'download',expires_at:Date.now()/1000+10};await updater.exchange();await new Promise(setImmediate);
+ assert.equal(updater.current.phase,'ready',JSON.stringify({seen,request,timer:updater.bridgeTimer,exchanging:updater.exchanging,current:updater.current}));
+ request={action:'install',expires_at:Date.now()/1000+10};await updater.exchange();
+ assert.match(updater.current.error,/Busy/);assert.equal(calls.length,0);
+ updater.setBridge(async()=>({action:'install',expires_at:0}),async()=>true);await updater.exchange();assert.equal(calls.length,0);
+ updater.stop();assert(seen.length>0);
+});
+test('account policy gates checks, downloads and staged installs, and failures fail closed', async () => {
+ const { updater, calls } = fixture(); let enabled = false; let checks = 0;
+ updater.setPolicy(async () => enabled);
+ updater.useApplications(source({check:async()=>{ checks++; return available; }}));
+ await updater.check(); assert.equal(checks,0);
+ enabled=true; await updater.check(); assert.equal(checks,1);
+ enabled=false; await updater.download(); assert.equal(updater.current.phase,'available');
+ enabled=true; await updater.download(); assert.equal(updater.current.phase,'ready');
+ enabled=false; await updater.install(); assert.equal(calls.length,0);
+ updater.setPolicy(async()=>{throw Error('offline');});
+ await updater.install(); assert.equal(calls.length,0); assert.match(updater.current.error,/Could not read/);
+ updater.setPolicy(async()=>true); await updater.install(); assert.equal(calls.at(-1),'quit');
+});
 test('metadata checks expose available; only explicit download builds, then install stops services and relaunches', async () => {
  const { updater, calls } = fixture(); const states = []; updater.subscribe(s => states.push(s)); let downloads = 0;
  updater.useApplications(source({ download: async progress => { downloads++; progress(null, 'Building frontend…'); return ready; } }));

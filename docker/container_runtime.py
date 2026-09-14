@@ -505,10 +505,13 @@ class ReadinessMonitor:
         return self.failures >= (self.limit if self.ever_ready else self.startup_limit)
 
 
-def watch(app, db, chrome, monitor=None):
+def watch(app, db, chrome, monitor=None, updates=None, restart=None):
     next_probe = time.monotonic() + READY_PROBE_INTERVAL
+    next_update = time.monotonic() + 1
     while not STOP.is_set():
         if app.poll() is not None:
+            if updates is not None:
+                updates.failed()
             log("application exited unexpectedly")
             return 1
         if db.process is not None and db.process.poll() is not None:
@@ -520,9 +523,25 @@ def watch(app, db, chrome, monitor=None):
         if monitor is not None and time.monotonic() >= next_probe:
             next_probe = time.monotonic() + READY_PROBE_INTERVAL
             if monitor.check():
+                if updates is not None:
+                    updates.failed()
                 log(f"application readiness probe failed {monitor.failures} times in a row; "
                     "exiting so the container restarts")
                 return 1
+            if updates is not None and monitor.ever_ready and monitor.failures == 0:
+                updates.healthy()
+        if updates is not None and time.monotonic() >= next_update:
+            next_update = time.monotonic() + 1
+            if updates.install_requested.is_set():
+                updates.install_requested.clear()
+                try:
+                    app = restart(app)
+                    monitor = ReadinessMonitor(monitor.url)
+                    next_probe = time.monotonic() + 1
+                except Exception:
+                    updates.publish("ready", error="Could not restart for the update. Finish active sessions, check Allow updates, then retry.")
+            elif monitor.ever_ready and monitor.failures == 0:
+                updates.tick()
         STOP.wait(0.2)
     return 0
 
@@ -541,7 +560,7 @@ def shutdown(app, chrome, db):
 
 def run(settings, action, filename=None):
     db = Database(settings)
-    app = chrome = chrome_log = source = None
+    app = chrome = chrome_log = source = updates = None
     try:
         if action == "restore":
             # pg_restore inherits the OS descriptor, not Python's buffered
@@ -567,6 +586,38 @@ def run(settings, action, filename=None):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("DATABASE_", "POSTGRES_", "PG"))}
         env["DATA_DIR"] = str(settings.effective_data_dir)
+        # A provenance-free development image stays pinned. Production images
+        # carry a main-history ordinal and the immutable runtime fingerprint.
+        image_file = Path(__file__).with_name("image.json")
+        if image_file.is_file():
+            image = json.loads(image_file.read_text())
+            if image.get("sequence", 0) > 0 and re.fullmatch(r"[a-f0-9]{40}", image.get("revision", "")):
+                import httpx
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("shuffle_container_updates", Path(__file__).with_name("application_updates.py"))
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                ContainerUpdates, UpdateError = module.ContainerUpdates, module.UpdateError
+                token = secrets.token_hex(32)
+                env["SHUFFLE_DESKTOP_LIFECYCLE_TOKEN"] = token
+                root = safe_path(settings.effective_data_dir / "application-updates")
+                root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                safe_path(root / "versions").mkdir(exist_ok=True, mode=0o700)
+                env["SHUFFLE_CONTAINER_UPDATES"] = str(root)
+
+                def lifecycle(action):
+                    method = "POST" if action == "stop-sessions" else "GET"
+                    with httpx.Client(trust_env=False, timeout=35) as client:
+                        response = client.request(method, f"http://127.0.0.1:{settings.port}/api/v1/internal/desktop/{action}",
+                                                  headers={"Authorization": f"Bearer {token}"})
+                        response.raise_for_status()
+                        return response.json()
+
+                try:
+                    updates = ContainerUpdates(root, image, Path(__file__).with_name("application-update-key.pem").read_bytes(),
+                                               lambda: lifecycle("update-policy").get("allow_updates") is True, lifecycle)
+                except UpdateError as exc:
+                    raise RuntimeFailure(str(exc)) from exc
         if os.environ.get("START_CHROME", "1") == "1":
             logdir = Path.home() / ".config"
             logdir.mkdir(parents=True, exist_ok=True)
@@ -574,11 +625,31 @@ def run(settings, action, filename=None):
             chrome = subprocess.Popen(["chrome-supervisor"], env=env, stdout=chrome_log, stderr=chrome_log, start_new_session=True)
         if STOP.is_set():
             return 0
-        app = subprocess.Popen([sys.executable, "-m", "app.main"], env=env, start_new_session=True)
+        try:
+            command, cwd, child_env = updates.launch(env) if updates else ([sys.executable, "-m", "app.main"], None, env)
+        except UpdateError as exc:
+            raise RuntimeFailure(str(exc)) from exc
+        app = subprocess.Popen(command, cwd=cwd, env=child_env, start_new_session=True)
+
+        def restart(current):
+            nonlocal app
+            if updates.lifecycle("active-sessions").get("active_sessions") != 0:
+                raise UpdateError("Finish active sessions before restarting")
+            # Validate staged files and policy before stopping the healthy app.
+            command, cwd, child_env = updates.launch(env, activate=True)
+            if updates.lifecycle("stop-sessions").get("stopped") is not True:
+                raise UpdateError("Could not quiesce the worker")
+            stop_group(current, 30)
+            updates.activating()
+            app = subprocess.Popen(command, cwd=cwd, env=child_env, start_new_session=True)
+            return app
+
         log("authenticated database ready; application started")
-        return watch(app, db, chrome, ReadinessMonitor(f"http://127.0.0.1:{settings.port}/health/ready"))
+        return watch(app, db, chrome, ReadinessMonitor(f"http://127.0.0.1:{settings.port}/health/ready"), updates, restart)
     finally:
         try:
+            if updates is not None:
+                updates.close()
             shutdown(app, chrome, db)
         finally:
             if source is not None:

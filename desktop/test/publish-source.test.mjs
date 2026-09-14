@@ -18,7 +18,7 @@ for(const scenario of ['new','reuse','moved','corrupt'])test(`publisher ${scenar
  }else{
   const row=JSON.parse(await fs.readFile(path.join(root,'record.json'),'utf8')),signed=JSON.parse(row.manifest);
   assert.equal(row.asset_id,123);assert(verify(null,Buffer.from(signed.payload,'base64'),await fs.readFile(path.join(root,'public.pem'),'utf8'),Buffer.from(signed.signature,'base64')));
-  assert.equal(JSON.parse(Buffer.from(signed.payload,'base64')).revision,'a'.repeat(40));assert(events.includes('publish'));
+  const manifest=JSON.parse(Buffer.from(signed.payload,'base64'));assert.equal(manifest.revision,'a'.repeat(40));assert.deepEqual(manifest.container,{sequence:42,runtime:'b'.repeat(64)});assert(events.includes('publish'));
  }
  if(scenario==='reuse'){assert(events.includes('reuse'));assert(!events.some(url=>url.startsWith('https://uploads.github.com/')||url.includes('/zipball/')));}
  for(const name of ['desktop-source.sql','desktop-source-d1.json','desktop-source-readback.sql','a'.repeat(40)+'.zip'])await assert.rejects(fs.stat(path.join(root,name)),{code:'ENOENT'});
