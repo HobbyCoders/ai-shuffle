@@ -1452,6 +1452,12 @@ html.desktop {
 	--titlebar-height: env(titlebar-area-height, 52px);
 }
 
+/* Expanded chat previews must stay below native caption buttons, which
+   are drawn above the web page (including modal dialogs). */
+html.desktop:not(.desktop-fullscreen) {
+	--desktop-overlay-top: var(--titlebar-height);
+}
+
 html.desktop .sb-head,
 html.desktop .topbar {
 	-webkit-app-region: drag;

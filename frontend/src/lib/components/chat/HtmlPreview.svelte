@@ -60,11 +60,13 @@
 			<button class="view-tab" class:active={showSource} onclick={() => showSource = true} aria-pressed={showSource}>Source</button>
 		</div>
 		<div class="viewport-switch" role="group" aria-label="Preview viewport">
-			<button class="icon-button" class:selected={!mobile} onclick={() => mobile = false} aria-pressed={!mobile} aria-label="Desktop" title="Desktop · available width">
+			<button class="icon-button" class:viewport-button={full} class:selected={!mobile} onclick={() => mobile = false} aria-pressed={!mobile} aria-label="Desktop" title="Desktop · available width">
 				<Monitor size={14} strokeWidth={1.8} aria-hidden="true" />
+				{#if full}<span>Desktop</span>{/if}
 			</button>
-			<button class="icon-button" class:selected={mobile} onclick={() => mobile = true} aria-pressed={mobile} aria-label="Mobile" title="Mobile · 375 px">
+			<button class="icon-button" class:viewport-button={full} class:selected={mobile} onclick={() => mobile = true} aria-pressed={mobile} aria-label="Mobile" title="Mobile · 375 px">
 				<Smartphone size={14} strokeWidth={1.8} aria-hidden="true" />
+				{#if full}<span>Mobile</span>{/if}
 			</button>
 		</div>
 		<div class="actions">
@@ -215,7 +217,7 @@
 	.preview-info p { margin: 7px 0 0; max-width: 390px; line-height: 1.6; color: var(--muted-foreground); }
 	.viewport-label { flex: none; font-family: var(--font-mono); }
 	.expanded-notice { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; padding: 24px; border: 1px dashed var(--border); border-radius: var(--radius); font-size: 11px; }
-	dialog { container-type: inline-size; position: fixed; inset: 0; margin: auto; padding: 10px 14px 12px; width: min(1440px, calc(100vw - 48px)); max-width: none; height: calc(100dvh - 48px); max-height: none; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--background); color: var(--foreground); box-shadow: var(--shadow-l); }
+	dialog { container-type: inline-size; position: fixed; inset: var(--desktop-overlay-top, 0px) 0 0; margin: auto; padding: 10px 14px 12px; width: min(1440px, calc(100vw - 48px)); max-width: none; height: calc(100dvh - var(--desktop-overlay-top, 0px) - 48px); max-height: none; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--background); color: var(--foreground); box-shadow: var(--shadow-l); }
 	dialog[open] { display: flex; flex-direction: column; }
 	dialog::backdrop { background: rgb(0 0 0 / .7); }
 	dialog .preview-toolbar, dialog footer { flex: none; }
@@ -228,7 +230,8 @@
 		.viewport-switch { grid-column: 2; grid-row: 2; justify-content: end; border: 0; padding: 0; }
 		.icon-button { width: 30px; height: 30px; }
 	}
+	.icon-button.viewport-button { display: inline-flex; align-items: center; width: auto; gap: 6px; padding-inline: 8px; font-size: 11px; }
 	@media (pointer: coarse) { .icon-button { min-width: 36px; min-height: 36px; } .view-tab { min-height: 36px; } summary { min-height: 28px; } }
-	@media (max-width: 600px) { dialog { width: calc(100vw - 12px); height: calc(100dvh - 16px); padding: 6px 8px 8px; border-radius: 12px; } }
+	@media (max-width: 600px) { dialog { width: calc(100vw - 12px); height: calc(100dvh - var(--desktop-overlay-top, 0px) - 16px); padding: 6px 8px 8px; border-radius: 12px; } }
 	@media (prefers-reduced-motion: reduce) { button, a { transition: none; } .loading-icon { animation: none; } }
 </style>

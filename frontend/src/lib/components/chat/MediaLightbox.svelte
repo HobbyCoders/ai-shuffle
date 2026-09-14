@@ -382,9 +382,9 @@
 		onclick={closeLightbox}
 		onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') closeLightbox(); }}
 	>
-		<!-- Top-right actions — offset for the mobile safe area (notch / status bar). -->
+		<!-- Keep actions below native caption buttons and the mobile safe area. -->
 		<div
-			class="absolute top-[calc(0.75rem+env(safe-area-inset-top,0px))] right-[calc(0.75rem+env(safe-area-inset-right,0px))] flex gap-2"
+			class="absolute top-[calc(0.75rem+max(env(safe-area-inset-top,0px),var(--desktop-overlay-top,0px)))] right-[calc(0.75rem+env(safe-area-inset-right,0px))] flex gap-2"
 			role="presentation"
 			onclick={(e) => e.stopPropagation()}
 		>

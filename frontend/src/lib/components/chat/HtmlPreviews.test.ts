@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import HtmlPreviews from './HtmlPreviews.svelte';
 import { loadHtmlPreview } from '$lib/utils/htmlPreview';
@@ -68,6 +68,31 @@ describe('HTML preview cards', () => {
 		expect(view.container.querySelectorAll('iframe')).toHaveLength(1);
 		view.unmount();
 		expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:preview-download');
+	});
+
+	it('switches viewport in the expanded dialog and preserves it after closing', async () => {
+		load.mockResolvedValue('<p>Responsive preview</p>');
+		const view = render(HtmlPreviews, { content });
+		await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull());
+		await fireEvent.click(view.getByRole('button', { name: 'Expand HTML preview' }));
+		const dialog = within(view.getByRole('dialog'));
+		const frame = dialog.getByTitle('HTML preview: demo.html');
+		const mobile = dialog.getByRole('button', { name: 'Mobile' });
+		const desktop = dialog.getByRole('button', { name: 'Desktop' });
+		expect(mobile.textContent).toContain('Mobile');
+		expect(desktop.textContent).toContain('Desktop');
+		await fireEvent.click(mobile);
+		expect(mobile.getAttribute('aria-pressed')).toBe('true');
+		expect(desktop.getAttribute('aria-pressed')).toBe('false');
+		expect(frame.classList.contains('mobile')).toBe(true);
+		await fireEvent.click(desktop);
+		expect(frame.classList.contains('mobile')).toBe(false);
+		expect(desktop.getAttribute('aria-pressed')).toBe('true');
+		await fireEvent.click(mobile);
+		await fireEvent.click(dialog.getByRole('button', { name: 'Close HTML preview' }));
+		expect(view.container.querySelector('iframe')!.classList.contains('mobile')).toBe(true);
+		await fireEvent.click(view.getByRole('button', { name: 'Expand HTML preview' }));
+		expect(within(view.getByRole('dialog')).getByRole('button', { name: 'Mobile' }).getAttribute('aria-pressed')).toBe('true');
 	});
 
 	it('labels icon controls and keeps the sandbox explanation available', async () => {
