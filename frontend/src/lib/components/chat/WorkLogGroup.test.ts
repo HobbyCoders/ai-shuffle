@@ -3,6 +3,8 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { createRawSnippet, tick } from 'svelte';
 import type { ChatMessage } from '$lib/stores/types';
 import WorkLogGroup from './WorkLogGroup.svelte';
+import { buildTranscriptModel } from '$lib/utils/work-log';
+import { deriveUserTurnNavigationItems, turnAnchorId } from '$lib/utils/transcript-navigation';
 
 /** jsdom has no ResizeObserver. Drive reserved height from the stub. */
 function installFakeRO(initialHeight = 80) {
@@ -76,6 +78,44 @@ const baseProps = {
 afterEach(cleanup);
 
 describe('WorkLogGroup', () => {
+	it('keeps mid-turn navigation anchors when settled work is collapsed or expanded', async () => {
+		const messages = [
+			{ id: 'prompt', role: 'user', content: 'Start', turnId: 'turn-1' },
+			{ ...message, turnId: 'turn-1' },
+			{ id: 'steer / 1', role: 'user', content: 'Also check this', turnId: 'turn-1' },
+			{ id: 'steer-2', role: 'user', content: 'And this', turnId: 'turn-1' },
+			{ id: 'answer', role: 'assistant', type: 'text', content: 'Done', turnId: 'turn-1' }
+		] as ChatMessage[];
+		const model = buildTranscriptModel(messages, { isStreaming: false, groupingEnabled: true });
+		const group = model.items.find(item => item.kind === 'work_log');
+		if (!group || group.kind !== 'work_log') throw new Error('Expected a settled work log');
+		const observed = new Set<HTMLElement>();
+		const view = render(WorkLogGroup, { props: {
+			...group, row,
+			observeTurnAnchor: (node: HTMLElement) => {
+				if (node.dataset.userTurnId) observed.add(node);
+				return { destroy: () => { observed.delete(node); } };
+			}
+		} });
+		function expectAnchors() {
+			for (const item of deriveUserTurnNavigationItems(messages).slice(1)) {
+				const anchor = document.getElementById(turnAnchorId(item.id));
+				expect(anchor?.dataset.userTurnId).toBe(item.id);
+				expect(anchor?.textContent).toContain(item.label);
+				expect(observed.has(anchor!)).toBe(true);
+			}
+			expect(view.container.querySelectorAll('[data-user-turn-id]')).toHaveLength(2);
+			expect(observed.size).toBe(2);
+		}
+		expectAnchors();
+		await fireEvent.click(screen.getByRole('button', { name: /Show work details/i }));
+		expectAnchors();
+		await fireEvent.click(screen.getByRole('button', { name: /Hide work details/i }));
+		expectAnchors();
+		view.unmount();
+		expect(observed.size).toBe(0);
+	});
+
 	it('uses action text for a collapsed live group', () => {
 		render(WorkLogGroup, { props: { ...baseProps, mode: 'live' } });
 		expect(screen.getByRole('button', { name: /Show work details: Read 1 file/i })).toBeTruthy();

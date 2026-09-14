@@ -859,6 +859,27 @@ describe('duration helpers', () => {
  * kept in work-log.ts as the oracle.
  */
 describe('transcript model lookups', () => {
+	it.each([true, false])('locates mid-turn prompts across live and settled rendering (grouping=%s)', (groupingEnabled) => {
+		const first = user('first', undefined, 'turn-1');
+		const steer = user('also check this', undefined, 'turn-1');
+		const messages = [first, tool(), steer, tool(), text('done')];
+		for (const isStreaming of [true, false]) {
+			const model = buildTranscriptModel(messages, { isStreaming, groupingEnabled });
+			for (const prompt of [first, steer]) {
+				const itemIndex = model.itemIndexByTurnId.get(prompt.id!);
+				expect(itemIndex).toBeDefined();
+				const item = model.items[itemIndex!];
+				if (prompt === steer && groupingEnabled && !isStreaming) {
+					expect(item.kind).toBe('work_log');
+					if (item.kind !== 'work_log') throw new Error('Expected work log');
+					expect(item.sequence.find(entry => entry.message.id === prompt.id)?.hiddenWhenCollapsed).toBe(false);
+				} else {
+					expect(item.kind === 'message' && item.message.id).toBe(prompt.id);
+				}
+			}
+		}
+	});
+
 	function linkedSubagentByScan(messages: ChatMessage[], toolId: string | undefined): boolean {
 		return messages.some((m) => m.type === 'subagent' && m.toolId === toolId);
 	}

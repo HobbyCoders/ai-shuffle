@@ -16,6 +16,7 @@
 import type { ChatMessage } from '$lib/stores/types';
 import { galleryMediaForTurn, type GalleryMedia } from './media-gallery';
 import { agentDelivery } from './agent-delivery';
+import { isNavigableUserTurn } from './transcript-navigation';
 import { isTransientProviderRetry } from '$lib/utils/provider-retry';
 import { displayToolName } from './tool-icons';
 import { isSwarmTool, parseSwarm, resolveSwarm, type SwarmSnapshot } from './swarm';
@@ -714,10 +715,12 @@ export function buildTranscriptModel(
 	// display item that id lives in so it can mount far enough back to reach it.
 	const itemIndexByTurnId = new Map<string, number>();
 	items.forEach((item, itemIndex) => {
-		if (item.kind !== 'message') return;
-		const { message } = item;
-		if (message.id && message.role === 'user' && message.type !== 'command' && !agentDelivery(message)) {
-			if (!itemIndexByTurnId.has(message.id)) itemIndexByTurnId.set(message.id, itemIndex);
+		// Mid-turn prompts remain in the settled work log's ordered sequence.
+		const entries = item.kind === 'message' ? [item] : item.kind === 'work_log' ? item.sequence : [];
+		for (const { message } of entries) {
+			if (message.id && isNavigableUserTurn(message) && !itemIndexByTurnId.has(message.id)) {
+				itemIndexByTurnId.set(message.id, itemIndex);
+			}
 		}
 	});
 

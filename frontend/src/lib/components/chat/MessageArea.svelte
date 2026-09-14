@@ -657,6 +657,13 @@
 		updateCurrentTurnIndex();
 	}
 
+	// Work-log disclosures remount their retained rows on open/close and settle.
+	// Register those anchors without rebuilding the observer on every stream delta.
+	function observeTurnAnchor(anchor: HTMLElement) {
+		if (anchor.dataset.userTurnId) turnObserver?.observe(anchor);
+		return { destroy() { turnObserver?.unobserve(anchor); } };
+	}
+
 	/** (Re)build the observer for the mounted anchors and the current geometry. */
 	function syncTurnObserver() {
 		if (!containerRef || typeof IntersectionObserver === 'undefined') return;
@@ -1816,6 +1823,7 @@
 				     streaming region near the viewport bottom is never re-estimated. -->
 				<div
 					class="msg-virtualized"
+					use:observeTurnAnchor
 					class:msg-live={isLiveTailIndex(mountedStart + i, displayItems.length, LIVE_TAIL)}
 					id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? turnAnchorId(item.message.id) : undefined}
 					data-user-turn-id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? item.message.id : undefined}
@@ -1832,6 +1840,7 @@
 						summary={item.summary}
 						compactSummary={item.compactSummary}
 						row={messageBody}
+						{observeTurnAnchor}
 					/>
 				{:else if item.kind === 'system_group'}
 					<!-- Grouped system/hook messages (2+ consecutive low-signal events) -->

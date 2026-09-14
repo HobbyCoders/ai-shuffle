@@ -13,6 +13,8 @@
 	 * dispatch table that decides which component a message becomes.
 	 */
 	import type { Snippet } from 'svelte';
+	import type { Action } from 'svelte/action';
+	import { isNavigableUserTurn, turnAnchorId } from '$lib/utils/transcript-navigation';
 	import type { ChatMessage } from '$lib/stores/types';
 	import MediaGallery from './MediaGallery.svelte';
 	import type { GalleryMedia } from '$lib/utils/media-gallery';
@@ -34,6 +36,7 @@
 		compactSummary?: string | null;
 		gallery?: GalleryMedia[];
 		row: Snippet<[ChatMessage, number, ReadonlySet<string>?]>;
+		observeTurnAnchor?: Action<HTMLElement>;
 	}
 
 	let {
@@ -45,7 +48,8 @@
 		durationLabel = null,
 		summary = null,
 		compactSummary = null,
-		row
+		row,
+		observeTurnAnchor = () => {}
 	}: Props = $props();
 	const retainedSequence = $derived(sequence.filter((entry) => !entry.hiddenWhenCollapsed));
 	const gallerySources = $derived(new Set(gallery.map(item => item.src)));
@@ -138,7 +142,13 @@
 		{#if mode === 'settled' && sequence.length > 0}
 			<div class="work-sequence is-expanded">
 				{#each sequence as entry (entry.message.id ?? entry.index)}
-					<div class="sequence-row" class:is-prose={isAssistantProse(entry)}>
+					<div
+						class="sequence-row"
+						class:is-prose={isAssistantProse(entry)}
+						id={entry.message.id && isNavigableUserTurn(entry.message) ? turnAnchorId(entry.message.id) : undefined}
+						data-user-turn-id={entry.message.id && isNavigableUserTurn(entry.message) ? entry.message.id : undefined}
+						use:observeTurnAnchor
+					>
 						{@render row(entry.message, entry.index)}
 					</div>
 				{/each}
@@ -187,7 +197,13 @@
 			<div class="work-sequence is-collapsed">
 				{#if gallery.length > 1}<MediaGallery items={gallery} />{/if}
 				{#each retainedSequence as entry (entry.message.id ?? entry.index)}
-					<div class="sequence-row" class:is-prose={isAssistantProse(entry)}>
+					<div
+						class="sequence-row"
+						class:is-prose={isAssistantProse(entry)}
+						id={entry.message.id && isNavigableUserTurn(entry.message) ? turnAnchorId(entry.message.id) : undefined}
+						data-user-turn-id={entry.message.id && isNavigableUserTurn(entry.message) ? entry.message.id : undefined}
+						use:observeTurnAnchor
+					>
 						{@render row(entry.message, entry.index, gallerySources)}
 					</div>
 				{/each}
