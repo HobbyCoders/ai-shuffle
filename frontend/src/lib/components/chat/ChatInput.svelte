@@ -119,6 +119,7 @@
 	let inputValue = $state(initialComposerDraft);
 	let plainTextValue = $state(''); // Plain text without chip serialization, for autocomplete
 	let uploadedFiles = $state<FileUploadResponse[]>([]);
+	const hasMessageContent = $derived(!!inputValue.trim() || uploadedFiles.length > 0);
 	let draftSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 	// Flag to prevent onDestroy from overwriting draft after we've already cleared it.
 	// Using plain variable (not $state) to avoid reactivity issues with onDestroy capture.
@@ -537,7 +538,7 @@
 		// which read as a dead app. The guards keep the message in the composer and
 		// (except for an empty composer) name the missing piece with a toast.
 		const block = evaluateSubmitGuards({
-			hasPrompt: !!finalPrompt.trim(),
+			hasPrompt: !!finalPrompt.trim() || uploadedFiles.length > 0,
 			isUploading,
 			isCreatingWorktree: $activeSession.isCreatingWorktree,
 			hasProfile: !!$activeSession.profile,
@@ -557,7 +558,7 @@
 		let messageToSend = finalPrompt;
 		if (uploadedFiles.length > 0) {
 			const fileRefs = uploadedFiles.map(f => `@${f.path}`).join(' ');
-			messageToSend = finalPrompt.trim() + '\n\n' + fileRefs;
+			messageToSend = [finalPrompt.trim(), fileRefs].filter(Boolean).join('\n\n');
 		}
 
 		// Send the message
@@ -753,7 +754,7 @@
 		});
 
 		// Update inputValue to reflect text after chip insertion (for autocomplete state)
-		inputValue = editorRef?.getText() ?? '';
+		inputValue = editorRef?.getMessage() ?? '';
 		showFileAutocomplete = false;
 
 		tick().then(() => editorRef?.focus());
@@ -826,7 +827,7 @@
 				});
 			}
 			// Update inputValue for state sync
-			inputValue = editorRef?.getText() ?? '';
+			inputValue = editorRef?.getMessage() ?? '';
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
@@ -841,7 +842,7 @@
 	async function handleTranscription(text: string) {
 		if (!ownsComposer()) return;
 		editorRef?.appendText(text);
-		inputValue = editorRef?.getText() ?? '';
+		inputValue = editorRef?.getMessage() ?? '';
 		await tick();
 		editorRef?.focus();
 	}
@@ -852,18 +853,18 @@
 	function handleLiveText(text: string) {
 		if (!ownsComposer()) return;
 		editorRef?.streamText(text);
-		inputValue = editorRef?.getText() ?? '';
+		inputValue = editorRef?.getMessage() ?? '';
 	}
 
 	function handleLiveCommit() {
 		if (!ownsComposer()) return;
 		editorRef?.commitDictation();
-		inputValue = editorRef?.getText() ?? '';
+		inputValue = editorRef?.getMessage() ?? '';
 	}
 
 	function handleLiveDiscard() {
 		editorRef?.discardDictation();
-		inputValue = editorRef?.getText() ?? '';
+		inputValue = editorRef?.getMessage() ?? '';
 	}
 
 	// Drag and drop file upload with errors shown by the composer.
@@ -929,7 +930,7 @@
 					type: 'file'
 				});
 			}
-			inputValue = editorRef?.getText() ?? '';
+			inputValue = editorRef?.getMessage() ?? '';
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
@@ -1088,8 +1089,8 @@
 								</svg>
 							</button>
 						{:else if $activeSession.isStreaming}
-							{#if plainTextValue.trim()}
-								<button type="submit" class="send-btn" title="Send — Enter" aria-label="Send">
+							{#if hasMessageContent}
+								<button type="submit" class="send-btn" disabled={!$anyCredential || isUploading || isRecording || isTranscribing} title="Send — Enter" aria-label="Send">
 									<CornerDownLeft size={13} strokeWidth={2.2} aria-hidden="true" />
 								</button>
 							{:else}
@@ -1102,7 +1103,7 @@
 							<button
 								type="submit"
 								class="send-btn"
-								disabled={!inputValue.trim() || !$anyCredential || isUploading || isRecording || isTranscribing}
+								disabled={!hasMessageContent || !$anyCredential || isUploading || isRecording || isTranscribing}
 								title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.worktreeIntent === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
 								aria-label="Send"
 							>
