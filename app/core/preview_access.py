@@ -33,7 +33,8 @@ Threat model, and what the token is NOT:
   chat session, and NOTHING that changes who owns the install or what it can
   reach: every unsafe-method request under :data:`MUTATION_DENY_PREFIXES`
   (auth, pairing, credentials, settings, network, plugins, ...) is refused
-  even with a valid cookie. Cross-site mutations are refused by the same
+  even when the browser independently authenticates as a local owner, paired
+  client or API user. Cross-site mutations are refused by the same
   ``same_origin`` check the local owner is held to. Account-preference writes
   are also refused by the preferences API, even if the browser independently
   qualifies as a direct LAN owner; test clicks must not sync to the user's UI.
@@ -184,7 +185,7 @@ def verify(token: Optional[str], *, now: Optional[float] = None) -> Optional[Gra
     if len(parts) != 4 or parts[0] != _VERSION:
         return None
     payload = ".".join(parts[:3])
-    if not hmac.compare_digest(_sign(payload), parts[3]):
+    if not parts[3].isascii() or not hmac.compare_digest(_sign(payload), parts[3]):
         return None
     try:
         session_id = _unb64(parts[1])
@@ -223,6 +224,23 @@ def mutation_allowed(path: str, method: str) -> bool:
     if method.upper() in _SAFE_METHODS:
         return True
     return not path.startswith(MUTATION_DENY_PREFIXES)
+
+
+def enforce_limits(request) -> None:
+    """A valid preview cookie restricts *all* HTTP authentication paths.
+
+    This is not authentication: transport checks still apply when a preview
+    cookie is used to admit a request. Even a separately authenticated owner,
+    paired client or API user must not bypass the cookie's mutation ceiling.
+    Invalid/expired cookies neither grant access nor restrict ordinary clients.
+    """
+    from fastapi import HTTPException
+
+    token = request.cookies.get(COOKIE_NAME)
+    found = verify(token) if token else None
+    request.state.preview_grant = found
+    if found is not None and not mutation_allowed(request.url.path, request.method):
+        raise HTTPException(403, "Agent previews cannot change ownership, credentials or settings.")
 
 
 def grant(request) -> Optional[Grant]:

@@ -64,6 +64,7 @@ def test_tampered_expired_and_foreign_tokens_are_refused(monkeypatch):
     head, sig = token.rsplit(".", 1)
     assert preview_access.verify(head + "." + ("0" * len(sig))) is None
     assert preview_access.verify(token + "x") is None
+    assert preview_access.verify(head + "." + "é" * 64) is None
     assert preview_access.verify("v1.garbage") is None
     assert preview_access.verify(token, now=time.time() + 61) is None
     # Another install's key signs differently: rotate the key file.
@@ -176,7 +177,7 @@ def test_redirect_sets_the_cookie_and_the_ui_reads_as_owner(app):
     posted = c.post("/api/v1/sessions/abc/messages", headers={"Origin": "http://10.0.0.135:18090"})
     assert posted.status_code == 200
     # ... except the routes that change ownership or credentials.
-    assert c.post("/api/v1/auth/danger", headers={"Origin": "http://10.0.0.135:18090"}).status_code == 401
+    assert c.post("/api/v1/auth/danger", headers={"Origin": "http://10.0.0.135:18090"}).status_code == 403
 
 
 def test_redirect_refuses_bad_tokens_remote_ingress_and_public_peers(app):
@@ -227,3 +228,101 @@ def test_transport_check_uses_the_shared_owner_auth_helpers():
     assert preview_access._private_peer(_request(peer="192.168.1.9"))
     assert not preview_access._private_peer(_request(peer="203.0.113.4"))
     assert not preview_access._private_peer(_request(ingress="remote"))
+
+@pytest.mark.parametrize("dependency", ["require_auth", "require_admin", "require_api_key", "get_current_api_user"])
+@pytest.mark.parametrize("identity", ["local-owner", "admin-cookie", "paired-cookie", "paired-bearer", "api-key"])
+@pytest.mark.parametrize("transport", ["direct-LAN", "vite-proxy", "remote"])
+@pytest.mark.parametrize("cookie_state", ["valid", "expired", "invalid", "missing"])
+def test_preview_ceiling_precedes_every_authentication_path(monkeypatch, dependency, identity, transport, cookie_state):
+    from fastapi import HTTPException
+    from app.api import auth as auth_api
+
+    paired = {"id": "paired", "account_owner_admin": True}
+    monkeypatch.setattr(auth_api, "get_paired_client_from_token",
+                        lambda token, **kw: paired if token == "paired-token" else None)
+    monkeypatch.setattr(auth_api.auth_service, "validate_session", lambda token: token == "admin-token")
+    monkeypatch.setattr(auth_api.db, "get_api_user_by_key_hash",
+                        lambda hashed: {"id": "api-user"} if hashed == auth_api.hash_api_key("api-token") else None)
+    monkeypatch.setattr(auth_api.db, "update_api_user_last_used", lambda ident: None)
+    cookies = {}
+    if cookie_state != "missing":
+        cookies[preview_access.COOKIE_NAME] = ("invalid" if cookie_state == "invalid" else
+            preview_access.mint(SESSION, ttl_seconds=60))
+        if cookie_state == "expired":
+            now = time.time()
+            monkeypatch.setattr(preview_access.time, "time", lambda: now + 120)
+    headers = {"Origin": "http://10.0.0.135:8000"}
+    if transport == "vite-proxy":
+        headers.update(_VITE)
+    if identity.endswith("cookie"):
+        cookies["session"] = "admin-token" if identity == "admin-cookie" else "paired-token"
+    elif identity in ("paired-bearer", "api-key"):
+        headers["Authorization"] = "Bearer " + ("paired-token" if identity == "paired-bearer" else "api-token")
+    request = _request("/api/v1/settings/test-only", "POST", cookies=cookies, headers=headers,
+                       peer="127.0.0.1" if identity == "admin-cookie" else "10.0.0.200",
+                       ingress="remote" if transport == "remote" else "local")
+    call = getattr(auth_api, dependency)
+    if cookie_state == "valid":
+        with pytest.raises(HTTPException) as exc:
+            call(request)
+        assert exc.value.status_code == 403
+        assert "Agent previews" in exc.value.detail
+        assert request.state.preview_grant.session_id == SESSION
+        return
+
+    # A broken/absent cookie does not change the normal credential's authority.
+    api_only = dependency in ("require_api_key", "get_current_api_user")
+    admitted = (identity == "api-key" if api_only else
+                identity.startswith("paired") or
+                (identity == "api-key" and dependency == "require_auth") or
+                (transport == "direct-LAN" and identity != "api-key"))
+    if admitted:
+        assert call(request)
+    else:
+        with pytest.raises(HTTPException) as exc:
+            call(request)
+        assert "Agent previews" not in exc.value.detail
+    assert request.state.preview_grant is None
+
+
+@pytest.mark.parametrize("prefix", preview_access.MUTATION_DENY_PREFIXES)
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+@pytest.mark.parametrize("dependency", ["require_auth", "require_admin"])
+def test_direct_owner_preview_cannot_reach_protected_handler(prefix, method, dependency):
+    from unittest.mock import Mock
+    from app.api import auth as auth_api
+
+    api = FastAPI()
+    handler = Mock(return_value={"changed": True})
+
+    @api.api_route(prefix + "/test-only", methods=[method])
+    def protected(_: str = Depends(getattr(auth_api, dependency))):
+        return handler()
+
+    client = TestClient(IngressApplication(api, local_port=18090),
+                        base_url="http://10.0.0.135:18090", client=("10.0.0.200", 54321),
+                        headers={"Origin": "http://10.0.0.135:18090"})
+    client.cookies.set(preview_access.COOKIE_NAME, preview_access.mint(SESSION))
+    assert client.request(method, prefix + "/test-only").status_code == 403
+    handler.assert_not_called()
+
+
+@pytest.mark.parametrize("proxied", [False, True])
+def test_preview_retains_reads_and_chat_mutations_but_not_admin_authority(app, proxied):
+    from fastapi import HTTPException
+    from app.api.auth import require_admin
+
+    client = _client(app)
+    if not proxied:
+        client.headers.pop("X-Forwarded-Host")
+    client.cookies.set(preview_access.COOKIE_NAME, preview_access.mint(SESSION))
+    assert client.get("/api/v1/sessions").status_code == 200
+    assert client.post("/api/v1/sessions/abc/messages", headers={"Origin": "http://10.0.0.135:18090"}).status_code == 200
+    request = _request("/api/v1/settings/test-only", cookies={preview_access.COOKIE_NAME: preview_access.mint(SESSION)},
+                       headers=_VITE if proxied else {})
+    if proxied:
+        with pytest.raises(HTTPException):
+            require_admin(request)
+    else:
+        assert require_admin(request) == "local-owner"
+    assert request.state.preview_grant.session_id == SESSION

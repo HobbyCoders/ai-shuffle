@@ -119,6 +119,7 @@ def _set_paired_request_state(request: Request, token: str, client: dict) -> str
 
 def require_auth(request: Request) -> str:
     """Dependency that requires authentication (cookie or API key)"""
+    preview_access.enforce_limits(request)
     # First try cookie-based admin auth
     token = get_session_token(request)
     if token:
@@ -203,6 +204,7 @@ def require_admin(request: Request) -> str:
     A paired owner keeps its device-bound session and revocation path. Ordinary
     API users, mobile keys and directly paired controllers never qualify.
     """
+    preview_access.enforce_limits(request)
     token = get_session_token(request)
     candidate = token or get_api_key(request)
     if candidate:
@@ -239,6 +241,7 @@ def require_api_key(request: Request) -> dict:
     Use this for /api/v1/ endpoints that should only be accessible via API keys,
     not admin sessions. Returns the API user dict.
     """
+    preview_access.enforce_limits(request)
     api_key = get_api_key(request)
     if api_key:
         key_hash = hash_api_key(api_key)
@@ -265,6 +268,7 @@ def get_current_api_user(request: Request) -> dict:
     Dependency that requires an API user to be authenticated via API key.
     Returns the API user dict.
     """
+    preview_access.enforce_limits(request)
     api_key = get_api_key(request)
     if api_key:
         key_hash = hash_api_key(api_key)
