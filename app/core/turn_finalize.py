@@ -94,6 +94,16 @@ def resync_session_branch_from_head(session_id: str) -> Optional[Tuple[str, str]
     if not recorded or not path or not os.path.isdir(path):
         return None
 
+    # Git walks up to a parent repository when a partially removed worktree
+    # leaves an empty directory. Never adopt that parent's HEAD as this session's.
+    root = git_service._run_git(path, ["rev-parse", "--show-toplevel"], timeout=10)
+    if root.returncode != 0 or not (root.stdout or "").strip():
+        return None
+    if os.path.normcase(os.path.realpath(root.stdout.strip())) != os.path.normcase(
+        os.path.realpath(path)
+    ):
+        return None
+
     head = (git_service.get_current_branch(path) or "").strip()
     if not head or head == "HEAD":
         return None

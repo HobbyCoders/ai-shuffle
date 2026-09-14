@@ -416,9 +416,9 @@ async def _release_session_cwd(session_id: Optional[str]) -> bool:
         logger.warning("cleanup: session %s did not release; retaining checkout", session_id, exc_info=True)
         return False
     try:
-        from app.mcp.builtin_tools import reap_session_background_shells
+        from app.mcp.builtin_tools import stop_session_background_shells
 
-        reap_session_background_shells(session_id)
+        await stop_session_background_shells(session_id, require_stopped=True)
     except Exception:
         logger.debug("cleanup: shell reap failed for %s", session_id, exc_info=True)
         return False

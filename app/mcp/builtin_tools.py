@@ -431,6 +431,7 @@ class _BackgroundTask:
         # signals — CTRL_BREAK on Windows, killpg on POSIX — are only safe
         # when this holds; otherwise they land on the SERVER's own group.
         self.own_process_group: bool = False
+        self._reap_survivors: list[int] = []
 
     def is_running(self) -> bool:
         return self.process is not None and self.process.returncode is None
@@ -773,7 +774,9 @@ async def _settle_reaped_shell(session_id: str, task_id: str) -> None:
         )
 
 
-async def stop_session_background_shells(session_id: str) -> int:
+async def stop_session_background_shells(
+    session_id: str, *, require_stopped: bool = False,
+) -> int:
     """Terminate + reap every Monitor shell spawned by a session (U2).
 
     Monitor shells deliberately do NOT pin a live session open (see
@@ -788,6 +791,10 @@ async def stop_session_background_shells(session_id: str) -> int:
     Also reaps already-finished shells, bounding the dict's growth to session
     lifetime.
 
+    With require_stopped, termination errors or surviving descendants raise and
+    leave the task tracked. Checkout deletion must await this strict mode rather
+    than schedule the fire-and-forget wrapper.
+
     Returns the number of shell tasks reaped.
     """
     victims = [
@@ -796,10 +803,21 @@ async def stop_session_background_shells(session_id: str) -> int:
     ]
     reaped = 0
     for tid, task in victims:
+        # An exited shell is not proof that descendants released the cwd.
+        # Only check these PIDs; never kill them by number on a later retry.
+        if task._reap_survivors:
+            from app.core.process_tree import pid_alive
+
+            task._reap_survivors = [pid for pid in task._reap_survivors if pid_alive(pid)]
+            if task._reap_survivors:
+                if require_stopped:
+                    raise RuntimeError(f"Session shell {tid} still has live processes")
+                continue
         # Cancel the reader first so it stops touching task/registry state.
         rt = task._reader_task
         if rt is not None and not rt.done():
             rt.cancel()
+            await asyncio.gather(rt, return_exceptions=True)
         # Terminate the subprocess AND its descendants, escalating to a forced
         # tree kill after 5s. Killing only the shell would leave whatever it
         # started (a dev server, typically) running for the life of the host.
@@ -812,12 +830,18 @@ async def stop_session_background_shells(session_id: str) -> int:
                     proc, own_process_group=task.own_process_group
                 )
                 if survivors:
+                    task._reap_survivors = survivors
                     logger.warning(
                         "Session reap left orphan pids for shell %s: %s",
                         tid, survivors,
                     )
+                    if require_stopped:
+                        raise RuntimeError(f"Session shell {tid} still has live processes")
+                    continue
             except Exception:
                 logger.debug(f"Error terminating background shell {tid}", exc_info=True)
+                if require_stopped:
+                    raise
         _background_tasks.pop(tid, None)
         await _settle_reaped_shell(session_id, tid)
         reaped += 1

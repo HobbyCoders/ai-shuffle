@@ -982,7 +982,11 @@ async def test_release_requesting_session_waits_for_execution_finally(monkeypatc
     monkeypatch.setattr(session_runtime, "active_executions", lambda: {task: "requesting"})
     monkeypatch.setattr(turns, "interrupt_turn", lambda *a, **kw: events.append("durable interrupt"))
     monkeypatch.setattr(session_pool, "get_session_pool", lambda: SimpleNamespace(remove=remove))
-    monkeypatch.setattr(builtin_tools, "reap_session_background_shells", lambda sid: events.append("reap"))
+    async def stop_shells(sid, *, require_stopped=False):
+        assert require_stopped
+        await asyncio.sleep(0)
+        events.append("reap")
+    monkeypatch.setattr(builtin_tools, "stop_session_background_shells", stop_shells)
     assert await gitops._release_session_cwd("requesting") is True
     assert events == ["durable interrupt", "interrupt", "terminal persisted and lease released", "remove", "reap"]
 

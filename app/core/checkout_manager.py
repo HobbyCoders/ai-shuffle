@@ -135,6 +135,24 @@ def _branch_checkout_path(base_dir: str, branch: str) -> Path:
     return Path(base_dir) / _WORKTREES_DIRNAME / "worktrees" / sanitized
 
 
+def _is_empty_cleanup_remnant(path: str, row: Optional[Dict[str, Any]]) -> bool:
+    """Allow Git to reuse an empty recorded checkout, never remove its contents."""
+    if not row or not row.get("head_sha") or not row.get("path"):
+        return False
+    if os.path.normcase(os.path.abspath(path)) != os.path.normcase(
+        os.path.abspath(_resolve_checkout_path(row["path"]))
+    ):
+        return False
+    candidate = Path(path)
+    if _is_directory_link(candidate):
+        return False
+    try:
+        with os.scandir(candidate) as entries:
+            return next(entries, None) is None
+    except OSError:
+        return False
+
+
 def _dir_is_worktree(path: str) -> bool:
     """A directory is a usable checkout iff it exists AND carries a ``.git`` entry
     (a FILE for a linked worktree, or a DIRECTORY for a plain clone) — the same
@@ -517,12 +535,15 @@ def _ensure_branch_checkout(
                         project_id, runner_id, path, branch=branch, status="active"
                     )
                 return resolved
-            # Dir present but not a worktree — never destroy; surface not-materialized.
-            logger.warning(
-                "checkout_manager: %s exists but is not a worktree; refusing to touch it",
-                resolved,
-            )
-            return None
+            # A Windows cwd lock can leave an empty directory after Git removes
+            # its contents. The pre-cleanup SHA proves this is a known checkout.
+            # Git can reuse that empty directory without deleting it.
+            if not _is_empty_cleanup_remnant(resolved, row):
+                logger.warning(
+                    "checkout_manager: %s exists but is not a worktree; refusing to touch it",
+                    resolved,
+                )
+                return None
         # Row exists but its dir is gone → fall through and re-materialize below
         # (at the same deterministic path, so the upsert reuses the same row).
 
@@ -536,11 +557,12 @@ def _ensure_branch_checkout(
                 project_id, runner_id, dest_str, branch=branch, status="active"
             )
             return dest_str
-        logger.warning(
-            "checkout_manager: %s exists but is not a worktree; refusing to touch it",
-            dest_str,
-        )
-        return None
+        if not _is_empty_cleanup_remnant(dest_str, row):
+            logger.warning(
+                "checkout_manager: %s exists but is not a worktree; refusing to touch it",
+                dest_str,
+            )
+            return None
 
     # Lazy Step-E mirror: a branch already checked out in a post-collapse legacy
     # worktree dir (un-upgraded install or the legacy WS worktree_id intake) must

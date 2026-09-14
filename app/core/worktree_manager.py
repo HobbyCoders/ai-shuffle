@@ -855,12 +855,11 @@ class WorktreeManager:
             except Exception:
                 logger.debug("worktree-cleanup task reap failed", exc_info=True)
             try:
-                from app.mcp.builtin_tools import reap_session_background_shells
-                reap_session_background_shells(session_id)
+                from app.mcp.builtin_tools import stop_session_background_shells
+                await stop_session_background_shells(session_id, require_stopped=True)
             except Exception:
-                logger.debug(
-                    "worktree-cleanup shell reap scheduling failed", exc_info=True
-                )
+                logger.warning("worktree-cleanup shell reap failed", exc_info=True)
+                raise WorktreeError("Session shells did not stop; retaining checkout")
 
         if terminated:
             logger.info(
