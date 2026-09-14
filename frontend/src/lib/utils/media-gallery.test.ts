@@ -58,6 +58,35 @@ describe('settled turn media gallery', () => {
 		expect(groups).toHaveLength(1);
 		expect(groups[0].gallery).toHaveLength(2);
 	});
+	it('splits galleries at same-turn steers only after the entire turn settles', () => {
+		const steer = message('steer', { role: 'user', turnId: 'turn-1', content: 'Try a different style' });
+		const later = message('later', { type: 'text', content: '![Third](/c.png) [Clip](/d.mp4)' });
+		const messages = [{ ...user, turnId: 'turn-1' }, tool, answer, steer, later];
+		for (let length = 1; length <= messages.length; length++) {
+			for (const liveOptions of [{ ...options, isStreaming: true }, { ...options, latestTurnUnsettled: true }]) {
+				const items = buildDisplayItems(messages.slice(0, length), liveOptions);
+				expect(items.every(item => item.kind === 'message')).toBe(true);
+			}
+		}
+		const items = buildDisplayItems(messages, options);
+		expect(items.map(item => item.kind)).toEqual(['message', 'work_log', 'message', 'work_log']);
+		const groups = items.filter(item => item.kind === 'work_log');
+		expect(groups.map(group => group.gallery?.map(media => media.src)))
+			.toEqual([[image, image2], ['/c.png', '/d.mp4']]);
+		expect(groups.map(group => group.sequence.map(entry => entry.message.id)))
+			.toEqual([['t', 'a'], ['later']]);
+		expect(buildDisplayItems(structuredClone(messages), options)).toEqual(items);
+	});
+	it('does not combine single images across a steer into a gallery', () => {
+		const messages = [
+			{ ...user, turnId: 'turn-1' },
+			message('before', { type: 'text', content: '![Before](/before.png)' }),
+			message('steer', { role: 'user', turnId: 'turn-1', content: 'Change it' }),
+			message('after', { type: 'text', content: '![After](/after.png)' })
+		];
+		expect(buildDisplayItems(messages, options).map(item => item.kind))
+			.toEqual(['message', 'message', 'message', 'message']);
+	});
 	it('does not override disabled work grouping', () => {
 		expect(buildDisplayItems([user, tool, answer], { ...options, groupingEnabled: false }).every(item => item.kind !== 'work_log')).toBe(true);
 	});

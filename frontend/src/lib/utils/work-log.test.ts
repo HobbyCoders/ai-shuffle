@@ -351,10 +351,14 @@ describe('buildDisplayItems — settled turns', () => {
 		];
 		const folds = buildDisplayItems(messages, SETTLED).filter((item) => item.kind === 'work_log');
 
-		expect(folds).toHaveLength(1);
-		if (folds[0].kind !== 'work_log') throw new Error('expected a work_log');
-		expect(folds[0].durationLabel).toBe('Worked for 2m 52s');
-		expect(folds[0].summary).toBe('Ran 2 commands');
+		expect(folds).toHaveLength(2);
+		expect(folds.map((fold) => fold.durationLabel)).toEqual(['Worked for 2m 52s', 'Worked for 2m 52s']);
+		expect(folds.map((fold) => fold.summary)).toEqual(['Ran 1 command', 'Ran 1 command']);
+		expect(folds.map((fold) => fold.sequence.map((entry) => entry.message)))
+			.toEqual([[messages[1]], [messages[3], messages[4]]]);
+		const model = buildTranscriptModel(messages, SETTLED);
+		expect(model.items.map((item) => item.kind)).toEqual(['message', 'work_log', 'message', 'work_log']);
+		expect(model.itemIndexByTurnId.get(messages[2].id!)).toBe(2);
 		// The steered prompt still shows: it is the user talking, not folded work.
 		const visible = collapsedVisibleMessages(buildDisplayItems(messages, SETTLED));
 		expect(visible.filter((message) => message.role === 'user')).toHaveLength(2);
@@ -630,6 +634,8 @@ describe('work folds from wire events', () => {
 			['assistant.text_delta', { text: 'Checking the first file.' }],
 			['tool.use', { tool_use_id: 'read-1', name: 'Read', input: { file_path: 'one.txt' } }],
 			['tool.result', { tool_use_id: 'read-1', content_preview: 'one', is_error: false }],
+			['message.user', { content: 'Also check the second file', turn_id: 'turn-1' }],
+			['message.user', { content: 'And summarize it', turn_id: 'turn-1' }],
 			['assistant.text_delta', { text: 'Now the second file.' }],
 			['tool.use', { tool_use_id: 'read-2', name: 'Read', input: { file_path: 'two.txt' } }],
 			['tool.result', { tool_use_id: 'read-2', content_preview: 'two', is_error: false }],
@@ -653,9 +659,13 @@ describe('work folds from wire events', () => {
 			expect(collapsedVisibleMessages(items)).toEqual(state.messages);
 		}
 		const settled = apply('turn.completed');
-		expect(settled.filter((item) => item.kind === 'work_log')).toHaveLength(1);
+		expect(settled.map((item) => item.kind)).toEqual(['message', 'work_log', 'message', 'message', 'work_log']);
 		expect(collapsedVisibleMessages(settled).map((message) => message.content))
-			.toEqual(['Check two files', 'Both files checked.']);
+			.toEqual(['Check two files', 'Checking the first file.', 'Also check the second file', 'And summarize it', 'Both files checked.']);
+		expect(buildDisplayItems(structuredClone(state.messages), SETTLED)).toEqual(settled);
+		const parked = buildDisplayItems(state.messages, { ...SETTLED, latestTurnUnsettled: true });
+		expect(parked.every((item) => item.kind === 'message')).toBe(true);
+		expect(collapsedVisibleMessages(parked)).toEqual(state.messages);
 	});
 });
 

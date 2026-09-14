@@ -669,46 +669,54 @@ export function buildTranscriptModel(
 			return;
 		}
 
-		const prefix = turn.slice(0, userIndex + 1);
-		const response = turn.slice(userIndex + 1);
-		const gallery = galleryMediaForTurn(response.map((entry) => entry.message));
-		const terminalAssistant = response.findLast((entry) => isAssistantText(entry.message)) ?? null;
-		const shouldHide = (entry: Positioned) =>
-			isCompletedRoutineWork(entry.message, gallery.length > 1) ||
-			isGroupableSystem(entry.message) ||
-			entry.message.type === 'tool_result' ||
-			(isAssistantText(entry.message) && !entry.message.streaming && entry !== terminalAssistant);
-		const folded = response
-			.filter(shouldHide)
-			.map((entry) => ({ message: entry.message, index: entry.index }));
-
-		if (folded.length === 0 && gallery.length === 0) {
-			emitWithSystemGroups(turn, items);
-			return;
+		// A steer does not end the running turn, but it is a presentation boundary
+		// once that turn settles. Keep its work and media on the side they arrived.
+		const turnMessages = turn.map((entry) => entry.message);
+		const durationLabel = turnFoldLabel(turnMessages, turnWasInterrupted(turnMessages));
+		const segments: Positioned[][] = [];
+		for (const entry of turn) {
+			if (entry.message.role === 'user' && !agentDelivery(entry.message)) segments.push([]);
+			segments.at(-1)!.push(entry);
 		}
+		for (const segment of segments) {
+			const prefix = segment.slice(0, 1);
+			const response = segment.slice(1);
+			const gallery = galleryMediaForTurn(response.map((entry) => entry.message));
+			const terminalAssistant = response.findLast((entry) => isAssistantText(entry.message)) ?? null;
+			const shouldHide = (entry: Positioned) =>
+				isCompletedRoutineWork(entry.message, gallery.length > 1) ||
+				isGroupableSystem(entry.message) ||
+				entry.message.type === 'tool_result' ||
+				(isAssistantText(entry.message) && !entry.message.streaming && entry !== terminalAssistant);
+			const folded = response
+				.filter(shouldHide)
+				.map((entry) => ({ message: entry.message, index: entry.index }));
 
-		// The user prompt remains its own stable anchor. Everything after it is one
-		// turn-level disclosure: routine rows hide, while failures/screenshots,
-		// decisions, agents/teams/system rows, streaming anomalies, and the terminal
-		// assistant answer stay visible in their original order.
-		emitWithSystemGroups(prefix, items);
-		const interrupted = turnWasInterrupted(turn.map((entry) => entry.message));
-		items.push({
-			kind: 'work_log',
-			key: `wl-turn-${(folded[0] ?? response[0]).message.id ?? (folded[0] ?? response[0]).index}`,
-			gallery,
-			mode: 'settled',
-			folded,
-			tail: [],
-			sequence: response.map((entry) => ({
-				message: entry.message,
-				index: entry.index,
-				hiddenWhenCollapsed: shouldHide(entry)
-			})),
-			durationLabel: turnFoldLabel(turn.map((entry) => entry.message), interrupted),
-			summary: summarizeWork(folded),
-			compactSummary: summarizeWorkCompact(folded)
-		});
+			if (folded.length === 0 && gallery.length === 0) {
+				emitWithSystemGroups(segment, items);
+				continue;
+			}
+
+			// User prompts stay outside disclosures, including steers. The duration
+			// still describes the logical turn; summaries count only this segment.
+			emitWithSystemGroups(prefix, items);
+			items.push({
+				kind: 'work_log',
+				key: `wl-turn-${(folded[0] ?? response[0]).message.id ?? (folded[0] ?? response[0]).index}`,
+				gallery,
+				mode: 'settled',
+				folded,
+				tail: [],
+				sequence: response.map((entry) => ({
+					message: entry.message,
+					index: entry.index,
+					hiddenWhenCollapsed: shouldHide(entry)
+				})),
+				durationLabel,
+				summary: summarizeWork(folded),
+				compactSummary: summarizeWorkCompact(folded)
+			});
+		}
 	});
 
 	// Turn navigation jumps by message id; windowed mounting needs to know which
