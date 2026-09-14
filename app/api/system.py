@@ -220,6 +220,17 @@ async def get_diagnostics(token: str = Depends(require_auth), whole_stack: bool 
             metrics["whole_stack"] = await run_sync(collect_process_metrics, True)
         except Exception as exc:
             metrics["whole_stack"] = {"unavailable": type(exc).__name__}
+        from app.core.fluid_memory import journal_diagnostics
+        try:
+            metrics["inference_journal"] = await run_sync(journal_diagnostics)
+        except Exception as exc:
+            metrics["inference_journal"] = {"unavailable": type(exc).__name__}
+        # A desktop ancestor can include sibling workers. Local activity is
+        # useful context but cannot certify that the whole installation is idle.
+        metrics["activity_scope"] = {
+            "worker": "local", "cross_worker_activity_known": False,
+            "whole_stack_idle_classified": False,
+        }
     warnings = _check_warnings(metrics)
 
     return {

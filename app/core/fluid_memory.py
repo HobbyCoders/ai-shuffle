@@ -56,6 +56,116 @@ def stores():
             continue
 
 
+# Diagnostics are opt-in and bounded independently of journal retention. Do not
+# instantiate SkillStore here: observing a missing store must not create it.
+JOURNAL_DIAGNOSTIC_STORES = 32
+JOURNAL_DIAGNOSTIC_BYTES = 8 * 1024 * 1024
+JOURNAL_DIAGNOSTIC_META_BYTES = 256 * 1024
+
+
+def journal_diagnostics() -> dict:
+    """Content-free, best-effort coverage of this worker's configured stores.
+
+    Count newline bytes, never parse journal entries or return paths/identities.
+    Concurrent rewrites, caps and unreadable files are explicit, not zero loss.
+    Process counters are separate from retained filesystem coverage.
+    """
+    import json
+    import os
+    import stat
+    import time
+    from fluid.codemode.skills import JOURNAL_MAX_BYTES, journal_metrics
+
+    started = time.perf_counter()
+    root = skills_root()
+    candidates = [root]
+    discovery_incomplete = False
+    users = root / ".users"
+    try:
+        if users.is_symlink():
+            discovery_incomplete = True
+        elif users.exists():
+            with os.scandir(users) as entries:
+                for index, entry in enumerate(entries):
+                    if index >= JOURNAL_DIAGNOSTIC_STORES - 1:
+                        discovery_incomplete = True
+                        break
+                    if (len(entry.name) == 64 and all(c in "0123456789abcdef" for c in entry.name)
+                            and entry.is_dir(follow_symlinks=False)):
+                        candidates.append(Path(entry.path))
+                    else:
+                        discovery_incomplete = True
+    except OSError:
+        discovery_incomplete = True
+
+    result = {
+        "scope": "configured_worker_stores", "snapshot_atomic": False,
+        "stores_examined": 0, "journals_found": 0, "journals_incomplete": 0,
+        "discovery_incomplete": discovery_incomplete, "retained_bytes": 0,
+        "retained_entries_known": 0, "consumed_entries_known": 0,
+        "pending_entries_known": 0, "journals_at_byte_cap": 0,
+        "bytes_scanned": 0, "scan_budget_bytes": JOURNAL_DIAGNOSTIC_BYTES,
+        "per_journal_byte_cap": JOURNAL_MAX_BYTES,
+    }
+
+    def read_regular(path, limit):
+        # Never follow links or block on FIFOs/devices placed in a store. The
+        # fstat check also covers a replacement between lstat and open.
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("Not a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise ValueError("Not a regular file")
+            data = stream.read(limit)
+        after = path.stat()
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+        return data, opened.st_size, identity(before) == identity(opened) == identity(after)
+
+    for directory in candidates:
+        result["stores_examined"] += 1
+        try:
+            if directory.is_symlink():
+                raise ValueError("Linked store")
+            budget = max(0, JOURNAL_DIAGNOSTIC_BYTES - result["bytes_scanned"])
+            data, size, stable = read_regular(directory / "journal.jsonl", min(JOURNAL_MAX_BYTES, budget))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            result["journals_incomplete"] += 1
+            continue
+        result["journals_found"] += 1
+        result["retained_bytes"] += size
+        result["bytes_scanned"] += len(data)
+        result["journals_at_byte_cap"] += int(size >= JOURNAL_MAX_BYTES)
+        if not stable or len(data) != size:
+            result["journals_incomplete"] += 1
+            continue
+        entries = data.count(b"\n") + int(bool(data) and not data.endswith(b"\n"))
+        result["retained_entries_known"] += entries
+        try:
+            meta, meta_size, meta_stable = read_regular(directory / "meta.json", JOURNAL_DIAGNOSTIC_META_BYTES)
+            if not meta_stable or len(meta) != meta_size:
+                raise ValueError("Incomplete metadata")
+            cursor = json.loads(meta).get("synth_cursor", 0)
+            if type(cursor) is not int or cursor < 0:
+                raise ValueError("Invalid cursor")
+        except FileNotFoundError:
+            cursor = 0
+        except (OSError, ValueError, AttributeError):
+            result["journals_incomplete"] += 1
+            continue
+        consumed = min(entries, cursor)
+        result["consumed_entries_known"] += consumed
+        result["pending_entries_known"] += entries - consumed
+    result["coverage_complete"] = not result["discovery_incomplete"] and result["journals_incomplete"] == 0
+    result["process_events"] = journal_metrics()
+    result["collection_ms"] = (time.perf_counter() - started) * 1000
+    return result
+
+
 async def maintain_memories():
     """Finite maintenance batches, independent of chat or a learning model."""
     import asyncio

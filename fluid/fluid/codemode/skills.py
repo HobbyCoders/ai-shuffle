@@ -71,6 +71,7 @@ import keyword
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -80,6 +81,36 @@ from pathlib import Path
 from fluid._filelock import file_lock
 
 _log = logging.getLogger(__name__)
+
+# Aggregate counters only: no store paths, identities or journal contents. They
+# describe this Python process since import, not durable or cross-worker totals.
+_JOURNAL_METRICS_LOCK = threading.Lock()
+_JOURNAL_METRICS = {
+    "appended_entries": 0, "reaped_entries": 0,
+    "skipped_busy": 0, "skipped_quota": 0,
+    "explicit_busy_failures": 0, "explicit_quota_failures": 0,
+}
+_JOURNAL_SATURATED_AT: float | None = None
+
+
+def _journal_event(event: str, count: int = 1) -> None:
+    global _JOURNAL_SATURATED_AT
+    with _JOURNAL_METRICS_LOCK:
+        _JOURNAL_METRICS[event] += count
+        if event in ("skipped_quota", "explicit_quota_failures"):
+            _JOURNAL_SATURATED_AT = time.monotonic()
+
+
+def journal_metrics() -> dict:
+    """Cheap loss/retention counters, including drops hidden by log throttling."""
+    with _JOURNAL_METRICS_LOCK:
+        age = None if _JOURNAL_SATURATED_AT is None else max(0, time.monotonic() - _JOURNAL_SATURATED_AT)
+        return {
+            "scope": "this_process_since_import", **_JOURNAL_METRICS,
+            "last_saturation_age_seconds": age,
+            "saturation_observed_last_60s": age is not None and age < 60,
+            "chat_history_loss_measured": False,
+        }
 
 _NAME_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 MAX_SKILL_BYTES = 65536
@@ -675,6 +706,7 @@ class SkillStore:
             return -1
 
     def _journal_skip(self, reason: str) -> None:
+        _journal_event("skipped_quota" if reason == "journal byte quota reached" else "skipped_busy")
         self._journal_skipped[reason] = self._journal_skipped.get(reason, 0) + 1
         now = time.monotonic()
         if now - self._journal_warning_at.get(reason, float("-inf")) >= 60:
@@ -718,12 +750,14 @@ class SkillStore:
         with journal_lock(self._journal_path, wait=JOURNAL_APPEND_LOCK_WAIT) as held:
             if not held:
                 if explicit:
+                    _journal_event("explicit_busy_failures")
                     raise OSError("journal is busy; the entry was not recorded")
                 self._journal_skip("journal is busy")
                 return
             before = self._journal_size()
             if max(0, before) + line_bytes > JOURNAL_MAX_BYTES:
                 if explicit:
+                    _journal_event("explicit_quota_failures")
                     raise OSError(
                         "journal byte quota reached and nothing consumed is "
                         "left to reap; the entry was not recorded"
@@ -733,6 +767,7 @@ class SkillStore:
             with self._journal_path.open("a", encoding="utf-8") as fh:
                 fh.write(line)
             after = self._journal_size()
+        _journal_event("appended_entries")
         # Only carry the cached count forward when the file was exactly where
         # we last left it; otherwise someone else wrote and the count is a
         # guess, so force a rescan instead of guessing.
@@ -810,6 +845,7 @@ class SkillStore:
             self._save_meta(meta)
             self._journal_lines = max(0, total - drop)
             self._journal_bytes = self._journal_size()
+            _journal_event("reaped_entries", drop)
             return drop
 
     def reap(self) -> dict[str, int]:
