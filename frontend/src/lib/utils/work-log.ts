@@ -623,7 +623,7 @@ export function createTranscriptModelBuilder() {
 		if (sameOptions && (options.latestTurnUnsettled ?? options.isStreaming)
 			&& tail && oldTail && tail.streaming && oldTail.streaming
 			&& tail.role === 'assistant' && ['text', 'thinking'].includes(tail.type ?? '')
-			&& tail.content && oldTail.content
+			&& tail.content && oldTail.content && !isAssistantPhantom(tail)
 			&& lastItem?.kind === 'message' && lastItem.message === oldTail
 			&& lastItem.index === messages.length - 1
 			&& messages.length === old.messages.length

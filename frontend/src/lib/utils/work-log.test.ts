@@ -57,6 +57,16 @@ describe('streaming model reuse', () => {
 		expect(build(metadata, options)).toEqual(buildTranscriptModel(metadata, options));
 		expect(build(metadata, options).lastAssistantMetadata).toEqual({input_tokens:123});
 	});
+	it('rebuilds when a streaming text replacement becomes a hidden placeholder', () => {
+		const build = createTranscriptModelBuilder();
+		const prompt = user('Question');
+		const tail = msg({type:'text', content:'Hello', streaming:true});
+		const options = {isStreaming:true, groupingEnabled:true};
+		build([prompt, tail], options);
+		const next = [prompt, {...tail, content:'   '}];
+		expect(build(next, options)).toEqual(buildTranscriptModel(next, options));
+		expect(build(next, options).items).toHaveLength(1);
+	});
 	it('rebuilds for historical changes, metadata and settlement', () => {
 		const build = createTranscriptModelBuilder();
 		let messages = [user('Question'), tool(), msg({type:'text',content:'Hello',streaming:true})];
