@@ -33,6 +33,19 @@ logger = logging.getLogger(__name__)
 TERMINAL_STATUSES: tuple = ("completed", "error", "killed")
 
 
+def _task_text(text: Optional[str]) -> Optional[str]:
+    """Render NUL in free-form task text for PostgreSQL without hiding byte loss.
+
+    Monitor stdout (including binary output) reaches terminal summaries verbatim.
+    PostgreSQL rejects U+0000 in text, aborting even unrelated rows in the batch.
+    Show each NUL as U+2400 SYMBOL FOR NULL in this durable mirror only; this is
+    a lossy display representation, not an encoding to decode on restore. Live
+    output, ordinary Unicode, literal escapes and generated identifiers stay
+    unchanged. One-for-one replacement also preserves the existing text bounds.
+    """
+    return text.replace("\x00", "␀") if text is not None else None
+
+
 def upsert_background_task(snapshot: Dict[str, Any]) -> None:
     """Insert-or-update one task snapshot (latest state wins).
 
@@ -49,7 +62,7 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
     if not snapshots:
         return
     def bounded_summary(snapshot: Dict[str, Any]) -> Optional[str]:
-        text = snapshot.get("summary") or ""
+        text = _task_text(snapshot.get("summary")) or ""
         if len(text) <= 20_000:
             return text or None
         marker = "\n… [middle of terminal summary clipped] …\n"
@@ -86,14 +99,14 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                 snapshot.get("kind"),
                 bool(snapshot.get("is_sdk_background")),
                 snapshot.get("tool_use_id"),
-                snapshot.get("title"),
+                _task_text(snapshot.get("title")),
                 snapshot.get("status"),
                 bool(snapshot.get("terminal_notified")),
                 snapshot.get("started_at"),
                 snapshot.get("updated_at"),
                 bounded_summary(snapshot),
-                (snapshot.get("reason") or "")[:256] or None,
-                (snapshot.get("report_path") or "")[:4096] or None,
+                (_task_text(snapshot.get("reason")) or "")[:256] or None,
+                (_task_text(snapshot.get("report_path")) or "")[:4096] or None,
                 snapshot.get("report_chars"),
             ) for snapshot in snapshots],
         )

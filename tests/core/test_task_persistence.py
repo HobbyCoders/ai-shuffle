@@ -86,6 +86,79 @@ async def test_full_lifecycle_coalesces_to_latest_snapshot(mock_db):
     assert rows[0]["status"] == "completed"
 
 
+@pytest.mark.parametrize("field", ["title", "summary", "reason", "report_path"])
+async def test_nul_task_text_does_not_poison_batch_or_durable_restore(mock_db, field):
+    """Registry-produced text is made visibly safe only in its durable mirror."""
+    sid = "tpers-nul-" + field
+    ordinary = "café 日本語 🦋\n\t literal \\u0000 ␀"
+    text = "before\x00after " + ordinary
+    task_registry.start_task(sid, "nul", "agent", text if field == "title" else "work")
+    metadata = {field: text} if field != "title" else {}
+    task_registry.complete_task(sid, "nul", "completed", **metadata)
+    task_registry.start_task(sid, "ordinary", "agent", "ordinary")
+    task_registry.complete_task(sid, "ordinary", "completed", summary=ordinary)
+    assert tp.pending_count() == 2
+    await tp.flush()
+
+    assert not tp._outage_logged
+    assert task_registry._tasks[sid]["nul"][field] == text  # live output is unchanged
+    task_registry.reset_all()  # TaskGet must now use its real durable fallback
+    restored = task_registry.get_task(sid, "nul", durable=True)
+    wire_field = {"title": "subject", "report_path": "reportPath"}.get(field, field)
+    assert restored[wire_field] == text.replace("\x00", "␀")
+    assert restored["status"] == "completed"
+    assert task_registry.get_task(sid, "ordinary", durable=True)["summary"] == ordinary
+
+
+@pytest.mark.parametrize(
+    "field, limit", [("summary", 20_000), ("reason", 256), ("report_path", 4096)]
+)
+async def test_nul_normalization_preserves_task_text_bounds(mock_db, field, limit):
+    from app.db.background_tasks import get_background_task
+
+    sid = "tpers-nul-bounds"
+    text = "\x00" + "日" * limit + "\x00"
+    task_registry.start_task(sid, "bounded", "agent", "work")
+    task_registry.complete_task(sid, "bounded", "completed", **{field: text})
+    await tp.flush()
+    stored = get_background_task("bounded", sid)[field]
+    assert len(stored) == limit
+    assert stored.startswith("␀")
+    assert "\x00" not in stored
+    if field == "summary":
+        assert "[middle of terminal summary clipped]" in stored
+        assert stored.endswith("␀")
+    else:
+        assert stored == text.replace("\x00", "␀")[:limit]
+
+
+async def test_real_monitor_nul_stdout_survives_persistence_and_restart(mock_db, tmp_path):
+    import shlex
+    import sys
+    from app.mcp import builtin_tools as bt
+
+    sid = "tpers-nul-monitor"
+    database.create_session(sid, None)
+    code = "import sys; sys.stdout.buffer.write(b'before\\x00after\\n')"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+    task = await bt._spawn_background(command, str(tmp_path), sid)
+    try:
+        await asyncio.wait_for(task._reader_task, timeout=10)
+        assert task.exit_code == 0
+        assert task.lines == ["before\x00after"]
+        await tp.flush()
+        assert not tp._outage_logged
+        task_registry.reset_all()
+        restored = task_registry.get_task(sid, task.task_id, durable=True)
+        assert restored["status"] == "completed"
+        assert restored["summary"] == "before␀after"
+    finally:
+        if task.process.returncode is None:
+            task.process.kill()
+            await task.process.wait()
+        bt._background_tasks.pop(task.task_id, None)
+
+
 async def test_upsert_updates_existing_row(mock_db):
     sid = "tpers-upsert"
     task_registry.start_task(sid, "t1", "agent", "bg work")
