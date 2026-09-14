@@ -3479,11 +3479,11 @@ def _chat_mode_rules(options: SessionOptions) -> Optional[list]:
     ``broadcast_func``); a spawn without one would park the turn on a prompt
     nobody can see instead of refusing the read. A ceiling that turns into a
     hang when the responder is missing is not a ceiling. fluid's own path
-    matching is what makes the deny safe to be this blunt: rule 2 sees the
-    normalized, cwd-resolved, symlink-followed spellings of the path (see
-    ``fluid.permissions.rules.path_candidates``), so ``..`` and symlink games
-    cannot widen it, and the app callback still gets the last word on the
-    delegated leg, where these rules do not apply.
+    matching rejects traversal and requires the symlink-resolved target to
+    match rule 2 independently of its lexical spelling. This is a preflight,
+    not race-safe confinement: Read opens the path separately, and hard links
+    are not distinguished here. The delegated CLI has its own read approvals;
+    these native rules do not apply to that runtime.
     """
     if _session_mode(options) != "chat":
         return None

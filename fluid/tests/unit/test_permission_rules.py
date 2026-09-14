@@ -140,3 +140,45 @@ def test_path_candidates_follow_symlinks_when_the_file_exists(tmp_path) -> None:
     _, normalized = path_candidates("harmless.txt", cwd=str(tmp_path))
     assert any(c.endswith("/.env") for c in normalized)
     assert _ENV_ASK.matches("Read", {"file_path": "harmless.txt"}, cwd=str(tmp_path))
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_allow_rule_requires_resolved_target_match(tmp_path, monkeypatch, relative):
+    allowed = tmp_path / "granted"
+    allowed.mkdir()
+    rule = Rule(tool="Read", decision="allow", input_globs={"file_path": str(allowed) + "/**"})
+    monkeypatch.setattr("fluid.permissions.rules.os.path.realpath", lambda path: str(tmp_path / "outside" / "secret.txt"))
+    value = "link/secret.txt" if relative else str(allowed / "link" / "secret.txt")
+    assert not rule.matches("Read", {"file_path": value}, cwd=str(allowed))
+
+
+def test_allow_rule_fails_closed_when_resolution_fails(tmp_path, monkeypatch):
+    rule = Rule(tool="Read", decision="allow", input_globs={"file_path": str(tmp_path) + "/**"})
+    def broken(path):
+        raise OSError("cannot resolve target")
+    monkeypatch.setattr("fluid.permissions.rules.os.path.realpath", broken)
+    assert not rule.matches("Read", {"file_path": str(tmp_path / "file.txt")}, cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize("relative_pattern", [False, True])
+def test_allow_rule_accepts_inside_alias_but_not_outside_target(tmp_path, relative_pattern):
+    granted = tmp_path / "granted"
+    granted.mkdir()
+    (granted / "inside.txt").write_text("inside")
+    (tmp_path / "outside.txt").write_text("outside")
+    try:
+        (granted / "inside-link.txt").symlink_to(granted / "inside.txt")
+        (granted / "outside-link.txt").symlink_to(tmp_path / "outside.txt")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    pattern = "granted/**" if relative_pattern else str(granted) + "/**"
+    rule = Rule(tool="Read", decision="allow", input_globs={"file_path": pattern})
+    for filename, allowed in [("inside.txt", True), ("inside-link.txt", True), ("outside-link.txt", False)]:
+        assert rule.matches("Read", {"file_path": str(granted / filename)}, cwd=str(tmp_path)) is allowed
+
+
+def test_absolute_allow_does_not_need_a_same_drive_relative_form(tmp_path, monkeypatch):
+    rule = Rule(tool="Read", decision="allow", input_globs={"file_path": str(tmp_path) + "/**"})
+    def different_drives(paths):
+        raise ValueError("Paths are on different drives")
+    monkeypatch.setattr("fluid.permissions.rules.os.path.commonpath", different_drives)
+    assert rule.matches("Read", {"file_path": str(tmp_path / "file.txt")}, cwd=str(tmp_path))

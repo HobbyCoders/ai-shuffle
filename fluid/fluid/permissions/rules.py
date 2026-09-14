@@ -94,7 +94,29 @@ def _path_matches(value: str, pattern: str, decision: str, cwd: str | None) -> b
     raw, normalized = path_candidates(value, cwd)
     candidates = normalized if decision == "allow" else raw | normalized
     patterns = {pattern, _normalize_pattern(pattern)}
-    return any(fnmatchcase(c, p) for c in candidates for p in patterns)
+    if not any(fnmatchcase(c, p) for c in candidates for p in patterns):
+        return False
+    if decision != "allow":
+        return True
+
+    # A lexical match must not override an outside resolved target. Match the
+    # resolved spelling independently (absolute and cwd-relative), never mixed
+    # with the lexical candidates above. This is a permission preflight, NOT a
+    # race-safe filesystem broker: the tool still opens the file separately.
+    text = value.strip().replace("\\", "/")
+    try:
+        root = os.path.abspath(cwd or os.getcwd())
+        resolved = os.path.realpath(os.path.join(root, text))
+    except (OSError, ValueError):
+        return False
+    resolved_candidates = {resolved.replace("\\", "/")}
+    if cwd or not os.path.isabs(text):
+        try:
+            if os.path.commonpath([root, resolved]) == root:
+                resolved_candidates.add(os.path.relpath(resolved, root).replace("\\", "/"))
+        except ValueError:  # Different drives have no relative form.
+            pass
+    return any(fnmatchcase(c, p) for c in resolved_candidates for p in patterns)
 
 
 def _command_matches(value: str, pattern: str, decision: str) -> bool:

@@ -141,6 +141,51 @@ def test_the_pinned_permission_mode_does_not_dissolve_the_rules(workspace):
     assert verdict.decision == "deny"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("link_kind", ["file", "directory"])
+async def test_native_read_execution_rejects_outside_symlink(workspace, tmp_path, link_kind):
+    """Real Read through NativeLoop's permission AND dispatch path, no provider IO."""
+    from types import SimpleNamespace
+    from fluid.engine.native import NativeLoop
+    from fluid.providers.base import ProviderCaps
+    from fluid.store.base import MemoryStore
+    from fluid.tools.registry import ToolCtx, ToolRegistry
+
+    inside = workspace / "inside.txt"
+    inside.write_text("permitted attachment marker")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside file marker must not be returned")
+    try:
+        if link_kind == "file":
+            (workspace / "escape").symlink_to(outside)
+            (workspace / "alias").symlink_to(inside)
+            escape, alias = "escape", "alias"
+        else:
+            (workspace / "escape").symlink_to(tmp_path, target_is_directory=True)
+            (workspace / "alias").symlink_to(workspace, target_is_directory=True)
+            escape, alias = "escape/outside.txt", "alias/inside.txt"
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+
+    from fluid.tools.builtins import register_builtins
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    loop = NativeLoop(provider=SimpleNamespace(name="test", caps=ProviderCaps()),
+                      store=MemoryStore(), model="test", registry=registry,
+                      permissions=_engine_for("chat"), ctx=ToolCtx(cwd=str(workspace)),
+                      allowed_tools=CHAT_SURFACE,
+                      claude_settings=False, claude_plugins=False, claude_agents=False)
+    for index, spelling in enumerate([str(inside), "inside.txt", alias, escape]):
+        outcome = await loop._gated_call("test-session", "test-turn", "Read", str(index), {"file_path": spelling})
+        if spelling == escape:
+            assert outcome.is_error
+            assert "outside file marker" not in outcome.text
+        else:
+            assert not outcome.is_error
+            assert "permitted attachment marker" in outcome.text
+
+
 # =============================================================================
 # Delegated leg: what the claude CLI is handed on its command line
 # =============================================================================
