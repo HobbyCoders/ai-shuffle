@@ -1002,3 +1002,55 @@ async def test_cleanup_retains_checkout_when_requesting_interrupt_fails(monkeypa
     monkeypatch.setattr(session_pool, "get_session_pool", lambda: SimpleNamespace(remove=remove))
     assert await gitops._release_session_cwd("requesting") is False
     remove.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_release_checkout_closes_idle_siblings_and_runtime_cwds(monkeypatch, tmp_path):
+    from app.core import project_resolver, session_pool
+    from app.db import checkouts, sessions
+    target = tmp_path / "checkout"
+    target.mkdir()
+    monkeypatch.setattr(checkouts, "get_checkout_by_path", lambda p: {"project_id": "v2"})
+    monkeypatch.setattr(sessions, "list_sessions_for_cleanup", lambda *a: [
+        {"id": "idle"}, {"id": "unrelated"},
+    ])
+    monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda s:
+        str(target) if s["id"] == "idle" else str(tmp_path / "elsewhere"))
+    def state(cwd):
+        return SimpleNamespace(connect_options=SimpleNamespace(cwd=str(cwd)))
+    pool = SimpleNamespace(items=lambda: [
+        ("runtime-only", state(target / "nested")),
+        ("other-runtime", state(tmp_path / "other")),
+    ])
+    monkeypatch.setattr(session_pool, "get_session_pool", lambda: pool)
+    monkeypatch.setattr(gitops, "_session_is_busy", lambda sid: False)
+    release = AsyncMock(return_value=True)
+    monkeypatch.setattr(gitops, "_release_session_cwd", release)
+    assert await gitops._release_checkout_sessions("legacy", str(target), "requester")
+    assert {c.args[0] for c in release.await_args_list} == {"idle", "runtime-only", "requester"}
+    monkeypatch.setattr(gitops, "_session_is_busy", lambda sid: sid == "runtime-only")
+    release.reset_mock()
+    assert not await gitops._release_checkout_sessions("legacy", str(target), "requester")
+    release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_release_session_closes_app_owned_browser_before_shells(monkeypatch):
+    from app.core import browser_runtime, session_runtime, session_pool
+    from app.mcp import builtin_tools
+    events = []
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: None)
+    monkeypatch.setattr(session_runtime, "active_executions", lambda: {})
+    async def remove(sid):
+        events.append("engine")
+    async def close(sid):
+        events.append("browser")
+    async def shells(sid, **kwargs):
+        events.append("shells")
+    monkeypatch.setattr(session_pool, "get_session_pool", lambda: SimpleNamespace(remove=remove))
+    monkeypatch.setattr(browser_runtime, "close_session", close)
+    monkeypatch.setattr(builtin_tools, "stop_session_background_shells", shells)
+    assert await gitops._release_session_cwd("s")
+    assert events == ["engine", "browser", "shells"]
+    monkeypatch.setattr(browser_runtime, "close_session", AsyncMock(side_effect=TimeoutError()))
+    assert not await gitops._release_session_cwd("s")

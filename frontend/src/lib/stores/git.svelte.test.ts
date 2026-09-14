@@ -129,6 +129,22 @@ describe('git store — cleaned-up / reused worktree', () => {
 	});
 });
 
+describe('git store — optional worktree list', () => {
+	it.each([404, 500])('keeps resumed session Git usable when listing fails (%s)', async (code) => {
+		mocks.getWorktrees.mockRejectedValue({ status: code, detail: 'Project not found' });
+		await git.loadRepository('pv2-only', false, 'resumed-here');
+		expect(git.current.error).toBeNull();
+		expect(git.current.hydrated).toBe(true);
+		expect(git.current.stale).toBe(false);
+		expect(git.current.status?.is_git_repo).toBe(true);
+		expect(git.current.prState?.open_pr?.number).toBe(7);
+		expect(git.current.worktrees).toEqual([]);
+		await git.loadWorktrees();
+		expect(git.current.error).toBeNull();
+		expect(git.current.status?.current_branch).toBe('feat/x');
+	});
+});
+
 describe('git store — initial owner failure recovery', () => {
 	it.each([null, 'wt-remote'])('hydrates the complete header on the next poll (%s)', async (worktreeId) => {
 		git.setRemoteSession('remote-session', true);
