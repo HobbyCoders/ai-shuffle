@@ -130,23 +130,19 @@ async def _collect_metrics() -> dict:
     # heap). Fall back to /proc on Linux so a container without psutil still reports
     # at least its own RSS instead of silently dropping all memory metrics.
     try:
-        import psutil
-        process = psutil.Process(os.getpid())
-        rss_mb = round(process.memory_info().rss / (1024 * 1024), 1)
+        from app.core.process_metrics import collect_process_metrics
+        process_metrics = await asyncio.to_thread(collect_process_metrics)
+        groups = process_metrics["groups"]
+        backend = groups.get("backend", {})
+        rss_mb = round(backend.get("rss_mib", 0), 1)
         metrics["process_rss_mb"] = rss_mb
-        metrics["process_threads"] = process.num_threads()
-        # Child processes (SDK Node subprocesses, any spawned Chrome, etc.) — count
-        # AND sum their RSS, since a child-process leak never shows in our own RSS.
-        child_rss_mb = 0.0
-        children = process.children(recursive=True)
-        for child in children:
-            try:
-                child_rss_mb += child.memory_info().rss / (1024 * 1024)
-            except Exception:
-                continue  # child may have exited mid-iteration
-        metrics["child_processes"] = len(children)
+        metrics["process_threads"] = backend.get("threads", 0)
+        metrics["child_processes"] = sum(g["processes"] for k, g in groups.items() if k != "backend")
+        child_rss_mb = sum(g["rss_mib"] for k, g in groups.items() if k != "backend")
         metrics["child_rss_mb"] = round(child_rss_mb, 1)
         metrics["tree_rss_mb"] = round(rss_mb + child_rss_mb, 1)
+        metrics["tree_rss_scope"] = "backend_tree"
+        metrics["tree_rss_counts_shared_pages_multiple_times"] = True
     except ImportError:
         # psutil not installed — fall back to /proc for our own RSS (Linux only).
         try:

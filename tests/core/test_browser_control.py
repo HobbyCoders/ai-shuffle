@@ -47,6 +47,33 @@ def command(cid="cmd", op="takeover", args=None, **extra):
 
 
 @pytest.mark.asyncio
+async def test_viewer_lifecycle_wakes_poll_without_claiming_control(broker):
+    async def send(message):
+        pass
+
+    waiting = asyncio.create_task(broker.poll("runtime"))
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    broker.attach("viewer", send)
+    assert await asyncio.wait_for(waiting, 1) == []
+    assert len(broker.viewers) == 1
+    assert broker.state["control"]["owner"] == "agent"
+
+    waiting = asyncio.create_task(broker.poll("runtime"))
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    await broker.detach("viewer")
+    await asyncio.wait_for(waiting, 1)
+    assert not broker.viewers
+
+    # Attach before polling also returns immediately; clearing the wake event
+    # must not lose this transition. Reopening does not replace actor identity.
+    broker.attach("reopened", send)
+    assert await asyncio.wait_for(broker.poll("runtime"), 1) == []
+    assert broker.runtime_id == "runtime"
+
+
+@pytest.mark.asyncio
 async def test_native_edit_requires_owner_and_valid_utf16_selection(broker):
     args = {"field": "field", "action": "replace", "value": "😀", "start": 2, "end": 2}
     with pytest.raises(control.ControlError, match="Take control"):
@@ -107,7 +134,7 @@ async def test_poll_bounds_actual_response_bytes_without_losing_queued_text(brok
     while broker.queue:
         batch = await broker.poll('runtime')
         assert batch
-        assert len(JSONResponse({'commands': batch}).body) <= control.MAX_BODY
+        assert len(JSONResponse({'commands': batch, 'viewer_count': len(broker.viewers)}).body) <= control.MAX_BODY
         delivered.extend(item['id'] for item in batch)
         assert len(broker.queue) == 16 - len(delivered)
     assert delivered == [str(index) for index in range(16)]

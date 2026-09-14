@@ -39,6 +39,7 @@ vi.mock('./active-session', () => ({
 }));
 
 import { appData, sessionListsEqual } from './app-data.svelte';
+import { ResourceSync } from '$lib/services/resource-sync';
 
 interface Row { id: string; title: string; is_active: boolean }
 
@@ -101,6 +102,47 @@ beforeEach(() => {
 });
 
 describe('capped initial load (W1)', () => {
+	it('coalesces independent resource subscribers and keeps an in-flight dirty follow-up', async () => {
+		vi.useFakeTimers();
+		const sync = new ResourceSync();
+		const off = [
+			sync.subscribe(['sessions'], () => appData.loadSessions()),
+			sync.subscribe(['projects'], () => appData.loadSessions()),
+		];
+		try {
+			listDelayMs = 500;
+			sync.invalidate(['sessions', 'projects']);
+			await vi.advanceTimersByTimeAsync(100);
+			expect(mocks.get).toHaveBeenCalledTimes(2);
+			// A focus refresh while the requests are running must not be lost.
+			const refreshed = appData.loadSessions();
+			void appData.loadSessions();
+			await vi.advanceTimersByTimeAsync(1000);
+			await refreshed;
+			expect(mocks.get).toHaveBeenCalledTimes(4);
+		} finally { off.forEach(stop => stop()); sync.clear(); vi.useRealTimers(); }
+	});
+
+	it('discards an in-flight response for a superseded tag', async () => {
+		let resolve!: (value: unknown) => void;
+		mocks.get.mockImplementation((url: string) => {
+			if (url.includes('active_only=true')) return Promise.resolve({ items: [] });
+			if (url.includes('tag_id=old')) return new Promise(done => { resolve = done; });
+			return Promise.resolve({ items: [{id: 'new-tag'}], has_more: false });
+		});
+		const first = appData.loadSessions('old');
+		await Promise.resolve();
+		const second = appData.loadSessions('new');
+		resolve({ items: [{id: 'old-tag'}], has_more: false });
+		await Promise.all([first, second]);
+		expect(appData.current.sessions.map(s => s.id)).toEqual(['new-tag']);
+		mocks.get.mockClear();
+		await appData.loadSessions();
+		expect(mocks.get.mock.calls.every(([url]) => url.includes('tag_id=new'))).toBe(true);
+		// Explicit null still clears the filter.
+		await appData.loadSessions(null);
+		expect(appData.current.sessionsTagFilter).toBeNull();
+	});
 	it('fetches ONE page up front (plus the Active set) and reports more', async () => {
 		await appData.loadSessions();
 

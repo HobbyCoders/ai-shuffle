@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import ipaddress
+import logging
 import os
 import re
 import time
@@ -127,6 +128,25 @@ class Broker:
         self.grants: dict[str, Grant] = {}
         self.actions: dict[str, Action] = {}
         self.requests: dict[str, AccessRequest] = {}
+        self._notifications: set[asyncio.Task] = set()
+
+    def _notify(self, session_id: str, owner: tuple) -> None:
+        async def send():
+            try:
+                from app.core.sync_engine import sync_engine
+                await sync_engine._broadcast_user_message(
+                    owner[2] or "admin",
+                    {"type": "chat_access_changed", "session_id": session_id},
+                )
+            except Exception:
+                logging.getLogger(__name__).debug("Access refresh notification unavailable", exc_info=True)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # Synchronous shutdown has no connected UI to notify.
+        task = loop.create_task(send())
+        self._notifications.add(task)
+        task.add_done_callback(self._notifications.discard)
 
     async def request(self, session_id: str, kind: str, purpose: str):
         owner = await session_owner(session_id)
@@ -139,6 +159,7 @@ class Broker:
         request = AccessRequest(uuid.uuid4().hex, session_id, owner, kind, purpose.strip(),
                                 time.time() + 240, asyncio.get_running_loop().create_future())
         self.requests[request.id] = request
+        self._notify(session_id, owner)
         try:
             grant_id = await asyncio.wait_for(request.result, 240)
             if not grant_id:
@@ -149,6 +170,7 @@ class Broker:
             raise AccessDenied("Private input request expired; ask the user before requesting it again.") from None
         finally:
             self.requests.pop(request.id, None)
+            self._notify(session_id, owner)
 
     async def fulfill(self, session_id: str, request_id: str, submission: GrantSubmission):
         request = self.requests.get(request_id)
@@ -264,6 +286,7 @@ class Broker:
             raise
         self.grants[grant.id] = grant
         grant.timer = asyncio.get_running_loop().call_later(spec.minutes * 60, self.revoke, session_id, grant.id)
+        self._notify(session_id, owner)
         return grant.public()
 
     def revoke(self, session_id: str, grant_id: str):
@@ -283,6 +306,7 @@ class Broker:
             os.close(grant.root)
             grant.root = None
         grant.password, grant.key = "", None
+        self._notify(session_id, grant.owner)
 
     async def get(self, session_id: str, grant_id: str) -> Grant:
         grant = self.grants.get(grant_id)
@@ -299,17 +323,16 @@ class Broker:
         return grant
 
     async def snapshot(self, session_id: str):
-        await session_owner(session_id)
+        owner = await session_owner(session_id)
         result = []
         for grant in list(self.grants.values()):
             if grant.session_id == session_id:
-                try:
-                    result.append((await self.get(session_id, grant.id)).public())
-                except AccessDenied:
-                    continue
+                if grant.revoked or grant.expires_at <= time.time() or grant.owner != owner:
+                    self.revoke(session_id, grant.id)
+                else:
+                    result.append(grant.public())
         from app.core import chat_vault, encryption
         from app.db.async_database import run_sync
-        owner = await session_owner(session_id)
         saved = await run_sync(chat_vault.catalog, owner)
         return {
             "saved_connections": saved,
@@ -341,6 +364,7 @@ class Broker:
                         dict(arguments), min(grant.expires_at, time.time() + 240),
                         asyncio.get_running_loop().create_future())
         self.actions[action.id] = action
+        self._notify(grant.session_id, grant.owner)
         try:
             allowed = await asyncio.wait_for(action.decision, max(0, action.expires_at - time.time()))
             if not allowed:
@@ -349,6 +373,7 @@ class Broker:
             raise AccessDenied("Approval expired. Ask the user before requesting it again.") from None
         finally:
             self.actions.pop(action.id, None)
+            self._notify(grant.session_id, grant.owner)
         await self.get(grant.session_id, grant.id)
 
     async def run(self, session_id: str, grant_id: str, operation: str, arguments: dict):

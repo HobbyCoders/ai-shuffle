@@ -82,6 +82,37 @@ def test_catalog_mirrors_sessions_and_events_to_peers(workers):
         assert rows[0]["is_remote"] and rows[0]["device_name"] == "A"
 
 
+def test_quiet_catalog_uses_one_query_and_finds_later_appends(workers):
+    worker = workers("quiet-catalog")
+    with worker.active():
+        engine.create_network("Quiet catalog")
+        for index in range(32):
+            session_id = f"quiet-{index}"
+            database.create_session(session_id=session_id, profile_id="default", project_id=None, title=session_id)
+            events_db.append_events(session_id, [{"type": "message.user", "payload": {"content": "hello"}}])
+        assert catalog.publish_events() == 32
+        queries = []
+        worker.raw.set_trace_callback(queries.append)
+        try:
+            assert catalog.publish_events() == 0
+        finally:
+            worker.raw.set_trace_callback(None)
+        selects = [q for q in queries if q.lstrip().upper().startswith("SELECT")]
+        assert len(selects) == 1
+        # This is an actual append, not a fabricated dirty marker/cursor.
+        events_db.append_events("quiet-31", [{"type": "message.user", "payload": {"content": "later"}}])
+        assert catalog.publish_events() == 1
+        assert catalog.publish_events() == 0
+        # A reset cursor must remain eligible, even without events: PR #1240's
+        # retraction path needs to see cleared transcripts on the next pass.
+        with store.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM network_catalog_cursors WHERE session_id = %s", ("quiet-31",))
+            cur.execute("DELETE FROM session_events WHERE session_id = %s", ("quiet-31",))
+            assert "quiet-31" in catalog._owned_session_ids(
+                cur, worker.device_id, recent_only=True, include_held=True, unpublished_only=True)
+
+
 def test_placement_treats_own_device_id_as_me(workers):
     """A pin on our own device id resolves exactly like a pin on our instance id."""
     a = workers("a")

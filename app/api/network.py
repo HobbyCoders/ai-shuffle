@@ -461,7 +461,7 @@ async def peer_ping(device_id: str = Depends(tokens.require_device)) -> dict:
     transport.note_contact(device_id)
     return {"device_id": ctx.device_id, "network_id": ctx.network_id, "generation": ctx.generation,
             "incarnation": ctx.identity.incarnation, "version": settings.version,
-            "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities()}
+            **(await run_sync(transport._description))}
 
 
 @router.post("/peer/exchange")
@@ -474,11 +474,12 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
             engine.scan_all(strict=True)
         store.touch_member(device_id, capabilities=body.capabilities or None, endpoints=body.endpoints or None,
                            version=body.version, incarnation=body.incarnation)
-        ops = store.ops_since(body.watermarks, limit=body.limit, lane=body.lane, exclude_origin=device_id)
-        return {"ops": ops, "watermarks": store.local_watermarks(), "generation": ctx.generation,
+        ops, heads, snapshot = store.exchange_batch(body.watermarks, limit=body.limit, lane=body.lane,
+                                                   exclude_origin=device_id)
+        return {"ops": ops, "watermarks": heads, "generation": ctx.generation,
                 "key_version": ctx.key_version, "incarnation": ctx.identity.incarnation,
                 "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),
-                "version": settings.version, "snapshot_required": store.requires_snapshot(body.watermarks, exclude_origin=device_id),
+                "version": settings.version, "snapshot_required": snapshot,
                 "peer_state": 1, "flushed": body.flush}
 
     return await run_sync(_work)

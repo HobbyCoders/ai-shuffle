@@ -3,16 +3,16 @@ import { WorkspaceBridge, bridgeConfig } from "../src/workspace-bridge.js";
 import { Session } from "../src/session.js";
 import { BrowserManager } from "../src/browser.js";
 const bridges: WorkspaceBridge[] = [];
-afterEach(() => { bridges.forEach(b => b.stop()); bridges.length = 0; vi.restoreAllMocks(); });
+afterEach(() => { bridges.forEach(b => b.stop()); bridges.length = 0; vi.useRealTimers(); vi.restoreAllMocks(); });
 const json = (data: unknown) => new Response(JSON.stringify(data), {headers:{"content-type":"application/json"}});
-function harness(options: { registerStatus?: number; reportFail?: boolean; pollStatus?: number } = {}) {
+function harness(options: { registerStatus?: number; reportFail?: boolean; pollStatus?: number; viewerCount?: number } = {}) {
   const calls: {endpoint:string;body:any}[] = [];
-  let deliver: ((commands: unknown[]) => void) | undefined;
+  let deliver: ((commands: unknown[], viewerCount?: number) => void) | undefined;
   let failedReport = false;
   const fetcher = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
     const endpoint = String(url).split("/").at(-1)!;
     const body = JSON.parse(init!.body as string); calls.push({endpoint,body});
-    if (endpoint === "register") return options.registerStatus ? new Response(null,{status:options.registerStatus}) : json({ok:true});
+    if (endpoint === "register") return options.registerStatus ? new Response(null,{status:options.registerStatus}) : json({ok:true,viewer_count:options.viewerCount});
     if (endpoint === "report") {
       if (options.reportFail && !failedReport) {failedReport=true; return new Response(null,{status:503});}
       return new Response(null,{status:204});
@@ -21,16 +21,78 @@ function harness(options: { registerStatus?: number; reportFail?: boolean; pollS
     return new Promise<Response>((resolve,reject) => {
       const aborted = () => { deliver=undefined; reject(new Error("aborted")); };
       init!.signal!.addEventListener("abort",aborted,{once:true});
-      deliver = commands => {init!.signal!.removeEventListener("abort",aborted); deliver=undefined; resolve(json({commands}));};
+      deliver = (commands, viewerCount = options.viewerCount) => {init!.signal!.removeEventListener("abort",aborted); deliver=undefined; resolve(json({commands,viewer_count:viewerCount}));};
     });
   });
   const session = new Session(new BrowserManager());
   vi.spyOn(session, "workspaceMetadata").mockResolvedValue({target_id:"target-1",active_tab_id:"tab1",tabs:[{id:"tab1",url:"https://example.com",title:"fixture",current:true}],viewport:{mode:"fixed",width:1280,height:800}});
   const bridge = new WorkspaceBridge(session,{sessionId:"s",token:"test-token",baseUrl:"http://localhost/api/v1/browser/panel/control/"},fetcher as typeof fetch);
   bridges.push(bridge); bridge.start();
-  return {session,bridge,calls,fetcher,send:(commands:unknown[]) => { if (!deliver) throw new Error("no poll"); deliver(commands); }};
+  return {session,bridge,calls,fetcher,send:(commands:unknown[], viewerCount?:number) => { if (!deliver) throw new Error("no poll"); deliver(commands, viewerCount); }};
 }
 describe("runtime bridge", () => {
+  it("pauses metadata without viewers and resumes for passive viewers, events and reopening", async () => {
+    vi.useFakeTimers();
+    const h = harness({viewerCount:0});
+    await vi.advanceTimersByTimeAsync(600);
+    const metadata = vi.mocked(h.session.workspaceMetadata);
+    metadata.mockClear();
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(metadata).not.toHaveBeenCalled();
+
+    // The producer's viewer count includes passive viewers, not only owners.
+    h.send([], 1);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(metadata).toHaveBeenCalled();
+    metadata.mockClear();
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(metadata).toHaveBeenCalled();
+
+    h.send([], 0);
+    await vi.advanceTimersByTimeAsync(600);
+    metadata.mockClear();
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(metadata).not.toHaveBeenCalled();
+
+    await h.session.runAgentExclusive(async () => {});
+    await vi.advanceTimersByTimeAsync(600);
+    expect(metadata).toHaveBeenCalled();
+    metadata.mockClear();
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(metadata).not.toHaveBeenCalled();
+
+    h.send([], 1);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(metadata).toHaveBeenCalled();
+    h.bridge.stop();
+    metadata.mockClear();
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(metadata).not.toHaveBeenCalled();
+  });
+  it("does not turn changing metadata into a self-sustaining no-viewer poll", async () => {
+    vi.useFakeTimers();
+    const h = harness({viewerCount:0});
+    let revision = 0;
+    vi.mocked(h.session.workspaceMetadata).mockImplementation(async () => ({
+      target_id:"target-1", active_tab_id:"tab1", editors:[],
+      tabs:[{id:"tab1",url:"https://example.com",title:String(++revision),current:true}],
+      viewport:{mode:"fixed",width:1280,height:800},
+    }));
+    await vi.advanceTimersByTimeAsync(600);
+    vi.mocked(h.session.workspaceMetadata).mockClear();
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(h.session.workspaceMetadata).not.toHaveBeenCalled();
+  });
+  it("retains a slower fallback for hosts without viewer counts", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    await vi.advanceTimersByTimeAsync(600);
+    vi.mocked(h.session.workspaceMetadata).mockClear();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.session.workspaceMetadata).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(h.session.workspaceMetadata).toHaveBeenCalled();
+  });
   it("graceful shutdown reports unavailable, then aborts the poll; start is idempotent", async () => {
     const h = harness(); h.bridge.start();
     await vi.waitFor(() => expect(h.calls.some(c=>c.endpoint==="poll")).toBe(true));

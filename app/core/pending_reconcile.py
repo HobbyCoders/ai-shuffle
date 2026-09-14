@@ -460,9 +460,9 @@ def repair_fluid_pending_log(
         if not frames:
             return []
 
-        from fluid.events.model import WAKE_SUPPRESSED, SubagentEvent, event_to_dict
+        from fluid.events.model import WAKE_SUPPRESSED, SubagentEvent
 
-        from app.core.provider.fluid_pg_store import _append_event_sync
+        from app.core.provider.fluid_pg_store import _append_events_sync
 
         seq = _max_event_seq(fluid_session_id)
         if seq < 0:
@@ -486,7 +486,7 @@ def repair_fluid_pending_log(
                 status=str(frame.get("status") or kind),
                 wake_disposition=WAKE_SUPPRESSED,
             )
-            _append_event_sync(fluid_session_id, event_to_dict(event), seq)
+            _append_events_sync(fluid_session_id, [event])
             repaired.append(str(frame["task_id"]))
         logger.warning(
             "pending_reconcile: repaired %d orphaned engine-pending task(s) in "

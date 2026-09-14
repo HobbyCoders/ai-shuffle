@@ -312,7 +312,33 @@ async function fetchActiveSessions(tagId?: string | null): Promise<Session[]> {
 	}
 }
 
-async function loadSessionsInternal(tagId?: string | null, pages: number = INITIAL_SESSION_PAGES) {
+// Share a refresh across callers, including different resource subscribers. Calls
+// in the same turn share the first request; later invalidations retain one trailing
+// refresh. A changed filter fences the old response before it can publish.
+let sessionLoad: Promise<void> | null = null;
+let pendingSessionLoad: { tagId: string | null; pages: number } | null = null;
+let runningSessionTag: string | null = null;
+function loadSessionsInternal(tagId?: string | null, pages: number = INITIAL_SESSION_PAGES): Promise<void> {
+	const tag = tagId ?? null;
+	pendingSessionLoad = { tagId: tag, pages };
+	if (sessionLoad) {
+		if (runningSessionTag !== tag) ++_loadSessionsRequestId;
+		return sessionLoad;
+	}
+	sessionLoad = Promise.resolve().then(async () => {
+		try {
+			while (pendingSessionLoad) {
+				const next = pendingSessionLoad;
+				pendingSessionLoad = null;
+				runningSessionTag = next.tagId;
+				await fetchSessionList(next.tagId, next.pages);
+			}
+		} finally { sessionLoad = null; }
+	});
+	return sessionLoad;
+}
+
+async function fetchSessionList(tagId?: string | null, pages: number = INITIAL_SESSION_PAGES) {
 	const requestId = ++_loadSessionsRequestId;
 	_update(s => ({ ...s, sessionsLoading: true }));
 	try {
@@ -666,7 +692,7 @@ export const appData = {
 
 	// ── Session Operations ──────────────────────────────────────────────
 
-	async loadSessions(tagId?: string | null) {
+	async loadSessions(tagId: string | null = _state.sessionsTagFilter) {
 		await loadSessionsInternal(tagId);
 	},
 

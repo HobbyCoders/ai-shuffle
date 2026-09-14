@@ -43,6 +43,7 @@ const flush = () => vi.advanceTimersByTimeAsync(0);
 beforeEach(() => {
 	vi.useFakeTimers();
 	vi.clearAllMocks();
+	Object.defineProperty(document, 'hidden', { configurable: true, value: false });
 	mocks.getGitStatus.mockResolvedValue(status());
 	mocks.getDiffStats.mockResolvedValue({ additions: 12, deletions: 3, files_changed: 1 });
 });
@@ -53,6 +54,41 @@ afterEach(() => {
 });
 
 describe('sessionGitState', () => {
+	it.each([false, true])('pauses hidden checkout watches and resumes deduped cards (dirty=%s)', async (dirty) => {
+		mocks.getGitStatus.mockResolvedValue(status({ has_changes: dirty }));
+		Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+		const a = sessionGitState.watch('s1', 'proj-1');
+		const b = sessionGitState.watch('s1', 'proj-1');
+		await vi.advanceTimersByTimeAsync(REFRESH_MS * 3);
+		expect(mocks.getGitStatus).not.toHaveBeenCalled();
+		Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+		document.dispatchEvent(new Event('visibilitychange'));
+		await flush();
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(1);
+		expect(mocks.getDiffStats).toHaveBeenCalledTimes(dirty ? 1 : 0);
+		Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+		document.dispatchEvent(new Event('visibilitychange'));
+		await vi.advanceTimersByTimeAsync(REFRESH_MS * 3);
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(1);
+		a(); b();
+		Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+		document.dispatchEvent(new Event('visibilitychange'));
+		await flush();
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it('aborts hidden work before it can launch a dirty diff request', async () => {
+		let finish!: (value: ReturnType<typeof status>) => void;
+		mocks.getGitStatus.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+		sessionGitState.watch('s1', 'proj-1');
+		const signal = mocks.getGitStatus.mock.calls[0][2].signal;
+		Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+		document.dispatchEvent(new Event('visibilitychange'));
+		expect(signal.aborted).toBe(true);
+		finish(status());
+		await flush();
+		expect(mocks.getDiffStats).not.toHaveBeenCalled();
+	});
 	it('retains hydrated main-panel state when returning to a background card', async () => {
 		const clean = { status: status({ has_changes: false }), diffStats: null, loaded: true };
 		sessionGitState.remember('s1', 'proj-1', 'wt-1', clean);

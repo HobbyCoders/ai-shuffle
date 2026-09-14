@@ -38,6 +38,7 @@ import { TAB_ACTIVE_SESSION_KEY } from '$lib/stores/device-id';
 import { feedController } from '$lib/stores/session/v2/feed-controller';
 import { api } from '$lib/api/client';
 import { openSessionLink } from '$lib/services/session-navigation';
+import { resourceSync } from '$lib/services/resource-sync';
 
 beforeEach(() => {
 	activeSession.destroy();
@@ -57,6 +58,27 @@ beforeEach(() => {
 });
 
 afterEach(() => { cleanup(); activeSession.destroy(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+describe('page session refresh scheduling', () => {
+	it('joins focus/visibility and root reconnect invalidations in one subscriber refresh', async () => {
+		const listen = vi.spyOn(window, 'addEventListener');
+		render(Page);
+		await waitFor(() => expect(listen.mock.calls.some(([name]) => name === 'focus')).toBe(true));
+		vi.useFakeTimers();
+		const off = resourceSync.subscribe(['sessions'], () => appData.loadSessions());
+		try {
+			await vi.advanceTimersByTimeAsync(5000);
+			vi.mocked(appData.loadSessions).mockClear();
+			Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'visible'});
+			document.dispatchEvent(new Event('visibilitychange'));
+			window.dispatchEvent(new Event('focus'));
+			resourceSync.invalidate();
+			expect(appData.loadSessions).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(100);
+			expect(appData.loadSessions).toHaveBeenCalledOnce();
+		} finally { off(); resourceSync.clear(); vi.useRealTimers(); }
+	});
+});
 
 describe('Swarm session navigation through the actual active-session store', () => {
 	it('selects a child absent from the sidebar list and starts that child feed on click', async () => {

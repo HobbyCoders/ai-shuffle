@@ -1,5 +1,5 @@
 /**
- * Windowed transcript mounting — pure geometry/bookkeeping helpers.
+ * Windowed transcript mounting — scheduling and geometry helpers.
  *
  * Why (PERFORMANCE_REVIEW §3.2 R4): MessageArea used to mount EVERY display
  * item. `content-visibility: auto` skips paint and layout for off-screen rows,
@@ -15,9 +15,36 @@
  * keeps the keyed `{#each}` append-only in both directions and makes every
  * transition here monotone.
  *
- * All of it is pure integer math so the behaviour can be pinned by tests
- * without a DOM.
+ * Geometry stays pure; the background scheduler takes callbacks so its
+ * visibility and idle-budget decisions can be tested independently.
  */
+
+/** Schedule optional history mounting only when the view can use it. Explicit
+ * scroll/search/turn navigation stays outside this background scheduler. */
+export function createWindowBackfill(canRun: () => boolean, expand: () => void) {
+	let handle: number | null = null;
+	let idle = false;
+	function cancel() {
+		if (handle === null) return;
+		if (idle && typeof cancelIdleCallback !== 'undefined') cancelIdleCallback(handle);
+		else clearTimeout(handle);
+		handle = null;
+	}
+	function schedule() {
+		if (handle !== null || !canRun()) return;
+		const run = (deadline?: IdleDeadline) => {
+			handle = null;
+			if (!canRun()) return;
+			// A timeout is not idle time. Leave a frame's worth of headroom before
+			// mounting a chunk; never force optional work onto a busy renderer.
+			if (!deadline || (!deadline.didTimeout && deadline.timeRemaining() >= 8)) expand();
+			schedule();
+		};
+		idle = typeof requestIdleCallback !== 'undefined';
+		handle = idle ? requestIdleCallback(run) : setTimeout(run, 300) as unknown as number;
+	}
+	return { schedule, cancel };
+}
 
 /** Items mounted immediately on open / session switch. */
 export const TRANSCRIPT_WINDOW_SIZE = 60;

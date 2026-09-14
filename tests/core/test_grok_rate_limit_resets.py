@@ -5,6 +5,7 @@ Wire fixtures mirror the live gRPC-web response captured from grok.com on
 2026-08-20 (one ``restok_*`` token with validity_start/validity_end).
 """
 
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import httpx
@@ -231,6 +232,12 @@ class TestNormalize:
 
 
 class TestNetwork:
+    @pytest.fixture(autouse=True)
+    def fixed_inventory_clock(self, monkeypatch):
+        # Keep the recorded wire fixture valid without changing expiry policy
+        # or replacing the process-wide time module used by other code.
+        monkeypatch.setattr(grok, "time", SimpleNamespace(time=lambda: NOW))
+
     def test_urls_are_pinned_to_grok_com(self):
         for url in (GET_REMAINING_RESETS_URL, REDEEM_RESET_URL):
             parts = urlsplit(url)

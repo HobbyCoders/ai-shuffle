@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const m = vi.hoisted(() => ({ bindings:new Set<string>(),listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadSessions:vi.fn() }));
 vi.mock('$lib/stores/auth.svelte',()=>({auth:{subscribe:(fn:(s:any)=>void)=>{m.listener=fn;return m.unsubscribe;},checkAuth:m.check}}));
 vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,refresh:m.refresh,register:(key:string)=>m.bindings.add(key)}}));
-vi.mock('./resource-sync',()=>({resourceSync:{subscribe:vi.fn(()=>vi.fn()),invalidate:m.invalidate,clear:m.clear}}));
+vi.mock('./resource-sync', async (importOriginal) => {
+ const actual = await importOriginal<typeof import('./resource-sync')>();
+ const sync = new actual.ResourceSync();
+ m.invalidate.mockImplementation(sync.invalidate.bind(sync));
+ m.clear.mockImplementation(sync.clear.bind(sync));
+ return { ...actual, resourceSync: { subscribe: vi.fn(sync.subscribe.bind(sync)), invalidate: m.invalidate, clear: m.clear } };
+});
 vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null},applyComposerDefaults:vi.fn(),resetForAccountChange:vi.fn()}}));
 vi.mock('$lib/stores/app-data.svelte',()=>({appData:{loadProfiles:vi.fn().mockResolvedValue(undefined),loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadSessions:m.loadSessions}}));
 vi.mock('$lib/stores/notifications',()=>({notify:{resetLocal:vi.fn()}}));
@@ -21,6 +27,14 @@ vi.mock('$lib/stores/sidebar-prefs.svelte',()=>({}));
 vi.mock('$lib/stores/sessionMode.svelte',()=>({}));
 vi.mock('$lib/stores/browser-panel.svelte',()=>({}));
 vi.mock('./notificationSound',()=>({}));
+const access = vi.hoisted(() => ({get: vi.fn()}));
+vi.mock('$lib/api/client', async (importOriginal) => {
+ const actual = await importOriginal<typeof import('$lib/api/client')>();
+ return {...actual, api: {...actual.api, get: access.get}};
+});
+import { render, screen, cleanup } from '@testing-library/svelte';
+import { tick } from 'svelte';
+import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
 import { startLiveSync } from './live-sync';
 import { resourceSync } from './resource-sync';
 import { hydrateModelRegistry } from '$lib/constants/models';
@@ -41,6 +55,25 @@ function account(username:string|null) {m.listener?.({loading:false,status:{auth
 beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();Socket.all=[];localStorage.clear();sessionStorage.clear();vi.stubGlobal('WebSocket',Socket);});
 afterEach(()=>{stop?.();vi.useRealTimers();vi.unstubAllGlobals();});
 describe('root authenticated live-sync lifecycle',()=>{
+ it('delivers a scoped socket access change through the real resource subscriber to the approval card', async () => {
+  Object.defineProperty(document, 'hidden', {configurable:true, value:false});
+  const empty = {requests:[],actions:[],grants:[],saved_connections:[],vault_available:false};
+  let snapshot: Record<string, unknown> = empty;
+  access.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? {mode:'code'} : snapshot);
+  stop=startLiveSync();account('alice');
+  const view=render(ChatAccess,{sessionId:'s1'});
+  try {
+   await vi.advanceTimersByTimeAsync(0);
+   snapshot = {...empty, actions:[{id:'a1',grant_id:'g1',operation:'command',arguments:{command:'pwd'},expires_at:9999999999}]};
+   Socket.all[0].emit({type:'chat_access_changed',session_id:'other'});
+   await vi.advanceTimersByTimeAsync(100);await tick();
+   expect(screen.queryByText('Approve this remote command?')).toBeNull();
+   Socket.all[0].emit({type:'chat_access_changed',session_id:'s1'});
+   await vi.advanceTimersByTimeAsync(100);await tick();
+   expect(screen.getByText('Approve this remote command?')).toBeTruthy();
+   expect(access.get.mock.calls.filter(([url])=>url.startsWith('/chat-access/'))).toHaveLength(2);
+  } finally {view.unmount();cleanup();resourceSync.clear();}
+ });
  it.each(['settings','agents'])('refreshes synced %s and reapplies composer defaults without opening Settings',async(resource)=>{
   stop=startLiveSync();account('alice');
   const subscription=vi.mocked(resourceSync.subscribe).mock.calls.find(([names])=>names.includes(resource));

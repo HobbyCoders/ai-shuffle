@@ -531,7 +531,8 @@ def insert_op(cursor, env: dict, lane: str) -> bool:
 
 
 def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: Optional[str] = None,
-              exclude_origin: Optional[str] = None, _conn=None) -> List[dict]:
+              exclude_origin: Optional[str] = None, _conn=None,
+              _heads: Optional[Dict[str, Dict[str, int]]] = None) -> List[dict]:
     """Ops the caller lacks: per origin/incarnation, everything past its watermark.
 
     ``watermarks`` is ``{origin_device_id: {incarnation: last_seq}}``. Origins
@@ -539,18 +540,27 @@ def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: 
     origin by (incarnation, seq) so the receiver can apply them in order.
     """
     def _query(cursor):
-        cursor.execute("SELECT DISTINCT origin_device_id, incarnation FROM sync_ops ORDER BY origin_device_id, incarnation")
-        streams = [(r["origin_device_id"], int(r["incarnation"])) for r in cursor.fetchall()]
+        if _heads is None:
+            cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS head FROM sync_ops "
+                           "GROUP BY origin_device_id, incarnation ORDER BY origin_device_id, incarnation")
+            streams = [(r["origin_device_id"], int(r["incarnation"]), int(r["head"])) for r in cursor.fetchall()]
+        else:
+            streams = sorted((origin, int(inc), int(head))
+                             for origin, incarnations in _heads.items() for inc, head in incarnations.items())
         out: List[dict] = []
-        for origin, incarnation in streams:
+        for origin, incarnation, head in streams:
             if origin == exclude_origin:
                 continue
             last = int((watermarks.get(origin) or {}).get(str(incarnation), (watermarks.get(origin) or {}).get(incarnation, 0)) or 0)
+            if last >= head:
+                continue
             budget = limit - len(out)
             if budget <= 0:
                 break
-            params: List[Any] = [origin, incarnation, last]
-            sql = "SELECT envelope FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s AND seq > %s"
+            # A concurrent append belongs to the next exchange, not beyond
+            # the frontier advertised with this batch.
+            params: List[Any] = [origin, incarnation, last, head]
+            sql = "SELECT envelope FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s AND seq > %s AND seq <= %s"
             if lane:
                 sql += " AND lane = %s"
                 params.append(lane)
@@ -951,11 +961,24 @@ def set_catalog_cursor(cursor, session_id: str, published_seq: int) -> None:
         (session_id, published_seq, _now()))
 
 
-def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None) -> bool:
-    """A state-copy recipient can forward state even without original log rows."""
+def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = None,
+                   exclude_origin: str | None = None) -> tuple[List[dict], dict, bool]:
+    """Read one frontier for a bounded batch and its snapshot-gap check."""
     with get_db() as conn:
+        heads = local_watermarks(conn)
+        snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin, _conn=conn, _heads=heads)
+        ops = ops_since(watermarks, limit=limit, lane=lane, exclude_origin=exclude_origin,
+                        _conn=conn, _heads=heads)
+        return ops, heads, snapshot
+
+
+def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None, _conn=None,
+                      _heads: Optional[Dict[str, Dict[str, int]]] = None) -> bool:
+    """A state-copy recipient can forward state even without original log rows."""
+    def _query(conn):
         cursor = conn.cursor()
-        for origin, streams in local_watermarks(conn).items():
+        heads = local_watermarks(conn) if _heads is None else _heads
+        for origin, streams in heads.items():
             if origin == exclude_origin:
                 continue
             for incarnation, head in streams.items():
@@ -967,4 +990,8 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None) ->
                                (origin, int(incarnation), last, head))
                 if int(cursor.fetchone()["n"]) != head - last:
                     return True
-    return False
+        return False
+    if _conn is not None:
+        return _query(_conn)
+    with get_db() as conn:
+        return _query(conn)

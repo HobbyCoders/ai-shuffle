@@ -141,13 +141,15 @@ async def _command(ws, state, op, args=None, ok=True):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("chrome_mode", ["external", "panel-demand", "direct-page-demand"])
 async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
-    tmp_path, monkeypatch, caplog
+    tmp_path, monkeypatch, caplog, chrome_mode
 ):
     from app.api import browser_panel as panel
     from app.core import browser_panel_registry as registry
     from app.core import browser_runtime, mcp_config, native_chrome
 
+    owned_chrome = chrome_mode != "external"
     caplog.set_level("DEBUG", logger="app.core.browser_stream")
     root = Path(__file__).resolve().parents[1]
     entry = root / "browser-mcp" / "dist" / "index.js"
@@ -177,8 +179,8 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
             try:
                 response = await client.get(cdp_origin + path, timeout=2)
                 return response.json() if response.is_success else None
-            except httpx.HTTPError:
-                return None
+            except (httpx.HTTPError, ValueError):
+                return None  # /json/close returns plain text, like the native helper.
 
     async def browser_running():
         return await cdp_get("/json/version") is not None
@@ -332,8 +334,34 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
         await _ready(cdp_origin + "/json/version")
         return chrome
 
+    if owned_chrome:
+        # Exercise the real supervisor through Runtime._connect, isolated from
+        # any live CDP listener/profile. Container CI also tests native demand.
+        from app.core import startup
+        monkeypatch.setattr(native_chrome, "_in_container", lambda: False)
+        monkeypatch.setattr(native_chrome, "resolve_chrome_executable", lambda: chromium)
+        monkeypatch.setattr(native_chrome, "_profile_dir", lambda: tmp_path / "chrome")
+        monkeypatch.setattr(native_chrome, "_proc", None)
+        monkeypatch.setattr(native_chrome, "_supervisor_task", None)
+        monkeypatch.setattr(native_chrome, "_stopping", False)
+        monkeypatch.setattr(native_chrome, "_last_detail", None)
+        launch_args = native_chrome._launch_args
+        monkeypatch.setattr(native_chrome, "_launch_args", lambda port: [*launch_args(port), "--no-sandbox"])
+        monkeypatch.setattr(startup.settings, "start_chrome", True)
+
     try:
-        chrome = await start_chrome()
+        if owned_chrome:
+            startup._check_browser_mcp_prereqs()
+            await asyncio.sleep(0)
+            assert native_chrome._supervisor_task is None
+            assert not await browser_running()
+            if chrome_mode == "direct-page-demand":
+                target = await native_chrome.create_page("about:blank")
+                assert target and target["id"]
+                await cdp_get("/json/close/" + target["id"])
+                assert target["id"] not in {tab["id"] for tab in await cdp_get("/json/list")}
+        else:
+            chrome = await start_chrome()
         server = uvicorn.Server(
             uvicorn.Config(
                 app, host="127.0.0.1", port=api_port, lifespan="off", log_level="error"
@@ -375,6 +403,10 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
             assert len(cold_state["tabs"]) == 1
             assert cold_state["control"]["owner"] == "agent"
             assert cold_state["target_id"]
+        if owned_chrome:
+            chrome = native_chrome._proc
+            assert chrome is not None and chrome.returncode is None
+            assert native_chrome._supervisor_task is not None
         # No agent exists yet. A human can acquire control and navigate.
         async with websockets.connect(f"ws://127.0.0.1:{api_port}/api/v1/ws/browser/{session_id}?token={auth}", max_size=8_000_000) as human:
             await _receive(human, lambda msg: msg.get("type") == "hello")
@@ -410,6 +442,21 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
                 )
             )["state"]
             await _receive(first, lambda msg: msg.get("type") == "frame")
+            # A delayed DOM-only change emits no Playwright navigation/tool
+            # event. Passive viewers must still receive fresh native editors.
+            update = await mcp.tool("browser_eval", {"code": (
+                "setTimeout(() => { const field = document.createElement('textarea');"
+                "field.setAttribute('aria-label', 'Passive editor'); field.value = 'Fresh';"
+                "field.style.cssText = 'position:fixed;left:300px;top:20px;width:120px;height:40px';"
+                "document.body.appendChild(field); }, 1200); return true;"
+            )})
+            assert not update.get("isError"), _text(update)
+            await _receive(second, lambda msg: (
+                msg.get("type") == "workspace" and any(
+                    field.get("label") == "Passive editor" and field.get("value") == "Fresh"
+                    for field in msg["state"].get("editors", [])
+                )
+            ))
             await _command(first, state, "takeover")
             shared = await _receive(
                 second,
@@ -596,8 +643,11 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
             assert "must-not-replay" not in _text(content)
             current_runtime = shared["state"]["runtime_id"]
             previous_tab = shared["state"]["active_tab_id"]
-            chrome.terminate()
-            await asyncio.wait_for(chrome.wait(), 10)
+            if owned_chrome:
+                await native_chrome.stop()
+            else:
+                chrome.terminate()
+                await asyncio.wait_for(chrome.wait(), 10)
             chrome = await start_chrome()
             navigation = await mcp.tool(
                 "browser_navigate", {"url": origin + "/fixture?browser-restarted"}
@@ -623,6 +673,8 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
             assert frame["metadata"]["runtime_id"] == current_runtime
     finally:
         await browser_runtime.shutdown()
+        if owned_chrome:
+            await native_chrome.stop()
         for proc in reversed(processes):
             if proc.returncode is None:
                 proc.terminate()

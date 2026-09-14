@@ -269,7 +269,7 @@ class TestWorkspaceEndpoints:
         token = registry.issue_token("control-api")
         auth = dict(session_id="control-api", token=token, runtime_id="runtime")
         prefix = "/api/v1/browser/panel/control/"
-        assert client.post(prefix + "register", json=auth).json() == {"ok": True}
+        assert client.post(prefix + "register", json=auth).json() == {"ok": True, "viewer_count": 0}
         value = control.unavailable("runtime")
         value["available"] = True
         assert (
@@ -281,6 +281,15 @@ class TestWorkspaceEndpoints:
         assert (
             client.post("/api/v1/browser/panel/register", json=auth).status_code == 409
         )
+        broker = control.get("control-api")
+        client.portal.call(broker.attach, "passive", AsyncMock())
+        assert client.post(prefix + "poll", json=auth).json() == {
+            "commands": [], "viewer_count": 1,
+        }
+        client.portal.call(broker.detach, "passive")
+        assert client.post(prefix + "poll", json=auth).json()["viewer_count"] == 0
+        client.portal.call(broker.attach, "reopened", AsyncMock())
+        assert client.post(prefix + "poll", json=auth).json()["viewer_count"] == 1
         invalid = {**value, "revision": -1}
         assert (
             client.post(prefix + "report", json={**auth, "state": invalid}).status_code

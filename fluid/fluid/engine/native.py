@@ -1563,7 +1563,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_progress_at = time.monotonic()
         sequenced = await self.bus.publish(event)
         try:
-            await self.store.append_event(event.session_id, sequenced)
+            stream_append = getattr(self.store, "append_stream_event", None)
+            if isinstance(event, _RECONSTRUCTIBLE_EVENTS) and callable(stream_append):
+                await stream_append(event.session_id, sequenced)
+            else:
+                await self.store.append_event(event.session_id, sequenced)
         except Exception as exc:
             if not isinstance(event, _RECONSTRUCTIBLE_EVENTS):
                 raise

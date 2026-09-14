@@ -20,8 +20,10 @@ store must not duplicate rows.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -81,31 +83,50 @@ def _create_session_sync(meta: SessionMeta) -> None:
 
 
 def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
-    """Load meta + all nodes + all events for one session (single trip)."""
+    """Load the node tree without retaining the unbounded event history."""
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT session_id, head_node_id, created_at, cli_session_id, "
-            "project_root FROM fluid_sessions WHERE session_id = %s",
-            (session_id,),
+            "project_root FROM fluid_sessions WHERE session_id = %s", (session_id,),
         )
-        meta_row = cur.fetchone()
-        if meta_row is None:
+        row = cur.fetchone()
+        if row is None:
             return None
+        meta = SessionMeta(**dict(row))
         cur.execute(
             "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
-            "WHERE session_id = %s",
-            (session_id,),
+            "WHERE session_id = %s", (session_id,),
         )
-        node_rows = cur.fetchall()
+        rows = cur.fetchall()
+    # Decode off the event loop, and release the connection first.
+    nodes = {r["node_id"]: SessionNode(
+        node_id=r["node_id"], parent_id=r["parent_id"], ts=r["ts"],
+        message=Message.from_dict(_as_dict(r["message"])),
+    ) for r in rows}
+    return {"meta": meta, "nodes": nodes}
+
+
+def _events_since_sync(session_id: str, seq: int) -> List[Event]:
+    with get_db() as conn:
+        cur = conn.cursor()
         cur.execute(
             "SELECT event FROM fluid_session_events WHERE session_id = %s "
-            "ORDER BY seq",
-            (session_id,),
+            "AND seq > %s ORDER BY seq", (session_id, seq),
         )
-        event_rows = cur.fetchall()
-    return {"meta": dict(meta_row), "nodes": [dict(r) for r in node_rows],
-            "events": [r["event"] for r in event_rows]}
+        rows = cur.fetchall()
+    return [event_from_dict(_as_dict(r["event"])) for r in rows]
+
+
+def _last_event_seq_sync(session_id: str) -> int:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT seq FROM fluid_session_events WHERE session_id = %s "
+            "ORDER BY seq DESC LIMIT 1", (session_id,),
+        )
+        row = cur.fetchone()
+    return int(row["seq"]) if row else 0
 
 
 def _append_node_sync(session_id: str, node: SessionNode) -> None:
@@ -144,27 +165,24 @@ def _set_cli_session_id_sync(session_id: str, cli_session_id: Optional[str]) -> 
         )
 
 
-def _append_event_sync(session_id: str, event_dict: Dict[str, Any], seq: int) -> None:
+def _append_events_sync(session_id: str, events: List[Event]) -> None:
+    # One transaction for consecutive reconstructible deltas and their barrier.
+    payloads = [(e.seq, _scrub_pg_illegal(scrub_url_credentials(event_to_dict(e))))
+                for e in events]
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO fluid_session_events (session_id, seq, event) "
-            "VALUES (%s, %s, %s) ON CONFLICT (session_id, seq) DO NOTHING",
-            # Same scrub as the node path: ToolUse.input / ToolArgsDelta.
-            # partial_json / TextDelta.text carry the very same cell text.
-            (session_id, seq,
-             Json(_scrub_pg_illegal(scrub_url_credentials(event_dict)))),
-        )
-        # The conflict clause is there for legitimate bus replays, but it also
-        # hides real loss: an engine whose in-memory log restarted at seq 1 for
-        # a resumed session re-uses numbers that already exist, and its events
-        # vanish. Never let that be silent again.
-        if cur.rowcount == 0:
-            logger.warning(
-                "fluid event DROPPED by seq collision: session=%s seq=%s "
-                "type=%s (a row with that seq already exists)",
-                session_id, seq, event_dict.get("_cls"),
+        for seq, payload in payloads:
+            cur.execute(
+                "INSERT INTO fluid_session_events (session_id, seq, event) "
+                "VALUES (%s, %s, %s) ON CONFLICT (session_id, seq) DO NOTHING",
+                (session_id, seq, Json(payload)),
             )
+            if cur.rowcount == 0:
+                logger.warning(
+                    "fluid event DROPPED by seq collision: session=%s seq=%s "
+                    "type=%s (a row with that seq already exists)",
+                    session_id, seq, payload.get("_cls"),
+                )
 
 
 # ─── Cross-session search ────────────────────────────────────────────────────
@@ -596,40 +614,83 @@ def _slice_sync(session_id: str, start: int, count: int) -> Optional[SessionSlic
 class PgFluidStore:
     """fluid ``SessionStore`` over the app's PostgreSQL database."""
 
+    EVENT_CACHE_LIMIT = 128
+    STREAM_BATCH_LIMIT = 32
+    STREAM_BATCH_BYTES = 64 * 1024
+    STREAM_BATCH_SECONDS = 0.05
+
     def __init__(self) -> None:
         self._sessions: Dict[str, SessionMeta] = {}
         self._nodes: Dict[str, Dict[str, SessionNode]] = {}
         self._events: Dict[str, List[Event]] = {}
+        self._event_floor: Dict[str, int] = {}
+        self._pending_events: Dict[str, List[Event]] = {}
+        self._pending_since: Dict[str, float] = {}
+        self._pending_bytes: Dict[str, int] = {}
         self._loaded: set = set()
+        self._load_lock = asyncio.Lock()
+        self._event_lock = asyncio.Lock()
 
     async def _ensure_loaded(self, session_id: str) -> bool:
-        if session_id in self._loaded:
-            return session_id in self._sessions
-        self._loaded.add(session_id)
-        data = await run_sync(_load_session_sync, session_id)
-        if data is None:
-            return False
-        meta_row = data["meta"]
-        meta = SessionMeta(
-            session_id=meta_row["session_id"],
-            head_node_id=meta_row["head_node_id"],
-            created_at=meta_row["created_at"],
-            cli_session_id=meta_row.get("cli_session_id"),
-            project_root=meta_row.get("project_root"),
-        )
-        nodes: Dict[str, SessionNode] = {}
-        for r in data["nodes"]:
-            nodes[r["node_id"]] = SessionNode(
-                node_id=r["node_id"],
-                parent_id=r["parent_id"],
-                message=Message.from_dict(_as_dict(r["message"])),
-                ts=r["ts"],
-            )
-        events = [event_from_dict(_as_dict(e)) for e in data["events"]]
-        self._sessions[session_id] = meta
-        self._nodes[session_id] = nodes
-        self._events[session_id] = events
-        return True
+        async with self._load_lock:
+            if session_id in self._loaded:
+                return session_id in self._sessions
+            data = await run_sync(_load_session_sync, session_id)
+            # A failed read must be retryable; never publish a half-loaded cache.
+            if data is not None:
+                self._sessions[session_id] = data["meta"]
+                self._nodes[session_id] = data["nodes"]
+            self._loaded.add(session_id)
+            return data is not None
+
+    def _cache_events(self, session_id: str, events: List[Event], floor: int) -> None:
+        tail = events[-self.EVENT_CACHE_LIMIT:]
+        self._events[session_id] = tail
+        self._event_floor[session_id] = max(floor, tail[0].seq - 1) if len(events) > len(tail) else floor
+
+    async def _write_pending(self, session_id: str, extra: Optional[Event] = None) -> None:
+        events = self._pending_events.pop(session_id, [])
+        self._pending_since.pop(session_id, None)
+        self._pending_bytes.pop(session_id, None)
+        if extra is not None:
+            events.append(extra)
+        if not events:
+            return
+        await run_sync(_append_events_sync, session_id, events)
+        # Invalidate rather than publishing uncommitted or duplicate objects.
+        self._events.pop(session_id, None)
+        self._event_floor.pop(session_id, None)
+
+    async def append_stream_event(self, session_id: str, event: Event) -> None:
+        """Optional native-loop hook; only reconstructible deltas may be buffered.
+
+        Flush on the next delta after 50ms, at 32 events, or before a durable
+        event/node/replay. No background task or timer survives a parked turn.
+        A crash may lose this bounded tail, never a durable lifecycle event.
+        """
+        from fluid.events.model import TextDelta, ThinkingDelta, ToolArgsDelta
+        if not isinstance(event, (TextDelta, ThinkingDelta, ToolArgsDelta)):
+            await self.append_event(session_id, event)
+            return
+        async with self._event_lock:
+            pending = self._pending_events.setdefault(session_id, [])
+            pending.append(event)
+            since = self._pending_since.setdefault(session_id, time.monotonic())
+            text = getattr(event, "text", getattr(event, "partial_json", ""))
+            # Four bytes per codepoint is a conservative UTF-8 payload bound.
+            size = self._pending_bytes.get(session_id, 0) + 4 * len(text)
+            self._pending_bytes[session_id] = size
+            if (len(pending) >= self.STREAM_BATCH_LIMIT or size >= self.STREAM_BATCH_BYTES
+                    or time.monotonic() - since >= self.STREAM_BATCH_SECONDS):
+                await self._write_pending(session_id)
+
+    async def flush_events(self, session_id: str) -> None:
+        async with self._event_lock:
+            await self._write_pending(session_id)
+
+    async def last_event_seq(self, session_id: str) -> int:
+        await self.flush_events(session_id)
+        return await run_sync(_last_event_seq_sync, session_id)
 
     # ─── SessionStore protocol ───────────────────────────────────────
 
@@ -657,11 +718,12 @@ class PgFluidStore:
         return None
 
     async def append(self, session_id: str, node: SessionNode) -> None:
+        await self.flush_events(session_id)
         await self._ensure_loaded(session_id)
+        await run_sync(_append_node_sync, session_id, node)
         self._nodes.setdefault(session_id, {})[node.node_id] = node
         if session_id in self._sessions:
             self._sessions[session_id].head_node_id = node.node_id
-        await run_sync(_append_node_sync, session_id, node)
 
     async def get_node(self, session_id: str, node_id: str) -> Optional[SessionNode]:
         await self._ensure_loaded(session_id)
@@ -704,16 +766,17 @@ class PgFluidStore:
         await run_sync(_set_cli_session_id_sync, session_id, cli_session_id)
 
     async def append_event(self, session_id: str, event: Event) -> None:
-        await self._ensure_loaded(session_id)
-        self._events.setdefault(session_id, []).append(event)
-        await run_sync(
-            _append_event_sync, session_id, event_to_dict(event),
-            getattr(event, "seq", -1),
-        )
+        async with self._event_lock:
+            await self._write_pending(session_id, event)
 
     async def events_since(self, session_id: str, seq: int) -> List[Event]:
-        await self._ensure_loaded(session_id)
-        return [e for e in self._events.get(session_id, []) if e.seq > seq]
+        async with self._event_lock:
+            await self._write_pending(session_id)
+            if session_id in self._event_floor and seq >= self._event_floor[session_id]:
+                return [e for e in self._events[session_id] if e.seq > seq]
+            events = await run_sync(_events_since_sync, session_id, seq)
+            self._cache_events(session_id, events, seq)
+            return events
 
     async def search(
         self,

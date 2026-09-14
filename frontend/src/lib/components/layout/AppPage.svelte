@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { watchResources } from '$lib/services/watch-resources';
+	import { resourceSync } from '$lib/services/resource-sync';
 	/**
 	 * AppPage - the authenticated workspace: data bootstrap, keyboard
 	 * shortcuts, deep links, the global modals — and a `shell` snippet that
@@ -166,8 +167,8 @@
 		const now = Date.now();
 		if (now - _lastBoardRefresh < BOARD_REFRESH_MIN_INTERVAL_MS) return;
 		_lastBoardRefresh = now;
-		// Respect the current tag filter (mirrors the other loadSessions callers).
-		void appData.loadSessions($sessionsTagFilter);
+		// Join the root visibility/reconnect queue instead of racing its load.
+		resourceSync.invalidate(['sessions']);
 	}
 	function refreshBoardIfVisible() {
 		// The sidebar session list is always on screen on desktop, so refresh on

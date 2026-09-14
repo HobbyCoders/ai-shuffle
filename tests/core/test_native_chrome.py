@@ -10,9 +10,10 @@ Pure/logic tests only: nothing here spawns Chrome or binds a port, and no
 POSIX-only APIs are exercised (the module and these tests import on Linux CI).
 """
 
+import asyncio
 import os
 from pathlib import Path
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, Mock
 
 import pytest
 
@@ -115,6 +116,13 @@ class TestEnsureStartedNoOps:
 
 
 class TestCreatePage:
+    @pytest.fixture(autouse=True)
+    def no_browser(self, monkeypatch):
+        from app.core.config import settings
+        monkeypatch.setattr(settings, "start_chrome", True)
+        monkeypatch.setattr(nc, "ensure_started", AsyncMock())
+        monkeypatch.setattr(nc, "_supervisor_task", None)
+
     @pytest.mark.asyncio
     async def test_put_json_new_returns_tab(self):
         class _Resp:
@@ -139,6 +147,32 @@ class TestCreatePage:
         with patch("app.core.native_chrome.httpx.AsyncClient", return_value=_Client()):
             tab = await nc.create_page("https://ex.test/")
         assert tab == {"id": "T1", "url": "https://ex.test/"}
+        nc.ensure_started.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_waits_for_demand_started_cdp(self, monkeypatch):
+        monkeypatch.setattr(nc, "_supervisor_task", Mock(done=lambda: False))
+        probe = AsyncMock(side_effect=[False, True])
+        monkeypatch.setattr(nc, "_cdp_answers", probe)
+        response = Mock()
+        response.json.return_value = {"id": "T1"}
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.put.return_value = response
+        monkeypatch.setattr(nc.httpx, "AsyncClient", lambda **kw: client)
+        assert await nc.create_page("about:blank") == {"id": "T1"}
+        assert probe.await_count == 2
+        client.put.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("enabled,port", [(False, None), (True, 12345)])
+    async def test_disabled_or_other_port_does_not_launch(self, monkeypatch, enabled, port):
+        from app.core.config import settings
+        monkeypatch.setattr(settings, "start_chrome", enabled)
+        monkeypatch.setattr(nc, "_cdp_port", lambda: 9221)
+        monkeypatch.setattr(nc.httpx, "AsyncClient", Mock(side_effect=OSError("offline")))
+        assert await nc.create_page("about:blank", port=port) is None
+        nc.ensure_started.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_page_none_on_error(self):
@@ -154,4 +188,71 @@ class TestCreatePage:
 
         with patch("app.core.native_chrome.httpx.AsyncClient", return_value=_Client()):
             assert await nc.create_page("https://ex.test/") is None
+
+
+@pytest.mark.asyncio
+async def test_prereq_check_does_not_start_chrome(monkeypatch):
+    from app.core import startup
+
+    monkeypatch.setattr(startup.settings, "start_chrome", True)
+    start = AsyncMock()
+    monkeypatch.setattr(nc, "ensure_started", start)
+    startup._check_browser_mcp_prereqs()
+    await asyncio.sleep(0)
+    start.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_demand_starts_only_one_supervisor(monkeypatch, tmp_path):
+    monkeypatch.setattr(nc, "_in_container", lambda: False)
+    monkeypatch.setattr(nc, "_supervisor_task", None)
+    monkeypatch.setattr(nc, "_proc", None)
+    monkeypatch.setattr(nc, "_stopping", False)
+    monkeypatch.setattr(nc, "_last_detail", None)
+    monkeypatch.setattr(nc, "resolve_chrome_executable", lambda: "fixture-chrome")
+    monkeypatch.setattr(nc, "_profile_dir", lambda: tmp_path)
+
+    async def probe(port):
+        await asyncio.sleep(0)
+        return False
+
+    monkeypatch.setattr(nc, "_cdp_answers", probe)
+    process = Mock()
+    process.pid = 123
+    process.returncode = None
+    process.wait = AsyncMock()
+    exited = asyncio.Event()
+
+    async def wait():
+        await exited.wait()
+        return 0
+
+    process.wait.side_effect = wait
+    process.terminate.side_effect = lambda: exited.set()
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(nc.asyncio, "create_subprocess_exec", spawn)
+    try:
+        await asyncio.gather(*(nc.ensure_started() for _ in range(8)))
+        await asyncio.sleep(0)
+        spawn.assert_awaited_once()
+        await nc.ensure_started()
+        spawn.assert_awaited_once()
+    finally:
+        await nc.stop()
+
+
+@pytest.mark.asyncio
+async def test_external_browser_is_never_supervised_or_stopped(monkeypatch):
+    monkeypatch.setattr(nc, "_in_container", lambda: False)
+    monkeypatch.setattr(nc, "_supervisor_task", None)
+    monkeypatch.setattr(nc, "_proc", None)
+    monkeypatch.setattr(nc, "_stopping", False)
+    monkeypatch.setattr(nc, "_last_detail", None)
+    monkeypatch.setattr(nc, "_cdp_answers", AsyncMock(return_value=True))
+    spawn = AsyncMock()
+    monkeypatch.setattr(nc.asyncio, "create_subprocess_exec", spawn)
+    await nc.ensure_started()
+    assert "external browser" in nc.get_detail()
+    await nc.stop()
+    spawn.assert_not_called()
 

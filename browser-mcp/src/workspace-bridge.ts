@@ -21,20 +21,22 @@ export class WorkspaceBridge {
   private dirty = true;
   private reporting = false;
   private results: CommandResult[] = [];
-  private refreshTimer?: ReturnType<typeof setInterval>;
+  private refreshTimer?: ReturnType<typeof setTimeout>;
+  private viewerCount?: number;
   private refreshing = false;
+  private refreshRequested = false;
   private refreshSoon?: ReturnType<typeof setTimeout>;
   private lastRefresh = 0;
   constructor(session: Session, private config: BridgeConfig, private transport: typeof fetch = fetch) {
     this.workspace = new BrowserWorkspace(session);
-    this.workspace.onChange = () => { this.dirty = true; void this.flush(); void this.refresh(); };
+    this.workspace.onChange = () => { this.dirty = true; void this.flush(); };
+    const workspaceChanged = session.onWorkspaceChange!;
+    session.onWorkspaceChange = () => { workspaceChanged(); void this.refresh(); };
   }
   start(): void {
     if (this.started || this.abort.signal.aborted) return;
     this.started = true;
     disableLegacyReports();
-    this.refreshTimer = setInterval(() => void this.refresh(), 500);
-    this.refreshTimer.unref();
     void this.pollLoop();
   }
   async shutdown(): Promise<void> {
@@ -48,7 +50,7 @@ export class WorkspaceBridge {
   stop(): void {
     if (this.abort.signal.aborted) return;
     this.abort.abort();
-    clearInterval(this.refreshTimer);
+    clearTimeout(this.refreshTimer);
     clearTimeout(this.refreshSoon);
     this.workspace.stop();
     this.results = [];
@@ -85,27 +87,50 @@ export class WorkspaceBridge {
       return JSON.parse(Buffer.concat(chunks).toString("utf8"));
     } finally { await reader.cancel().catch(() => {}); }
   }
+  private updateViewers(body: unknown): void {
+    const viewers = object(body) && typeof body.viewer_count === "number" && Number.isSafeInteger(body.viewer_count) && body.viewer_count >= 0 ? body.viewer_count : undefined;
+    if (viewers === this.viewerCount) return;
+    this.viewerCount = viewers;
+    this.scheduleRefresh();
+    if (viewers !== 0) void this.refresh();
+  }
+  private scheduleRefresh(): void {
+    clearTimeout(this.refreshTimer);
+    if (this.abort.signal.aborted || this.viewerCount === 0) return;
+    // Events and command completion refresh immediately. Poll only for DOM /
+    // title changes that Playwright does not report, while a panel is watching.
+    // Older hosts without viewer_count keep a slower compatibility fallback.
+    this.refreshTimer = setTimeout(() => void this.refresh(), this.viewerCount === undefined ? 5000 : 1000);
+    this.refreshTimer.unref();
+  }
   private async refresh(): Promise<void> {
-    if (this.refreshing || this.abort.signal.aborted) return;
+    if (this.abort.signal.aborted) return;
+    if (this.refreshing) { this.refreshRequested = true; return; }
     if (Date.now() - this.lastRefresh < 200) {
       if (!this.refreshSoon) this.refreshSoon = setTimeout(() => { this.refreshSoon = undefined; void this.refresh(); }, 200);
       return;
     }
     this.lastRefresh = Date.now();
     this.refreshing = true;
-    try { await this.workspace.refresh(); } catch { /* next heartbeat retries metadata */ }
-    finally { this.refreshing = false; }
+    try { await this.workspace.refresh(); } catch { /* the next page event or viewer refresh retries metadata */ }
+    finally {
+      this.refreshing = false;
+      this.scheduleRefresh();
+      if (this.refreshRequested) { this.refreshRequested = false; void this.refresh(); }
+    }
   }
   private async pollLoop(): Promise<void> {
     let delay = 250;
     while (!this.abort.signal.aborted) {
       try {
         if (!this.registered) {
-          await this.post("register", {}, 5000); this.registered = true;
+          const registration = await this.post("register", {}, 5000); this.registered = true;
+          this.updateViewers(registration);
           void this.flush(); void this.refresh();
         }
         const body = await this.post("poll", {}, 25000);
         if (!object(body) || !Array.isArray(body.commands) || body.commands.length > 16) throw new Error("invalid poll response");
+        this.updateViewers(body);
         for (const command of body.commands) {
           // receive reserves takeover synchronously, before any promise continuation.
           void this.workspace.receive(command).then(result => {

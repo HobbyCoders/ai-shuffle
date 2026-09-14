@@ -469,6 +469,9 @@ class SkillStore:
         self._journal_bytes = -1
         # Stamped onto every journal entry (see journal_context).
         self._journal_tag: dict[str, str] = {}
+        self._journal_warning_at: dict[str, float] = {}
+        self._journal_skipped: dict[str, int] = {}
+        self._journal_reap_retry_at = 0.0
 
     def journal_context(
         self, *, session_id: str | None = None, agent: str | None = None,
@@ -671,6 +674,15 @@ class SkillStore:
         except OSError:
             return -1
 
+    def _journal_skip(self, reason: str) -> None:
+        self._journal_skipped[reason] = self._journal_skipped.get(reason, 0) + 1
+        now = time.monotonic()
+        if now - self._journal_warning_at.get(reason, float("-inf")) >= 60:
+            _log.warning("Inference event skipped: %s (%d skipped since last warning)",
+                         reason, self._journal_skipped[reason])
+            self._journal_warning_at[reason] = now
+            self._journal_skipped[reason] = 0
+
     def journal_append(self, entry: dict) -> None:
         """Append one journal line.
 
@@ -692,10 +704,13 @@ class SkillStore:
         if max(0, self._journal_size()) + line_bytes > JOURNAL_MAX_BYTES:
             # Past the cap: give the consumed prefix a chance to go first.
             # reap_journal takes the lock itself, so it runs before ours.
-            try:
-                self.reap_journal()
-            except Exception:
-                pass
+            now = time.monotonic()
+            if explicit or now >= self._journal_reap_retry_at:
+                try:
+                    self.reap_journal()
+                except Exception:
+                    pass
+                self._journal_reap_retry_at = now + 15
         # One write under the journal lock: a reap in another process cannot
         # slip its replace between our size check and our line. If the lock
         # never frees, the entry is written anyway — losing it is worse than
@@ -704,7 +719,7 @@ class SkillStore:
             if not held:
                 if explicit:
                     raise OSError("journal is busy; the entry was not recorded")
-                _log.warning("Inference event skipped: journal is busy")
+                self._journal_skip("journal is busy")
                 return
             before = self._journal_size()
             if max(0, before) + line_bytes > JOURNAL_MAX_BYTES:
@@ -713,7 +728,7 @@ class SkillStore:
                         "journal byte quota reached and nothing consumed is "
                         "left to reap; the entry was not recorded"
                     )
-                _log.warning("Inference event skipped: journal byte quota reached")
+                self._journal_skip("journal byte quota reached")
                 return
             with self._journal_path.open("a", encoding="utf-8") as fh:
                 fh.write(line)

@@ -131,10 +131,10 @@ async def workspace_control(operation: str, request: Request):
     try:
         if operation == "register":
             await broker.register(runtime_id)
-            return {"ok": True}
+            return {"ok": True, "viewer_count": len(broker.viewers)}
         broker.check(runtime_id)
         if operation == "poll":
-            return {"commands": await broker.poll(runtime_id)}
+            return {"commands": await broker.poll(runtime_id), "viewer_count": len(broker.viewers)}
         await broker.report(runtime_id, body.get("state"), body.get("results", []))
         return Response(status_code=204)
     except browser_control.ControlError as exc:
@@ -311,7 +311,7 @@ async def serve_browser_panel(
         )
     broker = None if login_only else browser_control.get(session_id)
     if broker is not None:
-        broker.viewers[viewer_id] = lambda message: hub.send_to_viewer(viewer, message)
+        broker.attach(viewer_id, lambda message: hub.send_to_viewer(viewer, message))
         await broker.send(viewer_id, {"type": "workspace", "state": broker.state})
     ping_task = asyncio.create_task(_panel_ping(hub, viewer))
 

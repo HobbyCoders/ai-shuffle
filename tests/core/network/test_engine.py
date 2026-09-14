@@ -249,6 +249,49 @@ async def test_account_connection_starts_before_runner_approval_and_stops_cleanl
         assert engine.context() is None
 
 
+def test_exchange_batch_bounds_queries_frontier_and_detects_pruned_gaps(workers, monkeypatch):
+    a = workers("frontier")
+    with a.active():
+        engine.create_network("Frontier")
+        database.set_system_setting("tts_model", "first")
+        engine.scan_collection("system_settings")
+        before_update = store.local_watermarks()
+        database.set_system_setting("tts_model", "second")
+        engine.scan_collection("system_settings")
+        marks = store.local_watermarks()
+        queries = []
+        a.raw.set_trace_callback(queries.append)
+        try:
+            assert store.exchange_batch(marks) == ([], marks, False)
+        finally:
+            a.raw.set_trace_callback(None)
+        assert len([q for q in queries if q.lstrip().upper().startswith("SELECT")]) == 2
+        read_heads = store.local_watermarks
+
+        def append_after_frontier(conn=None):
+            heads = read_heads(conn)
+            # Interleave a real producer after the response frontier was read.
+            database.set_system_setting("tts_model", "third")
+            engine.scan_collection("system_settings")
+            return heads
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "local_watermarks", append_after_frontier)
+            ops, heads, snapshot = store.exchange_batch(before_update)
+        assert heads == marks and not snapshot
+        assert len(ops) == 1 and ops[0]["origin_seq"] == marks[a.device_id]["1"]
+        later, current, snapshot = store.exchange_batch(heads)
+        assert len(later) == 1 and not snapshot
+        assert later[0]["origin_seq"] == current[a.device_id]["1"]
+        # Use the actual pruner: it removes superseded versions but preserves
+        # the latest envelope, which still backs snapshots and stream heads.
+        assert store.prune_ops(keep_days=-1) >= 2
+        assert store.exchange_batch(before_update)[2] is True
+        assert store.exchange_batch(current) == ([], current, False)
+        assert store.exchange_batch({}, exclude_origin=a.device_id)[0] == []
+        assert store.exchange_batch({}, exclude_origin=a.device_id)[2] is False
+
+
 def test_network_of_one_records_and_scans(workers):
     a = workers("a")
     with a.active():

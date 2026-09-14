@@ -157,6 +157,19 @@ async def create_page(url: str, port: Optional[int] = None) -> Optional[dict]:
     p = port or _cdp_port()
     path = f"/json/new?{quote(url, safe=':/?&=%#')}"
     try:
+        from app.core.config import settings
+
+        # Billing/login tabs do not go through the MCP runtime. Demand-start
+        # them too, but never launch for a disabled or explicitly different port.
+        if settings.start_chrome and p == _cdp_port():
+            await ensure_started()
+            task = _supervisor_task
+            if task is not None and not task.done():
+                async with asyncio.timeout(10):
+                    while not await _cdp_answers(p):
+                        if task.done():
+                            return None
+                        await asyncio.sleep(0.1)
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.put(f"http://127.0.0.1:{p}{path}")
             resp.raise_for_status()
@@ -293,7 +306,13 @@ async def ensure_started() -> None:
 
     port = _cdp_port()
 
-    if await _cdp_answers(port):
+    answered = await _cdp_answers(port)
+    # Different sessions can demand-start together. Another caller may have
+    # installed our supervisor while this probe yielded; never launch a second
+    # process or mistake our newly started browser for an external owner.
+    if _supervisor_task is not None and not _supervisor_task.done():
+        return
+    if answered:
         _last_detail = f"external browser on port {port}"
         return
 

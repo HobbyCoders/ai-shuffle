@@ -117,13 +117,27 @@ async def test_peer_link_exchanges_both_ways_and_detects_rollback(workers, monke
     async with httpx.AsyncClient(transport=served.transport()) as client:
         with b.active():
             link = transport.PeerLink(a.device_id, ["http://172.17.0.11:8000", "https://a.example.com"])
-            summary = await link.sync_once(client, engine.context())
+            import threading
+            from unittest.mock import patch
+            loop_thread = threading.get_ident()
+            describe = transport._description
+
+            def describe_off_loop():
+                assert threading.get_ident() != loop_thread
+                return describe()
+
+            with patch.object(transport, "_description", side_effect=describe_off_loop) as descriptions:
+                summary = await link.sync_once(client, engine.context())
+            assert descriptions.call_count == 2  # authentication and exchange
             assert summary["received"] >= 1 and summary["sent"] >= 1
             assert link.base_url == "https://a.example.com" and link.token
             token_before = link.token
-            # Second pass reuses the token and moves nothing.
-            summary = await link.sync_once(client, engine.context())
+            # Second pass reuses the token and moves nothing. Count real head
+            # queries across both workers, not a seeded summary of a quiet pass.
+            with patch.object(store, "local_watermarks", wraps=store.local_watermarks) as heads:
+                summary = await link.sync_once(client, engine.context())
             assert summary["received"] == 0 and summary["sent"] == 0 and link.token == token_before
+            assert heads.call_count == 3  # pull frontier, server response, push frontier
     assert _pref(a, "from_b") == 1
     with b.active():
         assert database.get_system_setting("tts_model") == "voice-a"
@@ -216,6 +230,85 @@ async def test_enrollment_over_http_then_sync(workers, monkeypatch):
             results = await transport.sync_pass(client)
             assert results[a.device_id]["sent"] >= 1
     assert _pref(a, "from_b") == 42
+
+
+async def test_peer_loop_quiets_after_apply_and_wakes_for_a_real_write(workers, monkeypatch):
+    from types import SimpleNamespace
+    from app.network import blobs
+    from tests.core.network.harness import join
+
+    a, b = workers("loop-a"), workers("loop-b")
+    with a.active():
+        engine.create_network("Loop pacing")
+    join(a, b)
+    served = ServedBy(a, "http://loop-a.local:8000")
+    _set_pref(b, "first-write", 1)
+    timeouts = []
+    clients = []
+    real_client = httpx.AsyncClient
+
+    def client(**kwargs):
+        result = real_client(transport=served.transport(), **kwargs)
+        clients.append(result)
+        return result
+
+    async def wait_for(coro, *, timeout):
+        coro.close()
+        timeouts.append(timeout)
+        if len(timeouts) == 2:
+            # The real mutation and scanner publish through engine.kick.
+            database.set_system_setting("tts_model", "wake-the-peer")
+            engine.scan_all()
+            await asyncio.sleep(0)  # deliver call_soon_threadsafe's wake
+            assert transport._wake.is_set()
+        if len(timeouts) == 4:
+            raise asyncio.CancelledError
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    monkeypatch.setattr(transport, "_loop", asyncio.get_running_loop())
+    monkeypatch.setattr(transport, "asyncio", SimpleNamespace(
+        Event=asyncio.Event, Lock=asyncio.Lock, CancelledError=asyncio.CancelledError,
+        TimeoutError=asyncio.TimeoutError, to_thread=asyncio.to_thread, wait_for=wait_for))
+    # No blobs are seeded: use the real fetcher, which must report no activity.
+    with b.active():
+        assert await blobs.fetch_missing(limit=4) == 0
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        with pytest.raises(asyncio.CancelledError):
+            await transport.sync_loop()
+        await transport.stop()
+        assert engine._kick is None
+    assert timeouts == [transport.SYNC_ACTIVE_SECONDS, transport.SYNC_IDLE_SECONDS,
+                        transport.SYNC_ACTIVE_SECONDS, transport.SYNC_IDLE_SECONDS]
+    assert clients and all(c.is_closed for c in clients)
+    assert [path for _, path in served.requests].count("/api/v1/network/peer/ops") == 2
+    with a.active():
+        assert database.get_system_setting("tts_model") == "wake-the-peer"
+        assert engine.scan_all() == 0  # incoming records are not republished
+
+
+async def test_discovery_reads_off_loop_and_keeps_links_on_loop(workers, monkeypatch):
+    import threading
+    worker = workers("discovery")
+    loop_thread = threading.get_ident()
+    presence, members = engine.all_presence, store.list_members
+    reads = []
+
+    def read_presence():
+        reads.append(threading.get_ident())
+        return presence()
+
+    def read_members(**kwargs):
+        reads.append(threading.get_ident())
+        return members(**kwargs)
+
+    with worker.active():
+        engine.create_network("Discovery")
+        monkeypatch.setattr(engine, "all_presence", read_presence)
+        monkeypatch.setattr(store, "list_members", read_members)
+        await transport._refresh_links(engine.context())
+    assert len(reads) == 2 and all(thread != loop_thread for thread in reads)
+    assert transport._links == {}
 
 
 async def test_enrolled_worker_switches_networks_with_an_invite(workers, monkeypatch):

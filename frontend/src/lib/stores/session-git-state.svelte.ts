@@ -61,7 +61,7 @@ function scopeKey(projectId: string, worktreeId: string | null): string {
 
 async function load(sessionId: string) {
 	const watch = watches.get(sessionId);
-	if (!watch || watch.inFlight) return;
+	if (!watch || watch.inFlight || (typeof document !== 'undefined' && document.hidden)) return;
 	watch.inFlight = true;
 	const controller = new AbortController();
 	watch.abort = controller;
@@ -99,7 +99,7 @@ async function load(sessionId: string) {
 			cachedScopes.set(sessionId, watch.scope);
 		}
 	} finally {
-		if (watches.get(sessionId) === watch) {
+		if (watches.get(sessionId) === watch && watch.abort === controller) {
 			watch.inFlight = false;
 			watch.abort = null;
 		}
@@ -112,6 +112,27 @@ function teardown(sessionId: string, watch: Watch) {
 	watch.abort?.abort();
 	watch.abort = null;
 	if (watches.get(sessionId) === watch) watches.delete(sessionId);
+	if (watches.size === 0 && typeof document !== 'undefined') {
+		document.removeEventListener('visibilitychange', onVisibilityChange);
+	}
+}
+
+function resumeWatch(sessionId: string, watch: Watch) {
+	if (typeof document !== 'undefined' && document.hidden) return;
+	void load(sessionId);
+	if (watch.timer === null) watch.timer = setInterval(() => void load(sessionId), REFRESH_MS);
+}
+
+function onVisibilityChange() {
+	for (const [sessionId, watch] of watches) {
+		if (document.hidden) {
+			if (watch.timer !== null) clearInterval(watch.timer);
+			watch.timer = null;
+			watch.abort?.abort();
+			watch.abort = null;
+			watch.inFlight = false;
+		} else resumeWatch(sessionId, watch);
+	}
 }
 
 export const sessionGitState = {
@@ -166,8 +187,8 @@ export const sessionGitState = {
 			inFlight: false
 		};
 		watches.set(sessionId, watch);
-		void load(sessionId);
-		watch.timer = setInterval(() => void load(sessionId), REFRESH_MS);
+		if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibilityChange);
+		resumeWatch(sessionId, watch);
 		return () => release(sessionId, watch);
 	},
 

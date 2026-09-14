@@ -114,8 +114,7 @@ class PeerLink:
                     "challenge": challenge["challenge"],
                     "signature": signature,
                     "incarnation": ctx.identity.incarnation,
-                    "endpoints": engine._own_endpoints(),
-                    "capabilities": _capabilities(),
+                    **(await asyncio.to_thread(_description)),
                     "version": settings.version,
                     "platform": identity_mod.platform_name(),
                 }, auth=False)
@@ -145,7 +144,7 @@ class PeerLink:
             exchange = await self._request(client, "POST", "/api/v1/network/peer/exchange", json_body={
                 "watermarks": marks, "limit": BATCH_LIMIT, "incarnation": ctx.identity.incarnation,
                 "flush": catch_up and target is None,
-                "endpoints": engine._own_endpoints(), "capabilities": _capabilities(), "version": settings.version,
+                **(await asyncio.to_thread(_description)), "version": settings.version,
             })
             theirs = exchange.get("watermarks") or {}
             if catch_up and target is None and not exchange.get("flushed"):
@@ -162,10 +161,12 @@ class PeerLink:
                 result = await asyncio.to_thread(engine.apply_batch, ops)
                 summary["received"] += result.applied
                 summary["apply"] = result.as_dict()
+            if not catch_up:
+                break
             current = await asyncio.to_thread(store.local_watermarks)
             caught_up = all(int(current.get(origin, {}).get(str(inc), 0)) >= int(seq)
                             for origin, streams in target.items() for inc, seq in streams.items())
-            if not catch_up or caught_up:
+            if caught_up:
                 break
             if current == marks:
                 raise PeerError("Peer sync could not fill missing updates")
@@ -178,12 +179,12 @@ class PeerLink:
             self.update_endpoints(their_endpoints)
         # Push what the peer lacks, in bounded batches.
         while True:
-            if await asyncio.to_thread(store.requires_snapshot, theirs, exclude_origin=self.device_id):
+            outbound, _, snapshot = await asyncio.to_thread(
+                store.exchange_batch, theirs, limit=BATCH_LIMIT, exclude_origin=self.device_id)
+            if snapshot:
                 # The other worker's next pull requests our state. Do not send
                 # an incomplete log prefix and pretend it was acknowledged.
                 break
-            outbound = await asyncio.to_thread(store.ops_since, theirs, limit=BATCH_LIMIT,
-                                               exclude_origin=self.device_id)
             if not outbound:
                 break
             pushed = await self._request(client, "POST", "/api/v1/network/peer/ops", json_body={"ops": outbound})
@@ -224,6 +225,11 @@ class PeerLink:
             return await asyncio.to_thread(peer_snapshot.apply, manifest, directory, self.device_id)
 
 
+def _description() -> dict:
+    # Both probes can read the database, PATH and the filesystem.
+    return {"endpoints": engine._own_endpoints(), "capabilities": _capabilities()}
+
+
 def _capabilities() -> dict:
     try:
         from app.core.runner_capabilities import detect_capabilities
@@ -252,9 +258,13 @@ def _detect_rollback(ctx: engine.NetworkContext, theirs: Dict[str, Dict[str, int
 # Peer discovery
 # ---------------------------------------------------------------------------
 
-def _refresh_links(ctx: engine.NetworkContext) -> None:
-    presence = engine.all_presence()
-    for row in store.list_members(include_revoked=False):
+async def _refresh_links(ctx: engine.NetworkContext) -> None:
+    def _read():
+        return engine.all_presence(), store.list_members(include_revoked=False)
+
+    presence, members = await asyncio.to_thread(_read)
+    # Only the database reads leave the loop; links/locks remain loop-owned.
+    for row in members:
         device_id = row["device_id"]
         if device_id == ctx.device_id:
             continue
@@ -304,7 +314,7 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
     ctx = engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return {}
-    _refresh_links(ctx)
+    await _refresh_links(ctx)
     results: Dict[str, Any] = {}
     now = time.monotonic()
     for link in list(_links.values()):
@@ -420,7 +430,8 @@ async def scan_loop() -> None:
 async def presence_loop() -> None:
     while True:
         try:
-            await asyncio.to_thread(engine.publish_presence, capabilities=_capabilities(), version=settings.version)
+            capabilities = await asyncio.to_thread(_capabilities)
+            await asyncio.to_thread(engine.publish_presence, capabilities=capabilities, version=settings.version)
             await asyncio.to_thread(store.expire_conflicts)
             await asyncio.to_thread(store.expire_joins)
             from app.network import peer_snapshot

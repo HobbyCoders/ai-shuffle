@@ -184,7 +184,7 @@ async def get_deployment_info(token: str = Depends(require_auth)):
 
 
 @router.get("/api/v1/diagnostics")
-async def get_diagnostics(token: str = Depends(require_auth)):
+async def get_diagnostics(token: str = Depends(require_auth), whole_stack: bool = False):
     """
     On-demand resource diagnostics snapshot.
 
@@ -194,6 +194,12 @@ async def get_diagnostics(token: str = Depends(require_auth)):
     from app.core.resource_monitor import _collect_metrics, _check_warnings
 
     metrics = await _collect_metrics()
+    if whole_stack:
+        from app.core.process_metrics import collect_process_metrics
+        try:
+            metrics["whole_stack"] = await run_sync(collect_process_metrics, True)
+        except Exception as exc:
+            metrics["whole_stack"] = {"unavailable": type(exc).__name__}
     warnings = _check_warnings(metrics)
 
     return {

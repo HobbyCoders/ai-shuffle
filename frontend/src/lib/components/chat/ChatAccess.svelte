@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
+	import { resourceSync } from '$lib/services/resource-sync';
 	import PrivateAccessRequest from './PrivateAccessRequest.svelte';
 	let { sessionId }: { sessionId: string } = $props();
 	type Grant = { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean };
@@ -20,25 +21,69 @@
 	let busy = $state(false);
 	let refreshing = false;
 	let alive = true;
+	let enabled = false;
+	let verified = false;
+	let dirty = false;
+	let failures = 0;
+	let retryMs = 30_000;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	function schedule() {
+		clearTimeout(timer);
+		if (alive && !document.hidden && (!verified || enabled)) {
+			timer = setTimeout(() => void refresh(), retryMs);
+		}
+	}
 	const base = untrack(() => `/chat-access/${encodeURIComponent(sessionId)}`);
 	async function refresh() {
-		if (refreshing || !alive) return;
+		if (!alive || document.hidden) return;
+		if (refreshing) { dirty = true; return; }
+		clearTimeout(timer);
 		refreshing = true;
-		try { const next = await api.get<typeof data>(base); if (alive) data = next; }
-		catch (e) { if (alive) error = getErrorMessage(e, 'Private access is unavailable.'); }
-		finally { refreshing = false; }
+		try {
+			// Keep the persisted mode check; retries must not expose private controls
+			// for an unverified session or bypass endpoint authorization.
+			if (!verified) {
+				const session = await api.get<{mode: string}>(`/sessions/${encodeURIComponent(sessionId)}`);
+				if (!alive) return;
+				enabled = session.mode == null || ['code', 'chat', 'voice'].includes(session.mode);
+				verified = true;
+			}
+			if (!enabled) return;
+			const next = await api.get<typeof data>(base);
+			if (!alive) return;
+			data = next;
+			error = '';
+			failures = 0;
+			retryMs = next.requests.length || next.actions.length || next.grants.length ? 2000 : 30_000;
+		} catch (e) {
+			if (!alive) return;
+			error = getErrorMessage(e, 'Private access is unavailable.');
+			const status = (e as {status?: number})?.status;
+			failures++;
+			retryMs = [401, 403, 404, 405].includes(status ?? 0)
+				? 300_000 : Math.min(300_000, 5000 * 2 ** Math.min(failures - 1, 6));
+		} finally {
+			refreshing = false;
+			if (dirty && alive && !document.hidden) { dirty = false; void refresh(); }
+			else schedule();
+		}
 	}
 	onMount(() => {
-		// Draft mode can lag a deep-link load. Ask for the persisted session lane
-		// once instead of hiding a private request behind the global mode picker.
-		let enabled = false;
-		void api.get<{mode: string}>(`/sessions/${encodeURIComponent(sessionId)}`).then(session => {
-			if (!alive) return;
-			enabled = session.mode == null || ['code', 'chat', 'voice'].includes(session.mode);
-			if (enabled) void refresh();
-		}).catch(() => { /* No verified session: expose no private controls. */ });
-		const timer = setInterval(() => { if (enabled && !document.hidden) void refresh(); }, 2000);
-		return () => { alive = false; clearInterval(timer); };
+		const resume = () => {
+			clearTimeout(timer);
+			if (!document.hidden) void refresh();
+		};
+		const unsubscribe = resourceSync.subscribe(['chat-access', `chat-access:${sessionId}`], resume);
+		document.addEventListener('visibilitychange', resume);
+		window.addEventListener('online', resume);
+		void refresh();
+		return () => {
+			alive = false;
+			clearTimeout(timer);
+			unsubscribe();
+			document.removeEventListener('visibilitychange', resume);
+			window.removeEventListener('online', resume);
+		};
 	});
 	async function revoke(id: string) {
 		busy = true; error = '';

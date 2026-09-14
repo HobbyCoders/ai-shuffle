@@ -1290,7 +1290,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				};
 			}
 			if (next.openTextId) {
-				const open = next.messages.find((m) => m.id === next.openTextId);
+				const open = next.messages.findLast((m) => m.id === next.openTextId);
 				return {
 					...next,
 					messages: replaceById(next.messages, next.openTextId, {
@@ -1377,7 +1377,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const subtype = str(event.subtype) || undefined;
 			let next = closeOpenText(state);
 			if (next.openThinkingId) {
-				const open = next.messages.find((m) => m.id === next.openThinkingId);
+				const open = next.messages.findLast((m) => m.id === next.openThinkingId);
 				// The provider's summary and its reasoning text are different
 				// voices: a subtype change closes the open block and opens a
 				// new one rather than gluing the two under one label.

@@ -1,7 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
 	TRANSCRIPT_WINDOW_SIZE,
 	clampWindowStart,
+	createWindowBackfill,
 	classifyTurnEntry,
 	expandedWindowStart,
 	initialWindowStart,
@@ -13,6 +14,57 @@ import {
 	type TurnVisibility
 } from './transcript-window';
 import { resolveCurrentTurnIndex } from '$lib/utils/transcript-navigation';
+
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+describe('background transcript mounting', () => {
+	it('checks visibility, streaming and idle budget before producing each chunk', () => {
+		let callback!: IdleRequestCallback;
+		const request = vi.fn((cb: IdleRequestCallback) => { callback = cb; return 1; });
+		vi.stubGlobal('requestIdleCallback', request);
+		vi.stubGlobal('cancelIdleCallback', vi.fn());
+		let hidden = true, streaming = false, start = initialWindowStart(500);
+		const backfill = createWindowBackfill(() => !hidden && !streaming && start > 0,
+			() => { start = expandedWindowStart(start); });
+		backfill.schedule();
+		expect(request).not.toHaveBeenCalled();
+		hidden = false; backfill.schedule();
+		callback({ didTimeout: true, timeRemaining: () => 0 });
+		expect(start).toBe(440);
+		callback({ didTimeout: false, timeRemaining: () => 2 });
+		expect(start).toBe(440);
+		streaming = true;
+		callback({ didTimeout: false, timeRemaining: () => 20 });
+		expect(start).toBe(440);
+		streaming = false; backfill.schedule();
+		callback({ didTimeout: false, timeRemaining: () => 20 });
+		expect(start).toBe(410);
+		hidden = true;
+		callback({ didTimeout: false, timeRemaining: () => 20 });
+		expect(start).toBe(410);
+		hidden = false; backfill.schedule();
+		while (start > 0) callback({ didTimeout: false, timeRemaining: () => 20 });
+		expect(start).toBe(0);
+		backfill.cancel();
+	});
+
+	it('cancels fallback work and rechecks eligibility when the timer fires', async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal('requestIdleCallback', undefined);
+		let allowed = true;
+		const expand = vi.fn(() => { allowed = false; });
+		const backfill = createWindowBackfill(() => allowed, expand);
+		backfill.schedule(); backfill.cancel();
+		await vi.advanceTimersByTimeAsync(300);
+		expect(expand).not.toHaveBeenCalled();
+		backfill.schedule(); allowed = false;
+		await vi.advanceTimersByTimeAsync(300);
+		expect(expand).not.toHaveBeenCalled();
+		allowed = true; backfill.schedule();
+		await vi.advanceTimersByTimeAsync(300);
+		expect(expand).toHaveBeenCalledOnce();
+	});
+});
 
 describe('transcript window', () => {
 	it('mounts only a trailing window of a long transcript', () => {

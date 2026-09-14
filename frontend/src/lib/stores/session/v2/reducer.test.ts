@@ -38,6 +38,23 @@ function fold(events: WireEvent[]) {
 
 
 
+describe('streaming tail lookup', () => {
+	it.each(['assistant.text_delta', 'assistant.thinking_delta'])('does not scan historical IDs for %s', (type) => {
+		let state = initialState();
+		for (let i = 0; i < 1000; i++) state = reduce(state, ev('message.assistant', { content: `History ${i}` }));
+		state = reduce(state, ev('turn.started', { turn_id: 'live' }));
+		state = reduce(state, ev(type, { text: 'Hello' }));
+		let historicalReads = 0;
+		for (const message of state.messages.slice(0, -1)) {
+			const id = message.id;
+			Object.defineProperty(message, 'id', { configurable: true, get: () => { historicalReads++; return id; } });
+		}
+		const next = reduce(state, ev(type, { text: ' world' }));
+		expect(next.messages.at(-1)?.content).toBe('Hello world');
+		expect(historicalReads).toBe(0);
+	});
+});
+
 describe('voice transcript alongside a working chat agent', () => {
 	it('does not steal the live turn, close its text or settle its tasks', () => {
 		const events = [

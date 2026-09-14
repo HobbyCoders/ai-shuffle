@@ -75,6 +75,8 @@ async def test_concurrent_start_and_agent_call_coalesce(fake):
     assert results[-1]["content"][0]["type"] == "image"
     assert results[-1]["isError"] is True
     assert not fake[0].closed
+    from app.core import native_chrome
+    native_chrome.ensure_started.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -109,6 +111,8 @@ async def test_delete_and_shutdown_close_actor_and_token(fake):
     await runtime.start("runtime-test")
     await runtime.shutdown()
     assert fake[1].closed
+    from app.core import native_chrome
+    assert native_chrome.ensure_started.await_count == 2
 
 
 @pytest.mark.asyncio

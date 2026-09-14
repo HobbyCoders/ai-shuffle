@@ -80,7 +80,7 @@ async def _sync() -> dict:
         return {"status": "partial" if linked or ctx else "not_enrolled",
                 "reason": "Waiting for network enrollment." if linked or ctx else None}
     await run_sync(engine.scan_all, strict=True)
-    await run_sync(transport._refresh_links, ctx)
+    await transport._refresh_links(ctx)
     links = list(transport._links.values())
     if not links:
         return {"status": "partial" if account_incomplete else "synced", "peers": 0}

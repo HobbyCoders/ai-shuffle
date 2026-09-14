@@ -256,6 +256,132 @@ async def test_legal_content_survives_the_scrub_untouched(mock_db):
     )
 
 
+# ─── Idle / streaming performance regressions ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_native_producer_batches_deltas_before_durable_barrier(mock_db):
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import TurnComplete
+    store = PgFluidStore()
+    store.STREAM_BATCH_SECONDS = 60  # Deterministic count boundary, not wall-clock speed.
+    await store.create_session("batch")
+    statements = []
+    mock_db.set_trace_callback(statements.append)
+    loop = NativeLoop(provider=object(), store=store, model="test", session_id="batch")
+    try:
+        for i in range(65):
+            await loop._emit(TextDelta(session_id="batch", index=0, text=str(i)))
+        await loop._emit(TurnComplete(session_id="batch", stop_reason="end_turn", num_model_calls=1))
+    finally:
+        await loop.aclose()
+    commits = [s for s in statements if s.upper() == "COMMIT"]
+    assert len(commits) == 3
+    assert not store._pending_events
+    replay = await PgFluidStore().events_since("batch", 0)
+    assert len(replay) == 66
+    assert [e.seq for e in replay] == sorted(e.seq for e in replay)
+    assert isinstance(replay[-1], TurnComplete)
+    assert await PgFluidStore().last_event_seq("batch") == replay[-1].seq
+
+
+@pytest.mark.asyncio
+async def test_resume_loads_nodes_not_events_and_bounds_replay_cache(mock_db):
+    store = PgFluidStore()
+    await store.create_session("large")
+    store.STREAM_BATCH_SECONDS = 60
+    for seq in range(1, 301):
+        await store.append_stream_event("large", TextDelta(session_id="large", index=0, text="x", seq=seq))
+    await store.flush_events("large")
+    queries = []
+    mock_db.set_trace_callback(queries.append)
+    resumed = PgFluidStore()
+    assert await resumed.get_session("large")
+    assert await resumed.last_event_seq("large") == 300
+    assert not any("SELECT event FROM" in q for q in queries)
+    assert "large" not in resumed._events
+    assert len(await resumed.events_since("large", 0)) == 300
+    assert len(resumed._events["large"]) == resumed.EVENT_CACHE_LIMIT
+    queries.clear()
+    assert len(await resumed.events_since("large", 299)) == 1
+    assert not queries
+    assert len(await resumed.events_since("large", 20)) == 280
+    assert len(resumed._events["large"]) == resumed.EVENT_CACHE_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_node_append_and_replay_flush_pending_deltas(mock_db):
+    store = PgFluidStore()
+    await store.create_session("barriers")
+    await store.append_stream_event("barriers", TextDelta(session_id="barriers", index=0, text="a", seq=1))
+    assert not mock_db.execute("SELECT seq FROM fluid_session_events").fetchall()
+    await store.append("barriers", _node("answer", None, "a"))
+    assert await PgFluidStore().last_event_seq("barriers") == 1
+    await store.append_stream_event("barriers", TextDelta(session_id="barriers", index=0, text="b", seq=2))
+    assert len(await store.events_since("barriers", 0)) == 2
+    assert not store._pending_events
+
+
+@pytest.mark.asyncio
+async def test_real_native_turn_interrupt_flushes_reconstructible_tail(mock_db):
+    import asyncio
+    from fluid.engine.native import NativeLoop
+    from fluid.events import Interrupt, Interrupted, UserTurn
+    from fluid.providers.base import ProviderCaps, StreamChunk
+    reached = asyncio.Event()
+    class Provider:
+        name = "anthropic"
+        caps = ProviderCaps()
+        async def stream(self, request):
+            yield StreamChunk("message_start", {"usage": {"input_tokens": 1}})
+            yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+            yield StreamChunk("text_delta", {"index": 0, "text": "partial"})
+            reached.set()
+            await asyncio.Event().wait()
+    store = PgFluidStore()
+    loop = NativeLoop(provider=Provider(), store=store, model="claude-sonnet-5")
+    try:
+        await loop.submit(UserTurn(content="Start then stop"))
+        await asyncio.wait_for(reached.wait(), 5)
+        await loop.submit(Interrupt())
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        sid = loop.session_id
+        replay = await PgFluidStore().events_since(sid, 0)
+        assert any(isinstance(e, TextDelta) and e.text == "partial" for e in replay)
+        assert any(isinstance(e, Interrupted) for e in replay)
+        assert not store._pending_events
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_writes_do_not_publish_phantom_events(mock_db, monkeypatch):
+    store = PgFluidStore()
+    await store.create_session("failed")
+    assert await store.events_since("failed", 0) == []
+    def fail(*args):
+        raise RuntimeError("write rejected")
+    from app.core.provider import fluid_pg_store as _mod
+    monkeypatch.setattr(_mod, "_append_events_sync", fail)
+    with pytest.raises(RuntimeError, match="write rejected"):
+        await store.append_event("failed", TextDelta(session_id="failed", index=0, text="lost", seq=1))
+    assert await store.events_since("failed", 0) == []
+
+
+@pytest.mark.asyncio
+async def test_failed_load_is_retryable(mock_db, monkeypatch):
+    await PgFluidStore().create_session("retry")
+    resumed = PgFluidStore()
+    from app.core.provider import fluid_pg_store as _mod
+    original = _mod._load_session_sync
+    def fail(*args):
+        raise RuntimeError("read rejected")
+    monkeypatch.setattr(_mod, "_load_session_sync", fail)
+    with pytest.raises(RuntimeError):
+        await resumed.get_session("retry")
+    monkeypatch.setattr(_mod, "_load_session_sync", original)
+    assert await resumed.get_session("retry")
+
+
 # ─── Cross-session search (fluid's optional SessionStore.search hook) ────────
 #
 # The store backs the SessionSearch builtin over BOTH places a session's text

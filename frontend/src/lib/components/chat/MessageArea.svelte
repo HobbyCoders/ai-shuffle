@@ -55,6 +55,7 @@
 		TRANSCRIPT_WINDOW_SIZE,
 		TRANSCRIPT_WINDOW_CHUNK,
 		clampWindowStart,
+		createWindowBackfill,
 		classifyTurnEntry,
 		expandedWindowStart,
 		initialWindowStart,
@@ -523,8 +524,12 @@
 	let mountedStart = $state(0);
 	let windowSessionKey: string | null | undefined = undefined;
 	let previousItemCount = 0;
-	let backfillHandle: number | null = null;
-	let backfillIsIdleCallback = false;
+	const windowBackfill = createWindowBackfill(
+		() => isMounted && mountedStart > 0 && !document.hidden && !$activeSession.isStreaming,
+		() => expandMountedWindow(expandedWindowStart(mountedStart, TRANSCRIPT_WINDOW_CHUNK))
+	);
+	const cancelWindowBackfill = windowBackfill.cancel;
+	const scheduleWindowBackfill = windowBackfill.schedule;
 
 	const visibleItems = $derived(
 		mountedStart > 0 ? displayItems.slice(mountedStart) : displayItems
@@ -572,42 +577,6 @@
 		}
 	}
 
-	function cancelWindowBackfill() {
-		if (backfillHandle === null) return;
-		if (backfillIsIdleCallback && typeof cancelIdleCallback !== 'undefined') {
-			cancelIdleCallback(backfillHandle);
-		} else {
-			clearTimeout(backfillHandle);
-		}
-		backfillHandle = null;
-	}
-
-	/**
-	 * Mount the rest of the transcript during idle time.
-	 *
-	 * The window makes first paint cheap; this makes the window a scheduling
-	 * decision rather than a permanent hole — Ctrl+F, screen readers and long
-	 * scrolls all end up with the complete transcript, just not before the
-	 * reader can see anything. requestIdleCallback yields to streaming work, so
-	 * the backfill never competes with a live turn.
-	 */
-	function scheduleWindowBackfill() {
-		if (backfillHandle !== null || mountedStart === 0 || !isMounted) return;
-		const run = () => {
-			backfillHandle = null;
-			if (!isMounted || mountedStart === 0) return;
-			expandMountedWindow(expandedWindowStart(mountedStart, TRANSCRIPT_WINDOW_CHUNK));
-			scheduleWindowBackfill();
-		};
-		if (typeof requestIdleCallback !== 'undefined') {
-			backfillIsIdleCallback = true;
-			backfillHandle = requestIdleCallback(run, { timeout: 1500 }) as unknown as number;
-		} else {
-			backfillIsIdleCallback = false;
-			backfillHandle = setTimeout(run, 300) as unknown as number;
-		}
-	}
-
 	// Keep the window legal as the transcript grows, shrinks, or is replaced.
 	$effect(() => {
 		const sessionKey = $activeSession.sessionId ?? 'new';
@@ -632,7 +601,10 @@
 	// Idle backfill driver: re-arms itself whenever there is still history above
 	// the mounted window.
 	$effect(() => {
-		if (!isMounted || mountedStart === 0) return;
+		if (!isMounted || mountedStart === 0 || $activeSession.isStreaming) {
+			cancelWindowBackfill();
+			return;
+		}
 		scheduleWindowBackfill();
 	});
 	let currentTurnIndex = $state(0);
@@ -1250,6 +1222,8 @@
 	// Mobile browsers often restore a stale scroll position from their history state,
 	// causing the chat to appear scrolled to the middle instead of the bottom.
 	function handleVisibilityChange() {
+		if (document.hidden) cancelWindowBackfill();
+		else scheduleWindowBackfill();
 		// eslint-disable-next-line no-console
 		if (STREAM_DEBUG) console.log(`[AS] visibility=${document.visibilityState} autoS=${shouldAutoScroll} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 		if (document.visibilityState === 'visible' && shouldAutoScroll && containerRef) {

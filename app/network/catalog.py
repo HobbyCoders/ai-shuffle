@@ -28,7 +28,8 @@ HISTORY_DAYS = 30
 EVENT_BATCH = 400
 
 
-def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_held: bool = False) -> List[str]:
+def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_held: bool = False,
+                       unpublished_only: bool = False) -> List[str]:
     """Sessions this device publishes.
 
     Owned rows always. With ``include_held``, also rows this worker still
@@ -50,6 +51,15 @@ def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_hel
         column = "s.updated_at" if include_held else "updated_at"
         sql += f" AND ({column} >= %s OR {column} IS NULL)"
         params.append(cutoff)
+    if unpublished_only:
+        # One indexed existence check per eligible session, rather than two
+        # client/server round trips for every already-published transcript.
+        # Missing/zero cursors still visit the publisher so a cleared stream
+        # can retract its old tail before publishing replacement events.
+        sql = (f"SELECT owned.id FROM ({sql}) owned "
+               "LEFT JOIN network_catalog_cursors c ON c.session_id = owned.id "
+               "WHERE c.published_seq IS NULL OR c.published_seq = 0 OR EXISTS ("
+               "SELECT 1 FROM session_events e WHERE e.session_id = owned.id AND e.seq > c.published_seq)")
     cursor.execute(sql, tuple(params))
     return [r["id"] for r in cursor.fetchall()]
 
@@ -146,7 +156,7 @@ def publish_events(*, ctx: Optional[engine.NetworkContext] = None, recent_only: 
     with get_db() as conn:
         cursor = conn.cursor()
         targets = session_ids if session_ids is not None else _owned_session_ids(
-            cursor, ctx.device_id, recent_only=recent_only, include_held=True)
+            cursor, ctx.device_id, recent_only=recent_only, include_held=True, unpublished_only=True)
         for session_id in targets:
             if count >= limit:
                 break

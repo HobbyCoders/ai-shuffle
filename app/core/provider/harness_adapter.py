@@ -1745,7 +1745,12 @@ class HarnessAdapter(ProviderAdapter):
 
         if self._store is not None:
             try:
-                stored = await self._store.events_since(session_id, 0)
+                last_event_seq = getattr(self._store, "last_event_seq", None)
+                if callable(last_event_seq):
+                    head = max(head, int(await last_event_seq(session_id)))
+                    stored = []
+                else:
+                    stored = await self._store.events_since(session_id, 0)
             except Exception:
                 # Best effort — it must never fail a connect. The bus head (or
                 # 0 for a fresh session) still bounds the replay.

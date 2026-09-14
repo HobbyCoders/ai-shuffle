@@ -18,8 +18,8 @@ MAX_BODY = 262144
 
 
 def poll_response_size(commands):
-    """Match the HTTP JSON envelope and the bridge's UTF-8 response ceiling."""
-    return len(json.dumps({'commands': commands}, ensure_ascii=False,
+    """Bound the HTTP envelope, reserving space for the live viewer count."""
+    return len(json.dumps({'commands': commands, 'viewer_count': (1 << 63) - 1}, ensure_ascii=False,
                           separators=(',', ':'), allow_nan=False).encode('utf-8'))
 
 
@@ -195,6 +195,7 @@ class Broker:
         self.result_waiters = {}
         self.queue = []
         self.viewers = {}
+        self._viewers_changed = False
         self.event = asyncio.Event()
         self.registration_lock = asyncio.Lock()
         self.last_poll = 0
@@ -206,6 +207,11 @@ class Broker:
     def start(self):
         if self.timer is None:
             self.timer = asyncio.create_task(self._maintain())
+
+    def attach(self, viewer_id, callback):
+        self.viewers[viewer_id] = callback
+        self._viewers_changed = True
+        self.event.set()
 
     async def send(self, viewer_id, message):
         callback = self.viewers.get(viewer_id)
@@ -303,13 +309,14 @@ class Broker:
         self.polling = runtime_id
         self.last_poll = time.monotonic()
         try:
-            if not self.queue:
+            if not self.queue and not self._viewers_changed:
                 self.event.clear()
                 try:
                     await asyncio.wait_for(self.event.wait(), 20)
                 except asyncio.TimeoutError:
                     pass
             self.check(runtime_id)
+            self._viewers_changed = False
             commands = []
             while self.queue and len(commands) < 16:
                 candidate = self.queue[0]
@@ -487,6 +494,8 @@ class Broker:
 
     async def detach(self, viewer_id):
         self.viewers.pop(viewer_id, None)
+        self._viewers_changed = True
+        self.event.set()
         for cid, command in list(self.pending.items()):
             if command["viewer_id"] == viewer_id:
                 await self.settle(cid, False, "Viewer disconnected; outcome unknown")
