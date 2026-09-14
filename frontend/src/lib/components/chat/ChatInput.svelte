@@ -1076,13 +1076,9 @@
 						{/if}
 					</div>
 
-					<!-- Send cluster (mockup `.send`): the return glyph on the right
-					     of the editor row, vertically centred in that row, accent-
-					     coloured once there is something to send. Typing during a
-					     turn does not replace Stop: the send goes out as a pending
-					     message and the turn keeps running, so Stop stays one click
-					     away beside it. Stop is an informed choice when background
-					     agents are live — StopButton confirms first. -->
+					<!-- During a turn, show Send for a draft and Stop for an empty
+					     composer. Sending queues a message without stopping the turn.
+					     StopButton confirms first when background agents are live. -->
 					<div class="send-cluster">
 						{#if $activeSession.isCreatingWorktree}
 							<!-- Creating worktree - show spinner -->
@@ -1096,11 +1092,12 @@
 								<button type="submit" class="send-btn" title="Send — Enter" aria-label="Send">
 									<CornerDownLeft size={13} strokeWidth={2.2} aria-hidden="true" />
 								</button>
+							{:else}
+								<StopButton
+									activeTasks={$activeSession.activeTasks}
+									onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
+								/>
 							{/if}
-							<StopButton
-								activeTasks={$activeSession.activeTasks}
-								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
-							/>
 						{:else}
 							<button
 								type="submit"
