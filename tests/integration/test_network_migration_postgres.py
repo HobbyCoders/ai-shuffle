@@ -135,56 +135,51 @@ def test_postgres_migration_preserves_bytea_and_resume_state(pg):
         assert cursor.fetchone()["platform_chat_id"] == "chat"
 
 
-def test_cloud_receipt_upgrade_atomicity_and_exact_sequence_scope(pg, monkeypatch):
+def test_peer_schema_upgrade_preserves_ops_pending_and_sequence_scope(pg):
     from app.db import network as store
 
     new_schema, connect, _ = pg
     schema = new_schema()
 
-    def envelope(seq):
-        return {"origin_device_id": "origin", "origin_incarnation": 1, "origin_seq": seq,
+    def envelope(seq, incarnation=1):
+        return {"origin_device_id": "origin", "origin_incarnation": incarnation, "origin_seq": seq,
                 "collection": "test", "record_id": str(seq), "op": "upsert", "clock": seq}
 
     with connect(schema) as conn:
         cursor = conn.cursor()
         store.insert_op(cursor, envelope(1), "settings")
-        # Simulate an existing installation, then run the additive migration twice.
-        cursor.execute("DROP TABLE sync_hub_receipts")
+        store.set_watermark(cursor, "origin", 1, 1)
+        store.set_watermark(cursor, "origin", 2, 3)
+        store.set_watermark(cursor, "other", 1, 7)
+        store.stash_pending(cursor, envelope(5))
+        # Recreate an absent index as on an older installation, without losing queued work.
+        cursor.execute("DROP INDEX idx_sync_ops_record")
         store.create_schema(cursor)
         store.create_schema(cursor)
-        cursor.execute("SELECT COUNT(*) AS n FROM sync_ops")
-        assert cursor.fetchone()["n"] == 1
-    with pytest.raises(RuntimeError, match="after receipt"), connect(schema) as conn:
+    with connect(schema) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT to_regclass('idx_sync_ops_record') AS name")
+        assert cursor.fetchone()["name"] == "idx_sync_ops_record"
+        cursor.execute("SELECT envelope FROM sync_ops")
+        assert cursor.fetchone()["envelope"] == envelope(1)
+        assert store.local_watermarks(conn) == {"origin": {"1": 1, "2": 3}, "other": {"1": 7}}
+        assert store.get_watermark(cursor, "origin", 3) == 0
+        cursor.execute("SELECT envelope FROM sync_pending")
+        assert cursor.fetchone()["envelope"] == envelope(5)
+
+    with pytest.raises(RuntimeError, match="after frontier"), connect(schema) as conn:
         cursor = conn.cursor()
         store.insert_op(cursor, envelope(2), "settings")
-        store.record_hub_receipt(cursor, "hub-a", envelope(2))
-        raise RuntimeError("after receipt")
+        store.set_watermark(cursor, "origin", 1, 2)
+        raise RuntimeError("after frontier")
     with connect(schema) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) AS n FROM sync_hub_receipts")
-        assert cursor.fetchone()["n"] == 0
         cursor.execute("SELECT COUNT(*) AS n FROM sync_ops")
         assert cursor.fetchone()["n"] == 1
-        # A downloaded successor can be pending before LAN supplies its prefix.
-        store.record_hub_receipt(cursor, "hub-a", envelope(5))
-    with connect(schema) as conn:
-        store.insert_op(conn.cursor(), envelope(5), "settings")
-
-    @contextmanager
-    def isolated_db():
-        conn = connect(schema)
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
-
-    monkeypatch.setattr(store, "get_db", isolated_db)
-    assert [env for _, env in store.hub_ops_after_ingest(0, "hub-a")] == [envelope(1), None]
-    assert [env for _, env in store.hub_ops_after_ingest(0, "hub-b")] == [envelope(1), envelope(5)]
+        assert store.local_watermarks(conn) == {"origin": {"1": 1, "2": 3}, "other": {"1": 7}}
 
 
-def test_concurrent_hub_state_updates_preserve_cursors_and_cooldown(pg, monkeypatch):
+def test_concurrent_hub_registration_updates_preserve_unrelated_fields(pg, monkeypatch):
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
@@ -195,6 +190,7 @@ def test_concurrent_hub_state_updates_preserve_cursors_and_cooldown(pg, monkeypa
     schema = new_schema()
     with connect(schema) as conn:
         store.create_state(network_id="test-network", name="Test", founder_device_id="origin", keyring={}, _conn=conn)
+        store.update_state(_conn=conn, hub={"binding_scope": "scope"})
 
     @contextmanager
     def isolated_db():
@@ -207,35 +203,32 @@ def test_concurrent_hub_state_updates_preserve_cursors_and_cooldown(pg, monkeypa
 
     monkeypatch.setattr(store, "get_db", isolated_db)
     start = threading.Barrier(2)
-    blocked = {"reason": "daily_upload", "retry_at": 123456789}
 
     def update(fields):
         start.wait(timeout=5)
-        return hub._save_hub_state(**fields)
+        return hub._save_hub_state(_expected_scope="scope", **fields)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        list(executor.map(update, [{"cursor": 2, "quota": {"ops": 2}},
-                                   {"cursor": 1, "upload_blocked": blocked, "pushed_ingest_id": 10}]))
-    assert hub._hub_state() == {"cursor": 2, "quota": {"ops": 2}, "upload_blocked": blocked, "pushed_ingest_id": 10}
+        list(executor.map(update, [{"registered": True, "registered_name": "Worker"},
+                                   {"status": "active", "network_hub_id": "account-network"}]))
+    expected = {"binding_scope": "scope", "registered": True, "registered_name": "Worker",
+                "status": "active", "network_hub_id": "account-network"}
+    assert hub._hub_state() == expected
+    # Registration fields are current values, not monotonic transport cursors.
+    hub._save_hub_state(_expected_scope="scope", registered=False, status="conflict")
+    assert hub._hub_state() == {**expected, "registered": False, "status": "conflict"}
 
 
-def test_object_acknowledgement_and_outbox_removal_are_atomic(pg, monkeypatch):
-    import json
-    from types import SimpleNamespace
-
+def test_hub_registration_update_rolls_back_and_rejects_stale_scope(pg, monkeypatch):
     from app.db import network as store
-    from app.network import engine, object_sync
+    from app.network import hub
 
     new_schema, connect, _ = pg
     schema = new_schema()
-    descriptor = {'object_id': 'test', 'op_count': 1}
+    initial = {"binding_scope": "scope", "registered": False}
     with connect(schema) as conn:
-        store.create_state(network_id='test', name='Test', founder_device_id='origin', keyring={}, _conn=conn)
-        store.update_state(_conn=conn, hub={'binding_scope': 'scope', 'pushed_ingest_id': 0})
-        store.create_schema(conn.cursor())  # Upgrade remains repeatable with queued work.
-        conn.cursor().execute('INSERT INTO sync_object_outbox(hub_scope,object_id,descriptor,payload,last_ingest_id) VALUES(%s,%s,%s,%s,%s)',
-                              ('scope', 'test', json.dumps(descriptor), 'dGVzdA==', 7))
-        store.create_schema(conn.cursor())
+        store.create_state(network_id="test", name="Test", founder_device_id="origin", keyring={}, _conn=conn)
+        store.update_state(_conn=conn, hub=initial)
 
     @contextmanager
     def isolated_db():
@@ -246,24 +239,23 @@ def test_object_acknowledgement_and_outbox_removal_are_atomic(pg, monkeypatch):
         finally:
             conn.close()
 
-    monkeypatch.setattr(store, 'get_db', isolated_db)
-    monkeypatch.setattr(engine, 'require_context', lambda: None)
-    client = SimpleNamespace(_call=lambda *args, **kw: {'committed': True, 'descriptor': descriptor})
+    monkeypatch.setattr(store, "get_db", isolated_db)
     real_update = store.update_state
 
     def interrupted(**kwargs):
         real_update(**kwargs)
-        raise RuntimeError('process interrupted after cursor update')
+        raise RuntimeError("process interrupted after registration update")
 
-    monkeypatch.setattr(store, 'update_state', interrupted)
-    with pytest.raises(RuntimeError, match='process interrupted'):
-        object_sync.push(client, 'scope', {'object_sync': {'writes': True}})
-    assert object_sync._outbox('scope')
-    assert store.get_state()['hub']['pushed_ingest_id'] == 0
-    monkeypatch.setattr(store, 'update_state', real_update)
-    assert object_sync.push(client, 'scope', {'object_sync': {'writes': True}}) == 1
-    assert object_sync._outbox('scope') is None
-    assert store.get_state()['hub']['pushed_ingest_id'] == 7
+    monkeypatch.setattr(store, "update_state", interrupted)
+    with pytest.raises(RuntimeError, match="process interrupted"):
+        hub._save_hub_state(_expected_scope="scope", registered=True, registered_name="Worker")
+    assert hub._hub_state() == initial
+    monkeypatch.setattr(store, "update_state", real_update)
+    assert hub._save_hub_state(_expected_scope="scope", registered=True) == {**initial, "registered": True}
+    hub._save_hub_state(binding_scope="new-account", registered=False)
+    with pytest.raises(hub.HubError, match="Account network changed"):
+        hub._save_hub_state(_expected_scope="scope", registered=True, registered_name="Old account")
+    assert hub._hub_state() == {"binding_scope": "new-account", "registered": False}
 
 
 def test_checkpoint_pages_share_the_same_postgres_snapshot(pg):
