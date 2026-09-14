@@ -205,15 +205,18 @@ const PLACEHOLDER = '<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-
  * re-rendered tail (see its prefix/tail split) so a rendered <img> is never
  * torn down and refetched as later text streams in.
  */
-export function rewriteMediaMarkdown(text: string): string {
+export function rewriteMediaMarkdown(
+	text: string,
+	renderMedia: (kind: MediaKind, url: string, label: string) => string = mediaHtml
+): string {
 	let out = text.replace(IMG_MD, (match, alt: string, url: string) => {
 		const kind = classifyMediaUrl(url);
-		return kind ? mediaHtml(kind, url, alt) : match;
+		return kind ? renderMedia(kind, url, alt) : match;
 	});
 	out = out.replace(LINK_MD, (match, lead: string, label: string, url: string) => {
 		const kind = classifyMediaUrl(url);
 		// Only embed video/audio for link syntax; leave image links as links.
-		if (kind === 'video' || kind === 'audio') return lead + mediaHtml(kind, url, label);
+		if (kind === 'video' || kind === 'audio') return lead + renderMedia(kind, url, label);
 		return match;
 	});
 	// Never dump a raw base64 image blob as literal prose.

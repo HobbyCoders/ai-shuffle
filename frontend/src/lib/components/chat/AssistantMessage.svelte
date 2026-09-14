@@ -8,6 +8,7 @@
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { rewriteMediaMarkdown, clampRevealToMediaBoundary } from '$lib/utils/media';
 	import { renderChatMarkdown } from '$lib/utils/chat-markdown';
+	import { rewriteWithGallery } from '$lib/utils/media-gallery';
 	import { highlightGenerationForSource, onHighlighterReady } from '$lib/utils/shiki';
 	import { Typewriter } from '$lib/utils/typewriter';
 	import MessageActions from './MessageActions.svelte';
@@ -16,6 +17,7 @@
 
 	interface Props {
 		content: string;
+		gallerySources?: ReadonlySet<string>;
 		/** Real-time WS stream buffer — updates every delta, not just every poll */
 		wsContent?: string;
 		timestamp?: Date | string;
@@ -38,6 +40,7 @@
 	let {
 		content,
 		wsContent = '',
+		gallerySources,
 		timestamp,
 		messageIndex,
 		messageId,
@@ -165,7 +168,9 @@
 	const _stopHighlightWatch = onHighlighterReady(() => { highlightEpoch += 1; });
 	onDestroy(_stopHighlightWatch);
 
-	const rendered = $derived(renderMarkdownMemoized(displayContent, streaming, highlightEpoch));
+	const rendered = $derived(gallerySources?.size && !streaming
+		? { prefix: sanitizeHtml(renderChatMarkdown(rewriteWithGallery(displayContent, gallerySources), true)), tail: '' }
+		: renderMarkdownMemoized(displayContent, streaming, highlightEpoch));
 
 	// `_epoch` is unused by the body: it exists so the $derived above tracks the
 	// highlighter-readiness signal as a dependency.

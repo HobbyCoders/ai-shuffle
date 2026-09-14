@@ -14,6 +14,7 @@
  *   never disappear behind a fold.
  */
 import type { ChatMessage } from '$lib/stores/types';
+import { galleryMediaForTurn, type GalleryMedia } from './media-gallery';
 import { agentDelivery } from './agent-delivery';
 import { isTransientProviderRetry } from '$lib/utils/provider-retry';
 import { displayToolName } from './tool-icons';
@@ -47,6 +48,7 @@ export type DisplayItem =
 			tail: WorkLogEntry[];
 			/** Full settled-turn order, including protected rows and terminal prose. */
 			sequence: WorkLogSequenceEntry[];
+			gallery?: GalleryMedia[];
 			/** "Worked for 2m 14s" / "You stopped after 12s". */
 			durationLabel: string | null;
 			/** Provider-neutral description such as "Read 3 files and ran 2 commands". */
@@ -156,11 +158,11 @@ function isSpecialTool(msg: ChatMessage): boolean {
 	);
 }
 
-function isRoutineTool(msg: ChatMessage): boolean {
+function isRoutineTool(msg: ChatMessage, gallery = false): boolean {
 	if (msg.type !== 'tool_use' || isSpecialTool(msg)) return false;
-	// A screenshot stays visible because the image is the result. A failure folds
-	// with the rest of the run; the summary line reports how many failed.
-	return !msg.toolScreenshot;
+	// Keep screenshots visible unless a gallery represents them outside the fold.
+	// Failures still fold with the run and are counted in its summary.
+	return gallery || !msg.toolScreenshot;
 }
 
 /**
@@ -190,7 +192,7 @@ function isAssistantPhantom(msg: ChatMessage): boolean {
 }
 
 /** Only work known to be closed may disappear in a settled disclosure. */
-function isCompletedRoutineWork(msg: ChatMessage): boolean {
+function isCompletedRoutineWork(msg: ChatMessage, gallery = false): boolean {
 	if (msg.type === 'thinking') return !msg.streaming;
 	if (msg.type === 'subagent') return isSettledSubagent(msg);
 	// A finished retry note is routine work: it folds with the run instead of
@@ -203,7 +205,7 @@ function isCompletedRoutineWork(msg: ChatMessage): boolean {
 	// presentation boundary rather than widening transport semantics.
 	const status = msg.toolStatus as string | undefined;
 	const settled = status === 'complete' || status === 'completed' || status === 'error';
-	return isRoutineTool(msg) && settled && !msg.streaming;
+	return isRoutineTool(msg, gallery) && settled && !msg.streaming;
 }
 
 /** Human duration: "45s", "2m 14s", "1h 03m". */
@@ -668,9 +670,10 @@ export function buildTranscriptModel(
 
 		const prefix = turn.slice(0, userIndex + 1);
 		const response = turn.slice(userIndex + 1);
+		const gallery = galleryMediaForTurn(response.map((entry) => entry.message));
 		const terminalAssistant = response.findLast((entry) => isAssistantText(entry.message)) ?? null;
 		const shouldHide = (entry: Positioned) =>
-			isCompletedRoutineWork(entry.message) ||
+			isCompletedRoutineWork(entry.message, gallery.length > 1) ||
 			isGroupableSystem(entry.message) ||
 			entry.message.type === 'tool_result' ||
 			(isAssistantText(entry.message) && !entry.message.streaming && entry !== terminalAssistant);
@@ -678,7 +681,7 @@ export function buildTranscriptModel(
 			.filter(shouldHide)
 			.map((entry) => ({ message: entry.message, index: entry.index }));
 
-		if (folded.length === 0) {
+		if (folded.length === 0 && gallery.length === 0) {
 			emitWithSystemGroups(turn, items);
 			return;
 		}
@@ -691,7 +694,8 @@ export function buildTranscriptModel(
 		const interrupted = turnWasInterrupted(turn.map((entry) => entry.message));
 		items.push({
 			kind: 'work_log',
-			key: `wl-turn-${folded[0].message.id ?? folded[0].index}`,
+			key: `wl-turn-${(folded[0] ?? response[0]).message.id ?? (folded[0] ?? response[0]).index}`,
+			gallery,
 			mode: 'settled',
 			folded,
 			tail: [],

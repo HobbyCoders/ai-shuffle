@@ -14,6 +14,8 @@
 	 */
 	import type { Snippet } from 'svelte';
 	import type { ChatMessage } from '$lib/stores/types';
+	import MediaGallery from './MediaGallery.svelte';
+	import type { GalleryMedia } from '$lib/utils/media-gallery';
 	import type { WorkLogEntry, WorkLogSequenceEntry } from '$lib/utils/work-log';
 
 	interface Props {
@@ -30,7 +32,8 @@
 		summary?: string | null;
 		/** Token-condensed variant shown instead of `summary` on narrow screens. */
 		compactSummary?: string | null;
-		row: Snippet<[ChatMessage, number]>;
+		gallery?: GalleryMedia[];
+		row: Snippet<[ChatMessage, number, ReadonlySet<string>?]>;
 	}
 
 	let {
@@ -38,12 +41,14 @@
 		folded,
 		tail,
 		sequence = [],
+		gallery = [],
 		durationLabel = null,
 		summary = null,
 		compactSummary = null,
 		row
 	}: Props = $props();
 	const retainedSequence = $derived(sequence.filter((entry) => !entry.hiddenWhenCollapsed));
+	const gallerySources = $derived(new Set(gallery.map(item => item.src)));
 
 	let open = $state(false);
 	let previousMode = $state<'live' | 'settled' | null>(null);
@@ -180,9 +185,10 @@
 		</button>
 		{#if mode === 'settled' && sequence.length > 0}
 			<div class="work-sequence is-collapsed">
+				{#if gallery.length > 1}<MediaGallery items={gallery} />{/if}
 				{#each retainedSequence as entry (entry.message.id ?? entry.index)}
 					<div class="sequence-row" class:is-prose={isAssistantProse(entry)}>
-						{@render row(entry.message, entry.index)}
+						{@render row(entry.message, entry.index, gallerySources)}
 					</div>
 				{/each}
 			</div>

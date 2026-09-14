@@ -1827,6 +1827,7 @@
 						folded={item.folded}
 						tail={item.tail}
 						sequence={item.sequence}
+						gallery={item.gallery}
 						durationLabel={item.durationLabel}
 						summary={item.summary}
 						compactSummary={item.compactSummary}
@@ -1922,7 +1923,7 @@
 
 <!-- The one dispatch table: message → component. Shared with WorkLogGroup so a
      folded row renders exactly as it would inline. -->
-{#snippet messageBody(message: ChatMessage, messageIndex: number)}
+{#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>)}
 	{@const delivery = agentDelivery(message)}
 	{#if delivery}
 		<ToolUseMessage name="Agent message" input={{ label: delivery.sender }} result={delivery.content} status="complete" />
@@ -1963,6 +1964,7 @@
 		{#if shouldRenderAssistantText(message.content, isStreamAnchor)}
 			<AssistantMessage
 				content={message.content}
+				{gallerySources}
 				timestamp={message.timestamp}
 				messageIndex={messageIndex}
 				messageId={message.id}
