@@ -334,29 +334,80 @@ class NativeSmokeTest {
             variants(scenario, "phone-tools")
         }
     }
-    private fun consent(allow: Boolean?, ttl: Long) {
+    private data class ConsentClocks(
+        val wall: Long = System.currentTimeMillis(),
+        val elapsed: Long = android.os.SystemClock.elapsedRealtime(),
+        val uptime: Long = android.os.SystemClock.uptimeMillis(),
+    )
+
+    private fun consent(allow: Boolean?, ttl: Long, pauseHost: Boolean = false) {
         ActivityScenario.launch(ToolSettingsActivity::class.java).use { scenario ->
             onView(withText("Phone tools")).check(matches(isDisplayed()))
             awaitFocused(scenario)
             val result = AtomicReference<Boolean>(); val finished = CountDownLatch(1)
-            scenario.onActivity { activity -> activity.lifecycleScope.launch {
-                result.set(ToolApprovals.request("Allow test timer?", "set_timer: 30 seconds. No external action runs in this test.", System.currentTimeMillis() + ttl)); finished.countDown()
-            } }
+            val started = AtomicReference<ConsentClocks>()
+            val completed = AtomicReference<ConsentClocks>()
+            val completionCause = AtomicReference<Throwable>()
+            val lifecycle = CopyOnWriteArrayList<String>()
+            scenario.onActivity { activity ->
+                activity.lifecycle.addObserver(androidx.lifecycle.LifecycleEventObserver { _, event ->
+                    lifecycle.add("$event at ${ConsentClocks()}")
+                })
+                activity.lifecycleScope.launch {
+                    started.set(ConsentClocks())
+                    result.set(ToolApprovals.request("Allow test timer?", "set_timer: 30 seconds. No external action runs in this test.", started.get().wall + ttl))
+                }.invokeOnCompletion { cause ->
+                    completed.set(ConsentClocks())
+                    completionCause.set(cause)
+                    finished.countDown()
+                }
+            }
             val deadline = awaitConsent()
             Assert.assertEquals("Request must remain pending until a local decision or expiry", 1L, finished.count)
-            if (allow != null) {
+            if (pauseHost) scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
+            else if (allow != null) {
                 screenshot(scenario, "consent-${if (allow) "allow" else "deny"}")
                 onView(withText(if (allow) "Allow once" else "Deny")).perform(click())
             }
-            Assert.assertTrue("Consent did not settle before its deadline", finished.await(5, TimeUnit.SECONDS))
-            if (allow == null) Assert.assertTrue("Request rejected before expiry", System.currentTimeMillis() >= deadline)
-            Assert.assertEquals(allow == true, result.get())
-            Assert.assertNull(ToolApprovals.pending.value)
+            val settled = finished.await(5, TimeUnit.SECONDS)
+            // Capture at coroutine completion, not after the instrumentation thread wakes.
+            // A wall-clock correction, early detach, and coroutine cancellation are distinct.
+            val diagnostics = "deadline=$deadline start=${started.get()} end=${completed.get()} " +
+                "result=${result.get()} cause=${completionCause.get()} " +
+                "lifecycle=$lifecycle state=${scenario.state} pending=${ToolApprovals.pending.value}"
+            android.util.Log.i("ConsentTiming", diagnostics)
+            Assert.assertTrue("Consent did not settle: $diagnostics", settled)
+            Assert.assertNull("Coroutine cancelled instead of returning a decision: $diagnostics", completionCause.get())
+            if (pauseHost) {
+                Assert.assertTrue("Lifecycle cancellation waited for expiry: $diagnostics", completed.get().wall < deadline)
+                Assert.assertTrue("Expected host pause: $diagnostics", lifecycle.any { it.startsWith("ON_PAUSE") })
+            } else if (allow == null) {
+                Assert.assertTrue("Request rejected before expiry: $diagnostics", completed.get().wall >= deadline)
+                Assert.assertFalse("Host paused before timeout: $diagnostics", lifecycle.any { it.startsWith("ON_PAUSE") })
+            }
+            Assert.assertEquals(diagnostics, allow == true && !pauseHost, result.get())
+            Assert.assertNull(diagnostics, ToolApprovals.pending.value)
         }
     }
     @Test fun localConsentDenied() = consent(false, 20_000)
     @Test fun localConsentAcceptedOnlyByRealButton() = consent(true, 20_000)
     @Test fun localConsentExpiresWithoutAction() = consent(null, 2_000)
+    @Test fun localConsentHostPauseRejectsBeforeExpiry() = consent(null, 20_000, pauseHost = true)
+
+    @Test fun expiredConsentNeverBecomesPending() {
+        ActivityScenario.launch(ToolSettingsActivity::class.java).use { scenario ->
+            awaitFocused(scenario)
+            val result = AtomicReference<Boolean>(); val finished = CountDownLatch(1)
+            scenario.onActivity { activity -> activity.lifecycleScope.launch {
+                result.set(ToolApprovals.request("Expired request", "Must never ask for approval", System.currentTimeMillis() - 1))
+                finished.countDown()
+            } }
+            Assert.assertTrue("Expired request did not settle", finished.await(3, TimeUnit.SECONDS))
+            Assert.assertFalse(result.get())
+            Assert.assertNull(ToolApprovals.pending.value)
+            onView(withText("Allow once")).check(doesNotExist())
+        }
+    }
 
     private fun timerApproval(allow: Boolean?, ttl: Long) {
         val monitor = instrumentation.addMonitor(android.content.IntentFilter(android.provider.AlarmClock.ACTION_SET_TIMER), android.app.Instrumentation.ActivityResult(android.app.Activity.RESULT_CANCELED, null), true)

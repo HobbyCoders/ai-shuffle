@@ -48,9 +48,40 @@ class AccountProfileSmokeTest {
         }
     }
     @After fun restorePresenceTransport() { presenceFixture?.close() }
-    private fun awaitText(text: String) = kotlinx.coroutines.runBlocking {
-        kotlinx.coroutines.withTimeout(8_000) {
-            while (runCatching { onView(withText(text)).check(matches(isDisplayed())) }.isFailure) kotlinx.coroutines.delay(50)
+    private fun awaitText(text: String, timeoutMs: Long = 8_000) = kotlinx.coroutines.runBlocking {
+        val started = android.os.SystemClock.elapsedRealtime()
+        val wallStarted = System.currentTimeMillis()
+        var lastFailure: Throwable? = null
+        try {
+            kotlinx.coroutines.withTimeout(timeoutMs) {
+                while (true) {
+                    try {
+                        onView(withText(text)).check(matches(isDisplayed()))
+                        return@withTimeout
+                    } catch (e: androidx.test.espresso.NoMatchingViewException) {
+                        lastFailure = e
+                    } catch (e: AssertionError) {
+                        lastFailure = e
+                    }
+                    kotlinx.coroutines.delay(50)
+                }
+            }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            // Keep Espresso's observed view hierarchy/matcher failure, not just the timer stack.
+            throw AssertionError("Expected displayed text <$text> within ${timeoutMs}ms; " +
+                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}, " +
+                "wallMs=${System.currentTimeMillis() - wallStarted}; " +
+                "lastMatcherFailure=${lastFailure?.message}", lastFailure ?: e)
+        }
+    }
+    @Test fun textWaitTimeoutRetainsExpectedAndObservedState() {
+        // Pair mode renders locally; no signed-out OAuth request is needed for this matcher test.
+        ActivityScenario.launch<AccountActivity>(Intent(context, AccountActivity::class.java).putExtra("mode", "pair")).use {
+            val failure = assertThrows(AssertionError::class.java) { awaitText("missing-test-only-text", 100) }
+            assertTrue(failure.message!!.contains("Expected displayed text <missing-test-only-text>"))
+            assertTrue(failure.message!!.contains("elapsedMs="))
+            assertTrue(failure.message!!.contains("lastMatcherFailure="))
+            assertTrue(failure.cause is androidx.test.espresso.NoMatchingViewException)
         }
     }
     private fun profile(username: String, complete: Boolean) = JSONObject().put("device_id", store.installId)
