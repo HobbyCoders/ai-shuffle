@@ -193,7 +193,13 @@ def _handoff_handler():
     return handle
 
 
+def _session_active_handler():
+    from app.network.session_active import handle
+    return handle
+
+
 _LAZY_HANDLERS = {
+    "session-active": _session_active_handler,
     "handoff": _handoff_handler,
     "application-update": _application_update_handler,
     "rewind": _rewind_handler,

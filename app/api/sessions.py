@@ -2068,6 +2068,25 @@ async def set_session_active(
     """Set the active status of a session. Returns the updated session."""
     existing = await require_session(request, session_id)
 
+    from app.network import control, engine, session_active
+    owner = control.owner_of(existing)
+    if owner is not None:
+        try:
+            return await session_active.set_remote(owner, session_id, payload.is_active)
+        except control.RunnerUnreachable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except control.ControlRefused as exc:
+            raise HTTPException(409, str(exc)) from exc
+    ctx = engine.context()
+    if ctx is not None:
+        try:
+            await session_active.handle({"session_id": session_id, "is_active": payload.is_active}, ctx.device_id)
+            return await run_sync(database.get_session, session_id)
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
     session = await run_sync(database.set_session_active, session_id, payload.is_active)
     if not session:
         raise HTTPException(
