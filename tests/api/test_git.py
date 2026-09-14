@@ -2490,9 +2490,6 @@ def canonical_checkout(tmp_path, monkeypatch):
     from app.core.config import settings
     from app.core.checkout_manager import ensure_checkout
     from app.db import checkouts, database, projects_v2
-    from app.api import common
-    # These cases exercise the real resolver, not this module's legacy mocks.
-    monkeypatch.setattr(common, "database", database)
     monkeypatch.setattr(type(settings), "effective_instance_id", property(lambda self: "list-local"))
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -2505,7 +2502,10 @@ def canonical_checkout(tmp_path, monkeypatch):
     path = ensure_checkout(project, "feature/list", create_new_branch=True)
     assert path is not None
     (Path(path) / "change.txt").write_text("actual worktree change")
-    return project, path
+    # Restore the autouse legacy patch before its own teardown restores the
+    # real module; the shared monkeypatch fixture tears down too late here.
+    with patch("app.api.common.database", database):
+        yield project, path
 
 
 def test_canonical_list_uses_materialized_checkouts_and_local_scope(app, canonical_checkout):
