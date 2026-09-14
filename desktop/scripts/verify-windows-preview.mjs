@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { installPreview } from './install-preview.mjs';
+import { readPreviewRenderer } from './preview-renderer.mjs';
 
 const exec = promisify(execFile);
 assert(process.platform === 'win32' && process.env.CI === 'true', 'Windows CI only');
@@ -93,7 +94,7 @@ async function verifyStableState() {
   }
 }
 async function publicState() {
-  return page.evaluate(() => window.shuffleDesktop.worker.getState());
+  return readPreviewRenderer(page, () => window.shuffleDesktop.worker.getState());
 }
 async function networkStatus() {
   return page.evaluate(async () => {
@@ -170,7 +171,7 @@ try {
     const identity = await application.evaluate(({ app }) => ({ name: app.getName(), data: app.getPath('userData') }));
     assert.equal(identity.name, 'AI Shuffle Preview');
     assert.equal(path.resolve(identity.data).toLowerCase(), previewRoot.toLowerCase());
-    const update = await page.evaluate(() => window.shuffleDesktop.updates.getState());
+    const update = await readPreviewRenderer(page, () => window.shuffleDesktop.updates.getState());
     assert.equal(update.phase, 'unsupported', 'Preview must not update itself from the stable feed');
   }
   // A running stable app must produce a refusal, never attachment or migration.
