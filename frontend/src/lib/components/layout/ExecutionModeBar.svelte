@@ -16,7 +16,6 @@
 	 * picking a branch here only stages it.
 	 */
 	import { activeSession } from '$lib/stores/active-session';
-	import type { ExecutionMode } from '$lib/stores/types';
 	import { syncWorktrees, type Worktree, type Branch } from '$lib/api/git';
 	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
 	import {
@@ -27,7 +26,7 @@
 		runnerTitle,
 		emptyRunnersCopy
 	} from './execution-mode-eligibility';
-	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
+	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git.svelte';
 	import { ChevronDown, ChevronRight, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { untrack, type Snippet } from 'svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
@@ -66,14 +65,19 @@
 	// same `is_git_repo !== false` convention GitHeaderActions uses, so non-git
 	// controls only hide once the backend confirms the folder isn't a repo (during
 	// the brief load window status is null and we optimistically show everything).
-	const isGitRepo = $derived($gitStatus?.is_git_repo !== false);
+	// A cache miss retains the previous checkout's status while loading. Only
+	// use hydrated data belonging to this composer to constrain its intent.
+	const isGitRepo = $derived(!($git.hydrated
+		&& $git.projectId === $activeSession.project
+		&& $git.worktreeId === $activeSession.worktreeId
+		&& $git.sessionId === $activeSession.sessionId
+		&& $git.status?.is_git_repo === false));
 
 	$effect(() => {
-		// A non-git project can only run Local. If a stale persisted preference (or
-		// a switch from a git project) left this session in a hidden Worktree mode,
-		// fall back to Local so the toggle always has a visible active option.
-		if (!isGitRepo && untrack(() => $activeSession.worktreeIntent) !== 'local') {
-			setMode('local');
+		// Non-git drafts run Local, but this is not a new account-wide preference.
+		// Existing sessions retain their own checkout binding.
+		if (!isGitRepo && !$activeSession.sessionId && $activeSession.worktreeIntent !== 'local') {
+			activeSession.setWorktreeIntent('local', { persist: false });
 		}
 	});
 
@@ -159,10 +163,6 @@
 	// We only refresh on-demand when the dropdown is opened (see toggleDropdown).
 
 	// --- Functions ---
-
-	function setMode(mode: ExecutionMode) {
-		activeSession.setWorktreeIntent(mode);
-	}
 
 	// --- Execution-mode dropdown ---
 	//

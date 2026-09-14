@@ -24,7 +24,8 @@ const mocks = vi.hoisted(() => {
 			{ name: 'main', current: true, remote: false },
 			{ name: 'develop', current: false, remote: false }
 		]),
-		gitStatus: store({ is_git_repo: true }),
+		git: store({ projectId: 'repo', worktreeId: null as string | null, sessionId: null as string | null,
+			hydrated: true, status: { is_git_repo: true } }),
 		currentBranch: store({ name: 'main' }),
 		loadWorktrees: vi.fn().mockResolvedValue(undefined),
 		loadBranches: vi.fn().mockResolvedValue(undefined),
@@ -53,9 +54,9 @@ vi.mock('$lib/api/installs', () => ({
 vi.mock('$lib/stores/git.svelte', () => ({
 	worktrees: mocks.worktrees,
 	branches: mocks.branches,
-	gitStatus: mocks.gitStatus,
 	currentBranch: mocks.currentBranch,
 	git: {
+		...mocks.git,
 		loadWorktrees: mocks.loadWorktrees,
 		loadBranches: mocks.loadBranches
 	}
@@ -65,11 +66,16 @@ import ExecutionModeBar from './ExecutionModeBar.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { listInstalls } from '$lib/api/installs';
 import { getPersistedDeviceIntent } from '$lib/stores/worker-selection';
+import { composerPreferences } from '$lib/stores/composer-preferences';
+import { getPersistedWorktreeIntent } from '$lib/stores/session/session-switcher';
+import { tick } from 'svelte';
 
 afterEach(() => cleanup());
 afterAll(() => vi.unstubAllGlobals());
 
 beforeEach(() => {
+	Object.assign(activeSession.current, { sessionId: null, project: 'repo', projectV2Id: null, messages: [] });
+	mocks.git.set({ projectId: 'repo', worktreeId: null, sessionId: null, hydrated: true, status: { is_git_repo: true } });
 	activeSession.setDeviceIntent(null);
 	activeSession.setWorktreeIntent('worktree');
 	activeSession.clearWorktreeSelection();
@@ -79,6 +85,63 @@ beforeEach(() => {
 		{ name: 'main', current: true, remote: false },
 		{ name: 'develop', current: false, remote: false }
 	]);
+});
+
+
+describe('automatic non-git fallback', () => {
+	const nonGit = { projectId: 'repo', worktreeId: null, sessionId: null,
+		hydrated: true, status: { is_git_repo: false } };
+
+	it('runs a non-git draft locally without changing the remembered toggle', async () => {
+		render(ExecutionModeBar);
+		mocks.git.set(nonGit);
+		await tick();
+		expect(activeSession.current.worktreeIntent).toBe('local');
+		expect(composerPreferences.current.worktreeIntent).toBe('worktree');
+		expect(getPersistedWorktreeIntent()).toBe('worktree');
+		expect(JSON.parse(localStorage.getItem('ai-shuffle-composer:worktreeIntent')!)).toBe('worktree');
+		expect(screen.queryByRole('checkbox')).toBeNull();
+
+		activeSession.setProject('another-repo', null);
+		await tick();
+		expect(activeSession.current.worktreeIntent).toBe('worktree');
+		expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+	});
+
+	it.each([
+		{ projectId: 'previous-repo' },
+		{ hydrated: false },
+		{ worktreeId: 'previous-checkout' },
+		{ sessionId: 'previous-session' },
+	])('ignores non-git status from a different or unhydrated checkout: %o', async stale => {
+		render(ExecutionModeBar);
+		mocks.git.set({ ...nonGit, ...stale });
+		await tick();
+		expect(activeSession.current.worktreeIntent).toBe('worktree');
+		expect(getPersistedWorktreeIntent()).toBe('worktree');
+		expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+	});
+
+	it('does not change an existing session binding', async () => {
+		Object.assign(activeSession.current, { sessionId: 'existing' });
+		mocks.git.set({ ...nonGit, sessionId: 'existing' });
+		render(ExecutionModeBar);
+		await tick();
+		expect(activeSession.current.worktreeIntent).toBe('worktree');
+		expect(getPersistedWorktreeIntent()).toBe('worktree');
+	});
+
+	it('still persists explicit checkbox changes in both directions', async () => {
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('checkbox'));
+		expect(activeSession.current.worktreeIntent).toBe('local');
+		expect(composerPreferences.current.worktreeIntent).toBe('local');
+		expect(getPersistedWorktreeIntent()).toBe('local');
+		await fireEvent.click(screen.getByRole('checkbox'));
+		expect(activeSession.current.worktreeIntent).toBe('worktree');
+		expect(composerPreferences.current.worktreeIntent).toBe('worktree');
+		expect(getPersistedWorktreeIntent()).toBe('worktree');
+	});
 });
 
 describe('worker picker persistence', () => {

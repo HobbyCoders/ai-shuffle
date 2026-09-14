@@ -963,9 +963,9 @@ export const activeSession = {
 
 	// ── Execution Mode & Worktree ───────────────────────────────────
 
-	setWorktreeIntent(mode: ExecutionMode) {
-		// Remember the toggle so new sessions reopen in the same mode
-		setPersistedWorktreeIntent(mode);
+	setWorktreeIntent(mode: ExecutionMode, { persist = true }: { persist?: boolean } = {}) {
+		// Only explicit choices change the default for future chats.
+		if (persist) setPersistedWorktreeIntent(mode);
 		_update(s => ({
 			...s,
 			worktreeIntent: mode,
