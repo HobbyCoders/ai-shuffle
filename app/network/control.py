@@ -170,6 +170,11 @@ def _git_state_handler():
     return git.handle_state
 
 
+def _git_catalog_handler():
+    from app.network import git
+    return git.handle_catalog
+
+
 def _git_op_handler():
     from app.network import git
     return git.handle_op
@@ -182,6 +187,7 @@ _LAZY_HANDLERS = {
     "rewind": _rewind_handler,
     "session-git": _session_git_handler,
     "git-state": _git_state_handler,
+    "git-catalog": _git_catalog_handler,
     "git-op": _git_op_handler,
 }
 

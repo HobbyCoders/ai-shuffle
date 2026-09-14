@@ -374,6 +374,25 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
     return results
 
 
+async def liveness_loop() -> None:
+    """Invalidate readers on contact expiry even if sync is blocked or idle.
+
+    Presence/runtime records are not contact evidence. This observes only the
+    monotonic contact clock used by the runner directory, without DB reads.
+    """
+    from app.core.global_events import global_events
+
+    previous: set[str] = set()
+    while True:
+        current = set(online_devices())
+        if current != previous:
+            for resource in ("network", "sessions"):
+                for kind in ("admin", "api_user", "account", "paired"):
+                    global_events.resources_changed(resource, user_type=kind)
+            previous = current
+        await asyncio.sleep(1.0)
+
+
 async def sync_loop() -> None:
     global _wake
     _wake = asyncio.Event()
@@ -508,6 +527,7 @@ def start() -> List[asyncio.Task]:
         asyncio.create_task(sync_loop(), name="network-sync"),
         asyncio.create_task(scan_loop(), name="network-scan"),
         asyncio.create_task(presence_loop(), name="network-presence"),
+        asyncio.create_task(liveness_loop(), name="network-liveness"),
     ]
     return list(_tasks)
 

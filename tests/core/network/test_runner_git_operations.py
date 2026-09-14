@@ -107,6 +107,76 @@ def _install(response_body, device_id):
     return rows[0]
 
 
+def test_catalog_discovers_clone_less_viewer_project_from_owner(
+    workers, monkeypatch, tmp_path
+):
+    a, b = _join_with_distinct_legacy_ids(workers, monkeypatch)
+    project = _seed_project(b, tmp_path)
+    from tests.core.network.harness import exchange
+    with b.active():
+        engine.scan_all()
+    exchange(b, a)
+    served = _serve_peer(monkeypatch, b)
+    with a.active():
+        assert checkouts_db.list_active_base_checkouts() == []
+        store.touch_member(b.device_id, endpoints=["http://peer.local:8000"])
+        transport.note_contact(b.device_id)
+        with TestClient(_cluster_app()) as client:
+            response = client.get("/api/v1/cluster/projects")
+            assert response.status_code == 200
+            row, = response.json()["projects"]
+            assert row["project_v2_id"] == project["pv2"]["id"]
+            assert row["remote_only"] is True
+            assert row["local_project_id"] is None
+            assert [item["install_id"] for item in row["eligible"]] == [b.device_id]
+            assert str(project["path"]) not in response.text
+            with b.active():
+                checkouts_db.upsert_checkout(project["pv2"]["id"], LEGACY_B,
+                                            str(project["path"]), status="archived")
+            assert client.get("/api/v1/cluster/projects").json()["projects"] == []
+            with b.active():
+                checkouts_db.upsert_checkout(project["pv2"]["id"], LEGACY_B,
+                                            str(project["path"]), status="active")
+            transport.forget_peers()
+            assert client.get("/api/v1/cluster/projects").json()["projects"] == []
+    assert ("POST", "/api/v1/network/peer/control/git-catalog") in served.requests
+
+
+def test_catalog_unavailable_owner_is_not_advertised(workers, monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+    from app.network import control
+
+    a, b = _join_with_distinct_legacy_ids(workers, monkeypatch)
+    project = _seed_project(b, tmp_path)
+    from tests.core.network.harness import exchange
+    with b.active():
+        engine.scan_all()
+    exchange(b, a)
+    monkeypatch.setattr(control, "call", AsyncMock(side_effect=control.RunnerUnreachable("old or unreachable worker")))
+    with a.active():
+        transport.note_contact(b.device_id)
+        with TestClient(_cluster_app()) as client:
+            assert client.get("/api/v1/cluster/projects").json() == {"projects": []}
+
+
+def test_catalog_batch_matches_owner_eligibility(workers, monkeypatch, tmp_path):
+    a, b = _join_with_distinct_legacy_ids(workers, monkeypatch)
+    project = _seed_project(b, tmp_path)
+    pid = project["pv2"]["id"]
+    with b.active():
+        assert checkouts_db.eligible_base_project_ids(LEGACY_B) == [pid]
+        with database.get_db() as conn:
+            conn.cursor().execute("UPDATE checkouts SET status = 'archived' WHERE project_id = %s", (pid,))
+        checkouts_db.upsert_checkout(pid, "", str(tmp_path / "legacy-base"))
+        # An archived owner base suppresses the legacy sentinel fallback.
+        assert checkouts_db.has_active_base_checkout(pid, LEGACY_B) is False
+        assert checkouts_db.eligible_base_project_ids(LEGACY_B) == []
+        with database.get_db() as conn:
+            conn.cursor().execute("DELETE FROM checkouts WHERE runner_id = %s", (LEGACY_B,))
+        assert checkouts_db.has_active_base_checkout(pid, LEGACY_B) is True
+        assert checkouts_db.eligible_base_project_ids(LEGACY_B) == [pid]
+
+
 def test_git_state_reads_each_independent_owner_with_legacy_checkout_ids(
     workers, monkeypatch, tmp_path
 ):

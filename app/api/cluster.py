@@ -13,6 +13,7 @@ claim loop and durable ``pending_interactions``, not HTTP relay.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -220,9 +221,28 @@ async def list_cluster_projects(
     if scoped_origin == "":
         return {"projects": []}
 
-    bases = await run_sync(checkouts_db.list_active_base_checkouts)
     pv2s = await run_sync(projects_v2_db.list_projects_v2)
     installs = await run_sync(database.get_installs)
+    from app.network import engine, git as network_git
+    if engine.context() is not None:
+        # One bounded request per owner, not per project. Checkouts themselves
+        # stay private to that owner; a failed/old peer is never called eligible.
+        semaphore = asyncio.Semaphore(4)
+
+        async def owned_bases(install):
+            if not install.get("online") or not install.get("approved", True):
+                return []
+            async with semaphore:
+                try:
+                    ids = await network_git.catalog(install["id"])
+                    return [{"project_id": pid, "runner_id": install["id"]} for pid in ids]
+                except Exception:
+                    logger.warning("Cannot read project catalog from worker %s", install["id"], exc_info=True)
+                    return []
+
+        bases = [row for rows in await asyncio.gather(*(owned_bases(i) for i in installs)) for row in rows]
+    else:
+        bases = await run_sync(checkouts_db.list_active_base_checkouts)
     local_projects = await run_sync(database.get_all_projects)
     me = _self_install_id()
 

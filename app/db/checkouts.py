@@ -320,6 +320,23 @@ def has_active_checkout(
     return bool(list_active_checkouts(project_id, runner_id, branch))
 
 
+def eligible_base_project_ids(runner_id: str) -> List[str]:
+    """Batch the base-checkout predicate, including its legacy fallback."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT c.project_id FROM checkouts c "
+            "WHERE (c.branch IS NULL OR c.branch = '') "
+            "AND (c.status IS NULL OR c.status = '' OR c.status = 'active') "
+            "AND (c.runner_id = %s OR (c.runner_id = '' AND NOT EXISTS ("
+            "SELECT 1 FROM checkouts own WHERE own.project_id = c.project_id "
+            "AND own.runner_id = %s AND (own.branch IS NULL OR own.branch = '')))) "
+            "ORDER BY c.project_id",
+            (runner_id, runner_id),
+        )
+        return [row["project_id"] for row in cursor.fetchall()]
+
+
 def list_active_base_checkouts() -> List[Dict[str, Any]]:
     """One SELECT of every ACTIVE base checkout across every project.
 

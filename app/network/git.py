@@ -58,6 +58,20 @@ async def state(runner_id: str, project_v2_id: str) -> dict[str, Any]:
     return await run_sync(local_state, project_v2_id)
 
 
+async def catalog(runner_id: str) -> list[str]:
+    """Owner-reported eligibility only: no checkout paths or executable jobs."""
+    ctx = engine.context()
+    target = device_id(runner_id)
+    if ctx and target != ctx.device_id:
+        return (await control.call(target, "git-catalog", {}))["project_ids"]
+    return await run_sync(checkouts.eligible_base_project_ids, settings.effective_instance_id)
+
+
+async def handle_catalog(body: dict, from_device: str) -> dict:
+    return {"project_ids": await run_sync(
+        checkouts.eligible_base_project_ids, settings.effective_instance_id)}
+
+
 async def eligible(runner_id: str, project_v2_id: str) -> bool:
     if engine.context() is None:
         return await run_sync(checkouts.has_active_base_checkout, project_v2_id, runner_id)

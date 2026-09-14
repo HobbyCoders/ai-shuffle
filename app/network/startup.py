@@ -209,7 +209,7 @@ def _on_applied(touched) -> None:
         if coll is not None and coll.resource:
             resources.add(coll.resource)
         if collection in ("membership", "presence"):
-            resources.add("network")
+            resources.update(("network", "sessions"))
     for resource in resources:
         try:
             # Remote applies bypass the local mutation decorators. Account and

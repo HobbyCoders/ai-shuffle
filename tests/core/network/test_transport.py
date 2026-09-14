@@ -39,6 +39,42 @@ def workers(tmp_path):
     enrollment._task = None
 
 
+def test_liveness_expiry_and_reconnect_invalidate_without_peer_writes(monkeypatch):
+    from app.core.global_events import global_events
+
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    events = []
+    monkeypatch.setattr(global_events, "resources_changed",
+                        lambda resource, **kw: events.append((resource, kw["user_type"])))
+    transport.reset_for_tests()
+    transport.note_contact("owner")
+    step = [0]
+
+    async def tick(_delay):
+        step[0] += 1
+        if step[0] == 1:
+            assert len(events) == 8  # first real contact, all authenticated audiences
+        elif step[0] == 2:
+            assert len(events) == 8  # quiet time emits nothing
+            now[0] += transport.ONLINE_WINDOW_SECONDS + 1
+        elif step[0] == 3:
+            assert len(events) == 16  # expiry, with no incoming record
+            transport.note_contact("owner")
+        elif step[0] == 4:
+            assert len(events) == 24  # reconnect
+            transport.forget_peers()
+        else:
+            assert len(events) == 32  # leaving the network
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(transport.asyncio, "sleep", tick)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(transport.liveness_loop())
+    assert set(events) == {(r, k) for r in ("sessions", "network")
+                           for k in ("admin", "api_user", "account", "paired")}
+
+
 def _app():
     app = FastAPI()
     app.include_router(network_api.router)
