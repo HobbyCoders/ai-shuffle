@@ -37,6 +37,20 @@ class ConfinedFilesTests(unittest.TestCase):
             except OSError as exc:
                 self.skipTest(f'Symlink unavailable: {exc}')
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows DOS aliases required')
+    def test_short_root_spelling_uses_same_pinned_directory(self):
+        import ctypes
+        from ctypes import wintypes
+        short_path = ctypes.WinDLL('kernel32', use_last_error=True).GetShortPathNameW
+        short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        short_path.restype = wintypes.DWORD
+        buffer = ctypes.create_unicode_buffer(32768)
+        self.assertGreater(short_path(str(self.root), buffer, len(buffer)), 0)
+        short = Path(buffer.value)
+        inside = files.upload(short, '', 'file.txt', b'inside')
+        with files.open_attachment(short, inside.resolve()) as stream:
+            self.assertEqual(stream.read(), b'inside')
+
     def test_duplicate_and_hardlink_destination_are_not_overwritten(self):
         os.link(self.secret, self.root / 'file.txt')
         new = files.upload(self.root, '', 'file.txt', b'new')

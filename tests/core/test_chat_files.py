@@ -192,6 +192,16 @@ class WindowsChatFileFenceTests(unittest.TestCase):
         self.assertEqual(files.read(self.fd, "file"), "inside")
         self.assertEqual(self.secret.read_text(), "outside marker")
 
+    def test_exclusive_temp_collision_does_not_remove_existing_file(self):
+        from types import SimpleNamespace
+        temp = self.root / ".chat-write-collision"
+        temp.write_text("existing")
+        with patch.object(files.uuid, "uuid4", return_value=SimpleNamespace(hex="collision")):
+            with self.assertRaises(FileExistsError):
+                files.write(self.fd, "file", "new")
+        self.assertEqual(temp.read_text(), "existing")
+        self.assertFalse((self.root / "file").exists())
+
     def test_root_spellings_and_unavailable_fail_closed(self):
         for path in (str(self.root.anchor), str(self.root / ".." / "grant"),
                      "C:relative", "\\\\server\\share\\folder"):

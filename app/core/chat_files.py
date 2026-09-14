@@ -187,18 +187,21 @@ def write(root: int | WindowsRoot, path: str, content: str) -> None:
             except FileNotFoundError:
                 pass
             temp = parent / (".chat-write-" + uuid.uuid4().hex)
-            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY, 0o600)
+            created = False
             try:
-                with os.fdopen(fd, "wb") as stream:
-                    regular(os.fstat(stream.fileno()))
-                    stream.write(data)
-                    stream.flush()
-                    os.fsync(stream.fileno())
+                with _windows_handle(temp, directory=False, create_new=True) as fd:
+                    created = True
+                    with os.fdopen(os.dup(fd), "wb") as stream:
+                        regular(os.fstat(stream.fileno()))
+                        stream.write(data)
+                        stream.flush()
+                        os.fsync(stream.fileno())
                 # Pinned parents cannot be replaced. Replace the entry, never
                 # follow a destination swapped after validation.
                 os.replace(temp, destination)
             finally:
-                temp.unlink(missing_ok=True)
+                if created:
+                    temp.unlink(missing_ok=True)
         return
     with directory(root, names[:-1]) as parent:
         mode = 0o600
