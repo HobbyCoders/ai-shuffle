@@ -189,6 +189,58 @@ describe('ContextUsageBar — popover positioning', () => {
 		expect(container.querySelector('.sec-header')?.getAttribute('aria-expanded')).toBe('true');
 	});
 
+
+	it('stays inside the chat column when the browser panel resizes it', async () => {
+		const originalWidth = window.innerWidth;
+		let columnWidth = 600;
+		const column = document.createElement('div');
+		column.className = 'chat-view';
+		document.body.append(column);
+		let resize: () => void = () => {};
+		const observe = vi.fn();
+		const disconnect = vi.fn();
+		vi.stubGlobal('ResizeObserver', class {
+			constructor(callback: () => void) { resize = callback; }
+			observe = observe;
+			disconnect = disconnect;
+		});
+		const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
+		rectSpy.mockImplementation(function (this: HTMLElement) {
+			if (this === column) return DOMRect.fromRect({ x: 240, width: columnWidth });
+			const shift = Number(this.style.transform.match(/translateX\((-?[\d.]+)px\)/)?.[1] ?? 0);
+			const width = Math.min(380, Number.parseFloat(this.style.getPropertyValue('--usage-popover-room')) || 380);
+			return DOMRect.fromRect({ x: 790 - width + shift, width, height: 200 });
+		});
+		try {
+			window.innerWidth = 1440;
+			const { container, unmount } = render(ContextUsageBar, { target: column });
+			await openPopover(container);
+			const popover = container.querySelector('.usage-popover') as HTMLElement;
+			expect(observe).toHaveBeenCalledWith(column);
+			expect(observe).toHaveBeenCalledWith(popover);
+			for (const width of [600, 420, 280, 600]) {
+				columnWidth = width;
+				for (let repeat = 0; repeat < 2; repeat++) {
+					resize();
+					await waitFor(() => {
+						const rect = popover.getBoundingClientRect();
+						expect(rect.left).toBeGreaterThanOrEqual(252);
+						expect(rect.right).toBeLessThanOrEqual(240 + width - 12);
+						expect(popover.style.getPropertyValue('--usage-popover-room')).toBe(`${width - 24}px`);
+					});
+				}
+			}
+			await openPopover(container);
+			expect(disconnect).toHaveBeenCalled();
+			await unmount();
+		} finally {
+			rectSpy.mockRestore();
+			vi.unstubAllGlobals();
+			window.innerWidth = originalWidth;
+			column.remove();
+		}
+	});
+
 	it('keeps translated bounds stable through repeated desktop and mobile resizes', async () => {
 		const originalWidth = window.innerWidth;
 		let unshiftedLeft = 1201;

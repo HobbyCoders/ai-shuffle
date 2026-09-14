@@ -135,6 +135,7 @@
 	let wrapperRef = $state<HTMLDivElement | null>(null);
 	let popoverEl = $state<HTMLDivElement | null>(null);
 	let popShift = $state(0);
+	let popResizeObserver: ResizeObserver | null = null;
 
 	function measurePopoverShift() {
 		const el = popoverEl;
@@ -142,24 +143,35 @@
 			popShift = 0;
 			return;
 		}
+		// The browser panel reduces the clipping chat column, not the viewport.
+		const column = wrapperRef?.closest(".chat-view")?.getBoundingClientRect();
+		const minLeft = Math.max(0, column?.left ?? 0) + 12;
+		const maxRight = Math.min(window.innerWidth, column?.right ?? window.innerWidth) - 12;
+		el.style.setProperty("--usage-popover-room", `${Math.max(0, maxRight - minLeft)}px`);
 		const r = el.getBoundingClientRect();
 		// Bounds already include the current translation; solve from the unshifted position.
 		const left = r.left - popShift;
 		const right = r.right - popShift;
-		const PAD = 12;
 		let shift = 0;
-		if (right > window.innerWidth - PAD) shift = window.innerWidth - PAD - right;
-		if (left + shift < PAD) shift = PAD - left;
+		if (right > maxRight) shift = maxRight - right;
+		if (left + shift < minLeft) shift = minLeft - left;
 		popShift = Math.round(shift);
 	}
 
 	function attachPopShiftListener() {
-		window.removeEventListener('resize', measurePopoverShift);
+		detachPopShiftListener();
 		window.addEventListener('resize', measurePopoverShift);
+		if (typeof ResizeObserver === 'undefined') return;
+		popResizeObserver = new ResizeObserver(measurePopoverShift);
+		const column = wrapperRef?.closest('.chat-view');
+		if (column) popResizeObserver.observe(column);
+		if (popoverEl) popResizeObserver.observe(popoverEl);
 	}
 
 	function detachPopShiftListener() {
 		window.removeEventListener('resize', measurePopoverShift);
+		popResizeObserver?.disconnect();
+		popResizeObserver = null;
 	}
 
 	function setOpen(next: boolean) {
@@ -646,7 +658,7 @@
 	</button>
 
 	{#if open}
-		<div class="usage-popover" bind:this={popoverEl} style="transform: translateX({popShift}px)" role="dialog" aria-label="Context and usage">
+		<div class="usage-popover" bind:this={popoverEl} style:transform="translateX({popShift}px)" role="dialog" aria-label="Context and usage">
 			<!-- ═══ Context window ═══ -->
 			<div class="ctx-section">
 				<button
@@ -970,19 +982,19 @@
 		stroke: var(--destructive);
 	}
 
-	/* ===== Popover — wide + compact, opens upward above the pill (dock sits at
-	   the bottom). Width is clamped to the viewport so it never overflows on
-	   mobile. Per CSS, min-width is resolved after max-width and wins when the
-	   two conflict — so the viewport clamp must live inside min-width too, or a
-	   narrow viewport would still force the popover to the raw 340px floor. ===== */
+	/* Opens upward and inward from the rightmost control. Clamp both width
+	   limits to the visible chat column: min-width otherwise beats max-width. */
 	.usage-popover {
 		position: absolute;
 		bottom: calc(100% + 6px);
-		left: 0;
+		right: 0;
 		z-index: 50;
+		box-sizing: border-box;
+		/* Position corrections must be immediate, not globally animated. */
+		transition: none;
 		width: max-content;
-		min-width: min(340px, calc(100vw - 24px));
-		max-width: min(380px, calc(100vw - 24px));
+		min-width: min(340px, var(--usage-popover-room, calc(100vw - 24px)));
+		max-width: min(380px, var(--usage-popover-room, calc(100vw - 24px)));
 		padding: 12px 14px;
 		display: flex;
 		flex-direction: column;
