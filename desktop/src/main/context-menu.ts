@@ -25,6 +25,26 @@ export function attachTextContextMenu(win: BrowserWindow): void {
 					{ role: 'selectAll', enabled: editFlags.canSelectAll }
 				];
 
+		// Electron draws the underline, but custom menus must expose Chromium's
+		// suggestions explicitly. Keep these tied to the word that was clicked.
+		if (isEditable && params.misspelledWord) {
+			const spelling: MenuItemConstructorOptions[] = params.dictionarySuggestions.length
+				? params.dictionarySuggestions.map((suggestion) => ({
+						label: suggestion,
+						click: () => win.webContents.replaceMisspelling(suggestion)
+					}))
+				: [{ label: 'No spelling suggestions', enabled: false }];
+			spelling.push(
+				{ type: 'separator' },
+				{
+					label: 'Add to dictionary',
+					click: () => win.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord)
+				},
+				{ type: 'separator' }
+			);
+			template.unshift(...spelling);
+		}
+
 		Menu.buildFromTemplate(template).popup({
 			window: win,
 			frame: params.frame ?? undefined,
