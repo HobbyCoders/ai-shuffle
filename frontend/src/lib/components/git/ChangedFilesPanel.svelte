@@ -1189,21 +1189,12 @@
 		text-overflow: ellipsis;
 	}
 
-	/* Smaller basename in review sidebar */
-	.review-file-item .file-basename {
-		font-size: 0.6875rem;
-	}
-
 	.file-dirname {
 		font-size: 0.6875rem;
 		color: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-
-	.review-file-item .file-dirname {
-		font-size: 0.5625rem;
 	}
 
 	/* ── Diff stats ──────────────────────────────────────────────────── */

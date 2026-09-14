@@ -246,6 +246,64 @@ describe('session navigation closes header dropdowns', () => {
 	});
 });
 
+describe('session-switcher · authoritative lane hydration', () => {
+	beforeEach(() => {
+		_mockSessions.current = [];
+		vi.mocked(api.get).mockReset().mockResolvedValue(null);
+		appMode.set('code', false);
+	});
+
+	it.each([
+		['chat', 'chat'], ['voice', 'voice'], ['code', 'code'], [null, 'code'], ['unknown', 'code'],
+	] as const)('opens an unlisted deep link in its persisted %s lane', async (mode, expected) => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { mode } });
+		const { switcher, getState } = makeSwitcher(fullState({ mode: 'voice' }));
+		const setMode = vi.spyOn(appMode, 'set');
+		await switcher.switchSession('unlisted-session');
+		await vi.waitFor(() => expect(setMode).toHaveBeenCalledWith(expected, false));
+		expect(getState().mode).toBe(expected);
+		expect(appMode.current).toBe(expected);
+		setMode.mockRestore();
+		switcher.destroy();
+	});
+
+	it('corrects a stale lane on reload without changing the saved default', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { mode: 'chat' } });
+		const { switcher, getState } = makeSwitcher(fullState({ mode: 'voice' }));
+		const setMode = vi.spyOn(appMode, 'set');
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState().mode).toBe('chat');
+		expect(setMode).toHaveBeenCalledExactlyOnceWith('chat', false);
+		setMode.mockRestore();
+		switcher.destroy();
+	});
+
+	it('preserves the lane when an older worker omits mode', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { title: 'Chat' } });
+		appMode.set('chat', false);
+		const { switcher, getState } = makeSwitcher(fullState({ mode: 'chat' }));
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState().mode).toBe('chat');
+		expect(appMode.current).toBe('chat');
+		switcher.destroy();
+	});
+
+	it('does not let a late snapshot change the newly selected session or lane', async () => {
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState } = makeSwitcher(fullState());
+		const refresh = switcher.refreshSessionMetadata('session-A');
+		_mockSessions.current = [{ id: 'session-B', mode: 'voice' }];
+		await switcher.switchSession('session-B');
+		appMode.set('voice', false);
+		resolve({ session_meta: { mode: 'chat' } });
+		await refresh;
+		expect(getState()).toMatchObject({ sessionId: 'session-B', mode: 'voice' });
+		expect(appMode.current).toBe('voice');
+		switcher.destroy();
+	});
+});
+
 describe('session-switcher · authoritative project hydration', () => {
 	beforeEach(() => {
 		_mockSessions.current = [];

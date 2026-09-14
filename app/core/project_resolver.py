@@ -216,11 +216,13 @@ def _local_checkout(
 ) -> Optional[Dict[str, Any]]:
     # A moved checkout leaves the old row behind. Prefer an existing directory
     # among this runner's candidates, without falling back to another branch.
+    # Legacy relative paths use the same runner-local normalization as writes;
+    # never rewrite the stored row or test it against the process cwd.
     rows = checkouts_db.list_checkouts_with_legacy_fallback(
         project_id, runner_id, branch=branch
     )
     for row in rows:
-        path = row.get("path")
+        path = checkout_manager._resolve_checkout_path(row["path"]) if row.get("path") else None
         if path and os.path.isdir(path):
             return row
     # Metadata callers still need the recorded checkout when its folder is gone.
@@ -250,7 +252,7 @@ def has_local_base_checkout(
     row = _local_checkout(project["id"], runner_id)
     if not row:
         return False
-    path = row.get("path")
+    path = checkout_manager._resolve_checkout_path(row["path"]) if row.get("path") else None
     return bool(path and os.path.isdir(path))
 
 
@@ -286,7 +288,7 @@ def resolve_existing_cwd(session_row: Dict[str, Any]) -> Optional[str]:
     row = resolve_local_checkout(session_row)
     if not row:
         return None
-    path = row.get("path")
+    path = checkout_manager._resolve_checkout_path(row["path"]) if row.get("path") else None
     if path and os.path.isdir(path):
         return path
     return None

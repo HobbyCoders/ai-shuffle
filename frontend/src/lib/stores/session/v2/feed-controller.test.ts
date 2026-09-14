@@ -566,6 +566,112 @@ describe('feedController flush scheduling (post-catch-up live cadence)', () => {
 	});
 });
 
+describe('feedController hidden streaming publication (#1282)', () => {
+	function visibility(hidden: boolean): void {
+		vi.spyOn(document, 'hidden', 'get').mockReturnValue(hidden);
+		document.dispatchEvent(new Event('visibilitychange'));
+	}
+
+	afterEach(() => vi.restoreAllMocks());
+
+	it('reduces hidden deltas without publishing, then publishes the entire stream once visible', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		const calls = deps.update.mock.calls.length;
+		visibility(true);
+
+		// Ten seconds of 20 Hz SSE input. Count actual subscriber publications,
+		// not merely scheduled timers; intake still has to retain every delta.
+		for (let i = 0; i < 200; i++) {
+			hoisted.onEvent!(textDelta(`hidden-${i}`, 'x'));
+			vi.advanceTimersByTime(STREAM_FOLD_MS);
+		}
+		expect(deps.update.mock.calls.length - calls).toBe(0);
+		expect(deps.state.messages).toHaveLength(0);
+		visibility(false);
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		expect(deps.update.mock.calls.length - calls).toBe(1);
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('x'.repeat(200));
+		vi.advanceTimersByTime(1000);
+		expect(deps.update.mock.calls.length - calls).toBe(1);
+	});
+
+	it.each([true, false])('defers an already queued throttle even if visibilitychange dispatch is %s', (dispatch) => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		const calls = deps.update.mock.calls.length;
+		hoisted.onEvent!(textDelta('queued', 'retained'));
+		vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+		if (dispatch) document.dispatchEvent(new Event('visibilitychange'));
+		vi.advanceTimersByTime(1000);
+		expect(deps.update.mock.calls.length).toBe(calls);
+		visibility(false);
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		expect(deps.update.mock.calls.length).toBe(calls + 1);
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('retained');
+	});
+
+	it('keeps lifecycle and interaction settlement prompt while hidden, without a duplicate resume fold', () => {
+		const deps = makeDeps({ pendingPermissions: [{ request_id: 'perm-1' }] as ActiveSessionState['pendingPermissions'] });
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		visibility(true);
+		hoisted.onEvent!({ ...textDelta('start', ''), type: 'turn.started', turn_id: 't1' });
+		vi.advanceTimersByTime(250);
+		expect(deps.state.isStreaming).toBe(true);
+		hoisted.onEvent!(textDelta('hidden', 'complete text'));
+		hoisted.onEvent!({ ...textDelta('answered', ''), type: 'interaction.answered', request_id: 'perm-1' });
+		expect(deps.resolveInteractionByRequestId).toHaveBeenCalledWith('perm-1');
+		expect(deps.state.pendingPermissions).toEqual([]);
+		hoisted.onEvent!({ ...textDelta('end', ''), type: 'turn.completed', turn_id: 't1' });
+		vi.advanceTimersByTime(250);
+		expect(deps.state.isStreaming).toBe(false);
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('complete text');
+		const calls = deps.update.mock.calls.length;
+		visibility(false);
+		vi.advanceTimersByTime(1000);
+		expect(deps.update.mock.calls.length).toBe(calls);
+	});
+
+	it('lets reconnect catch-up publish deferred data and clears the visibility dirty flag', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		visibility(true);
+		hoisted.onEvent!(textDelta('before-reconnect', 'kept'));
+		hoisted.onOpen!();
+		hoisted.onEvent!(caughtUp(1));
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('kept');
+		const calls = deps.update.mock.calls.length;
+		visibility(false);
+		vi.advanceTimersByTime(1000);
+		expect(deps.update.mock.calls.length).toBe(calls);
+	});
+
+	it('removes visibility work on stop and retains unpublished data in the session cache', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		visibility(true);
+		hoisted.onEvent!({ ...textDelta('hidden', 'cached'), seq: 1 });
+		feedController.stop();
+		const calls = deps.update.mock.calls.length;
+		visibility(false);
+		vi.advanceTimersByTime(1000);
+		expect(deps.update.mock.calls.length).toBe(calls);
+		feedController.start('s1');
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('cached');
+		expect(hoisted.fromSeq).toBe(1);
+	});
+});
+
 describe('feedController queue reconciliation (#588)', () => {
 	it('drops a stale queue chip once its turn is delivered on the transcript', () => {
 		const deps = makeDeps();

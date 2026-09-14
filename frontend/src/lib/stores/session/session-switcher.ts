@@ -69,6 +69,7 @@ interface LiveSnapshot {
 		cache_read_tokens?: number;
 	};
 	session_meta?: {
+		mode?: string | null;
 		project_id?: string | null;
 		project_v2_id?: string | null;
 		model?: string | null;
@@ -740,6 +741,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		const meta = snap.session_meta;
 		if (meta) {
+			// A deep link or reload need not have a sidebar row. The persisted
+			// lane is authoritative; missing fields from older workers are not.
+			if (meta.mode !== undefined) {
+				patch.mode = normalizeSessionMode(meta.mode);
+				appMode.set(patch.mode, false);
+			}
 			// Deep links can open before the sidebar row arrives. Restore the
 			// durable project alongside its branch, including remote-only/null IDs.
 			// Do not replace a project selection made while the request was in flight.

@@ -460,6 +460,7 @@ function fold(hydrationComplete = false): void {
 	if (!deps) return;
 	// Guard against a session switch that landed mid-batch.
 	if (deps.getState().sessionId !== currentSessionId) return;
+	hiddenStreamDirty = false;
 	const patch = transcriptPatch(reducerState, {
 		hydrationComplete,
 		appOptimistic: deps.getState().optimisticStreaming === true,
@@ -497,9 +498,9 @@ function fold(hydrationComplete = false): void {
 //     the pending schedule instead of waiting out the throttle.
 //
 // The 250ms timer exists because browsers pause rAF in hidden or fully-occluded
-// tabs: a pure-rAF schedule would strand `scheduledMode` forever — the reducer
-// keeps advancing but the UI never folds. The throttled path is timer-only, so
-// it is unaffected by a paused rAF clock.
+// tabs: lifecycle/permission updates must still reach non-rendering subscribers.
+// Streaming-only publication is deferred while hidden, without pausing SSE intake
+// or reduction, and catches up once on visibility. No event buffer is retained.
 export const STREAM_FOLD_MS = 50;
 const THROTTLED_EVENT_TYPES = new Set([
 	'assistant.text_delta',
@@ -510,6 +511,22 @@ const THROTTLED_EVENT_TYPES = new Set([
 type FlushMode = 'none' | 'throttled' | 'immediate';
 let scheduledMode: FlushMode = 'none';
 let lastFoldAt = 0;
+let hiddenStreamDirty = false;
+
+function isHidden(): boolean {
+	return typeof document !== 'undefined' && document.hidden;
+}
+
+function onVisibilityChange(): void {
+	if (isHidden()) {
+		if (scheduledMode === 'throttled') {
+			clearScheduledFlush();
+			hiddenStreamDirty = true;
+		}
+	} else if (hiddenStreamDirty) {
+		scheduleFlush('throttled');
+	}
+}
 
 function clearScheduledFlush(): void {
 	if (rafHandle !== null && typeof cancelAnimationFrame !== 'undefined') {
@@ -524,6 +541,10 @@ function clearScheduledFlush(): void {
 }
 
 function scheduleFlush(mode: Exclude<FlushMode, 'none'>): void {
+	if (mode === 'throttled' && isHidden()) {
+		hiddenStreamDirty = true;
+		return;
+	}
 	// An immediate schedule already covers anything a throttled one would do.
 	if (scheduledMode === 'immediate') return;
 	if (scheduledMode === mode) return;
@@ -536,6 +557,12 @@ function scheduleFlush(mode: Exclude<FlushMode, 'none'>): void {
 		// a fresh flush. This makes `run` execute exactly once per schedule even
 		// when both handles are pending.
 		clearScheduledFlush();
+		// Visibility can change before its event is dispatched (or while a
+		// callback is already queued), so check at execution as well.
+		if (mode === 'throttled' && isHidden()) {
+			hiddenStreamDirty = true;
+			return;
+		}
 		lastFoldAt = Date.now();
 		fold();
 	};
@@ -671,6 +698,10 @@ function teardown(capture: boolean): void {
 		feed = null;
 	}
 	clearScheduledFlush();
+	if (typeof document !== 'undefined') {
+		document.removeEventListener('visibilitychange', onVisibilityChange);
+	}
+	hiddenStreamDirty = false;
 	clearCatchupFallback();
 	// The fold clock belongs to a feed, not to the module: a fresh feed must not
 	// inherit the previous session's throttle window.
@@ -699,6 +730,9 @@ export const feedController: FeedController = {
 		teardown(true);
 		const generation = ++feedGeneration;
 		currentSessionId = sessionId;
+		if (typeof document !== 'undefined') {
+			document.addEventListener('visibilitychange', onVisibilityChange);
+		}
 		resetFeedFlags();
 		hydrationStartedAt = Date.now();
 

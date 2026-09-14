@@ -7,6 +7,7 @@
 	 * based on the layout store's activeView state.
 	 */
 	import { untrack, type Snippet } from 'svelte';
+	import { MediaQuery } from 'svelte/reactivity';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { projects, sessions } from '$lib/stores/app-data.svelte';
@@ -112,6 +113,10 @@
 
 	// Shared behaviour switches read the build's platform (see platform.svelte.ts).
 	const isMobile = $derived(platform.isMobile);
+	// The web shell overlays panels at narrow widths too, independently of
+	// native-mobile platform identity. Match SessionSidePanel's CSS breakpoint.
+	const narrowPanel = new MediaQuery('(max-width: 700px)');
+	const panelOverlay = $derived(isMobile || narrowPanel.current);
 
 	// View type → page title mapping
 	const viewTitles: Record<string, string> = {
@@ -911,7 +916,7 @@
 	{/if}
 
 	<div class="main-content">
-		<div class="main-surface" inert={!!activeSidePanel.active && (activeSidePanel.expanded || isMobile)}>
+		<div class="main-surface" inert={!!activeSidePanel.active && (activeSidePanel.expanded || panelOverlay)}>
 		{#if $activeView}
 			{#if showChatSurface}
 				<div class="chat-row">
@@ -975,7 +980,7 @@
 		</div>
 		{#if activeSidePanel.active}
 			<SessionSidePanel active={activeSidePanel.active} expanded={activeSidePanel.expanded}
-				width={browserPanel.current.width} mobile={isMobile}
+				width={browserPanel.current.width} mobile={panelOverlay}
 				browserAvailable={!!activeTab?.sessionId} changesAvailable={!!activeProject}
 				onSelect={selectSidePanel} onClose={closeSidePanel}
 				onResize={(width) => browserPanel.setWidth(width)}
@@ -1034,7 +1039,8 @@
 
 <style>
 	.main-content { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
-	.main-surface { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+	/* Keep composer popovers below the sibling side-panel overlay. */
+	.main-surface { isolation: isolate; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 	.chat-browser-underlay { display: flex; flex: 1; min-width: 0; min-height: 0; }
 	.chat-browser-underlay > :global(.chat-view) { flex: 1; min-width: 0; }
 	.main-panel {

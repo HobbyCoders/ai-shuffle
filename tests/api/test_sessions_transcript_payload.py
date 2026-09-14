@@ -370,6 +370,19 @@ class TestLiveEndpointPayload:
         assert meta["project_id"] == project_id
         assert meta["project_v2_id"] == project_v2_id
 
+    @pytest.mark.parametrize("mode", [None, "code", "chat", "voice"])
+    @pytest.mark.parametrize("query", ["", "?include_messages=false"])
+    def test_snapshot_exposes_persisted_lane(self, api_client, mode, query):
+        response = self._live(api_client, query, {"mode": mode})
+        assert response.status_code == 200
+        assert response.json()["session_meta"]["mode"] == mode
+
+    def test_pre_modes_session_exposes_null_lane(self, api_client):
+        response = self._live(api_client, "?include_messages=false")
+        assert response.status_code == 200
+        assert "mode" not in SESSION_ROW
+        assert response.json()["session_meta"]["mode"] is None
+
     def test_metadata_only_snapshot_still_reports_a_window(self, api_client):
         body = self._live(api_client, "?include_messages=false").json()
         assert body["messages"] == []

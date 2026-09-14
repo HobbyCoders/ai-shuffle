@@ -513,3 +513,28 @@ def test_missing_exact_runner_does_not_use_live_legacy_candidate(mock_db, tmp_pa
     assert project_resolver.resolve_local_checkout(session)["id"] == missing["id"]
     assert project_resolver.resolve_existing_cwd(session) is None
     assert not project_resolver.has_local_base_checkout(session)
+
+def test_legacy_relative_self_seed_resolves_read_paths_without_rewriting(mock_db, tmp_path, monkeypatch):
+    from app.core.config import settings
+    from app.db import database
+    workspace = tmp_path / "workspace"
+    repo = workspace / "relative-repo"
+    repo.mkdir(parents=True)
+    other_cwd = tmp_path / "other"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+    monkeypatch.setattr(type(settings), "effective_workspace_dir", property(lambda self: workspace))
+    database.create_project("relative-repo", "Relative repo", None, "relative-repo")
+    session = {"project_id": "relative-repo"}
+    project = project_resolver.resolve_project_v2(session)
+    assert project is not None
+    row = project_resolver.resolve_local_checkout(session)
+    assert row["path"] == "relative-repo"  # actual legacy self-seed producer
+    monkeypatch.setattr(project_resolver.checkout_manager, "ensure_checkout",
+                        lambda *a, **kw: pytest.fail("Read must not materialize"))
+    assert project_resolver.resolve_existing_cwd(session) == str(repo)
+    assert project_resolver.has_local_base_checkout(session)
+    assert project_resolver.resolve_local_checkout(session)["path"] == "relative-repo"
+    repo.rmdir()
+    assert project_resolver.resolve_existing_cwd(session) is None
+    assert not project_resolver.has_local_base_checkout(session)
