@@ -3,6 +3,7 @@ System API routes - health, version, stats, workspace configuration, tools
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -28,10 +29,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["System"])
 
 
-@router.get("/health", response_model=HealthResponse)
+# The desktop app starts its worker with a random attach token and adopts a
+# worker already answering on its port only when this hash matches the token it
+# stored. The hash proves which app started the process; the token never leaves
+# the environment the desktop passed in.
+DESKTOP_ATTACH_TOKEN_ENV = "SHUFFLE_DESKTOP_ATTACH_TOKEN"
+
+
+def desktop_attach_hash() -> Optional[str]:
+    """SHA-256 hex of the desktop attach token, or None outside a desktop-started worker."""
+    token = os.environ.get(DESKTOP_ATTACH_TOKEN_ENV)
+    if not token:
+        return None
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+@router.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
 async def health_check():
     """Health check endpoint (no auth required)"""
-    return {
+    body = {
         "status": "healthy",
         "service": settings.service_name,
         "version": settings.version,
@@ -39,9 +55,13 @@ async def health_check():
         "setup_required": auth_service.is_setup_required(),
         "claude_authenticated": auth_service.is_claude_authenticated()
     }
+    attach = desktop_attach_hash()
+    if attach is not None:
+        body["attach"] = attach
+    return body
 
 
-@router.get("/api/v1/health", response_model=HealthResponse)
+@router.get("/api/v1/health", response_model=HealthResponse, response_model_exclude_none=True)
 async def api_health_check():
     """API health check endpoint"""
     return await health_check()

@@ -65,10 +65,30 @@ def is_unowned(row: Mapping[str, Any]) -> bool:
     return owner_of(row) is None
 
 
+def _claimant(ctx: engine.NetworkContext) -> Optional[str]:
+    """The one online, eligible worker that may claim unowned work: the lowest device id."""
+    from app.network import transport
+    online = set(transport.online_devices()) | {ctx.device_id}
+    candidates = []
+    for device_id in online:
+        member = ctx.member(device_id)
+        if member is not None and member.status == engine.membership.STATUS_ACTIVE \
+                and member.kind == engine.membership.KIND_WORKER:
+            candidates.append(device_id)
+    return min(candidates) if candidates else None
+
+
 def claim(table: str, row_id: str) -> bool:
-    """Take ownership of an unowned definition (race-safe: only the first UPDATE wins)."""
+    """Take ownership of an unowned definition.
+
+    Deterministic across devices: only the online eligible worker with the
+    lowest device id claims; the others wait for its revision to arrive.
+    Inside one database only the first UPDATE wins.
+    """
     me = my_device_id()
     if table not in OWNED_TABLES or not me or not execution_eligible():
+        return False
+    if _claimant(engine.require_context()) != me:
         return False
     with get_db() as conn:
         cursor = conn.cursor()
@@ -89,6 +109,8 @@ def assign(table: str, row_id: str, device_id: Optional[str]) -> dict:
         member = ctx.member(device_id)
         if member is None or member.status != engine.membership.STATUS_ACTIVE:
             raise KeyError("Owner must be an active device")
+        if member.kind != engine.membership.KIND_WORKER:
+            raise ValueError("Only a worker device can own a definition")
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(f"UPDATE {table} SET owner_device_id = %s, updated_at = NOW() WHERE id = %s", (device_id, row_id))

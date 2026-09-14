@@ -18,6 +18,7 @@ the mirrored transcript into a new session on an online runner.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -31,9 +32,19 @@ logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 20.0
 
+# A strict ref name: no leading dash or dot, no "..", "@{", control
+# characters, spaces, path tricks or the characters refs may not contain.
+_BRANCH_RE = re.compile(
+    r"^(?![-.])(?!.*\.\.)(?!.*@\{)(?!.*//)(?!.*/\.)(?!.*\.lock(?:/|$))"
+    r"[^\x00-\x20\x7f~^:?*\[\\]+(?<![/.])$")
+
 
 class RunnerUnreachable(RuntimeError):
     pass
+
+
+class UnknownControlAction(LookupError):
+    """No handler is registered for the requested control action."""
 
 
 class ControlRefused(RuntimeError):
@@ -134,21 +145,47 @@ async def hydrate(device_id: str, session_id: str) -> Dict[str, Any]:
 # Owner side (handlers behind /peer/control/{action})
 # ---------------------------------------------------------------------------
 
+def _rewind_handler():
+    from app.api.rewind_owner import handle_rewind
+    return handle_rewind
+
+
+def _session_git_handler():
+    from app.api.git_owner import handle_session_git
+    return handle_session_git
+
+
+def _git_state_handler():
+    from app.network import git
+    return git.handle_state
+
+
+def _git_op_handler():
+    from app.network import git
+    return git.handle_op
+
+
+# Handlers that live in modules imported lazily (they pull in the session
+# runtime). One table serves both dispatch and ``known_action`` so a new
+# action cannot be reachable in one and unknown to the other.
+_LAZY_HANDLERS = {
+    "rewind": _rewind_handler,
+    "session-git": _session_git_handler,
+    "git-state": _git_state_handler,
+    "git-op": _git_op_handler,
+}
+
+
 async def handle(action: str, body: Dict[str, Any], *, from_device: str) -> Dict[str, Any]:
-    if action == "rewind":
-        from app.api.rewind_owner import handle_rewind
-        return await handle_rewind(body, from_device)
-    if action == "session-git":
-        from app.api.git_owner import handle_session_git
-        return await handle_session_git(body, from_device)
-    if action in {"git-state", "git-op"}:
-        from app.network import git
-        handler = git.handle_state if action == "git-state" else git.handle_op
-        return await handler(body, from_device)
-    handler = _HANDLERS.get(action)
+    loader = _LAZY_HANDLERS.get(action)
+    handler = loader() if loader is not None else _HANDLERS.get(action)
     if handler is None:
-        raise KeyError(action)
+        raise UnknownControlAction(action)
     return await handler(body, from_device)
+
+
+def known_action(action: str) -> bool:
+    return action in _HANDLERS or action in _LAZY_HANDLERS
 
 
 def _require_owned(session_id: str) -> Dict[str, Any]:
@@ -161,16 +198,51 @@ def _require_owned(session_id: str) -> Dict[str, Any]:
     return row
 
 
+def _valid_permission_mode(value: Any) -> Optional[str]:
+    from app.api.voice_context import VALID_PERMISSION_MODES
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or value not in VALID_PERMISSION_MODES:
+        raise ValueError("Invalid permission_mode")
+    return value
+
+
+def _valid_branch(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or len(value) > 255 or not _BRANCH_RE.match(value):
+        raise ValueError("Invalid branch name")
+    return value
+
+
+def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
+    """Only the keys the local WebSocket composer sends (model, permission_mode).
+
+    Anything else — ``cwd`` and ``worktree_info`` above all — is dropped so a
+    member cannot run the owner's agent outside the session's checkout.
+    """
+    if not isinstance(raw, dict):
+        return None
+    overrides: Dict[str, Any] = {}
+    model = raw.get("model")
+    if isinstance(model, str) and model.strip():
+        overrides["model"] = model.strip()[:200]
+    permission_mode = _valid_permission_mode(raw.get("permission_mode"))
+    if permission_mode:
+        overrides["permission_mode"] = permission_mode
+    return overrides or None
+
+
 async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     from app.core import turn_manager
     session_id = str(body.get("session_id") or "")
-    _require_owned(session_id)
+    row = _require_owned(session_id)
     payload = dict(body.get("payload") or {})
     payload.setdefault("forwarded_by_device", from_device)
     turn_id = await turn_manager.submit_async(
         session_id, str(body.get("source") or "user"), prompt=body.get("prompt"),
-        profile_id=body.get("profile_id"), project_id=body.get("project_id"),
-        overrides=body.get("overrides") or None, payload=payload or None)
+        profile_id=body.get("profile_id"), project_id=row.get("project_id") or None,
+        overrides=_turn_overrides(body.get("overrides")), payload=payload or None)
     return {"turn_id": turn_id, "session_id": session_id}
 
 
@@ -181,10 +253,17 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     session_id = str(session.get("id") or "")
     if not session_id:
         raise ValueError("session.id is required")
-    allowed = {"profile_id", "project_v2_id", "title", "api_user_id", "model", "effort", "permission_mode",
+    allowed = {"profile_id", "project_v2_id", "title", "model", "effort", "permission_mode",
                "context_window", "fast", "mode", "hidden"}
     fields = {k: v for k, v in session.items() if k in allowed}
     profile_id = fields.pop("profile_id", None) or "default"
+    # A remote member is the session's owner, never an API user of this worker.
+    fields["api_user_id"] = None
+    if "hidden" in fields:
+        fields["hidden"] = bool(fields["hidden"])
+    if "permission_mode" in fields:
+        fields["permission_mode"] = _valid_permission_mode(fields["permission_mode"])
+    branch = _valid_branch(session.get("branch"))
 
     def _create():
         existing = database.get_session(session_id)
@@ -195,8 +274,8 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
 
     row = await run_sync(_create)
     _require_owned(session_id)
-    if session.get("branch"):
-        await run_sync(database.set_session_branch, session_id, str(session["branch"]), session.get("project_v2_id"))
+    if branch:
+        await run_sync(database.set_session_branch, session_id, branch, session.get("project_v2_id"))
     if body.get("uploads"):
         from app.network import git
         await run_sync(git.import_uploads, session_id, body["uploads"])
@@ -229,7 +308,7 @@ async def _permission(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     result = await permission_handler.respond(
         request_id=str(body.get("request_id") or ""), session_id=session_id, decision=body.get("decision"),
         remember=body.get("remember"), pattern=body.get("pattern"),
-        answered_by_device=body.get("answered_by_device") or from_device)
+        answered_by_device=from_device)
     return {"result": result}
 
 
@@ -239,7 +318,7 @@ async def _question(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     _require_owned(session_id)
     result = await user_question_handler.respond(
         request_id=str(body.get("request_id") or ""), session_id=session_id, answers=body.get("answers") or {},
-        answered_by_device=body.get("answered_by_device") or from_device, dismissed=bool(body.get("dismissed")),
+        answered_by_device=from_device, dismissed=bool(body.get("dismissed")),
         skipped=body.get("skipped"))
     return {"success": bool(result)}
 

@@ -78,6 +78,7 @@ def create_schema(cursor) -> None:
             generation INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'active',
             last_seq_accepted BIGINT,
+            last_incarnation_accepted INTEGER,
             incarnation INTEGER NOT NULL DEFAULT 1,
             capabilities JSONB NOT NULL DEFAULT '{}',
             endpoints JSONB NOT NULL DEFAULT '[]',
@@ -248,6 +249,22 @@ def create_schema(cursor) -> None:
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
+    _ensure_columns(cursor)
+
+
+def _ensure_columns(cursor) -> None:
+    """Additive columns for databases created before they existed (idempotent).
+
+    PostgreSQL does this natively and in whatever schema ``search_path``
+    names; the SQLite shim has no ``IF NOT EXISTS`` for columns, so it asks
+    the catalog first.
+    """
+    if type(cursor).__module__.startswith("psycopg2"):
+        cursor.execute("ALTER TABLE network_members ADD COLUMN IF NOT EXISTS last_incarnation_accepted INTEGER")
+        return
+    from app.db.base import column_exists
+    if not column_exists(cursor, "network_members", "last_incarnation_accepted"):
+        cursor.execute("ALTER TABLE network_members ADD COLUMN last_incarnation_accepted INTEGER")
 
 
 # ---------------------------------------------------------------------------
@@ -363,23 +380,25 @@ def _member_row(row) -> Optional[dict]:
 def upsert_member(*, device_id: str, name: str, kind: str, signing_public: str, encryption_public: str,
                   generation: int, status: str = "active", platform: Optional[str] = None,
                   added_by: Optional[str] = None, legacy_instance_id: Optional[str] = None,
-                  last_seq_accepted: Optional[int] = None, _conn=None) -> dict:
+                  last_seq_accepted: Optional[int] = None, last_incarnation_accepted: Optional[int] = None,
+                  _conn=None) -> dict:
     sql = """INSERT INTO network_members (device_id, name, kind, platform, signing_public, encryption_public,
-                                          generation, status, last_seq_accepted, legacy_instance_id, added_by,
-                                          created_at, updated_at)
-             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                          generation, status, last_seq_accepted, last_incarnation_accepted,
+                                          legacy_instance_id, added_by, created_at, updated_at)
+             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
              ON CONFLICT (device_id) DO UPDATE SET
                  name = EXCLUDED.name, kind = EXCLUDED.kind,
                  platform = COALESCE(EXCLUDED.platform, network_members.platform),
                  signing_public = EXCLUDED.signing_public, encryption_public = EXCLUDED.encryption_public,
                  generation = EXCLUDED.generation, status = EXCLUDED.status,
                  last_seq_accepted = EXCLUDED.last_seq_accepted,
+                 last_incarnation_accepted = EXCLUDED.last_incarnation_accepted,
                  legacy_instance_id = COALESCE(EXCLUDED.legacy_instance_id, network_members.legacy_instance_id),
                  added_by = COALESCE(EXCLUDED.added_by, network_members.added_by),
                  updated_at = EXCLUDED.updated_at"""
     now = _now()
     params = (device_id, name, kind, platform, signing_public, encryption_public, generation, status,
-              last_seq_accepted, legacy_instance_id, added_by, now, now)
+              last_seq_accepted, last_incarnation_accepted, legacy_instance_id, added_by, now, now)
     if _conn is not None:
         _conn.cursor().execute(sql, params)
         return get_member(device_id, _conn=_conn)
@@ -737,6 +756,41 @@ def pending_holes(_conn=None) -> List[dict]:
 
 def clear_pending_stream(cursor, origin: str, incarnation: int) -> None:
     cursor.execute("DELETE FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s", (origin, incarnation))
+
+
+def drop_pending_upto(cursor, origin: str, incarnation: int, seq: int) -> None:
+    """Forget buffered copies of ops the stream has already moved past."""
+    cursor.execute("DELETE FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq <= %s",
+                   (origin, incarnation, seq))
+
+
+def clear_pending_origin(cursor, origin: str) -> None:
+    """Drop every buffered op of an origin (it was revoked; nothing of it will apply)."""
+    cursor.execute("DELETE FROM sync_pending WHERE origin_device_id = %s", (origin,))
+
+
+def count_pending(cursor, origin: str, incarnation: int) -> int:
+    cursor.execute("SELECT COUNT(*) AS n FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s",
+                   (origin, incarnation))
+    row = cursor.fetchone()
+    return int(row["n"]) if row else 0
+
+
+def get_op(cursor, origin: str, incarnation: int, seq: int) -> Optional[dict]:
+    """One stored envelope by its stream identity, or None."""
+    cursor.execute("SELECT envelope FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
+                   (origin, incarnation, seq))
+    row = cursor.fetchone()
+    return _load(row["envelope"], {}) if row else None
+
+
+def membership_ops_after(cursor, origin: str, incarnation: int, seq: int) -> List[dict]:
+    """Membership records this worker applied from ``origin`` past ``(incarnation, seq)``."""
+    cursor.execute("""SELECT record_id, incarnation, seq FROM sync_ops
+                      WHERE origin_device_id = %s AND collection = 'membership'
+                        AND (incarnation > %s OR (incarnation = %s AND seq > %s))
+                      ORDER BY incarnation, seq""", (origin, incarnation, incarnation, seq))
+    return [dict(r) for r in cursor.fetchall()]
 
 
 # ---------------------------------------------------------------------------

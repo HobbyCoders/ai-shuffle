@@ -196,6 +196,80 @@ def test_unexpected_clean_app_exit_still_fails_container():
     assert runtime.watch(app, db, None) == 1
 
 
+def test_readiness_monitor_counts_consecutive_failures_only():
+    # DESK-04: a live but unready application is reported after N failures in
+    # a row; any success resets the count; first boot gets a larger allowance.
+    answers = []
+    monitor = runtime.ReadinessMonitor("http://127.0.0.1:8000/health/ready", probe=lambda url: answers.pop(0), failures=4, startup_failures=6)
+    answers[:] = [False] * 5
+    assert [monitor.check() for _ in range(5)] == [False] * 5, "before the first success the startup allowance applies"
+    answers[:] = [False]
+    assert monitor.check() is True
+    monitor = runtime.ReadinessMonitor("http://127.0.0.1:8000/health/ready", probe=lambda url: answers.pop(0), failures=4, startup_failures=6)
+    answers[:] = [True, False, False, False, True, False, False, False, False]
+    assert [monitor.check() for _ in range(8)] == [False] * 8
+    assert monitor.failures == 3
+    assert monitor.check() is True
+    assert monitor.failures == 4
+    assert runtime.READY_PROBE_FAILURES * runtime.READY_PROBE_INTERVAL == 120, "an unhealthy worker is restarted after two minutes"
+    assert runtime.READY_PROBE_STARTUP_FAILURES >= runtime.READY_PROBE_FAILURES
+
+
+def test_probe_ready_uses_status_and_never_raises():
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200 if self.path == "/health/ready" else 503)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        assert runtime.probe_ready(base + "/health/ready", timeout=2) is True
+        assert runtime.probe_ready(base + "/health/not-ready", timeout=2) is False
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert runtime.probe_ready(base + "/health/ready", timeout=0.5) is False, "connection refused counts as a failure"
+
+
+def test_watch_exits_non_zero_when_live_app_stops_answering_readiness(monkeypatch, capsys):
+    app = Mock()
+    app.poll.return_value = None
+    db = Mock(process=None)
+    monkeypatch.setattr(runtime, "READY_PROBE_INTERVAL", 0.05)
+    probes = []
+    monitor = runtime.ReadinessMonitor("http://127.0.0.1:1/health/ready", probe=lambda url: probes.append(url) or False, failures=3, startup_failures=3)
+    assert runtime.watch(app, db, None, monitor) == 1
+    assert len(probes) == 3 and probes[0] == "http://127.0.0.1:1/health/ready"
+    assert "readiness probe failed 3 times in a row" in capsys.readouterr().err
+
+
+def test_run_probes_the_application_port(settings_factory, monkeypatch):
+    cfg = settings_factory(port=18080)
+    db = runtime.Database(cfg)
+    db.password = "synthetic-password"
+    for name in ("open", "close", "publish_descriptor"):
+        monkeypatch.setattr(db, name, Mock())
+    monkeypatch.setattr(runtime, "Database", lambda settings: db)
+    monkeypatch.setenv("START_CHROME", "0")
+    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *args, **kwargs: Mock())
+    seen = {}
+    monkeypatch.setattr(runtime, "watch", lambda app, db, chrome, monitor=None: seen.update(url=monitor.url) or 0)
+    monkeypatch.setattr(runtime, "shutdown", Mock())
+    runtime.STOP.clear()
+    assert runtime.run(cfg, "run") == 0
+    assert seen["url"] == "http://127.0.0.1:18080/health/ready"
+
+
 def test_backend_refuses_legacy_sqlite_before_creating_directories_or_connecting(tmp_path, monkeypatch):
     from app.core import startup
     legacy = tmp_path / "db.sqlite"

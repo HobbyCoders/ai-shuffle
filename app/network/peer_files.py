@@ -12,17 +12,18 @@ def part(digest: str, index: int, recipient: str) -> dict:
     member = ctx.member(recipient)
     if member is None or member.status != "active" or index < 0:
         raise ValueError("Invalid file recipient or part")
-    data = blobs.read_local(digest)
-    if data is None:
-        raise FileNotFoundError("File not held on this worker")
     offset = index * PART_BYTES
-    if len(data) > blobs.MAX_BLOB_BYTES or offset >= max(1, len(data)):
+    found = blobs.read_local_range(digest, offset, PART_BYTES)
+    if found is None:
+        raise FileNotFoundError("File not held on this worker")
+    chunk, size = found
+    if size > blobs.MAX_BLOB_BYTES or offset >= max(1, size):
         raise ValueError("Invalid file part")
     header = {"network_id": ctx.network_id, "publisher": ctx.device_id, "recipient": recipient,
-              "hash": digest, "index": index, "size": len(data)}
+              "hash": digest, "index": index, "size": size}
     key = os.urandom(32)
     result = {**header, "key": crypto.wrap_key(member.encryption_public, key),
-              "ciphertext": crypto.encrypt_payload(key, data[offset:offset + PART_BYTES], crypto.canonical_json(header))}
+              "ciphertext": crypto.encrypt_payload(key, chunk, crypto.canonical_json(header))}
     result["signature"] = crypto.b64u_encode(crypto.sign(ctx.identity.signing_private, crypto.canonical_json(result)))
     return result
 

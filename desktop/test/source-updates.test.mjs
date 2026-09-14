@@ -173,9 +173,34 @@ test('a newer milestone installer supersedes older healthy source code but never
  const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
  u=new SourceUpdates({...f.options,baseline:{revision:B,sequence:200}});await u.load();await u.useNewerBaseline();
  assert.equal(u.version,B);assert.equal(u.hasSourceState,false);assert(await fs.stat(path.join(f.root,'versions',A)));
- await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({active:A,blocked:true}));
+ // A failed revision (sequence 100) newer than the installer (sequence 50) keeps the block: never roll back over its database.
+ await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({active:A,blocked:true,failed:[A]}));
+ u=new SourceUpdates({...f.options,baseline:{revision:B,sequence:50}});await u.load();await u.useNewerBaseline();
+ assert.equal(u.hasSourceState,true);assert.equal(u.blocked,true);await assert.rejects(u.select(),/No healthy/);
+ // Unreadable failed-revision metadata keeps the block too.
+ await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({blocked:true,failed:[C]}));
  u=new SourceUpdates({...f.options,baseline:{revision:B,sequence:200}});await u.load();await u.useNewerBaseline();
- assert.equal(u.hasSourceState,true);await assert.rejects(u.select(),/No healthy/);
+ assert.equal(u.blocked,true);
+});
+test('DESK-02: a failed first boot stays blocked until a newer download or installer supersedes it',async t=>{
+ const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();
+ // Crash during the first boot of A: the next launch records the failure.
+ u=f.create();await u.load();assert.equal(u.hasSourceState,true);assert.equal(u.blocked,true);assert.equal(u.pendingVersion,null);
+ await assert.rejects(u.select(),/No healthy/);assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')),{failed:[A],blocked:true});
+ // The installer baseline is older than the failed revision: the block prevents unsafe fallback.
+ u=new SourceUpdates({...f.options,baseline:{revision:B,sequence:50}});await u.load();await u.useNewerBaseline();
+ assert.equal(u.blocked,true);assert.equal(u.hasSourceState,true);assert.equal(u.version,B);await assert.rejects(u.select(),/No healthy/);
+ // A retry of the failed revision is refused; a newer main-branch revision downloads, is selected and clears the block.
+ await assert.rejects(u.download(),/failed to start/);
+ await f.release(C);assert.equal((await u.download()).kind,'ready');assert.equal(u.blocked,false,'a pending build may run over a block');
+ assert.equal(u.hasSourceState,true);await u.select();await u.healthy();assert.equal(u.version,C);
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).blocked,undefined);
+ // A milestone installer newer than every failed revision clears the block on its own.
+ await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({blocked:true,failed:[A]}));
+ u=new SourceUpdates({...f.options,baseline:{revision:B,sequence:101}});await u.load();await u.useNewerBaseline();
+ assert.equal(u.blocked,false);assert.equal(u.hasSourceState,false);
+ const saved=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.equal(saved.blocked,undefined);assert.deepEqual(saved.failed,[A]);
+ await f.release(A);await assert.rejects(u.download(),/failed to start/,'the failed revision stays refused after the block clears');
 });
 test('public source requests omit credentials and reject off-origin URLs and redirects',async()=>{
  const module={exports:{}};const requests=[];

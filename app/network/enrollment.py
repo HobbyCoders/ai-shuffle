@@ -116,6 +116,15 @@ def receive_join(*, code: str, device: Dict[str, Any], inviter_fingerprint: Opti
     device_id = membership.device_id_for(signing_public)
     if device_id == ctx.device_id:
         raise EnrollmentError("A worker cannot join itself")
+    if not membership.verify_device_description(device):
+        # The code proves the joiner holds an invite; the proof shows the
+        # keys it presents are its own, so a valid code cannot be used to
+        # bind an attacker's encryption key to another device's identity.
+        raise EnrollmentError("The joining worker did not prove it holds its device keys; update it and retry")
+    existing = ctx.member(device_id)
+    if existing is not None and existing.status == membership.STATUS_ACTIVE and (
+            existing.signing_public != signing_public or existing.encryption_public != encryption_public):
+        raise EnrollmentError("This device is already a member with different keys; remove it first")
     grant = pairing_db.consume_grant_for_network_join(token_hash=pairing_core.hash_pairing_code(code))
     if grant is None:
         raise EnrollmentError("Join code is invalid, expired, already used, or revoked.")
@@ -128,7 +137,6 @@ def receive_join(*, code: str, device: Dict[str, Any], inviter_fingerprint: Opti
         "grant_id": grant["id"], "poll_secret_hash": _hash(poll_secret), "legacy_instance_id": legacy,
         "expires_at": (_now() + timedelta(minutes=JOIN_TTL_MINUTES)).isoformat(),
     })
-    existing = ctx.member(device_id)
     if existing is not None and existing.status == membership.STATUS_ACTIVE:
         logger.info("Device %s asked to join again", device_id)
     # The consumed code authorizes the join: admit the device now. A failure
@@ -246,6 +254,11 @@ async def start_enrollment(*, endpoint_url: str, code: str, inviter_fingerprint:
     endpoint = pairing_core.sanitize_endpoint_url(endpoint_url)
     if not endpoint:
         raise EnrollmentError("An endpoint is required")
+    if endpoint.startswith("http://"):
+        # The one-time code travels in this request. Plain http is acceptable
+        # only where the path is a local one (the LAN, the same machine).
+        if pairing_core.classify_endpoint(endpoint).get("kind") not in ("loopback", "lan", "tailscale"):
+            raise EnrollmentError("Use an https:// invite for a worker outside your local network")
     inviter_fingerprint = (inviter_fingerprint or "").strip() or None
     if inviter_fingerprint and len(_normalize_fp(inviter_fingerprint)) < 32:
         raise EnrollmentError("The inviter's fingerprint is incomplete")
@@ -256,12 +269,13 @@ async def start_enrollment(*, endpoint_url: str, code: str, inviter_fingerprint:
     payload = {
         "code": pairing_core.normalize_pairing_code(code),
         "inviter_fingerprint": inviter_fingerprint,
-        "device": {
+        "device": membership.sign_device_description({
+            "device_id": device_identity.device_id,
             "signing_public": crypto.b64u_encode(device_identity.signing_public),
             "encryption_public": crypto.b64u_encode(device_identity.encryption_public),
             "name": name, "platform": identity_mod.platform_name(), "kind": membership.KIND_WORKER,
             "legacy_instance_id": legacy_instance_id or settings.effective_instance_id,
-        },
+        }, device_identity.signing_private),
     }
     if not payload["code"]:
         raise EnrollmentError("Join code must have 12 characters")

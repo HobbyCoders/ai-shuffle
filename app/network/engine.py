@@ -62,7 +62,56 @@ class NotEnrolled(RuntimeError):
 
 
 class ApplyError(ValueError):
-    """An envelope was rejected; the message says why (no secrets)."""
+    """An envelope was rejected for good; the message says why (no secrets).
+
+    A permanent rejection at the head of a stream advances the watermark past
+    the operation: the same identity can never carry a different, valid
+    operation, so retrying it would only stall everything behind it.
+    """
+
+
+class TransientApplyError(ApplyError):
+    """An envelope cannot be applied *yet* (a key or certificate from another
+    stream has not arrived, credential storage is locked). The watermark stays
+    put and the peer resends it on the next pass."""
+
+
+# Storage errors usually describe the operation, not the database. Foreign-key
+# violations are the exception: a parent from another stream may arrive later.
+# Connection loss, disk exhaustion and other operational errors also retry.
+def _permanent_db_errors() -> tuple:
+    import sqlite3
+    import psycopg2
+    return (psycopg2.IntegrityError, psycopg2.DataError, sqlite3.IntegrityError, sqlite3.DataError)
+
+
+def _savepoint(cursor, statement: str) -> None:
+    """PostgreSQL aborts the whole transaction on a statement error, so the
+    apply of one op runs under a savepoint. SQLite (the test shim) fails only
+    the statement and cannot nest savepoints under the shim; skip it there."""
+    if type(cursor).__module__.startswith("psycopg2"):
+        cursor.execute(statement)
+
+
+# Out-of-order ops are buffered per stream. Beyond these bounds a peer is
+# either broken or hostile; its later ops are re-requested once the hole fills.
+PENDING_CAP_PER_STREAM = 5000
+PENDING_WINDOW = 20000
+
+_outbox_held = False
+
+
+def hold_outbox(held: bool) -> None:
+    """Keep local writes out of the outbox until the transport has compared
+    this device's stream with a peer (see ``transport.sync_pass``): a worker
+    restored from a backup must learn its new incarnation before it allocates
+    sequence numbers that peers already hold under different content."""
+    global _outbox_held
+    _outbox_held = bool(held)
+
+
+def outbox_held() -> bool:
+    return _outbox_held
 
 
 @dataclass
@@ -117,7 +166,8 @@ def _member_from_row(row: Mapping[str, Any]) -> Member:
     return Member(device_id=row["device_id"], signing_public=crypto.b64u_decode(row["signing_public"]),
                   encryption_public=crypto.b64u_decode(row["encryption_public"]), name=row["name"],
                   kind=row["kind"], generation=int(row["generation"]), status=row["status"],
-                  last_seq_accepted=row.get("last_seq_accepted"))
+                  last_seq_accepted=row.get("last_seq_accepted"),
+                  last_incarnation_accepted=row.get("last_incarnation_accepted"))
 
 
 def _unwrap_keyring(wrapped: Mapping[str, Any], device_identity: identity_mod.DeviceIdentity) -> Dict[int, bytes]:
@@ -341,7 +391,7 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[D
             value = _parse_json(value)
         elif name in coll.encrypted and isinstance(value, str) and encryption.is_encrypted(value):
             if not encryption.is_encryption_ready():
-                raise ApplyError("Credential storage is locked; cannot share " + coll.name)
+                raise TransientApplyError("Credential storage is locked; cannot share " + coll.name)
             value = encryption.decrypt_value(value)
             encrypted_columns.append(name)
         record[name] = _normalize_value(value)
@@ -365,7 +415,7 @@ def _column_value(coll: policy.Collection, name: str, value: Any, encrypted_colu
         return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
     if name in encrypted_columns and isinstance(value, str) and value:
         if not encryption.is_encryption_ready():
-            raise ApplyError("Credential storage is locked; cannot store " + coll.name)
+            raise TransientApplyError("Credential storage is locked; cannot store " + coll.name)
         return encryption.encrypt_value(value)
     return value
 
@@ -450,6 +500,8 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
     ctx = ctx or context()
     if ctx is None or ctx.bootstrap_state != BOOTSTRAP_READY or ctx.key_version not in ctx.keyring:
         return None
+    if _outbox_held and collection != "membership":
+        return None  # the scanner publishes the row once the transport has compared streams
     if collection != "membership":
         from app.network.keyring import safe
         if not safe(ctx, crypto.sha256_hex(ctx.network_key)):
@@ -468,6 +520,10 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
         if (not force and existing is not None and not bool(existing["deleted"])
                 and existing["content_hash"] == new_hash):
             return None
+    # Sequence numbers are allocated under the state row lock: two writers in
+    # separate transactions must never sign the same (device, incarnation,
+    # seq). ``bump_clock`` takes that lock implicitly; keep it explicit.
+    store.lock_state(cursor)
     clock = store.bump_clock(cursor)
     seq = store.next_origin_seq(cursor, ctx.device_id, ctx.identity.incarnation)
     env = envelope_mod.build(
@@ -536,40 +592,66 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
         return 0
     coll = policy.collection(collection)
     published = 0
+    # Phase one reads without publishing, so the state row lock that
+    # ``record`` takes is held only while the changed rows are written out
+    # (in bounded batches), not for the whole table walk.
+    changed: List[Tuple[str, Optional[dict]]] = []
     with get_db() as conn:
         cursor = conn.cursor()
         known = store.records_for_collection(cursor, collection)
         cursor.execute(f"SELECT * FROM {coll.table}")
         rows = [dict(r) for r in cursor.fetchall()]
-        seen = set()
-        for row in rows:
-            if owner_only:
-                owner = row.get("owner_device_id")
-                if owner not in (None, ctx.device_id):
-                    continue
-                # NULL owner means "this worker" only for rows this install
-                # wrote; a shared database's rows from other installs wait for
-                # their device to join (legacy map) before anyone publishes them.
-                if owner is None and (row.get("instance_id") or "") not in ("", _my_instance_id()):
-                    continue
+    seen = set()
+    skipped = 0
+    for row in rows:
+        if owner_only:
+            owner = row.get("owner_device_id")
+            if owner not in (None, ctx.device_id):
+                continue
+            # NULL owner means "this worker" only for rows this install
+            # wrote; a shared database's rows from other installs wait for
+            # their device to join (legacy map) before anyone publishes them.
+            if owner is None and (row.get("instance_id") or "") not in ("", _my_instance_id()):
+                continue
+        try:
             plaintext = serialize_row(coll, row)
-            if plaintext is None:
-                continue
-            record_id = coll.record_id(plaintext)
-            seen.add(record_id)
-            existing = known.get(record_id)
-            if existing is not None and not bool(existing["deleted"]) and existing["content_hash"] == content_hash(coll, plaintext):
-                continue
-            if record(cursor, collection, record_id, row, ctx=ctx) is not None:
-                published += 1
+        except ApplyError:
+            # One unreadable row (locked credential storage, a bad value) must
+            # not stop the rest of the collection.
+            skipped += 1
+            continue
+        if plaintext is None:
+            continue
+        record_id = coll.record_id(plaintext)
+        seen.add(record_id)
+        existing = known.get(record_id)
+        if existing is not None and not bool(existing["deleted"]) and existing["content_hash"] == content_hash(coll, plaintext):
+            continue
+        changed.append((record_id, row))
+    if skipped:
+        # A row we could not read has a record id we could not compute, so a
+        # missing id proves nothing this pass: publish no deletions.
+        logger.debug("Scan of %s skipped %d unreadable rows; deletions deferred", collection, skipped)
+    else:
         for record_id, existing in known.items():
             if record_id in seen or bool(existing["deleted"]):
                 continue
             if owner_only and existing.get("origin_device_id") != ctx.device_id:
                 continue
-            if record(cursor, collection, record_id, None, ctx=ctx) is not None:
-                published += 1
+            changed.append((record_id, None))
+    for start in range(0, len(changed), SCAN_PUBLISH_BATCH):
+        with get_db() as conn:
+            cursor = conn.cursor()
+            for record_id, row in changed[start:start + SCAN_PUBLISH_BATCH]:
+                try:
+                    if record(cursor, collection, record_id, row, ctx=ctx) is not None:
+                        published += 1
+                except TransientApplyError:
+                    continue
     return published
+
+
+SCAN_PUBLISH_BATCH = 200
 
 
 def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = True, strict: bool = False) -> int:
@@ -616,23 +698,39 @@ class ApplyResult:
     applied: int = 0
     duplicate: int = 0
     pending: int = 0
-    rejected: int = 0
+    rejected: int = 0  # permanent: the op can never apply and the stream moved past it
+    retry: int = 0     # transient: kept in place, the peer resends it
     lost: int = 0
+    own_ahead: int = 0  # highest seq of our own current stream seen that we do not hold
     reasons: List[str] = field(default_factory=list)
     touched: List[Tuple[str, str, str]] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {"applied": self.applied, "duplicate": self.duplicate, "pending": self.pending,
-                "rejected": self.rejected, "lost": self.lost, "reasons": self.reasons[:20]}
+                "rejected": self.rejected, "retry": self.retry, "lost": self.lost, "reasons": self.reasons[:20]}
 
 
-def _origin_allowed(ctx: NetworkContext, env: Envelope) -> Optional[Member]:
+def _origin_allowed(cursor, ctx: NetworkContext, env: Envelope) -> Optional[Member]:
+    """The member an envelope claims to come from, or None for an unknown origin.
+
+    A revoked device is honoured only up to the stream position recorded in
+    its revocation: nothing from a newer incarnation (a removed device could
+    otherwise open a fresh stream with a fresh sequence budget) and nothing
+    past ``last_seq_accepted`` in the incarnation the revoker knew.
+    """
     member = ctx.member(env.origin_device_id)
     if member is None:
         return None
     if member.status == membership.STATUS_REVOKED:
         limit = member.last_seq_accepted
-        if limit is None or env.origin_seq > int(limit):
+        limit_incarnation = member.last_incarnation_accepted
+        if limit_incarnation is None:
+            # Revocation from before incarnations were recorded: the streams
+            # this worker already knew are the only ones it will ever honour.
+            limit_incarnation = store.highest_incarnation(cursor, env.origin_device_id)
+        if limit is None or env.origin_incarnation > int(limit_incarnation):
+            raise ApplyError("origin revoked")
+        if env.origin_incarnation == int(limit_incarnation) and env.origin_seq > int(limit):
             raise ApplyError("origin revoked")
     return member
 
@@ -645,7 +743,7 @@ def _verify_recovery_origin(ctx: NetworkContext, env: Envelope) -> Member:
     the beginning (hub restore) and the founder is not yet in the members.
     """
     if env.collection != "membership" or env.key_version not in ctx.keyring:
-        raise ApplyError("unknown origin")
+        raise TransientApplyError("unknown origin")
     try:
         from app.network.keyring import open_envelope
         row, decryption_key = open_envelope(ctx, env)
@@ -654,20 +752,28 @@ def _verify_recovery_origin(ctx: NetworkContext, env: Envelope) -> Member:
                                                founder_device_id=ctx.founder_device_id,
                                                network_key=decryption_key)
     except (crypto.CryptoError, envelope_mod.EnvelopeError, membership.MembershipError, AttributeError, TypeError) as exc:
-        raise ApplyError("unknown origin") from exc
+        raise TransientApplyError("unknown origin") from exc
     if member.device_id != env.origin_device_id:
-        raise ApplyError("unknown origin")
+        raise TransientApplyError("unknown origin")
     is_recovery = record_data.get("type") == membership.TYPE_RECOVERY
     is_founder = (record_data.get("type") == membership.TYPE_CERTIFICATE
                   and record_data.get("issued_by") == member.device_id == ctx.founder_device_id)
     if not (is_recovery or is_founder):
-        raise ApplyError("unknown origin")
+        raise TransientApplyError("unknown origin")
     return member
 
 
 def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkContext] = None,
                    result: Optional[ApplyResult] = None, _draining: bool = False) -> str:
-    """Apply one envelope. Returns applied | duplicate | pending | lost; raises ApplyError."""
+    """Apply one envelope.
+
+    Returns ``applied`` | ``duplicate`` | ``pending`` | ``lost`` | ``rejected``.
+    ``rejected`` means the op was refused for good and, when it was the next
+    in its stream, the watermark moved past it. Raises ``TransientApplyError``
+    when the op must be retried later and ``ApplyError`` for a refusal that
+    happened before the op's place in its stream was known (bad signature,
+    wrong network, malformed).
+    """
     ctx = ctx or require_context()
     result = result if result is not None else ApplyResult()
     try:
@@ -679,14 +785,42 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     if env.origin_device_id == ctx.device_id:
         if not env.verify_signature(ctx.identity.signing_public):
             raise ApplyError("bad signature")
-        return "duplicate"  # our own op coming back
-    member = _origin_allowed(ctx, env)
-    if member is None:
-        member = _verify_recovery_origin(ctx, env)
-    if not env.verify_signature(member.signing_public):
-        raise ApplyError("bad signature")
+        if env.origin_incarnation >= ctx.identity.incarnation:
+            if env.origin_incarnation == ctx.identity.incarnation and \
+                    env.origin_seq > store.own_watermark(cursor, ctx.device_id, env.origin_incarnation):
+                # Signed by this device, yet not in its outbox: our history
+                # went backwards (restore from backup). ``apply_batch`` moves
+                # to a fresh incarnation once the batch is stored.
+                result.own_ahead = max(result.own_ahead, env.origin_seq)
+            return "duplicate"  # our own op coming back
+        # An op this device signed in an earlier incarnation: our own history
+        # that a backup restore lost. Re-import it like any other stream.
+        member = ctx.member(ctx.device_id)
+        if member is None:
+            return "duplicate"
+    else:
+        refused: Optional[str] = None
+        try:
+            member = _origin_allowed(cursor, ctx, env)
+        except ApplyError as exc:
+            member, refused = ctx.member(env.origin_device_id), str(exc)
+        if member is None:
+            member = _verify_recovery_origin(ctx, env)
+        if not env.verify_signature(member.signing_public):
+            raise ApplyError("bad signature")
+        if refused is not None:
+            # The stream moved past what this device may still say. When the
+            # op is the next in its stream, advance past it so the peer stops
+            # resending it; otherwise simply drop it.
+            highest = store.highest_incarnation(cursor, env.origin_device_id)
+            if env.origin_incarnation >= highest:
+                watermark = store.get_watermark(cursor, env.origin_device_id, env.origin_incarnation)
+                if env.origin_seq == watermark + 1:
+                    store.set_watermark(cursor, env.origin_device_id, env.origin_incarnation, env.origin_seq)
+            result.reasons.append(refused)
+            return "rejected"
     if env.key_version not in ctx.keyring:
-        raise ApplyError("unknown key version %d" % env.key_version)
+        raise TransientApplyError("unknown key version %d" % env.key_version)
 
     # Stream ordering per (origin, incarnation).
     highest = store.highest_incarnation(cursor, env.origin_device_id)
@@ -696,11 +830,16 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     if env.origin_seq <= watermark:
         return "duplicate"
     if env.origin_seq > watermark + 1:
+        if env.origin_seq > watermark + PENDING_WINDOW:
+            raise ApplyError("sequence too far ahead of the stream")
+        if store.count_pending(cursor, env.origin_device_id, env.origin_incarnation) >= PENDING_CAP_PER_STREAM:
+            raise ApplyError("too many buffered operations for this stream")
         store.stash_pending(cursor, env.to_dict())
         return "pending"
 
-    outcome = _apply_in_order(cursor, ctx, env, member, result)
+    outcome = _apply_next(cursor, ctx, env, member, result)
     store.set_watermark(cursor, env.origin_device_id, env.origin_incarnation, env.origin_seq)
+    store.drop_pending_upto(cursor, env.origin_device_id, env.origin_incarnation, env.origin_seq)
     if env.origin_incarnation > highest and highest:
         store.clear_pending_stream(cursor, env.origin_device_id, highest)
     # Drain buffered successors.
@@ -712,6 +851,14 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
                 break
             try:
                 inner = apply_envelope(cursor, buffered, ctx=ctx, result=result, _draining=True)
+            except TransientApplyError as exc:
+                # Not applicable yet (a key or certificate from another stream
+                # is still on its way). Keep it buffered; the stream resumes
+                # here once it can be opened.
+                store.stash_pending(cursor, buffered)
+                result.retry += 1
+                result.reasons.append(str(exc))
+                break
             except ApplyError as exc:
                 result.rejected += 1
                 result.reasons.append(str(exc))
@@ -722,8 +869,58 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
                 result.applied += 1
             elif inner == "lost":
                 result.lost += 1
+            elif inner == "rejected":
+                result.rejected += 1
             store.set_watermark(cursor, env.origin_device_id, env.origin_incarnation, next_seq)
             next_seq += 1
+    return outcome
+
+
+def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
+    """Apply the next op of a stream; classify what cannot be applied.
+
+    Transient failures propagate (the watermark stays, the peer resends).
+    Permanent ones (a membership record that does not verify, a row the
+    database refuses) become ``rejected``: the loser is kept in the conflicts
+    list so nothing disappears silently, and the caller moves the watermark.
+    """
+    _savepoint(cursor, "SAVEPOINT apply_op")
+    try:
+        outcome = _apply_in_order(cursor, ctx, env, member, result)
+    except TransientApplyError:
+        _savepoint(cursor, "ROLLBACK TO SAVEPOINT apply_op")
+        raise
+    except ApplyError as exc:
+        _savepoint(cursor, "ROLLBACK TO SAVEPOINT apply_op")
+        result.reasons.append(str(exc))
+        return "rejected"
+    except _permanent_db_errors() as exc:
+        _savepoint(cursor, "ROLLBACK TO SAVEPOINT apply_op")
+        import sqlite3
+        from psycopg2.errors import ForeignKeyViolation
+
+        if (isinstance(exc, ForeignKeyViolation) or getattr(exc, "pgcode", None) == "23503"
+                or getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY):
+            # Ordering is per origin, not global. Consuming this op now would
+            # permanently lose a valid child whose parent is still in flight.
+            raise TransientApplyError("Referenced record has not arrived yet") from exc
+        reason = "storage refused the record: " + type(exc).__name__
+        logger.warning("Operation %s/%s from %s could not be stored (%s); kept as a conflict",
+                       env.collection, env.record_id, env.origin_device_id, type(exc).__name__)
+        try:
+            from app.network.keyring import open_envelope
+            plaintext, _key = open_envelope(ctx, env)
+        except (crypto.CryptoError, envelope_mod.EnvelopeError):
+            plaintext = None
+        existing = store.get_record(cursor, env.collection, env.record_id)
+        store.add_conflict(cursor, collection=env.collection, record_id=env.record_id, losing_clock=env.clock,
+                           losing_device_id=env.origin_device_id,
+                           losing_record=plaintext if env.op == OP_UPSERT else {"_deleted": True},
+                           winning_clock=int(existing["clock"]) if existing else env.clock,
+                           winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
+        result.reasons.append(reason)
+        return "rejected"
+    _savepoint(cursor, "RELEASE SAVEPOINT apply_op")
     return outcome
 
 
@@ -741,7 +938,6 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     except (crypto.CryptoError, envelope_mod.EnvelopeError) as exc:
         raise ApplyError("cannot open payload") from exc
 
-    store.insert_op(cursor, env.to_dict(), _lane(coll))
     existing = store.get_record(cursor, env.collection, env.record_id)
     if coll.mode == policy.MODE_OWNER_ORDERED:
         # Owner-ordered: the owner's stream order is the order. No clock race.
@@ -751,11 +947,17 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         wins = existing is None or envelope_mod.compare(
             env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
     if not wins:
-        # The network already moved past this write; keep it as a conflict record.
+        # The network already moved past this write; keep it as a conflict
+        # record, unless it says the same thing as what we already hold.
+        incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
+        if incoming_hash == (existing["content_hash"] or "") and bool(existing["deleted"]) == (env.op == OP_DELETE):
+            store.insert_op(cursor, env.to_dict(), _lane(coll))
+            return "lost"
         losing_record = plaintext if env.op == OP_UPSERT else {"_deleted": True}
         store.add_conflict(cursor, collection=env.collection, record_id=env.record_id, losing_clock=env.clock,
                            losing_device_id=env.origin_device_id, losing_record=losing_record,
                            winning_clock=int(existing["clock"]), winning_device_id=existing["origin_device_id"])
+        store.insert_op(cursor, env.to_dict(), _lane(coll))
         return "lost"
 
     if env.collection == "membership":
@@ -769,7 +971,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                 local_plain = serialize_row(coll, local_row)
             except ApplyError:
                 local_plain = None
-            if local_plain is not None and content_hash(coll, local_plain) != (env.content_hash if env.op == OP_UPSERT else ""):
+            incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
+            if local_plain is not None and content_hash(coll, local_plain) != incoming_hash:
                 if local_plain.get("_enc"):
                     local_plain = {k: ("<secret>" if k in local_plain["_enc"] else v) for k, v in local_plain.items() if k != "_enc"}
                 store.add_conflict(cursor, collection=env.collection, record_id=env.record_id,
@@ -795,6 +998,9 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                 pass
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash=local_hash, deleted=False, order_seq=env.order_seq)
+    # Stored for forwarding only once it applied: a failure above must not
+    # leave an op in the log that this worker never materialized.
+    store.insert_op(cursor, env.to_dict(), _lane(coll))
     result.touched.append((env.collection, env.record_id, env.op))
     return "applied"
 
@@ -852,11 +1058,51 @@ def _apply_membership(cursor, ctx: NetworkContext, plaintext: Mapping[str, Any])
             store.update_state(_conn=conn, legacy_instance_map=ctx.legacy_instance_map)
     elif kind == membership.TYPE_REVOCATION:
         member = members[record_data["device_id"]]
+        last_incarnation = member.last_incarnation_accepted
+        if last_incarnation is None:
+            # An older revoker did not record the incarnation: honour only the
+            # streams this worker already knew when it learned the revocation.
+            last_incarnation = store.highest_incarnation(cursor, member.device_id)
+            members[member.device_id] = member = membership.Member(
+                device_id=member.device_id, signing_public=member.signing_public,
+                encryption_public=member.encryption_public, name=member.name, kind=member.kind,
+                generation=member.generation, status=member.status, last_seq_accepted=member.last_seq_accepted,
+                last_incarnation_accepted=int(last_incarnation))
         store.upsert_member(device_id=member.device_id, name=member.name, kind=member.kind,
                             signing_public=crypto.b64u_encode(member.signing_public),
                             encryption_public=crypto.b64u_encode(member.encryption_public),
                             generation=member.generation, status=membership.STATUS_REVOKED,
-                            last_seq_accepted=member.last_seq_accepted, _conn=conn)
+                            last_seq_accepted=member.last_seq_accepted,
+                            last_incarnation_accepted=int(last_incarnation), _conn=conn)
+        # Nothing buffered from the removed device will ever apply.
+        store.clear_pending_origin(cursor, member.device_id)
+        # Certificates the removed device issued past the point its revoker
+        # honours were applied here but rejected by the revoker: unwind them
+        # so every member agrees on who is in the network.
+        for op in store.membership_ops_after(cursor, member.device_id, int(last_incarnation),
+                                             int(member.last_seq_accepted or 0)):
+            parts = str(op.get("record_id") or "").split(":")
+            if len(parts) != 3 or parts[0] != "cert":
+                continue
+            late = members.get(parts[1])
+            if late is None or late.status != membership.STATUS_ACTIVE or late.device_id == ctx.device_id:
+                continue
+            row = store.get_member(late.device_id, _conn=conn)
+            if not row or row.get("added_by") != member.device_id:
+                continue
+            members[late.device_id] = membership.Member(
+                device_id=late.device_id, signing_public=late.signing_public,
+                encryption_public=late.encryption_public, name=late.name, kind=late.kind,
+                generation=generation, status=membership.STATUS_REVOKED, last_seq_accepted=0,
+                last_incarnation_accepted=0)
+            store.upsert_member(device_id=late.device_id, name=late.name, kind=late.kind,
+                                signing_public=crypto.b64u_encode(late.signing_public),
+                                encryption_public=crypto.b64u_encode(late.encryption_public),
+                                generation=generation, status=membership.STATUS_REVOKED,
+                                last_seq_accepted=0, last_incarnation_accepted=0, _conn=conn)
+            store.clear_pending_origin(cursor, late.device_id)
+            logger.warning("Device %s was admitted by %s after its revocation point; membership withdrawn",
+                           late.device_id, member.device_id)
         if member.device_id == ctx.device_id:
             logger.error("This device was removed from network %s", ctx.network_id)
         # A recovery certificate under a predecessor key is no longer an
@@ -931,6 +1177,10 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext |
                 outcome = apply_envelope(cursor, data, ctx=ctx, result=result)
                 if hub_scope is not None:
                     store.record_hub_receipt(cursor, hub_scope, data)
+        except TransientApplyError as exc:
+            result.retry += 1
+            result.reasons.append(str(exc))
+            continue
         except ApplyError as exc:
             result.rejected += 1
             result.reasons.append(str(exc))
@@ -942,7 +1192,7 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext |
                 load_context()
                 raise
             logger.warning("Applying an operation failed: %s", exc, exc_info=True)
-            result.rejected += 1
+            result.retry += 1
             result.reasons.append("apply failed")
             continue
         if outcome == "applied":
@@ -953,6 +1203,10 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext |
             result.pending += 1
         elif outcome == "lost":
             result.lost += 1
+        elif outcome == "rejected":
+            result.rejected += 1
+    if result.own_ahead:
+        restored_from_backup(result.own_ahead)
     if result.touched:
         touched = list(result.touched)
         if any(c in ("membership", "member_names") for c, _, _ in touched):
@@ -960,6 +1214,26 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext |
             _ensure_safe_write_key(ctx)
         _notify(touched)
     return result
+
+
+def restored_from_backup(evidence_seq: int) -> NetworkContext:
+    """Start a fresh stream: an op this device signed exists that it does not hold.
+
+    Called with proof only (an envelope that verifies under our own signing
+    key, at a sequence past our outbox), never on a peer's bare claim.
+    """
+    ctx = require_context()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        held = store.own_watermark(cursor, ctx.device_id, ctx.identity.incarnation)
+    if evidence_seq <= held:
+        return ctx
+    logger.error("An operation this device signed (seq %d) is not in its outbox (last %d); this worker was "
+                 "restored from a backup and moves to a new incarnation", evidence_seq, held)
+    identity_mod.bump_incarnation()
+    ctx = load_context()
+    kick()
+    return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -1180,7 +1454,7 @@ def admit_device(*, device_id: str, signing_public: bytes, encryption_public: by
         # Rows this database still holds for that install now belong to its device.
         try:
             from app.network.startup import backfill_owner_device_ids
-            backfill_owner_device_ids(ctx.device_id)
+            backfill_owner_device_ids(ctx.device_id, include_unscoped=False)
         except Exception:  # noqa: BLE001
             logger.debug("Legacy owner backfill failed", exc_info=True)
     kick()
@@ -1310,14 +1584,14 @@ def revoke_device(device_id: str, *, reason: str = "") -> dict:
         cursor = conn.cursor()
         state = store.lock_state(cursor)
         generation = int(state["generation"]) + 1
-        # The last sequence we will still honour from the removed device.
-        last_seq = 0
-        for incarnation in range(1, store.highest_incarnation(cursor, device_id) + 1):
-            last_seq = max(last_seq, store.get_watermark(cursor, device_id, incarnation))
+        # The stream position we will still honour from the removed device:
+        # its newest incarnation we know, up to what we have applied of it.
+        last_incarnation = store.highest_incarnation(cursor, device_id)
+        last_seq = store.get_watermark(cursor, device_id, last_incarnation) if last_incarnation else 0
         revocation = membership.issue_revocation(
             network_id=ctx.network_id, issuer_device_id=ctx.device_id,
             issuer_signing_private=ctx.identity.signing_private, device_id=device_id, generation=generation,
-            last_seq_accepted=last_seq, reason=reason)
+            last_seq_accepted=last_seq, last_incarnation_accepted=last_incarnation, reason=reason)
         ctx.members = membership.apply_record(revocation, network_id=ctx.network_id, members=dict(ctx.members),
                                               founder_device_id=ctx.founder_device_id)
         revoked = ctx.members[device_id]
@@ -1325,7 +1599,8 @@ def revoke_device(device_id: str, *, reason: str = "") -> dict:
                             signing_public=crypto.b64u_encode(revoked.signing_public),
                             encryption_public=crypto.b64u_encode(revoked.encryption_public),
                             generation=generation, status=membership.STATUS_REVOKED,
-                            last_seq_accepted=last_seq, _conn=conn)
+                            last_seq_accepted=last_seq, last_incarnation_accepted=last_incarnation, _conn=conn)
+        store.clear_pending_origin(cursor, device_id)
         ctx.generation = generation
         store.update_state(_conn=conn, generation=generation)
         record_membership(cursor, revocation, ctx=ctx)
@@ -1343,6 +1618,14 @@ def revoke_device(device_id: str, *, reason: str = "") -> dict:
         from app.network import recovery
         recovery.refresh_wrap_after_rotation(_conn=conn)
     _notify([("membership", f"rev:{device_id}:{generation}", "upsert")])
+    try:
+        # The account hub must stop relaying for the removed device too; its
+        # registration would otherwise keep feeding the account after the
+        # LAN stopped listening to it. Retried by the hub loop on failure.
+        from app.network import hub
+        hub.notify_revoked(device_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("Hub revocation notice deferred for %s", device_id, exc_info=True)
     kick()
     return {"device_id": device_id, "generation": generation, "key_version": new_version}
 

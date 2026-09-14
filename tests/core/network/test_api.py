@@ -9,7 +9,7 @@ from app.api import pairing as pairing_api
 from app.api.auth import require_admin, require_auth
 from app.db import database
 from app.db import network as store
-from app.network import crypto, engine, enrollment, tokens, transport
+from app.network import crypto, engine, enrollment, membership, tokens, transport
 from tests.core.network.harness import Worker, exchange
 
 
@@ -43,7 +43,10 @@ def make_client():
 
 
 def _peer_token(client, ctx_of_peer, server_device_id):
-    challenge = client.post("/api/v1/network/peer/auth/challenge", json={"device_id": ctx_of_peer.device_id}).json()
+    issued = client.post("/api/v1/network/peer/auth/challenge", json={"device_id": ctx_of_peer.device_id})
+    if issued.status_code != 200:
+        return issued  # a non-member is refused before it gets a challenge
+    challenge = issued.json()
     signature = tokens.sign_challenge(ctx_of_peer.identity.signing_private, challenge["challenge"], server_device_id)
     response = client.post("/api/v1/network/peer/auth/token", json={
         "device_id": ctx_of_peer.device_id, "challenge": challenge["challenge"], "signature": signature,
@@ -124,8 +127,11 @@ def test_peer_plane_requires_membership_and_valid_signatures(workers, make_clien
         exchange_resp = client.post("/api/v1/network/peer/exchange", headers=headers, json={"watermarks": {}}).json()
         assert exchange_resp["ops"] and exchange_resp["watermarks"][a.device_id]
         # Revoked devices lose access within the token lifetime: immediately here.
+        # The revocation moves the membership generation, which every token is
+        # bound to, so the old token is refused before membership is even checked.
         engine.revoke_device(b.device_id)
-        assert client.get("/api/v1/network/peer/ping", headers=headers).status_code == 403
+        assert client.get("/api/v1/network/peer/ping", headers=headers).status_code in (401, 403)
+        assert _peer_token(client, b_ctx, a.device_id).status_code == 403
         assert tokens.verify_token("dvt_garbage") is None
 
 
@@ -143,9 +149,11 @@ def test_join_flow_end_to_end(workers, make_client, monkeypatch):
         parsed = enrollment.parse_join_link(link["url"])
         assert parsed["endpoint"] == "http://10.0.0.5:8000" and parsed["fingerprint"] == link["fingerprint"]
 
-        device = {"signing_public": crypto.b64u_encode(b.identity.signing_public),
-                  "encryption_public": crypto.b64u_encode(b.identity.encryption_public),
-                  "name": "Laptop", "platform": "linux", "legacy_instance_id": "laptop-1234"}
+        device = membership.sign_device_description({
+            "device_id": b.device_id, "signing_public": crypto.b64u_encode(b.identity.signing_public),
+            "encryption_public": crypto.b64u_encode(b.identity.encryption_public),
+            "name": "Laptop", "platform": "linux", "kind": "worker", "legacy_instance_id": "laptop-1234"},
+            b.identity.signing_private)
         # Wrong fingerprint claimed by the joiner is refused before the code is consumed.
         wrong = client.post("/api/v1/network/join", json={"code": parsed["code"], "device": device,
                                                           "inviter_fingerprint": "0000-0000-0000-0000-0000-0000-0000-0000"})
@@ -217,3 +225,81 @@ def test_cluster_installs_marks_this_worker_by_device_id(workers, make_client):
         assert [row["id"] for row in listing["installs"]] == [a.device_id]
         me = listing["installs"][0]
         assert me["is_self"] is True and me["online"] is True and me["device_name"] == "Desk"
+
+
+def _client_as_api_user(api_user):
+    from fastapi import Request
+
+    def fake_auth(request: Request):
+        request.state.api_user = api_user
+        return "user"
+
+    app = FastAPI()
+    app.include_router(network_api.router)
+    app.dependency_overrides[require_admin] = lambda: "admin"
+    app.dependency_overrides[require_auth] = fake_auth
+    return TestClient(app)
+
+
+def test_fork_here_and_hydrate_enforce_api_user_session_scope(workers):
+    """NET-08: a project-restricted API user cannot fork or hydrate a session outside its project."""
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        database.create_project(project_id="proj-a", name="A", description=None, path="/srv/a")
+        database.create_session(session_id="s-scoped", profile_id="default", project_id="proj-a", title="Scoped",
+                                is_active=True)
+        outsider = _client_as_api_user({"id": "u-out", "project_id": "proj-other"})
+        assert outsider.post("/api/v1/network/sessions/s-scoped/fork-here").status_code == 403
+        assert outsider.post(f"/api/v1/network/runners/{a.device_id}/sessions/s-scoped/hydrate").status_code == 403
+        assert outsider.post("/api/v1/network/sessions/s-missing/fork-here").status_code == 404
+        assert outsider.post(f"/api/v1/network/runners/{a.device_id}/sessions/s-missing/hydrate").status_code == 404
+        assert a.sql("SELECT COUNT(*) AS n FROM sessions")[0]["n"] == 1  # nothing was forked
+        database.create_api_user(user_id="u-in", name="Insider", api_key_hash="h" * 64, project_id="proj-a")
+        insider = _client_as_api_user({"id": "u-in", "project_id": "proj-a"})
+        forked = insider.post("/api/v1/network/sessions/s-scoped/fork-here")
+        assert forked.status_code == 201, forked.text
+        assert database.get_session(forked.json()["session_id"])["api_user_id"] == "u-in"
+
+
+def test_legacy_plaintext_blob_route_is_gone(workers, make_client):
+    """NET-18: only the encrypted parts route serves bytes to members."""
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home")
+        client = make_client()
+        engine.admit_device(device_id=b.device_id, signing_public=b.identity.signing_public,
+                            encryption_public=b.identity.encryption_public, name="B")
+        b_ctx = type("Ctx", (), {"device_id": b.device_id, "identity": b.identity})()
+        headers = {"Authorization": "Bearer " + _peer_token(client, b_ctx, a.device_id).json()["token"]}
+        assert client.get("/api/v1/network/peer/blob/" + "a" * 64, headers=headers).status_code == 404
+        assert client.get("/api/v1/network/peer/blob/" + "a" * 64 + "/parts/0", headers=headers).status_code == 404
+        assert not any(getattr(r, "path", "") == "/api/v1/network/peer/blob/{hash_value}" for r in network_api.router.routes)
+
+
+def test_member_endpoints_are_validated_before_they_are_stored(workers, make_client):
+    """NET-22: only plain http(s) addresses without credentials or link-local hosts are kept."""
+    from app.network import endpoints
+    good = ["http://10.0.0.5:8000", "https://desk.local", "http://192.168.1.20:8000/", "http://[fd00::1]:8000"]
+    bad = ["http://169.254.169.254/latest/meta-data", "http://[fe80::1]:8000", "ftp://10.0.0.5", "http://user:pw@10.0.0.5",
+           "http://", "javascript:alert(1)", "http://10.0.0.5:99999", "http://a b", "http://10.0.0.5/" + "x" * 600, "", 7]
+    assert endpoints.validate_endpoints(good + bad + good) == [u.rstrip("/") for u in good]
+    assert len(endpoints.validate_endpoints([f"http://10.0.0.{i}" for i in range(20)])) == endpoints.MAX_ENDPOINTS
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home")
+        client = make_client()
+        engine.admit_device(device_id=b.device_id, signing_public=b.identity.signing_public,
+                            encryption_public=b.identity.encryption_public, name="B")
+        challenge = client.post("/api/v1/network/peer/auth/challenge", json={"device_id": b.device_id}).json()["challenge"]
+        signature = tokens.sign_challenge(b.identity.signing_private, challenge, a.device_id)
+        token = client.post("/api/v1/network/peer/auth/token", json={
+            "device_id": b.device_id, "challenge": challenge, "signature": signature, "incarnation": 1,
+            "endpoints": ["http://169.254.169.254/latest", "http://user:pw@10.0.0.9", "http://10.0.0.9:8000"]})
+        assert token.status_code == 200, token.text
+        assert store.get_member(b.device_id)["endpoints"] == ["http://10.0.0.9:8000"]
+        headers = {"Authorization": "Bearer " + token.json()["token"]}
+        exchanged = client.post("/api/v1/network/peer/exchange", headers=headers, json={
+            "watermarks": {}, "endpoints": ["http://[fe80::1]:8000", "ftp://x", "https://b.example.com/"]})
+        assert exchanged.status_code == 200, exchanged.text
+        assert store.get_member(b.device_id)["endpoints"] == ["https://b.example.com"]

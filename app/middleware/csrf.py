@@ -41,6 +41,10 @@ _EXEMPT_PATHS = frozenset({
     # Pair exchange authenticates with a one-time, high-entropy grant in the
     # request body and is called before the new device owns a session cookie.
     "/api/v1/pairing/exchange",
+    # A worker joining a network posts its keys with a one-time join code
+    # from another host: no cookie, no Origin header, nothing a browser can
+    # forge without the code. The poll that follows is a safe GET.
+    "/api/v1/network/join",
 })
 
 # Prefixes that are exempt from CSRF checks.

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import http from 'node:http';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { WorkerSupervisor, syncBeforeOpen } = require('../dist/main/worker.js');
+const { WorkerSupervisor, syncBeforeOpen, ATTACH_ANY_ENV } = require('../dist/main/worker.js');
 
 async function serve(t, handler) {
   const server = http.createServer(handler);
@@ -13,7 +13,7 @@ async function serve(t, handler) {
 }
 
 for (const external of [true, false]) {
-  test(`${external ? 'attached' : 'owned'} worker stays on splash until sync responds`, async t => {
+  test(`${external ? 'attached' : 'owned'} worker stays on splash until sync responds`, {timeout: 10000}, async t => {
     let release, requested;
     const began = new Promise(resolve => { requested = resolve; });
     const port = await serve(t, (req, res) => {
@@ -23,7 +23,9 @@ for (const external of [true, false]) {
       release = () => res.end(JSON.stringify({status: 'synced'}));
       requested();
     });
-    const worker = new WorkerSupervisor({runtime: {}, port, logDir: '.', dataDir: '.', envFile: '', postgres: () => null});
+    // This synthetic worker is explicitly attachable; a mere health response
+    // must not bypass the supervisor's ownership guard.
+    const worker = new WorkerSupervisor({runtime: {}, port, logDir: '.', dataDir: '.', envFile: '', baseEnv: {[ATTACH_ANY_ENV]: '1'}, postgres: () => null});
     if (!external) worker._state = {...worker.state, phase: 'starting'};
     const opening = external ? worker.start() : worker.finishStartup(port);
     await began;

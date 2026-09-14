@@ -55,11 +55,54 @@ class Member:
     generation: int
     status: str = STATUS_ACTIVE
     last_seq_accepted: Optional[int] = None  # set on revocation
+    # The incarnation ``last_seq_accepted`` refers to. A revoked device may
+    # not open a newer stream; ``None`` (a record from before this field)
+    # means "whatever incarnation the receiver already knew at revocation".
+    last_incarnation_accepted: Optional[int] = None
 
 
 def device_id_for(signing_public: bytes) -> str:
     """Self-certifying device id: ``dev_`` plus 24 hex of the key digest."""
     return "dev_" + crypto.sha256_hex(signing_public)[:24]
+
+
+# ---------------------------------------------------------------------------
+# Device descriptions (proof of key possession)
+# ---------------------------------------------------------------------------
+
+_DESCRIPTION_PROOF_FIELDS = ("device_id", "signing_public", "encryption_public", "kind")
+_DESCRIPTION_PROOF_DOMAIN = b"shuffle-device-description-v1|"
+
+
+def _description_message(description: Mapping[str, Any]) -> bytes:
+    body = {name: description.get(name) for name in _DESCRIPTION_PROOF_FIELDS}
+    return _DESCRIPTION_PROOF_DOMAIN + crypto.canonical_json(body)
+
+
+def sign_device_description(description: Mapping[str, Any], signing_private: bytes) -> dict:
+    """Return the description with a ``proof`` only the signing key holder can make.
+
+    The proof binds the encryption key to the device id, so a relay (the
+    account hub, a pairing link) cannot substitute its own encryption key and
+    receive the network keys in the device's name.
+    """
+    signed = dict(description)
+    signed["proof"] = crypto.b64u_encode(crypto.sign(signing_private, _description_message(signed)))
+    return signed
+
+
+def verify_device_description(description: Mapping[str, Any]) -> bool:
+    """True when ``proof`` was made by the signing key the description names."""
+    try:
+        signing_public = crypto.b64u_decode(description["signing_public"])
+        if description.get("device_id") != device_id_for(signing_public):
+            return False
+        proof = description.get("proof")
+        if not isinstance(proof, str) or not proof:
+            return False
+        return crypto.verify(signing_public, _description_message(description), crypto.b64u_decode(proof))
+    except (KeyError, TypeError, AttributeError, crypto.CryptoError):
+        return False
 
 
 def _strip_signature(record: Mapping[str, Any]) -> dict:
@@ -162,6 +205,15 @@ def verify_certificate(record: Mapping[str, Any], *, network_id: str,
             raise MembershipError("Only the founder may self-certify")
         if not _verify(record, member.signing_public):
             raise MembershipError("Self-signed certificate is invalid")
+        known = members.get(member.device_id)
+        if known is not None and (known.generation != member.generation
+                                  or known.signing_public != member.signing_public
+                                  or known.encryption_public != member.encryption_public):
+            # The founder's self-signed certificate is a trust root, issued
+            # once when the network is created. A founder that was removed
+            # cannot re-admit itself by publishing another one; like any
+            # other device it needs a certificate from an active member.
+            raise MembershipError("The founder certificate is already established")
         return member
     signer = members.get(issuer)
     if signer is None or signer.status != STATUS_ACTIVE:
@@ -176,7 +228,8 @@ def verify_certificate(record: Mapping[str, Any], *, network_id: str,
 # ---------------------------------------------------------------------------
 
 def issue_revocation(*, network_id: str, issuer_device_id: str, issuer_signing_private: bytes,
-                     device_id: str, generation: int, last_seq_accepted: int, reason: str = "") -> dict:
+                     device_id: str, generation: int, last_seq_accepted: int,
+                     last_incarnation_accepted: int = 0, reason: str = "") -> dict:
     record = {
         "v": RECORD_VERSION,
         "type": TYPE_REVOCATION,
@@ -184,6 +237,7 @@ def issue_revocation(*, network_id: str, issuer_device_id: str, issuer_signing_p
         "device_id": device_id,
         "generation": generation,
         "last_seq_accepted": int(last_seq_accepted),
+        "last_incarnation_accepted": int(last_incarnation_accepted),
         "reason": reason[:200],
         "issued_by": issuer_device_id,
         "issued_at": now_iso(),
@@ -199,7 +253,8 @@ def verify_revocation(record: Mapping[str, Any], *, network_id: str, members: Ma
             raise MembershipError("Revocation belongs to another network")
         generation = record["generation"]
         last_seq = record["last_seq_accepted"]
-        for value in (generation, last_seq):
+        last_incarnation = record.get("last_incarnation_accepted")
+        for value in (generation, last_seq) + ((last_incarnation,) if last_incarnation is not None else ()):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise MembershipError("Bad revocation counters")
         issuer = members.get(record["issued_by"])
@@ -213,7 +268,8 @@ def verify_revocation(record: Mapping[str, Any], *, network_id: str, members: Ma
         raise MembershipError("A device cannot revoke itself")
     if not _verify(record, issuer.signing_public):
         raise MembershipError("Revocation signature is invalid")
-    return {"device_id": record["device_id"], "generation": generation, "last_seq_accepted": last_seq}
+    return {"device_id": record["device_id"], "generation": generation, "last_seq_accepted": last_seq,
+            "last_incarnation_accepted": last_incarnation}
 
 
 def issue_key_record(*, network_id: str, issuer_device_id: str, issuer_signing_private: bytes,
@@ -242,6 +298,9 @@ def verify_key_record(record: Mapping[str, Any], *, network_id: str, members: Ma
         version = record["key_version"]
         if isinstance(version, bool) or not isinstance(version, int) or version < 1:
             raise MembershipError("Bad key version")
+        generation = record["generation"]
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+            raise MembershipError("Bad key record generation")
         if not isinstance(record["wraps"], dict):
             raise MembershipError("Bad wraps")
         issuer = members.get(record["issued_by"])
@@ -325,7 +384,8 @@ def apply_record(record: Mapping[str, Any], *, network_id: str, members: Dict[st
             device_id=existing.device_id, signing_public=existing.signing_public,
             encryption_public=existing.encryption_public, name=existing.name, kind=existing.kind,
             generation=details["generation"], status=STATUS_REVOKED,
-            last_seq_accepted=details["last_seq_accepted"])
+            last_seq_accepted=details["last_seq_accepted"],
+            last_incarnation_accepted=details["last_incarnation_accepted"])
         return members
     if kind == TYPE_KEY:
         verify_key_record(record, network_id=network_id, members=members)

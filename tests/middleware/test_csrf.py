@@ -34,6 +34,10 @@ def client(monkeypatch):
     async def pairing_exchange():
         return {"ok": True}
 
+    @api.post("/api/v1/network/join")
+    async def network_join():
+        return {"ok": True}
+
     return TestClient(api)
 
 
@@ -62,6 +66,14 @@ def test_peer_bootstrap_has_no_ambient_browser_authority(monkeypatch, path, loca
 def test_mobile_register_exempt_without_origin(client):
     """Native registration has no Origin header and must NOT be CSRF-blocked."""
     resp = client.post("/api/v1/mobile/register", json={"device_info": {}})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": True}
+
+
+def test_network_join_exempt_without_origin(client):
+    """A worker joining from another host posts its keys with a one-time code:
+    no cookie, no Origin header. It must not need a wildcard CORS to get through."""
+    resp = client.post("/api/v1/network/join", json={"code": "x", "device": {}})
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"ok": True}
 

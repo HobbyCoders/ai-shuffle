@@ -261,7 +261,35 @@ class ChatCapabilitiesSmokeTest {
             assertThrows(java.io.FileNotFoundException::class.java) { context.contentResolver.openInputStream(destination) }
         }
         fixture({ _, server -> ServerStore.get(context).remove(server.id); Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, _ ->
-            saveBlob(scenario); status(scenario, "Chat changed. Download the file again.")
+            lateinit var downloadStatus: TextView
+            scenario.onActivity { downloadStatus = it.findViewById(R.id.screenStatus) }
+            // SAF creates the selected document before returning it. Seed it so an
+            // absent destination proves removePartial finished, not that it never ran.
+            context.contentResolver.openOutputStream(destination, "wt")!!.use { it.write("picker-created document".toByteArray()) }
+            saveBlob(scenario)
+            waitFor("Removed-worker download was neither rejected nor its chat closed") {
+                // ActivityScenario.getState synchronizes with the main thread and
+                // must itself run on the instrumentation thread, not inside runOnMainSync.
+                if (scenario.state == androidx.lifecycle.Lifecycle.State.DESTROYED) {
+                    true
+                } else {
+                    var rejected = false
+                    instrumentation.runOnMainSync {
+                        // The captured view can be read even if authorization loss
+                        // finished ChatActivity; never call onActivity after removal.
+                        rejected = downloadStatus.text.toString() == "Chat changed. Download the file again."
+                    }
+                    rejected
+                }
+            }
+            // removePartial uses IO + NonCancellable: neither the status nor activity
+            // destruction is a barrier for the asynchronous document deletion.
+            waitFor("Removed-worker download left its picker document behind") {
+                try {
+                    context.contentResolver.openInputStream(destination)!!.use { }
+                    false
+                } catch (_: java.io.FileNotFoundException) { true }
+            }
             assertThrows(java.io.FileNotFoundException::class.java) { context.contentResolver.openInputStream(destination) }
         }
     }

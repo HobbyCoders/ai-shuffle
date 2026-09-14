@@ -117,6 +117,7 @@ async function main(): Promise<void> {
 						runtime: resolved,
 						logDir,
 						envFile: path.join(userData, 'worker', '.env'),
+						stateDir: path.join(userData, 'worker'),
 						dataDir: identity.preview ? path.join(userData, 'data') : stableDataDir(process.platform, process.env, app.getPath('home')),
 						...(identity.preview ? { workspaceDir: path.join(userData, 'workspace'), profileDir: path.join(userData, 'profile') } : {}),
 						port: identity.port,

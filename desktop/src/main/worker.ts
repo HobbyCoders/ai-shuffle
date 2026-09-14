@@ -10,11 +10,16 @@
  *
  * The worker is `python -m app.main` in local mode, listening on 127.0.0.1.
  * The app's own protected listener on port 8001 is fixed by the server, so
- * only one worker can run per machine; if one is already answering on the
- * default port the app attaches to it instead of starting a second.
+ * only one worker can run per machine. A worker already answering on the
+ * default port is adopted only when it proves it is ours: every spawn gets a
+ * random attach token (SHUFFLE_DESKTOP_ATTACH_TOKEN) whose SHA-256 the
+ * worker reports in /health, and the token plus pid are kept in a private
+ * file so the next launch can tell its own orphan from another user's worker
+ * or a Docker container. `SHUFFLE_DESKTOP_ATTACH_ANY=1` restores unverified
+ * attaching for developers running a manual worker.
  */
 import { EventEmitter } from 'node:events';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createWriteStream, existsSync, type WriteStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
@@ -144,7 +149,7 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 	if (opts.runtime.nodeBinDir) pathParts.push(opts.runtime.nodeBinDir);
 	if (base[pathKey]) pathParts.push(base[pathKey] as string);
 	for (const key of Object.keys(base)) {
-		if (/^(POSTGRES_|DATABASE_|PG|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$|SHUFFLE_DESKTOP_ISOLATED$|SHUFFLE_PROTECTED_PORT$|SHUFFLE_DESKTOP_PROTECTED_PORT$)/i.test(key)) delete base[key];
+		if (/^(POSTGRES_|DATABASE_|PG|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$|SHUFFLE_DESKTOP_ISOLATED$|SHUFFLE_PROTECTED_PORT$|SHUFFLE_DESKTOP_PROTECTED_PORT$|SHUFFLE_DESKTOP_ATTACH_TOKEN$)/i.test(key)) delete base[key];
 	}
 	let profile: NodeJS.ProcessEnv = {};
 	if (opts.profileDir) {
@@ -197,6 +202,8 @@ export async function prepareWorkerConfig(file: string): Promise<void> {
 	await writePrivateFile(file, clean);
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export function isPortFree(port: number, host = '127.0.0.1'): Promise<boolean> {
 	return new Promise((resolve) => {
 		const server = net.createServer();
@@ -211,6 +218,8 @@ export interface HealthReply {
 	ok: boolean;
 	service?: string;
 	version?: string;
+	/** SHA-256 hex of the attach token the worker was started with, when it was started by a desktop app. */
+	attach?: string;
 	status?: number;
 }
 
@@ -223,8 +232,8 @@ export function fetchHealth(port: number, pathname = '/health', timeoutMs = 2500
 			res.on('end', () => {
 				if (res.statusCode !== 200) return resolve({ ok: false, status: res.statusCode });
 				try {
-					const json = JSON.parse(body) as { service?: string; version?: string };
-					resolve({ ok: true, service: json.service, version: json.version, status: 200 });
+					const json = JSON.parse(body) as { service?: string; version?: string; attach?: string };
+					resolve({ ok: true, service: json.service, version: json.version, attach: typeof json.attach === 'string' ? json.attach : undefined, status: 200 });
 				} catch {
 					resolve({ ok: false, status: res.statusCode });
 				}
@@ -238,6 +247,58 @@ export function fetchHealth(port: number, pathname = '/health', timeoutMs = 2500
 	});
 }
 
+/** What the worker reports in /health for a given attach token. */
+export function attachTokenHash(token: string): string {
+	return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
+/** The spawned worker's identity, kept privately so the next launch can recognise it. */
+export interface WorkerProcessRecord {
+	version: 1;
+	pid: number | null;
+	token: string;
+	port: number;
+}
+
+export async function readWorkerProcessRecord(file: string): Promise<WorkerProcessRecord | null> {
+	try {
+		const record = JSON.parse(await fs.readFile(file, 'utf8')) as Partial<WorkerProcessRecord>;
+		if (record.version !== 1 || typeof record.token !== 'string' || !/^[a-f0-9]{64}$/.test(record.token)) return null;
+		const pid = Number.isSafeInteger(record.pid) && (record.pid as number) > 0 ? (record.pid as number) : null;
+		const port = Number.isSafeInteger(record.port) ? (record.port as number) : 0;
+		return { version: 1, pid, token: record.token, port };
+	} catch {
+		return null;
+	}
+}
+
+export function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === 'EPERM';
+	}
+}
+
+/** Stop a worker we started earlier and its children; waits until the pid is gone. */
+export async function terminateProcessTree(pid: number, timeoutMs = 10_000): Promise<boolean> {
+	if (process.platform === 'win32') {
+		spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+	} else {
+		try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ } }
+	}
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (!isProcessAlive(pid)) return true;
+		await sleep(100);
+	}
+	if (process.platform !== 'win32') {
+		try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
+		await sleep(200);
+	}
+	return !isProcessAlive(pid);
+}
 
 /** Owner-only launch barrier, also used when attaching to a running local worker. */
 export function syncBeforeOpen(port: number): Promise<{ status: string }> {
@@ -296,8 +357,6 @@ export function requestLifecycle(port: number, token: string, action: 'active-se
 	});
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 export interface SupervisorOptions {
 	isolated?: boolean;
 	runtime: WorkerRuntime;
@@ -309,10 +368,14 @@ export interface SupervisorOptions {
 	port?: number;
 	protectedPort?: number;
 	allowAttach?: boolean;
+	/** Private directory for the spawned worker's pid and attach token; defaults to the env file's directory. */
+	stateDir?: string;
 	baseEnv?: NodeJS.ProcessEnv;
 	postgres: () => PostgresConfig | null;
 	readyTimeoutMs?: number;
 }
+
+export const ATTACH_ANY_ENV = 'SHUFFLE_DESKTOP_ATTACH_ANY';
 
 export class WorkerSupervisor extends EventEmitter {
 	private child: ChildProcess | null = null;
@@ -323,9 +386,14 @@ export class WorkerSupervisor extends EventEmitter {
 	private readonly lifecycleToken = randomBytes(32).toString('hex');
 	private recentLog: string[] = [];
 	private crashRestarts: number[] = [];
+	/** Set by a post-ready crash so the scheduled start() proceeds although the phase already says 'starting'. */
+	private restartPending = false;
+	private restartTimer: NodeJS.Timeout | null = null;
+	private readonly processFile: string;
 
 	constructor(private readonly opts: SupervisorOptions) {
 		super();
+		this.processFile = path.join(opts.stateDir ?? path.dirname(opts.envFile), 'worker-process.json');
 		this._state = {
 			phase: 'idle',
 			port: opts.port ?? DEFAULT_PORT,
@@ -364,19 +432,36 @@ export class WorkerSupervisor extends EventEmitter {
 	}
 
 	private async doStart(): Promise<WorkerState> {
-		if (this._state.phase === 'starting' || this._state.phase === 'ready') return this.state;
+		if (this._state.phase === 'ready' || (this._state.phase === 'starting' && !this.restartPending)) return this.state;
+		this.restartPending = false;
 		this.stopping = false;
 		this.set({ phase: 'starting', startupStep: undefined, syncStatus: undefined, error: null, exitCode: null, pid: null, external: false });
 
 		const port = this.opts.port ?? DEFAULT_PORT;
 		const protectedPort = this.opts.protectedPort ?? PROTECTED_PORT;
-		// Preview NEVER attaches to an existing worker, even on its own port.
-		if (this.opts.allowAttach !== false) {
-			const health = await fetchHealth(port);
-			if (this.stopping) return this.state;
-			if (health.ok && health.service === 'ai-shuffle') {
+		const previous = await readWorkerProcessRecord(this.processFile);
+		const orphanAlive = !!previous?.pid && isProcessAlive(previous.pid);
+		// Preview NEVER attaches to an existing worker, even on its own port, and
+		// does not probe an unrelated one; it only looks for its own orphan.
+		const health: HealthReply = this.opts.allowAttach !== false || orphanAlive ? await fetchHealth(port) : { ok: false };
+		if (this.stopping) return this.state;
+		if (health.ok && health.service === 'ai-shuffle') {
+			const ours = !!previous && health.attach === attachTokenHash(previous.token);
+			if (ours && orphanAlive) {
+				// Our own orphan from a run that did not shut down: stop it and start
+				// fresh on the current database rather than adopting it as external.
+				this.log(`stopping worker ${previous!.pid} left behind by a previous run`);
+				if (!(await terminateProcessTree(previous!.pid!)) || !(await this.waitForFreePorts([port, protectedPort]))) {
+					this.set({ phase: 'failed', error: `A worker from a previous run (pid ${previous!.pid}) is still holding port ${port} and could not be stopped.` });
+					return this.state;
+				}
+				if (this.stopping) return this.state;
+			} else if (this.opts.allowAttach !== false && (ours || (this.opts.baseEnv ?? process.env)[ATTACH_ANY_ENV] === '1')) {
 				this.set({ external: true, port, url: `http://127.0.0.1:${port}`, startedAt: new Date().toISOString() });
 				await this.finishStartup(port);
+				return this.state;
+			} else if (this.opts.allowAttach !== false) {
+				this.set({ phase: 'failed', error: `Port ${port} is in use by another AI Shuffle worker that this app did not start (another user's app, a Docker container or a manual run). Stop it and try again, or set ${ATTACH_ANY_ENV}=1 to attach to it anyway.` });
 				return this.state;
 			}
 		}
@@ -409,6 +494,8 @@ export class WorkerSupervisor extends EventEmitter {
 		}
 		const env = buildWorkerEnv({ ...this.opts, port });
 		env.SHUFFLE_DESKTOP_LIFECYCLE_TOKEN = this.lifecycleToken;
+		const attachToken = randomBytes(32).toString('hex');
+		env.SHUFFLE_DESKTOP_ATTACH_TOKEN = attachToken;
 		const child = spawn(this.opts.runtime.python, ['-m', 'app.main'], {
 			cwd: this.opts.runtime.serverDir,
 			env,
@@ -430,6 +517,12 @@ export class WorkerSupervisor extends EventEmitter {
 		});
 		void exited.then((code) => this.onExit(code));
 		this.set({ pid: child.pid ?? null, port, url: `http://127.0.0.1:${port}`, startedAt: new Date().toISOString() });
+		try {
+			const record: WorkerProcessRecord = { version: 1, pid: child.pid ?? null, token: attachToken, port };
+			await writePrivateFile(this.processFile, JSON.stringify(record));
+		} catch (error) {
+			this.log(`could not record the worker process: ${(error as Error).message}`);
+		}
 
 		const deadline = Date.now() + (this.opts.readyTimeoutMs ?? 180_000);
 		while (Date.now() < deadline) {
@@ -453,6 +546,7 @@ export class WorkerSupervisor extends EventEmitter {
 		const child = this.child;
 		this.child = null;
 		this.closeLog(`--- worker ${this.stopping ? 'stopped by the app' : `exited (${code ?? 'signal'})`} ${new Date().toISOString()} ---`);
+		void fs.rm(this.processFile, { force: true }).catch(() => {});
 		if (this.stopping) {
 			this.set({ phase: 'stopped', pid: null, exitCode: code });
 			return;
@@ -466,8 +560,12 @@ export class WorkerSupervisor extends EventEmitter {
 		this.crashRestarts = this.crashRestarts.filter((t) => now - t < 5 * 60_000);
 		if (child && this.crashRestarts.length < 2) {
 			this.crashRestarts.push(now);
+			this.restartPending = true;
 			this.set({ phase: 'starting', pid: null, exitCode: code, error: this.describeExit(code, 'The worker stopped unexpectedly; restarting it.') });
-			setTimeout(() => void this.start(), 1500);
+			this.restartTimer = setTimeout(() => {
+				this.restartTimer = null;
+				if (this.restartPending) void this.start();
+			}, 1500);
 			return;
 		}
 		this.set({ phase: 'failed', pid: null, exitCode: code, error: this.describeExit(code, 'The worker keeps stopping unexpectedly.') });
@@ -513,6 +611,11 @@ export class WorkerSupervisor extends EventEmitter {
 			if (reply.stopped !== true) throw new Error('Worker did not finish stopping sessions');
 		}
 		this.stopping = true;
+		this.restartPending = false;
+		if (this.restartTimer) {
+			clearTimeout(this.restartTimer);
+			this.restartTimer = null;
+		}
 		const child = this.child;
 		if (!child || child.exitCode !== null) {
 			if (this.starting) await this.starting;
@@ -552,6 +655,17 @@ export class WorkerSupervisor extends EventEmitter {
 		await this.stop();
 		this.set({ phase: 'idle' });
 		return this.start();
+	}
+
+	private async waitForFreePorts(ports: number[], timeoutMs = 10_000): Promise<boolean> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			let free = true;
+			for (const port of ports) if (!(await isPortFree(port))) free = false;
+			if (free) return true;
+			await sleep(250);
+		}
+		return false;
 	}
 
 	private async rotateLog(): Promise<void> {

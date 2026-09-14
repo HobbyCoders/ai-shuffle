@@ -15,7 +15,10 @@ installation and protected backups unchanged.
 
 ## Source-build Prerequisites
 
-- **Python 3.12+** — [Download](https://www.python.org/downloads/)
+- **Python 3.12** — [Download](https://www.python.org/downloads/). The
+  vendored `fluid` package (`pip install -e ./fluid`) requires 3.12, so the
+  backend test suite (`pytest tests`) needs a 3.12 virtual environment; a
+  newer interpreter cannot install it.
 - **Node.js 22.12+** — [Download](https://nodejs.org/) (for building frontend)
 - **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
 - **Managed runtime** — Desktop or Docker supplies the database; an external
@@ -205,7 +208,7 @@ already owns the port), or `Chrome crash-looped …` (check the app logs).
 | File access | Container only | Full PC access |
 | Installation | Single command | Packaged desktop app |
 | Updates | Rebuild image | Update package; rebuild source assets for development |
-| Port binding | Configurable | Default 8000 |
+| Port binding | `127.0.0.1:8000` by default; `BIND_HOST`/`PORT` in `.env` (Docker-published ports bypass host firewall rules) | Loopback only, default 8000 |
 | Data isolation | Volume mounts | User directories |
 
 ## Troubleshooting
@@ -230,6 +233,14 @@ Close the other AI Shuffle app normally before starting the managed desktop
 runtime or a test installer. Do not force-kill a database process or attach the
 test app to a production worker. The supervisor needs time to stop PostgreSQL
 cleanly; preserve existing data and backups.
+
+The desktop app adopts a worker already answering on its port only when that
+worker proves it was started by this app (its `/health` reports the hash of
+the attach token the app passed in). A worker started by another user, by
+Docker, or by hand is reported as "in use by another AI Shuffle worker that
+this app did not start" and nothing is spawned. Developers who run
+`python -m app.main` themselves can set `SHUFFLE_DESKTOP_ATTACH_ANY=1` before
+starting the desktop app to attach to it anyway.
 
 ### Database Issues
 

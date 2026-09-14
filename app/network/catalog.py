@@ -20,12 +20,16 @@ from typing import Any, Dict, List, Optional
 
 from app.db import network as store
 from app.db.base import get_db
-from app.network import engine, policy
+from app.network import engine, envelope as envelope_mod, policy
 
 logger = logging.getLogger(__name__)
 
 HISTORY_DAYS = 30
 EVENT_BATCH = 400
+# Peers refuse an envelope field over 4 MiB (``envelope._text``); the sealed
+# payload is base64 of nonce + ciphertext + tag, so bound the plaintext at
+# three quarters of that with room for the AEAD overhead.
+MAX_EVENT_BYTES = (1 << 22) * 3 // 4 - 4096
 
 
 def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_held: bool = False,
@@ -149,7 +153,9 @@ def publish_events(*, ctx: Optional[engine.NetworkContext] = None, recent_only: 
                    session_ids: Optional[List[str]] = None, limit: int = EVENT_BATCH) -> int:
     """Append new transcript events of owned sessions to the outbox, in seq order."""
     ctx = ctx or engine.context()
-    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY or engine.outbox_held():
+        # While the outbox is held (see ``engine.hold_outbox``) nothing may
+        # move the per-session cursor past events that were not published.
         return 0
     coll = policy.collection("session_events")
     count = 0
@@ -161,19 +167,51 @@ def publish_events(*, ctx: Optional[engine.NetworkContext] = None, recent_only: 
             if count >= limit:
                 break
             published_seq = store.catalog_cursor(cursor, session_id)
+            if published_seq == 0:
+                # A cleared transcript restarts at seq 1 (its cursor row is
+                # gone): retract what the network still holds beyond the new
+                # end before the fresh events replace the low seqs.
+                count += _retract_stale_events(cursor, session_id, ctx)
             cursor.execute(
                 "SELECT * FROM session_events WHERE session_id = %s AND seq > %s ORDER BY seq LIMIT %s",
                 (session_id, published_seq, max(1, limit - count)))
             rows = [dict(r) for r in cursor.fetchall()]
+            skipped = 0
             for row in rows:
                 record_id = coll.record_id(row)
-                if engine.record(cursor, "session_events", record_id, row, ctx=ctx, order_seq=int(row["seq"])) is not None:
-                    count += 1
+                # One event the envelope cannot carry (over the size cap)
+                # must not freeze this session or the ones after it.
+                try:
+                    plaintext = engine.serialize_row(coll, row)
+                    if plaintext is not None and len(envelope_mod.record_bytes(plaintext)) > MAX_EVENT_BYTES:
+                        raise envelope_mod.EnvelopeError("Event exceeds the envelope size cap")
+                    if engine.record(cursor, "session_events", record_id, row, ctx=ctx, order_seq=int(row["seq"])) is not None:
+                        count += 1
+                except (envelope_mod.EnvelopeError, engine.ApplyError, ValueError, TypeError):
+                    skipped += 1
                 published_seq = int(row["seq"])
+            if skipped:
+                logger.warning("Skipped %d unpublishable transcript event(s) of session %s", skipped, session_id)
             if rows:
                 store.set_catalog_cursor(cursor, session_id, published_seq)
     if count:
         engine.kick()
+    return count
+
+
+def _retract_stale_events(cursor, session_id: str, ctx: engine.NetworkContext) -> int:
+    """Delete published events past the transcript's current end (a restarted stream)."""
+    cursor.execute("SELECT MAX(seq) AS s FROM session_events WHERE session_id = %s", (session_id,))
+    row = cursor.fetchone()
+    max_seq = int(row["s"]) if row and row["s"] is not None else 0
+    cursor.execute(
+        "SELECT record_id FROM sync_records WHERE collection = 'session_events' AND deleted = FALSE "
+        "AND order_seq > %s AND record_id LIKE %s", (max_seq, session_id + "|%"))
+    stale = [r["record_id"] for r in cursor.fetchall() if r["record_id"].split("|", 1)[0] == session_id]
+    count = 0
+    for record_id in stale:
+        if engine.record(cursor, "session_events", record_id, None, ctx=ctx) is not None:
+            count += 1
     return count
 
 
@@ -225,16 +263,27 @@ def after_event_mirrored(cursor, record: Dict[str, Any]) -> None:
     seq = int(record.get("seq") or 0)
     if not session_id or not seq:
         return
-    cursor.execute(
-        """INSERT INTO session_event_counters (session_id, next_seq) VALUES (%s, %s)
-           ON CONFLICT (session_id) DO UPDATE SET next_seq = CASE
-               WHEN session_event_counters.next_seq > EXCLUDED.next_seq THEN session_event_counters.next_seq
-               ELSE EXCLUDED.next_seq END""",
-        (session_id, seq))
-    # Should this device become the owner later (a migrated session), it
-    # publishes from here on instead of re-sending what the network has.
-    if store.catalog_cursor(cursor, session_id) < seq:
+    cursor.execute("SELECT next_seq FROM session_event_counters WHERE session_id = %s", (session_id,))
+    row = cursor.fetchone()
+    if row is not None and int(row["next_seq"]) > seq:
+        # The owner restarted its stream (a cleared transcript): the row at
+        # this seq was replaced, and the counter must follow what is left.
+        cursor.execute("SELECT MAX(seq) AS s FROM session_events WHERE session_id = %s", (session_id,))
+        top = cursor.fetchone()
+        seq = max(seq, int(top["s"]) if top and top["s"] is not None else 0)
+        cursor.execute("UPDATE session_event_counters SET next_seq = %s WHERE session_id = %s", (seq, session_id))
         store.set_catalog_cursor(cursor, session_id, seq)
+    else:
+        cursor.execute(
+            """INSERT INTO session_event_counters (session_id, next_seq) VALUES (%s, %s)
+               ON CONFLICT (session_id) DO UPDATE SET next_seq = CASE
+                   WHEN session_event_counters.next_seq > EXCLUDED.next_seq THEN session_event_counters.next_seq
+                   ELSE EXCLUDED.next_seq END""",
+            (session_id, seq))
+        # Should this device become the owner later (a migrated session), it
+        # publishes from here on instead of re-sending what the network has.
+        if store.catalog_cursor(cursor, session_id) < seq:
+            store.set_catalog_cursor(cursor, session_id, seq)
     try:
         from app.db.session_events import NOTIFY_CHANNEL
         cursor.execute("SELECT pg_notify(%s, %s)", (NOTIFY_CHANNEL, json.dumps({"session_id": session_id, "max_seq": seq})))
@@ -243,11 +292,17 @@ def after_event_mirrored(cursor, record: Dict[str, Any]) -> None:
 
 
 def transcript_text(session_id: str, *, limit: int = 400) -> str:
-    """Plain-text rendering of a mirrored transcript (for a fork's context)."""
-    from app.db.session_events import get_events
+    """Plain-text rendering of the last ``limit`` events of a mirrored transcript (for a fork's context)."""
+    from app.db.session_events import _parse_payload
     lines: List[str] = []
-    events = get_events(session_id, 0, limit)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT event_type, payload FROM session_events WHERE session_id = %s ORDER BY seq DESC LIMIT %s",
+            (session_id, limit))
+        events = [dict(r) for r in cursor.fetchall()][::-1]
     for event in events:
+        event["payload"] = _parse_payload(event.get("payload"))
         payload = event.get("payload") or {}
         kind = event.get("event_type") or payload.get("type")
         content = payload.get("content")

@@ -712,6 +712,9 @@ class HealthResponse(BaseModel):
     authenticated: bool
     setup_required: bool
     claude_authenticated: bool
+    # SHA-256 hex of the desktop attach token; only present in a worker the
+    # desktop app started, so the app can tell its own worker from another.
+    attach: Optional[str] = None
 
 
 class VersionResponse(BaseModel):

@@ -65,7 +65,7 @@ def _call(method: str, suffix: str, body=None, *, max_bytes: int = 16384, timeou
 
 
 def _device_description(ident: identity_mod.DeviceIdentity, name: Optional[str] = None) -> dict:
-    return {
+    description = {
         "device_id": ident.device_id,
         "signing_public": crypto.b64u_encode(ident.signing_public),
         "encryption_public": crypto.b64u_encode(ident.encryption_public),
@@ -75,6 +75,10 @@ def _device_description(ident: identity_mod.DeviceIdentity, name: Optional[str] 
         "kind": membership.KIND_WORKER,
         "version": settings.version,
     }
+    # ``proof`` lets the admitting member check that the encryption key the
+    # hub relays belongs to the device that owns the signing key; the hub
+    # stores and returns the description as given.
+    return membership.sign_device_description(description, ident.signing_private)
 
 
 # ---------------------------------------------------------------------------
@@ -134,12 +138,14 @@ def status() -> dict:
         "last_error": _state.get("last_error"),
         "pending_devices": _state.get("pending_devices") or [],
         "account_network": _state.get("account_network"),
+        "adoption_required": bool(_state.get("adoption_required")),
+        "revocations_due": list(hub_state.get("revocations_due") or []),
     }
 
 
 def forget_network() -> None:
     """The worker left its network: drop what was learned about the account's."""
-    for key in ("status", "pending_devices", "account_network", "last_error", "enrollment_poll"):
+    for key in ("status", "pending_devices", "account_network", "last_error", "enrollment_poll", "adoption_required"):
         _state.pop(key, None)
 
 
@@ -224,6 +230,8 @@ def approve_device(device_id: str, *, fingerprint_confirmed: bool = True) -> dic
     device = next((d for d in pending_devices() if d.get("device_id") == device_id), None)
     if device is None:
         raise HubError("No such pending device")
+    # The displayed fingerprint covers only the signing key. Even explicit
+    # confirmation cannot authorize a hub-substituted encryption key.
     return _admit(device)
 
 
@@ -236,6 +244,15 @@ def _admit(device: dict) -> dict:
         raise HubError("Pending device has malformed keys") from exc
     if membership.device_id_for(signing_public) != device_id:
         raise HubError("Pending device id does not match its key")
+    if not membership.verify_device_description(device):
+        # Both unattended and manual admission must bind the encryption key
+        # to the device's signing key before any network key is wrapped.
+        raise HubError("Pending device carries no valid proof of its keys; update that worker and re-register")
+    ctx = engine.context()
+    existing = ctx.member(device_id) if ctx else None
+    if existing is not None and existing.status == membership.STATUS_ACTIVE and (
+            existing.signing_public != signing_public or existing.encryption_public != encryption_public):
+        raise HubError("Device is already a member with different keys; remove it before admitting it again")
     response = engine.admit_device(device_id=device_id, signing_public=signing_public,
                                    encryption_public=encryption_public, name=device.get("name") or device_id,
                                    platform=device.get("platform"), legacy_instance_id=device.get("legacy_instance_id"))
@@ -260,6 +277,34 @@ def admit_pending_devices(devices: list[dict] | None = None) -> int:
         _state["pending_devices"] = [d for d in (_state.get("pending_devices") or [])
                                      if d.get("device_id") not in admitted]
     return len(admitted)
+
+
+def notify_revoked(device_id: str) -> bool:
+    """Tell the hub a member was removed so it stops relaying for that device.
+
+    Best effort: when the hub cannot be reached the notice is queued in the
+    hub state and retried by the sync loop.
+    """
+    if _binding() is None or store.get_state() is None:
+        return False
+    try:
+        _call("POST", f"devices/{device_id}/reject", {"reason": "revoked"})
+    except HubError as exc:
+        logger.warning("Hub revocation notice for %s deferred: %s", device_id, exc)
+        due = list(_hub_state().get("revocations_due") or [])
+        if device_id not in due:
+            due.append(device_id)
+            _save_hub_state(revocations_due=due)
+        return False
+    due = [d for d in (_hub_state().get("revocations_due") or []) if d != device_id]
+    if due != list(_hub_state().get("revocations_due") or []):
+        _save_hub_state(revocations_due=due)
+    return True
+
+
+def _flush_revocations() -> None:
+    for device_id in list(_hub_state().get("revocations_due") or []):
+        notify_revoked(device_id)
 
 
 def reject_device(device_id: str) -> dict:
@@ -339,12 +384,33 @@ async def adopt_account_network(*, device_name: Optional[str] = None) -> dict:
         await asyncio.to_thread(engine.leave_network)
     except RuntimeError as exc:
         raise HubError(str(exc)) from exc
+    _state.pop("adoption_required", None)
     result = await asyncio.to_thread(register)
     _state["account_network"] = _account_network(info)
     kick()
     return {"adopted": True, "status": result.get("status")}
 
 
+async def _adopt_or_wait() -> None:
+    """Switch to the account's network on our own only when nothing is at stake.
+
+    A worker that is alone in its network loses no shared state by leaving
+    it. One that syncs with other workers would drop their membership, its
+    conflicts list and its recovery wrap without anyone asking; that switch
+    waits for an explicit *Adopt the account's network* from Settings >
+    Devices (``POST /api/v1/network/hub/adopt``).
+    """
+    ctx = engine.context()
+    others = [m for m in ctx.active_members() if m.device_id != ctx.device_id] if ctx else []
+    if not others:
+        _state.pop("adoption_required", None)
+        await adopt_account_network()
+        return
+    if not _state.get("adoption_required"):
+        logger.warning("The account already has a network; this worker syncs with %d other worker(s) and "
+                       "keeps its own until the switch is confirmed from Settings > Devices", len(others))
+    _state["adoption_required"] = True
+    _state["status"] = "conflict"
 def _bootstrap_id() -> str:
     return "hub-bootstrap:" + identity_mod.load().device_id
 
@@ -393,6 +459,7 @@ async def _bootstrap_from_hub(response: dict | None = None, *, device_name: str 
         await asyncio.to_thread(store.delete_join, marker["id"])
         engine.kick()
         return True
+
 
 
 async def _loop_body() -> bool:
@@ -457,15 +524,17 @@ async def _account_pass() -> bool:
         # started. Remember it only after registration succeeds so outages retry.
         member = await asyncio.to_thread(store.get_member, ctx.device_id)
         name_changed = member is not None and hub_state.get("registered_name") != member["name"]
+        if hub_state.get("revocations_due"):
+            await asyncio.to_thread(_flush_revocations)
         if not hub_state.get("registered") or name_changed:
             result = await asyncio.to_thread(register)
             if result.get("status") == "conflict":
                 # The account already syncs other workers: the account wins.
-                await adopt_account_network()
+                await _adopt_or_wait()
                 _state["last_error"] = None
                 return True
         elif hub_state.get("status") == "conflict":
-            await adopt_account_network()
+            await _adopt_or_wait()
             _state["last_error"] = None
             return True
         recovery_wrap = (await run_sync(store.get_state) or {}).get("recovery") or {}

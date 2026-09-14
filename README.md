@@ -134,6 +134,12 @@ This starts **one container**, including managed PostgreSQL **16**. Open
 username, password, or Shuffle account is required. An optional `.env` can set
 other options; `.env.example` contains no database connection settings.
 
+The app port is published on the host's loopback interface only
+(`127.0.0.1:8000`). Docker-published ports bypass host firewall rules, and the
+worker grants owner authority to local peers, so keep it on loopback unless you
+mean to share it: set `BIND_HOST=0.0.0.0` (or one LAN address) in `.env` to
+expose it on the LAN deliberately, ideally behind a reverse proxy or VPN.
+
 Keep the existing `ai-shuffle-data:/data` mount: it contains the database at
 `/data/postgres/data`, private lifecycle files in `/data/postgres`, app credential
 keys, memory and identity. PostgreSQL is private to the container; publish only

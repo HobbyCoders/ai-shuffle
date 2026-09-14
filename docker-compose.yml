@@ -89,8 +89,17 @@ services:
     # Port mapping. The browser's CDP port stays loopback-only inside the
     # container (the browser-mcp server attaches to it in-process) — it is never
     # published to the network, so only the app port is mapped.
+    #
+    # The app port is published on the host's loopback interface only. The
+    # listener grants owner authority to local (loopback) peers, and a port
+    # Docker publishes on 0.0.0.0 bypasses host firewall rules (Docker inserts
+    # its own iptables/nftables rules ahead of ufw/firewalld), so a plain
+    # "8000:8000" exposes the worker to every network the host is on.
+    # To reach it from the LAN deliberately, set BIND_HOST=0.0.0.0 (or one
+    # LAN address) in .env and put it behind a reverse proxy / VPN; see the
+    # README for the trade-offs.
     ports:
-      - "${PORT:-8000}:8000"
+      - "${BIND_HOST:-127.0.0.1}:${PORT:-8000}:8000"
 
     # Health check — readiness probe (DB SELECT 1 + session-pool headroom).
     # /health/ready returns 503 until the DB is reachable, so give a generous

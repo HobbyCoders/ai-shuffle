@@ -4,8 +4,8 @@
 
 - makes sure this worker has a device identity
 - turns an existing single install into a network of one (a fresh install
-  waits for the first-run choice instead)
-- stamps ``owner_device_id`` on rows that still only carry ``instance_id``
+  waits for the first-run choice instead), stamping ``owner_device_id`` on
+  the rows that still only carry ``instance_id`` that one time
 - hooks resource invalidation so a domain write triggers a scan
 
 ``start()`` launches the sync, scan and presence loops once credentials are
@@ -51,8 +51,11 @@ def initialize() -> Optional[engine.NetworkContext]:
     ctx = engine.load_context()
     if ctx is None and _is_existing_install():
         ctx = _migrate_single_install()
+        if ctx is not None:
+            # Once, when the private database becomes a network: later boots
+            # leave ownership alone so an explicit ``assign(None)`` holds.
+            backfill_owner_device_ids(ctx.device_id)
     if ctx is not None:
-        backfill_owner_device_ids(ctx.device_id)
         try:
             from app.network import blobs
             blobs.backfill_attachment_hashes()
@@ -93,11 +96,17 @@ def _migrate_single_install() -> Optional[engine.NetworkContext]:
         return None
 
 
-def backfill_owner_device_ids(device_id: str) -> dict:
+def backfill_owner_device_ids(device_id: str, *, include_unscoped: bool = True) -> dict:
     """Rows owned by this install (by instance_id or NULL) get this device id.
 
     Rows that name another install's instance id are left for that install's
-    device to claim through the legacy map when it joins.
+    device to claim through the legacy map when it joins. Runs once, when an
+    install migrates or admits a legacy install — not at every boot.
+
+    Automations carry no install column, so every unowned one is claimed
+    only with ``include_unscoped`` (the single-install migration). A later
+    legacy admission leaves them alone: an unowned automation by then is one
+    somebody unassigned on purpose.
     """
     counts = {}
     me = settings.effective_instance_id
@@ -112,8 +121,11 @@ def backfill_owner_device_ids(device_id: str) -> dict:
                 cursor.execute(
                     f"UPDATE {table} SET owner_device_id = %s WHERE owner_device_id IS NULL AND ({column} IS NULL OR {column} = '' OR {column} = %s)",
                     (device_id, me))
-            else:
+            elif include_unscoped:
                 cursor.execute(f"UPDATE {table} SET owner_device_id = %s WHERE owner_device_id IS NULL", (device_id,))
+            else:
+                counts[table] = 0
+                continue
             counts[table] = cursor.rowcount or 0
             if column:
                 for instance_id, mapped in legacy_map.items():

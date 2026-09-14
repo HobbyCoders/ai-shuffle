@@ -88,9 +88,19 @@ hosted public downloads or GitHub download permissions.
 
 - Starts its bundled PostgreSQL, then the worker (`python -m app.main` in
   local mode, listening on 127.0.0.1:8000), and opens the worker's UI once it
-  answers. Stable builds may attach to an already running local worker; preview
-  builds refuse occupied ports and never attach. Exit the old app before opening
-  Preview. Quitting stops the worker and database that this app started.
+  answers. Every spawn gets a random attach token (`SHUFFLE_DESKTOP_ATTACH_TOKEN`)
+  whose SHA-256 the worker reports in `/health`; the token and pid are kept in
+  the private `<userData>/worker/worker-process.json`. A worker already
+  answering on the port is adopted only when that hash matches, so another
+  user's worker, a Docker container or a manual run is reported as "in use by
+  another AI Shuffle worker that this app did not start" and no second worker
+  is spawned. An orphan of our own from a crashed run is stopped by pid and
+  replaced. Set `SHUFFLE_DESKTOP_ATTACH_ANY=1` to attach to any local worker
+  (developers running the worker by hand). Preview builds refuse occupied ports
+  and never attach. Exit the old app before opening Preview. Quitting stops the
+  worker and database that this app started. A worker that crashes after it was
+  ready is restarted, at most twice in five minutes, before the status page
+  reports it.
 - Needs no database setup. The first run creates a cluster in
   `<userData>/postgres/data` (`initdb`, user `ai_shuffle`, a generated
   password, `scram-sha-256`); every start picks a free loopback port and

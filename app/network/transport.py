@@ -30,6 +30,8 @@ import httpx
 from app.core.config import settings
 from app.db import network as store
 from app.network import engine, identity as identity_mod, membership, tokens
+from app.network.endpoints import validate_endpoints
+from app.network.envelope import Envelope
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,8 @@ class PeerLink:
 
     def __init__(self, device_id: str, endpoints: list[str]):
         self.device_id = device_id
-        self.endpoints = list(endpoints)
+        # Member-advertised addresses are dialed: keep only usable http(s) URLs.
+        self.endpoints = validate_endpoints(endpoints)
         self.base_url: str | None = None
         self.token: str | None = None
         self.token_expires = 0.0
@@ -70,7 +73,7 @@ class PeerLink:
     def update_endpoints(self, endpoints: list[str]) -> None:
         """Learn endpoints without dropping the one that is answering right now."""
         merged: list[str] = [self.base_url] if self.base_url else []
-        for url in list(endpoints or []) + self.endpoints:
+        for url in validate_endpoints(endpoints) + self.endpoints:
             url = (url or "").rstrip("/")
             if url and url not in merged:
                 merged.append(url)
@@ -170,7 +173,8 @@ class PeerLink:
                 break
             if current == marks:
                 raise PeerError("Peer sync could not fill missing updates")
-        _detect_rollback(ctx, theirs)
+        if await self._check_rollback(client, ctx, theirs):
+            ctx = engine.require_context()
         their_endpoints = exchange.get("endpoints") or []
         await asyncio.to_thread(store.touch_member, self.device_id, capabilities=exchange.get("capabilities"),
                                 endpoints=their_endpoints or None, version=exchange.get("version"),
@@ -224,6 +228,43 @@ class PeerLink:
                 await asyncio.to_thread((directory / f"{index}.json").write_bytes, raw)
             return await asyncio.to_thread(peer_snapshot.apply, manifest, directory, self.device_id)
 
+    async def _check_rollback(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
+                              theirs: Dict[str, Dict[str, int]]) -> bool:
+        """A peer claims to hold more of our current stream than we do.
+
+        The claim alone proves nothing (any member could say it and make us
+        discard our unsynced writes). Ask for the first op past our outbox:
+        an envelope that verifies under our own signing key is the proof
+        that we were restored from a backup. Returns True after a bump.
+        """
+        mine = theirs.get(ctx.device_id) or {}
+        remote = int(mine.get(str(ctx.identity.incarnation), 0) or 0)
+        if not remote:
+            return False
+
+        def _held() -> int:
+            with store.get_db() as conn:
+                return store.own_watermark(conn.cursor(), ctx.device_id, ctx.identity.incarnation)
+
+        local = await asyncio.to_thread(_held)
+        if remote <= local:
+            return False
+        try:
+            answer = await self._request(client, "GET",
+                                         f"/api/v1/network/peer/ops/{ctx.device_id}/{ctx.identity.incarnation}/{local + 1}")
+            env = Envelope.from_dict(answer["op"])
+        except (PeerError, httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            logger.warning("Peer %s claims %d ops of our stream (we hold %d) but produced no proof: %s",
+                           self.device_id, remote, local, exc)
+            return False
+        if (env.origin_device_id != ctx.device_id or env.origin_incarnation != ctx.identity.incarnation
+                or env.origin_seq != local + 1 or not env.verify_signature(ctx.identity.signing_public)):
+            logger.warning("Peer %s offered an op of our stream that does not verify; claim ignored", self.device_id)
+            return False
+        await asyncio.to_thread(engine.restored_from_backup, env.origin_seq)
+        await asyncio.to_thread(engine.publish_presence, capabilities=_capabilities(), version=settings.version)
+        return True
+
 
 def _description() -> dict:
     # Both probes can read the database, PATH and the filesystem.
@@ -238,20 +279,6 @@ def _capabilities() -> dict:
         return {}
 
 
-def _detect_rollback(ctx: engine.NetworkContext, theirs: Dict[str, Dict[str, int]]) -> None:
-    """A peer knows more of our current stream than we do: we were restored from a backup."""
-    mine = theirs.get(ctx.device_id) or {}
-    remote = int(mine.get(str(ctx.identity.incarnation), 0) or 0)
-    if not remote:
-        return
-    with store.get_db() as conn:
-        local = store.own_watermark(conn.cursor(), ctx.device_id, ctx.identity.incarnation)
-    if remote > local:
-        logger.error("Peers hold %d operations from this device but only %d exist locally; "
-                     "this worker was restored from a backup and re-enrolls with a new incarnation.", remote, local)
-        identity_mod.bump_incarnation()
-        engine.load_context()
-        engine.publish_presence(capabilities=_capabilities(), version=settings.version)
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +362,11 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
             link.failures += 1
             link.backoff_until = time.monotonic() + 10.0
             logger.warning("Sync with %s failed", link.device_id, exc_info=True)
+    if engine.outbox_held() and (results or not any(link.endpoints for link in _links.values())):
+        # Our stream was compared with at least one peer (or there is no
+        # peer to compare with): local writes may be published now.
+        engine.hold_outbox(False)
+        request_scan()
     return results
 
 
@@ -427,13 +459,25 @@ async def scan_loop() -> None:
             delay = SCAN_INTERVAL_SECONDS
 
 
+PRUNE_INTERVAL_SECONDS = 24 * 3600.0
+_last_prune = 0.0
+
+
 async def presence_loop() -> None:
+    global _last_prune
     while True:
         try:
             capabilities = await asyncio.to_thread(_capabilities)
             await asyncio.to_thread(engine.publish_presence, capabilities=capabilities, version=settings.version)
             await asyncio.to_thread(store.expire_conflicts)
             await asyncio.to_thread(store.expire_joins)
+            if time.monotonic() - _last_prune >= PRUNE_INTERVAL_SECONDS:
+                # The op log is forwarded to peers that lack it; older ops that
+                # are not a record's latest are served by snapshots instead.
+                _last_prune = time.monotonic()
+                pruned = await asyncio.to_thread(store.prune_ops)
+                if pruned:
+                    logger.info("Pruned %d old sync operations", pruned)
             from app.network import peer_snapshot
             await asyncio.to_thread(peer_snapshot.cleanup)
         except asyncio.CancelledError:
@@ -451,6 +495,11 @@ def request_scan() -> None:
 def start() -> List[asyncio.Task]:
     global _loop
     _loop = asyncio.get_running_loop()
+    # Publish nothing until this device's stream has been compared with a
+    # peer or the account feed (or there is nobody to compare with): a
+    # worker restored from a backup must move to a new incarnation before it
+    # reuses sequence numbers peers already hold under other content.
+    engine.hold_outbox(True)
     _tasks[:] = [
         asyncio.create_task(sync_loop(), name="network-sync"),
         asyncio.create_task(scan_loop(), name="network-scan"),
@@ -471,6 +520,7 @@ async def stop() -> None:
     _tasks.clear()
     _loop = None
     engine.set_kick(None)
+    engine.hold_outbox(False)
 
 
 def forget_peers() -> None:

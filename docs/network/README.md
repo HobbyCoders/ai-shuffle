@@ -116,21 +116,51 @@ them when the worker is enrolled).
   `engine.leave_network` then a fresh registration; the account's records
   win, local-only rows are merged in). A signed-in worker is always in its
   account's network.
-- **Device tokens.** Peers prove key possession with a signed challenge and get
-  a five-minute HMAC token; every authenticated request re-checks membership, so
-  revocation takes effect within one token lifetime.
+- **Proof of key possession.** A device description (the join request, the
+  hub registration) carries a `proof`: an Ed25519 signature by the device's own
+  signing key over its id, both public keys and kind. Join-code admission and
+  all account-hub approvals require it, including manual approvals, so a relay
+  cannot substitute its encryption key and receive network keys in the device's
+  name. Older workers must update and re-register: the displayed signing-key
+  fingerprint does not bind their encryption key. An active member's keys are never
+  rebound by a later description.
+- **Device tokens.** Peers prove key possession with a signed challenge
+  (issued to one named active member, spendable only by that member's key,
+  bounded per member and per client address) and get a five-minute HMAC
+  token bound to the network and its membership generation; every
+  authenticated request re-checks membership, so revocation takes effect
+  within one token lifetime, and any membership change invalidates every
+  outstanding token at once.
 - **Revocation.** Publishes a signed revocation carrying the last accepted
-  sequence of the removed device and rotates the network key for the rest
-  (wrapped to each remaining member, sealed under the previous key so members can
-  read it). The UI recommends rotating provider keys.
+  incarnation and sequence of the removed device and rotates the network key
+  for the rest (wrapped to each remaining member, sealed under the previous
+  key so members can read it). A revoked device cannot open a newer stream
+  (its later incarnations are refused outright), a revoked founder cannot
+  re-establish itself with another self-signed certificate, certificates it
+  issued past the honoured point are withdrawn when the revocation applies,
+  and the account hub is told to stop relaying for it. The UI recommends
+  rotating provider keys.
 - **Recovery.** A 128-bit recovery key (`A1-XXXXX-...`) wraps the network key
   through HKDF-SHA256 + AES-GCM; the wrap is public data kept locally and at the
   hub. Unlocking self-issues a certificate whose proof is an AES-GCM tag under
   the network key, which only a key holder can make; members accept it from the
   device's first operation.
-- **Restore from backup.** A peer that holds more of our current stream than we
-  do proves our sequence went backwards; the device bumps its incarnation and
-  starts a fresh stream.
+- **Restore from backup.** An envelope this device signed that it does not hold
+  proves its sequence went backwards: a peer that claims to hold more of our
+  stream is asked for the first op past our outbox and only a verified one
+  counts; the same proof arrives on its own through the account feed. The
+  device then bumps its incarnation and starts a fresh stream, and re-imports
+  its earlier incarnation's ops from peers. Until the first comparison with a
+  peer or the account feed after start, the outbox is held so a restored
+  worker never reuses sequence numbers peers already hold.
+- **Apply semantics.** An op that cannot be applied *yet* (a key or
+  certificate from another stream still on its way, credential storage
+  locked) stays in place for a retry; one that can never apply (a record the
+  database refuses, a membership record that does not verify) moves the
+  stream past it and keeps the record in the conflicts list. Buffered
+  out-of-order ops are bounded per stream and dropped for revoked origins;
+  the op log is pruned after 30 days (peers behind the pruned prefix take a
+  state copy instead).
 
 ## Deviations from the plan
 

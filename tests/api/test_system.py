@@ -112,6 +112,40 @@ class TestHealthCheckFunction:
             assert result["version"] == "1.2.1"
 
     @pytest.mark.asyncio
+    async def test_health_check_reports_desktop_attach_hash_only_when_started_by_the_desktop(self, monkeypatch):
+        """DESK-03: the desktop adopts a worker only when this hash matches its stored token."""
+        import hashlib
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app.api.system import health_check, router
+
+        app = FastAPI()
+        app.include_router(router)
+        with patch("app.api.system.auth_service") as mock_auth, \
+             patch("app.api.system.settings") as mock_settings:
+            mock_auth.is_setup_required.return_value = False
+            mock_auth.is_claude_authenticated.return_value = True
+            mock_settings.service_name = "ai-shuffle"
+            mock_settings.version = "1.2.1"
+
+            monkeypatch.delenv("SHUFFLE_DESKTOP_ATTACH_TOKEN", raising=False)
+            assert "attach" not in await health_check()
+            for path in ("/health", "/api/v1/health"):
+                assert "attach" not in TestClient(app).get(path).json()
+
+            token = "f" * 64
+            monkeypatch.setenv("SHUFFLE_DESKTOP_ATTACH_TOKEN", token)
+            expected = hashlib.sha256(token.encode()).hexdigest()
+            assert (await health_check())["attach"] == expected
+            for path in ("/health", "/api/v1/health"):
+                body = TestClient(app).get(path).json()
+                assert body["attach"] == expected
+                assert token not in str(body), "the token itself never leaves the process"
+
+            monkeypatch.setenv("SHUFFLE_DESKTOP_ATTACH_TOKEN", "")
+            assert "attach" not in await health_check()
+
+    @pytest.mark.asyncio
     async def test_health_check_shows_setup_required(self):
         """Should show setup_required when admin not configured."""
         from app.api.system import health_check

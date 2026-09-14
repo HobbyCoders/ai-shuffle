@@ -230,7 +230,8 @@ async def test_remote_owner_receives_turns_interrupts_and_answers(workers, monke
         assert result["interrupted"] and interrupted[0][1] == "stop"
         await control.answer_permission(owner, request_id="req1", session_id="s1", decision="allow",
                                         remember=None, pattern=None, answered_by_device="phone")
-        assert permissions[0]["answered_by_device"] == "phone" and permissions[0]["decision"] == "allow"
+        # The answering device is the authenticated caller, never a claimed id.
+        assert permissions[0]["answered_by_device"] == b.device_id and permissions[0]["decision"] == "allow"
         await control.answer_question(owner, request_id="q1", session_id="s1", answers={"Q": "A"},
                                       answered_by_device=None, dismissed=False, skipped=None)
         assert questions[0]["answered_by_device"] == b.device_id
@@ -322,3 +323,165 @@ def test_fork_here_seeds_a_local_session_from_the_mirror(workers):
         assert database.get_session("s1")["owner_device_id"] == a.device_id  # untouched
         with pytest.raises(LookupError):
             control.fork_here("nope")
+
+
+def _served_client(monkeypatch, server):
+    served = ServedBy(server, "http://a.local:8000")
+    real_async = httpx.AsyncClient
+
+    def async_client(*args, **kwargs):
+        kwargs["transport"] = served.transport()
+        return real_async(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", async_client)
+    return served
+
+
+async def test_control_turns_whitelist_overrides_and_use_the_sessions_project(workers, monkeypatch):
+    """NET-06: a member cannot move the owner's agent (``cwd``) or re-home the turn."""
+    a, b = workers("a"), workers("b")
+    served = _served_client(monkeypatch, a)
+    submitted = []
+
+    async def fake_submit(session_id, source, **kwargs):
+        submitted.append(kwargs)
+        return "turn_1"
+
+    from app.core import turn_manager
+    monkeypatch.setattr(turn_manager, "submit_async", fake_submit)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with a.active():
+        database.create_project(project_id="proj-a", name="A's project", description=None, path="/srv/a")
+        database.create_session(session_id="s-proj", profile_id="default", project_id="proj-a", title="On A",
+                                is_active=True)
+        engine.scan_all()
+    converge([a, b])
+    with a.active():
+        store.touch_member(b.device_id, endpoints=[])
+    with b.active():
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        await control.submit_turn(a.device_id, "s-proj", prompt="go", project_id="proj-elsewhere",
+                                  overrides={"cwd": "/", "worktree_info": {"x": 1}, "model": "x"})
+        assert submitted[-1]["overrides"] == {"model": "x"}
+        assert submitted[-1]["project_id"] == "proj-a"
+        await control.submit_turn(a.device_id, "s-proj", prompt="go", overrides={"cwd": "/", "permission_mode": "acceptEdits"})
+        assert submitted[-1]["overrides"] == {"permission_mode": "acceptEdits"}
+        await control.submit_turn(a.device_id, "s-proj", prompt="go", overrides={"cwd": "/"})
+        assert submitted[-1]["overrides"] is None
+        with pytest.raises(control.ControlRefused):
+            await control.submit_turn(a.device_id, "s-proj", prompt="go", overrides={"permission_mode": "plan-evil"})
+    assert len(submitted) == 3
+
+
+async def test_control_session_creation_validates_its_fields(workers, monkeypatch):
+    """NET-24: api_user_id, hidden, permission_mode and branch are not taken on faith."""
+    a, b = workers("a"), workers("b")
+    served = _served_client(monkeypatch, a)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with b.active():
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        base = {"id": "s-new", "profile_id": "default", "title": "Born on B", "api_user_id": "u-b",
+                "hidden": "yes", "permission_mode": "acceptEdits"}
+        for branch in ("../etc", "-x", "a b", "feature/..", "a//b", "refs/heads/x.lock", "a\tb"):
+            with pytest.raises(control.ControlRefused):
+                await control.create_session(a.device_id, {**base, "branch": branch}, None)
+        with pytest.raises(control.ControlRefused):
+            await control.create_session(a.device_id, {**base, "permission_mode": "plan-evil"}, None)
+        result = await control.create_session(a.device_id, {**base, "branch": "fix/remote"}, None)
+        assert result["session_id"] == "s-new"
+        # Unknown actions are 404; a KeyError raised inside a handler is not masked as one.
+        with pytest.raises(control.ControlRefused, match="Unknown control action"):
+            await control.call(a.device_id, "nope", {})
+
+        async def broken(body, from_device):
+            raise KeyError("request_id")
+
+        monkeypatch.setitem(control._HANDLERS, "broken", broken)
+        with pytest.raises(control.ControlRefused, match="Missing field: request_id"):
+            await control.call(a.device_id, "broken", {})
+    with a.active():
+        row = database.get_session("s-new")
+        assert row["api_user_id"] is None
+        assert row["hidden"] in (True, 1)
+        assert row["permission_mode"] == "acceptEdits" and row["branch"] == "fix/remote"
+        assert row["owner_device_id"] == a.device_id
+
+
+def test_cleared_transcript_republishes_and_mirrors_replace_not_freeze(workers):
+    """NET-07: clearing on the owner resets the catalog cursor; mirrors converge on the new transcript."""
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with a.active():
+        database.create_session(session_id="s-clear", profile_id="default", project_id=None, title="Clear me",
+                                is_active=True)
+        events_db.append_events("s-clear", [
+            {"type": "message.user", "payload": {"type": "message.user", "content": f"old {i}"}} for i in range(5)])
+        engine.scan_all()
+    converge([a, b])
+    with b.active():
+        assert [e["payload"]["content"] for e in events_db.get_events("s-clear", 0)] == [f"old {i}" for i in range(5)]
+    with a.active():
+        database.clear_session_conversation("s-clear")
+        with store.get_db() as conn:
+            assert store.catalog_cursor(conn.cursor(), "s-clear") == 0
+        events_db.append_events("s-clear", [
+            {"type": "message.user", "payload": {"type": "message.user", "content": "new 0"}},
+            {"type": "message.assistant", "payload": {"type": "message.assistant", "content": "new 1", "kind": "text"}}])
+        assert [e["seq"] for e in events_db.get_events("s-clear", 0)] == [1, 2]
+        assert catalog.publish_events() > 0
+    converge([a, b])
+    with b.active():
+        events = events_db.get_events("s-clear", 0)
+        assert [(e["seq"], e["payload"]["content"]) for e in events] == [(1, "new 0"), (2, "new 1")]
+        assert events_db.get_max_seq("s-clear") == 2
+    # The next tail continues from the new counter on both sides.
+    with a.active():
+        events_db.append_events("s-clear", [{"type": "message.user", "payload": {"type": "message.user", "content": "new 2"}}])
+        assert catalog.publish_events() == 1
+    converge([a, b])
+    with b.active():
+        assert [e["payload"]["content"] for e in events_db.get_events("s-clear", 0)] == ["new 0", "new 1", "new 2"]
+        assert events_db.get_max_seq("s-clear") == 3
+
+
+def test_oversized_event_is_skipped_without_freezing_later_sessions(workers):
+    """NET-12: one event over the envelope cap advances the cursor and the loop goes on."""
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        for sid in ("s-big", "s-after"):
+            database.create_session(session_id=sid, profile_id="default", project_id=None, title=sid, is_active=True)
+        events_db.append_events("s-big", [
+            {"type": "message.user", "payload": {"type": "message.user", "content": "small"}},
+            {"type": "message.assistant", "payload": {"type": "message.assistant", "content": "x" * (5 * 1024 * 1024), "kind": "text"}},
+            {"type": "message.user", "payload": {"type": "message.user", "content": "after"}}])
+        events_db.append_events("s-after", [{"type": "message.user", "payload": {"type": "message.user", "content": "later"}}])
+        assert catalog.publish_events() == 3
+        with store.get_db() as conn:
+            assert store.catalog_cursor(conn.cursor(), "s-big") == 3
+            assert store.catalog_cursor(conn.cursor(), "s-after") == 1
+        published = sorted((o["record_id"], o["order_seq"]) for o in store.ops_since({}) if o["collection"] == "session_events")
+        assert published == [("s-after|1", 1), ("s-big|1", 1), ("s-big|3", 3)]
+        assert catalog.publish_events() == 0  # nothing left behind, nothing retried
+
+
+def test_fork_context_uses_the_latest_events(workers):
+    """NET-16: a long session forks with its recent turns, in order."""
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        database.create_session(session_id="s-long", profile_id="default", project_id=None, title="Long", is_active=True)
+        events_db.append_events("s-long", [
+            {"type": "message.user", "payload": {"type": "message.user", "content": f"msg {i:03d}"}} for i in range(500)])
+        text = catalog.transcript_text("s-long")
+        lines = text.split("\n\n")
+        assert len(lines) == 400
+        assert lines[0] == "User: msg 100" and lines[-1] == "User: msg 499"
+        assert "msg 099" not in text
+        assert lines == sorted(lines)

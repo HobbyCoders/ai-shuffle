@@ -23,6 +23,9 @@ export async function startInstalled(): Promise<void> {
   await updates.load();
   await updates.useNewerBaseline();
   await saveInstalledHost(root, { executable: process.execPath, userData, name: app.getName() });
+  // useNewerBaseline clears source state only when the installed baseline is
+  // newer than every build that may have migrated this database. Otherwise a
+  // blocked first boot must fail closed, never downgrade to bundled code.
   if (updates.hasSourceState) {
     const selected = await updates.select();
     app.releaseSingleInstanceLock();

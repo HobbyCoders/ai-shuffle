@@ -56,6 +56,8 @@ export class SourceUpdates {
   get version(): string | null { return this.running ?? this.state.active ?? this.options.baseline?.revision ?? null; }
   get pendingVersion(): string | null { return this.state.pending ?? null; }
   get hasSourceState(): boolean { return !!(this.state.active || this.state.pending || this.state.blocked); }
+  /** A failed first boot with nothing newer staged: no source build may run, so the installer's bundled baseline does. */
+  get blocked(): boolean { return !!this.state.blocked && !this.state.pending; }
   private directory(revision: string): string {
     if (!REVISION.test(revision)) throw new Error('Invalid installed revision');
     return path.join(this.options.root, 'versions', revision);
@@ -80,18 +82,29 @@ export class SourceUpdates {
     // application code back automatically over that possibly changed database.
     if (this.state.booting) await this.failed();
   }
-  /** A newer milestone installer may supersede older healthy source code. */
+  /** A newer milestone installer may supersede older healthy source code, and a block left by older failed boots. */
   async useNewerBaseline(): Promise<void> {
     const baseline = this.options.baseline;
-    if (!baseline || this.state.blocked || this.state.booting) return;
+    if (!baseline || this.state.booting) return;
     const revisions = [this.state.active, this.state.pending].filter((value): value is string => !!value);
-    if (!revisions.length) return;
+    if (!revisions.length && !this.state.blocked) return;
     for (const revision of revisions) {
       const manifest = verifySourceManifest(await fs.readFile(path.join(this.directory(revision), 'release.json'), 'utf8'), this.options.publicKey);
       if (manifest.sequence >= baseline.sequence) return;
     }
+    if (this.state.blocked) {
+      // A failed revision may have migrated the database; only an installer
+      // newer than every failed revision may take over. Unreadable metadata
+      // keeps the block: neither the failed build nor an older baseline runs.
+      for (const revision of this.state.failed ?? []) {
+        let sequence: number;
+        try { sequence = verifySourceManifest(await fs.readFile(path.join(this.directory(revision), 'release.json'), 'utf8'), this.options.publicKey).sequence; }
+        catch { return; }
+        if (sequence >= baseline.sequence) return;
+      }
+    }
     this.state.previous = this.state.active ?? this.state.previous;
-    delete this.state.active; delete this.state.pending;
+    delete this.state.active; delete this.state.pending; delete this.state.blocked;
     await this.save();
   }
   private async lock(): Promise<() => Promise<void>> {

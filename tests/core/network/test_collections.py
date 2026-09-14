@@ -227,3 +227,96 @@ def test_fresh_install_waits_for_the_first_run_choice(workers):
     with a.active():
         assert network_startup.initialize() is None
         assert engine.context() is None
+
+
+def test_boot_leaves_explicitly_unassigned_definitions_alone(workers):
+    """NET-11a: the owner backfill runs at migration, not at every boot."""
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        database.create_automation(automation_id="auto1", name="Nightly", trigger_type="schedule",
+                                   trigger_config={"cron": "0 0 * * *"}, prompt="do", profile_id="default")
+        assert ownership.decide_automation(database.get_automation("auto1"))[0] is True
+        assert ownership.assign("automations", "auto1", None)["owner_device_id"] is None
+        assert network_startup.initialize().device_id == a.device_id  # a reboot
+        assert database.get_automation("auto1")["owner_device_id"] is None
+
+
+def test_assign_refuses_consumer_devices(workers):
+    """NET-11b: a phone or browser never owns an automation or connector."""
+    a, phone = workers("a"), workers("phone")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        engine.admit_device(device_id=phone.device_id, signing_public=phone.identity.signing_public,
+                            encryption_public=phone.identity.encryption_public, name="Phone", kind="consumer")
+        database.create_automation(automation_id="auto1", name="Nightly", trigger_type="schedule",
+                                   trigger_config={"cron": "0 0 * * *"}, prompt="do", profile_id="default")
+        with pytest.raises(ValueError):
+            ownership.assign("automations", "auto1", phone.device_id)
+        assert database.get_automation("auto1")["owner_device_id"] != phone.device_id
+
+
+def test_only_the_lowest_online_worker_claims_unowned_work(workers):
+    """NET-11c: two online workers seeing the same unowned automation do not both fire it."""
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        database.create_automation(automation_id="auto1", name="Nightly", trigger_type="schedule",
+                                   trigger_config={"cron": "0 0 * * *"}, prompt="do", profile_id="default")
+        a.sql("UPDATE automations SET owner_device_id = NULL WHERE id = 'auto1'")
+        engine.scan_all()
+    join(a, b)
+    lower, higher = sorted([a, b], key=lambda w: w.device_id)
+    transport.note_contact(a.device_id)
+    transport.note_contact(b.device_id)
+    with higher.active():
+        assert ownership.claim("automations", "auto1") is False
+        assert ownership.decide_automation(database.get_automation("auto1")) == (False, "automation has no owner yet")
+        assert database.get_automation("auto1")["owner_device_id"] is None
+    with lower.active():
+        assert ownership.claim("automations", "auto1") is True
+        assert database.get_automation("auto1")["owner_device_id"] == lower.device_id
+    # Alone, the higher device may claim other unowned work.
+    transport.reset_for_tests()
+    with higher.active():
+        database.create_automation(automation_id="auto2", name="Weekly", trigger_type="schedule",
+                                   trigger_config={"cron": "0 0 * * 0"}, prompt="do", profile_id="default")
+        higher.sql("UPDATE automations SET owner_device_id = NULL WHERE id = 'auto2'")
+        assert ownership.claim("automations", "auto2") is True
+
+
+def test_file_parts_are_served_by_range_without_reading_the_whole_file(workers, monkeypatch, tmp_path):
+    """NET-15: a part of a file-backed blob is a seek, not a full read."""
+    from app.core import artifact_store
+    from app.network import crypto, peer_files
+    monkeypatch.setattr(artifact_store, "ARTIFACTS_DIR", tmp_path / "artifacts")
+    monkeypatch.setattr(peer_files, "PART_BYTES", 4)
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        engine.admit_device(device_id=b.device_id, signing_public=b.identity.signing_public,
+                            encryption_public=b.identity.encryption_public, name="B")
+        payload = b"01234567AB"
+        digest = blobs.sha256(payload)
+        artifact_store.store_bytes(payload, runner_id=settings.effective_instance_id)
+        assert blobs.read_local_range(digest, 4, 4) == (b"4567", 10)
+        assert blobs.read_local_range(digest, 8, 4) == (b"AB", 10)
+        assert blobs.read_local_range("0" * 64, 0, 4) is None
+        with monkeypatch.context() as whole:
+            def whole_file_read(*args, **kwargs):
+                raise AssertionError("part() must not read the whole blob")
+
+            whole.setattr(blobs, "read_local", whole_file_read)
+            for index in range(3):
+                sealed = peer_files.part(digest, index, b.device_id)
+                assert sealed["size"] == 10 and sealed["index"] == index
+                header = {k: sealed[k] for k in ("network_id", "publisher", "recipient", "hash", "index", "size")}
+                key = crypto.unwrap_key(b.identity.encryption_private, sealed["key"])
+                assert crypto.decrypt_payload(key, sealed["ciphertext"], crypto.canonical_json(header)) == payload[index * 4:index * 4 + 4]
+            with pytest.raises(ValueError):
+                peer_files.part(digest, 3, b.device_id)
+        # Database-backed bytes go through the same range reader.
+        database.create_note(note_id="n1", title="Note", content="body")
+        database.create_note_attachment(attachment_id="att1", note_id="n1", filename="x.txt",
+                                        file_path="/tmp/x.txt", content_type="text/plain", size_bytes=5, data=b"hello")
+        assert blobs.read_local_range(blobs.sha256(b"hello"), 2, 2) == (b"ll", 5)

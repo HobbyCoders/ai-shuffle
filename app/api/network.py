@@ -18,7 +18,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.api.auth import require_admin, require_auth
 from app.core.request_identity import get_client_ip
@@ -27,11 +27,14 @@ from app.core.config import settings
 from app.db import network as store
 from app.db.async_database import run_sync
 from app.network import engine, enrollment, identity as identity_mod, policy, recovery, runners, tokens, transport
+from app.network import endpoints as endpoints_mod
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/network", tags=["Network"])
 _join_limiter = _ExchangeRateLimiter(limit=10, window_seconds=60)
+# A peer authenticates at most a few times a minute per endpoint it tries.
+_challenge_limiter = _ExchangeRateLimiter(limit=60, window_seconds=60)
 
 
 # ---------------------------------------------------------------------------
@@ -48,12 +51,16 @@ class RenameMember(BaseModel):
 
 
 class DeviceDescription(BaseModel):
+    device_id: Optional[str] = Field(default=None, max_length=64)
     signing_public: str = Field(min_length=40, max_length=64)
     encryption_public: str = Field(min_length=40, max_length=64)
     name: str = Field(min_length=1, max_length=100)
     platform: Optional[str] = Field(default=None, max_length=60)
     kind: str = Field(default="worker", max_length=20)
     legacy_instance_id: Optional[str] = Field(default=None, max_length=200)
+    # Ed25519 signature by the device's own signing key over its identity
+    # fields (see ``membership.sign_device_description``).
+    proof: Optional[str] = Field(default=None, min_length=64, max_length=128)
 
 
 class JoinRequest(BaseModel):
@@ -93,6 +100,13 @@ class TokenRequest(BaseModel):
     platform: Optional[str] = Field(default=None, max_length=40)
     name: Optional[str] = Field(default=None, max_length=100)
 
+    # Member-advertised addresses are stored and later dialed: keep only
+    # http(s) URLs with a plain host (LAN addresses are the normal case).
+    @field_validator("endpoints")
+    @classmethod
+    def _usable_endpoints(cls, value: List[str]) -> List[str]:
+        return endpoints_mod.validate_endpoints(value)
+
 
 class ExchangeRequest(BaseModel):
     flush: bool = False
@@ -103,6 +117,11 @@ class ExchangeRequest(BaseModel):
     endpoints: List[str] = Field(default_factory=list, max_length=8)
     capabilities: Dict[str, Any] = Field(default_factory=dict)
     version: Optional[str] = Field(default=None, max_length=40)
+
+    @field_validator("endpoints")
+    @classmethod
+    def _usable_endpoints(cls, value: List[str]) -> List[str]:
+        return endpoints_mod.validate_endpoints(value)
 
 
 class OpsRequest(BaseModel):
@@ -282,6 +301,8 @@ async def assign_owner(body: OwnerAssignment, _: str = Depends(require_admin)) -
         raise HTTPException(404, "Unknown device") from None
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -439,10 +460,11 @@ async def reject_join(join_id: str, _: str = Depends(require_admin)) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.post("/peer/auth/challenge")
-async def peer_challenge(body: ChallengeRequest) -> dict:
-    if engine.context() is None:
-        raise HTTPException(404, "This worker has no network")
-    return {"challenge": tokens.new_challenge(), "expires_in": tokens.CHALLENGE_TTL_SECONDS}
+async def peer_challenge(body: ChallengeRequest, request: Request) -> dict:
+    # Unauthenticated by nature; bounded per client address, issued only to
+    # a named active member and spendable only by that member's key.
+    _challenge_limiter.check(get_client_ip(request))
+    return {"challenge": tokens.new_challenge(body.device_id), "expires_in": tokens.CHALLENGE_TTL_SECONDS}
 
 
 @router.post("/peer/auth/token")
@@ -494,6 +516,28 @@ async def peer_ops(body: OpsRequest, device_id: str = Depends(tokens.require_dev
     return result.as_dict()
 
 
+@router.get("/peer/ops/{origin}/{incarnation}/{seq}")
+async def peer_op(origin: str, incarnation: int, seq: int, device_id: str = Depends(tokens.require_device)) -> dict:
+    """One stored envelope by stream identity.
+
+    A peer that hears we hold more of its own stream than it does asks for
+    the first op past its watermark: only an envelope it signed itself proves
+    it really was restored from a backup (see ``transport._detect_rollback``).
+    """
+    transport.note_contact(device_id)
+    if len(origin) > 64 or incarnation < 1 or seq < 1:
+        raise HTTPException(400, "Invalid stream identity")
+
+    def _work():
+        with store.get_db() as conn:
+            return store.get_op(conn.cursor(), origin, incarnation, seq)
+
+    op = await run_sync(_work)
+    if op is None:
+        raise HTTPException(404, "No such operation")
+    return {"op": op}
+
+
 class ControlBody(BaseModel):
     model_config = {"extra": "allow"}
 
@@ -509,10 +553,16 @@ async def peer_control(action: str, request: Request, device_id: str = Depends(t
         body = {}
     if not isinstance(body, dict):
         raise HTTPException(400, "Body must be an object")
+    if not control.known_action(action):
+        raise HTTPException(404, "Unknown control action")
     try:
         return await control.handle(action, body, from_device=device_id)
-    except KeyError:
+    except control.UnknownControlAction:
         raise HTTPException(404, "Unknown control action") from None
+    except KeyError as exc:
+        # A missing field inside a handler is a bad request, not an unknown action.
+        logger.exception("Control action %s from %s failed on a missing field", action, device_id)
+        raise HTTPException(400, f"Missing field: {exc.args[0] if exc.args else exc}") from exc
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except PermissionError as exc:
@@ -524,7 +574,9 @@ async def peer_control(action: str, request: Request, device_id: str = Depends(t
 @router.post("/sessions/{session_id}/fork-here", status_code=status.HTTP_201_CREATED)
 async def fork_session_here(session_id: str, request: Request, _: str = Depends(require_auth)) -> dict:
     """Continue a session whose owner is offline: a new local session with the mirrored transcript."""
+    from app.api.sessions_helpers import require_session
     from app.network import control
+    await require_session(request, session_id)  # 404 unknown, 403 outside the API user's scope
     api_user = getattr(request.state, "api_user", None)
     try:
         result = await run_sync(control.fork_here, session_id, api_user_id=(api_user or {}).get("id") if api_user else None)
@@ -535,29 +587,17 @@ async def fork_session_here(session_id: str, request: Request, _: str = Depends(
 
 
 @router.post("/runners/{device_id}/sessions/{session_id}/hydrate")
-async def hydrate_session(device_id: str, session_id: str, _: str = Depends(require_auth)) -> dict:
+async def hydrate_session(device_id: str, session_id: str, request: Request, _: str = Depends(require_auth)) -> dict:
     """Ask the owner to publish an old transcript so this mirror can show it."""
+    from app.api.sessions_helpers import require_session
     from app.network import control
+    await require_session(request, session_id)
     try:
         return await control.hydrate(device_id, session_id)
     except control.RunnerUnreachable as exc:
         raise HTTPException(503, f"The owning worker is offline: {exc}") from exc
     except control.ControlRefused as exc:
         raise HTTPException(409, str(exc)) from exc
-
-
-@router.get("/peer/blob/{hash_value}")
-async def peer_blob(hash_value: str, device_id: str = Depends(tokens.require_device)):
-    """Serve content-addressed bytes (an artifact or a note attachment) to a member."""
-    from fastapi.responses import Response as RawResponse
-    from app.network import blobs
-    if not hash_value.isalnum() or len(hash_value) != 64:
-        raise HTTPException(400, "Invalid hash")
-    transport.note_contact(device_id)
-    data = await run_sync(blobs.read_local, hash_value)
-    if data is None:
-        raise HTTPException(404, "Blob not held here")
-    return RawResponse(content=data, media_type="application/octet-stream")
 
 
 @router.get("/peer/snapshot")

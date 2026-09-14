@@ -24,6 +24,16 @@ import time
 
 
 MAJOR = "16"
+# Readiness supervision: `restart: unless-stopped` only restarts an exited
+# container, so an application that is alive but no longer answers
+# /health/ready is probed here and the supervisor exits non-zero after
+# READY_PROBE_FAILURES consecutive failures (2 minutes at these values).
+# Until the first successful probe a larger allowance covers first-boot
+# migrations; the probe itself is one cheap loopback GET per interval.
+READY_PROBE_INTERVAL = 30.0
+READY_PROBE_TIMEOUT = 5.0
+READY_PROBE_FAILURES = 4
+READY_PROBE_STARTUP_FAILURES = 30
 APP_USER = "ai_shuffle"
 APP_DB = "ai_shuffle"
 ADMIN = "shuffle_admin"
@@ -462,7 +472,41 @@ def drop_privileges(settings):
         raise RuntimeFailure("DATA_DIR must exist and be writable by the runtime UID; prepare mount ownership explicitly")
 
 
-def watch(app, db, chrome):
+def probe_ready(url, timeout=None):
+    """True when the readiness endpoint answers 200; never logs response content."""
+    from urllib.request import urlopen
+    try:
+        with urlopen(url, timeout=READY_PROBE_TIMEOUT if timeout is None else timeout) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+class ReadinessMonitor:
+    """Counts consecutive readiness failures; `record` says when the app is considered dead."""
+
+    def __init__(self, url, *, probe=probe_ready, failures=None, startup_failures=None):
+        self.url = url
+        self.probe = probe
+        self.limit = READY_PROBE_FAILURES if failures is None else failures
+        self.startup_limit = READY_PROBE_STARTUP_FAILURES if startup_failures is None else startup_failures
+        self.failures = 0
+        self.ever_ready = False
+
+    def check(self):
+        return self.record(self.probe(self.url))
+
+    def record(self, ready):
+        if ready:
+            self.failures = 0
+            self.ever_ready = True
+            return False
+        self.failures += 1
+        return self.failures >= (self.limit if self.ever_ready else self.startup_limit)
+
+
+def watch(app, db, chrome, monitor=None):
+    next_probe = time.monotonic() + READY_PROBE_INTERVAL
     while not STOP.is_set():
         if app.poll() is not None:
             log("application exited unexpectedly")
@@ -473,6 +517,12 @@ def watch(app, db, chrome):
         if chrome is not None and chrome.poll() is not None:
             log("Chromium supervisor exited unexpectedly")
             return 1
+        if monitor is not None and time.monotonic() >= next_probe:
+            next_probe = time.monotonic() + READY_PROBE_INTERVAL
+            if monitor.check():
+                log(f"application readiness probe failed {monitor.failures} times in a row; "
+                    "exiting so the container restarts")
+                return 1
         STOP.wait(0.2)
     return 0
 
@@ -526,7 +576,7 @@ def run(settings, action, filename=None):
             return 0
         app = subprocess.Popen([sys.executable, "-m", "app.main"], env=env, start_new_session=True)
         log("authenticated database ready; application started")
-        return watch(app, db, chrome)
+        return watch(app, db, chrome, ReadinessMonitor(f"http://127.0.0.1:{settings.port}/health/ready"))
     finally:
         try:
             shutdown(app, chrome, db)

@@ -1,17 +1,18 @@
 """Content-addressed blobs: artifacts and note attachments, fetched on demand.
 
 A synced record names a hash; the bytes are not in the envelope. Every
-device that holds the bytes serves them at ``/peer/blob/{hash}``; a device
-that materialized a record without bytes asks online holders (the owner
-first) and stores what it gets. ``sync_blobs`` tracks what is present and
-who else has it.
+device that holds the bytes serves them in encrypted parts at
+``/peer/blob/{hash}/parts/{index}`` (``peer_files``); a device that
+materialized a record without bytes asks online holders (the owner first)
+and stores what it gets. ``sync_blobs`` tracks what is present and who else
+has it.
 """
 from __future__ import annotations
 
 import hashlib
 import logging
 from contextlib import nullcontext
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
@@ -90,6 +91,27 @@ def read_local(hash_value: str, *, _conn=None) -> Optional[bytes]:
         data = row["data"]
         return data.tobytes() if isinstance(data, memoryview) else bytes(data)
     return None
+
+
+def read_local_range(hash_value: str, offset: int, length: int) -> Optional[Tuple[bytes, int]]:
+    """``(bytes[offset:offset+length], total size)`` without loading a whole file, else None.
+
+    A file-backed blob is seeked; a database-backed one is read once per call.
+    """
+    try:
+        from app.core.artifact_store import artifact_path
+        path = artifact_path(hash_value)
+        if path is not None:
+            size = path.stat().st_size
+            with open(path, "rb") as fh:
+                fh.seek(offset)
+                return fh.read(max(0, length)), size
+    except Exception:  # noqa: BLE001
+        pass
+    data = read_local(hash_value)
+    if data is None:
+        return None
+    return data[offset:offset + max(0, length)], len(data)
 
 
 def note_missing(hash_value: str, size: int, holder: Optional[str], *, _cursor=None) -> None:

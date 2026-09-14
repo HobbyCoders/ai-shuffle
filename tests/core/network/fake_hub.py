@@ -163,4 +163,4 @@ class FakeHub:
     @staticmethod
     def _public(device):
         return {k: device.get(k) for k in ("device_id", "signing_public", "encryption_public", "name", "platform",
-                                            "kind", "status", "incarnation", "version", "legacy_instance_id")}
+                                            "kind", "status", "incarnation", "version", "legacy_instance_id", "proof")}

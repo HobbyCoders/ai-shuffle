@@ -2113,6 +2113,13 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
             f"DELETE FROM session_event_counters WHERE session_id = {_ph}",
             (session_id,),
         )
+        # The worker network publishes only ``seq > published_seq``; with the
+        # log restarting at seq 1 the cursor must restart too, or mirrors stay
+        # frozen until the new transcript outgrows the old one.
+        cursor.execute(
+            f"DELETE FROM network_catalog_cursors WHERE session_id = {_ph}",
+            (session_id,),
+        )
 
         # Unlink the SDK session and zero the persisted usage counters. Nulling
         # sdk_session_id makes the read path skip the transcript block entirely

@@ -57,7 +57,11 @@ Body:
 ```json
 {
   "device": {"device_id": "dev_…", "signing_public": "b64u", "encryption_public": "b64u",
-             "incarnation": 1, "name": "Desk", "platform": "desktop", "kind": "worker", "version": "0.8.6"},
+             "incarnation": 1, "name": "Desk", "platform": "desktop", "kind": "worker", "version": "0.8.6",
+             "proof": "b64u"},   // Ed25519 signature by the device's own signing key over
+                                // device_id, signing_public, encryption_public and kind
+                                // (app.network.membership.sign_device_description); stored
+                                // and returned verbatim, never checked by the hub
   "network_id": "net_…",            // present when the worker already belongs to a network
   "founder_device_id": "dev_…",     // idem
   "generation": 3,                  // idem
@@ -106,7 +110,15 @@ Body `{"response": <join response>}` where the join response is what
 
 ### `POST .../network/devices/{device_id}/reject`
 
-Marks the device `rejected`.
+Marks the device `rejected`. A member also posts this for a device it
+removed from the network (`engine.revoke_device`), so the hub stops relaying
+for that device's registration; a worker that could not reach the hub at the
+time retries from `revocations_due` in its hub state on later passes.
+
+Both unattended and manual admission require a valid description `proof`.
+A description without one (an older worker, or a relay that dropped the field)
+remains pending until the worker updates and re-registers. Comparing the
+signing-key fingerprint cannot substitute for proof binding both public keys.
 
 ### `GET .../network/approval` — the calling device's own approval
 

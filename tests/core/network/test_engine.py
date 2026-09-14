@@ -515,7 +515,9 @@ def test_revoked_device_is_rejected_and_cannot_read_new_records(workers):
         assert op["key_version"] == 2
     with b.active():
         result = engine.apply_batch([op])
-        assert result.rejected == 1 and "unknown key version 2" in result.reasons
+        # A key B does not hold is a transient condition (the key record may
+        # still be on its way), so the op is left for a retry, not skipped.
+        assert result.applied == 0 and result.retry == 1 and "unknown key version 2" in result.reasons
     # C still converges with A on the new key.
     converge([a, c])
     assert _pref(c, "after") == "rotation"
