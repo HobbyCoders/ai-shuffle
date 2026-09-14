@@ -91,6 +91,7 @@ import { pendingQueue } from '../pending-queue';
 import { swarms } from '../../swarms';
 import { get } from 'svelte/store';
 import { browserPanel } from '../../browser-panel.svelte';
+import { sidePanel, sessionPanelKey } from '../../side-panel.svelte';
 import type { ActiveSessionState } from '../../active-session';
 
 // ─── rAF stub: capture callbacks, flush on demand (never auto-fires) ──────────
@@ -1047,6 +1048,24 @@ describe('feedController browser-panel auto-open', () => {
 		expect(browserPanel.forSession('browser-live').open).toBe(false);
 		hoisted.onEvent!(toolUse('t1', 'mcp__browser__browser_navigate'));
 		expect(browserPanel.forSession('browser-live').open).toBe(true);
+	});
+
+	it('selects browser over diff on each live browser launch, not on backfill', () => {
+		const id = 'browser-over-diff';
+		const deps = makeDeps();
+		deps.state.sessionId = id;
+		feedController.attach(deps);
+		feedController.start(id);
+		browserPanel.openPanel(id);
+		sidePanel.open(sessionPanelKey(id), 'changes');
+		hoisted.onEvent!(toolUse('history-browser', 'mcp__browser__browser_navigate'));
+		expect(sidePanel.forScope(sessionPanelKey(id)).active).toBe('changes');
+		hoisted.onEvent!(caughtUp(1));
+		hoisted.onEvent!(toolUse('live-browser', 'mcp__browser__browser_navigate'));
+		expect(sidePanel.forScope(sessionPanelKey(id)).active).toBe('browser');
+		sidePanel.open(sessionPanelKey(id), 'changes');
+		hoisted.onEvent!(toolUse('live-browser-again', 'mcp__browser__browser_snapshot'));
+		expect(sidePanel.forScope(sessionPanelKey(id)).active).toBe('browser');
 	});
 
 	it('does NOT open for a non-browser tool.use', () => {

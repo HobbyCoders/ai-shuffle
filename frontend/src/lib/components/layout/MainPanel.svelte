@@ -44,7 +44,7 @@
 	import { notify } from '$lib/stores/notifications';
 	import { Download } from 'lucide-svelte';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
-	import { sidePanel, sessionPanelKey, type SidePanelView } from '$lib/stores/side-panel.svelte';
+	import { sidePanel, sessionPanelKey } from '$lib/stores/side-panel.svelte';
 	import SessionSidePanel from './SessionSidePanel.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
@@ -282,12 +282,9 @@
 	// Visibility is scoped, so switching sessions cannot show another checkout's diff.
 	const panelScope = $derived(activeTab?.sessionId ? sessionPanelKey(activeTab.sessionId) : null);
 	const activeSidePanel = $derived(sidePanel.forScope(panelScope));
-	function selectSidePanel(view: SidePanelView) {
-		if (view === 'browser') browserPanel.openPanel(activeTab?.sessionId ?? null);
-		else {
-			sidePanel.open(panelScope, 'changes');
-			git.refreshChangedFiles();
-		}
+	function openDiffPanel() {
+		sidePanel.open(panelScope, 'changes');
+		git.refreshChangedFiles();
 	}
 	function closeSidePanel() {
 		if (activeSidePanel.active === 'browser') browserPanel.closePanel(activeTab?.sessionId ?? null);
@@ -876,7 +873,7 @@
 				onClickPull={handlePull}
 				onClickInitRepo={() => { initRepoEverOpened = true; showInitRepoModal = true; }}
 				onClickShipIt={handleShipIt}
-				onOpenDiffReview={() => selectSidePanel('changes')}
+				onOpenDiffReview={openDiffPanel}
 			/>
 			<GitProgressPopover />
 		</div>
@@ -981,19 +978,20 @@
 		{#if activeSidePanel.active}
 			<SessionSidePanel active={activeSidePanel.active} expanded={activeSidePanel.expanded}
 				width={browserPanel.current.width} mobile={panelOverlay}
-				browserAvailable={!!activeTab?.sessionId} changesAvailable={!!activeProject}
-				onSelect={selectSidePanel} onClose={closeSidePanel}
+				onClose={closeSidePanel}
 				onResize={(width) => browserPanel.setWidth(width)}
 				onExpand={() => sidePanel.setExpanded(panelScope, !activeSidePanel.expanded)}>
-				{#key panelScope}
+				{#snippet children(panelActions)}
+				{#key `${panelScope}:${activeSidePanel.active}`}
 					{#if activeSidePanel.active === 'browser' && activeTab?.sessionId}
-						<LazyPanel handle={BrowserSidePanel} props={{ sessionId: activeTab.sessionId, embedded: true }} label="the live browser" bare />
+						<LazyPanel handle={BrowserSidePanel} props={{ sessionId: activeTab.sessionId, embedded: true, panelActions }} label="the live browser" fallbackActions={panelActions} />
 					{:else if activeSidePanel.active === 'changes' && activeProject}
-						<LazyPanel handle={ChangedFilesPanelLazy} label="changed files" bare
+						<LazyPanel handle={ChangedFilesPanelLazy} label="changed files" fallbackActions={panelActions}
 							props={{ projectId: activeProject, open: true, reviewMode: true, embedded: true,
-								onClose: closeSidePanel, onViewDiff: () => {} }} />
+								onClose: closeSidePanel, onViewDiff: () => {}, panelActions }} />
 					{/if}
 				{/key}
+				{/snippet}
 			</SessionSidePanel>
 		{/if}
 	</div>

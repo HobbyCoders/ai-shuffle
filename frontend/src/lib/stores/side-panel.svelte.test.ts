@@ -16,12 +16,15 @@ describe('shared right-side panel', () => {
 		browserPanel.toggle(id);
 		expect(sidePanel.forScope(key).active).toBeNull();
 	});
-	it('does not let browser activity replace changes or reopen a dismissed panel', () => {
+	it('lets browser activity select browser from changes without reopening a dismissed panel', () => {
 		const id = session(), key = sessionPanelKey(id);
 		browserPanel.setAutoOpen(true);
 		sidePanel.open(key, 'changes');
 		browserPanel.autoOpenFor(id);
-		expect(sidePanel.forScope(key).active).toBe('changes');
+		expect(sidePanel.forScope(key).active).toBe('browser');
+		sidePanel.open(key, 'changes');
+		browserPanel.autoOpenFor(id);
+		expect(sidePanel.forScope(key).active).toBe('browser');
 		sidePanel.close(key);
 		browserPanel.autoOpenFor(id);
 		expect(sidePanel.forScope(key).active).toBeNull();

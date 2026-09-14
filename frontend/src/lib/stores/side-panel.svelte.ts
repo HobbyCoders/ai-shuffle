@@ -21,6 +21,6 @@ export const sidePanel = {
 	autoOpenBrowser(key: string | null) {
 		if (!key) return;
 		const current = this.forScope(key);
-		if (!current.active && !current.dismissed) panels[key] = { ...current, active: 'browser' };
+		if (current.active === 'changes' || (!current.active && !current.dismissed)) panels[key] = { ...current, active: 'browser' };
 	},
 };

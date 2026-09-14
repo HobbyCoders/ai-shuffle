@@ -1,7 +1,7 @@
 <script lang="ts">
 	// Layout adapted from pingdotgg/t3code's MIT-licensed DiffPanel.
 	// See t3code.LICENSE for the upstream notice.
-	import { tick } from 'svelte';
+	import { tick, type Snippet } from 'svelte';
 	import { X, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Rows3, Columns2, WrapText, FolderTree, Folder, FileText, Copy, RefreshCw } from 'lucide-svelte';
 	import type { FileChangeInfo } from '$lib/api/git';
 	import { git } from '$lib/stores/git.svelte';
@@ -17,8 +17,9 @@
 		onSelect: (file: FileChangeInfo | null) => void;
 		onClose: () => void;
 		embedded: boolean;
+		panelActions?: Snippet;
 	}
-	let { projectId, files, loading, selected, onSelect, onClose, embedded }: Props = $props();
+	let { projectId, files, loading, selected, onSelect, onClose, embedded, panelActions }: Props = $props();
 	let mode = $state<'unified' | 'side-by-side'>('unified');
 	let wrap = $state(false);
 	let treeOpen = $state(false);
@@ -107,6 +108,7 @@
 			<button title="Wrap diff lines" aria-label="Wrap diff lines" aria-pressed={wrap} onclick={() => { wrap = !wrap; }}><WrapText size={14} /></button>
 			<button title="Toggle file tree" aria-label="Toggle file tree" aria-pressed={treeOpen} onclick={() => { treeOpen = !treeOpen; }}><FolderTree size={14} /></button>
 			{#if !embedded}<button title="Close" aria-label="Close" onclick={onClose}><X size={16} /></button>{/if}
+			{@render panelActions?.()}
 		</div>
 	</header>
 	<div class="body">

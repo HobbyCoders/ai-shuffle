@@ -335,7 +335,7 @@ export const browserPanel = {
 	 */
 	autoOpenFor(sessionId: string | null) {
 		updateSession(sessionId, (s) => {
-			if (s.open || !s.autoOpen) return s;
+			if (this.forSession(sessionId).open || !s.autoOpen) return s;
 			if (sessionId !== null && s.userClosedForSession === sessionId) return s;
 			sidePanel.autoOpenBrowser(sessionId ? sessionPanelKey(sessionId) : null);
 			return { ...s, open: this.forSession(sessionId).open };

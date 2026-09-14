@@ -17,6 +17,7 @@
 	import type { FileChangeInfo } from '$lib/api/git';
 	import { platform } from '$lib/stores/platform.svelte';
 	import ReviewDiffPanel from './ReviewDiffPanel.svelte';
+	import type { Snippet } from 'svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { notify } from '$lib/stores/notifications';
 
@@ -28,9 +29,10 @@
 		/** When true, shows the full review layout with inline side-by-side diff */
 		reviewMode?: boolean;
 		embedded?: boolean;
+		panelActions?: Snippet;
 	}
 
-	let { projectId, open, onClose, onViewDiff, reviewMode = false, embedded = false }: Props = $props();
+	let { projectId, open, onClose, onViewDiff, reviewMode = false, embedded = false, panelActions }: Props = $props();
 
 	// ── Grouped file lists ──────────────────────────────────────────────
 	const conflicts = $derived(($changedFiles ?? []).filter(f => f.category === 'conflict'));
@@ -667,7 +669,7 @@
 			<ReviewDiffPanel
 				{projectId} files={flatFiles} loading={$changedFilesLoading}
 				selected={reviewSelectedFile} onSelect={(file) => { reviewSelectedFile = file; }}
-				{onClose} {embedded}
+				{onClose} {embedded} {panelActions}
 			/>
 
 			<!-- Accept / Decline footer -->

@@ -11,6 +11,7 @@
 	 *    the import (the handle deliberately does not cache rejections), instead
 	 *    of leaving a blank panel.
 	 */
+	import type { Snippet } from 'svelte';
 	import type { LazyComponentHandle } from './lazy-component';
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 
@@ -28,9 +29,11 @@
 		bare?: boolean;
 		/** Grace period before the skeleton appears. */
 		skeletonDelayMs?: number;
+		/** Keep visible panel controls usable before its component is available. */
+		fallbackActions?: Snippet;
 	}
 
-	let { handle, props = {}, label = 'panel', bare = false, skeletonDelayMs = 140 }: Props = $props();
+	let { handle, props = {}, label = 'panel', bare = false, skeletonDelayMs = 140, fallbackActions }: Props = $props();
 
 	// Seed from the cache so an already-loaded chunk renders synchronously.
 	// Reading the prop once at init is deliberate: the effect below re-syncs on
@@ -94,6 +97,7 @@
 		<Component {...props} />
 	{/key}
 {:else if failed && !bare}
+	{@render fallbackActions?.()}
 	<div class="lazy-error" role="alert">
 		<p class="lazy-error-title">Couldn’t load {label}.</p>
 		<p class="lazy-error-hint">
@@ -107,6 +111,7 @@
 		</div>
 	</div>
 {:else if showSkeleton && !bare}
+	{@render fallbackActions?.()}
 	<div class="lazy-skeleton" aria-busy="true" aria-label={`Loading ${label}`}>
 		<div class="sk sk-title"></div>
 		<div class="sk sk-sub"></div>

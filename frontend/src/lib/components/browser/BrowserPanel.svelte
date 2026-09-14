@@ -39,7 +39,7 @@
 		Maximize2,
 		Minimize2,
 	} from 'lucide-svelte';
-	import { untrack } from 'svelte';
+	import { untrack, type Snippet } from 'svelte';
 	import { startPanelBrowser, uploadPanelFiles } from '$lib/api/browser-panel';
 	import { PanelOperation } from '$lib/browser-panel/panel-operation';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
@@ -67,9 +67,10 @@
 		/** Session whose browser page is streamed. */
 		sessionId: string;
 		embedded?: boolean;
+		panelActions?: Snippet;
 	}
 
-	let { sessionId: requestedSessionId, embedded = false }: Props = $props();
+	let { sessionId: requestedSessionId, embedded = false, panelActions }: Props = $props();
 	// LazyPanel spreads a fresh props object on chat updates. Compare the ID
 	// value before effects read it so typing/streaming cannot reconnect the feed.
 	const sessionId = $derived(requestedSessionId);
@@ -755,6 +756,7 @@
 				</button>
 				<button class="tool-btn" onclick={close} aria-label="Close browser panel"><X size={16} /></button>
 			</div>{/if}
+			{@render panelActions?.()}
 		</div>
 		<header class="panel-header">
 			<div class="nav-buttons">
