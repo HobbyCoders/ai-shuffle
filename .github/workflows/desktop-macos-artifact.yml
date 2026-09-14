@@ -89,4 +89,4 @@ jobs:
             desktop/release/latest-mac.yml
             desktop/release/macos-build-provenance.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 1

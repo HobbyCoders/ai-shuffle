@@ -3,9 +3,9 @@ name: Android CI
 # Android app (android/) and the Cloudflare account hub (android/hub). Paths-
 # filtered like the other CI workflows: a PR that touches nothing under
 # android/, frontend/ or mobile/ never starts it (the APK bundles the mobile
-# UI built from mobile/ and the shared frontend/src/lib). The push-to-main leg keeps producing the signed
-# release APK artifact. Publishing additionally requires explicit rollout approval:
-# a merge must not ship a client before its workers support the bundled UI.
+# UI built from mobile/ and the shared frontend/src/lib). Signed sideload builds
+# require publish_download; normal CI only stages APKs for emulator verification.
+# A merge must not ship a client before its workers support the bundled UI.
 # PRs run this when the app or the mobile UI it bundles change. frontend/ is
 # deliberately not a trigger: the mobile shell imports from it, but running an
 # emulator for every frontend PR cost more than the whole backend suite, and
@@ -67,7 +67,7 @@ jobs:
         run: node --test app/src/test/js/chat-downloads.test.cjs
 
   build:
-    name: Build signed release APK
+    name: Build and test Android app
     runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
@@ -121,6 +121,7 @@ jobs:
       - name: Upload instrumentation APKs
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: android-instrumentation-apks
           path: |
             android/app/build/outputs/apk/debug/app-debug.apk
@@ -128,7 +129,7 @@ jobs:
           if-no-files-found: error
 
       - name: Decode release keystore
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
@@ -139,7 +140,7 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
 
       - name: Build release APK
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
         env:
           KEYSTORE_PATH: ${{ runner.temp }}/release.jks
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -161,28 +162,21 @@ jobs:
           python3 ci/verify-mobile-apk.py --app-bundle app/build/outputs/bundle/release/app-release.aab
 
       - name: Verify APK is signed with the release key
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
         run: |
           APK=app/build/outputs/apk/release/app-release.apk
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)"
           "$APKSIGNER" verify --print-certs "$APK"
 
       - name: Prepare public APK download
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
         run: python3 ci/prepare-apk-download.py
 
-      - name: Upload release APK
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-shuffle-release-apk
-          path: android/app/build/outputs/apk/release/app-release.apk
-          if-no-files-found: error
-
       - name: Upload public download files
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: android-download
           path: android/app/build/outputs/download/
           if-no-files-found: error
@@ -256,6 +250,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 7
           name: android-ui-verification-api-${{ matrix.api }}
           path: |
             ${{ runner.temp }}/android-emulator/

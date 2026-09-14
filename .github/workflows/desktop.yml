@@ -9,6 +9,10 @@ on:
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
     inputs:
+      upload_preview:
+        description: 'Keep the verified preview installer for download (one day)'
+        type: boolean
+        default: false
       build_linux_runtime:
         description: 'Explicitly assemble the Linux desktop runtime (additional build cost)'
         type: boolean
@@ -166,13 +170,14 @@ jobs:
           $signature = Get-AuthenticodeSignature $installers[0].FullName
           @{ status = [string]$signature.Status } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM (Join-Path $delivery 'signature.json')
       - name: Upload verified installer
+        if: github.event_name == 'workflow_dispatch' && inputs.upload_preview
         uses: actions/upload-artifact@v4
         with:
           name: windows-preview-installer
           path: ${{ runner.temp }}/windows-preview-delivery/
           if-no-files-found: error
           compression-level: 0
-          retention-days: 14
+          retention-days: 1
       - name: Upload sanitized native acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -180,4 +185,4 @@ jobs:
           name: windows-preview-acceptance
           path: ${{ runner.temp }}/windows-preview-evidence/
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 7

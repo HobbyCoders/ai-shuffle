@@ -141,6 +141,9 @@ jobs:
   android:
     name: Android Play internal release
     needs: [create-release, docker]
+    permissions:
+      contents: write
+      actions: write
     uses: ./.github/workflows/android-play.yml
     with:
       release_tag: ${{ needs.create-release.outputs.release_tag }}
@@ -152,6 +155,9 @@ jobs:
     name: Windows installer (opt-in)
     if: github.event_name == 'workflow_dispatch' && inputs.build_desktop
     needs: create-release
+    permissions:
+      contents: write
+      actions: write
     uses: ./.github/workflows/desktop-installer.yml
     with:
       release_tag: ${{ needs.create-release.outputs.release_tag }}

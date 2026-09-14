@@ -92,6 +92,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 7
           name: container-postgres-${{ github.sha }}
           path: ${{ runner.temp }}/container-postgres
           if-no-files-found: ignore

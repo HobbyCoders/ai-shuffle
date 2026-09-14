@@ -122,10 +122,11 @@ jobs:
           path: installer/
           compression-level: 0
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 7
           name: installed-desktop-evidence
           path: ${{ runner.temp }}/installed-desktop-evidence/
           if-no-files-found: ignore
@@ -135,6 +136,9 @@ jobs:
     if: always() && needs.verify.result == 'success'
     runs-on: ubuntu-latest
     environment: account-hub-production
+    permissions:
+      contents: write
+      actions: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -156,3 +160,21 @@ jobs:
         run: |
           gh release upload "$RELEASE_TAG" installer/*.exe installer/SHA256SUMS installer/desktop-build.json
           node desktop/scripts/publish-installer.mjs installer/*.exe "$RELEASE_TAG"
+      - name: Remove published build staging artifacts
+        # Publication is already complete; the one-day expiry backs up failed cleanup.
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const names = new Set(["windows-installer-candidate", "windows-stable-installer"]);
+            const params = {...context.repo, run_id: context.runId, per_page: 100};
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, params);
+            const selected = artifacts.filter(artifact => names.has(artifact.name));
+            for (const artifact of selected) {
+              await github.rest.actions.deleteArtifact({...context.repo, artifact_id: artifact.id});
+            }
+            const remaining = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, params);
+            if (remaining.some(artifact => selected.some(deleted => deleted.id === artifact.id))) {
+              throw new Error('Published build staging artifacts were not removed');
+            }
+            core.info(`Removed ${selected.length} published build staging artifacts`);
