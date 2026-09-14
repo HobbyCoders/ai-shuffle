@@ -13,6 +13,7 @@ import { appMode } from '../sessionMode.svelte';
 import { api } from '$lib/api/client';
 import { get } from 'svelte/store';
 import { openDropdown, openHeaderDropdown } from '../header-dropdowns';
+import { getPersistedDeviceIntent, setPersistedDeviceIntent } from '../worker-selection';
 
 // session-switcher looks up the session row in appData to tailor the load-error
 // message for remote (cross-install) sessions (B4). Mock it so tests can seed the
@@ -160,6 +161,38 @@ function makeSwitcher(initial: ActiveSessionState) {
 	const switcher = createSessionSwitcher(deps);
 	return { switcher, getState, ephemeralStore, deps };
 }
+
+describe('remembered new-chat worker', () => {
+	it('restores the preference after send cleared the active intent, without rerouting existing sessions', async () => {
+		const pick = { id: 'runner-1', name: 'Unraid' };
+		setPersistedDeviceIntent(pick);
+		const { switcher, getState } = makeSwitcher(fullState({ deviceIntent: null }));
+		try {
+			switcher.newChat();
+			expect(getState().deviceIntent).toEqual(pick);
+			await switcher.switchSession('session-B');
+			expect(getState().deviceIntent).toBeNull();
+			expect(getPersistedDeviceIntent()).toEqual(pick);
+			switcher.newChat();
+			expect(getState().deviceIntent).toEqual(pick);
+		} finally {
+			switcher.destroy();
+			setPersistedDeviceIntent(null);
+		}
+	});
+
+	it('preserves a cached draft explicitly targeting Local instead of the remote default', () => {
+		setPersistedDeviceIntent({ id: 'runner-1', name: 'Unraid' });
+		const { switcher, getState } = makeSwitcher(fullState({ sessionId: null, draft: 'Local draft', deviceIntent: null }));
+		try {
+			switcher.newChat();
+			expect(getState().deviceIntent).toBeNull();
+		} finally {
+			switcher.destroy();
+			setPersistedDeviceIntent(null);
+		}
+	});
+});
 
 describe('session navigation closes header dropdowns', () => {
 	const dropdowns = [

@@ -6,6 +6,7 @@ import { reopenWorktree } from '$lib/api/git';
 import { api } from '$lib/api/client';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 import { pendingQueue } from './pending-queue';
+import { getPersistedDeviceIntent, setPersistedDeviceIntent } from '../worker-selection';
 const voice = vi.hoisted(() => ({ isCallActiveFor: vi.fn(() => false), sendVoiceText: vi.fn(() => true) }));
 vi.mock('$lib/services/voiceCall', () => voice);
 const context = vi.hoisted(() => ({ persistVoiceContext: vi.fn(async () => {}), voiceContextFor: vi.fn(() => ({})) }));
@@ -113,6 +114,23 @@ function makeDeps(initial: ActiveSessionState) {
 
 	return { deps, wsConn, getState, internal, autoCreateWorktree, createWorktree };
 }
+
+describe('remembered worker on send', () => {
+	it('sends to the remembered worker, consumes the active intent but keeps the default', async () => {
+		const pick = { id: 'runner-1', name: 'Unraid' };
+		setPersistedDeviceIntent(pick);
+		const { deps, wsConn, getState } = makeDeps(baseState({ deviceIntent: getPersistedDeviceIntent() }));
+		try {
+			expect(await createMessageSender(deps).sendMessage('hello worker')).toBe(true);
+			expect(wsConn.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'query', target_instance_id: pick.id }));
+			expect(deps.sessionEphemeralCache.remove).toHaveBeenCalledWith('__new_chat__');
+			expect(getState().deviceIntent).toBeNull();
+			expect(getPersistedDeviceIntent()).toEqual(pick);
+		} finally {
+			setPersistedDeviceIntent(null);
+		}
+	});
+});
 
 describe('message-sender voice ownership', () => {
 	it('preserves attachment paths in the owning voice conversation', async () => {

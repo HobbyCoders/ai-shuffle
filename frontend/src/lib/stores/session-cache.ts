@@ -26,9 +26,8 @@ export interface SessionEphemeral {
 	workspaceProjectIds?: string[];
 	contextWindowChoice?: ContextWindowChoice;
 	worktreeIntent: ExecutionMode;
-	/** Compose-time device pick — memory-only, exactly like the rest of this
-	 *  cache, so a draft keeps its device across a switch away and back without
-	 *  ever becoming a durable default. */
+	/** Compose-time device pick. A cached draft keeps its own target, including
+	 *  an explicit Local/null, rather than inheriting a newer worker default. */
 	deviceIntent: DeviceIntent | null;
 	worktreeId: string | null;
 	worktreeBranch: string;

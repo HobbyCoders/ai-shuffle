@@ -46,6 +46,7 @@ import { createDraftManager } from './session/draft-manager';
 // Caches and helpers
 import { sessionEphemeralCache } from './session-cache';
 import { getOrCreateDeviceId } from './device-id';
+import { getPersistedDeviceIntent, setPersistedDeviceIntent } from './worker-selection';
 import { appData } from './app-data.svelte';
 import { composerPreferences, resolveComposerProject } from './composer-preferences';
 import { appMode, type SessionMode } from './sessionMode.svelte';
@@ -362,8 +363,7 @@ function defaultState(): ActiveSessionState {
 		scrollTop: 0,
 		streamStartTime: null,
 		worktreeIntent: getPersistedWorktreeIntent(),
-		// Never restored from a preference: every new chat starts on this device.
-		deviceIntent: null,
+		deviceIntent: getPersistedDeviceIntent(),
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: false,
@@ -880,8 +880,7 @@ export const activeSession = {
 			// Keep the user's preferred mode; only the project-specific worktree
 			// selection below is reset since it doesn't apply to the new project.
 			worktreeIntent: getPersistedWorktreeIntent(),
-			// The picked device was validated against the OLD project's checkout.
-			deviceIntent: null,
+			// Keep the worker pick; the routing API validates the new project's checkout.
 			worktreeBranch: '',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
@@ -975,11 +974,10 @@ export const activeSession = {
 	/**
 	 * Pick the device a NEW session runs on (`null` = this device).
 	 *
-	 * Deliberately NOT persisted anywhere durable (contrast with
-	 * setWorktreeIntent's localStorage preference): a device pick applies to the
-	 * chat being composed, never to the next one.
+	 * Remember explicit picks for future chats without changing existing owners.
 	 */
 	setDeviceIntent(intent: DeviceIntent | null) {
+		setPersistedDeviceIntent(intent);
 		_update(s => ({ ...s, deviceIntent: intent }));
 	},
 

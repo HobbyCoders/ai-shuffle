@@ -149,9 +149,9 @@ export type ExecutionMode = 'local' | 'worktree';
  * `null` (the absence of an intent) means "this device" — the default.
  *
  * Creation-time only: the picked install is stamped onto the session row, so
- * this is cleared once the query is sent. Deliberately never persisted to
- * localStorage — a one-off "run this one over there" must not silently become
- * the default device for every future chat.
+ * this is cleared once the query is sent. The explicit picker choice is also
+ * remembered separately as the browser-local default for future chats; that
+ * preference never changes an existing session's owner.
  */
 export interface DeviceIntent {
 	/** Target install id (= instance_id). */

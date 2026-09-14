@@ -63,11 +63,14 @@ vi.mock('$lib/stores/git.svelte', () => ({
 
 import ExecutionModeBar from './ExecutionModeBar.svelte';
 import { activeSession } from '$lib/stores/active-session';
+import { listInstalls } from '$lib/api/installs';
+import { getPersistedDeviceIntent } from '$lib/stores/worker-selection';
 
 afterEach(() => cleanup());
 afterAll(() => vi.unstubAllGlobals());
 
 beforeEach(() => {
+	activeSession.setDeviceIntent(null);
 	activeSession.setWorktreeIntent('worktree');
 	activeSession.clearWorktreeSelection();
 	activeSession.setWorktreeBaseBranch('main');
@@ -76,6 +79,25 @@ beforeEach(() => {
 		{ name: 'main', current: true, remote: false },
 		{ name: 'develop', current: false, remote: false }
 	]);
+});
+
+describe('worker picker persistence', () => {
+	it('persists actual picker clicks and retains the worker on project changes', async () => {
+		vi.mocked(listInstalls).mockResolvedValueOnce({ self_instance_id: 'local', installs: [{
+			id: 'runner-1', device_name: 'Unraid', online: true, base_url: null,
+			platform: 'linux', version: null, capabilities: {}, last_seen: null,
+		}] });
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Other workers' }));
+		await fireEvent.click(await screen.findByRole('menuitemradio', { name: 'Unraid' }));
+		expect(getPersistedDeviceIntent()).toEqual({ id: 'runner-1', name: 'Unraid' });
+		activeSession.setProject('another-project', null);
+		expect(activeSession.current.deviceIntent).toEqual(getPersistedDeviceIntent());
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Unraid' }));
+		await fireEvent.click(screen.getByRole('menuitemradio', { name: 'Local' }));
+		expect(getPersistedDeviceIntent()).toBeNull();
+	});
 });
 
 describe('ExecutionModeBar merged worktree branch chip', () => {

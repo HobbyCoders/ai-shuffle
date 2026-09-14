@@ -18,6 +18,7 @@ import { api } from '$lib/api/client';
 import { composerPreferences, resolveComposerProject } from '../composer-preferences';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { openHeaderDropdown } from '../header-dropdowns';
+import { getPersistedDeviceIntent } from '../worker-selection';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
@@ -897,9 +898,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 				newChatEphemeral,
 				getPersistedProject() || s.project,
 			),
-			// The device pick rides the new-chat draft's ephemeral entry (memory
-			// only) — restored alongside the draft, never from a preference.
-			deviceIntent: newChatEphemeral?.deviceIntent ?? null,
+			// A restored compose keeps its explicit pick (including Local/null).
+			// Otherwise use the last worker chosen, not the session being left.
+			deviceIntent: newChatEphemeral ? newChatEphemeral.deviceIntent : getPersistedDeviceIntent(),
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
 			worktreeMode: 'new' as const,
