@@ -37,7 +37,7 @@
 	import { git, gitStatus } from '$lib/stores/git.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
-	import { adoptSession, unpinSession, moveSession } from '$lib/api/sessions';
+	import { adoptSession, moveSession } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 	import { GitBranch, Monitor, MonitorOff, Check, Loader2 } from 'lucide-svelte';
 	import { checkoutEligibility, type EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
@@ -140,7 +140,6 @@
 	const runnerMenu = $derived(
 		runnerBadgeMenuItems({
 			ownerId: sessionRow?.instance_id ?? null,
-			isPinned: sessionRow?.is_pinned ?? false,
 			installs: runnerInstalls,
 			eligibility: runnerEligibility,
 			hasProject: !!(sessionRow?.project_id || sessionRow?.project_v2_id),
@@ -191,8 +190,7 @@
 		try {
 			if (item.action.kind === 'adopt') {
 				await adoptSession(sessionId);
-			} else if (item.action.kind === 'unpin') {
-				await unpinSession(sessionId);
+
 			} else {
 				await moveSession(sessionId, item.action.targetInstanceId);
 			}

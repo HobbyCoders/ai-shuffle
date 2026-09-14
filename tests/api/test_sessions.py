@@ -2135,37 +2135,24 @@ class TestAdoptSession:
         assert data["status"] == "already_local"
         mock_database.adopt_session.assert_not_called()
 
-    def test_adopt_foreign_offline_session_succeeds(self, client, mock_database, sample_session):
-        """A foreign session whose owner is offline is re-pointed to this install."""
-        from app.core.config import settings
-
+    def test_adopt_foreign_offline_session_keeps_owner(self, client, mock_database, sample_session):
+        """An idle session still needs its online owner to transfer working state."""
         sample_session["instance_id"] = "other-install-xyz"
         mock_database.get_session.return_value = sample_session
         mock_database.get_install.return_value = {
             "device_name": "Studio Mac",
             "online": False,
         }
-        adopted_row = {**sample_session, "instance_id": settings.effective_instance_id}
-        mock_database.adopt_session.return_value = adopted_row
 
-        # Not streaming (no active run in the runs table) → adopt.
-        response = client.post("/api/v1/sessions/test-session-id/adopt")
+        with patch("app.network.engine.context", return_value=None):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["adopted"] is True
-        assert data["status"] == "adopted"
-        assert data["instance_id"] == settings.effective_instance_id
-        mock_database.adopt_session.assert_called_once_with(
-            "test-session-id", settings.effective_instance_id
-        )
+        assert response.status_code == 409
+        assert "owning worker must be online" in response.json()["detail"]
+        mock_database.adopt_session.assert_not_called()
 
     def test_adopt_foreign_online_but_idle_session_succeeds(self, client, mock_database, sample_session):
-        """Owner install ONLINE but the session is NOT streaming → adopt succeeds.
-
-        A 24/7 install must not block adoption of its idle sessions: the gate is
-        per-session streaming state, not the install-level online heartbeat.
-        """
+        """An idle session can move after its online owner transfers state."""
         from app.core.config import settings
 
         sample_session["instance_id"] = "other-install-xyz"
@@ -2177,12 +2164,17 @@ class TestAdoptSession:
         adopted_row = {**sample_session, "instance_id": settings.effective_instance_id}
         mock_database.adopt_session.return_value = adopted_row
 
-        # Owner online, but this idle session has no lease-valid active run.
+        # No active run; the source completes the online handoff before adoption.
+        async def transfer(session):
+            mock_database.adopt_session.assert_not_called()
+            return "/local/resumed"
+
         with patch(
             "app.core.streaming_status.has_active_run",
             return_value=False,
-        ):
+        ), patch("app.network.handoff.receive", side_effect=transfer) as receive:
             response = client.post("/api/v1/sessions/test-session-id/adopt")
+        receive.assert_awaited_once_with(sample_session)
 
         assert response.status_code == 200
         data = response.json()
@@ -2262,18 +2254,23 @@ class TestAdoptSession:
         sample_session["project_id"] = "proj-1"
         sample_session["branch"] = "feature-x"
         mock_database.get_session.return_value = sample_session
-        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": True}
         mock_database.adopt_session.return_value = {
             **sample_session, "instance_id": settings.effective_instance_id
         }
 
+        async def transfer(session):
+            mock_database.adopt_session.assert_not_called()
+            return "/local/feature-x"
+
         with patch(
             "app.core.project_resolver.has_local_base_checkout", return_value=True
         ), patch(
-            "app.core.project_resolver.resolve_cwd", return_value="/local/feature-x"
-        ) as prepare:
+            "app.network.handoff.receive", side_effect=transfer
+        ) as receive, patch("app.core.project_resolver.resolve_cwd") as prepare:
             response = client.post("/api/v1/sessions/test-session-id/adopt")
-        prepare.assert_called_once_with(sample_session)
+        receive.assert_awaited_once_with(sample_session)
+        prepare.assert_not_called()
 
         assert response.status_code == 200
         data = response.json()

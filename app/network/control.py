@@ -188,7 +188,13 @@ def _application_update_handler():
     return peer_action
 
 
+def _handoff_handler():
+    from app.network.handoff import handle
+    return handle
+
+
 _LAZY_HANDLERS = {
+    "handoff": _handoff_handler,
     "application-update": _application_update_handler,
     "rewind": _rewind_handler,
     "session-git": _session_git_handler,

@@ -786,6 +786,22 @@ class SessionRuntime:
             return None
         run_id = run["id"]
         fence_token = run["fence_token"]
+        # An online handoff may have committed after the placement read but
+        # before this claim. Never execute a stale-owner turn after its lease
+        # was released. A read error here is fail-closed, unlike the UI hint.
+        try:
+            from app.network import engine as network_engine
+            from app.network.control import owner_of
+            from app.db import database as current_database
+            moved = False
+            if network_engine.context() is not None:
+                current = await asyncio.to_thread(current_database.get_session, sid)
+                moved = current is None or owner_of(current) is not None
+        except Exception:
+            moved = True
+        if moved:
+            await asyncio.to_thread(runs_db.release_run, run_id, fence_token)
+            return None
         # Run went active — force the board-spinner ON frame NOW. The first
         # event append would eventually tick the gateway recheck, but by then
         # _last_broadcast may still hold the PREVIOUS turn's stale busy entry,

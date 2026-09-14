@@ -1,7 +1,7 @@
 /**
  * Tests for the context-bar runner badge menu.
  *
- * Continue here and (when pinned) Unpin are always offered. Other runners
+ * Continue here is always offered; Unpin is not. Other runners
  * are listed, offline greyed, ineligible blocked when the session has a
  * project. git-state is fetched by project_id, else project_v2_id.
  */
@@ -38,7 +38,6 @@ const offlinePeer = install({ id: 'inst-offline', device_name: 'Garage', online:
 function input(overrides: Partial<RunnerBadgeMenuInput> = {}): RunnerBadgeMenuInput {
 	return {
 		ownerId: owner.id,
-		isPinned: true,
 		installs: [self, owner, onlinePeer, offlinePeer],
 		eligibility: { 'inst-owner': true, 'inst-online': true, 'inst-offline': true },
 		hasProject: true,
@@ -48,15 +47,11 @@ function input(overrides: Partial<RunnerBadgeMenuInput> = {}): RunnerBadgeMenuIn
 }
 
 describe('runnerBadgeMenuItems', () => {
-	it('offers Continue here, and Unpin only when pinned', () => {
-		const pinned = runnerBadgeMenuItems(input());
-		expect(pinned.map((i) => i.id)).toContain('continue-here');
-		expect(pinned.map((i) => i.id)).toContain('unpin');
-		expect(pinned.find((i) => i.id === 'continue-here')!.action).toEqual({ kind: 'adopt' });
-		expect(pinned.find((i) => i.id === 'unpin')!.action).toEqual({ kind: 'unpin' });
-
-		const unpinned = runnerBadgeMenuItems(input({ isPinned: false }));
-		expect(unpinned.map((i) => i.id)).not.toContain('unpin');
+	it('offers Continue here without an Unpin action', () => {
+		const items = runnerBadgeMenuItems(input());
+		expect(items.map((i) => i.id)).toContain('continue-here');
+		expect(items.map((i) => i.id)).not.toContain('unpin');
+		expect(items.find((i) => i.id === 'continue-here')!.action).toEqual({ kind: 'adopt' });
 	});
 
 	it('lists other runners for /move and skips self and the current owner', () => {

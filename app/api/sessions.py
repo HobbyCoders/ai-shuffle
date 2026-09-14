@@ -190,17 +190,17 @@ async def _parse_adopt_request(request: Request) -> AdoptRequest:
         )
 
 
-async def _prepare_local_checkout(session: dict, session_id: str, me: str) -> None:
+async def _prepare_local_checkout(session: dict, session_id: str, me: str) -> bool:
     """Prepare the canonical local checkout before transferring ownership.
 
-    Project-less sessions skip. Resolution failures leave ownership unchanged.
+    Project-less sessions transfer history only. Failures leave ownership unchanged.
     """
-    if not (session.get("project_v2_id") or session.get("project_id")):
-        return
     from app.core import project_resolver
+    from app.network import handoff, control
+    has_project = bool(session.get("project_v2_id") or session.get("project_id"))
 
     try:
-        has_base = await run_sync(
+        has_base = not has_project or await run_sync(
             project_resolver.has_local_base_checkout, session, me
         )
         if not has_base:
@@ -212,7 +212,15 @@ async def _prepare_local_checkout(session: dict, session_id: str, me: str) -> No
                     "open the project), then try again."
                 ),
             )
-        cwd = await run_sync(project_resolver.resolve_cwd, session)
+        try:
+            cwd = await handoff.receive(session)
+        except (control.RunnerUnreachable, control.ControlRefused, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        transferred = cwd is not None
+        if not has_project:
+            return transferred
+        if cwd is None:
+            cwd = await run_sync(project_resolver.resolve_cwd, session)
         if not cwd:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -223,6 +231,7 @@ async def _prepare_local_checkout(session: dict, session_id: str, me: str) -> No
                     "directory here. Then try again."
                 ),
             )
+        return transferred
     except HTTPException:
         raise
     except Exception:
@@ -265,7 +274,8 @@ async def adopt_session_endpoint(
     session = await require_session(request, session_id)
 
     me = settings.effective_instance_id
-    owner = session.get("instance_id")
+    from app.network import control
+    owner = control.owner_of(session) or session.get("instance_id")
 
     if streaming_status.has_active_run(session_id):
         device = await run_sync(_adopt_device_name, owner) or "another device"
@@ -308,7 +318,7 @@ async def adopt_session_endpoint(
             status="already_local",
         )
 
-    await _prepare_local_checkout(session, session_id, me)
+    transferred = await _prepare_local_checkout(session, session_id, me)
 
     updated = await run_sync(database.adopt_session, session_id, me)
     if not updated:
@@ -318,7 +328,8 @@ async def adopt_session_endpoint(
         )
 
     invalidate_working_dir_cache(session_id=session_id)
-    await run_sync(apply_sdk_session_keep, updated, me)
+    if not transferred:
+        await run_sync(apply_sdk_session_keep, updated, me)
     logger.info("Adopted session %s from install %s -> %s", session_id, owner, me)
     return AdoptSessionResponse(
         session_id=session_id,

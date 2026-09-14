@@ -1,7 +1,7 @@
 /**
  * Menu items for the context-bar runner badge.
  *
- * Continue here → POST /adopt. Unpin (when pinned) → /adopt {follow:true}.
+ * Continue here → POST /adopt.
  * Other runners → /move. Offline / ineligible rows are listed and greyed
  * via execution-mode-eligibility (same helpers as the Cloud accordion).
  */
@@ -16,7 +16,6 @@ import {
 
 export interface RunnerBadgeMenuInput {
 	ownerId: string | null | undefined;
-	isPinned: boolean;
 	installs: Install[];
 	eligibility: EligibilityMap;
 	/** Session has a project — ineligible runners 409 on /move. */
@@ -27,7 +26,6 @@ export interface RunnerBadgeMenuInput {
 
 export type RunnerBadgeMenuAction =
 	| { kind: 'adopt' }
-	| { kind: 'unpin' }
 	| { kind: 'move'; targetInstanceId: string };
 
 export interface RunnerBadgeMenuItem {
@@ -48,15 +46,6 @@ export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMe
 			title: 'Resume this session on this runner'
 		}
 	];
-	if (input.isPinned) {
-		items.push({
-			id: 'unpin',
-			label: 'Unpin',
-			action: { kind: 'unpin' },
-			disabled: false,
-			title: 'Keep running here, but let the next send from another runner take over'
-		});
-	}
 	const peers = peerRunners(input.installs).filter((i) => i.id !== input.ownerId);
 	for (const install of peers) {
 		const blocked = isBlocked(install, input.hasProject, input.eligibility);

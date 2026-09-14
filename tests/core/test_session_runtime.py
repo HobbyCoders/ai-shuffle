@@ -145,6 +145,20 @@ def _runtime_env(*, pump, bg_work=None, bg_launches=None, patch_idle=True):
 # ---------------------------------------------------------------------------
 # 1. Mandatory lease
 
+@pytest.mark.asyncio
+async def test_handoff_after_placement_read_releases_claim_without_running(mock_db):
+    turn = turns_db.enqueue_turn("handoff-race", "user", prompt="hello")
+    with _runtime_env(pump=_make_pump([{"type": "done"}])) as env, patch(
+        "app.network.engine.context", return_value=object()
+    ), patch("app.db.database.get_session", return_value={"id": "handoff-race"}), patch(
+        "app.network.control.owner_of", return_value="new-owner"
+    ):
+        result = await session_runtime.SessionRuntime(turn).execute()
+    assert result is None
+    env["recorder"].start.assert_not_awaited()
+    assert runs_db.get_active_run("handoff-race") is None
+
+
 @pytest.mark.parametrize("phase", ["start", "done", "close", "timer"])
 @pytest.mark.parametrize("background", [False, True])
 async def test_recording_failure_aborts_and_cleans_up(mock_db, phase, background):

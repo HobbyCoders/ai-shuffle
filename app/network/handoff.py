@@ -1,0 +1,252 @@
+"""Online, leased checkout and transcript handoff between authenticated workers."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import uuid
+
+from app.core import checkout_transfer, project_resolver, checkout_manager
+from app.core.config import settings
+from app.db import database, runs, checkouts
+from app.db.base import get_db
+from app.db.async_database import run_sync
+from app.network import control, crypto, engine
+
+TTL = 300
+MAX_STATE = 192 * 1024 * 1024
+# Explicit columns only: no credentials, arbitrary tables, paths or executable jobs.
+TABLES = {
+    "session_messages": ("role", "content", "tool_name", "tool_input", "metadata", "jsonl_uuid", "created_at"),
+    "session_events": ("id", "seq", "event_type", "payload", "command_id", "created_at"),
+    "fluid_sessions": ("head_node_id", "created_at", "cli_session_id", "project_root"),
+    "fluid_session_nodes": ("node_id", "parent_id", "ts", "message"),
+    "fluid_session_events": ("seq", "event"),
+    "session_store_entries": ("project_key", "subpath", "entry", "created_at"),
+}
+JSON_COLUMNS = {"tool_input", "metadata", "message", "event", "entry", "payload"}
+APP_TABLES = {"session_messages", "session_events"}
+
+
+def _aad(sid, target):
+    return ("shuffle-session-handoff-v1:" + sid + ":" + target).encode()
+
+
+def _idle(cursor, sid):
+    cursor.execute("SELECT 1 FROM background_tasks WHERE session_id=%s AND status IN ('running','pending') LIMIT 1", (sid,))
+    if cursor.fetchone():
+        raise ValueError("Wait for this session's background work to finish before resuming here.")
+    cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND state IN ('queued','running','interrupting','draining') LIMIT 1", (sid,))
+    if cursor.fetchone():
+        raise ValueError("Wait for this session's queued or active turn to finish before resuming here.")
+
+
+def _history(session):
+    rows = {}
+    with get_db() as conn:
+        cur = conn.cursor()
+        for table, columns in TABLES.items():
+            sid = session["id"] if table in APP_TABLES else session.get("sdk_session_id")
+            order = " ORDER BY id" if table in ("session_messages", "session_store_entries") else ""
+            cur.execute(f"SELECT {', '.join(columns)} FROM {table} WHERE session_id=%s" + order, (sid,))
+            rows[table] = [dict(row) for row in cur.fetchall()]
+    return rows
+
+
+def _lease(cur, sid, target, token):
+    cur.execute("SELECT * FROM runs WHERE id=%s AND session_id=%s AND runner_id=%s "
+                "AND state='active' AND lease_expires_at >= NOW() FOR UPDATE",
+                (token, sid, "handoff:" + target))
+    row = cur.fetchone()
+    if not row:
+        raise ValueError("The resume reservation expired. Retry from the owning worker.")
+    return dict(row)
+
+
+def begin(sid, target):
+    control._require_owned(sid)
+    session = database.get_session(sid)
+    project = project_resolver.resolve_project_v2(session)
+    branch = project_resolver._effective_branch(session)
+    cwd = project_resolver.resolve_existing_cwd(session) if project else None
+    if project and (not branch or not cwd):
+        raise ValueError("The owning worker has no existing branch checkout to transfer.")
+    with get_db() as conn:
+        _idle(conn.cursor(), sid)
+    run = runs.claim_run(sid, "handoff:" + target, TTL)
+    if not run:
+        raise ValueError("The owning worker is busy. Wait for its turn to finish before resuming here.")
+    try:
+        state = checkout_transfer.export_checkout(cwd, branch) if project else None
+        data = dict(checkout=state, history=_history(session), sdk_session_id=session.get("sdk_session_id"),
+                    project_id=project["id"] if project else None, token=run["id"])
+        raw = json.dumps(data, default=str).encode()
+        if len(raw) > MAX_STATE:
+            raise ValueError("This session exceeds the resume transfer limit.")
+        ctx = engine.require_context()
+        return {"payload": crypto.encrypt_payload(ctx.network_key, raw, _aad(sid, target)), "key_version": ctx.key_version}
+    except BaseException:
+        runs.release_run(run["id"], run["fence_token"])
+        raise
+
+
+def finish(sid, target, payload):
+    token = payload.get("token", "")
+    # Cancellation never changes ownership and cannot release someone else's run.
+    if payload.get("phase") == "cancel":
+        with get_db() as conn:
+            cur = conn.cursor()
+            run = _lease(cur, sid, target, token)
+            cur.execute("UPDATE runs SET state='released' WHERE id=%s", (run["id"],))
+        return {"cancelled": True}
+    session = database.get_session(sid)
+    if session.get("owner_device_id") == target:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM runs WHERE id=%s AND session_id=%s AND runner_id=%s AND state='transferred'",
+                        (token, sid, "handoff:" + target))
+            if cur.fetchone():
+                return {"committed": True}
+    control._require_owned(sid)
+    project = project_resolver.resolve_project_v2(session)
+    if project:
+        cwd = project_resolver.resolve_existing_cwd(session)
+        if (not cwd or project_resolver._effective_branch(session) != payload.get("branch")
+                or checkout_transfer.fingerprint(cwd) != payload.get("fingerprint")):
+            raise ValueError("The owning worker's files changed during resume; ownership was not moved.")
+    elif payload.get("fingerprint") is not None:
+        raise ValueError("The owning worker's project changed during resume.")
+    with get_db() as conn:
+        cur = conn.cursor()
+        _lease(cur, sid, target, token)
+        _idle(cur, sid)
+        cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, updated_at=NOW() WHERE id=%s",
+                    (target, target, json.dumps({"where": "runner:" + target}), sid))
+        cur.execute("SELECT * FROM sessions WHERE id=%s", (sid,))
+        engine.record(cur, "sessions", sid, dict(cur.fetchone()), force=True)
+        cur.execute("UPDATE runs SET state='transferred' WHERE id=%s", (token,))
+    engine.kick()
+    return {"committed": True}
+
+
+async def handle(payload, peer_device_id):
+    sid = str(payload.get("session_id") or "")
+    member = engine.require_context().member(peer_device_id)
+    if not member or member.kind != "worker" or member.status != "active":
+        raise PermissionError("A handoff requires an authenticated receiving worker.")
+    if payload.get("phase") == "begin":
+        return await run_sync(begin, sid, peer_device_id)
+    if payload.get("phase") in ("commit", "cancel"):
+        return await run_sync(finish, sid, peer_device_id, payload)
+    raise ValueError("Unknown handoff phase")
+
+
+def install_history(sid, data, cwd):
+    from psycopg2.extras import Json
+    from claude_agent_sdk._internal.sessions import project_key_for_directory
+    old_sdk = data.get("sdk_session_id")
+    # New store identity prevents replacing another local session's native tree
+    # and prevents a warm provider cache from reusing stale nodes.
+    sdk = ("ses_" if str(old_sdk).startswith("ses_") else "") + str(uuid.uuid4()) if old_sdk else None
+    with get_db() as conn:
+        cur = conn.cursor()
+        for table in APP_TABLES:
+            cur.execute(f"DELETE FROM {table} WHERE session_id=%s", (sid,))
+        for table, columns in TABLES.items():
+            destination_id = sid if table in APP_TABLES else sdk
+            for row in data["history"].get(table, []):
+                values = []
+                for column in columns:
+                    value = row.get(column)
+                    if column == "cli_session_id":
+                        value = None
+                    if column == "project_root":
+                        value = str(Path(cwd).resolve())
+                    if column == "project_key":
+                        value = project_key_for_directory(cwd)
+                    if column in JSON_COLUMNS and value is not None:
+                        value = json.loads(value) if isinstance(value, str) else value
+                        if column == "entry" and isinstance(value, dict):
+                            value = {**value, "sessionId": sdk}
+                            if "cwd" in value:
+                                value["cwd"] = cwd
+                        value = Json(value)
+                    values.append(value)
+                names = ("session_id", *columns)
+                cur.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join(['%s'] * len(names))})",
+                            (destination_id, *values))
+        cur.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM session_events WHERE session_id=%s", (sid,))
+        ceiling = cur.fetchone()["seq"]
+        cur.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,%s) "
+                    "ON CONFLICT(session_id) DO UPDATE SET next_seq=EXCLUDED.next_seq", (sid, ceiling))
+        cur.execute("UPDATE sessions SET sdk_session_id=%s WHERE id=%s", (sdk, sid))
+    return sdk
+
+
+def _accept_owner(sid, device_id):
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE sessions SET owner_device_id=%s WHERE id=%s", (device_id, sid))
+
+
+async def receive(session):
+    """Sync first, then ask the owner to commit. Never fall back to GitHub."""
+    sid = session["id"]
+    owner = control.owner_of(session)
+    ctx = engine.context()
+    if owner is None:
+        if (not ctx or session.get("owner_device_id") != ctx.device_id) and session.get("instance_id") not in (None, "", settings.effective_instance_id):
+            raise ValueError("The owning worker must be online on this network to resume here.")
+        return None
+    if ctx is None:
+        raise ValueError("The owning worker must be online on this network to resume here.")
+    project = await run_sync(project_resolver.resolve_project_v2, session)
+    if project and not await run_sync(project_resolver.has_local_base_checkout, session):
+        raise ValueError("Clone this project on this worker before resuming here.")
+    reply = await control.call(owner, "handoff", {"session_id": sid,"phase": "begin"}, timeout=180)
+    blob = reply.get("payload", "")
+    if len(json.dumps(blob)) > MAX_STATE * 2:
+        raise ValueError("Resume response exceeds the transfer limit.")
+    raw = crypto.decrypt_payload(ctx.keyring[int(reply["key_version"])], blob, _aad(sid, ctx.device_id))
+    data = json.loads(raw)
+    token = data["token"]
+    committed = False
+    try:
+        state = data["checkout"]
+        if data["project_id"] != (project["id"] if project else None):
+            raise ValueError("The owning worker's project changed; refresh before resuming.")
+        if project:
+            if not state or state["branch"] != project_resolver._effective_branch(session):
+                raise ValueError("The owning worker's branch changed; refresh before resuming.")
+            base_row = await run_sync(
+                project_resolver._local_checkout, project["id"], settings.effective_instance_id,
+            )
+            base = checkout_manager._resolve_checkout_path(base_row["path"])
+            dest = checkout_manager._branch_checkout_path(base, state["branch"])
+            cwd = await run_sync(checkout_transfer.import_checkout, base, dest, state)
+        else:
+            if state is not None:
+                raise ValueError("Unexpected checkout for a project-less session.")
+            cwd = str(settings.effective_workspace_dir)
+        # Keep placement on the original owner while preparing local context.
+        await run_sync(install_history, sid, data, cwd)
+        if project:
+            await run_sync(checkouts.upsert_checkout, project["id"], settings.effective_instance_id, cwd,
+                           branch=state["branch"], head_sha=state["head"], status="active")
+        result = await control.call(owner, "handoff", {"session_id": sid,
+            "phase": "commit", "token": token,
+            "fingerprint": state["fingerprint"] if state else None,
+            "branch": state["branch"] if state else None,
+        }, timeout=180)
+        if not result.get("committed"):
+            raise ValueError("The owning worker did not confirm the transfer.")
+        committed = True
+        await run_sync(_accept_owner, sid, ctx.device_id)
+        return cwd
+    finally:
+        if not committed:
+            # Best effort. A lost response/worker restart leaves a bounded lease,
+            # not a permanent block; never force ownership after a timeout.
+            try:
+                await control.call(owner, "handoff", {"session_id": sid,"phase": "cancel", "token": token})
+            except (control.RunnerUnreachable, control.ControlRefused, ValueError):
+                pass

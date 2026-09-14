@@ -142,7 +142,7 @@ export interface ActiveBranchPillInput {
  * Whether the interactive BranchSelector pill should appear in an active chat.
  *
  * Remote and degraded sessions keep this slot for the runner / read-only
- * badge (Continue here, Unpin, Move). Local authenticated project chats
+ * badge (Continue here, Move). Local authenticated project chats
  * still get the branch pill.
  */
 export function shouldShowBranchPill(input: ActiveBranchPillInput): boolean {

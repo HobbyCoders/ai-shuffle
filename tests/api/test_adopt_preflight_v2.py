@@ -65,7 +65,7 @@ def _not_streaming():
 
 @pytest.fixture(autouse=True)
 def prepared_checkout():
-    with patch(
+    with patch("app.network.handoff.receive", new=AsyncMock(return_value=None)), patch(
         "app.core.project_resolver.resolve_cwd", return_value="/local/branch"
     ) as resolve:
         yield resolve
@@ -383,6 +383,30 @@ def test_failed_transfer_does_not_invalidate_cache(client, mock_database, follow
         )
     assert response.status_code == 404
     invalidate.assert_not_called()
+
+@pytest.mark.parametrize("message", ["Worker offline", "Local checkout conflict", "Worker is busy"])
+def test_online_handoff_failure_keeps_ownership(client, mock_database, message):
+    mock_database.get_session.return_value = _v2_session()
+    with patch("app.core.project_resolver.has_local_base_checkout", return_value=True), patch(
+        "app.network.handoff.receive", new=AsyncMock(side_effect=ValueError(message))
+    ):
+        response = client.post("/api/v1/sessions/test-session-id/adopt", json={})
+    assert response.status_code == 409
+    assert message in response.json()["detail"]
+    mock_database.adopt_session.assert_not_called()
+
+
+def test_imported_native_context_is_not_cleared(client, mock_database, prepared_checkout):
+    mock_database.get_session.return_value = _v2_session()
+    mock_database.adopt_session.return_value = {**_v2_session(), "sdk_session_id": "ses_imported"}
+    with patch("app.core.project_resolver.has_local_base_checkout", return_value=True), patch(
+        "app.network.handoff.receive", new=AsyncMock(return_value="/imported/branch")
+    ), patch("app.api.sessions.apply_sdk_session_keep") as keep:
+        response = client.post("/api/v1/sessions/test-session-id/adopt", json={})
+    assert response.status_code == 200
+    keep.assert_not_called()
+    prepared_checkout.assert_not_called()
+
 
 
 @pytest.mark.parametrize("follow", [False, True])
