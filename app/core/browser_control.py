@@ -195,6 +195,7 @@ class Broker:
         self.result_waiters = {}
         self.queue = []
         self.viewers = {}
+        self.last_viewer_detached = 0.0
         self._viewers_changed = False
         self.event = asyncio.Event()
         self.registration_lock = asyncio.Lock()
@@ -493,7 +494,10 @@ class Broker:
             pass  # MCP lease is the bounded fallback when a runtime/queue is gone.
 
     async def detach(self, viewer_id):
-        self.viewers.pop(viewer_id, None)
+        if viewer_id in self.viewers:
+            self.viewers.pop(viewer_id)
+            if not self.viewers:
+                self.last_viewer_detached = time.monotonic()
         self._viewers_changed = True
         self.event.set()
         for cid, command in list(self.pending.items()):

@@ -139,6 +139,75 @@ async def test_idle_keeps_viewers_and_active_calls(fake, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("agent_returns", [False, True])
+async def test_idle_grace_starts_after_last_viewer_and_reopens(fake, monkeypatch, agent_returns):
+    """Drive attach/detach and actor retirement at the real 900s boundary.
+
+    Only the monotonic clock and timer wait are virtual; the broker release,
+    actor disposal, registry removal and next start run their production paths.
+    """
+    # Integer virtual timestamps make the exact boundary representable on all
+    # hosts; adding offsets to a fractional uptime can subtract to 899.999999s.
+    now = [1000.0]
+    monkeypatch.setattr(runtime, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(control, "time", SimpleNamespace(monotonic=lambda: now[0], time=time.time))
+    await runtime.start("runtime-test")
+    instance = runtime.get("runtime-test")
+    instance.idle.cancel()
+    await asyncio.gather(instance.idle, return_exceptions=True)
+    broker = control.get("runtime-test")
+
+    async def tick(at):
+        # The actor keeps long-polling even without viewers. Feed that real
+        # producer in <=20s increments so its separate broker TTL stays valid.
+        while now[0] < at:
+            now[0] = min(at, now[0] + 20)
+            broker._viewers_changed = True
+            await broker.poll(broker.runtime_id)
+        waits = 0
+
+        async def one_tick(delay):
+            nonlocal waits
+            assert delay == 30  # keep the production 900s retention setting
+            waits += 1
+            if waits > 1:
+                raise asyncio.CancelledError
+
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime, "asyncio", SimpleNamespace(**(vars(asyncio) | {"sleep": one_tick})))
+            await instance._idle()
+
+    started = now[0]
+    broker.attach("first", AsyncMock())
+    broker.attach("last", AsyncMock())
+    await tick(started + 1800)
+    assert not instance.closed  # a long-lived viewer is never idle
+    await broker.detach("first")
+    await tick(started + 2700)
+    assert not instance.closed
+    await broker.detach("last")
+    detached = now[0]
+    # Disconnect must retain its release command, not silently steal control.
+    assert any(c["op"] == "release" for c in broker.queue)
+    await tick(detached + 899)
+    assert not instance.closed
+    # A duplicate/unknown disconnect cannot extend the last real viewer lease.
+    await broker.detach("last")
+    if agent_returns:
+        await runtime.call("runtime-test", "browser_status", {})
+        await tick(detached + 900)
+        assert not instance.closed  # real tool completion restarts the grace
+        await tick(detached + 1799)
+    else:
+        await tick(detached + 900)
+    assert instance.closed and fake[0].closed
+    assert "runtime-test" not in runtime._runtimes
+    assert not broker.state["available"]
+    assert (await runtime.start("runtime-test"))["runtime_id"] == fake[1].runtime_id
+    assert fake[1].runtime_id != fake[0].runtime_id
+
+
+@pytest.mark.asyncio
 async def test_invalid_tool_and_nonfinite_arguments_cannot_spawn(fake):
     for tool, arguments in [("shell", {}), ("browser_act", {"x": float("nan")})]:
         with pytest.raises(ValueError):

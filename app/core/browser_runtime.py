@@ -297,7 +297,12 @@ class Runtime:
                 broker = browser_control.get(self.session_id)
                 if (
                     not self.active and not broker.viewers
-                    and time.monotonic() - self.touched >= IDLE_SECONDS
+                    # A viewer can stay longer than the last agent call.
+                    # Start its grace at the actual final disconnect, not at
+                    # that old call; duplicate disconnects cannot extend it.
+                    and time.monotonic() - max(
+                        self.touched, broker.last_viewer_detached
+                    ) >= IDLE_SECONDS
                 ):
                     await self.close()
         except asyncio.CancelledError:

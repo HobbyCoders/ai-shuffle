@@ -671,6 +671,33 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
                 ),
             )
             assert frame["metadata"]["runtime_id"] == current_runtime
+            # Accelerated wall-clock integration complements the unit test's
+            # exact 900s boundary. A long-lived viewer must get a fresh grace
+            # after WebSocket disconnect, even when its last tool is old.
+            monkeypatch.setattr(browser_runtime, "IDLE_SECONDS", 1.0)
+            actor = browser_runtime.get(session_id)
+            actor.touched -= 10
+            actor.idle.cancel()
+            await asyncio.gather(actor.idle, return_exceptions=True)
+            actor.idle = asyncio.create_task(actor._idle())
+        from app.core import browser_control
+        async with asyncio.timeout(10):
+            while browser_control.get(session_id).viewers:
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+        assert not actor.closed
+        async with asyncio.timeout(10):
+            while not actor.closed or actor.client is not None:
+                await asyncio.sleep(0.05)
+        assert session_id not in browser_runtime._runtimes
+        assert await browser_running(), "Actor retirement must not close shared Chrome"
+        targets = await cdp_get("/json/list")
+        assert recovered["state"]["target_id"] not in {target["id"] for target in targets}
+        async with httpx.AsyncClient() as http:
+            reopened = await http.post(origin + f"/api/v1/sessions/{session_id}/browser/panel/start", timeout=60)
+        assert reopened.status_code == 200, reopened.text
+        assert reopened.json()["runtime_id"] != current_runtime
+        assert len(reopened.json()["tabs"]) == 1
     finally:
         await browser_runtime.shutdown()
         if owned_chrome:
