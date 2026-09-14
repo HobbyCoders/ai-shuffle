@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { layout } from '$lib/stores/layout.svelte';
 	/**
 	 * DocsCard — Studio-v2 documentation surface.
 	 *
@@ -17,9 +18,11 @@
 
 	interface Props {
 		mobile?: boolean;
+		initialItemId?: string | null;
 	}
 
-	let { mobile = false }: Props = $props();
+	let { mobile = false, initialItemId }: Props = $props();
+	let consumedItemId: string | null = null;
 
 	// Active state
 	let activeCategory = $state(categories[0]?.id || 'getting-started');
@@ -63,6 +66,15 @@
 		mobilePanel = null;
 		if (scrollEl) scrollEl.scrollTop = 0;
 	}
+
+	$effect(() => {
+        if (!initialItemId) { consumedItemId = null; return; }
+        if (initialItemId !== consumedItemId) {
+            consumedItemId = initialItemId;
+            handleSearchResult(initialItemId);
+            layout.clearFeatureItemId();
+        }
+    });
 
 	function handleSearchResult(fullSlug: string) {
 		const [cat, slug] = fullSlug.split('/');

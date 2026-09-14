@@ -465,6 +465,7 @@
 		onClose={() => showSpotlight = false}
 		onSelectSession={handleSpotlightSelectSession}
 		onSelectAgent={handleSpotlightSelectAgent}
+		onOpenFeature={handleOpenFeature}
 		onNewChat={handleSpotlightNewChat}
 		onOpenSettings={handleSpotlightOpenSettings}
 		onImportSession={() => { showSpotlight = false; showImportModal = true; }}

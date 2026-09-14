@@ -1,178 +1,96 @@
-/**
- * Behavior tests for the reworked SpotlightSearch palette.
- *
- * The rework removed the slash-Commands group and added server-side session
- * search (debounced) plus a client-filtered Agents group (loaded from
- * /agents). Profiles and Subagents were unified into a single "Agents" group
- * when subagents stopped being a distinct concept. These mount the real
- * component with its data dependencies mocked and assert:
- *  - the Commands group is gone entirely (no "Commands" heading, ever)
- *  - the Agents group renders and is selectable
- *  - the debounced session search fires exactly once for a burst of keystrokes
- *  - keyboard ArrowDown navigation crosses group boundaries (Chats → Agents →
- *    Quick Actions) using a single global index
- */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
-
-// jsdom lacks Element.scrollIntoView; keyboard nav calls it.
-if (!('scrollIntoView' in Element.prototype)) {
-	(Element.prototype as unknown as { scrollIntoView: () => void }).scrollIntoView = () => {};
-}
-
-const mocks = vi.hoisted(() => {
-	return {
-		apiGet: vi.fn(),
-		searchSessionsPaginated: vi.fn()
-	};
-});
-
-vi.mock('$lib/api/sessions', () => ({
-	searchSessionsPaginated: mocks.searchSessionsPaginated
-}));
-
-vi.mock('$lib/api/client', () => ({
-	api: { get: mocks.apiGet }
-}));
-
-vi.mock('$lib/utils/sanitize', () => ({
-	sanitizeHtml: (s: string) => s
-}));
-
+const mocks = vi.hoisted(() => ({ get: vi.fn(), sessions: vi.fn() }));
+vi.mock('$lib/api/client', () => ({ api: { get: mocks.get } }));
+vi.mock('$lib/api/sessions', () => ({ searchSessionsPaginated: mocks.sessions }));
 import SpotlightSearch from './SpotlightSearch.svelte';
-import type { Session } from '$lib/api/client';
 
-// Only the fields the palette reads; cast to Session for the prop contract.
-const SESSIONS = [
-	{ id: 'sess-1', title: 'First chat', updated_at: new Date().toISOString() },
-	{ id: 'sess-2', title: 'Second chat', updated_at: new Date().toISOString() }
-] as unknown as Session[];
-
-function baseProps(overrides: Record<string, unknown> = {}) {
-	return {
-		visible: true,
-		sessions: SESSIONS,
-		currentProjectId: undefined,
-		onClose: vi.fn(),
-		onSelectSession: vi.fn(),
-		onSelectAgent: vi.fn(),
-		onNewChat: vi.fn(),
-		onOpenSettings: vi.fn(),
-		...overrides
-	};
+const props = () => ({ visible: true, sessions: [], onClose: vi.fn(), onSelectSession: vi.fn(),
+ onSelectAgent: vi.fn(), onNewChat: vi.fn(), onOpenSettings: vi.fn(), onOpenFeature: vi.fn() });
+async function search(query: string) {
+ await fireEvent.input(screen.getByRole('textbox'), { target: { value: query } });
+ await vi.advanceTimersByTimeAsync(260);
+ await tick();
 }
-
 beforeEach(() => {
-	mocks.apiGet.mockReset();
-	mocks.searchSessionsPaginated.mockReset();
-	mocks.apiGet.mockResolvedValue([
-		{ id: 'agent-1', name: 'Explorer', description: 'Searches the codebase' },
-		{ id: 'agent-2', name: 'Researcher', description: 'Deep research agent' }
-	]);
-	mocks.searchSessionsPaginated.mockResolvedValue({
-		items: [],
-		total: 0,
-		offset: 0,
-		limit: 10,
-		has_more: false
-	});
+ vi.useFakeTimers();
+ Element.prototype.scrollIntoView = vi.fn();
+ mocks.get.mockReset().mockImplementation(async (path: string) => {
+  if (path === '/agents') return [{ id: 'agent', name: 'Orchid agent' }];
+  if (path === '/mcp/servers') return [{ name: 'Orchid MCP', scope: 'user', env: { SECRET: 'never-render' } }];
+  if (path === '/plugins/installed') return [{ id: 'plugin', name: 'Orchid plugin' }];
+  if (path.startsWith('/notes?')) return [{ id: 'note', title: 'Orchid note', content: 'Saved orchid details' }];
+  if (path.startsWith('/documentation/')) return { results: [{ category: 'features', slug: 'orchid', title: 'Orchid guide', snippets: ['Orchid help'] }] };
+  return [];
+ });
+ mocks.sessions.mockReset().mockResolvedValue({ items: [{ id: 'session', title: 'Unrelated title', match_type: 'content', match_snippet: 'Assistant discussed orchid' }] });
 });
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
-afterEach(() => {
-	cleanup();
-	vi.useRealTimers();
-});
-
-describe('SpotlightSearch — groups', () => {
-	it('exposes session import and tag management through quick actions', async () => {
-		const onImportSession = vi.fn(), onManageTags = vi.fn();
-		render(SpotlightSearch, { props: baseProps({ onImportSession, onManageTags }) });
-		await fireEvent.click(screen.getByText('Import session'));
-		expect(onImportSession).toHaveBeenCalledOnce();
-		await fireEvent.click(screen.getByText('Manage session tags'));
-		expect(onManageTags).toHaveBeenCalledOnce();
-	});
-	it('offers knowledge management only with an active project', async () => {
-		const onManageKnowledge = vi.fn();
-		const view = render(SpotlightSearch, { props: baseProps({ onManageKnowledge }) });
-		expect(screen.queryByText('Manage project knowledge')).toBeNull();
-		await view.rerender(baseProps({ onManageKnowledge, currentProjectId: 'project' }));
-		await fireEvent.click(screen.getByText('Manage project knowledge'));
-		expect(onManageKnowledge).toHaveBeenCalledOnce();
-	});
-	it('never renders a Commands group and shows a single Agents group', async () => {
-		render(SpotlightSearch, { props: baseProps() });
-		// Agents are loaded async via api.get('/agents').
-		await waitFor(() => expect(screen.getByText('Explorer')).toBeTruthy());
-
-		expect(screen.queryByText('Commands')).toBeNull();
-		expect(screen.queryByText('Profiles')).toBeNull();
-		expect(screen.queryByText('Subagents')).toBeNull();
-		expect(screen.getByText('Chats')).toBeTruthy();
-		expect(screen.getByText('Agents')).toBeTruthy();
-		expect(screen.getByText('Quick Actions')).toBeTruthy();
-		// Agents render from the /agents fetch.
-		expect(screen.getByText('Researcher')).toBeTruthy();
-	});
-
-	it('selecting an agent fires onSelectAgent with its id', async () => {
-		const onSelectAgent = vi.fn();
-		render(SpotlightSearch, { props: baseProps({ onSelectAgent }) });
-		await waitFor(() => expect(screen.getByText('Explorer')).toBeTruthy());
-		await fireEvent.click(screen.getByText('Explorer'));
-		expect(onSelectAgent).toHaveBeenCalledWith('agent-1');
-	});
-});
-
-describe('SpotlightSearch — debounced session search', () => {
-	it('fires exactly once for a burst of keystrokes, with the final query', async () => {
-		vi.useFakeTimers();
-		const { container } = render(SpotlightSearch, { props: baseProps() });
-		const input = container.querySelector('input') as HTMLInputElement;
-
-		// Three rapid keystrokes within the debounce window.
-		input.value = 'a';
-		await fireEvent.input(input);
-		input.value = 'ab';
-		await fireEvent.input(input);
-		input.value = 'abc';
-		await fireEvent.input(input);
-
-		expect(mocks.searchSessionsPaginated).not.toHaveBeenCalled();
-
-		await vi.advanceTimersByTimeAsync(300);
-
-		expect(mocks.searchSessionsPaginated).toHaveBeenCalledTimes(1);
-		expect(mocks.searchSessionsPaginated).toHaveBeenCalledWith('abc', {
-			projectId: undefined,
-			limit: 10
-		});
-	});
-});
-
-describe('SpotlightSearch — keyboard navigation across groups', () => {
-	it('ArrowDown advances the global index across group boundaries', async () => {
-		const { container } = render(SpotlightSearch, { props: baseProps() });
-		await waitFor(() => expect(screen.getByText('Explorer')).toBeTruthy());
-
-		// Layout (empty query): 2 recent chats, 2 agents, 2 quick actions.
-		// index 0 selected by default.
-		const selectedIndexOf = () => {
-			const el = container.querySelector('.spotlight-item.selected') as HTMLElement | null;
-			return el ? Number(el.getAttribute('data-index')) : -1;
-		};
-
-		expect(selectedIndexOf()).toBe(0);
-
-		const win = window;
-		for (let i = 1; i <= 3; i++) {
-			await fireEvent.keyDown(win, { key: 'ArrowDown' });
-			await tick();
-			expect(selectedIndexOf()).toBe(i);
-		}
-		// index 2 is the first agent row — proves navigation crossed Chats → Agents.
-		const rowAt2 = container.querySelector('[data-index="2"]') as HTMLElement;
-		expect(rowAt2.textContent).toContain('Explorer');
-	});
+describe('universal search', () => {
+ it('starts without hardcoded sessions or agents and keeps quick actions', () => {
+  render(SpotlightSearch, { props: props() });
+  expect(screen.queryByRole('region', { name: 'Sessions' })).toBeNull();
+  expect(screen.queryByRole('region', { name: 'Agents' })).toBeNull();
+  expect(screen.getByText('New conversation')).toBeTruthy();
+  expect(mocks.get).not.toHaveBeenCalled();
+ });
+ it('groups only matching results and opens content-only sessions', async () => {
+  const p = props(); render(SpotlightSearch, { props: p });
+  await search('orchid');
+  for (const name of ['Sessions', 'Agents', 'MCP servers', 'Plugins', 'Notes', 'Documentation'])
+   expect(screen.getByRole('region', { name })).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'Hooks' })).toBeNull();
+  expect(screen.queryByText('never-render')).toBeNull();
+  await fireEvent.click(screen.getByText('Unrelated title'));
+  expect(p.onSelectSession).toHaveBeenCalledWith(expect.objectContaining({ id: 'session' }));
+ });
+ it('debounces and searches all sessions, not just the current project', async () => {
+  render(SpotlightSearch, { props: { ...props(), currentProjectId: 'project' } });
+  for (const value of ['o', 'or', 'orchid']) await fireEvent.input(screen.getByRole('textbox'), { target: { value } });
+  await vi.advanceTimersByTimeAsync(260);
+  expect(mocks.sessions).toHaveBeenCalledExactlyOnceWith('orchid', { limit: 20 });
+ });
+ it('keeps keyboard indices aligned across dynamic groups', async () => {
+  const p = props(); render(SpotlightSearch, { props: p }); await search('orchid');
+  await fireEvent.keyDown(window, { key: 'ArrowDown' });
+  await fireEvent.keyDown(window, { key: 'Enter' });
+  expect(p.onSelectAgent).toHaveBeenCalledWith('agent');
+ });
+ it('opens the selected note and doc, not just their list', async () => {
+  const p = props(); render(SpotlightSearch, { props: p }); await search('orchid');
+  await fireEvent.click(screen.getByText('Orchid note'));
+  expect(p.onOpenFeature).toHaveBeenCalledWith('notes', 'note');
+  await fireEvent.click(screen.getByText('Orchid guide'));
+  expect(p.onOpenFeature).toHaveBeenCalledWith('docs', 'features/orchid');
+ });
+ it('does not let an old request repopulate a cleared query', async () => {
+  let resolve!: (result: unknown) => void;
+  mocks.sessions.mockReturnValueOnce(new Promise(r => { resolve = r; }));
+  render(SpotlightSearch, { props: props() }); await search('orchid'); await search('');
+  resolve({ items: [{ id: 'old', title: 'Stale result' }] }); await tick(); await vi.advanceTimersByTimeAsync(1);
+  expect(screen.queryByText('Stale result')).toBeNull();
+ });
+ it('invalidates an old result during the next debounce window', async () => {
+  let resolve!: (result: unknown) => void;
+  mocks.sessions.mockReturnValueOnce(new Promise(r => { resolve = r; }));
+  render(SpotlightSearch, { props: props() }); await search('old');
+  await fireEvent.input(screen.getByRole('textbox'), { target: { value: 'new' } });
+  resolve({ items: [{ id: 'old', title: 'Stale result' }] }); await tick(); await vi.advanceTimersByTimeAsync(1);
+  expect(screen.queryByText('Stale result')).toBeNull();
+ });
+ it('reports partial failures while keeping successful sources', async () => {
+  mocks.sessions.mockRejectedValue(new Error('offline'));
+  render(SpotlightSearch, { props: props() }); await search('orchid');
+  expect(screen.getByText('Orchid note')).toBeTruthy();
+  expect(screen.getByText('Could not search: Sessions. Try again.')).toBeTruthy();
+ });
+ it('refreshes configuration on reopen', async () => {
+  const p = props(); const view = render(SpotlightSearch, { props: p }); await search('orchid');
+  await search('other');
+  expect(mocks.get.mock.calls.filter(([path]) => path === '/agents')).toHaveLength(1);
+  await view.rerender({ ...p, visible: false }); await view.rerender(p); await search('orchid');
+  expect(mocks.get.mock.calls.filter(([path]) => path === '/agents')).toHaveLength(2);
+ });
 });

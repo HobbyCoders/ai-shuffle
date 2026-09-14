@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { layout } from '$lib/stores/layout.svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * NotesCard - Global notes for ideas, bugs, planning
@@ -27,14 +28,16 @@
 		type NoteTag,
 		type NoteAttachment
 	} from '$lib/api/client';
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 
 	interface Props {
 		mobile?: boolean;
+		initialItemId?: string | null;
 	}
 
-	let { mobile = false }: Props = $props();
+	let { mobile = false, initialItemId }: Props = $props();
+	let consumedItemId: string | null = null;
 
 	// State
 	let notes = $state<Note[]>([]);
@@ -223,7 +226,7 @@
 
 	// Load data on mount
 	onMount(() => {
-		void restoreDraft();
+		void restoreDraft().finally(() => { draftRestored = true; });
 		loadData();
 		window.addEventListener('beforeunload', protectDraft);
 		window.addEventListener('focus', handleWindowFocus);
@@ -308,6 +311,19 @@
 		showPreview = false;
 		closeAutocomplete();
 	}
+
+	let draftRestored = $state(false);
+    $effect(() => {
+        const id = initialItemId;
+        if (!id) { consumedItemId = null; return; }
+        if (!draftRestored || id === consumedItemId) return;
+        consumedItemId = id;
+        let cancelled = false;
+        getNote(id).then(note => {
+            if (!cancelled) untrack(() => { openNote(note); layout.clearFeatureItemId(); });
+        }).catch(() => { if (!cancelled) error = 'Could not open the selected note.'; });
+        return () => { cancelled = true; };
+    });
 
 	// Open a note for editing
 	function openNote(note: Note) {

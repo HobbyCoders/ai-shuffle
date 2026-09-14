@@ -186,10 +186,10 @@
 				<LazyPanel
 					handle={SUB_PANELS.mcp}
 					label="MCP Servers"
-					props={{ embedded: true, onDetailChange: setDetail }}
+					props={{ embedded: true, initialSelectedId: requestedItemId, onDetailChange: setDetail }}
 				/>
 			{:else if sub === 'plugins'}
-				<LazyPanel handle={SUB_PANELS.plugins} label="Plugins" />
+				<LazyPanel handle={SUB_PANELS.plugins} props={{ initialSelectedId: requestedItemId }} label="Plugins" />
 			{:else if sub === 'hooks'}
 				<LazyPanel
 					handle={SUB_PANELS.hooks}

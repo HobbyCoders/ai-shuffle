@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { layout } from '$lib/stores/layout.svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * McpManagerCard - MCP Server management card for The Deck
@@ -8,7 +9,7 @@
 	 * - Form view: Add or edit an MCP server configuration (inline, not modal)
 	 */
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import {
 		mcp,
 		globalMcpServers,
@@ -27,6 +28,7 @@
 		/** When embedded in the Build page, render the header-less rows list
 		 *  while keeping the same editor form. */
 		embedded?: boolean;
+		initialSelectedId?: string | null;
 		/** Reports full-canvas detail/editor state so BuildPage can hide its chrome. */
 		onDetailChange?: (detail: boolean) => void;
 	}
@@ -34,6 +36,7 @@
 	let {
 		mobile = false,
 		embedded = false,
+		initialSelectedId,
 		onDetailChange
 	}: Props = $props();
 
@@ -65,6 +68,16 @@
 	onMount(() => {
 		mcp.loadGlobalServers();
 	});
+
+	let consumedItemId: string | null = null;
+    $effect(() => {
+        if (!initialSelectedId) { consumedItemId = null; return; }
+        const server = $globalMcpServers.find(server => server.name === initialSelectedId);
+        if (server && initialSelectedId !== consumedItemId) {
+            consumedItemId = initialSelectedId;
+            untrack(() => { openEditForm(server); layout.clearFeatureItemId(); });
+        }
+    });
 
 	// Form helpers
 	function resetForm() {

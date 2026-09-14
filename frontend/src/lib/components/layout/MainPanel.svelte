@@ -949,7 +949,7 @@
 					{:else if key === 'file-browser'}
 						<LazyPanel handle={panelForKey('file-browser')} label="Files" />
 					{:else if key === 'notes'}
-						<LazyPanel handle={panelForKey('notes')} label="Notes" />
+						<LazyPanel handle={panelForKey('notes')} props={{ initialItemId: $activeView?.type === 'notes' ? $activeView.itemId : null }} label="Notes" />
 					{:else if key === 'automations'}
 						<LazyPanel handle={panelForKey('automations')} label="Automations" />
 					{:else if key === 'stats'}
@@ -961,7 +961,7 @@
 					{:else if key === 'docs'}
 						<LazyPanel
 							handle={panelForKey('docs')}
-							props={{ mobile: isMobile }}
+							props={{ mobile: isMobile, initialItemId: $activeView?.type === 'docs' ? $activeView.itemId : null }}
 							label="Documentation"
 						/>
 					{/if}

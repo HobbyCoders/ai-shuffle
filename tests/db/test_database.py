@@ -952,7 +952,7 @@ class TestSearchSessionsSql:
         assert "s.status NOT IN ('archived','failed')" in store
 
     def test_every_cte_excludes_archived_and_failed(self):
-        """All three CTEs (title / legacy content / store content) drop
+        """All four CTEs (title / legacy / SDK / native content) drop
         ``status IN ('archived','failed')``. ``'failed'`` is ProviderAgent's
         verdict on a worker session whose dispatch errored: the transcript stays
         reachable from the session LISTS (visibility is deliberately unchanged),
@@ -961,7 +961,7 @@ class TestSearchSessionsSql:
         becomes searchable again."""
         sql = self._captured_search_sql()
 
-        assert sql.count("s.status NOT IN ('archived','failed')") == 3
+        assert sql.count("s.status NOT IN ('archived','failed')") == 4
         assert "s.status != 'archived'" not in sql
 
     def test_match_count_window_before_dedupe(self):
@@ -1030,7 +1030,7 @@ class TestSearchSessionsPaginatedSql:
         """Same exclusion as the non-paginated variant — a failed worker session
         must not surface in either search surface."""
         for sql in self._captured_paginated_sql():
-            assert sql.count("s.status NOT IN ('archived','failed')") == 3
+            assert sql.count("s.status NOT IN ('archived','failed')") == 4
             assert "s.status != 'archived'" not in sql
 
 

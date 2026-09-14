@@ -87,8 +87,8 @@ def get_all_notes(
         params: List[Any] = []
 
         if search:
-            query += " AND (title LIKE %s OR content LIKE %s)"
-            search_term = f"%{search}%"
+            query += " AND (title ILIKE %s OR content ILIKE %s)"
+            search_term = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             params.extend([search_term, search_term])
 
         if tag:

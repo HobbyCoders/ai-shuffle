@@ -1,5 +1,8 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { layout } from '$lib/stores/layout.svelte';
+	import { onMount, untrack } from 'svelte';
+	let { initialSelectedId }: { initialSelectedId?: string | null } = $props();
+	let consumedItemId: string | null = null;
 	import { api } from '$lib/api/client';
 	import { Search, Plus, ArrowLeft, Settings, Package, Mail, MessageCircle, Music, House, Lightbulb, Webhook, RefreshCw } from 'lucide-svelte';
 	import { getConnectors, getConnectorTypes, type Connector, type ConnectorTypeInfo } from '$lib/api/connectors';
@@ -64,6 +67,16 @@
 	}
 	onMount(() => { void load(); return () => { generation++; }; });
 	watchResources(['connectors', 'plugins'], load);
+
+    $effect(() => {
+        if (!initialSelectedId) { consumedItemId = null; return; }
+        const entry = entries.find(entry => entry.id === initialSelectedId)
+            ?? entries.find(entry => entry.id === `connection:${connections.find(c => c.id === initialSelectedId)?.type}`);
+        if (entry && initialSelectedId !== consumedItemId) {
+            consumedItemId = initialSelectedId;
+            untrack(() => { void open(entry); layout.clearFeatureItemId(); });
+        }
+    });
 
 	async function open(entry: Entry) {
 		selected = entry; details = null; error = ''; pendingRemoval = false;

@@ -2247,6 +2247,43 @@ def _fts_query_term(query: str) -> str:
     return cleaned
 
 
+def _search_literal_pattern(text: str) -> str:
+    return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _native_search_cte(projection: str, placeholder: str, instance_sql: str) -> str:
+    """Search visible user/assistant text, never tool payloads or system prompts.
+
+    The raw JSON prefilter uses the existing trigram index. The extracted text
+    predicate is authoritative so metadata cannot produce a false match.
+    """
+    return f"""
+        native_matches AS (
+            SELECT DISTINCT ON (s.id)
+                {projection},
+                'content' as match_type,
+                substring(texts.content FROM greatest(1, strpos(lower(texts.content), lower({placeholder})) - 60)
+                    FOR 240) as match_snippet,
+                to_timestamp(n.ts) as match_time
+            FROM fluid_session_nodes n
+            INNER JOIN sessions s ON s.sdk_session_id = n.session_id
+            CROSS JOIN LATERAL (
+                SELECT string_agg(block->>'text', ' ' ORDER BY ord) AS content
+                FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(n.message->'content') = 'array'
+                    THEN n.message->'content' ELSE '[]'::jsonb END
+                ) WITH ORDINALITY AS blocks(block, ord)
+                WHERE block->>'kind' = 'text'
+            ) texts
+            WHERE n.message::text ILIKE {placeholder}
+            AND texts.content ILIKE {placeholder}
+            AND n.message->>'role' IN ('user', 'assistant')
+            AND s.status NOT IN ('archived','failed'){instance_sql}
+            ORDER BY s.id, n.ts DESC
+        ),
+    """
+
+
 def search_sessions(
     query: str,
     project_id: Optional[str] = None,
@@ -2271,7 +2308,9 @@ def search_sessions(
     if not query or not query.strip():
         return []
 
-    search_term = f"%{query.strip()}%"
+    literal_pattern = _search_literal_pattern(query.strip())
+    raw_pattern = _search_literal_pattern(json.dumps(query.split()[0], ensure_ascii=False)[1:-1])
+    search_term = literal_pattern
     fts_query = _fts_query_term(query)
     _ph = ph()
     # Cross-install sharing (default): no per-install clause. Isolation mode:
@@ -2290,6 +2329,7 @@ def search_sessions(
         # session_messages. Joined to sessions on sdk_session_id.
         # match_count = COUNT(*) OVER (PARTITION BY id) taken BEFORE the final
         # dedupe, i.e. how many of {title, legacy-content, store-content} hit.
+        native_cte = _native_search_cte("s.id, s.project_id, s.profile_id, s.api_user_id, s.title, s.status, s.is_active, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out, s.turn_count, s.created_at, s.updated_at", _ph, inst_sql)
         sql = f"""
         WITH title_matches AS (
             SELECT
@@ -2314,7 +2354,7 @@ def search_sessions(
                 sm.created_at as match_time
             FROM session_messages sm
             INNER JOIN sessions s ON s.id = sm.session_id
-            WHERE sm.content_tsv @@ plainto_tsquery('english', {_ph})
+            WHERE (sm.content_tsv @@ plainto_tsquery('english', {_ph}) OR sm.content ILIKE {_ph})
             AND sm.role IN ('user', 'assistant')
             AND s.status NOT IN ('archived','failed'){inst_sql}
             ORDER BY s.id, sm.created_at DESC
@@ -2331,10 +2371,12 @@ def search_sessions(
             FROM session_store_entries sse
             INNER JOIN sessions s ON s.sdk_session_id = sse.session_id
             WHERE sse.subpath IS NULL
-            AND to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
+            AND (to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
+                 OR sse_entry_text(sse.entry) ILIKE {_ph})
             AND s.status NOT IN ('archived','failed'){inst_sql}
             ORDER BY s.id, sse.created_at DESC
         ),
+        {native_cte}
         all_matches AS (
             SELECT *, COUNT(*) OVER (PARTITION BY id) as match_count
             FROM (
@@ -2343,6 +2385,8 @@ def search_sessions(
                 SELECT * FROM content_matches
                 UNION ALL
                 SELECT * FROM store_matches
+                UNION ALL
+                SELECT * FROM native_matches
             ) unioned
         )
         SELECT DISTINCT ON (id) *
@@ -2355,8 +2399,9 @@ def search_sessions(
         # fts_query (+ instance_id).
         params: List[Any] = [
             search_term, *inst_params,
-            fts_query, fts_query, *inst_params,
-            fts_query, fts_query, *inst_params,
+            fts_query, fts_query, literal_pattern, *inst_params,
+            fts_query, fts_query, literal_pattern, *inst_params,
+            query.strip(), raw_pattern, literal_pattern, *inst_params,
         ]
 
         # Add filters
@@ -2396,8 +2441,8 @@ def search_sessions_paginated(
 ) -> tuple[List[SessionSearchResultPaginated], int]:
     """
     Search sessions by title and message content with pagination.
-    Uses Postgres tsvector for content search (fast indexed lookup) with ILIKE
-    for title search.
+    Matches titles and user/assistant messages across legacy, SDK and native
+    transcripts. Literal substring matching supplements legacy full-text search.
 
     Excludes ``status IN ('archived','failed')`` in every CTE, for the reasons
     spelled out on :func:`search_sessions`.
@@ -2408,7 +2453,9 @@ def search_sessions_paginated(
     if not query or not query.strip():
         return [], 0
 
-    search_term = f"%{query.strip()}%"
+    literal_pattern = _search_literal_pattern(query.strip())
+    raw_pattern = _search_literal_pattern(json.dumps(query.split()[0], ensure_ascii=False)[1:-1])
+    search_term = literal_pattern
     fts_query = _fts_query_term(query)
     _ph = ph()
     # Cross-install sharing (default): no per-install clause. Isolation mode:
@@ -2427,6 +2474,7 @@ def search_sessions_paginated(
         # sessions on sdk_session_id. match_count = COUNT(*) OVER (PARTITION BY
         # id) taken BEFORE the final dedupe, i.e. how many of {title,
         # legacy-content, store-content} hit.
+        native_cte = _native_search_cte("s.*", _ph, inst_sql)
         base_cte = f"""
         WITH title_matches AS (
             SELECT
@@ -2447,7 +2495,7 @@ def search_sessions_paginated(
                 sm.created_at as match_time
             FROM session_messages sm
             INNER JOIN sessions s ON s.id = sm.session_id
-            WHERE sm.content_tsv @@ plainto_tsquery('english', {_ph})
+            WHERE (sm.content_tsv @@ plainto_tsquery('english', {_ph}) OR sm.content ILIKE {_ph})
             AND sm.role IN ('user', 'assistant')
             AND s.status NOT IN ('archived','failed'){inst_sql}
             ORDER BY s.id, sm.created_at DESC
@@ -2462,10 +2510,12 @@ def search_sessions_paginated(
             FROM session_store_entries sse
             INNER JOIN sessions s ON s.sdk_session_id = sse.session_id
             WHERE sse.subpath IS NULL
-            AND to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
+            AND (to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
+                 OR sse_entry_text(sse.entry) ILIKE {_ph})
             AND s.status NOT IN ('archived','failed'){inst_sql}
             ORDER BY s.id, sse.created_at DESC
         ),
+        {native_cte}
         all_matches AS (
             SELECT *, COUNT(*) OVER (PARTITION BY id) as match_count
             FROM (
@@ -2474,6 +2524,8 @@ def search_sessions_paginated(
                 SELECT * FROM content_matches
                 UNION ALL
                 SELECT * FROM store_matches
+                UNION ALL
+                SELECT * FROM native_matches
             ) unioned
         ),
         deduped_matches AS (
@@ -2487,8 +2539,9 @@ def search_sessions_paginated(
         # fts_query (+ instance_id).
         base_params: List[Any] = [
             search_term, *inst_params,
-            fts_query, fts_query, *inst_params,
-            fts_query, fts_query, *inst_params,
+            fts_query, fts_query, literal_pattern, *inst_params,
+            fts_query, fts_query, literal_pattern, *inst_params,
+            query.strip(), raw_pattern, literal_pattern, *inst_params,
         ]
 
         # Build filter conditions
