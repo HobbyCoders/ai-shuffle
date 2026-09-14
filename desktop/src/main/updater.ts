@@ -7,6 +7,7 @@ export type UpdatePhase = 'idle' | 'checking' | 'available' | 'downloading' | 'r
 export interface UpdateState {
   phase: UpdatePhase; version: string | null; percent: number | null;
   error: string | null; checkedAt: string | null; message?: string | null;
+  running_version?: string | null;
 }
 export class Updater {
   private state: UpdateState = { phase: 'unsupported', version: null, percent: null, error: null, checkedAt: null };
@@ -64,7 +65,7 @@ export class Updater {
     const pending = applications.pendingVersion !== applications.version ? applications.pendingVersion : null;
     this.set({ phase: pending ? 'ready' : 'idle', version: pending?.slice(0, 12) ?? null, error: null, message: null, percent: null });
   }
-  get current(): UpdateState { return { ...this.state }; }
+  get current(): UpdateState { return { ...this.state, running_version: this.applications?.version ?? null }; }
   subscribe(fn: (state: UpdateState) => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   private set(patch: Partial<UpdateState>): void { this.state = { ...this.state, ...patch }; for (const fn of this.listeners) fn(this.current); }
   start(): void {

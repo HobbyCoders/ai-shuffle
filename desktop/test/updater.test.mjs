@@ -137,6 +137,19 @@ test('pending source state is immediately ready and checks and downloads leave i
  await updater.check(); await updater.download(); assert.equal(updater.current.phase, 'ready');
 });
 
+test('bridge reports the running revision separately from the staged update', async () => {
+ const { updater } = fixture(); const seen = [];
+ updater.useApplications(source({ pendingVersion: 'b'.repeat(40) }));
+ updater.setBridge(async state => { seen.push(state); return {}; }, async () => true);
+ await updater.exchange();
+ assert.equal(seen[0].version, 'b'.repeat(12));
+ assert.equal(seen[0].running_version, 'a'.repeat(40));
+ updater.useApplications(source({ version: 'b'.repeat(40), pendingVersion: 'b'.repeat(40) }));
+ await updater.exchange();
+ assert.equal(seen[1].phase, 'idle');
+ assert.equal(seen[1].running_version, 'b'.repeat(40));
+});
+
 test('a pending revision already running its first boot is not offered for installation again', async () => {
  const { updater, calls } = fixture();
  updater.useApplications(source({ pendingVersion: 'a'.repeat(40) }));
