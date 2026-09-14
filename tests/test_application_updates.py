@@ -198,3 +198,187 @@ def test_default_enabled_policy_and_desktop_mirror(tmp_path, monkeypatch, value,
 def test_account_policy_is_shared():
     from app.network.policy import is_shared_setting_key
     assert is_shared_setting_key(policy.KEY)
+
+@pytest.mark.parametrize("failure", [
+    "busy", "policy", "files", "preflight-timeout", "flush", "stop-timeout",
+    "stop-response", "stop-group", "activating", "popen", "none",
+])
+def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failure):
+    """Drive run -> watch -> restart and the real shutdown-latch producer.
+
+    Only transport, process/DB boundaries and the flush failure are injected;
+    staging validation, lifecycle authorization, shutdown and update state are real.
+    """
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from starlette.requests import Request
+    from app.api import internal
+    from app.core import session_runtime, startup, task_persistence
+    from app.core.config import Settings
+    from app.core.task_registry import task_registry
+    pytest.importorskip("fcntl", reason="The container supervisor requires POSIX file locking")
+    from docker import container_runtime as supervisor
+    from docker import application_updates as update_module
+
+    updater, publish, enabled, _, _ = feed
+    publish()
+    updater.check(download=True)
+    if failure == "files":
+        (updater.directory(B) / "complete").unlink()
+    if failure == "policy":
+        enabled[0] = False
+
+    # run loads image provenance and the updater beside its own source file.
+    packaging = tmp_path / "packaging"
+    packaging.mkdir()
+    (packaging / "image.json").write_text(json.dumps(updater.image))
+    (packaging / "application-update-key.pem").write_bytes(updater.public_key)
+    (packaging / "application_updates.py").write_text(
+        "from docker.application_updates import ContainerUpdates, UpdateError\n"
+    )
+    monkeypatch.setattr(supervisor, "__file__", str(packaging / "container_runtime.py"))
+    def factory(root, image, public_key, allowed, lifecycle):
+        updater.allowed, updater.lifecycle = allowed, lifecycle
+        return updater
+    monkeypatch.setattr(update_module, "ContainerUpdates", factory)
+    monkeypatch.setattr(startup, "is_shutting_down", False)
+    monkeypatch.setattr(internal, "_shutdown_task", None)
+    monkeypatch.setattr(session_runtime, "_executions", {})
+    monkeypatch.setattr(task_registry, "active_session_ids", lambda: ["busy"] if failure == "busy" else [])
+    for name in ("HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "DATA_DIR"):
+        monkeypatch.setenv(name, str(tmp_path / name.lower()))
+    monkeypatch.setenv("AI_SHUFFLE_ENV_FILE", "/dev/null")
+    monkeypatch.setenv("START_CHROME", "0")
+
+    events, actions = [], []
+    release_flush = asyncio.Event()
+    async def flush():
+        assert startup.is_shutting_down, "the real producer must set the latch first"
+        events.append("flush")
+        if failure == "flush":
+            raise OSError("synthetic flush failure")
+        if failure == "stop-timeout":
+            await release_flush.wait()
+    flush_mock = AsyncMock(side_effect=flush)
+    monkeypatch.setattr(task_persistence, "flush", flush_mock)
+
+    with asyncio.Runner() as runner:
+        def handler(request):
+            action = request.url.path.rsplit("/", 1)[-1]
+            actions.append(action)
+            local_request = Request({"type": "http", "shuffle.ingress": "local",
+                                     "headers": [(k.encode(), v.encode()) for k, v in request.headers.items()]})
+            if action == "update-policy":
+                internal.require_desktop(local_request)
+                return httpx.Response(200, json={"allow_updates": enabled[0]})
+            if action == "active-sessions":
+                if failure == "preflight-timeout":
+                    raise httpx.ReadTimeout("synthetic preflight timeout", request=request)
+                result = runner.run(internal.desktop_active_sessions(local_request))
+            else:
+                assert action == "stop-sessions"
+                async def stop():
+                    return await asyncio.wait_for(internal.desktop_stop_sessions(local_request), 0.01)
+                try:
+                    result = runner.run(stop())
+                except TimeoutError as exc:
+                    assert startup.is_shutting_down
+                    assert not internal._shutdown_task.done(), "HTTP cancellation must not cancel cleanup"
+                    raise httpx.ReadTimeout("synthetic stop timeout", request=request) from exc
+                except OSError:
+                    return httpx.Response(500)
+                if failure == "stop-response":
+                    result = {"stopped": False}
+            return httpx.Response(200, json=result)
+
+        # feed patches the shared httpx module: use a captured real client type.
+        with httpx.Client() as client:
+            client_type = type(client)
+        monkeypatch.setattr(httpx, "Client", lambda **kw: client_type(transport=httpx.MockTransport(handler), **kw))
+        db = Mock(process=None)
+        db.close.side_effect = lambda: events.append("db-close")
+        monkeypatch.setattr(supervisor, "Database", lambda settings: db)
+        old, new = Mock(name="old"), Mock(name="new")
+        old.poll.return_value = new.poll.return_value = None
+        def popen(*args, **kwargs):
+            if "initial-start" not in events:
+                events.append("initial-start")
+                monkeypatch.setenv("SHUFFLE_DESKTOP_LIFECYCLE_TOKEN", kwargs["env"]["SHUFFLE_DESKTOP_LIFECYCLE_TOKEN"])
+                return old
+            events.append("replacement-start")
+            assert updater.state["booting"] == B
+            if failure == "popen":
+                raise OSError("synthetic spawn failure")
+            return new
+        spawn = Mock(side_effect=popen)
+        monkeypatch.setattr(supervisor.subprocess, "Popen", spawn)
+        def stop_group(process, timeout):
+            if process is None:
+                return
+            events.append("stop-old" if process is old else "stop-new")
+            if failure == "stop-group" and events.count("stop-old") == 1:
+                raise OSError("synthetic process stop failure")
+            process.poll.return_value = 0
+            if failure == "stop-timeout":
+                assert startup.is_shutting_down
+                assert not internal._shutdown_task.done()
+                release_flush.set()
+                async def finish_stop():
+                    await internal._shutdown_task
+                runner.run(finish_stop())
+        monkeypatch.setattr(supervisor, "stop_group", stop_group)
+        if failure == "activating":
+            monkeypatch.setattr(updater, "activating", Mock(side_effect=OSError("synthetic state write failure")))
+
+        # Deterministic watch clock, with a guard against silently continuing.
+        stop_event = Mock(wraps=threading.Event())
+        stop_event.is_set.side_effect = [False, False, False, True]
+        monkeypatch.setattr(supervisor, "STOP", stop_event)
+        clock = iter(range(100))
+        monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+        monkeypatch.setattr(supervisor, "READY_PROBE_INTERVAL", 1000)
+        monitor_type = supervisor.ReadinessMonitor
+        monkeypatch.setattr(supervisor, "ReadinessMonitor", lambda url: monitor_type(url, probe=lambda _: False))
+        safe = failure in {"busy", "policy", "files", "preflight-timeout"}
+        def still_supervising(_):
+            if safe:
+                assert not startup.is_shutting_down
+                assert old.poll() is None
+                assert "stop-old" not in events
+        stop_event.wait.side_effect = still_supervising
+        updater.install_requested.set()
+        tick = Mock()
+        monkeypatch.setattr(updater, "tick", tick)
+        status = Mock(wraps=updater.publish)
+        monkeypatch.setattr(updater, "publish", status)
+        result = supervisor.run(Settings(_env_file=None), "run")
+
+        assert result == (0 if safe or failure == "none" else 1)
+        if safe:
+            assert not startup.is_shutting_down
+            flush_mock.assert_not_awaited()
+            assert "stop-sessions" not in actions
+            assert status.call_args.args == ("ready",)
+            assert stop_event.wait.call_count == 2, "old worker remains supervised until external shutdown"
+        else:
+            assert startup.is_shutting_down, "recovery must never clear a real shutdown latch"
+            flush_mock.assert_awaited_once()
+            status.assert_not_called()
+            if failure != "none":
+                stop_event.wait.assert_not_called(), "fatal restart must exit watch immediately"
+        assert events[-1] == "db-close"
+        assert "stop-old" in events
+        if failure in {"popen", "none"}:
+            assert spawn.call_count == 2
+            assert updater.state == {"pending": B, "booting": B}
+            if failure == "none":
+                assert events[-2] == "stop-new", "finally owns the replacement process"
+            # A potentially migrated boot never falls back to the image on restart.
+            with pytest.raises(UpdateError, match="older code cannot safely run"):
+                ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: False, lambda _: {})
+        else:
+            spawn.assert_called_once()
+            assert updater.state == {"pending": B}

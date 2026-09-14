@@ -44,6 +44,10 @@ class RuntimeFailure(Exception):
     """Deliberately secret-free operator diagnostic."""
 
 
+class RestartRejected(RuntimeFailure):
+    """Preflight failed before any request could quiesce the running worker."""
+
+
 def log(message):
     print(f"container runtime: {message}", file=sys.stderr, flush=True)
 
@@ -538,8 +542,15 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None):
                     app = restart(app)
                     monitor = ReadinessMonitor(monitor.url)
                     next_probe = time.monotonic() + 1
-                except Exception:
+                except RestartRejected:
                     updates.publish("ready", error="Could not restart for the update. Finish active sessions, check Allow updates, then retry.")
+                except Exception:
+                    # A stop request may have latched shutdown even when its
+                    # response failed or timed out. Never advertise that worker
+                    # as usable, clear its latch, or roll back migrated code.
+                    log("application update restart failed after preflight; "
+                        "exiting so the container restarts")
+                    return 1
             elif monitor.ever_ready and monitor.failures == 0:
                 updates.tick()
         STOP.wait(0.2)
@@ -633,10 +644,15 @@ def run(settings, action, filename=None):
 
         def restart(current):
             nonlocal app
-            if updates.lifecycle("active-sessions").get("active_sessions") != 0:
-                raise UpdateError("Finish active sessions before restarting")
-            # Validate staged files and policy before stopping the healthy app.
-            command, cwd, child_env = updates.launch(env, activate=True)
+            try:
+                if updates.lifecycle("active-sessions").get("active_sessions") != 0:
+                    raise UpdateError("Finish active sessions before restarting")
+                # Validate staged files and policy before stopping the healthy app.
+                command, cwd, child_env = updates.launch(env, activate=True)
+            except Exception as exc:
+                raise RestartRejected("Application update preflight failed") from exc
+            # Once sent, even a timeout cannot prove the worker is still usable.
+            # Let watch fail closed; run's finally stops children with DB alive.
             if updates.lifecycle("stop-sessions").get("stopped") is not True:
                 raise UpdateError("Could not quiesce the worker")
             stop_group(current, 30)
