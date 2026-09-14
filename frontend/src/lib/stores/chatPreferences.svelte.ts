@@ -32,6 +32,7 @@ export interface ChatPreferences {
 
 	// Background tasks strip
 	activeTasksCollapsed: boolean;      // Whether the active-tasks strip is minimized
+	activeWorkersCollapsed: boolean;    // Saved expansion choice for the active-workers panel
 
 	// Todo list
 	todosStartExpanded: boolean;        // Initial collapse state for todo list
@@ -52,6 +53,7 @@ const DEFAULT_PREFERENCES: ChatPreferences = {
 	toolsStartExpanded: false,          // Collapsed by default (current behavior)
 	groupToolCalls: true,               // Group consecutive tools by default (current behavior)
 	activeTasksCollapsed: false,        // Expanded by default
+	activeWorkersCollapsed: true,       // Collapsed until the user expands it
 	todosStartExpanded: true,           // Expanded by default (current behavior)
 	autoScrollOnNewMessage: true,
 	showMessageTimestamps: false,       // Off by default - cleaner look
@@ -224,6 +226,7 @@ export const chatPreferences = {
 	setToolsStartExpanded: (value: boolean) => updatePreference('toolsStartExpanded', value),
 	setGroupToolCalls: (value: boolean) => updatePreference('groupToolCalls', value),
 	setActiveTasksCollapsed: (value: boolean) => updatePreference('activeTasksCollapsed', value),
+	setActiveWorkersCollapsed: (value: boolean) => updatePreference('activeWorkersCollapsed', value),
 	setTodosStartExpanded: (value: boolean) => updatePreference('todosStartExpanded', value),
 	setAutoScrollOnNewMessage: (value: boolean) => updatePreference('autoScrollOnNewMessage', value),
 	setShowMessageTimestamps: (value: boolean) => updatePreference('showMessageTimestamps', value),

@@ -1,22 +1,25 @@
 <script lang="ts">
 	import { ChevronDown, LoaderCircle } from 'lucide-svelte';
 	import { swarms } from '$lib/stores/swarms';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { isSwarmActive } from '$lib/utils/swarm';
 	import SwarmCard from './SwarmCard.svelte';
 
 	let { sessionId }: { sessionId?: string | null } = $props();
-	let expanded = $state(false);
+	const expanded = $derived(!chatPreferences.current.activeWorkersCollapsed);
 	const active = $derived(Object.values($swarms.bySession[sessionId ?? ''] ?? {}).filter(isSwarmActive));
 	const running = $derived(active.reduce((count, swarm) => count + swarm.tasks.filter(task => task.status === 'running').length, 0));
+	// The parent passes a store-backed prop. Track the ID's value, not every
+	// session-store update (messages, streaming deltas, and worker receipts).
+	const hydrationSessionId = $derived(sessionId ?? null);
 	$effect(() => {
-		expanded = false;
-		if (sessionId) void swarms.hydrate(sessionId);
+		if (hydrationSessionId) void swarms.hydrate(hydrationSessionId);
 	});
 </script>
 
 {#if active.length}
 	<section class="active-swarms" aria-label="Active workers">
-		<button class="workers-toggle" aria-expanded={expanded} onclick={() => expanded = !expanded}>
+		<button class="workers-toggle" aria-expanded={expanded} onclick={() => chatPreferences.setActiveWorkersCollapsed(expanded)}>
 			<LoaderCircle size={13} class="worker-spinner" aria-hidden="true" />
 			<span>{running ? `${running} ${running === 1 ? 'worker' : 'workers'} running` : 'Workers queued'}</span>
 			<ChevronDown size={12} class={expanded ? 'expanded' : ''} aria-hidden="true" />
