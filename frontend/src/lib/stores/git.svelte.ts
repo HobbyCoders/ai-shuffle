@@ -930,6 +930,17 @@ export const git = {
 		if (_statusInFlight) return; // Prevent overlapping requests
 		if (_worktreeGone) return; // Worktree deleted — stop polling
 		if (_isBackingOff()) return; // Server error backoff — skip this cycle
+		// Status alone cannot hydrate the header after an initial owner/network
+		// failure. Retry the coherent load (including branches and PR state),
+		// preserving the session target and the load's overlap/stale-response guards.
+		if (!_state.hydrated) {
+			if (_state.worktreeId) {
+				await git.loadForWorktree(_state.projectId, _state.worktreeId, true, _state.sessionId ?? undefined);
+			} else {
+				await git.loadRepository(_state.projectId, true, _state.sessionId ?? undefined);
+			}
+			return;
+		}
 		const scope = _loadedScope ?? _scopeKey(_state.projectId, _state.worktreeId, _state.sessionId);
 		const key = _identityFor(scope);
 		const projectId = _state.projectId;

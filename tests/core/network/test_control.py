@@ -174,6 +174,66 @@ async def test_remote_nonblocking_answer_is_durable_only_on_owner(workers, monke
         assert interactions.get_answered_interactions("s-question")[0]["answered_by_device"] == b.device_id
 
 
+async def test_control_reauthenticates_after_owner_token_reset(workers, monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.core import turn_manager
+
+    a, b = workers("token-owner"), workers("token-viewer")
+    served = ServedBy(a, "http://a.local:8000")
+    real_async = httpx.AsyncClient
+
+    def async_client(*args, **kwargs):
+        kwargs["transport"] = served.transport()
+        return real_async(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", async_client)
+    interrupt = AsyncMock(return_value={"id": "turn_1"})
+    monkeypatch.setattr(turn_manager, "interrupt_async", interrupt)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    _new_session(a, "s-token", "On A")
+    converge([a, b])
+    with b.active():
+        link = transport.PeerLink(a.device_id, [served.base_url])
+        transport._links[a.device_id] = link
+        async with httpx.AsyncClient() as client:
+            await link.authenticate(client, engine.require_context())
+        # Real issuer invalidation, as on restart, while the cached token's
+        # advertised expiry is still in the future. No fabricated 401 response.
+        tokens.reset_for_tests()
+        served.requests.clear()
+        result = await control.interrupt(a.device_id, "s-token", "stop")
+        assert result["interrupted"] is True
+        assert served.requests == [
+            ("POST", "/api/v1/network/peer/control/interrupt"),
+            ("POST", "/api/v1/network/peer/auth/challenge"),
+            ("POST", "/api/v1/network/peer/auth/token"),
+            ("POST", "/api/v1/network/peer/control/interrupt"),
+        ]
+        interrupt.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failure, attempts, auth_calls", [
+    (transport.PeerTokenRejected("token rejected"), 2, 2),
+    (transport.PeerError("HTTP 403 forbidden"), 1, 1),
+    (transport.PeerError("HTTP 500 failed"), 1, 1),
+    (httpx.ReadTimeout("timeout"), 1, 1),
+])
+async def test_control_retry_is_bounded_and_only_for_rejected_tokens(monkeypatch, failure, attempts, auth_calls):
+    from unittest.mock import AsyncMock
+
+    link = transport.PeerLink("owner", ["http://a.local:8000"])
+    link.authenticate = AsyncMock()
+    link._request = AsyncMock(side_effect=failure)
+    monkeypatch.setitem(transport._links, "owner", link)
+    monkeypatch.setattr(engine, "require_context", lambda: object())
+    with pytest.raises((control.RunnerUnreachable, control.ControlRefused)):
+        await control.call("owner", "session-git", {"action": "get_git_status"})
+    assert link._request.await_count == attempts
+    assert link.authenticate.await_count == auth_calls
+
+
 async def test_remote_owner_receives_turns_interrupts_and_answers(workers, monkeypatch):
     a, b = workers("a"), workers("b")
     served = ServedBy(a, "http://a.local:8000")

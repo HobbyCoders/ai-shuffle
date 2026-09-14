@@ -88,11 +88,21 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
             await link.authenticate(client, ctx)
             # DB-backed control payloads contain datetimes (notably session rows).
             # httpx does not apply FastAPI's response encoding to outgoing JSON.
-            result = await link._request(
-                client, "POST", f"/api/v1/network/peer/control/{action}",
-                json_body=jsonable_encoder(body or {}),
-                **({"timeout": timeout} if timeout is not None else {}),
-            )
+            for attempt in range(2):
+                try:
+                    result = await link._request(
+                        client, "POST", f"/api/v1/network/peer/control/{action}",
+                        json_body=jsonable_encoder(body or {}),
+                        **({"timeout": timeout} if timeout is not None else {}),
+                    )
+                    break
+                except transport.PeerTokenRejected:
+                    # A worker restart invalidates tokens before their advertised
+                    # expiry. A 401 is pre-dispatch, so retrying cannot duplicate
+                    # a mutation. Never retry timeouts or other action failures.
+                    if attempt:
+                        raise
+                    await link.authenticate(client, ctx)
         except transport.PeerError as exc:
             message = str(exc)
             if message.startswith("HTTP 4"):

@@ -55,6 +55,10 @@ class PeerError(RuntimeError):
     pass
 
 
+class PeerTokenRejected(PeerError):
+    """The peer rejected authentication before dispatching the action."""
+
+
 class PeerLink:
     """One peer: endpoint candidates, a cached token, and an HTTP client."""
 
@@ -90,7 +94,7 @@ class PeerLink:
                                         headers=headers, timeout=120 if path == "/api/v1/network/peer/state" else timeout)
         if response.status_code == 401 and auth:
             self.token = None
-            raise PeerError("token rejected")
+            raise PeerTokenRejected("token rejected")
         if response.status_code >= 400:
             detail = ""
             try:

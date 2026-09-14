@@ -129,6 +129,26 @@ describe('git store — cleaned-up / reused worktree', () => {
 	});
 });
 
+describe('git store — initial owner failure recovery', () => {
+	it.each([null, 'wt-remote'])('hydrates the complete header on the next poll (%s)', async (worktreeId) => {
+		git.setRemoteSession('remote-session', true);
+		mocks.getGitStatus.mockRejectedValueOnce({ status: 503, detail: 'token rejected' });
+		if (worktreeId) await git.loadForWorktree('p1', worktreeId, false, 'remote-session');
+		else await git.loadRepository('p1', false, 'remote-session');
+		expect(git.current.hydrated).toBe(false);
+
+		await git.refreshStatus();
+
+		expect(git.current.hydrated).toBe(true);
+		expect(git.current.error).toBeNull();
+		expect(git.current.prState?.open_pr?.number).toBe(7);
+		expect(git.current.branches).toHaveLength(1);
+		expect(git.current.sessionId).toBe('remote-session');
+		expect(mocks.getPrState).toHaveBeenCalledWith('p1', worktreeId ?? undefined, 'remote-session');
+		expect(mocks.getWorktrees).not.toHaveBeenCalled();
+	});
+});
+
 describe('git store — checkout-keyed cache (G4)', () => {
 	it('keeps a remote checkout separate from the same local project and branch', async () => {
 		await git.loadRepository('p1', false, 'local-session');
