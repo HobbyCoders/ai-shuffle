@@ -27,6 +27,7 @@ export class WorkspaceBridge {
   private refreshRequested = false;
   private refreshSoon?: ReturnType<typeof setTimeout>;
   private lastRefresh = 0;
+  private lastActivity = Date.now();
   constructor(session: Session, private config: BridgeConfig, private transport: typeof fetch = fetch) {
     this.workspace = new BrowserWorkspace(session);
     this.workspace.onChange = () => { this.dirty = true; void this.flush(); };
@@ -97,17 +98,19 @@ export class WorkspaceBridge {
   private scheduleRefresh(): void {
     clearTimeout(this.refreshTimer);
     if (this.abort.signal.aborted || this.viewerCount === 0) return;
-    // Events and command completion refresh immediately. Poll only for DOM /
-    // title changes that Playwright does not report, while a panel is watching.
-    // Older hosts without viewer_count keep a slower compatibility fallback.
-    this.refreshTimer = setTimeout(() => void this.refresh(), this.viewerCount === undefined ? 5000 : 1000);
+    // Events and commands refresh immediately. A passive viewer needs only a
+    // slower fallback for DOM/title changes that Playwright does not report.
+    // Heartbeats preserve ownership, but must not keep metadata collection hot.
+    const active = this.viewerCount !== undefined && Date.now() - this.lastActivity < 5000;
+    this.refreshTimer = setTimeout(() => void this.refresh(false), active ? 1000 : 5000);
     this.refreshTimer.unref();
   }
-  private async refresh(): Promise<void> {
+  private async refresh(activity = true): Promise<void> {
     if (this.abort.signal.aborted) return;
+    if (activity) this.lastActivity = Date.now();
     if (this.refreshing) { this.refreshRequested = true; return; }
     if (Date.now() - this.lastRefresh < 200) {
-      if (!this.refreshSoon) this.refreshSoon = setTimeout(() => { this.refreshSoon = undefined; void this.refresh(); }, 200);
+      if (!this.refreshSoon) this.refreshSoon = setTimeout(() => { this.refreshSoon = undefined; void this.refresh(false); }, 200);
       return;
     }
     this.lastRefresh = Date.now();
@@ -116,7 +119,7 @@ export class WorkspaceBridge {
     finally {
       this.refreshing = false;
       this.scheduleRefresh();
-      if (this.refreshRequested) { this.refreshRequested = false; void this.refresh(); }
+      if (this.refreshRequested) { this.refreshRequested = false; void this.refresh(false); }
     }
   }
   private async pollLoop(): Promise<void> {
@@ -136,7 +139,8 @@ export class WorkspaceBridge {
           void this.workspace.receive(command).then(result => {
             if (this.abort.signal.aborted) return;
             if (this.results.length >= 512) { this.stop(); return; }
-            this.results.push(result); void this.flush(); void this.refresh();
+            this.results.push(result); void this.flush();
+            if (!object(command) || command.op !== "heartbeat") void this.refresh();
           });
         }
         delay = 250;

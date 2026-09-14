@@ -56,8 +56,11 @@ export async function readEditors(page: Page): Promise<BrowserEditor[]> {
       const anchor = type === 'file' && (!el.checkVisibility() || el.getBoundingClientRect().width < 1)
         ? Array.from(el.labels ?? []).find(label => label.checkVisibility()) ?? el : el;
       const chooser = type === 'file' && registry.pending === el;
+      // Large forms often retain thousands of hidden fields. Skip them before
+      // asking for geometry, while preserving explicit hidden file choosers.
+      if (!chooser && !anchor.checkVisibility()) continue;
       const rect = chooser ? new DOMRect(16, 16, Math.max(240, innerWidth - 32), 44) : anchor.getBoundingClientRect();
-      if ((!chooser && !anchor.checkVisibility()) || rect.width < 1 || rect.height < 1 || rect.bottom <= 0 || rect.right <= 0 || rect.top >= innerHeight || rect.left >= innerWidth) continue;
+      if (rect.width < 1 || rect.height < 1 || rect.bottom <= 0 || rect.right <= 0 || rect.top >= innerHeight || rect.left >= innerWidth) continue;
       // Do not put password contents into shared workspace state.
       const value = type === 'password' ? '' : type === 'file' ? Array.from((el as HTMLInputElement).files ?? []).map(f => f.name).join(', ') : el.value;
       if (value.length > 16384 || value.length > budget) continue;

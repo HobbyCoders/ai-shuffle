@@ -496,7 +496,12 @@ export class WorkerSupervisor extends EventEmitter {
 		env.SHUFFLE_DESKTOP_LIFECYCLE_TOKEN = this.lifecycleToken;
 		const attachToken = randomBytes(32).toString('hex');
 		env.SHUFFLE_DESKTOP_ATTACH_TOKEN = attachToken;
-		const child = spawn(this.opts.runtime.python, ['-m', 'app.main'], {
+		// The preview job owns descendants even after an intermediate parent exits.
+		// Normal installed workers retain their existing lifecycle.
+		const entry = process.platform === 'win32' && this.opts.runtime.mode === 'repo'
+			&& this.opts.profileDir && env.AI_SHUFFLE_PREVIEW === '1'
+			? 'app.preview_process' : 'app.main';
+		const child = spawn(this.opts.runtime.python, ['-m', entry], {
 			cwd: this.opts.runtime.serverDir,
 			env,
 			stdio: ['ignore', 'pipe', 'pipe'],
