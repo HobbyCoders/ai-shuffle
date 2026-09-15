@@ -78,7 +78,7 @@ const baseProps = {
 afterEach(cleanup);
 
 describe('WorkLogGroup', () => {
-	it('keeps mid-turn navigation anchors when settled work is collapsed or expanded', async () => {
+	it('keeps legacy embedded turn anchors when settled work is collapsed or expanded', async () => {
 		const messages = [
 			{ id: 'prompt', role: 'user', content: 'Start', turnId: 'turn-1' },
 			{ ...message, turnId: 'turn-1' },
@@ -92,6 +92,12 @@ describe('WorkLogGroup', () => {
 		const observed = new Set<HTMLElement>();
 		const view = render(WorkLogGroup, { props: {
 			...group, row,
+			// Current grouping splits at steers. Pin the component's legacy ordered
+			// sequence contract explicitly rather than expecting the builder to
+			// put new steers back inside a disclosure.
+			sequence: messages.slice(1).map((message, index) => ({
+				message, index: index + 1, hiddenWhenCollapsed: message.role !== 'user'
+			})),
 			observeTurnAnchor: (node: HTMLElement) => {
 				if (node.dataset.userTurnId) observed.add(node);
 				return { destroy: () => { observed.delete(node); } };
