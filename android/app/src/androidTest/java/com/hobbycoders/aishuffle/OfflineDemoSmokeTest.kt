@@ -86,11 +86,12 @@ class OfflineDemoSmokeTest {
         }
         try {
             PresenceFixture().use {
-                ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use { scenario ->
-                    val touches = mutableListOf<String>()
-                    scenario.onActivity { activity ->
-                        val callback = activity.window.callback
-                        activity.window.callback = object : android.view.Window.Callback by callback {
+                val touches = java.util.concurrent.CopyOnWriteArrayList<String>()
+                val monitor = androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
+                val callback = androidx.test.runner.lifecycle.ActivityLifecycleCallback { activity, stage ->
+                    if (activity is ServerListActivity && stage == androidx.test.runner.lifecycle.Stage.CREATED) {
+                        val original = activity.window.callback
+                        activity.window.callback = object : android.view.Window.Callback by original {
                             override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
                                 val buttons = ArrayList<View>()
                                 activity.window.decorView.findViewsWithText(buttons, "Settings", View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION)
@@ -100,23 +101,35 @@ class OfflineDemoSmokeTest {
                                     "bounds=$bounds focused=${activity.hasWindowFocus()} pressed=${button.isPressed}"
                                 touches += detail
                                 android.util.Log.i("DemoNavigation", detail)
-                                return callback.dispatchTouchEvent(event)
+                                return original.dispatchTouchEvent(event)
                             }
                         }
                     }
-                    onView(withText("Workers")).check(matches(isDisplayed()))
-                    onView(withText("Explore offline demo")).check(doesNotExist())
-                    onView(withContentDescription("Settings")).perform(click())
-                    TestScreenshots.capture("offline-demo-after-settings-tap")
-                    try { onView(withText("Explore offline demo")).perform(scrollTo(), click()) }
-                    catch (failure: Throwable) {
-                        throw AssertionError("Single Settings tap: $touches; state=${scenario.state}", failure)
+                }
+                instrumentation.runOnMainSync { monitor.addLifecycleCallback(callback) }
+                try {
+                    // Independent launches, never a retry of an ignored tap. Stop at the first failure.
+                    repeat(10) { launch ->
+                        touches.clear()
+                        ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use { scenario ->
+                            onView(withText("Workers")).check(matches(isDisplayed()))
+                            onView(withText("Explore offline demo")).check(doesNotExist())
+                            onView(withContentDescription("Settings")).perform(click())
+                            try { onView(withText("Settings")).check(matches(isDisplayed())) }
+                            catch (failure: AssertionError) {
+                                throw AssertionError("Launch $launch single Settings tap: $touches; state=${scenario.state}", failure)
+                            }
+                            if (launch == 0) TestScreenshots.capture("offline-demo-after-settings-tap")
+                            onView(withText("Explore offline demo")).perform(scrollTo(), click())
+                            onView(withText("Exit offline demo")).perform(click())
+                            onView(withText("Settings")).check(matches(isDisplayed()))
+                            onView(withContentDescription("Back")).perform(click())
+                            onView(withText("Workers")).check(matches(isDisplayed()))
+                            onView(withText("Explore offline demo")).check(doesNotExist())
+                        }
                     }
-                    onView(withText("Exit offline demo")).perform(click())
-                    onView(withText("Settings")).check(matches(isDisplayed()))
-                    onView(withContentDescription("Back")).perform(click())
-                    onView(withText("Workers")).check(matches(isDisplayed()))
-                    onView(withText("Explore offline demo")).check(doesNotExist())
+                } finally {
+                    instrumentation.runOnMainSync { monitor.removeLifecycleCallback(callback) }
                 }
             }
             assertEquals(listOf(server), ServerStore.get(context).getAll())
