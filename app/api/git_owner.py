@@ -42,6 +42,11 @@ def session_git_action(endpoint):
         request = values.get("request")
         body = values.get("body")
         session_id = values.get("session_id") or getattr(body, "session_id", None)
+        worker_id = request.query_params.get("worker_id") if request else None
+        if worker_id:
+            if session_id or values.get("worktree_id"):
+                raise HTTPException(400, "Worker Git scope cannot include a session or legacy worktree")
+            return await _route_project_git(endpoint, values, worker_id, request.query_params.get("checkout_branch"))
         if not session_id:
             return await endpoint(*args, **kwargs)
         session = await run_sync(database.get_session, session_id)
@@ -134,3 +139,122 @@ def _owner_project_id(session, fallback):
             if origin_for_legacy_project(local) == project["origin"]:
                 return local["id"]
     return session.get("project_v2_id") or fallback
+
+# Only checkout-scoped actions are supported without a persisted session.
+# Session lifecycle, init/clone and GitHub orchestration must not run on a
+# caller's local project merely because the composer selected another worker.
+_PROJECT_ACTIONS = {
+    "get_git_status", "list_branches", "get_commit_graph", "get_diff_stats",
+    "get_changed_files", "get_file_diff", "get_pr_state", "fetch_from_remote",
+    "pull_from_remote", "push_commits", "create_commit", "stage_files", "unstage_files",
+    "discard_changes", "create_branch", "checkout_branch", "delete_branch",
+    "generate_commit_message",
+}
+
+
+async def _route_project_git(endpoint, values, worker_id, branch):
+    from app.api.common import require_origin_access
+    from app.db.projects_v2 import get_project_v2
+    from app.network import engine, git as network_git
+
+    project_id = values["project_id"]
+    identity = await run_sync(require_origin_access, request=values["request"], **(
+        {"project_v2_id": project_id} if await run_sync(get_project_v2, project_id)
+        else {"project_id": project_id}
+    ))
+    if endpoint.__name__ not in _PROJECT_ACTIONS:
+        raise HTTPException(409, "This Git action requires a session on the selected worker")
+    ctx = engine.context()
+    from app.core.config import settings
+    local = ctx.device_id if ctx else settings.effective_instance_id
+    try:
+        target = local if worker_id == "local" else await run_sync(network_git.device_id, worker_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    params = jsonable_encoder({k: v for k, v in values.items() if k not in {"request", "token"}})
+    params["project_id"] = identity["project_v2"]["id"]
+    payload = {"action": endpoint.__name__, "project_id": params["project_id"], "branch": branch, "params": params}
+    try:
+        result = (await handle_project_git(payload, local) if target == local else
+                  await control.call(target, "project-git", payload,
+                                     timeout=20.0 if values["request"].method == "GET" else 300.0))
+    except control.RunnerUnreachable as exc:
+        raise HTTPException(503, "Selected worker is unreachable. No local Git action was run.") from exc
+    except control.ControlRefused as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if result["status"] >= 400:
+        raise HTTPException(result["status"], result["detail"])
+    return result["result"]
+
+
+async def handle_project_git(body, from_device):
+    from app.api import git  # noqa: F401
+    from app.api.git_helpers import _worker_checkout_scope
+    from app.core.checkout_manager import _dir_is_worktree, _resolve_checkout_path
+    from app.core.config import settings
+    from app.core.git_service import git_service
+    from app.db import checkouts, projects_v2
+
+    name = body.get("action")
+    if name not in _PROJECT_ACTIONS or name not in _actions:
+        raise ValueError("Unsupported project Git action")
+    project_id = body.get("project_id")
+    if not await run_sync(projects_v2.get_project_v2, project_id):
+        return {"status": 404, "detail": "Project not found on selected worker"}
+    endpoint, signature, hints = _actions[name]
+    params = body.get("params")
+    if not isinstance(params, dict) or params.get("project_id") != project_id or set(params) - (set(signature.parameters) - {"request", "token"}):
+        raise ValueError("Invalid project Git parameters")
+    if params.get("session_id") or params.get("worktree_id"):
+        raise ValueError("Mixed project and session Git scope")
+    branch = body.get("branch") or None
+    if branch is not None and (not isinstance(branch, str) or not control._BRANCH_RE.fullmatch(branch)):
+        raise ValueError("Invalid checkout branch")
+    rows = await run_sync(checkouts.list_checkouts, project_id)
+    candidates = [r for r in rows if r["runner_id"] == settings.effective_instance_id
+                  and (r.get("status") or "active") == "active"
+                  and (not r.get("branch") or r.get("branch") == branch)]
+    # A named branch must match the repository too, not only stale DB metadata.
+    paths = []
+    for row in candidates:
+        path = _resolve_checkout_path(row["path"])
+        if not await run_sync(_dir_is_worktree, path):
+            continue
+        actual = await run_sync(git_service.get_current_branch, path)
+        if branch is None and row.get("branch"):
+            continue
+        if branch is not None and actual != branch:
+            continue
+        paths.append((path, row))
+    if len(paths) != 1:
+        return {"status": 409, "detail": "Selected checkout is missing or ambiguous on this worker"}
+    path, checkout = paths[0]
+    if name == "checkout_branch" and checkout.get("branch"):
+        return {"status": 400, "detail": "Cannot checkout branches in a worktree. Worktrees are bound to their branch."}
+    try:
+        values = {}
+        for name, parameter in signature.parameters.items():
+            if name in {"request", "token"}:
+                continue
+            if name in params:
+                values[name] = TypeAdapter(hints[name]).validate_python(params[name])
+            elif parameter.default is inspect.Parameter.empty:
+                raise ValueError(f"Missing Git parameter: {name}")
+            else:
+                values[name] = parameter.default
+        payload = values.get("body")
+        if getattr(payload, "session_id", None) or getattr(payload, "worktree_id", None):
+            raise ValueError("Mixed project and session Git scope")
+        request = Request({"type": "http", "method": "POST", "path": "/", "headers": [], "state": {}})
+        request.state.api_user = None  # Authenticated peer membership authorizes this catalog.
+        values.update(request=request, token="worker-control")
+        scope = _worker_checkout_scope.set((project_id, path))
+        try:
+            result = await endpoint(**values)
+        finally:
+            _worker_checkout_scope.reset(scope)
+        return {"status": 200, "result": jsonable_encoder(result)}
+    except ValidationError as exc:
+        return {"status": 422, "detail": jsonable_encoder(exc.errors(), custom_encoder={ValueError: str})}
+    except HTTPException as exc:
+        return {"status": exc.status_code, "detail": exc.detail}

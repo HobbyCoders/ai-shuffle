@@ -25,7 +25,7 @@ import json
 import logging
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from psycopg2.extras import Json
 
@@ -113,6 +113,18 @@ def _events_since_sync(session_id: str, seq: int) -> List[Event]:
         cur.execute(
             "SELECT event FROM fluid_session_events WHERE session_id = %s "
             "AND seq > %s ORDER BY seq", (session_id, seq),
+        )
+        rows = cur.fetchall()
+    return [event_from_dict(_as_dict(r["event"])) for r in rows]
+
+
+def _events_page_sync(session_id: str, seq: int, through: int, limit: int) -> List[Event]:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT event FROM fluid_session_events WHERE session_id = %s "
+            "AND seq > %s AND seq <= %s ORDER BY seq LIMIT %s",
+            (session_id, seq, through, limit),
         )
         rows = cur.fetchall()
     return [event_from_dict(_as_dict(r["event"])) for r in rows]
@@ -768,6 +780,28 @@ class PgFluidStore:
     async def append_event(self, session_id: str, event: Event) -> None:
         async with self._event_lock:
             await self._write_pending(session_id, event)
+
+    async def iter_events(
+        self, session_id: str, seq: int, *, page_size: int = EVENT_CACHE_LIMIT,
+    ) -> AsyncIterator[Event]:
+        """Replay a finite committed prefix without retaining the whole history.
+
+        Decode each page off-loop and release its connection before yielding.
+        Later writes belong to the next replay, even if they arrive mid-page.
+        Gaps from retention are legal: the cursor advances by sequence, not count.
+        """
+        if not 1 <= page_size <= 1024:
+            raise ValueError("page_size must be between 1 and 1024")
+        async with self._event_lock:
+            await self._write_pending(session_id)
+            through = await run_sync(_last_event_seq_sync, session_id)
+        while seq < through:
+            page = await run_sync(_events_page_sync, session_id, seq, through, page_size)
+            if not page:
+                break
+            for event in page:
+                yield event
+            seq = page[-1].seq
 
     async def events_since(self, session_id: str, seq: int) -> List[Event]:
         async with self._event_lock:

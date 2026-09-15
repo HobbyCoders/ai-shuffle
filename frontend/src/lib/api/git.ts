@@ -6,6 +6,9 @@ import { api, type RequestOptions } from './client';
 
 const BASE = '/projects';
 
+export interface WorkerGitTarget { workerId: string; branch?: string | null }
+export type GitRequestScope = string | WorkerGitTarget;
+
 // ============================================================================
 // Git Status Types
 // ============================================================================
@@ -360,7 +363,12 @@ export interface WorktreeGitStatus {
 
 export interface Worktree {
     id: string;
-    repository_id: string;
+    repository_id: string | null;
+    checkout_id?: string | null;
+    resource_kind?: 'worktree' | 'checkout';
+    legacy_lifecycle_supported?: boolean;
+    project_id?: string | null;
+    runner_id?: string | null;
     session_id: string | null;
     branch_name: string;
     worktree_path: string;
@@ -381,10 +389,15 @@ export interface Worktree {
 /** Query-string fragment scoping a git call to a legacy worktree row and/or a
  *  v2 branch session. The backend prefers worktree_id; session_id resolves the
  *  session's own checkout (needed for v2 branch sessions with no legacy row). */
-function scopeQs(worktreeId?: string, sessionId?: string): string {
+function scopeQs(worktreeId?: string, sessionId?: GitRequestScope): string {
     const sp = new URLSearchParams();
     if (worktreeId) sp.set('worktree_id', worktreeId);
-    if (sessionId) sp.set('session_id', sessionId);
+    if (typeof sessionId === 'string') sp.set('session_id', sessionId);
+    else if (sessionId) {
+        if (worktreeId) throw new Error('Cannot mix worker and legacy worktree targets');
+        sp.set('worker_id', sessionId.workerId);
+        if (sessionId.branch) sp.set('checkout_branch', sessionId.branch);
+    }
     const qs = sp.toString();
     return qs ? `?${qs}` : '';
 }
@@ -395,7 +408,7 @@ function scopeQs(worktreeId?: string, sessionId?: string): string {
  * The wire response is normalized into the canonical flat `GitStatus` here, at
  * the API boundary, so no consumer ever sees the raw list shape.
  */
-export async function getGitStatus(projectId: string, worktreeId?: string, options?: RequestOptions, sessionId?: string): Promise<GitStatus> {
+export async function getGitStatus(projectId: string, worktreeId?: string, options?: RequestOptions, sessionId?: GitRequestScope): Promise<GitStatus> {
     const raw = await api.get<RawGitStatus>(`${BASE}/${projectId}/git/status${scopeQs(worktreeId, sessionId)}`, options);
     return transformGitStatus(raw);
 }
@@ -419,11 +432,11 @@ export interface BranchListResponse {
  * @param projectId - The project ID
  * @param includeRemote - Whether to include remote tracking branches (default: false for cleaner UI)
  */
-export async function getBranches(projectId: string, includeRemote: boolean = false, worktreeId?: string, options?: RequestOptions, sessionId?: string): Promise<Branch[]> {
+export async function getBranches(projectId: string, includeRemote: boolean = false, worktreeId?: string, options?: RequestOptions, sessionId?: GitRequestScope): Promise<Branch[]> {
     const searchParams = new URLSearchParams();
     if (!includeRemote) searchParams.set('include_remote', 'false');
     if (worktreeId) searchParams.set('worktree_id', worktreeId);
-    if (sessionId) searchParams.set('session_id', sessionId);
+    for (const [key, value] of new URLSearchParams(scopeQs(worktreeId, sessionId))) searchParams.set(key, value);
     const qs = searchParams.toString();
     const response = await api.get<RawBranchListResponse>(`${BASE}/${projectId}/git/branches${qs ? `?${qs}` : ''}`, options);
     return deduplicateBranches(response.branches.map(transformBranch));
@@ -432,7 +445,7 @@ export async function getBranches(projectId: string, includeRemote: boolean = fa
 /**
  * Create a new branch
  */
-export async function createBranch(projectId: string, name: string, startPoint?: string, sessionId?: string): Promise<Branch> {
+export async function createBranch(projectId: string, name: string, startPoint?: string, sessionId?: GitRequestScope): Promise<Branch> {
     const body: CreateBranchRequest = { name };
     if (startPoint) {
         body.start_point = startPoint;
@@ -443,7 +456,7 @@ export async function createBranch(projectId: string, name: string, startPoint?:
 /**
  * Delete a branch
  */
-export async function deleteBranch(projectId: string, name: string, sessionId?: string): Promise<void> {
+export async function deleteBranch(projectId: string, name: string, sessionId?: GitRequestScope): Promise<void> {
     await api.delete(`${BASE}/${projectId}/git/branches/${encodeURIComponent(name)}${scopeQs(undefined, sessionId)}`);
 }
 
@@ -453,7 +466,7 @@ export async function deleteBranch(projectId: string, name: string, sessionId?: 
  * When `autoStash` is true, the backend stashes uncommitted changes before
  * checking out (instead of returning a 409). Mirrors the pull auto_stash flow.
  */
-export async function checkout(projectId: string, ref: string, worktreeId?: string, autoStash: boolean = false, sessionId?: string): Promise<{ success: boolean; message: string }> {
+export async function checkout(projectId: string, ref: string, worktreeId?: string, autoStash: boolean = false, sessionId?: GitRequestScope): Promise<{ success: boolean; message: string }> {
     const params = scopeQs(worktreeId, sessionId);
     return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/checkout${params}`, { ref, auto_stash: autoStash });
 }
@@ -461,7 +474,7 @@ export async function checkout(projectId: string, ref: string, worktreeId?: stri
 /**
  * Fetch from remote
  */
-export async function fetchRemote(projectId: string, worktreeId?: string, sessionId?: string): Promise<{ success: boolean; message: string }> {
+export async function fetchRemote(projectId: string, worktreeId?: string, sessionId?: GitRequestScope): Promise<{ success: boolean; message: string }> {
     return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/fetch${scopeQs(worktreeId, sessionId)}`);
 }
 
@@ -478,7 +491,7 @@ interface RawCommitGraphResponse {
     total: number;
 }
 
-export async function getCommitGraph(projectId: string, limit?: number, worktreeId?: string, sessionId?: string): Promise<CommitGraphResponse> {
+export async function getCommitGraph(projectId: string, limit?: number, worktreeId?: string, sessionId?: GitRequestScope): Promise<CommitGraphResponse> {
     const query = new URLSearchParams(scopeQs(worktreeId, sessionId));
     if (limit) query.set('limit', String(limit));
     const params = query.size ? `?${query}` : '';
@@ -732,7 +745,7 @@ function transformOperationResponse(raw: RawOperationResponse): OperationRespons
 /**
  * Get all changed files with per-file diff stats
  */
-export async function getChangedFiles(projectId: string, worktreeId?: string, sessionId?: string): Promise<ChangedFilesResponse> {
+export async function getChangedFiles(projectId: string, worktreeId?: string, sessionId?: GitRequestScope): Promise<ChangedFilesResponse> {
     return api.get<ChangedFilesResponse>(`${BASE}/${projectId}/git/changed-files${scopeQs(worktreeId, sessionId)}`);
 }
 
@@ -744,7 +757,7 @@ export async function getFileDiff(
     filePath: string,
     staged: boolean = false,
     worktreeId?: string,
-    sessionId?: string
+    sessionId?: GitRequestScope
 ): Promise<FileDiffResponse> {
     return api.post<FileDiffResponse>(`${BASE}/${projectId}/git/file-diff${scopeQs(worktreeId, sessionId)}`, {
         file_path: filePath,
@@ -759,7 +772,7 @@ export async function stageFiles(
     projectId: string,
     files: string[],
     worktreeId?: string,
-    sessionId?: string
+    sessionId?: GitRequestScope
 ): Promise<OperationResponse> {
     return transformOperationResponse(
         await api.post<RawOperationResponse>(`${BASE}/${projectId}/git/stage${scopeQs(worktreeId, sessionId)}`, { files })
@@ -773,7 +786,7 @@ export async function unstageFiles(
     projectId: string,
     files: string[],
     worktreeId?: string,
-    sessionId?: string
+    sessionId?: GitRequestScope
 ): Promise<OperationResponse> {
     return transformOperationResponse(
         await api.post<RawOperationResponse>(`${BASE}/${projectId}/git/unstage${scopeQs(worktreeId, sessionId)}`, { files })
@@ -788,7 +801,7 @@ export async function discardChanges(
     files: string[],
     fileStatuses: Record<string, string>,
     worktreeId?: string,
-    sessionId?: string
+    sessionId?: GitRequestScope
 ): Promise<OperationResponse> {
     return transformOperationResponse(
         await api.post<RawOperationResponse>(`${BASE}/${projectId}/git/discard${scopeQs(worktreeId, sessionId)}`, {
@@ -811,11 +824,11 @@ export interface DiffStats {
 /**
  * Get diff statistics (lines added/removed)
  */
-export async function getDiffStats(projectId: string, includeUnstaged: boolean = true, worktreeId?: string, options?: RequestOptions, sessionId?: string): Promise<DiffStats> {
+export async function getDiffStats(projectId: string, includeUnstaged: boolean = true, worktreeId?: string, options?: RequestOptions, sessionId?: GitRequestScope): Promise<DiffStats> {
     const searchParams = new URLSearchParams();
     if (!includeUnstaged) searchParams.set('include_unstaged', 'false');
     if (worktreeId) searchParams.set('worktree_id', worktreeId);
-    if (sessionId) searchParams.set('session_id', sessionId);
+    for (const [key, value] of new URLSearchParams(scopeQs(worktreeId, sessionId))) searchParams.set(key, value);
     const qs = searchParams.toString();
     return api.get<DiffStats>(`${BASE}/${projectId}/git/diff-stats${qs ? `?${qs}` : ''}`, options);
 }
@@ -850,7 +863,7 @@ interface RawCommitResponse {
  * Create a commit. The response carries the backend's inline post-commit
  * status + diff stats, which the store applies directly (finding G6).
  */
-export async function commitChanges(projectId: string, request: CommitRequest, worktreeId?: string, sessionId?: string): Promise<CommitResponse> {
+export async function commitChanges(projectId: string, request: CommitRequest, worktreeId?: string, sessionId?: GitRequestScope): Promise<CommitResponse> {
     const raw = await api.post<RawCommitResponse>(`${BASE}/${projectId}/git/commit${scopeQs(worktreeId, sessionId)}`, request);
     return {
         success: raw.success,
@@ -875,7 +888,7 @@ export interface PushRequest {
 /**
  * Push commits to remote. Returns the backend's inline post-push status.
  */
-export async function pushCommits(projectId: string, request: PushRequest = {}, worktreeId?: string, sessionId?: string): Promise<OperationResponse> {
+export async function pushCommits(projectId: string, request: PushRequest = {}, worktreeId?: string, sessionId?: GitRequestScope): Promise<OperationResponse> {
     return transformOperationResponse(
         await api.post<RawOperationResponse>(`${BASE}/${projectId}/git/push${scopeQs(worktreeId, sessionId)}`, request)
     );
@@ -917,7 +930,7 @@ export async function pullFromRemote(
     projectId: string,
     request: PullRequest = {},
     worktreeId?: string,
-    sessionId?: string
+    sessionId?: GitRequestScope
 ): Promise<PullResponse> {
     const raw = await api.post<RawPullResponse>(`${BASE}/${projectId}/git/pull${scopeQs(worktreeId, sessionId)}`, request);
     return {
@@ -1033,7 +1046,7 @@ export function prStateEqual(a: PrState | null, b: PrState | null): boolean {
  * PR lifecycle for the current branch of the resolved checkout
  * (session-scoped like every other git call).
  */
-export async function getPrState(projectId: string, worktreeId?: string, sessionId?: string, options?: RequestOptions): Promise<PrState> {
+export async function getPrState(projectId: string, worktreeId?: string, sessionId?: GitRequestScope, options?: RequestOptions): Promise<PrState> {
     const raw = await api.get<RawPrState>(`${BASE}/${projectId}/git/pr-state${scopeQs(worktreeId, sessionId)}`, options);
     return transformPrState(raw);
 }
@@ -1064,7 +1077,7 @@ export interface InitRepoResponse {
 export async function initRepository(
     projectId: string,
     request: InitRepoRequest = {},
-    sessionId?: string
+    sessionId?: GitRequestScope
 ): Promise<InitRepoResponse> {
     return api.post<InitRepoResponse>(`${BASE}/${projectId}/git/init${scopeQs(undefined, sessionId)}`, request);
 }
@@ -1089,7 +1102,7 @@ export interface CloneRepoResponse {
 export async function cloneRepository(
     projectId: string,
     request: CloneRepoRequest,
-    sessionId?: string
+    sessionId?: GitRequestScope
 ): Promise<CloneRepoResponse> {
     return api.post<CloneRepoResponse>(`${BASE}/${projectId}/git/clone${scopeQs(undefined, sessionId)}`, request);
 }
@@ -1122,7 +1135,7 @@ export async function generateCommitMessage(
     projectId: string,
     request: GenerateCommitMessageRequest = {},
     worktreeId?: string,
-    sessionId?: string
+    sessionId?: GitRequestScope
 ): Promise<GenerateCommitMessageResponse> {
     return api.post<GenerateCommitMessageResponse>(
         `${BASE}/${projectId}/git/generate-commit-message${scopeQs(worktreeId, sessionId)}`, request
@@ -1136,7 +1149,7 @@ export async function generatePRDescription(
     projectId: string,
     request: GeneratePRDescriptionRequest = {},
     worktreeId?: string,
-    sessionId?: string
+    sessionId?: GitRequestScope
 ): Promise<GeneratePRDescriptionResponse> {
     return api.post<GeneratePRDescriptionResponse>(
         `${BASE}/${projectId}/git/generate-pr-description${scopeQs(worktreeId, sessionId)}`, request
@@ -1233,7 +1246,7 @@ export async function getGitOperation(
     projectId: string,
     operationId: string,
     options?: RequestOptions,
-    sessionId?: string
+    sessionId?: GitRequestScope
 ): Promise<GitOperation> {
     return api.get<GitOperation>(
         `${BASE}/${projectId}/git/operations/${encodeURIComponent(operationId)}${scopeQs(undefined, sessionId)}`,

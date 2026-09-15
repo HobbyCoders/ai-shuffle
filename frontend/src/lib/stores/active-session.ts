@@ -978,7 +978,13 @@ export const activeSession = {
 	 */
 	setDeviceIntent(intent: DeviceIntent | null) {
 		setPersistedDeviceIntent(intent);
-		_update(s => ({ ...s, deviceIntent: intent }));
+		const branch = !_state.sessionId && intent && _state.worktreeId
+			? _state.selectedWorktreeBranch || _state.worktreeBranch : null;
+		_update(s => ({ ...s, deviceIntent: intent, ...(branch ? {
+			worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: branch,
+			worktreeMode: 'new' as const, worktreeCreateNewBranch: false,
+		} : {}) }));
+		if (branch) rememberBranchIntent();
 	},
 
 	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); rememberBranchIntent(); },

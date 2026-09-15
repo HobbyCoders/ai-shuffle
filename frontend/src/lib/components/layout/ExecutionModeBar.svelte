@@ -256,7 +256,18 @@
 	}
 
 	function selectWorktree(wt: Worktree) {
-		activeSession.selectWorktreeBranch(wt.branch_name, wt.id);
+		if (wt.resource_kind === 'checkout') {
+			// The worktree list contains only this runner's checkouts. Clear any
+			// previous runner/legacy selection before staging the logical branch.
+			activeSession.setDeviceIntent(null);
+			activeSession.clearWorktreeSelection();
+			activeSession.setWorktreeBranch(wt.branch_name);
+			activeSession.setWorktreeMode('new');
+			activeSession.setWorktreeCreateNewBranch(false);
+		} else {
+			activeSession.setDeviceIntent(null);
+			activeSession.selectWorktreeBranch(wt.branch_name, wt.id);
+		}
 		showBranchDropdown = false;
 	}
 

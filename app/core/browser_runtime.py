@@ -173,8 +173,15 @@ class Runtime:
         self.idle = asyncio.create_task(self._idle())
 
     async def _start(self):
-        async with asyncio.timeout(READY_SECONDS + 15):
-            await self._connect()
+        # Cold/reopened actors are busy before their first tool or viewer exists.
+        # The idle timer must not cancel that connection or consume its grace.
+        self.active += 1
+        try:
+            async with asyncio.timeout(READY_SECONDS + 15):
+                await self._connect()
+        finally:
+            self.active -= 1
+            self.touched = time.monotonic()
 
     async def _connect(self):
         broker = browser_control.get(self.session_id)

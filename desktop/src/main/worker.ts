@@ -482,7 +482,13 @@ export class WorkerSupervisor extends EventEmitter {
 		try {
 			await writeManagedPostgres(this.opts.dataDir, postgres);
 			await prepareWorkerConfig(this.opts.envFile);
-			for (const dir of [this.opts.workspaceDir, this.opts.profileDir]) if (dir) await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+			const profile = this.opts.profileDir;
+			// Windows known-folder lookup rejects nonexistent redirected AppData.
+			// Chrome then treats even an explicit profile as the default and refuses CDP.
+			for (const dir of [this.opts.workspaceDir, profile,
+				...(profile ? [path.join(profile, 'AppData', 'Roaming'), path.join(profile, 'AppData', 'Local')] : [])]) {
+				if (dir) await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+			}
 		} catch {
 			this.set({ phase: 'failed', error: 'Could not prepare the private embedded database connection.' });
 			return this.state;
@@ -496,7 +502,12 @@ export class WorkerSupervisor extends EventEmitter {
 		env.SHUFFLE_DESKTOP_LIFECYCLE_TOKEN = this.lifecycleToken;
 		const attachToken = randomBytes(32).toString('hex');
 		env.SHUFFLE_DESKTOP_ATTACH_TOKEN = attachToken;
-		const child = spawn(this.opts.runtime.python, ['-m', 'app.main'], {
+		// The preview job owns descendants even after an intermediate parent exits.
+		// Normal installed workers retain their existing lifecycle.
+		const entry = process.platform === 'win32' && this.opts.runtime.mode === 'repo'
+			&& this.opts.profileDir && env.AI_SHUFFLE_PREVIEW === '1'
+			? 'app.preview_process' : 'app.main';
+		const child = spawn(this.opts.runtime.python, ['-m', entry], {
 			cwd: this.opts.runtime.serverDir,
 			env,
 			stdio: ['ignore', 'pipe', 'pipe'],
