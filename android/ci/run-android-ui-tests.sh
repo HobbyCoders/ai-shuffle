@@ -7,7 +7,7 @@ on_exit() {
   local status=$?
   trap - EXIT
   # Keep timing evidence on success too, before emulator teardown loses logcat.
-  timeout 15 adb -s emulator-5554 logcat -d -v threadtime ConsentTiming:I ProfileTiming:I '*:S' > "$out/timing.txt" || true
+  timeout 15 adb -s emulator-5554 logcat -d -v threadtime ConsentTiming:I ProfileTiming:I DemoNavigation:I '*:S' > "$out/timing.txt" || true
   timeout 30 adb -s emulator-5554 pull /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke "$out/screenshots" || true
   if (( status != 0 )); then
     bash ci/emulator-diagnostics.sh test-failure || true

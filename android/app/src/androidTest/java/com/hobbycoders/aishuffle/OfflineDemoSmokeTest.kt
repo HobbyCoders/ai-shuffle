@@ -86,11 +86,32 @@ class OfflineDemoSmokeTest {
         }
         try {
             PresenceFixture().use {
-                ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use {
+                ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use { scenario ->
+                    val touches = mutableListOf<String>()
+                    scenario.onActivity { activity ->
+                        val callback = activity.window.callback
+                        activity.window.callback = object : android.view.Window.Callback by callback {
+                            override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+                                val buttons = ArrayList<View>()
+                                activity.window.decorView.findViewsWithText(buttons, "Settings", View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION)
+                                val button = buttons.single()
+                                val bounds = android.graphics.Rect().also { button.getGlobalVisibleRect(it) }
+                                val detail = "action=${event.actionMasked} flags=${event.flags} x=${event.rawX} y=${event.rawY} " +
+                                    "bounds=$bounds focused=${activity.hasWindowFocus()} pressed=${button.isPressed}"
+                                touches += detail
+                                android.util.Log.i("DemoNavigation", detail)
+                                return callback.dispatchTouchEvent(event)
+                            }
+                        }
+                    }
                     onView(withText("Workers")).check(matches(isDisplayed()))
                     onView(withText("Explore offline demo")).check(doesNotExist())
                     onView(withContentDescription("Settings")).perform(click())
-                    onView(withText("Explore offline demo")).perform(scrollTo(), click())
+                    TestScreenshots.capture("offline-demo-after-settings-tap")
+                    try { onView(withText("Explore offline demo")).perform(scrollTo(), click()) }
+                    catch (failure: Throwable) {
+                        throw AssertionError("Single Settings tap: $touches; state=${scenario.state}", failure)
+                    }
                     onView(withText("Exit offline demo")).perform(click())
                     onView(withText("Settings")).check(matches(isDisplayed()))
                     onView(withContentDescription("Back")).perform(click())
