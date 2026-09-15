@@ -69,6 +69,8 @@ def _mark_task_stopped_by_user(session_id: str, task_id: str, *, source: str = "
         USER_STOP_REASON,
     )
 
+    if source == "user_stop":
+        source = USER_STOP_REASON
     task_registry.complete_task(
         session_id,
         task_id,
@@ -286,6 +288,8 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
     from app.mcp.builtin_tools import stop_background_shell_task
     from app.core.task_registry import USER_STOP_REASON, USER_STOP_SUMMARY
 
+    if source == "user_stop":
+        source = USER_STOP_REASON
     shell = await stop_background_shell_task(
         task_id,
         session_id=session_id,
@@ -551,6 +555,8 @@ async def _settle_stopped_task(session_id: str, task_id: str, *, source: str = "
         USER_STOP_REASON,
     )
 
+    if source == "user_stop":
+        source = USER_STOP_REASON
     record = task_registry.get_task(session_id, task_id)
     if record is None:
         return None

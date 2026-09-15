@@ -886,17 +886,19 @@ async def test_interrupt_honors_durable_stop_background_on_owning_runner(mock_db
     stop_all.assert_awaited_once_with("s9-bg", user_stop=True)
 
 
-async def test_internal_interrupt_preserves_source_on_owning_runner(mock_db):
+@pytest.mark.parametrize("source,user_stop", [("session_closed", False), ("user_stopped", True), ("user_stop", True)])
+async def test_internal_interrupt_preserves_source_on_owning_runner(mock_db, source, user_stop):
     turn = turns_db.enqueue_turn("s9-internal", "provider_agent", prompt="hi")
     turns_db.start_turn(turn["id"], None, "runner")
-    turns_db.interrupt_turn("s9-internal", "stop", stop_background=True, source="session_closed")
+    turns_db.interrupt_turn("s9-internal", "stop", stop_background=True, source=source)
     turns_db.settle_turn(turn["id"], "aborted", "racer")
     stop_all = AsyncMock()
     with _interrupt_env(evict=False), patch(
         "app.core.query_session_lifecycle.stop_all_background_tasks", new=stop_all,
     ):
         await session_runtime.SessionRuntime(turn).interrupt(escalation_timeout=0.02)
-    stop_all.assert_awaited_once_with("s9-internal", user_stop=False, source="session_closed")
+    stop_all.assert_awaited_once_with("s9-internal", user_stop=user_stop,
+                                      **({"source": source} if not user_stop else {}))
 
 
 async def test_interrupt_cancels_pending_prompts_before_signalling_the_sdk(mock_db):
