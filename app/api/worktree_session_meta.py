@@ -94,8 +94,18 @@ def _worktree_deleted(
     (queued or fresh-running) is not-deleted. This path is a pure read —
     never ``fail_op``. Fail-open is the caller's enclosing try.
     """
+    from app.network import runners
+
     owner = session.get("instance_id")
     me = settings.effective_instance_id
+    device_id = runners.self_device_id()
+    network_owner = session.get("owner_device_id")
+    if device_id and network_owner:
+        if network_owner != device_id:
+            # Synced sessions carry device ownership, not the old instance ID.
+            # A viewer's worker-local rows cannot establish owner-side deletion.
+            return False
+        owner = me
     is_remote = bool(owner) and owner != me
     pv2_id = session.get("project_v2_id")
     branch = _logical_branch(session)
@@ -113,12 +123,10 @@ def _worktree_deleted(
     if is_remote:
         if not pv2_id or not owner:
             return False
-        from app.network import runners
-
         # Network checkouts and git_ops are worker-local, not replicated. Their
         # absence here says nothing about the owner's disk. Owner-routed Git
         # requests resolve that checkout; keep the viewer's metadata unknown.
-        if runners.self_device_id():
+        if device_id:
             return False
         return not checkouts_db.has_active_checkout(pv2_id, owner, branch)
 
