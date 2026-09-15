@@ -133,6 +133,18 @@ class Broker:
     def _notify(self, session_id: str, owner: tuple) -> None:
         async def send():
             try:
+                from app.core.global_events import global_events
+                # Root-layout subscribers use the authenticated global socket,
+                # not the legacy session socket below. Publish only an
+                # invalidation; snapshots still enforce private-access policy.
+                from app.core.preference_identity import principal_preference_identity
+                from app.db.async_database import run_sync
+                principal = ({"kind": "api_user", "principal_id": owner[2]}
+                             if owner[2] is not None else {"kind": "admin"})
+                kind, identity = await run_sync(principal_preference_identity, principal)
+                global_events.resources_changed(
+                    f"chat-access:{session_id}", user_type=kind, user_id=identity,
+                )
                 from app.core.sync_engine import sync_engine
                 await sync_engine._broadcast_user_message(
                     owner[2] or "admin",
@@ -333,7 +345,7 @@ class Broker:
                     result.append(grant.public())
         from app.core import chat_vault, encryption
         from app.db.async_database import run_sync
-        saved = await run_sync(chat_vault.catalog, owner)
+        saved = await run_sync(chat_vault.catalog, owner, cache_empty=True)
         return {
             "saved_connections": saved,
             "vault_available": encryption.is_encryption_ready(),

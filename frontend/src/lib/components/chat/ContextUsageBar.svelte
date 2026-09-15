@@ -674,8 +674,7 @@
 							displayBreakdown.contextMax
 						)}
 						<span class="ctx-pct {displayBreakdown.severity}"
-							>({Math.round(displayBreakdown.totalPercent)}%)</span
-						>
+							use:usageNumber={{ key: `context:${resolvedKey}:${sessionId ?? 'new'}:${effectiveProviderId}:${effectiveModel}`, text: `(${Math.round(displayBreakdown.totalPercent)}%)` }}></span>
 					</span>
 					<svg
 						class="ctx-chevron {breakdownOpen ? '' : 'collapsed'}"
@@ -848,13 +847,13 @@
 								     about, so it outranks the window pct (which an OpenRouter
 								     key-spend limit would otherwise produce). -->
 								{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
-									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${sectionId}:credits-short`, text: pbCreditsShort }}></span>
+									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
 								{:else if pbSummary}
 									<span class="row-pct {pbSummary.severity} sec-summary"
-										use:usageNumber={{ key: `${sectionId}:summary`, text: `${pbSummary.pct}%${pbShowsRemaining ? ' left' : ''}` }}></span
+										use:usageNumber={{ key: `${resolvedKey}:${sectionId}:summary`, text: `${pbSummary.pct}%${pbShowsRemaining ? ' left' : ''}` }}></span
 									>
 								{:else if pbCreditsShort}
-									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${sectionId}:credits-short`, text: pbCreditsShort }}></span>
+									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
 								{/if}
 							{/if}
 							<svg
@@ -896,7 +895,7 @@
 										{/if}
 									</span>
 									<span class="row-pct {display.severity}"
-										use:usageNumber={{ key: `${sectionId}:${w.type}`, text: `${display.pct}%${pbShowsRemaining ? ' left' : ''}` }}></span
+										use:usageNumber={{ key: `${resolvedKey}:${sectionId}:${w.type}`, text: `${display.pct}%${pbShowsRemaining ? ' left' : ''}` }}></span
 									>
 								</span>
 							</div>
@@ -907,7 +906,7 @@
 					{/each}
 					{@const credits = creditsSummary(pb.credits, pb.providerType)}
 					{#if credits}
-						<div class="row-reset usage-credits" use:usageNumber={{ key: `${sectionId}:credits`, text: credits }}></div>
+						<div class="row-reset usage-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits`, text: credits }}></div>
 					{/if}
 				{/if}
 			{/each}
