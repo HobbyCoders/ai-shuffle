@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { getWorktreeFiles } from '$lib/api/git';
   import { apiBase, withAuth } from '$lib/api/runtime';
   import { getNotesAutocomplete, getSubagentsForAutocomplete } from '$lib/api/client';
@@ -51,7 +52,8 @@
   let selectedIndex = $state(0);
   let loading = $state(false);
   let currentPath = $state('');
-  let lastFetchedPath = $state<string | null>(null);
+  let lastFetchedKey = $state<string | null>(null);
+  let filteredQuery = $state<string | null>(null);
   let listElement = $state<HTMLUListElement | null>(null);
   let inChatHistoryFolder = $state(false);
   let inNotesFolder = $state(false);
@@ -113,48 +115,45 @@
     ].filter(s => s.text.length > 0);
   }
 
-  // Track previous visibility to detect transitions
-  let wasVisible = $state(false);
+  const query = $derived(extractAtMentionQuery(inputValue)?.query ?? null);
+  const requestPath = $derived(query?.startsWith(NOTES_FOLDER + '/') ? query : getPathFromQuery(query ?? ''));
+  const requestKey = $derived(visible && projectId && query !== null
+    ? JSON.stringify([requestPath, projectId, profileId, worktreeId, sessionId]) : null);
+  const selectionPending = $derived(loading || requestKey !== lastFetchedKey || query !== filteredQuery);
 
-  // Handle visibility changes and initial load
+  // Invalidate on every request/mode/visibility change, before awaiting I/O.
+  // The key check also protects selection before this effect has flushed.
   $effect(() => {
-    if (!visible && wasVisible) {
-      lastFetchedPath = null;
-      currentPath = '';
+    const key = requestKey;
+    untrack(() => {
       files = [];
       filteredFiles = [];
-      inChatHistoryFolder = false;
-      inNotesFolder = false;
-      inSubagentsFolder = false;
-    } else if (visible && !wasVisible && projectId) {
-      fetchFiles('');
-    }
-    wasVisible = visible;
+      filteredQuery = null;
+      lastFetchedKey = key;
+      selectedIndex = 0;
+      if (key !== null) {
+        fetchFiles(requestPath);
+      } else {
+        loading = false;
+        currentPath = '';
+        inChatHistoryFolder = false;
+        inNotesFolder = false;
+        inSubagentsFolder = false;
+      }
+    });
+    return () => { ++fetchCounter; };
   });
 
-  // Handle path changes from query
-  $effect(() => {
-    if (!visible || !projectId) return;
-
-    const atInfo = extractAtMentionQuery(inputValue);
-    if (!atInfo) return;
-
-    const query = atInfo.query;
-    const targetPath = getPathFromQuery(query);
-    const requestPath = query.startsWith(NOTES_FOLDER + '/') ? query : targetPath;
-
-    if (requestPath !== lastFetchedPath) {
-      fetchFiles(requestPath);
-    }
-  });
 
   // Filter files based on @ query
   $effect(() => {
     const atInfo = extractAtMentionQuery(inputValue);
-    if (!atInfo) {
+    if (!atInfo || loading || requestKey === null || requestKey !== lastFetchedKey) {
       filteredFiles = [];
+      filteredQuery = null;
       return;
     }
+    filteredQuery = atInfo.query;
 
     const query = atInfo.query;
     const filterPart = getFilterFromQuery(query).toLowerCase();
@@ -236,7 +235,8 @@
 
     const thisFetchId = ++fetchCounter;
     loading = true;
-    lastFetchedPath = path;
+    files = [];
+    filteredFiles = [];
     currentPath = isNotesPath(path) ? NOTES_FOLDER : path;
 
     if (isChatHistoryPath(path)) {
@@ -353,6 +353,7 @@
 
       if (response.ok) {
         const data = await response.json();
+        if (fetchId !== fetchCounter) return;
         files = data.sessions.map((session: any) => ({
           name: session.name,
           type: 'chat_history' as const,
@@ -429,8 +430,18 @@
     }
   }
 
-  export function handleKeyDown(event: KeyboardEvent): boolean {
-    if (!visible || filteredFiles.length === 0) return false;
+  export function handleKeyDown(event: KeyboardEvent, latestInput = inputValue): boolean {
+    if (!visible) return false;
+
+    // Read the live composer value too: its next prop/effect update may still be queued.
+    const latestQuery = extractAtMentionQuery(latestInput)?.query ?? null;
+    const pending = selectionPending || latestQuery !== filteredQuery;
+    if (pending && ['Enter', 'Tab', 'ArrowDown', 'ArrowUp'].includes(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
+    if (filteredFiles.length === 0 && event.key !== 'Escape' && event.key !== 'Backspace') return false;
 
     switch (event.key) {
       case 'ArrowDown':
@@ -473,7 +484,7 @@
         return true;
 
       case 'Backspace':
-        const backspaceAtInfo = extractAtMentionQuery(inputValue);
+        const backspaceAtInfo = extractAtMentionQuery(latestInput);
         if (backspaceAtInfo && backspaceAtInfo.query.endsWith('/')) {
           event.preventDefault();
           const pathWithoutTrailingSlash = backspaceAtInfo.query.slice(0, -1);
@@ -507,7 +518,7 @@
   }
 
   function handleSelect(file: FileItem) {
-    onSelect(file);
+    if (!selectionPending && filteredFiles.includes(file)) onSelect(file);
   }
 
   function formatSize(size: number | null | undefined): string {

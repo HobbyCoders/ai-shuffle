@@ -691,7 +691,7 @@
 
 		// Let file autocomplete handle the event
 		if (fileAutocompleteRef && showFileAutocomplete) {
-			const handled = fileAutocompleteRef.handleKeyDown(e);
+			const handled = fileAutocompleteRef.handleKeyDown(e, editorRef?.getText() ?? plainTextValue);
 			if (handled) return;
 		}
 
