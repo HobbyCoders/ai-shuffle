@@ -55,6 +55,10 @@ class ProviderAdapter(ABC):
         as such rather than persisted as a durable error.
         """
 
+    async def disconnect_transport(self, *, session_id: Optional[str] = None) -> None:
+        """Replace a connection without ending application-owned session work."""
+        await self.disconnect(session_id=session_id)
+
     @abstractmethod
     def is_alive(self) -> bool:
         """Check if the backend process is still running.

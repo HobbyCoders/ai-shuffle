@@ -56,6 +56,80 @@ async def test_real_task_dispatch_producer_routes_only_aggregate_completion(agen
     started.assert_awaited_once()
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("preserve_session", [True, False])
+async def test_pool_replacement_preserves_session_workflow(monkeypatch, preserve_session):
+    from claude_agent_sdk import ClaudeAgentOptions
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.core.session_pool import SessionPool, SessionState, requires_reconnect
+    from fluid.tools.registry import BackgroundTaskReceipt, ToolOutcome
+    from fluid.swarm import current_launch
+
+    pool = SessionPool()
+    engine = SimpleNamespace(aclose=AsyncMock())
+    adapter = HarnessAdapter()
+    adapter._engine = engine
+    adapter._connected = True
+    adapter._app_session_id = "replace-parent"
+    state = SessionState(adapter=adapter, is_connected=True,
+                         connect_options=ClaudeAgentOptions(system_prompt="old"))
+    pool.put("replace-parent", state)
+    monkeypatch.setattr(adapter, "is_alive", lambda: adapter._connected)
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "replace-parent")
+    entered = asyncio.Event()
+    launches = {}
+    calls = []
+    replacement = SimpleNamespace(submit=AsyncMock())
+    async def dispatch(data, ctx):
+        launch = current_launch.get()
+        calls.append(launch.task_id)
+        launches[launch.task_id] = launch
+        if launch.task_id == "first":
+            entered.set()
+        else:
+            launch.finish("completed", "successor report")
+        return ToolOutcome(text="started", background_task=BackgroundTaskReceipt(task_id=launch.task_id))
+    async def cancel(worker_id):
+        launches[worker_id].finish("cancelled", "explicit session teardown")
+    async def finished(key, status, summary):
+        # The session delivery endpoint is resolved at completion, not captured
+        # from the engine that originally launched the workflow.
+        await pool.get("replace-parent").adapter.engine.submit((key, status))
+    coordinator = SwarmCoordinator("replace-parent", dispatch, cancel, AsyncMock(), finished)
+    swarm.coordinators["replace-parent"] = coordinator
+    snapshot, _ = await coordinator.start({"tasks": [
+        {"id": "first", "agent": "helper", "prompt": "work"},
+        {"id": "next", "agent": "helper", "prompt": "continue", "depends_on": ["first"]},
+    ]}, ToolCtx())
+    key = snapshot["id"]
+    await asyncio.wait_for(entered.wait(), 2)
+    assert requires_reconnect(state, ClaudeAgentOptions(system_prompt="changed"))
+    # Install the replacement before completion delivery; removal pops the old
+    # state synchronously, then yields to transport cleanup.
+    engine.aclose.side_effect = lambda: pool.put("replace-parent", SessionState(
+        adapter=SimpleNamespace(engine=replacement), is_connected=True))
+    # Destructive close completes before the engine is replaced.
+    if not preserve_session:
+        coordinator.finished = AsyncMock()
+    await pool.remove("replace-parent", preserve_session=preserve_session)
+    engine.aclose.assert_awaited_once()
+    assert adapter._engine is None
+    if preserve_session:
+        assert swarm.coordinators["replace-parent"] is coordinator
+        assert not coordinator.closed
+        assert calls == ["first"]
+        launches["first"].finish("completed", "first report")
+        await asyncio.wait_for(coordinator.jobs[key], 2)
+        assert calls == ["first", "next"]
+        assert coordinator.snapshot(key)["status"] == "completed"
+        replacement.submit.assert_awaited_once_with((key, "completed"))
+    else:
+        assert "replace-parent" not in swarm.coordinators
+        assert coordinator.closed
+        assert calls == ["first"]
+        assert coordinator.snapshot(key)["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_nonlocal_read_preserves_durable_running_state(agents, monkeypatch):
     from app.db.session_events import append_events
     _mk_session(agents, "reload-parent", "root-agent")

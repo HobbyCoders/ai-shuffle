@@ -114,14 +114,12 @@ async def test_swarm_scope_and_mixed_roster_deduplicate_worker_identity(runtime)
         assert (await restricted({"to": address, "message": "hi"}, ToolCtx())).is_error
 
 
-@pytest.mark.parametrize("state", ["completed", "delegated", "stopped"])
+@pytest.mark.parametrize("state", ["completed", "stopped"])
 async def test_unavailable_targets_report_errors(runtime, state):
     registry, engines = runtime
     engine = worker(runtime, "parent", "worker")
     if state == "completed":
         registry.complete_task("parent", "worker", "completed")
-    elif state == "delegated":
-        engines["worker"].adapter.provider_kind = "delegated"
     else:
         registry.mark_user_stopped("worker")
     result = await messaging.make_message(lambda: "parent")(
@@ -135,6 +133,57 @@ async def test_unavailable_targets_report_errors(runtime, state):
             == []
         )
         assert messaging.peer_rows("parent")[0]["status"] == "completed"
+
+
+@pytest.mark.parametrize("state", ["completed", "error", "interrupted"])
+@pytest.mark.parametrize("kind", ["openai_responses", "delegated"])
+async def test_finished_worker_queues_one_message_over_saved_context(runtime, monkeypatch, state, kind):
+    from app.core import provider_agent
+    from app.db import sessions
+    registry, engines = runtime
+    engine = worker(runtime, "parent", "worker")
+    engines["worker"].adapter.provider_kind = kind
+    registry.complete_task("parent", "worker", state)
+    monkeypatch.setattr(sessions, "get_session", lambda sid: {"id": sid})
+    monkeypatch.setattr(turn_scheduler, "_latest_context_turn", lambda sid: {"id": "previous", "profile_id": "helper"})
+    monkeypatch.setattr(provider_agent, "final_turn_outcome", lambda sid: {"error": None})
+    monkeypatch.setattr(turn_scheduler, "_turn_terminal_payload", lambda *args: {})
+    queue = AsyncMock(return_value="resumed-turn")
+    monkeypatch.setattr(turn_scheduler, "on_agent_message", queue)
+    result = await messaging.make_message(lambda: "parent")({"to": "Helper", "message": "Continue from the saved result"}, ToolCtx())
+    assert not result.is_error, result.text
+    assert "Resume queued" in result.text
+    queue.assert_awaited_once_with("worker", "parent", "Continue from the saved result", reply_to="parent")
+    engine.submit.assert_not_awaited()
+
+
+async def test_running_delegated_worker_queues_instead_of_using_native_engine(runtime, monkeypatch):
+    _, engines = runtime
+    engine = worker(runtime, "parent", "worker")
+    engines["worker"].adapter.provider_kind = "delegated"
+    queue = AsyncMock(return_value="message-turn")
+    monkeypatch.setattr(turn_scheduler, "on_agent_message", queue)
+    result = await messaging.make_message(lambda: "parent")({"to": "Helper", "message": "progress?"}, ToolCtx())
+    assert not result.is_error
+    queue.assert_awaited_once_with("worker", "parent", "progress?")
+    engine.submit.assert_not_awaited()
+
+
+async def test_policy_rejected_worker_is_not_resumed(runtime, monkeypatch):
+    from app.core import provider_agent
+    from app.db import sessions
+    registry, _ = runtime
+    worker(runtime, "parent", "worker")
+    registry.complete_task("parent", "worker", "error")
+    monkeypatch.setattr(sessions, "get_session", lambda sid: {"id": sid})
+    monkeypatch.setattr(turn_scheduler, "_latest_context_turn", lambda sid: {"id": "previous", "profile_id": "helper"})
+    monkeypatch.setattr(provider_agent, "final_turn_outcome", lambda sid: {"error": "Provider rejected: cyber_policy"})
+    monkeypatch.setattr(turn_scheduler, "_turn_terminal_payload", lambda *args: {})
+    queue = AsyncMock()
+    monkeypatch.setattr(turn_scheduler, "on_agent_message", queue)
+    result = await messaging.make_message(lambda: "parent")({"to": "Helper", "message": "try again"}, ToolCtx())
+    assert result.is_error and "policy" in result.text
+    queue.assert_not_awaited()
 
 
 @pytest.mark.parametrize("state", ["missing", "closing", "parked"])

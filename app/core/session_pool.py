@@ -327,7 +327,9 @@ def mark_subprocess_oom_killable(state: SessionState) -> None:
         pass  # non-Linux, missing /proc, or denied — degrade silently
 
 
-async def graceful_disconnect(adapter: ProviderAdapter, session_id: str) -> None:
+async def graceful_disconnect(
+    adapter: ProviderAdapter, session_id: str, *, preserve_session: bool = False,
+) -> None:
     """Disconnect the provider adapter, giving the subprocess time to flush JSONL writes.
 
     The adapter's disconnect() handles the full grace period logic:
@@ -338,7 +340,10 @@ async def graceful_disconnect(adapter: ProviderAdapter, session_id: str) -> None
         # the SDK reader-task "Fatal error in message reader" that a force-
         # terminate provokes is then demoted to WARNING instead of persisted as
         # a durable error_log ERROR (see app/core/expected_shutdown.py).
-        await adapter.disconnect(session_id=session_id)
+        if preserve_session:
+            await adapter.disconnect_transport(session_id=session_id)
+        else:
+            await adapter.disconnect(session_id=session_id)
         logger.debug(f"[Pool] Disconnected adapter for session {session_id}")
     except Exception as e:
         logger.warning(f"[Pool] Error during graceful disconnect for {session_id}: {e}")
@@ -1175,10 +1180,12 @@ class SessionPool:
                 )
         return session_id
 
-    async def remove(self, session_id: str) -> Optional[SessionState]:
-        """Explicitly remove a session (for close_session, clear_context, delete).
+    async def remove(
+        self, session_id: str, *, preserve_session: bool = False,
+    ) -> Optional[SessionState]:
+        """Remove a client; options replacement preserves session-owned jobs.
 
-        Returns the removed state, or None if not found.
+        Explicit close, clear and delete retain destructive teardown by default.
         """
         state = self._pool.pop(session_id, None)
         if state is None:
@@ -1191,7 +1198,9 @@ class SessionPool:
         descendants = await asyncio.to_thread(snapshot_descendants, pid)
         if was_connected and is_subprocess_alive(state):
             try:
-                await graceful_disconnect(state.adapter, session_id)
+                await graceful_disconnect(
+                    state.adapter, session_id, preserve_session=preserve_session,
+                )
             except Exception as e:
                 logger.warning(f"[Pool] Error disconnecting session {session_id}: {e}")
         record_terminated_subprocess(pid, descendants)
@@ -1745,37 +1754,38 @@ def _agents_equivalent(old: Optional[Dict], new: Optional[Dict]) -> bool:
     return True
 
 
-def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> bool:
+def reconnect_option_names(state: SessionState, new_options: ClaudeAgentOptions) -> list[str]:
     """Check if option changes between queries require a fresh subprocess.
 
     Some options (model, permission_mode) can be changed at runtime via SDK methods.
     Others (system_prompt, cwd, mcp_servers, plugins, and the resolved provider
     binding) are fixed at spawn/connect time and require a new subprocess.
     """
+    changed = []
     old = state.connect_options
     if old is None:
-        return True  # No previous options to compare — reconnect to be safe
+        return ["connect_options"]  # No previous options to compare
 
     # These are immutable per-subprocess (CLI args at spawn time)
     if old.system_prompt != new_options.system_prompt:
-        return True
+        changed.append("system_prompt")
     if old.cwd != new_options.cwd:
-        return True
+        changed.append("cwd")
     if not mcp_servers_equivalent(old.mcp_servers, new_options.mcp_servers):
-        return True
+        changed.append("mcp_servers")
     if (old.plugins or []) != (new_options.plugins or []):
-        return True
+        changed.append("plugins")
     if (old.tools or []) != (new_options.tools or []):
-        return True
+        changed.append("tools")
     if not _agents_equivalent(old.agents, new_options.agents):
-        return True
+        changed.append("agents")
 
     # Provider identity/config (base URL, auth, model overlays) — a change here
     # means the subprocess would be talking to a different provider/account.
     # Overlay-key comparison is scoped to provider sessions so a native model
     # switch stays a hot-swap (see provider_env_requires_reconnect).
     if provider_env_requires_reconnect(old.env, new_options.env):
-        return True
+        changed.append("provider_env")
 
     # Resolved provider BINDING (PA13 / W-R4). The env comparison above only
     # sees the gateway overlay vars, which are identical (absent) on two
@@ -1790,14 +1800,14 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     if getattr(old, "aih_provider_id", None) != getattr(
         new_options, "aih_provider_id", None
     ):
-        return True
+        changed.append("aih_provider_id")
 
     # Context limits are fixed into both delegated CLI env and native-loop
     # compaction state at connect time, so a picker change must rebuild the leg.
     if getattr(old, "aih_context_window", None) != getattr(
         new_options, "aih_context_window", None
     ):
-        return True
+        changed.append("aih_context_window")
 
     # Per-session fast mode (v81) is baked in at connect time the same way — a
     # ``--settings {"fastMode": true}`` CLI arg on the delegated leg, a
@@ -1807,12 +1817,12 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     if bool(getattr(old, "aih_fast", None)) != bool(
         getattr(new_options, "aih_fast", None)
     ):
-        return True
+        changed.append("aih_fast")
 
     # Directory grants are fixed at connection time. Reconnect after either
     # adding or removing a workspace so stale access never survives a turn.
     if set(getattr(old, "add_dirs", None) or []) != set(getattr(new_options, "add_dirs", None) or []):
-        return True
+        changed.append("add_dirs")
 
     # The session's sidepanel lane. The chat lane's read fence is built INTO the
     # engine at connect time — a fluid permission rule on the native leg, a
@@ -1823,7 +1833,7 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     if getattr(old, "aih_session_mode", None) != getattr(
         new_options, "aih_session_mode", None
     ):
-        return True
+        changed.append("aih_session_mode")
 
     # Tool-surface restriction (ruling CE12) — stamped by ``query_options`` as
     # ``aih_tool_allowlist`` and frozen into the engine at connect time (fluid
@@ -1833,7 +1843,7 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     if getattr(old, "aih_tool_allowlist", None) != getattr(
         new_options, "aih_tool_allowlist", None
     ):
-        return True
+        changed.append("aih_tool_allowlist")
 
     # The blocklist is spawn-time on BOTH legs now: a CLI arg
     # (``--disallowed-tools``) on the delegated one, and since CE12 a
@@ -1842,7 +1852,7 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     if sorted(getattr(old, "disallowed_tools", None) or []) != sorted(
         getattr(new_options, "disallowed_tools", None) or []
     ):
-        return True
+        changed.append("disallowed_tools")
 
     # NOTE: on-disk OAuth credential rotation is deliberately NOT a reconnect
     # reason. Respawning kills every background task/sub-agent parented to the
@@ -1851,7 +1861,10 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
 
     # These can be changed at runtime — no reconnect needed
     # (model via client.set_model(), permission_mode via client.set_permission_mode())
-    return False
+    return changed
+
+def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> bool:
+    return bool(reconnect_option_names(state, new_options))
 
 
 # Global singleton — initialized lazily to avoid circular imports with settings

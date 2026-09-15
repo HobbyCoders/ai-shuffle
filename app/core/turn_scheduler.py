@@ -399,6 +399,9 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
     if await _maybe_recover_failed_wake(session_id, settled):
         return
 
+    from app.core.agent_messaging import finish_message_resume
+    await finish_message_resume(session_id, settled, outcome)
+
     # (2) QUEUE DRAIN — pop_ready (non-mutating peek) → kick starts the front
     # queued row. Fires on ALL outcomes, ahead of auto-continue.
     front = await asyncio.to_thread(turns_db.pop_ready, session_id)
@@ -905,7 +908,9 @@ def _dedupe_frames_by_task_id(
     return out
 
 
-async def on_agent_message(session_id: str, sender: str, text: str) -> str | None:
+async def on_agent_message(
+    session_id: str, sender: str, text: str, *, reply_to: str | None = None,
+) -> str | None:
     """Queue peer traffic that cannot join an app-owned live turn.
 
     Keep it separate from terminal task wakes: those merge their prompts from
@@ -916,8 +921,15 @@ async def on_agent_message(session_id: str, sender: str, text: str) -> str | Non
     from fluid.tools.hardening import defang_harness_markers
 
     prompt = format_peer_message(sender, defang_harness_markers(text)).strip()
-    turn = await _enqueue_context_wake(session_id, "agent_message", [], [], prompt)
+    turn = await _enqueue_context_wake(
+        session_id, "agent_message", [], [], prompt,
+        extra_payload={"agent_message_reply_to": reply_to} if reply_to else None,
+    )
     if turn.get("id"):
+        if reply_to:
+            from app.core.task_registry import task_registry
+            task_registry.resume_task(reply_to, session_id)
+            task_registry.mark_background_launch(reply_to, session_id)
         kick(session_id)
     return turn.get("id")
 
@@ -928,6 +940,7 @@ async def _enqueue_context_wake(
     frames: List[Dict[str, Any]],
     task_ids: List[str],
     prompt: str,
+    *, extra_payload: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Enqueue a fresh context-carrying wake turn for the OWN lane's fall-through
     enqueue. Reads the session's latest context turn for
@@ -951,6 +964,10 @@ async def _enqueue_context_wake(
         return {"id": None, "session_id": session_id, "source": source}
     context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
     payload = _context_payload(context)
+    if source == "unpark" and (context or {}).get("payload", {}).get("agent_message_reply_to"):
+        payload["agent_message_reply_to"] = context["payload"]["agent_message_reply_to"]
+    if extra_payload:
+        payload.update(extra_payload)
     # One task_id, one frame — the wake turn's payload is what a later merge
     # rebuilds the prompt from, so a duplicate stored here outlives this call.
     payload["pending_frames"] = _dedupe_frames_by_task_id(list(frames))
@@ -1362,8 +1379,11 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
         task_id = frame.get("task_id")
         from app.core.swarm import workers as swarm_workers
         launch = swarm_workers.get(task_id)
-        if launch is not None and launch.coordinator.session_id == session_id:
-            return  # Only the aggregate owns a wake, including supervisor races.
+        if (launch is not None and launch.coordinator.session_id == session_id
+                and not frame.get("agent_message_turn_id")):
+            return  # Only the aggregate owns the original task's wake.
+        # An explicitly admitted follow-up has its own report; the old completed
+        # Swarm must neither swallow it nor rerun its already-finished successors.
         from app.core.task_registry import task_registry
 
         # STOP SEMANTICS (round 7). The user pressed Stop and has not messaged

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fluid.events.ops import AgentMessage
 from fluid.tools.registry import ToolOutcome
 
@@ -127,12 +129,12 @@ def make_message(supplier):
                 is_error=True,
             )
         row = matches[0]
-        if row["status"] != "running":
-            return ToolOutcome(
-                text=f"Agent {row['name']} is not running; this host cannot resume finished workers",
-                is_error=True,
-            )
         target = row["worker_session_id"]
+        resuming = row["status"] != "running"
+        if resuming:
+            error = await resume_unavailable(target, row)
+            if error:
+                return ToolOutcome(text=f"Could not resume {row['name']}: {error}", is_error=True)
         if task_registry.is_user_stopped(target):
             return ToolOutcome(
                 text=f"Could not deliver to {row['name']}: receiver was stopped",
@@ -141,12 +143,9 @@ def make_message(supplier):
         state = get_session_pool().get(target)
         adapter = getattr(state, "adapter", None)
         engine = getattr(adapter, "engine", None)
-        if getattr(adapter, "provider_kind", None) == "delegated":
-            return ToolOutcome(
-                text="Peer has no live native messaging engine", is_error=True
-            )
         text = str(data.get("message") or "")
-        if engine is not None and session_runtime.get_live_runtime(target) is not None:
+        if (not resuming and getattr(adapter, "provider_kind", None) != "delegated"
+                and engine is not None and session_runtime.get_live_runtime(target) is not None):
             try:
                 # Only the app queue may start a turn. The atomic no-wake op
                 # also covers a runtime still starting or an engine just done.
@@ -158,12 +157,78 @@ def make_message(supplier):
                 pass
             else:
                 return ToolOutcome(text=f"Delivered to {row['name']}")
-        turn_id = await turn_scheduler.on_agent_message(target, session_id, text)
+        if resuming:
+            turn_id = await turn_scheduler.on_agent_message(
+                target, session_id, text, reply_to=session_id,
+            )
+        else:
+            turn_id = await turn_scheduler.on_agent_message(target, session_id, text)
         if not turn_id:
             return ToolOutcome(
                 text=f"Could not deliver to {row['name']}: receiver was stopped",
                 is_error=True,
             )
+        if resuming:
+            return ToolOutcome(text=f"Resume queued for {row['name']} (turn {turn_id})")
         return ToolOutcome(text=f"Queued for {row['name']}")
 
     return message
+
+
+async def resume_unavailable(target, row):
+    """A message is never authority to undo Stop or retry a policy rejection."""
+    from app.core.task_registry import task_registry
+    from app.core import provider_agent, turn_scheduler
+    from app.db import sessions
+
+    if task_registry.is_user_stopped(target):
+        return "receiver was stopped by the user; ask them to continue it in its chat"
+    if row["status"] not in {"completed", "error", "failed", "interrupted"}:
+        return f"state {row['status']} is not resumable; open the worker chat"
+    session = await asyncio.to_thread(sessions.get_session, target)
+    context = await asyncio.to_thread(turn_scheduler._latest_context_turn, target)
+    if not session or not context or not context.get("profile_id"):
+        return "saved session/turn context is unavailable; open the worker chat"
+    outcome = await asyncio.to_thread(provider_agent.final_turn_outcome, target)
+    terminal = await asyncio.to_thread(turn_scheduler._turn_terminal_payload, target, context["id"])
+    error = (str(outcome.get("error") or "") + " " + str(terminal.get("errors") or "")).casefold()
+    if any(marker in error for marker in ("cyber_policy", "content_policy", "policy rejection", "policy violation", "safety policy")):
+        return "the provider rejected this work on policy grounds; ask the user, do not replay it"
+    return None
+
+
+async def finish_message_resume(session_id, settled, outcome):
+    """Complete a resumed worker through the same parent wake gate as Task."""
+    from app.core import provider_agent, turn_scheduler
+    from app.core.task_registry import task_registry
+
+    owner = (settled.get("payload") or {}).get("agent_message_reply_to")
+    if not owner or outcome == "parked":
+        return
+    # Read only this turn's report: an interrupted continuation must never
+    # report the previous successful turn as its new result.
+    events = await asyncio.to_thread(provider_agent._load_session_events, session_id)
+    events = [event for event in events if event.get("turn_id") == settled["id"]]
+    text = ""
+    for event in events:
+        payload = event.get("payload") or {}
+        if event.get("event_type") == "tool.result":
+            text = ""
+        elif event.get("event_type") == "assistant.text_delta":
+            text += payload.get("text") or payload.get("delta") or ""
+        elif event.get("event_type") == "message.assistant" and payload.get("kind") in (None, "text"):
+            text += payload.get("content") or ""
+        elif event.get("event_type") == "turn.aborted":
+            text = payload.get("message") or "Worker continuation interrupted"
+        elif event.get("event_type") == "turn.completed" and payload.get("is_error"):
+            outcome = "error"
+            text = str(payload.get("errors") or "Worker continuation failed")
+    status = "completed" if outcome == "completed" else "error"
+    summary, _ = provider_agent.bound_report(text or "Worker continuation ended without a report")
+    task_registry.complete_task(owner, session_id, status, summary=summary)
+    await turn_scheduler.on_task_terminal(owner, {
+        "task_id": session_id, "tool_use_id": session_id,
+        "status": status, "summary": summary,
+        "agent_message_turn_id": settled["id"],
+        "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
+    })

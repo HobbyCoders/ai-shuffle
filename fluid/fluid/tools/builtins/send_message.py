@@ -41,7 +41,7 @@ def describe(tools: frozenset[str] | None = None) -> str:
     )
     spawn_note = (
         " A subagent you started with Task takes messages while it works AND "
-        "after it has finished — a message to a finished one resumes it over "
+        "after it has finished on hosts that support resume — a message resumes it over "
         "its own transcript, so it still knows what it did, and its new report "
         "reaches you in a later turn the way a background Task's does.\n"
         if has("Task")
@@ -59,9 +59,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "## Delivery\n"
         "\n"
         "Messages are pushed, not polled: a busy agent picks yours up at its "
-        "next tool result, and an idle or finished one is started on it. "
-        "Whether the agent is currently running is never something you need to "
-        "check first. There is no inbox either — messages sent to you arrive "
+        "next tool result, and a supported idle or finished worker is queued over "
+        "its saved transcript. Queued is not delivered: read the tool's result. "
+        "An explicit user stop or policy rejection must not be replayed; ask the user. "
+        "A host without saved context reports that limitation. There is no inbox — messages sent to you arrive "
         "on their own.\n"
         + spawn_note +
         "\n"

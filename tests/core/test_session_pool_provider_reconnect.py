@@ -44,6 +44,15 @@ def _new_options(env) -> ClaudeAgentOptions:
 # ─── session_pool.requires_reconnect (the live path) ────────────────────────
 
 
+def test_reconnect_reports_all_changed_names_without_values():
+    from app.core.session_pool import reconnect_option_names
+    state = _make_state({"ANTHROPIC_AUTH_TOKEN": "old-secret"})
+    state.connect_options.system_prompt = "private prompt"
+    options = _new_options({"ANTHROPIC_AUTH_TOKEN": "new-secret"})
+    options.cwd = "/private/workspace"
+    assert reconnect_option_names(state, options) == ["system_prompt", "cwd", "provider_env"]
+
+
 def test_identical_env_no_reconnect():
     state = _make_state({"ANTHROPIC_BASE_URL": "https://api.anthropic.com"})
     new = _new_options({"ANTHROPIC_BASE_URL": "https://api.anthropic.com"})

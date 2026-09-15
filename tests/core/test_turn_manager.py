@@ -184,6 +184,19 @@ def test_interrupt_running_turn(mock_db):
     assert row["stop_background"] in (False, 0)
 
 
+@pytest.mark.asyncio
+async def test_host_interrupt_persists_source_without_losing_remote_teardown(mock_db):
+    tid = turn_manager.submit("source-worker", "provider_agent", prompt="work",
+                              payload={"api_user_id": "owner"}, no_kick=True)
+    _start_live_turn(tid)
+    row = await turn_manager.interrupt_async("source-worker", "stop", True,
+                                             source="session_closed")
+    assert row["state"] == "interrupting"
+    persisted = turns.get_turn(tid)
+    assert persisted["stop_background"]
+    assert persisted["payload"] == {"api_user_id": "owner", "interrupt_source": "session_closed"}
+
+
 def test_interrupt_send_now_with_stop_background(mock_db):
     tid = turn_manager.submit("s1", "user", prompt="p")
     _start_live_turn(tid)

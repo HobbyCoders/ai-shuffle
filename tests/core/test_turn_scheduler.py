@@ -142,6 +142,70 @@ async def test_peer_wakes_preserve_order_and_cannot_forge_user_authority(mock_db
 
 
 @pytest.mark.asyncio
+async def test_message_resume_rearms_failed_task_and_preserves_context(mock_db):
+    task_registry.start_task("owner", "child", "agent", "Implement once", name="helper", tool_use_id="child")
+    task_registry.complete_task("owner", "child", "error", summary="connection interrupted")
+    previous = _settled_turn("child", profile_id="worker-profile", project_id="project",
+        worktree_id="checkout", overrides={"provider": "local-provider", "model": "child-model"},
+        payload={"api_user_id": "owner-id"})
+    se_db.append_events("child", [{"type": "tool.result", "turn_id": previous["id"],
+                                  "payload": {"tool_use_id": "write-once", "content": "written"}}])
+    before = se_db.get_events("child", 0, 100)
+    with patch.object(turn_scheduler, "kick") as kick:
+        resumed = await turn_scheduler.on_agent_message("child", "owner", "Use the completed action", reply_to="owner")
+    queued = turns_db.get_queued_turns("child")
+    assert len(queued) == 1 and queued[0]["id"] == resumed
+    assert queued[0]["overrides"] == previous["overrides"]
+    assert queued[0]["worktree_id"] == "checkout"
+    assert queued[0]["payload"]["agent_message_reply_to"] == "owner"
+    assert queued[0]["payload"]["api_user_id"] == "owner-id"
+    assert se_db.get_events("child", 0, 100) == before
+    assert task_registry.get_task("owner", "child")["status"] == "running"
+    kick.assert_called_once_with("child")
+
+
+@pytest.mark.asyncio
+async def test_resumed_report_is_new_turn_only_and_wakes_parent(mock_db):
+    from types import SimpleNamespace
+    from app.core import swarm
+    from app.core.agent_messaging import finish_message_resume
+    _settled_turn("owner", profile_id="parent-profile")
+    swarm.workers["child"] = SimpleNamespace(coordinator=SimpleNamespace(session_id="owner"))
+    task_registry.start_task("owner", "child", "agent", "Implement once", tool_use_id="child")
+    task_registry.mark_background_launch("owner", "child")
+    se_db.append_events("child", [
+        {"type": "assistant.text_delta", "turn_id": "old", "payload": {"text": "old report"}},
+        {"type": "assistant.text_delta", "turn_id": "new", "payload": {"text": "new report"}},
+    ])
+    settled = {"id": "new", "payload": {"agent_message_reply_to": "owner"}}
+    try:
+        with patch.object(turn_scheduler, "kick"):
+            await finish_message_resume("child", settled, "completed")
+            await finish_message_resume("child", settled, "completed")
+        queued = turns_db.get_queued_turns("owner")
+        assert len(queued) == 1
+        assert queued[0]["prompt"].count("new report") == 1
+        assert "old report" not in queued[0]["prompt"]
+        assert task_registry.get_task("owner", "child")["status"] == "completed"
+    finally:
+        swarm.workers.pop("child", None)
+
+
+@pytest.mark.asyncio
+async def test_resumed_worker_error_is_not_reported_as_success(mock_db):
+    from app.core.agent_messaging import finish_message_resume
+    task_registry.start_task("owner", "child", "agent", "Continue", tool_use_id="child")
+    se_db.append_events("child", [{"type": "turn.completed", "turn_id": "failed",
+        "payload": {"is_error": True, "errors": ["transport failure"]}}])
+    with patch.object(turn_scheduler, "on_task_terminal", AsyncMock()) as notify:
+        await finish_message_resume("child", {"id": "failed", "payload": {
+            "agent_message_reply_to": "owner"}}, "completed")
+    frame = notify.await_args.args[1]
+    assert frame["status"] == "error"
+    assert "transport failure" in frame["summary"]
+
+
+@pytest.mark.asyncio
 async def test_peer_wake_obeys_stop_latch_and_stop_cancels_queued_peer(mock_db):
     _settled_turn("s")
     from app.core.query_session_lifecycle import enter_user_stop

@@ -335,6 +335,7 @@ def interrupt_turn(
     mode: str,
     stop_background: bool = False,
     turn_id: Optional[str] = None,
+    *, source: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Transition a session's ``running`` turn to ``interrupting``.
 
@@ -367,6 +368,14 @@ def interrupt_turn(
                 (mode, bool(stop_background), session_id),
             )
         row = cursor.fetchone()
+        if row is not None and source:
+            # The UPDATE above owns the row lock. Publish provenance in this
+            # same transaction before another runner can observe the interrupt.
+            result = _row(row)
+            result["payload"]["interrupt_source"] = source
+            cursor.execute("UPDATE turns SET payload=%s WHERE id=%s",
+                           (json.dumps(result["payload"]), result["id"]))
+            return result
     return _row(row)
 
 

@@ -52,7 +52,7 @@ def _reap_task_killed(session_id: str, task_id: str) -> None:
         task_registry.complete_task(session_id, task_id, "killed")
 
 
-def _mark_task_stopped_by_user(session_id: str, task_id: str) -> None:
+def _mark_task_stopped_by_user(session_id: str, task_id: str, *, source: str = "user_stop") -> None:
     """Mark a background task ``killed`` in the registry on an EXPLICIT user stop.
 
     Called after the SDK ``stop_task`` control request is issued for a LIVE
@@ -73,8 +73,8 @@ def _mark_task_stopped_by_user(session_id: str, task_id: str) -> None:
         session_id,
         task_id,
         "killed",
-        summary=USER_STOP_SUMMARY,
-        reason=USER_STOP_REASON,
+        summary=USER_STOP_SUMMARY if source == USER_STOP_REASON else f"Stopped by host: {source}",
+        reason=source,
     )
 
 
@@ -240,7 +240,7 @@ async def _durable_force_settle(session_id: str, task_id: str) -> Optional[dict]
     return None
 
 
-async def stop_session_task(session_id: str, task_id: str) -> dict:
+async def stop_session_task(session_id: str, task_id: str, *, source: str = "user_stop") -> dict:
     """Stop ONE background task (sub-agent OR Monitor shell) in a session.
 
     Two kinds of task surface in the UI's ``activeTasks`` strip:
@@ -289,8 +289,8 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
     shell = await stop_background_shell_task(
         task_id,
         session_id=session_id,
-        summary=USER_STOP_SUMMARY,
-        reason=USER_STOP_REASON,
+        summary=USER_STOP_SUMMARY if source == USER_STOP_REASON else f"Stopped by host: {source}",
+        reason=source,
     )
     if shell is not None:
         # ``survivors`` means descendants outlived the shell (a dev server the
@@ -324,9 +324,9 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
     if record is not None:
         await provider_agent_supervisor.teardown_worker(
             record,
-            reason=USER_STOP_REASON,
-            summary=USER_STOP_SUMMARY,
-            preview="Stopped by the user.",
+            reason=source,
+            summary=USER_STOP_SUMMARY if source == USER_STOP_REASON else f"Stopped by host: {source}",
+            preview="Stopped by the user." if source == USER_STOP_REASON else f"Stopped by host: {source}",
         )
         return {"ok": True, "kind": "agent", "task_id": task_id}
 
@@ -386,7 +386,7 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
         # DOES arrive re-completes to the same terminal state as a harmless no-op,
         # and the guaranteed terminal-surface callback fires exactly once
         # (``mark_terminal_notified`` latch), so this never double-surfaces.
-        _mark_task_stopped_by_user(session_id, task_id)
+        _mark_task_stopped_by_user(session_id, task_id, source=source)
         return {"ok": True, "kind": "agent", "task_id": task_id}
     except Exception as e:
         logger.error(
@@ -403,7 +403,7 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
         # reporting the dead worker as its outstanding delegated task for
         # four and a half minutes. The shell branch has always marked its row
         # unconditionally; this removes the asymmetry.
-        _mark_task_stopped_by_user(session_id, task_id)
+        _mark_task_stopped_by_user(session_id, task_id, source=source)
         return {"ok": False, "kind": "agent", "task_id": task_id, "detail": str(e)}
 
 
@@ -526,7 +526,7 @@ def _keep_monitor_shells_on_stop() -> bool:
         return False
 
 
-async def _settle_stopped_task(session_id: str, task_id: str) -> Optional[dict]:
+async def _settle_stopped_task(session_id: str, task_id: str, *, source: str = "user_stop") -> Optional[dict]:
     """Guarantee ONE terminal row + ONE terminal frame for a task Stop killed.
 
     Two guarantees, both of which were missing somewhere (087d3809 F2):
@@ -559,8 +559,8 @@ async def _settle_stopped_task(session_id: str, task_id: str) -> Optional[dict]:
             session_id,
             task_id,
             "killed",
-            summary=record.get("summary") or STOP_ALL_SUMMARY,
-            reason=record.get("reason") or USER_STOP_REASON,
+            summary=record.get("summary") or (STOP_ALL_SUMMARY if source == USER_STOP_REASON else f"Stopped by host: {source}"),
+            reason=record.get("reason") or source,
         )
     task_registry.force_terminal_surface(session_id, task_id)
     return task_registry.get_task(session_id, task_id)
@@ -568,7 +568,7 @@ async def _settle_stopped_task(session_id: str, task_id: str) -> Optional[dict]:
 
 async def stop_all_background_tasks(
     session_id: str, *, include_shells: bool = True, user_stop: bool = False,
-    respect_shell_preference: bool = True,
+    respect_shell_preference: bool = True, source: str = "user_stop",
 ) -> list[dict]:
     """Stop EVERY in-flight background task in a session, one at a time.
 
@@ -684,7 +684,8 @@ async def stop_all_background_tasks(
 
     results: list[dict] = list(spared)
     for task_id in task_ids:
-        results.append(await stop_session_task(session_id, task_id))
+        results.append(await stop_session_task(session_id, task_id,
+                                              **({"source": source} if source != "user_stop" else {})))
 
     for worker_session_id in worker_sessions:
         try:
@@ -707,7 +708,8 @@ async def stop_all_background_tasks(
     frames: list[dict] = []
     for task_id in task_ids:
         try:
-            record = await _settle_stopped_task(session_id, task_id)
+            record = await _settle_stopped_task(session_id, task_id,
+                                                **({"source": source} if source != "user_stop" else {}))
         except Exception:  # noqa: BLE001
             logger.debug(
                 "Stop: terminal settle failed for %s/%s", session_id, task_id,

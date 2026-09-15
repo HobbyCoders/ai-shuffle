@@ -1499,6 +1499,20 @@ class TaskRegistry:
                 owners.append(session_id)
         return owners
 
+    def resume_task(self, session_id: str, task_id: str) -> None:
+        """Explicit host resume, unlike a possibly stale SDK start frame."""
+        row = self.get_task(session_id, task_id, durable=True) or {}
+        # start_task intentionally ignores error/killed replays. Only this
+        # admitted resume may replace a terminal task and re-arm its wake.
+        self._tasks.get(session_id, {}).pop(task_id, None)
+        self._recent_terminal.get(session_id, {}).pop(task_id, None)
+        self._woken.get(session_id, set()).discard(task_id)
+        self._wake_suppressed.get(session_id, set()).discard(task_id)
+        self._chipped.get(session_id, {}).pop(task_id, None)
+        self.start_task(session_id, task_id, "agent", row.get("subject") or "Worker continuation",
+                        tool_use_id=task_id, agent=row.get("agent"), name=row.get("name"),
+                        model=row.get("model"))
+
     def get_task(
         self, session_id: str, task_id: str, *, durable: bool = False
     ) -> Optional[Dict[str, Any]]:
