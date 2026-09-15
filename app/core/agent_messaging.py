@@ -205,30 +205,45 @@ async def finish_message_resume(session_id, settled, outcome):
     owner = (settled.get("payload") or {}).get("agent_message_reply_to")
     if not owner or outcome == "parked":
         return
-    # Read only this turn's report: an interrupted continuation must never
-    # report the previous successful turn as its new result.
-    events = await asyncio.to_thread(provider_agent._load_session_events, session_id)
-    events = [event for event in events if event.get("turn_id") == settled["id"]]
-    text = ""
-    for event in events:
-        payload = event.get("payload") or {}
-        if event.get("event_type") == "tool.result":
-            text = ""
-        elif event.get("event_type") == "assistant.text_delta":
-            text += payload.get("text") or payload.get("delta") or ""
-        elif event.get("event_type") == "message.assistant" and payload.get("kind") in (None, "text"):
-            text += payload.get("content") or ""
-        elif event.get("event_type") == "turn.aborted":
-            text = payload.get("message") or "Worker continuation interrupted"
-        elif event.get("event_type") == "turn.completed" and payload.get("is_error"):
-            outcome = "error"
-            text = str(payload.get("errors") or "Worker continuation failed")
-    status = "completed" if outcome == "completed" else "error"
-    summary, _ = provider_agent.bound_report(text or "Worker continuation ended without a report")
-    task_registry.complete_task(owner, session_id, status, summary=summary)
-    await turn_scheduler.on_task_terminal(owner, {
-        "task_id": session_id, "tool_use_id": session_id,
-        "status": status, "summary": summary,
-        "agent_message_turn_id": settled["id"],
-        "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
-    })
+    from app.core import provider_agent_supervisor as supervisor
+    from app.db import turns as turns_db
+
+    record = supervisor.get_worker(owner, session_id)
+    try:
+        if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
+            return
+        # Read only this turn's report: an interrupted continuation must never
+        # report the previous successful turn as its new result.
+        events = await asyncio.to_thread(provider_agent._load_session_events, session_id)
+        if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
+            return
+        events = [event for event in events if event.get("turn_id") == settled["id"]]
+        text = ""
+        for event in events:
+            payload = event.get("payload") or {}
+            if event.get("event_type") == "tool.result":
+                text = ""
+            elif event.get("event_type") == "assistant.text_delta":
+                text += payload.get("text") or payload.get("delta") or ""
+            elif event.get("event_type") == "message.assistant" and payload.get("kind") in (None, "text"):
+                text += payload.get("content") or ""
+            elif event.get("event_type") == "turn.aborted":
+                text = payload.get("message") or "Worker continuation interrupted"
+            elif event.get("event_type") == "turn.completed" and payload.get("is_error"):
+                outcome = "error"
+                text = str(payload.get("errors") or "Worker continuation failed")
+        status = "completed" if outcome == "completed" else "error"
+        summary, _ = provider_agent.bound_report(text or "Worker continuation ended without a report")
+        task_registry.complete_task(owner, session_id, status, summary=summary)
+        await turn_scheduler.on_task_terminal(owner, {
+            "task_id": session_id, "tool_use_id": session_id,
+            "status": status, "summary": summary,
+            "agent_message_turn_id": settled["id"],
+            "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
+        })
+    finally:
+        if record and record.continuation_turn_id:
+            queued = await asyncio.to_thread(turns_db.get_queued_turns, session_id)
+            if (not any(t["id"] == record.continuation_turn_id for t in queued)
+                    and supervisor.get_worker(owner, session_id) is record):
+                supervisor.unregister_worker(owner, session_id)

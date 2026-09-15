@@ -618,9 +618,8 @@ class TaskRegistry:
         seen.add(task_id)
         return True
 
-    def mark_woken(self, session_id: str, task_id: str) -> bool:
-        """One-shot late-frame latch: a background task drives AT MOST ONE
-        unpark/pump wake for its whole life.
+    def mark_woken(self, session_id: str, task_id: str, *, completion_id: str | None = None) -> bool:
+        """One-shot late-frame latch: each completion drives at most one wake.
 
         Returns ``True`` only the FIRST time ``task_id`` is latched for
         ``session_id`` (and records it); every later call returns ``False``.
@@ -628,24 +627,25 @@ class TaskRegistry:
         the own-lane fresh-enqueue fall-through: a frame arriving AFTER the wake
         already left the queue (a lost merge race, or the wake already ran) finds
         the latch set and is dropped instead of spawning a duplicate wake. Keyed
-        on ``task_id`` ALONE (mirrors the retired ``_unparked`` intent) — cleared
-        only with the session, and flipped OFF on a genuine resume (``start_task``
-        revival) so a re-run agent can wake again. Defensive: missing ids never
-        latch (return ``False``).
+        on the task and optional continuation ID. Ordinary SDK revivals reset
+        the task latch; explicit message continuations retain older deliveries
+        and use their own completion ID. Missing ids never latch.
         """
         if not session_id or not task_id:
             return False
         seen = self._woken.setdefault(session_id, set())
-        if task_id in seen:
+        key = (task_id, completion_id) if completion_id else task_id
+        if key in seen:
             return False
-        seen.add(task_id)
+        seen.add(key)
         return True
 
-    def is_woken(self, session_id: str, task_id: str) -> bool:
+    def is_woken(self, session_id: str, task_id: str, *, completion_id: str | None = None) -> bool:
         """True iff ``task_id`` has already produced a wake (``mark_woken``)."""
         if not session_id or not task_id:
             return False
-        return task_id in self._woken.get(session_id, set())
+        key = (task_id, completion_id) if completion_id else task_id
+        return key in self._woken.get(session_id, set())
 
     def suppress_wake(self, session_id: str, task_id: str) -> bool:
         """Prevent a user-canceled task from waking its parent.
@@ -1506,7 +1506,7 @@ class TaskRegistry:
         # admitted resume may replace a terminal task and re-arm its wake.
         self._tasks.get(session_id, {}).pop(task_id, None)
         self._recent_terminal.get(session_id, {}).pop(task_id, None)
-        self._woken.get(session_id, set()).discard(task_id)
+        # Continuations have their own completion ID; retain earlier deliveries.
         self._wake_suppressed.get(session_id, set()).discard(task_id)
         self._chipped.get(session_id, {}).pop(task_id, None)
         self.start_task(session_id, task_id, "agent", row.get("subject") or "Worker continuation",

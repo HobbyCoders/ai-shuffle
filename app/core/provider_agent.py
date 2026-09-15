@@ -2343,9 +2343,10 @@ async def dispatch_worker(
                         supervised.torn_down_reason, worker_session_id
                     ),
                 )
-            provider_agent_supervisor.unregister_worker(
-                parent_session_id, worker_session_id
-            )
+            if provider_agent_supervisor.get_worker(parent_session_id, worker_session_id) is supervised:
+                provider_agent_supervisor.unregister_worker(
+                    parent_session_id, worker_session_id
+                )
         else:
             # Terminal frames FIRST. The terminal ``task.updated`` this emits is
             # what clears the v2 spinner overlay / background-tasks chip (it
@@ -2488,6 +2489,7 @@ async def dispatch_worker(
             provider_agent_supervisor.record_usage(
                 parent_session_id, worker_session_id, usage_seen
             )
-            provider_agent_supervisor.unregister_worker(
-                parent_session_id, worker_session_id
-            )
+            if provider_agent_supervisor.get_worker(parent_session_id, worker_session_id) is supervised:
+                provider_agent_supervisor.unregister_worker(
+                    parent_session_id, worker_session_id
+                )

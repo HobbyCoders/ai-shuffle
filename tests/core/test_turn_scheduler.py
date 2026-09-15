@@ -50,6 +50,8 @@ def mock_db(test_db):
 
 @pytest.fixture(autouse=True)
 def _clean_module_state():
+    from app.core import provider_agent_supervisor
+    provider_agent_supervisor.reset()
     session_runtime.register_scheduler(None)
     idle_reader.register_on_task_terminal(None)
     turn_manager.register_kick(None)
@@ -161,7 +163,28 @@ async def test_message_resume_rearms_failed_task_and_preserves_context(mock_db):
     assert queued[0]["payload"]["api_user_id"] == "owner-id"
     assert se_db.get_events("child", 0, 100) == before
     assert task_registry.get_task("owner", "child")["status"] == "running"
+    from app.core import provider_agent_supervisor
+    assert provider_agent_supervisor.get_worker("owner", "child") is not None
     kick.assert_called_once_with("child")
+
+
+@pytest.mark.asyncio
+async def test_parent_stop_during_continuation_enqueue_cannot_admit_work(mock_db):
+    from app.core import provider_agent_supervisor
+
+    _settled_turn("child", profile_id="profile")
+    enqueue = turn_scheduler._enqueue_context_wake
+
+    async def raced(*args, **kwargs):
+        turn = await enqueue(*args, **kwargs)
+        task_registry.mark_user_stopped("owner")
+        return turn
+
+    with patch.object(turn_scheduler, "_enqueue_context_wake", raced), patch.object(turn_scheduler, "kick") as kick:
+        assert await turn_scheduler.on_agent_message("child", "owner", "Continue", reply_to="owner") is None
+    assert turns_db.get_queued_turns("child") == []
+    assert provider_agent_supervisor.get_worker("owner", "child") is None
+    kick.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -189,6 +212,50 @@ async def test_resumed_report_is_new_turn_only_and_wakes_parent(mock_db):
         assert task_registry.get_task("owner", "child")["status"] == "completed"
     finally:
         swarm.workers.pop("child", None)
+
+
+@pytest.mark.asyncio
+async def test_continuations_keep_order_and_dedupe_each_completion(mock_db):
+    from app.core.agent_messaging import finish_message_resume
+
+    _settled_turn("owner", profile_id="parent-profile")
+    _settled_turn("child", profile_id="worker-profile")
+    task_registry.start_task("owner", "child", "agent", "Continue", tool_use_id="child")
+    task_registry.mark_background_launch("owner", "child")
+    task_registry.complete_task("owner", "child", "completed", summary="original report")
+    with patch.object(turn_scheduler, "kick"), patch.object(turn_scheduler, "_kick_after_batch_window"):
+        await turn_scheduler.on_task_terminal("owner", {
+            "task_id": "child", "status": "completed", "summary": "original report",
+            "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
+        })
+        for report in ("first continuation", "second continuation"):
+            turn_id = await turn_scheduler.on_agent_message("child", "owner", report, reply_to="owner")
+            se_db.append_events("child", [{"type": "assistant.text_delta", "turn_id": turn_id,
+                                         "payload": {"text": report}}])
+            assert turns_db.start_turn(turn_id, None, "runner")
+            turns_db.settle_turn(turn_id, "completed")
+            settled = turns_db.get_turn(turn_id)
+            await finish_message_resume("child", settled, "completed")
+            await finish_message_resume("child", settled, "completed")
+        queued = turns_db.get_queued_turns("owner")
+        assert len(queued) == 1
+        frames = queued[0]["payload"]["pending_frames"]
+        assert [f["summary"] for f in frames] == [
+            "original report", "first continuation", "second continuation",
+        ]
+        for report in ("original report", "first continuation", "second continuation"):
+            assert queued[0]["prompt"].count(report) == 1
+        assert turns_db.start_turn(queued[0]["id"], None, "runner")
+        for frame in frames:
+            await turn_scheduler.on_task_terminal("owner", frame)
+        assert turns_db.get_queued_turns("owner") == []
+        turns_db.settle_turn(queued[0]["id"], "completed")
+        later = {**frames[-1], "agent_message_turn_id": "later", "summary": "later report"}
+        await turn_scheduler.on_task_terminal("owner", later)
+        for frame in frames:
+            await turn_scheduler.on_task_terminal("owner", frame)
+        (pending,) = turns_db.get_queued_turns("owner")
+        assert pending["payload"]["pending_frames"] == [later]
 
 
 @pytest.mark.asyncio

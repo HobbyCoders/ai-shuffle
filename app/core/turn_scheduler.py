@@ -879,10 +879,14 @@ def _frame_is_richer(incoming: Dict[str, Any], stored: Dict[str, Any]) -> bool:
     )
 
 
+def _completion_key(frame: Dict[str, Any]) -> tuple:
+    return (frame.get("task_id"), frame.get("agent_message_turn_id"))
+
+
 def _dedupe_frames_by_task_id(
     frames: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """Collapse ``frames`` so ONE task_id contributes at most ONE frame.
+    """Collapse duplicate completions, keeping distinct continuation reports.
 
     A task can produce several terminal frames in a single wake batch — a bare
     ``TaskUpdated`` and the rich ``TaskNotification`` that follows it, or the same
@@ -893,15 +897,16 @@ def _dedupe_frames_by_task_id(
     kept, exactly as before.
     """
     out: List[Dict[str, Any]] = []
-    index: Dict[str, int] = {}
+    index: Dict[tuple, int] = {}
     for frame in frames:
         task_id = frame.get("task_id") if isinstance(frame, dict) else None
         if not task_id:
             out.append(frame)
             continue
-        seen = index.get(task_id)
+        key = _completion_key(frame)
+        seen = index.get(key)
         if seen is None:
-            index[task_id] = len(out)
+            index[key] = len(out)
             out.append(frame)
         elif _frame_is_richer(frame, out[seen]):
             out[seen] = frame
@@ -919,7 +924,11 @@ async def on_agent_message(
     """
     from fluid.context.peer import format_peer_message
     from fluid.tools.hardening import defang_harness_markers
+    from app.core.task_registry import task_registry
 
+    owner_generation = task_registry.stop_generation(reply_to) if reply_to else None
+    if reply_to and task_registry.is_user_stopped(reply_to):
+        return None
     prompt = format_peer_message(sender, defang_harness_markers(text)).strip()
     turn = await _enqueue_context_wake(
         session_id, "agent_message", [], [], prompt,
@@ -927,9 +936,17 @@ async def on_agent_message(
     )
     if turn.get("id"):
         if reply_to:
-            from app.core.task_registry import task_registry
+            if task_registry.stop_invalidated(reply_to, owner_generation):
+                await asyncio.to_thread(turns_db.remove_queued_turn, turn["id"])
+                return None
             task_registry.resume_task(reply_to, session_id)
             task_registry.mark_background_launch(reply_to, session_id)
+            from app.core import provider_agent_supervisor as supervisor
+            supervisor.register_worker(supervisor.WorkerRecord(
+                parent_session_id=reply_to, worker_session_id=session_id,
+                task_id=session_id, tool_use_id=session_id, background=True,
+                continuation_turn_id=turn["id"],
+            ))
         kick(session_id)
     return turn.get("id")
 
@@ -1305,7 +1322,7 @@ async def _retire_without_wake(
     await retire_task_terminals(session_id, [frame])
     from app.core.task_registry import task_registry
 
-    task_registry.mark_woken(session_id, task_id)
+    task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
     prompt = await asyncio.to_thread(_build_task_notification_prompt, [frame])
     steered = await _try_steer_terminal_notification(
         session_id, prompt, [], [task_id]
@@ -1433,7 +1450,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
                 # drop post-unpark duplicate frames instead of enqueueing an empty
                 # wake. (Return value ignored — this is a suppression path.)
                 if task_id:
-                    task_registry.mark_woken(session_id, task_id)
+                    task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
                 logger.info(
                     "turn_scheduler: unpark for %s — task %s completed; CLI owns "
                     "the at-rest wake (parent parked), suppressing app enqueue",
@@ -1449,18 +1466,20 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
                 existing_payload = dict(existing.get("payload") or {})
                 existing_task_ids = list(existing_payload.get("task_ids") or [])
                 existing_pending = list(existing_payload.get("pending_frames") or [])
-                if task_id and task_id in existing_task_ids:
+                stored_idx = next(
+                    (i for i, f in enumerate(existing_pending)
+                     if _completion_key(f) == _completion_key(frame)), None,
+                )
+                if task_id and (stored_idx is not None or (
+                    task_id in existing_task_ids and not existing_pending
+                    and not frame.get("agent_message_turn_id")
+                )):
                     # (a) this task is already folded into the wake. A-2: if the
                     # incoming frame is RICHER than the one already stored for it
                     # (e.g. the rich TaskNotification arriving after the bare
                     # TaskUpdated built the wake), upgrade the stored frame in place
                     # and rebuild the prompt; otherwise it is a plain idempotent
                     # no-op.
-                    stored_idx = next(
-                        (i for i, f in enumerate(existing_pending)
-                         if f.get("task_id") == task_id),
-                        None,
-                    )
                     if stored_idx is not None and _frame_is_richer(
                         frame, existing_pending[stored_idx]
                     ):
@@ -1492,6 +1511,10 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
                         )
                         return
                 else:
+                    if task_id and task_registry.is_woken(
+                        session_id, task_id, completion_id=frame.get("agent_message_turn_id")
+                    ):
+                        return
                     # (b) merge this frame into the pending wake and rebuild its
                     # prompt.
                     # Dedupe on the way in: branch (a) already covers the common
@@ -1516,7 +1539,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
                     if updated is not None:
                         # A-3: record the merged task woke so a later late frame
                         # for it can't re-enqueue.
-                        task_registry.mark_woken(session_id, task_id)
+                        task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
                         logger.info(
                             "turn_scheduler: unpark for %s — task %s terminal (%s) "
                             "merged into wake turn %s (%d pending)",
@@ -1533,7 +1556,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
             # that has since left the queue — a late/duplicate frame that must not
             # spawn a second wake. Guarded on a truthy task_id: a task_id-less frame
             # never latches (it also can't be deduped), so it enqueues as before.
-            if task_id and task_registry.is_woken(session_id, task_id):
+            if task_id and task_registry.is_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id")):
                 logger.info(
                     "turn_scheduler: unpark for %s — task %s late frame; wake "
                     "already produced, no re-enqueue",
@@ -1552,7 +1575,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
             if await _try_steer_terminal_notification(
                 session_id, prompt, [frame], wake_task_ids
             ):
-                task_registry.mark_woken(session_id, task_id)
+                task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
                 logger.info(
                     "turn_scheduler: unpark for %s — task %s terminal (%s) "
                     "steered into the live turn",
@@ -1562,7 +1585,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
             turn = await _enqueue_context_wake(
                 session_id, "unpark", [frame], wake_task_ids, prompt
             )
-            task_registry.mark_woken(session_id, task_id)
+            task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
             logger.info(
                 "turn_scheduler: unpark for %s — task %s terminal (%s), wake turn %s",
                 session_id, task_id, frame.get("status"), turn["id"],
@@ -1718,8 +1741,8 @@ def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
     genuinely different result gets its own element, and then the summary is
     capped back down to the label it is meant to be.
 
-    ``pending`` is deduplicated by ``task_id`` first: one task contributes one
-    block however many terminal frames it produced in the batch.
+    ``pending`` is deduplicated by task and continuation ID first: one
+    completion contributes one block, while later continuations keep their reports.
 
     ``kind`` selects the contract variant:
 

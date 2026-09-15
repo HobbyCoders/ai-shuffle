@@ -120,6 +120,8 @@ class WorkerRecord:
     #: via the task tools — so the turn-end teardown skips it. stop-all and the
     #: per-worker timeout still apply.
     background: bool = False
+    #: Explicit message continuation; guarded against an earlier dispatch cleanup.
+    continuation_turn_id: Optional[str] = None
 
 
 # parent_session_id -> {worker_session_id: WorkerRecord}
@@ -553,6 +555,11 @@ async def teardown_worker(
     parent_session_id = record.parent_session_id
     record.torn_down = True
     record.torn_down_reason = reason
+    if record.continuation_turn_id:
+        # A continuation may still be queued or parked, with no live runtime to
+        # clear its queue or stop descendants when the interrupt is delivered.
+        from app.core.query_session_lifecycle import stop_all_background_tasks
+        await stop_all_background_tasks(record.worker_session_id, user_stop=True, source=reason)
     await _settle_card(record, preview, summary)
 
     outcome = await _kill_worker_session(record.worker_session_id, reason=reason)
