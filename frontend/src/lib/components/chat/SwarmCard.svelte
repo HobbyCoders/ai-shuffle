@@ -10,7 +10,11 @@
  let confirming = $state(false);
  let cancelling = $state(false);
  let cancelError = $state('');
- const initial = $derived(parseSwarm(result));
+ // Transcript rebuilds replace the row prop container, not necessarily its result.
+ // Stabilize the text before parsing: a fresh snapshot would publish back to
+ // swarms, rebuild the transcript, and retrigger this effect indefinitely.
+ const resultText = $derived(result);
+ const initial = $derived(parseSwarm(resultText));
  const owner = $derived(sessionId ?? initial?.session_id);
  const snapshot = $derived(resolveSwarm(Object.values($swarms.bySession[owner ?? ''] ?? {}), initial, input));
  const stages = $derived(swarmStages(snapshot?.tasks ?? []));
