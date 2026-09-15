@@ -190,18 +190,29 @@ class AccountProfileSmokeTest {
             accountId = session.accountId, deviceId = session.deviceId, hubUrl = session.hub, hubServerId = "worker-one")
         ServerStore.get(context).add(worker)
         val patches = AtomicInteger()
+        val profileGets = AtomicInteger()
         withApi({ request ->
             check(request.url.encodedPath == "/v1/me")
-            if (request.method == "GET") 200 to profile("generated-name", false)
+            if (request.method == "GET") {
+                profileGets.incrementAndGet()
+                200 to profile("generated-name", false)
+            }
             else when (patches.incrementAndGet()) {
                 1 -> 409 to JSONObject()
                 2 -> 503 to JSONObject()
                 else -> 200 to profile(body(request).getString("username"), true)
             }
         }) {
-            ActivityScenario.launch<AccountActivity>(Intent(context, AccountActivity::class.java).putExtra("mode", "manage")).use {
+            ActivityScenario.launch<AccountActivity>(Intent(context, AccountActivity::class.java).putExtra("mode", "manage")).use { scenario ->
                 onView(withText("Edit username")).perform(scrollTo(), click())
-                awaitText("Save username")
+                try { awaitText("Save username") }
+                catch (failure: AssertionError) {
+                    var focused = false
+                    scenario.onActivity { focused = it.hasWindowFocus() }
+                    throw AssertionError("Single Edit username tap: profileGets=${profileGets.get()}, " +
+                        "state=${scenario.state}, focused=$focused; ${failure.message}", failure)
+                }
+                assertEquals("One tap must produce one profile refresh", 1, profileGets.get())
                 onView(withHint("Username")).check(matches(withText(""))).perform(replaceText("my.name"), closeSoftKeyboard())
                 onView(withText("Save username")).perform(scrollTo(), click())
                 awaitText("That username is already taken. Choose another.")
