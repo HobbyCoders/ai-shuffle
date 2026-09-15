@@ -150,8 +150,8 @@ class PeerLink:
         await self.authenticate(client, ctx)
         summary: dict[str, Any] = {"received": 0, "sent": 0}
         target = None
+        marks = await asyncio.to_thread(store.local_watermarks)
         while True:
-            marks = await asyncio.to_thread(store.local_watermarks)
             exchange = await self._request(client, "POST", "/api/v1/network/peer/exchange", json_body={
                 "watermarks": marks, "limit": BATCH_LIMIT, "incarnation": ctx.identity.incarnation,
                 "flush": catch_up and target is None,
@@ -181,6 +181,9 @@ class PeerLink:
                 break
             if current == marks:
                 raise PeerError("Peer sync could not fill missing updates")
+            # This is already the next request's committed frontier. A later
+            # local write can safely be advertised on the following exchange.
+            marks = current
         if await self._check_rollback(client, ctx, theirs):
             ctx = engine.require_context()
         their_endpoints = exchange.get("endpoints") or []
