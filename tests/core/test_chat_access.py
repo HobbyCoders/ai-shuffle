@@ -238,7 +238,7 @@ def test_paths_fail_closed(path):
         chat_files.parts(path)
 
 
-@pytest.mark.skipif(os.name == "nt" or not chat_files.available(), reason="Linux openat2 confinement required")
+@pytest.mark.skipif(not chat_files.available(), reason="Linux openat2 confinement required")
 def test_folder_links_traversal_atomic_writes_and_bounds(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -282,52 +282,6 @@ async def test_folder_cannot_run_shell_and_writes_need_grant_and_approval(broker
     assert await task == {"written": True}
     assert (tmp_path / "x").read_text() == "yes"
     broker.revoke("chat", grant["id"])
-
-
-@pytest.mark.skipif(not chat_files.available(), reason="Confined folders required")
-@pytest.mark.asyncio
-async def test_folder_request_produces_scoped_grant_and_one_shot_write(broker, tmp_path, monkeypatch):
-    from app.api import chat_access as api
-    monkeypatch.setattr(api, "broker", broker)
-    monkeypatch.setattr(api, "checked", AsyncMock())
-    app = FastAPI()
-    app.include_router(api.router)
-    app.dependency_overrides[api.require_admin] = lambda: "owner"
-    async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
-        requested = asyncio.create_task(broker.request("chat", "folder", "Read and update a test file"))
-        await asyncio.sleep(0)
-        request_id = next(iter(broker.requests))
-        endpoint = f"/api/v1/chat-access/chat/requests/{request_id}"
-        response = await client.post(endpoint, json={"connection": {
-            "kind": "folder", "label": "Test folder", "path": str(tmp_path), "writable": True,
-        }})
-        assert response.status_code == 200, response.text
-        handle = await requested
-        assert set(handle) == {"id", "kind", "expires_at", "writable"}
-        assert str(tmp_path) not in str(handle)
-        for session, operation, arguments in (
-            ("other", "read", {"path": "x"}),
-            ("chat", "read", {"path": "../outside"}),
-            ("chat", "command", {"command": "anything"}),
-        ):
-            with pytest.raises(AccessDenied):
-                await broker.run(session, handle["id"], operation, arguments)
-        for allow in (False, True):
-            task = asyncio.create_task(broker.run("chat", handle["id"], "write", {"path": "x", "content": "approved"}))
-            action = await pending(broker)
-            assert not (tmp_path / "x").exists()
-            response = await client.post(f"/api/v1/chat-access/chat/actions/{action.id}", json={"allow": allow})
-            assert response.status_code == 200
-            if allow:
-                assert await task == {"written": True}
-            else:
-                with pytest.raises(AccessDenied):
-                    await task
-        assert await broker.run("chat", handle["id"], "read", {"path": "x"}) == {"content": "approved"}
-        response = await client.delete(f"/api/v1/chat-access/chat/grants/{handle['id']}")
-        assert response.status_code == 200
-        with pytest.raises(AccessDenied):
-            await broker.run("chat", handle["id"], "read", {"path": "x"})
 
 
 def test_preview_cannot_grant_or_approve():

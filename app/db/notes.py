@@ -233,8 +233,8 @@ def get_notes_autocomplete(
         params: List[Any] = []
 
         if search:
-            query += " AND (title ILIKE %s ESCAPE '\\' OR content ILIKE %s ESCAPE '\\')"
-            search_term = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            query += " AND (title LIKE %s OR content LIKE %s)"
+            search_term = f"%{search}%"
             params.extend([search_term, search_term])
 
         query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT %s"

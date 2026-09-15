@@ -26,7 +26,7 @@ def _relative(path: str, *, empty: bool = False) -> list[str]:
 
 
 @contextmanager
-def _windows_handle(path: Path, *, directory: bool, create_new: bool = False):
+def _windows_handle(path: Path, *, directory: bool):
     import ctypes
     from ctypes import wintypes
     import msvcrt
@@ -39,8 +39,7 @@ def _windows_handle(path: Path, *, directory: bool, create_new: bool = False):
     close = kernel.CloseHandle
     close.argtypes = [wintypes.HANDLE]
     # No delete sharing: no ancestor can be renamed/replaced while it is pinned.
-    handle = create(str(path), 0x40000000 if create_new else 0x80000000,
-                    0x1 | 0x2, None, 1 if create_new else 3,
+    handle = create(str(path), 0x80000000, 0x1 | 0x2, None, 3,
                     0x00200000 | (0x02000000 if directory else 0), None)
     if handle == wintypes.HANDLE(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -64,7 +63,7 @@ def _windows_handle(path: Path, *, directory: bool, create_new: bool = False):
         if directory:
             yield handle
         else:
-            fd = msvcrt.open_osfhandle(handle, (os.O_WRONLY if create_new else os.O_RDONLY) | os.O_BINARY)
+            fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
             handle = None  # the CRT descriptor owns it now
             yield fd
     finally:
@@ -112,10 +111,7 @@ def upload(root: Path, directory: str, filename: str, content: bytes) -> Path:
         if os.name == 'nt':
             parent = stack.enter_context(_windows_directory(root, names, create=True))
             def create(name):
-                # CRT O_EXCL may follow a dangling symlink on Windows. CREATE_NEW
-                # opens the entry itself and refuses every existing name.
-                fd = stack.enter_context(_windows_handle(parent / name, directory=False, create_new=True))
-                return os.dup(fd)
+                return os.open(parent / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY, 0o600)
         else:
             fd = stack.enter_context(_linux_root(root))
             for i, name in enumerate(names):
@@ -151,18 +147,13 @@ def open_attachment(root: Path, path: Path):
     A substitution after resolution is either another in-root file or refused.
     """
     root = Path(os.path.abspath(root))
+    target = path.resolve(strict=True)
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        raise AccessDenied("Attachment is outside the uploads directory.") from None
+    names = _relative(relative.as_posix())
     with ExitStack() as stack:
-        if os.name == 'nt':
-            # Reject reparse ancestors before normalizing legitimate DOS 8.3
-            # aliases. Keep the original spelling pinned during all later IO.
-            stack.enter_context(_windows_directory(root, []))
-            root = root.resolve(strict=True)
-        target = path.resolve(strict=True)
-        try:
-            relative = target.relative_to(root)
-        except ValueError:
-            raise AccessDenied("Attachment is outside the uploads directory.") from None
-        names = _relative(relative.as_posix())
         if os.name == 'nt':
             parent = stack.enter_context(_windows_directory(root, names[:-1]))
             fd = stack.enter_context(_windows_handle(parent / names[-1], directory=False))

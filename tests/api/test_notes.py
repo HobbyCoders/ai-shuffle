@@ -26,36 +26,6 @@ from fastapi.testclient import TestClient
 from app.api.notes import router
 from app.api.auth import require_auth
 
-@pytest.mark.parametrize("search,expected", [
-    ("ALPHANEEDLE", {"AlphaNeedle"}),
-    ("%", {"Literal 50%"}),
-    ("_", {"Literal a_b"}),
-    ("\\", {"Literal back\\slash"}),
-    ("LATENEEDLE", {"Content match"}),
-])
-def test_autocomplete_literal_search(tmp_path, monkeypatch, search, expected):
-    from app.db import database
-    from app.core import note_files
-
-    monkeypatch.setattr("app.api.notes.database", database)
-    monkeypatch.setattr(note_files, "settings", MagicMock(effective_data_dir=tmp_path))
-    application = FastAPI()
-    application.include_router(router)
-    application.dependency_overrides[require_auth] = lambda: "test-owner"
-    with TestClient(application) as client:
-        for title, content in [
-            ("AlphaNeedle", "ordinary"), ("Literal 50%", "ordinary"),
-            ("Literal a_b", "ordinary"), ("Literal back\\slash", "ordinary"),
-            ("Plain control", "ordinary"), ("Content match", "x" * 120 + " lateNeedle"),
-        ]:
-            created = client.post("/api/v1/notes", json={"title": title, "content": content})
-            assert created.status_code == 201
-        response = client.get("/api/v1/notes/autocomplete", params={"search": search})
-        assert response.status_code == 200
-        assert {row["title"] for row in response.json()} == expected
-        assert all(len(row["preview"]) <= 103 for row in response.json())
-
-
 
 # =============================================================================
 # Fixtures

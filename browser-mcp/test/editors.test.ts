@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
@@ -30,6 +30,10 @@ describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () =
 
   it('uploads real bytes, supports hidden chooser targets, and rejects escaped or stale paths', async () => {
     const folder = mkdtempSync(join(tmpdir(), 'browser-picker-'));
+    const outside = mkdtempSync(join(tmpdir(), 'browser-picker-outside-'));
+    const outsideFile = join(outside, 'outside.txt');
+    const escape = join(folder, 'escape');
+    writeFileSync(outsideFile, 'outside upload bytes');
     const allowed = join(folder, 'allowed.txt');
     writeFileSync(allowed, 'original upload bytes');
     vi.stubEnv('AIS_BROWSER_PANEL_UPLOAD_DIR', folder);
@@ -41,9 +45,12 @@ describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () =
       expect(file).toMatchObject({ label: 'Documents', multiple: true, accept: '.txt' });
       await uploadField(page, {field: file.id, paths: [allowed]});
       expect(await page.locator('#doc').evaluate(async (el: HTMLInputElement) => [el.files![0].name, await el.files![0].text()])).toEqual(['allowed.txt', 'original upload bytes']);
-      await expect(uploadField(page, {field: file.id, paths: ['/etc/passwd']})).rejects.toThrow('outside');
-      symlinkSync('/etc/passwd', join(folder, 'escape.txt'));
-      await expect(uploadField(page, {field: file.id, paths: [join(folder, 'escape.txt')]})).rejects.toThrow('outside');
+      await expect(uploadField(page, {field: file.id, paths: [outsideFile]})).rejects.toThrow('outside');
+      // Directory junctions work without Windows symlink privileges.
+      symlinkSync(outside, escape, process.platform === 'win32' ? 'junction' : 'dir');
+      try {
+        await expect(uploadField(page, {field: file.id, paths: [join(escape, 'outside.txt')]})).rejects.toThrow('outside');
+      } finally { unlinkSync(escape); }
       const chooserEvent = page.waitForEvent('filechooser');
       await page.getByText('Custom upload').click();
       await rememberFileChooser(page, (await chooserEvent).element());
@@ -62,7 +69,7 @@ describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () =
       expect(await frame.locator('#inner').evaluate((el: HTMLInputElement) => el.files![0].name)).toBe('allowed.txt');
       expect((await readEditors(page)).some(f => f.chooser)).toBe(false);
       await expect(uploadField(page, {field: file.id, paths: [allowed]})).rejects.toThrow('changed');
-    } finally { await browser.close(); rmSync(folder, {recursive:true, force:true}); vi.unstubAllEnvs(); }
+    } finally { await browser.close(); rmSync(folder, {recursive:true, force:true}); rmSync(outside, {recursive:true, force:true}); vi.unstubAllEnvs(); }
   });
   it('discovers real fields, applies edits and rejects replaced nodes without leaking passwords', async () => {
     const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true, args: ['--no-sandbox'] });

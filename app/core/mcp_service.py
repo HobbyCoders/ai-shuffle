@@ -115,10 +115,8 @@ class McpServerConfig:
 
         Returns the server config without name/scope/enabled (those are external).
         """
-        config: Dict[str, Any] = {}
-        if self.description is not None:
-            config["description"] = self.description
         if self.type == McpServerType.STDIO or self.type == "stdio":
+            config: Dict[str, Any] = {}
             if self.command:
                 config["command"] = self.command
             if self.args:
@@ -128,7 +126,9 @@ class McpServerConfig:
             return config
         else:
             # SSE or HTTP
-            config["type"] = self.type.value if isinstance(self.type, McpServerType) else self.type
+            config = {
+                "type": self.type.value if isinstance(self.type, McpServerType) else self.type,
+            }
             if self.url:
                 config["url"] = self.url
             if self.headers:

@@ -212,6 +212,8 @@ class AccountProfileSmokeTest {
                     throw AssertionError("Single Edit username tap: profileGets=${profileGets.get()}, " +
                         "state=${scenario.state}, focused=$focused; ${failure.message}", failure)
                 }
+                android.util.Log.i("ProfileTiming", "Single Edit username tap reached Save username: " +
+                    "profileGets=${profileGets.get()}, state=${scenario.state}")
                 assertEquals("One tap must produce one profile refresh", 1, profileGets.get())
                 onView(withHint("Username")).check(matches(withText(""))).perform(replaceText("my.name"), closeSoftKeyboard())
                 onView(withText("Save username")).perform(scrollTo(), click())

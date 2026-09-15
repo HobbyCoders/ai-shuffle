@@ -10,6 +10,7 @@ import asyncio
 import hmac
 import ipaddress
 import logging
+import os
 import re
 import time
 import uuid
@@ -57,7 +58,7 @@ class Grant:
     target: str
     expires_at: float
     writable: bool = False
-    root: int | chat_files.WindowsRoot | None = None
+    root: int | None = None
     host: str = ""
     port: int = 22
     username: str = ""
@@ -293,7 +294,7 @@ class Broker:
                 raise AccessDenied("A session may have at most eight active grants.")
         except BaseException:
             if grant.root is not None:
-                chat_files.close_root(grant.root)
+                os.close(grant.root)
             raise
         self.grants[grant.id] = grant
         grant.timer = asyncio.get_running_loop().call_later(spec.minutes * 60, self.revoke, session_id, grant.id)
@@ -314,7 +315,7 @@ class Broker:
         for task in list(grant.tasks):
             task.cancel()
         if grant.root is not None:
-            chat_files.close_root(grant.root)
+            os.close(grant.root)
             grant.root = None
         grant.password, grant.key = "", None
         self._notify(session_id, grant.owner)

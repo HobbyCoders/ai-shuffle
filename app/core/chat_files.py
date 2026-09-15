@@ -6,8 +6,7 @@ import os
 import platform
 import stat
 import uuid
-from contextlib import contextmanager, ExitStack
-from pathlib import Path
+from contextlib import contextmanager
 from functools import lru_cache
 
 LIMIT = 64 * 1024
@@ -37,13 +36,6 @@ def confined_open(root: int, path: str, flags: int, mode: int = 0) -> int:
 
 @lru_cache(maxsize=1)
 def available() -> bool:
-    if os.name == "nt":
-        from app.core.confined_files import _windows_directory
-        try:
-            with _windows_directory(Path(os.path.abspath(os.sep)), []):
-                return True
-        except (OSError, AccessDenied):
-            return False
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "aarch64"):
         return False
     root = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
@@ -68,42 +60,9 @@ def parts(path: str, *, empty: bool = False) -> list[str]:
     return result
 
 
-class WindowsRoot:
-    """Pin the approved root and every ancestor until the grant is revoked."""
-
-    def __init__(self, path: str):
-        from app.core.confined_files import _relative, _windows_directory
-        self.path = Path(path)
-        if (not self.path.is_absolute() or not self.path.drive
-                or str(self.path).startswith("\\") or self.path == Path(self.path.anchor)):
-            raise AccessDenied("Choose a local absolute folder other than the filesystem root.")
-        # Validate the original spelling; Path would normalize dot components.
-        _relative(path[len(self.path.anchor):].replace("\\", "/"))
-        self.stack = ExitStack()
-        self.closed = False
-        try:
-            self.stack.enter_context(_windows_directory(self.path, []))
-        except BaseException:
-            self.stack.close()
-            raise
-
-    def close(self):
-        self.closed = True
-        self.stack.close()
-
-
-def close_root(root: int | WindowsRoot) -> None:
-    if isinstance(root, WindowsRoot):
-        root.close()
-    else:
-        os.close(root)
-
-
-def open_root(path: str) -> int | WindowsRoot:
+def open_root(path: str) -> int:
     if not available():
         raise AccessDenied("Folder access is unavailable on this worker; no unsafe fallback is used.")
-    if os.name == "nt":
-        return WindowsRoot(path)
     if not path.startswith("/") or path == "/":
         raise AccessDenied("Choose an absolute folder other than the filesystem root.")
     names = parts(path[1:])
@@ -120,15 +79,7 @@ def open_root(path: str) -> int | WindowsRoot:
 
 
 @contextmanager
-def directory(root: int | WindowsRoot, names: list[str]):
-    if isinstance(root, WindowsRoot):
-        from app.core.confined_files import _relative, _windows_directory
-        if root.closed:
-            raise AccessDenied("Folder access was revoked.")
-        _relative("/".join(names), empty=True)
-        with _windows_directory(root.path, names) as parent:
-            yield parent
-        return
+def directory(root: int, names: list[str]):
     fd = confined_open(root, "/".join(names) or ".", os.O_RDONLY | os.O_DIRECTORY)
     try:
         yield fd
@@ -141,26 +92,19 @@ def regular(info):
         raise AccessDenied("Only regular, singly linked files are accessible.")
 
 
-def read(root: int | WindowsRoot, path: str) -> str:
+def read(root: int, path: str) -> str:
     names = parts(path)
     with directory(root, names[:-1]) as parent:
-        with ExitStack() as stack:
-            if isinstance(root, WindowsRoot):
-                from app.core.confined_files import _relative, _windows_handle
-                _relative(path)
-                fd = stack.enter_context(_windows_handle(parent / names[-1], directory=False))
-            else:
-                fd = confined_open(parent, names[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                stack.callback(os.close, fd)
-            regular(os.fstat(fd))
-            with os.fdopen(os.dup(fd), "rb") as stream:
-                data = stream.read(LIMIT + 1)
+        fd = confined_open(parent, names[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            regular(os.fstat(stream.fileno()))
+            data = stream.read(LIMIT + 1)
     if len(data) > LIMIT:
         raise AccessDenied("File exceeds the 64 KiB text limit.")
     return data.decode("utf-8")
 
 
-def listing(root: int | WindowsRoot, path: str) -> list[str]:
+def listing(root: int, path: str) -> list[str]:
     with directory(root, parts(path, empty=True)) as parent:
         with os.scandir(parent) as entries:
             result = []
@@ -171,38 +115,11 @@ def listing(root: int | WindowsRoot, path: str) -> list[str]:
             return sorted(result)
 
 
-def write(root: int | WindowsRoot, path: str, content: str) -> None:
+def write(root: int, path: str, content: str) -> None:
     data = content.encode("utf-8")
     if len(data) > LIMIT:
         raise AccessDenied("File exceeds the 64 KiB text limit.")
     names = parts(path)
-    if isinstance(root, WindowsRoot):
-        from app.core.confined_files import _relative, _windows_handle
-        _relative(path)
-        with directory(root, names[:-1]) as parent:
-            destination = parent / names[-1]
-            try:
-                with _windows_handle(destination, directory=False):
-                    pass
-            except FileNotFoundError:
-                pass
-            temp = parent / (".chat-write-" + uuid.uuid4().hex)
-            created = False
-            try:
-                with _windows_handle(temp, directory=False, create_new=True) as fd:
-                    created = True
-                    with os.fdopen(os.dup(fd), "wb") as stream:
-                        regular(os.fstat(stream.fileno()))
-                        stream.write(data)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                # Pinned parents cannot be replaced. Replace the entry, never
-                # follow a destination swapped after validation.
-                os.replace(temp, destination)
-            finally:
-                if created:
-                    temp.unlink(missing_ok=True)
-        return
     with directory(root, names[:-1]) as parent:
         mode = 0o600
         try:

@@ -141,10 +141,9 @@
 
     const query = atInfo.query;
     const targetPath = getPathFromQuery(query);
-    const requestPath = query.startsWith(NOTES_FOLDER + '/') ? query : targetPath;
 
-    if (requestPath !== lastFetchedPath) {
-      fetchFiles(requestPath);
+    if (targetPath !== currentPath && targetPath !== lastFetchedPath) {
+      fetchFiles(targetPath);
     }
   });
 
@@ -160,9 +159,7 @@
     const filterPart = getFilterFromQuery(query).toLowerCase();
 
     let filtered: FileItem[];
-    // Note matches come from the full title/content query, not just the
-    // displayed filename or the truncated preview.
-    if (!filterPart || inNotesFolder) {
+    if (!filterPart) {
       filtered = [...files];
     } else {
       filtered = files.filter(f =>
@@ -237,7 +234,7 @@
     const thisFetchId = ++fetchCounter;
     loading = true;
     lastFetchedPath = path;
-    currentPath = isNotesPath(path) ? NOTES_FOLDER : path;
+    currentPath = path;
 
     if (isChatHistoryPath(path)) {
       inChatHistoryFolder = true;

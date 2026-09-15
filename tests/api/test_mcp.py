@@ -17,34 +17,6 @@ from app.api.mcp import router
 from app.api.auth import require_auth, require_admin
 from app.core.mcp_service import McpScope, McpServerType, McpServerConfig
 
-@pytest.mark.parametrize("server_type", ["stdio", "sse", "http"])
-def test_description_round_trip(tmp_path, monkeypatch, server_type):
-    from app.core import mcp_service
-
-    monkeypatch.setattr(mcp_service, "_get_claude_dir", lambda: tmp_path / ".claude")
-    monkeypatch.setattr(mcp_service, "_get_user_claude_json", lambda: tmp_path / ".claude.json")
-    monkeypatch.setattr("app.api.mcp.get_mcp_service", mcp_service.McpService)
-    application = FastAPI()
-    application.include_router(router)
-    application.dependency_overrides[require_admin] = lambda: "test-admin"
-    application.dependency_overrides[require_auth] = lambda: "test-admin"
-    payload = {"name": "round-trip", "type": server_type, "description": "Searchable description"}
-    payload.update({"command": "not-started"} if server_type == "stdio" else {"url": "http://127.0.0.1:9/mcp"})
-    with TestClient(application) as client:
-        created = client.post("/api/v1/mcp/servers", json=payload)
-        assert created.status_code == 201
-        for description in ["Searchable description", "Updated description", ""]:
-            if description != payload["description"]:
-                updated = client.put("/api/v1/mcp/servers/round-trip", json={"description": description})
-                assert updated.status_code == 200
-            servers = client.get("/api/v1/mcp/servers").json()
-            assert next(s for s in servers if s["name"] == "round-trip")["description"] == description
-            reloaded = mcp_service.McpService().get_server("round-trip", McpScope.USER)
-            assert reloaded.description == description
-        assert client.put("/api/v1/mcp/servers/round-trip", json={"env": {"TEST": "value"}}).status_code == 200
-        assert mcp_service.McpService().get_server("round-trip", McpScope.USER).description == ""
-
-
 
 # =============================================================================
 # Fixtures
