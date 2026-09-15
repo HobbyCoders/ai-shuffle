@@ -95,6 +95,22 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertEqual(version["env"]["RELEASE_TAG"], "${{ inputs.release_tag }}")
         self.assertIn('ANDROID_VERSION_NAME=${RELEASE_TAG#v}', version["run"])
 
+    def test_android_setup_explicitly_avoids_removed_tools_package(self):
+        setups = 0
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+            for job in workflow.get("jobs", {}).values():
+                for step in job.get("steps", []):
+                    if not step.get("uses", "").startswith("android-actions/setup-android@"):
+                        continue
+                    setups += 1
+                    with self.subTest(workflow=path.name, step=step.get("name")):
+                        # The action's default still includes the removed `tools` package.
+                        packages = step.get("with", {}).get("packages", "").split()
+                        self.assertIn("platform-tools", packages)
+                        self.assertNotIn("tools", packages)
+        self.assertGreater(setups, 0)
+
     def test_all_inline_shell_parses(self):
         for job in self.jobs.values():
             for step in job["steps"]:
