@@ -189,7 +189,10 @@ def _resolve_working_dir(
 
     Blocking: reads the database and stats the filesystem.
     """
-    if worktree_id:
+    session = database.get_session(session_id) if session_id else None
+    # Adoption preserves legacy IDs from the original worker. A canonical
+    # session must resolve on this runner even if that legacy ID also exists here.
+    if worktree_id and not (session and session.get("project_v2_id")):
         worktree = database.get_worktree(worktree_id)
         if not worktree:
             raise HTTPException(
@@ -201,7 +204,6 @@ def _resolve_working_dir(
     if session_id:
         from app.core.project_resolver import resolve_existing_cwd
 
-        session = database.get_session(session_id)
         if session:
             cwd = resolve_existing_cwd(session)
             if cwd:
@@ -242,10 +244,10 @@ def get_working_dir(
     Get the working directory for git operations.
 
     Resolution order:
-    1. ``worktree_id`` — a legacy worktrees row's directory.
-    2. ``session_id`` — a v2 branch session's own checkout (sessions.branch +
-       project_v2_id), so chat-header git actions target the branch checkout
-       rather than silently falling back to the base checkout.
+    1. A canonical ``session_id`` — this runner's checkout for its project/branch,
+       ignoring legacy worktree IDs retained from a previous owner.
+    2. ``worktree_id`` — a legacy worktrees row for drafts/pre-v2 sessions.
+    3. ``session_id`` — the session resolver's existing checkout.
     Otherwise returns the main project path.
 
     Results are memoized for a few seconds (see :data:`_WORKING_DIR_TTL`).

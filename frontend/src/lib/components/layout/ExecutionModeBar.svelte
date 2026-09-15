@@ -68,7 +68,7 @@
 	// A cache miss retains the previous checkout's status while loading. Only
 	// use hydrated data belonging to this composer to constrain its intent.
 	const isGitRepo = $derived(!($git.hydrated
-		&& $git.projectId === $activeSession.project
+		&& ($git.projectId === $activeSession.projectV2Id || $git.projectId === $activeSession.project)
 		&& $git.worktreeId === $activeSession.worktreeId
 		&& $git.sessionId === $activeSession.sessionId
 		&& $git.status?.is_git_repo === false));
@@ -150,7 +150,7 @@
 
 	// Sync worktrees when project changes (cleans up stale DB records)
 	$effect(() => {
-		const project = $activeSession.project;
+		const project = $activeSession.projectV2Id ? null : $activeSession.project;
 		if (project && project !== untrack(() => lastSyncedProject)) {
 			lastSyncedProject = project;
 			syncWorktrees(project).catch(e => {
@@ -228,7 +228,7 @@
 		const projectId = $activeSession.project;
 		const projectV2Id = $activeSession.projectV2Id;
 		const gitStateReq = (projectId || projectV2Id)
-			? getClusterGitState(projectId || null, projectId ? null : projectV2Id).catch(e => {
+			? getClusterGitState(projectV2Id ? null : projectId || null, projectV2Id || null).catch(e => {
 				console.warn('[ExecutionModeBar] Failed to load git state:', e);
 				return null;
 			})
@@ -284,7 +284,7 @@
 
 	function toggleDropdown() {
 		showBranchDropdown = !showBranchDropdown;
-		if (showBranchDropdown && $activeSession.project) {
+		if (showBranchDropdown && ($activeSession.projectV2Id || $activeSession.project)) {
 			refreshWorktrees();
 		}
 	}
