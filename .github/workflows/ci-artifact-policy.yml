@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/**'
-      - 'scripts/ci/test-artifact-policy.py'
+      - 'scripts/ci/*.py'
   workflow_dispatch:
 
 permissions:
@@ -24,3 +24,4 @@ jobs:
           node-version: '22'
       - run: python -m pip install PyYAML==6.0.3
       - run: python scripts/ci/test-artifact-policy.py
+      - run: python scripts/ci/test-cost-policy.py

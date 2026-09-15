@@ -95,7 +95,7 @@ class ArtifactPolicyTests(unittest.TestCase):
         exported = {s["with"]["name"]: s for s in uploads(build)}
         self.assertEqual(set(exported), {"android-instrumentation-apks", "android-download"})
         self.assertEqual(exported["android-instrumentation-apks"]["with"]["retention-days"], "1")
-        self.assertNotIn("if", exported["android-instrumentation-apks"])
+        self.assertEqual(exported["android-instrumentation-apks"]["if"], jobs["android-ui"]["if"])
         for name in ["Decode release keystore", "Build release APK", "Verify APK is signed with the release key", "Prepare public APK download", "Upload public download files"]:
             step = next(s for s in build["steps"] if s.get("name") == name)
             self.assertEqual(step["if"], jobs["publish"]["if"])

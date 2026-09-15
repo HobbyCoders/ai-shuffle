@@ -1,4 +1,5 @@
 name: CI JavaScript
+run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '4' }} vCPU)"
 
 # One runner checks only the JavaScript packages changed by a PR. Scheduled
 # canaries check all three packages; documentation-only PRs do not start it.
@@ -12,21 +13,24 @@ on:
       - 'browser-mcp/**'
       - 'app/contract/schema/**'
       - '.github/workflows/ci-frontend.yml'
-  # Main-branch canary. Merges to main no longer run CI directly — the PR
-  # already ran it, and re-running on the merge commit doubled the bill for a
-  # result that is green ~always. What that loses is semantic conflicts between
-  # two branches that were each green alone; the canary catches those within
-  # ~6h instead of at the next PR. The gate job below skips the paid runner
-  # when main has not moved since the last green canary.
+  # Daily main-branch canary catches interactions between merged PRs within
+  # roughly a day. Skip the paid runner when main has not moved since a green
+  # canary; PRs already check each revision before merge.
   schedule:
-    - cron: '7 */6 * * *'
+    - cron: '7 6 * * *'
   # Manual canary (`gh workflow run ci-frontend.yml`).
   workflow_dispatch:
+    inputs:
+      runner_cpus:
+        description: 'Runner vCPUs (compare the same commit before changing defaults)'
+        type: choice
+        options: ['4', '2']
+        default: '4'
 
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
 # letting stale runs finish and fail/email after a newer commit already ran.
 concurrency:
-  group: ci-frontend-${{ github.ref }}
+  group: ci-frontend-${{ github.ref }}-${{ inputs.runner_cpus || '4' }}
   cancel-in-progress: true
 
 jobs:
@@ -64,7 +68,7 @@ jobs:
     # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
     timeout-minutes: 20
     # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ inputs.runner_cpus == '2' && 'blacksmith-2vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
     defaults:
       run:
         working-directory: frontend

@@ -2,6 +2,9 @@ name: CI Browser Workspace
 
 on:
   pull_request:
+    # Add ci:full when ready to merge. Keeping it applied rechecks every push;
+    # removing it cancels obsolete full runs and makes readiness fail closed.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - 'app/api/browser_panel.py'
       - 'app/api/openai_billing.py'
@@ -27,15 +30,36 @@ on:
       - 'tests/test_browser_workspace_integration.py'
       - 'requirements*.txt'
       - '.github/workflows/ci-browser-workspace.yml'
+      - 'scripts/ci/require-full-ci.py'
   workflow_dispatch:
 
 concurrency:
   group: ci-browser-workspace-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
+  smoke:
+    name: Browser editor smoke checks
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: browser-mcp/package-lock.json
+      - run: npm ci --ignore-scripts --prefix browser-mcp
+      - run: npm run build --prefix browser-mcp
+      - run: npm test --prefix browser-mcp -- test/editors.test.ts
+
   workspace:
     name: Real browser workspace
+    needs: smoke
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     timeout-minutes: 10
     runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
@@ -73,12 +97,10 @@ jobs:
         run: |
           npx --no-install playwright-core install --with-deps chromium
           node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'
-      - name: Verify native text field discovery and editing
-        run: npm test --prefix browser-mcp -- test/editors.test.ts
       - name: Verify shared browser and rendered desktop/mobile UI
         run: python -m pytest tests/test_browser_workspace_integration.py -o addopts="" -q -s --timeout=240
       - name: Upload browser verification screenshots
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: browser-workspace-screenshots
@@ -88,4 +110,18 @@ jobs:
             /tmp/browser-cold-start-*.png
             /tmp/provider-login-*.png
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 3
+
+  readiness:
+    name: Browser merge readiness
+    needs: ['smoke', 'workspace']
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require successful full checks for this revision
+        env:
+          CI_FULL_REQUESTED: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+          CI_REQUIRED_RESULTS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/require-full-ci.py

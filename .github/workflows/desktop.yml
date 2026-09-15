@@ -4,9 +4,13 @@ name: Desktop CI
 # coverage.
 on:
   pull_request:
+    # Add ci:full when ready to merge. Keeping it applied rechecks every push;
+    # removing it cancels obsolete full runs and makes readiness fail closed.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - 'desktop/**'
       - '.github/workflows/desktop.yml'
+      - 'scripts/ci/require-full-ci.py'
   workflow_dispatch:
     inputs:
       upload_preview:
@@ -29,6 +33,7 @@ concurrency:
 jobs:
   check:
     name: Typecheck and unit tests
+    timeout-minutes: 10
     runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
@@ -46,6 +51,8 @@ jobs:
 
   package:
     name: Package Windows shell
+    timeout-minutes: 15
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     needs: check
     runs-on: blacksmith-2vcpu-windows-2025
     defaults:
@@ -68,6 +75,7 @@ jobs:
 
   runtime:
     name: Assemble worker runtime (linux-x64)
+    timeout-minutes: 20
     if: github.event_name == 'workflow_dispatch' && inputs.build_linux_runtime == true
     needs: check
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -109,6 +117,7 @@ jobs:
 
   windows-preview:
     name: Windows preview installer and fresh database
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     needs: check
     runs-on: blacksmith-2vcpu-windows-2025
     timeout-minutes: 35
@@ -186,3 +195,17 @@ jobs:
           path: ${{ runner.temp }}/windows-preview-evidence/
           if-no-files-found: ignore
           retention-days: 7
+
+  readiness:
+    name: Desktop merge readiness
+    needs: ['check', 'package', 'windows-preview']
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require successful full checks for this revision
+        env:
+          CI_FULL_REQUESTED: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+          CI_REQUIRED_RESULTS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/require-full-ci.py

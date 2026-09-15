@@ -16,10 +16,14 @@ name: Android CI
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
   pull_request:
+    # Add ci:full when ready to merge. Keeping it applied rechecks every push;
+    # removing it cancels obsolete full runs and makes readiness fail closed.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - 'android/**'
       - 'mobile/**'
       - '.github/workflows/android.yml'
+      - 'scripts/ci/require-full-ci.py'
   workflow_dispatch:
     inputs:
       publish_download:
@@ -47,6 +51,7 @@ concurrency:
 jobs:
   account-hub:
     name: Account hub Worker and D1 tests
+    timeout-minutes: 5
     runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
@@ -68,6 +73,7 @@ jobs:
 
   build:
     name: Build and test Android app
+    timeout-minutes: 20
     runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
@@ -115,12 +121,16 @@ jobs:
           python3 ci/test-mobile-apk.py
           ./gradlew testDebugUnitTest lintDebug --stacktrace
 
-      - name: Build instrumentation APKs
+      - name: Build and verify debug APK
         run: |
-          ./gradlew assembleDebug assembleDebugAndroidTest --max-workers=2 --stacktrace
+          ./gradlew assembleDebug --max-workers=2 --stacktrace
           python3 ci/verify-mobile-apk.py app/build/outputs/apk/debug/app-debug.apk
+      - name: Build Android test APK
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+        run: ./gradlew assembleDebugAndroidTest --max-workers=2 --stacktrace
 
       - name: Upload instrumentation APKs
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
         uses: actions/upload-artifact@v4
         with:
           retention-days: 1
@@ -185,6 +195,7 @@ jobs:
 
   android-ui:
     name: Android emulator verification (API ${{ matrix.api }})
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     strategy:
       fail-fast: false
       matrix:
@@ -287,3 +298,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: bash android/ci/publish-apk.sh android-download
+
+  readiness:
+    name: Android merge readiness
+    needs: ['account-hub', 'build', 'android-ui']
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require successful full checks for this revision
+        env:
+          CI_FULL_REQUESTED: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+          CI_REQUIRED_RESULTS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/require-full-ci.py

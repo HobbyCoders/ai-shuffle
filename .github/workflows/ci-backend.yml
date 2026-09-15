@@ -1,4 +1,5 @@
 name: CI Backend
+run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '2' }} vCPU)"
 
 # Python half of the split CI: the app's fast test subset, the packaging
 # checks and the real-PostgreSQL mobile contracts on one runner. (fluid's own
@@ -27,16 +28,19 @@ on:
       - 'pytest.ini'
       - '.github/workflows/ci-backend.yml'
       - '.github/workflows/release.yml'
-  # Main-branch canary. Merges to main no longer run CI directly — the PR
-  # already ran it, and re-running on the merge commit doubled the bill for a
-  # result that is green ~always. What that loses is semantic conflicts between
-  # two branches that were each green alone; the canary catches those within
-  # ~6h instead of at the next PR. The gate job below skips the paid runner
-  # when main has not moved since the last green canary.
+  # Daily main-branch canary catches interactions between merged PRs within
+  # roughly a day. Skip the paid runner when main has not moved since a green
+  # canary; PRs already check each revision before merge.
   schedule:
-    - cron: '7 */6 * * *'
+    - cron: '7 6 * * *'
   # Manual canary (`gh workflow run ci-backend.yml`).
   workflow_dispatch:
+    inputs:
+      runner_cpus:
+        description: 'Runner vCPUs (compare the same commit before changing defaults)'
+        type: choice
+        options: ['2', '4']
+        default: '2'
 
 permissions:
   contents: read
@@ -46,7 +50,7 @@ permissions:
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
 # letting stale runs finish and fail/email after a newer commit already ran.
 concurrency:
-  group: ci-backend-${{ github.ref }}
+  group: ci-backend-${{ github.ref }}-${{ inputs.runner_cpus || '2' }}
   cancel-in-progress: true
 
 jobs:
@@ -82,12 +86,15 @@ jobs:
     # Keep a hard job timeout to bound silent backend wedges and surface a useful failure rather than waiting
     # for the platform default.
     timeout-minutes: 20
-    # Size the runner for the pytest-xdist workers below so resource starvation does not cause fixture timeouts
-    # or teardown races.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Same-commit comparison on 2026-09-15: 2 vCPU / 2 workers passed in 415s;
+    # 4 vCPU / 4 workers passed in 287s (runs 35005402929 / 35005406199).
+    # The lower runner tier avoids unnecessary cost. Keep worker count
+    # matched to the runner: four workers previously starved 2-vCPU fixtures.
+    runs-on: ${{ inputs.runner_cpus == '4' && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
+      PYTEST_WORKERS: ${{ inputs.runner_cpus == '4' && '4' || '2' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -119,8 +126,14 @@ jobs:
           python scripts/scan_blocking_db.py
 
       - name: Run fast test subset
-        # Run the fast pytest subset with xdist for parallel execution.
-        run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance -o addopts="" -q -p no:cacheprovider --timeout=120 -n 4
+        # The suite uses an in-memory SQLite shim — no Postgres service needed.
+        # addopts="" overrides any pytest.ini addopts so this never fails on coverage.
+        # --timeout=120 bounds the rare hard-wedge per test: a wedged run fails
+        # in ~2 minutes with the hung test named, instead of billing the full
+        # 20-minute job timeout with no diagnosis.
+        # One pytest-xdist worker per vCPU; the dispatch input selects both
+        # runner size and worker count for repeatable comparisons.
+        run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance -o addopts="" -q -p no:cacheprovider --timeout=120 -n "$PYTEST_WORKERS"
 
       - name: Packaging and backup regression checks
         run: python -m pytest tests/test_packaging_audit.py tests/test_run_local_supervisor.py tests/test_chrome_supervisor.py -o addopts="" -q --timeout=120
