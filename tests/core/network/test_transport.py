@@ -240,6 +240,55 @@ async def test_rollback_proof_survives_peer_pruning(workers):
     assert _pref(a, "after-restore") is True
 
 
+@pytest.mark.parametrize("replace_all", [False, True])
+async def test_rollback_proof_after_cross_origin_head_pruning(workers, replace_all):
+    from tests.core.network.harness import exchange, join
+    a, b = workers("proof-holder"), workers("restored-writer")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    _set_pref(b, "record-x", "b1")
+    _set_pref(b, "record-y", "b2")
+    exchange(b, a)
+    with b.active():
+        with store.get_db() as conn:
+            head = store.own_watermark(conn.cursor(), b.device_id, 1)
+    _set_pref(a, "record-y", "a-replacement")
+    if replace_all:
+        _set_pref(a, "record-x", "a-replacement")
+    with a.active():
+        assert store.prune_ops(keep_days=-1) > 0
+        assert store.local_watermarks()[b.device_id]["1"] == head
+        with store.get_db() as conn:
+            assert store.get_op(conn.cursor(), b.device_id, 1, head) is None
+        retained = a.sql("SELECT seq FROM sync_ops WHERE origin_device_id = ?", (b.device_id,))
+        assert bool(retained) is not replace_all
+    with b.active():
+        b.sql("DELETE FROM sync_ops WHERE origin_device_id = ?", (b.device_id,))
+    served = ServedBy(a, "https://proof-holder.example.com")
+    async with httpx.AsyncClient(transport=served.transport()) as client:
+        denied = await client.get(f"{served.base_url}/api/v1/network/peer/ops/{b.device_id}/1/1",
+                                  params={"at_or_after": "true"})
+        assert denied.status_code == 401
+        served.requests.clear()
+        with b.active():
+            link = transport.PeerLink(a.device_id, [served.base_url])
+            await asyncio.wait_for(link.sync_once(client, engine.context(), catch_up=True), timeout=5)
+            assert engine.context().identity.incarnation == (1 if replace_all else 2)
+            proofs = [r for r in served.requests if r[0] == "GET" and "/peer/ops/" in r[1]]
+            assert len(proofs) == 1
+            served.requests.clear()
+            await asyncio.wait_for(link.sync_once(client, engine.context(), catch_up=True), timeout=5)
+            proofs = [r for r in served.requests if r[0] == "GET" and "/peer/ops/" in r[1]]
+            assert len(proofs) == (1 if replace_all else 0)
+        if not replace_all:
+            _set_pref(b, "after-restore", True)
+            with b.active():
+                await link.sync_once(client, engine.context())
+            assert _pref(a, "after-restore") is True
+    assert _pref(a, "record-y") == "a-replacement"
+
+
 async def test_enrollment_over_http_then_sync(workers, monkeypatch):
     a, b = workers("a"), workers("b")
     served = ServedBy(a, "http://a.local:8000")

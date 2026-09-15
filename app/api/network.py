@@ -517,12 +517,13 @@ async def peer_ops(body: OpsRequest, device_id: str = Depends(tokens.require_dev
 
 
 @router.get("/peer/ops/{origin}/{incarnation}/{seq}")
-async def peer_op(origin: str, incarnation: int, seq: int, device_id: str = Depends(tokens.require_device)) -> dict:
-    """One stored envelope by stream identity.
+async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = False,
+                  device_id: str = Depends(tokens.require_device)) -> dict:
+    """One signed envelope, optionally the first retained op at or after seq.
 
-    A peer that hears we hold more of its own stream than it does asks for
-    the first op past its watermark: only an envelope it signed itself proves
-    it really was restored from a backup (see ``transport._detect_rollback``).
+    Rollback detection needs an op past the caller's watermark, not necessarily
+    the advertised head: pruning can remove that head after another origin
+    replaces its record. A bare watermark is never rollback proof.
     """
     transport.note_contact(device_id)
     if len(origin) > 64 or incarnation < 1 or seq < 1:
@@ -530,7 +531,7 @@ async def peer_op(origin: str, incarnation: int, seq: int, device_id: str = Depe
 
     def _work():
         with store.get_db() as conn:
-            return store.get_op(conn.cursor(), origin, incarnation, seq)
+            return store.get_op(conn.cursor(), origin, incarnation, seq, at_or_after=at_or_after)
 
     op = await run_sync(_work)
     if op is None:

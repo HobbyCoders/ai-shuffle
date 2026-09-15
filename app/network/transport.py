@@ -244,10 +244,10 @@ class PeerLink:
         """A peer claims to hold more of our current stream than we do.
 
         The claim alone proves nothing (any member could say it and make us
-        discard our unsynced writes). Ask for the advertised head, since
-        pruning may have removed the first missing op. An envelope that
-        verifies under our own signing key is the proof
-        that we were restored from a backup. Returns True after a bump.
+        discard our unsynced writes). Ask for a retained op past our watermark:
+        pruning may have removed both the first missing op and the head. An
+        envelope that verifies under our own signing key proves that we were
+        restored from a backup. Returns True after a bump.
         """
         mine = theirs.get(ctx.device_id) or {}
         remote = int(mine.get(str(ctx.identity.incarnation), 0) or 0)
@@ -263,14 +263,16 @@ class PeerLink:
             return False
         try:
             answer = await self._request(client, "GET",
-                                         f"/api/v1/network/peer/ops/{ctx.device_id}/{ctx.identity.incarnation}/{remote}")
+                                         f"/api/v1/network/peer/ops/{ctx.device_id}/{ctx.identity.incarnation}/{local + 1}",
+                                         params={"at_or_after": "true"})
             env = Envelope.from_dict(answer["op"])
         except (PeerError, httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             logger.warning("Peer %s claims %d ops of our stream (we hold %d) but produced no proof: %s",
                            self.device_id, remote, local, exc)
             return False
-        if (env.origin_device_id != ctx.device_id or env.origin_incarnation != ctx.identity.incarnation
-                or env.origin_seq != remote or not env.verify_signature(ctx.identity.signing_public)):
+        if (env.network_id != ctx.network_id or env.origin_device_id != ctx.device_id
+                or env.origin_incarnation != ctx.identity.incarnation or env.origin_seq <= local
+                or not env.verify_signature(ctx.identity.signing_public)):
             logger.warning("Peer %s offered an op of our stream that does not verify; claim ignored", self.device_id)
             return False
         await asyncio.to_thread(engine.restored_from_backup, env.origin_seq, env.origin_incarnation)
