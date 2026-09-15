@@ -2,6 +2,8 @@ import base64
 import hashlib
 import io
 import json
+import os
+from pathlib import Path
 import stat
 import zipfile
 
@@ -63,7 +65,7 @@ def test_signed_download_stages_then_explicit_restart_and_health_commit(feed):
     assert updater.state == {"pending": B}
     assert updater.launch({})[1] is None, "ordinary container restart must not activate staging"
     command, cwd, env = updater.launch({"PYTHONPATH": "wrong", "PATH": "/usr/bin"}, activate=True)
-    assert command[0].endswith("versions/" + B + "/venv/bin/python")
+    assert Path(command[0]).parts[-5:] == ("versions", B, "venv", "bin", "python")
     assert "PYTHONPATH" not in env and env["GIT_SHA"] == B
     assert not updater.state.get("booting"), "validation must not mark old worker as new"
     updater.activating()
@@ -158,10 +160,20 @@ def test_bad_signature_and_checksum_rejected_before_build(feed):
 
 
 @pytest.mark.parametrize("name", ["../escape", "/absolute", f"ai-shuffle-{B}/../escape", f"ai-shuffle-{B}/a\\b", f"ai-shuffle-{B}/C:drive"])
-def test_archive_rejects_traversal_before_writes(tmp_path, name):
+def test_archive_rejects_traversal_before_writes(tmp_path, monkeypatch, name):
+    class ContainerZipInfo(zipfile.ZipInfo):
+        def __init__(self, filename="NoName", *args, **kwargs):
+            super().__init__(filename, *args, **kwargs)
+            # Model the Linux container parser: Windows ZipInfo normalizes
+            # backslashes on both write AND read, before our guard sees them.
+            self.filename = self.orig_filename
+
+    monkeypatch.setattr(zipfile, "ZipInfo", ContainerZipInfo)
     archive = tmp_path / "bad.zip"
     with zipfile.ZipFile(archive, "w") as zipped:
         zipped.writestr(name, "bad")
+    with zipfile.ZipFile(archive) as zipped:
+        assert zipped.namelist() == [name]
     with pytest.raises(UpdateError):
         extract_source(archive, tmp_path / "source", B)
     assert not (tmp_path / "source").exists()
@@ -183,7 +195,7 @@ def test_build_environment_never_inherits_credentials(tmp_path, monkeypatch):
     monkeypatch.setenv("NODE_OPTIONS", "secret")
     env = build_environment(tmp_path)
     assert all("secret" not in value for value in env.values())
-    assert env["PIP_CONFIG_FILE"] == "/dev/null"
+    assert env["PIP_CONFIG_FILE"] == os.devnull
 
 
 @pytest.mark.parametrize("value, expected", [(None, True), ("true", True), ("false", False), ("invalid", False)])

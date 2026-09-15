@@ -363,6 +363,7 @@ class NativeSmokeTest {
                 }
             }
             val deadline = awaitConsent()
+            val elapsedDeadline = requireNotNull(ToolApprovals.pending.value).expiresElapsedAt
             Assert.assertEquals("Request must remain pending until a local decision or expiry", 1L, finished.count)
             if (pauseHost) scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
             else if (allow != null) {
@@ -372,7 +373,7 @@ class NativeSmokeTest {
             val settled = finished.await(5, TimeUnit.SECONDS)
             // Capture at coroutine completion, not after the instrumentation thread wakes.
             // A wall-clock correction, early detach, and coroutine cancellation are distinct.
-            val diagnostics = "deadline=$deadline start=${started.get()} end=${completed.get()} " +
+            val diagnostics = "deadline=$deadline elapsedDeadline=$elapsedDeadline start=${started.get()} end=${completed.get()} " +
                 "result=${result.get()} cause=${completionCause.get()} " +
                 "lifecycle=$lifecycle state=${scenario.state} pending=${ToolApprovals.pending.value}"
             android.util.Log.i("ConsentTiming", diagnostics)
@@ -383,6 +384,7 @@ class NativeSmokeTest {
                 Assert.assertTrue("Expected host pause: $diagnostics", lifecycle.any { it.startsWith("ON_PAUSE") })
             } else if (allow == null) {
                 Assert.assertTrue("Request rejected before expiry: $diagnostics", completed.get().wall >= deadline)
+                Assert.assertTrue("Request rejected before monotonic expiry: $diagnostics", completed.get().elapsed >= elapsedDeadline)
                 Assert.assertFalse("Host paused before timeout: $diagnostics", lifecycle.any { it.startsWith("ON_PAUSE") })
             }
             Assert.assertEquals(diagnostics, allow == true && !pauseHost, result.get())
@@ -393,6 +395,28 @@ class NativeSmokeTest {
     @Test fun localConsentAcceptedOnlyByRealButton() = consent(true, 20_000)
     @Test fun localConsentExpiresWithoutAction() = consent(null, 2_000)
     @Test fun localConsentHostPauseRejectsBeforeExpiry() = consent(null, 20_000, pauseHost = true)
+
+    @Test fun callerCancellationClearsConsentWithoutAuthorizing() {
+        ActivityScenario.launch(ToolSettingsActivity::class.java).use { scenario ->
+            awaitFocused(scenario)
+            val result = AtomicReference<Boolean>()
+            val cause = AtomicReference<Throwable>()
+            val finished = CountDownLatch(1)
+            val request = AtomicReference<kotlinx.coroutines.Job>()
+            scenario.onActivity { activity ->
+                request.set(activity.lifecycleScope.launch {
+                    result.set(ToolApprovals.request("Cancelled caller", "No action may be authorized"))
+                }.also { job -> job.invokeOnCompletion { error -> cause.set(error); finished.countDown() } })
+            }
+            awaitConsent()
+            request.get().cancel()
+            Assert.assertTrue("Caller cancellation did not settle", finished.await(3, TimeUnit.SECONDS))
+            Assert.assertTrue("Cancellation was confused with a local decision", cause.get() is kotlinx.coroutines.CancellationException)
+            Assert.assertNull("Cancelled caller received an approval", result.get())
+            Assert.assertNull(ToolApprovals.pending.value)
+            onView(withText("Allow once")).check(doesNotExist())
+        }
+    }
 
     @Test fun expiredConsentNeverBecomesPending() {
         ActivityScenario.launch(ToolSettingsActivity::class.java).use { scenario ->
