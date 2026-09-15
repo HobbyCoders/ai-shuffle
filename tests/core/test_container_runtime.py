@@ -598,18 +598,42 @@ def _measured_checkpoint(db, phase):
         db.query("CHECKPOINT", admin=True)
     finally:
         # Only checkpoint timing lines: never SQL, client output or credentials.
-        lines = logpath.read_text()[offset:].splitlines()
+        with logpath.open("rb") as stream:
+            stream.seek(offset)
+            lines = stream.read().decode(errors="replace").splitlines()
         timings = [line[line.index("checkpoint "):] for line in lines
                    if re.search(r"LOG:  checkpoint (starting|complete):", line)]
         print(json.dumps({"phase": phase, "seconds": time.monotonic() - started,
                           "load_average": os.getloadavg(), "checkpoint_log": timings}))
 
 
-@pytest.mark.parametrize("writers", [0, 2], ids=["idle", "disk-pressure"])
+def test_checkpoint_measurement_keeps_timeout_and_excludes_other_logs(tmp_path, capsys):
+    db = Mock(pg=tmp_path)
+    log = tmp_path / "server.log"
+    log.write_text("previous log entry\n")
+
+    def timeout(*args, **kwargs):
+        with log.open("a") as stream:
+            stream.write("LOG:  checkpoint starting: immediate force wait\n")
+            stream.write("ERROR: synthetic-private-value\n")
+        raise runtime.RuntimeFailure("database command interrupted or timed out")
+
+    db.query.side_effect = timeout
+    with pytest.raises(runtime.RuntimeFailure, match="timed out"):
+        _measured_checkpoint(db, "test-timeout")
+    db.query.assert_called_once_with("CHECKPOINT", admin=True)
+    output = json.loads(capsys.readouterr().out)
+    assert output["seconds"] >= 0
+    assert output["checkpoint_log"] == ["checkpoint starting: immediate force wait"]
+    assert "synthetic-private-value" not in json.dumps(output)
+
+
+@pytest.mark.parametrize("writers", [0, 2], ids=["no-added-load", "disk-pressure"])
 def test_real_pg_checkpoint_timings(settings_factory, tmp_path, pg_enabled, writers):
     """Opt-in bounded same-filesystem fsync pressure; keep the real 10s budget."""
     if os.environ.get("CONTAINER_RUNTIME_TEST_PRESSURE") != "1":
         pytest.skip("requires explicit disk-pressure measurement opt-in")
+    import selectors
     import subprocess
     import sys
     db = runtime.Database(settings_factory(), port=pg_enabled)
@@ -638,7 +662,10 @@ print(written, flush=True)
             child = subprocess.Popen([sys.executable, "-c", writer, str(tmp_path / f"pressure-{index}")],
                                      stdout=subprocess.PIPE, text=True, start_new_session=True)
             children.append(child)
-            assert child.stdout.readline().strip() == "ready"
+            with selectors.DefaultSelector() as ready:
+                ready.register(child.stdout, selectors.EVENT_READ)
+                assert ready.select(timeout=10), "disk-pressure writer did not complete its first fsync"
+                assert child.stdout.readline().strip() == "ready"
         for sample in range(3):
             db.query("UPDATE checkpoint_probe SET value = reverse(value)")
             assert all(child.poll() is None for child in children), "disk-pressure producer exited early"
