@@ -588,11 +588,54 @@ def test_real_pg_restore_empty_only_and_failure_fence(settings_factory, tmp_path
         fenced.close()
 
 
+def _host_counters():
+    cpu = [int(value) for value in Path("/proc/stat").read_text().splitlines()[0].split()[1:9]]
+    disks = {}
+    for line in Path("/proc/diskstats").read_text().splitlines():
+        fields = line.split()
+        name = fields[2]
+        if (Path("/sys/block") / name).exists() and not name.startswith(("loop", "ram")):
+            disks[name] = (int(fields[9]), int(fields[12]))  # written sectors, busy milliseconds
+    return sum(cpu), cpu[3] + cpu[4], disks
+
+
+def _host_delta(before, after, seconds):
+    ticks = after[0] - before[0]
+    return {
+        "cpu_busy_percent": 100 * (1 - (after[1] - before[1]) / ticks) if ticks else 0,
+        "disks": {name: {"written_bytes": (values[0] - before[2][name][0]) * 512,
+                         "busy_percent": (values[1] - before[2][name][1]) / (seconds * 10)}
+                  for name, values in after[2].items() if name in before[2]},
+    }
+
+
+def _wait_for_idle():
+    import time
+    # A bounded, measured guest-idle baseline, not a claim about the physical host.
+    for _ in range(30):
+        before, started = _host_counters(), time.monotonic()
+        time.sleep(2)
+        sample = _host_delta(before, _host_counters(), time.monotonic() - started)
+        if sample["cpu_busy_percent"] < 10 and all(disk["busy_percent"] < 10 for disk in sample["disks"].values()):
+            print(json.dumps({"phase": "guest-idle-baseline", **sample}))
+            return
+    pytest.fail(f"No guest-idle interval within 60 seconds: {sample}")
+
+
+def test_checkpoint_host_delta_reports_cpu_and_disk_work():
+    before = (100, 80, {"sda": (100, 1000)})
+    after = (200, 170, {"sda": (104, 1100)})
+    sample = _host_delta(before, after, 2)
+    assert sample["cpu_busy_percent"] == pytest.approx(10)
+    assert sample["disks"] == {"sda": {"written_bytes": 2048, "busy_percent": 5}}
+
+
 def _measured_checkpoint(db, phase):
     import re
     import time
     logpath = db.pg / "server.log"
     offset = logpath.stat().st_size
+    before = _host_counters()
     started = time.monotonic()
     try:
         db.query("CHECKPOINT", admin=True)
@@ -603,7 +646,9 @@ def _measured_checkpoint(db, phase):
             lines = stream.read().decode(errors="replace").splitlines()
         timings = [line[line.index("checkpoint "):] for line in lines
                    if re.search(r"LOG:  checkpoint (starting|complete):", line)]
-        print(json.dumps({"phase": phase, "seconds": time.monotonic() - started,
+        seconds = time.monotonic() - started
+        print(json.dumps({"phase": phase, "seconds": seconds,
+                          "host": _host_delta(before, _host_counters(), seconds),
                           "load_average": os.getloadavg(), "checkpoint_log": timings}))
 
 
@@ -656,6 +701,8 @@ with path.open('wb', buffering=0) as stream:
 print(written, flush=True)
 """
     try:
+        if writers == 0:
+            _wait_for_idle()
         db.open()
         db.query("CREATE TABLE checkpoint_probe AS SELECT i, repeat(md5(i::text), 64) AS value FROM generate_series(1, 32768) i")
         for index in range(writers):
