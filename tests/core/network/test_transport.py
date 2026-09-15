@@ -206,6 +206,34 @@ async def test_peer_link_exchanges_both_ways_and_detects_rollback(workers, monke
         assert "2" in marks[b.device_id]
 
 
+async def test_rollback_proof_survives_peer_pruning(workers):
+    from tests.core.network.harness import exchange, join
+    a, b = workers("proof-holder"), workers("restored-writer")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    for value in range(4):
+        _set_pref(b, "before-restore", value)
+    exchange(b, a)
+    with a.active():
+        assert store.prune_ops(keep_days=-1) > 0
+        with store.get_db() as conn:
+            assert store.get_op(conn.cursor(), b.device_id, 1, 1) is None
+    with b.active():
+        b.sql("DELETE FROM sync_ops WHERE origin_device_id = ?", (b.device_id,))
+    served = ServedBy(a, "https://proof-holder.example.com")
+    async with httpx.AsyncClient(transport=served.transport()) as client:
+        with b.active():
+            link = transport.PeerLink(a.device_id, [served.base_url])
+            await link.sync_once(client, engine.context(), catch_up=True)
+            assert engine.context().identity.incarnation == 2
+        _set_pref(b, "after-restore", True)
+        with b.active():
+            await link.sync_once(client, engine.context())
+    assert _pref(a, "before-restore") == 3
+    assert _pref(a, "after-restore") is True
+
+
 async def test_enrollment_over_http_then_sync(workers, monkeypatch):
     a, b = workers("a"), workers("b")
     served = ServedBy(a, "http://a.local:8000")
