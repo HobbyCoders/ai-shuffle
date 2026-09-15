@@ -107,9 +107,34 @@ describe('private-access recovery and live invalidations', () => {
   await vi.advanceTimersByTimeAsync(299_999); expect(accessCalls()).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(1); expect(accessCalls()).toHaveLength(2);
   m.get.mockResolvedValue(empty());
-  resourceSync.invalidate(); await vi.advanceTimersByTimeAsync(100); await tick();
+  window.dispatchEvent(new Event('online')); await flush();
   expect(accessCalls()).toHaveLength(3);
   expect(screen.queryByRole('alert')).toBeNull();
+ });
+ it('keeps denial backoff across broad and scoped resource events', async () => {
+  m.get.mockImplementation(async (url: string) => {
+   if (url.startsWith('/sessions/')) return {mode: 'chat'};
+   throw {status: 403, detail: 'Denied'};
+  });
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  for (let i = 0; i < 30; i++) {
+   resourceSync.invalidate(['sessions', 'chat-access:s1']);
+   await vi.advanceTimersByTimeAsync(2000);
+  }
+  expect(accessCalls()).toHaveLength(1);
+ });
+ it('does not immediately retry a denial dirtied while in flight or revive after unmount', async () => {
+  let fail!: (value: unknown) => void;
+  m.get.mockImplementation((url: string) => url.startsWith('/sessions/')
+   ? Promise.resolve({mode: 'code'}) : new Promise((_resolve, reject) => {fail = reject;}));
+  const view = render(ChatAccess, {sessionId: 's1'}); await flush();
+  resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100);
+  fail({status:403}); await flush();
+  expect(accessCalls()).toHaveLength(1);
+  view.unmount();
+  window.dispatchEvent(new Event('online'));
+  await vi.advanceTimersByTimeAsync(600_000);
+  expect(accessCalls()).toHaveLength(1);
  });
  it('backs off transient failures and clears the error after recovery', async () => {
   m.get.mockImplementation(async (url: string) => {

@@ -13,6 +13,7 @@ from app.core.chat_files import AccessDenied
 @pytest.fixture
 def vault(monkeypatch):
     rows = {}
+    chat_vault._invalidate_catalog()
     monkeypatch.setattr(encryption, "_encryption_key", Fernet.generate_key())
     monkeypatch.setattr(chat_vault, "settings", SimpleNamespace(effective_instance_id="worker-one"))
     monkeypatch.setattr(chat_vault.database, "get_system_setting", lambda k: rows.get(k))
@@ -73,6 +74,79 @@ def test_swapped_ciphertext_and_other_worker_fail_closed(vault, monkeypatch):
     monkeypatch.setattr(chat_vault, "settings", SimpleNamespace(effective_instance_id="worker-two"))
     with pytest.raises(AccessDenied):
         chat_vault.load(owner, connection_id)
+
+
+def test_empty_snapshot_catalog_is_bounded_and_save_invalidates(vault, monkeypatch):
+    owner = ("local", "worker", None)
+    calls = []
+    original = chat_vault.database.get_db
+    def counted():
+        calls.append(True)
+        return original()
+    monkeypatch.setattr(chat_vault.database, "get_db", counted)
+    for _ in range(10):
+        assert chat_vault.catalog(owner, cache_empty=True) == []
+    assert len(calls) == 1
+    connection_id = chat_vault.save(owner, spec())
+    assert chat_vault.catalog(owner, cache_empty=True)[0]["id"] == connection_id
+    chat_vault.delete(owner, connection_id)
+    assert chat_vault.catalog(owner, cache_empty=True) == []
+    assert len(calls) == 4
+    for i in range(200):
+        chat_vault.catalog(("local", "worker", str(i)), cache_empty=True)
+    assert len(chat_vault._empty_catalog) <= 128
+
+
+def test_empty_catalog_expires_and_never_caches_decrypted_entries(vault, monkeypatch):
+    owner = ("local", "worker", None)
+    clock = [100.0]
+    monkeypatch.setattr(chat_vault.time, "monotonic", lambda: clock[0])
+    assert chat_vault.catalog(owner, cache_empty=True) == []
+    # Simulate an external database writer; TTL bounds recovery without treating
+    # an empty read as an authorization decision.
+    connection_id = "a" * 32
+    binding = chat_vault.key(owner, connection_id)
+    vault[binding] = "corrupt"
+    clock[0] += chat_vault._EMPTY_CATALOG_TTL
+    with pytest.raises(AccessDenied):
+        chat_vault.catalog(owner, cache_empty=True)
+    vault.clear()
+    connection_id = chat_vault.save(owner, spec())
+    assert chat_vault.catalog(owner, cache_empty=True)
+    monkeypatch.setattr(encryption, "_encryption_key", None)
+    assert chat_vault.catalog(owner, cache_empty=True) == []
+    with pytest.raises(AccessDenied):
+        chat_vault.load(owner, connection_id)
+
+
+def test_empty_query_started_before_save_cannot_republish_stale_absence(vault, monkeypatch):
+    owner = ("local", "worker", None)
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    queried = threading.Event()
+    finish = threading.Event()
+    original = chat_vault.database.get_db
+    @contextmanager
+    def delayed():
+        with original() as conn:
+            cursor = conn.cursor()
+            fetch = cursor.fetchall
+            def fetchall():
+                rows = fetch()
+                if threading.current_thread().name.startswith("stale-reader"):
+                    queried.set()
+                    assert finish.wait(5)
+                return rows
+            cursor.fetchall = fetchall
+            yield SimpleNamespace(cursor=lambda: cursor)
+    monkeypatch.setattr(chat_vault.database, "get_db", delayed)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="stale-reader") as executor:
+        pending = executor.submit(chat_vault.catalog, owner, cache_empty=True)
+        assert queried.wait(5)
+        connection_id = chat_vault.save(owner, spec())
+        finish.set()
+        assert pending.result() == []
+    assert chat_vault.catalog(owner, cache_empty=True)[0]["id"] == connection_id
 
 
 def test_connections_are_never_network_shared():

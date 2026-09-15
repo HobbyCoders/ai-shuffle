@@ -103,6 +103,7 @@ function openPopover(container: HTMLElement) {
 }
 
 beforeEach(() => {
+	vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
 	localStorage.clear();
 	mocks.adapters.get('context_breakdown_open')!.apply(undefined);
 	mocks.adapters.get('context_usage_sections')!.apply(undefined);
@@ -150,10 +151,11 @@ describe('ContextUsageBar — updates while closed', () => {
 			await openPopover(container);
 			expect(container.textContent).toContain('24% left');
 			expect(container.textContent).toContain('$22.91 left');
-			advance(0); advance(350);
-			expect(container.textContent).not.toContain('$22.91 left');
+			advance(0); advance(450);
+			expect(container.textContent).toContain('$22.91 left');
+			expect(container.querySelectorAll('.usage-number-flipping')).toHaveLength(2);
 			expect(container.textContent).not.toContain('$20.44 left');
-			advance(700);
+			advance(1650);
 			expect(container.textContent).toContain('18% left');
 			expect(container.textContent).toContain('$20.44 left');
 			await openPopover(container); await openPopover(container);
@@ -164,7 +166,7 @@ describe('ContextUsageBar — updates while closed', () => {
 			snapshot(19.25);
 			await waitFor(() => expect(callbacks.size).toBeGreaterThan(0));
 			expect(container.textContent).toContain('$20.44 left');
-			advance(0); advance(700);
+			advance(0); advance(1650);
 			expect(container.textContent).toContain('$19.25 left');
 		} finally {
 			cleanup(); vi.unstubAllGlobals();
