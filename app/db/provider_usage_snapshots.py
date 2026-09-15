@@ -61,6 +61,7 @@ def upsert_provider_usage_snapshot(
     fetched_at: Optional[int],
     expected_binding: Optional[tuple[str, str]] = None,
     expected_credential_generation: Optional[str] = None,
+    expected_admin_key: Optional[str] = None,
 ) -> bool:
     """Insert or replace a snapshot, rejecting observations of an old binding."""
     now = datetime.now(timezone.utc).isoformat()
@@ -74,10 +75,12 @@ def upsert_provider_usage_snapshot(
             raw = {**(raw or {}), "credential_generation": expected_credential_generation}
         if provider_type == "openai":
             cursor.execute(
-                "SELECT openai_billing_org_id, openai_billing_instance_id FROM model_providers WHERE id = %s FOR UPDATE",
+                "SELECT openai_billing_org_id, openai_billing_instance_id, openai_admin_key FROM model_providers WHERE id = %s FOR UPDATE",
                 (provider_id,),
             )
             binding = cursor.fetchone() or {}
+            if expected_admin_key is not None and binding.get("openai_admin_key") != expected_admin_key:
+                return False
             current = (binding.get("openai_billing_org_id"), binding.get("openai_billing_instance_id"))
             if expected_binding is not None and current != expected_binding:
                 return False
@@ -117,6 +120,7 @@ def record_provider_usage_failure(
     provider_id: str, provider_type: str, error_kind: str,
     expected_binding: Optional[tuple[str, str]] = None,
     expected_credential_generation: Optional[str] = None,
+    expected_admin_key: Optional[str] = None,
 ) -> None:
     if error_kind not in {
         "billing_access_denied", "missing_credentials", "timeout", "unavailable",
@@ -131,10 +135,12 @@ def record_provider_usage_failure(
             return
         if provider_type == "openai":
             cursor.execute(
-                "SELECT openai_billing_org_id, openai_billing_instance_id FROM model_providers WHERE id = %s FOR UPDATE",
+                "SELECT openai_billing_org_id, openai_billing_instance_id, openai_admin_key FROM model_providers WHERE id = %s FOR UPDATE",
                 (provider_id,),
             )
             binding = cursor.fetchone() or {}
+            if expected_admin_key is not None and binding.get("openai_admin_key") != expected_admin_key:
+                return False
             current = (binding.get("openai_billing_org_id"), binding.get("openai_billing_instance_id"))
             if expected_binding is not None and current != expected_binding:
                 return
@@ -155,8 +161,10 @@ def record_provider_usage_failure(
             "billing_fetched_at", previous.get("fetched_at") if previous.get("credits") else None
         )
         metadata = {}
-        if previous_raw.get("source") == "browser_platform":
+        if previous_raw.get("source") in {"browser_platform", "openai_admin"}:
             metadata = {key: previous_raw.get(key) for key in ("source", "organization_id")}
+        if provider_type == "openai" and expected_admin_key is not None:
+            metadata.update(source="openai_admin", organization_id=current[0])
         raw = json.dumps({
             **metadata,
             **({"credential_generation": expected_credential_generation} if provider_type == "fal" else {}),
@@ -180,7 +188,7 @@ def record_provider_usage_failure(
 def _lock_fal_generation(cursor, expected: Optional[str]) -> bool:
     # Lock the credential row until the usage write commits. Credential writes
     # and deletion take this same lock before invalidating the cached balance.
-    cursor.execute("SELECT revision FROM system_settings WHERE key = %s FOR UPDATE", ("fal_api_key",))
+    cursor.execute("SELECT revision FROM system_settings WHERE key = %s FOR UPDATE", ("fal_billing_api_key",))
     row = cursor.fetchone()
     return bool(expected and row and row["revision"] == expected)
 
@@ -195,7 +203,7 @@ def get_all_provider_usage_snapshots() -> List[Dict[str, Any]]:
         cursor.execute(
             "SELECT p.provider_id, p.provider_type, p.plan_type, p.windows, p.credits, "
             "p.raw, p.fetched_at, s.revision AS fal_credential_generation "
-            "FROM provider_usage_snapshots p LEFT JOIN system_settings s ON s.key = 'fal_api_key'"
+            "FROM provider_usage_snapshots p LEFT JOIN system_settings s ON s.key = 'fal_billing_api_key'"
         )
         rows = rows_to_list(cursor.fetchall())
     valid_rows = []

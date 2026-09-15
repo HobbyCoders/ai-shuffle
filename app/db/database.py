@@ -290,7 +290,7 @@ def _savepoint(cursor, name: str):
 #     sync_conflicts, sync_peers, network_joins, ...) and nullable
 #     ``owner_device_id`` on sessions / automations / connectors / artifacts,
 #     ``blob_hash`` on note_attachments. All additive.
-SCHEMA_VERSION = 87
+SCHEMA_VERSION = 88
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -1211,6 +1211,7 @@ def _run_column_migrations(cursor):
             ("needs_reauth", "BOOLEAN DEFAULT FALSE"),
             ("codex_refresh_lease_owner", "TEXT"),
             ("codex_refresh_lease_expires_at", "TIMESTAMP WITH TIME ZONE"),
+            ("openai_admin_key", "TEXT"),
             ("openai_billing_org_id", "TEXT"),
             ("openai_billing_instance_id", "TEXT"),
         )
@@ -1358,6 +1359,16 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("provider_usage_snapshots")
+
+    # Local durable upstream request budgets; never replicated as account data.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usage_poll_state (
+            identity TEXT PRIMARY KEY,
+            next_attempt DOUBLE PRECISION NOT NULL DEFAULT 0,
+            failures INTEGER NOT NULL DEFAULT 0,
+            paused BOOLEAN NOT NULL DEFAULT FALSE
+        )
+    """)
 
     # pending_wakeups (v68). Durable per-session wakeups (#598): ScheduleWakeup
     # and the idle-at-edge watchdog persist their pending wake here so an app

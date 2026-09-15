@@ -105,6 +105,7 @@ async def get_internal_api_key(key_name: str, _: str = Depends(require_admin)):
 class IntegrationSettingsResponse(BaseModel):
     """Response containing integration configuration status"""
     fal_api_key_set: bool
+    fal_billing_api_key_set: bool = False
     fal_api_key_masked: str
     # Anthropic API key — a Claude Code AUTHENTICATION credential. When set, it
     # is injected as ANTHROPIC_API_KEY into every Claude Code subprocess and
@@ -149,6 +150,24 @@ class FalAIKeyResponse(BaseModel):
     """Response after setting fal.ai API key"""
     success: bool
     masked_key: str
+
+
+@router.post("/integrations/fal-billing")
+async def set_fal_billing_key(request: FalAIKeyRequest, token: str = Depends(require_admin)):
+    key = request.api_key.strip()
+    if not key or len(key) > 4096 or any(c.isspace() for c in key):
+        raise HTTPException(400, "Enter an Admin API key without whitespace")
+    await run_sync(set_encrypted_api_key, "fal_billing_api_key", key)
+    from app.core.usage_polling import resume_authentication
+    from app.core.provider_usage import FAL_BILLING_URL
+    await run_sync(resume_authentication, FAL_BILLING_URL, {"Authorization": f"Key {key}"})
+    return {"success": True}
+
+
+@router.delete("/integrations/fal-billing")
+async def remove_fal_billing_key(token: str = Depends(require_admin)):
+    await run_sync(database.delete_system_setting, "fal_billing_api_key")
+    return {"success": True}
 
 
 class AnthropicKeyRequest(BaseModel):
@@ -203,6 +222,7 @@ async def get_integration_settings(token: str = Depends(require_auth)):
 
         return IntegrationSettingsResponse(
             fal_api_key_set=bool(fal_key),
+            fal_billing_api_key_set=bool(database.get_system_setting("fal_billing_api_key")),
             fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
             anthropic_api_key_set=bool(anthropic_key),
             anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",

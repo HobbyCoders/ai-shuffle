@@ -379,6 +379,18 @@ describe('ContextUsageBar — provider refresh status', () => {
 		expect(container.textContent).not.toContain('Last known usage');
 	});
 
+
+	it('labels official organization costs as spend rather than credit remaining', async () => {
+		rateLimit.applySnapshot({ windows: [], available: true, providers: [
+			{ provider_id: 'admin-api', provider_type: 'openai', provider_name: 'OpenAI', status: 'fresh',
+				credits: { spend_month: 12.34, input_tokens: 20, output_tokens: 30, num_model_requests: 2 } },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain('$12.34 spent this month (UTC)');
+		expect(container.textContent).not.toContain('$12.34 left');
+	});
+
 	it.each(['unavailable', 'stale'] as const)('links to Platform billing when OpenAI billing is %s', async (status) => {
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
 			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status,
@@ -389,7 +401,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await openPopover(container);
 		// Keep long guidance in the wrapping prose class, not just an account label.
 		const guidance = container.querySelector('.provider-status');
-		expect(guidance?.textContent).toBe('This credential cannot read OpenAI Platform billing');
+		expect(guidance?.textContent).toBe('Admin usage access refused; polling paused');
 		expect(container.textContent).not.toContain('Last known usage');
 		expect(container.textContent).not.toContain('Sign in');
 		expect(container.textContent).not.toContain('$0.00');
@@ -427,7 +439,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.textContent).toContain('OpenAI API credential required');
+		expect(container.textContent).toContain('Configure an Admin API key in provider settings');
 		expect(container.textContent).not.toContain('Sign in');
 		expect(container.textContent).toContain('Billing access required');
 		expect(container.querySelector('.provider-billing-link')).toBeNull();
@@ -442,7 +454,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await openPopover(container);
 		expect(container.textContent).toContain('$12.34');
 		expect(container.textContent).not.toMatch(/Last known usage|Refresh timed out/);
-		expect(container.textContent).toContain('This credential cannot read OpenAI Platform billing');
+		expect(container.textContent).toContain('Admin usage access refused; polling paused');
 		expect(container.textContent).not.toContain('$0.00');
 	});
 });

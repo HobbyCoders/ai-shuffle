@@ -105,25 +105,8 @@ class _Resp:
         return {}
 
 
-async def test_openai_credit_grants_403_is_an_error(caplog, monkeypatch):
-    """The exact case from the audit: an undocumented endpoint that 403s for
-    project keys used to be debug-only, so the missing balance had no
-    explanation anywhere an agent could reach."""
+async def test_unconfigured_openai_does_not_log_repeated_billing_failures(caplog):
     monitor = pu.ProviderUsageMonitor()
-
-    async def _grants(headers):
-        return {}, {}, 403
-
-    monkeypatch.setattr(monitor, "_request_openai_credit_grants", _grants)
-    monkeypatch.setattr(pu, "_decrypt_provider_auth_token", lambda row: "sk-test")
-
     with caplog.at_level(logging.DEBUG, logger=pu.__name__):
-        await monitor._poll_openai_provider(
-            {"id": "prov-1", "base_url": "https://api.openai.com/v1"}
-        )
-
-    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert errors, caplog.text
-    assert "HTTP 403" in errors[0].getMessage()
-    # And the message never carries the key.
-    assert "sk-test" not in caplog.text
+        await monitor._poll_openai_provider({"id": "not-configured"})
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]

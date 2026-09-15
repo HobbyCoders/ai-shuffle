@@ -186,3 +186,20 @@ class TestReencryptCodexTokens:
             "model_providers:prov-bad-codex:codex_access_token" in label
             for label, _ in failures
         )
+
+
+def test_admin_credential_rotates_with_password_without_becoming_an_inference_key(mock_db):
+    _seed_provider()
+    db.update_model_provider("prov-1", provider_type="openai", base_url="https://api.openai.com/v1")
+    admin = encryption.encrypt_value("admin-only")
+    db.set_openai_billing_binding("prov-1", "org-test", "worker-test", admin)
+    old_key = encryption.derive_key_from_password("old-pw", encryption.get_or_create_salt(db))
+    new_key = encryption.derive_key_from_password("new-pw", encryption.get_or_create_salt(db))
+    plan, failures = encryption.build_reencryption_plan(old_key, new_key, db)
+    assert not failures
+    assert any(item.kind == "model_provider_openai_admin" for item in plan)
+    encryption.apply_reencryption_plan(plan, db)
+    encryption.set_encryption_key("new-pw", db)
+    row = db.get_model_provider("prov-1", include_token=True)
+    assert encryption.decrypt_value(row["openai_admin_key"]) == "admin-only"
+    assert encryption.decrypt_value(row["auth_token"]) == "gw-secret"

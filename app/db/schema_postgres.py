@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 87
+SCHEMA_VERSION = 88
 
 
 def create_postgres_schema(cursor) -> None:
@@ -857,6 +857,15 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usage_poll_state (
+            identity TEXT PRIMARY KEY,
+            next_attempt DOUBLE PRECISION NOT NULL DEFAULT 0,
+            failures INTEGER NOT NULL DEFAULT 0,
+            paused BOOLEAN NOT NULL DEFAULT FALSE
+        )
+    """)
+
     # 36e. Pending wakeups (v68, #598). Durable per-session wakeups so an app
     #      restart rehydrates and re-arms them instead of dropping the bare
     #      in-process asyncio timer. ScheduleWakeup and the idle-at-edge watchdog
@@ -1301,6 +1310,7 @@ def create_postgres_schema(cursor) -> None:
             needs_reauth BOOLEAN DEFAULT FALSE,
             codex_refresh_lease_owner TEXT,
             codex_refresh_lease_expires_at TIMESTAMP WITH TIME ZONE,
+            openai_admin_key TEXT,
             openai_billing_org_id TEXT,
             openai_billing_instance_id TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),

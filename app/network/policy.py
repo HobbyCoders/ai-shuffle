@@ -90,6 +90,7 @@ _LOCAL_SETTING_PATTERNS = [
         r"^port$|^host$|^advertise_url",
         r"^tunnel_",
         r"^openai_billing_",
+        r"^fal_billing_api_key$",
         r"^oauth_state",
     )
 ]
@@ -190,7 +191,7 @@ _register(Collection(
             "codex_id_token_expires_at", "codex_last_refresh", "needs_reauth", "created_at", "updated_at"),
     encrypted=("auth_token", "codex_access_token", "codex_refresh_token"),
     local_fields=("codex_refresh_lease_owner", "codex_refresh_lease_expires_at",
-                  "openai_billing_org_id", "openai_billing_instance_id"),
+                  "openai_admin_key", "openai_billing_org_id", "openai_billing_instance_id"),
     resource="settings", priority=30,
     notes="API keys travel encrypted under the network key. Refresh leases and billing bindings stay local."))
 

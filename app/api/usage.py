@@ -34,6 +34,7 @@ def _credits_are_displayable(credits: object) -> bool:
         "usage",
         "balance",
         "total_available",
+        "spend_month",
     ):
         value = credits.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -196,6 +197,9 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
                 error = None
             fetched_at = row.get("fetched_at")
             if ptype == "openai":
+                if raw.get("source") != "openai_admin":
+                    credits = None
+                    error = error or "missing_credentials"
                 if not _credits_are_displayable(credits) and error is None:
                     continue
                 fetched_at = raw.get("billing_fetched_at", fetched_at if _credits_are_displayable(credits) else None)

@@ -325,7 +325,7 @@ class TestUsageLimitsProviders:
         fetched = int(time.time() * 1000)
         if balance is not None:
             db.upsert_provider_usage_snapshot(
-                "prov-openai", "openai", None, [], {"balance_remaining": balance}, {}, fetched
+                "prov-openai", "openai", None, [], {"spend_month": balance}, {"source": "openai_admin"}, fetched
             )
         record_provider_usage_failure("prov-openai", "openai", "billing_access_denied")
         db.upsert_provider_usage_snapshot(
@@ -338,7 +338,7 @@ class TestUsageLimitsProviders:
         assert entry["status"] == ("stale" if balance is not None else "unavailable")
         assert entry["last_error_kind"] == "billing_access_denied"
         assert entry["fetched_at"] == (fetched if balance is not None else None)
-        assert entry["credits"] == ({"balance_remaining": balance} if balance is not None else None)
+        assert entry["credits"] == ({"spend_month": balance} if balance is not None else None)
         assert "raw" not in entry
 
     def test_refresh_returns_cached_data_while_provider_work_is_pending(self, cached_provider_poll):
@@ -383,7 +383,7 @@ class TestUsageLimitsProviders:
         if configured:
             record_provider_usage_failure("prov-openai", "openai", "billing_access_denied")
             db.upsert_provider_usage_snapshot(
-                "prov-openai-2", "openai", None, [], {"balance_remaining": 0}, {}, fetched,
+                "prov-openai-2", "openai", None, [], {"spend_month": 0}, {"source": "openai_admin"}, fetched,
             )
         with patch("app.api.usage.usage_limits_monitor") as mon:
             mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
@@ -398,7 +398,7 @@ class TestUsageLimitsProviders:
         assert entries["prov-chatgpt"]["windows"][0]["utilization"] == 12
         if configured:
             assert entries["prov-openai"]["last_error_kind"] == "billing_access_denied"
-            assert entries["prov-openai-2"]["credits"] == {"balance_remaining": 0}
+            assert entries["prov-openai-2"]["credits"] == {"spend_month": 0}
         assert any(row["provider_id"] == "openai-api" for row in db.get_all_provider_usage_snapshots())
 
     def test_seeded_rows_returned_with_joined_name(self):
@@ -579,15 +579,15 @@ class TestUsageLimitsProviders:
 
         assert resp.status_code == 200
         providers = resp.json()["providers"]
-        assert [p["provider_id"] for p in providers] == ["prov-or", "prov-grok"]
+        assert [p["provider_id"] for p in providers] == ["prov-openai", "prov-or", "prov-grok"]
+        assert providers[0]["credits"] is None
+        assert providers[0]["last_error_kind"] == "missing_credentials"
         grok = next(p for p in providers if p["provider_id"] == "prov-grok")
         assert grok["provider_type"] == "grok"
         assert grok["plan_type"] == "SuperGrok"
 
     def test_openai_credits_surface_without_rate_limit_windows(self):
-        """Once credit_grants has populated a balance, OpenAI is included and
-        the per-minute requests/tokens windows are stripped so the popover
-        headlines remaining credits."""
+        """Official organization spend is not a prepaid balance or RPM window."""
         from app.db import database as db
 
         db.create_model_provider(
@@ -598,8 +598,8 @@ class TestUsageLimitsProviders:
         db.upsert_provider_usage_snapshot(
             provider_id="prov-openai", provider_type="openai", plan_type=None,
             windows=[{"type": "requests", "utilization": 0.2, "resets_at": None}],
-            credits={"balance_remaining": 20.75, "total_usage": 4.25},
-            raw=None, fetched_at=8,
+            credits={"spend_month": 4.25},
+            raw={"source": "openai_admin"}, fetched_at=8,
         )
 
         with patch("app.api.usage.usage_limits_monitor") as mon:
@@ -613,19 +613,20 @@ class TestUsageLimitsProviders:
         assert entry["provider_id"] == "prov-openai"
         assert entry["provider_type"] == "openai"
         assert entry["windows"] == []
-        assert entry["credits"]["balance_remaining"] == 20.75
+        assert entry["credits"]["spend_month"] == 4.25
+        assert "balance_remaining" not in entry["credits"]
 
     def test_fal_credits_surface_with_brand_name(self):
         """fal.ai is an integration key, not a model-provider row; the API
         still names it so the popover can render without a registry join."""
         from app.db import database as db
 
-        db.set_system_setting("fal_api_key", "dummy-fal-key")
+        db.set_system_setting("fal_billing_api_key", "dummy-fal-key")
         db.upsert_provider_usage_snapshot(
             provider_id="fal-ai", provider_type="fal", plan_type=None,
             windows=[], credits={"balance_remaining": 24.5, "currency": "USD"},
             raw=None, fetched_at=9,
-            expected_credential_generation=db.get_system_setting_revision("fal_api_key"),
+            expected_credential_generation=db.get_system_setting_revision("fal_billing_api_key"),
         )
 
         with patch("app.api.usage.usage_limits_monitor") as mon:

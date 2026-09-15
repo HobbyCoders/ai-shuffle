@@ -1,234 +1,88 @@
 <script lang="ts">
  import { onMount } from 'svelte';
  import type { ModelProvider } from '$lib/api/model-providers';
- import { getOpenAIBillingStatus, connectOpenAIBilling, confirmOpenAIBilling, cancelOpenAIBilling, disconnectOpenAIBilling, type OpenAIBillingStatus } from '$lib/api/openai-billing';
- import BrowserLiveView from '$lib/components/browser/BrowserLiveView.svelte';
- import { createBrowserStreamClient, type BrowserStreamClient, type FrameMessageMetadata, type StreamStatus } from '$lib/browser-panel/stream-client';
-
+ import { getOpenAIUsage, setOpenAIUsage, disconnectOpenAIUsage, type OpenAIUsageStatus } from '$lib/api/openai-billing';
  let { provider }: { provider: ModelProvider } = $props();
- let status = $state<OpenAIBillingStatus | null>(null);
+ let status = $state<OpenAIUsageStatus | null>(null);
+ let adminKey = $state('');
+ let organization = $state('');
  let busy = $state(false);
  let error = $state('');
- let open = $state(false);
- let disconnecting = $state(false);
- let dialog = $state<HTMLDialogElement>();
- let frame = $state<{ data: string; metadata: FrameMessageMetadata } | null>(null);
- let streamStatus = $state<StreamStatus>('connecting');
- let stream: BrowserStreamClient | null = null;
- let timer: ReturnType<typeof setTimeout> | undefined;
+ let removing = $state(false);
  let disposed = false;
- let ownedFlow = $state<string | null>(null);
- let revision = 0;
- let bound = $derived(status ? status.status === 'connected' || Boolean(status.organization_id && status.status !== 'ready') : Boolean(provider.openai_billing_org_id));
- let reconnecting = $state(false);
- let browserElement = $state<HTMLDivElement>();
- let liveView = $state<BrowserLiveView>();
- let keyboardOpen = $state(false);
- let keyboardEnabled = $derived(open && Boolean(ownedFlow && frame) && streamStatus === 'live' && !busy);
- function sendViewport() {
-  if (!browserElement) return;
-  const { width, height } = browserElement.getBoundingClientRect();
-  if (width > 0 && height > 0) stream?.send({ type: 'viewport', width: Math.round(width), height: Math.round(height) });
- }
- $effect(() => {
-  if (!browserElement) return;
-  const observer = new ResizeObserver(sendViewport);
-  observer.observe(browserElement);
-  return () => observer.disconnect();
- });
- let remote = $derived(status?.status === 'other_installation');
- let stale = $derived(status?.status === 'reconnect_required' || status?.status === 'unavailable');
- let savedBalance = $derived(status && ['connected', 'other_installation', 'reconnect_required', 'unavailable'].includes(status.status) && typeof status.credits?.balance_remaining === 'number' && Number.isFinite(status.credits.balance_remaining) ? status.credits.balance_remaining : null);
- const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
- let ready = $derived(status?.status === 'ready' && status.flow_id === ownedFlow && Boolean(status.observation_id && status.organization_id) && typeof status.credits?.balance_remaining === 'number' && Number.isFinite(status.credits.balance_remaining));
- const labels: Record<OpenAIBillingStatus['status'], string> = {
-  not_connected: 'Not connected', pending: 'Waiting for sign-in', ready: 'Review organization', connected: 'Connected',
-  reconnect_required: 'Sign in again to update credits', unavailable: 'Credit tracking unavailable', other_installation: 'Connected on another installation'
- };
- function stopStream() { stream?.destroy(); stream = null; frame = null; }
- function clearPoll() { if (timer) clearTimeout(timer); timer = undefined; }
- function startStream() {
-  if (stream || !ownedFlow) return;
-  streamStatus = 'connecting';
-  stream = createBrowserStreamClient({
-   providerId: provider.id,
-   getAuthToken: () => document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('session='))?.slice(8) ?? null,
-   onOpen: sendViewport,
-   onStatus: state => { streamStatus = state; if (state === 'live') sendViewport(); },
-   onFrame: (data, metadata) => { frame = { data, metadata }; },
-   onError: () => { error = 'The browser connection was interrupted. Close this dialog and try signing in again.'; }
-  });
-  stream.connect();
- }
- async function load(poll = false) {
-  const current = revision;
+ const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+ async function load() {
+  busy = true; error = '';
   try {
-   const next = await getOpenAIBillingStatus(provider.id);
-   if (disposed || current !== revision) return;
-   status = next;
-   if (open && ownedFlow && (next.flow_id !== ownedFlow || !['pending', 'ready'].includes(next.status))) {
-    ownedFlow = null;
-    stopStream();
-   }
-  } catch { if (!disposed && current === revision) error = 'Could not load credit tracking. Try again.'; }
-  finally { if (poll && open && !disposed && current === revision) timer = setTimeout(() => void load(true), 2000); }
- }
- async function begin() {
-  reconnecting = false;
-  busy = true; error = ''; revision++; clearPoll();
-  try {
-   const next = await connectOpenAIBilling(provider.id);
-   if (disposed) {
-    if (next.flow_id && ['pending', 'ready'].includes(next.status)) void cancelOpenAIBilling(provider.id, next.flow_id).catch(() => {});
-    return;
-   }
-   status = next;
-   ownedFlow = ['pending', 'ready'].includes(next.status) ? next.flow_id : null;
-   open = true;
-   startStream();
-   timer = setTimeout(() => void load(true), 2000);
-  } catch { error = 'Could not start credit sign-in. Make sure the browser is running, then try again.'; }
+   const next = await getOpenAIUsage(provider.id);
+   if (!disposed) { status = next; organization = next.organization_id ?? ''; }
+  } catch { if (!disposed) error = 'Could not load usage settings.'; }
   finally { busy = false; }
  }
- async function close() {
-  if (busy) return;
-  busy = true; revision++; clearPoll(); error = '';
+ async function save() {
+  busy = true; error = '';
   try {
-   if (ownedFlow) status = await cancelOpenAIBilling(provider.id, ownedFlow);
-   ownedFlow = null; stopStream(); open = false;
-  } catch { error = 'Could not cancel sign-in. Try closing again.'; }
-  finally { busy = false; }
- }
- async function confirm() {
-  if (!ready || !status?.flow_id || !status.observation_id || !status.organization_id) return;
-  busy = true; error = ''; revision++; clearPoll();
-  try {
-   status = await confirmOpenAIBilling(provider.id, { flow_id: status.flow_id, observation_id: status.observation_id, organization_id: status.organization_id });
-   ownedFlow = null; stopStream(); open = false;
-  } catch {
-   error = 'Could not confirm this organization. Check the latest balance and try again.';
-   void load(true);
-  } finally { busy = false; }
+   const next = await setOpenAIUsage(provider.id, adminKey, organization.trim());
+   if (!disposed) status = next;
+  } catch { if (!disposed) error = 'Could not save usage access. Check the organization ID and try again.'; }
+  finally { adminKey = ''; busy = false; }
  }
  async function disconnect() {
-  busy = true; error = ''; revision++; clearPoll();
-  try { status = await disconnectOpenAIBilling(provider.id); disconnecting = false; }
-  catch { error = 'Could not disconnect credit tracking. Try again.'; }
+  busy = true; error = '';
+  try { status = await disconnectOpenAIUsage(provider.id); removing = false; organization = ''; }
+  catch { error = 'Could not disconnect usage access.'; }
   finally { busy = false; }
  }
- $effect(() => {
-  if (open && dialog && !dialog.open) dialog.showModal();
-  else if (!open && dialog?.open) dialog.close();
- });
- onMount(() => {
-  void load();
-  return () => {
-   disposed = true; revision++; clearPoll(); stopStream();
-   if (ownedFlow) void cancelOpenAIBilling(provider.id, ownedFlow).catch(() => {});
-  };
- });
+ onMount(() => { void load(); return () => { disposed = true; adminKey = ''; }; });
 </script>
 
-<section class="credits" aria-label="OpenAI credits">
- <div class="heading">Credits</div>
- <p class="state">{status ? labels[status.status] : 'Loading credit tracking…'}</p>
- <p class="muted">Track your OpenAI Platform balance with a separate sign-in. Your API key stays unchanged.</p>
- {#if status?.organization_id && status.status !== 'ready'}<p class="organization">{status.organization_id}</p>{/if}
- {#if savedBalance !== null}
-  <p class="state">{stale ? 'Last known balance: ' : ''}{currency.format(savedBalance)}{stale ? ' (stale)' : ' available'}</p>
-  {#if status?.fetched_at != null}<p class="muted">Last checked <time datetime={new Date(status.fetched_at).toISOString()}>{new Date(status.fetched_at).toLocaleString()}</time></p>{/if}
- {/if}
- {#if status?.status === 'reconnect_required'}<p class="muted">Reconnect credits and sign in again to update your balance.</p>
- {:else if status?.status === 'unavailable'}<p class="muted">The latest balance could not be checked. Check status again, or reconnect credits if the problem continues.</p>{/if}
- {#if remote}
-  <p class="muted">Manage this connection on installation <span class="organization">{status?.owner_instance_id}</span>. This installation cannot take it over.</p>
+<section class="usage-admin" aria-label="OpenAI account usage">
+ <h4>Organization usage and spend</h4>
+ <p>Uses OpenAI’s official Admin API. This does not retrieve your prepaid credit balance or ChatGPT subscription allowance.</p>
+ <p class="muted">Optional access, stored encrypted on this worker only. Your model API key is unchanged. Use an Admin API key with permission to read organization usage and costs; grant no other permissions where OpenAI allows it.</p>
+ <a href="https://platform.openai.com/settings/organization/admin-keys" target="_blank" rel="noopener noreferrer">Manage OpenAI Admin API keys</a>
+ {#if status?.configured}
+  <p role="status">Admin key saved{status.fetched_at ? '' : ' — awaiting a successful usage refresh'}.</p>
+  {#if status.last_error_kind}
+   <p class="warning">{status.last_error_kind === 'billing_access_denied' ? 'OpenAI refused usage access. Polling is paused for this key; check its organization and permissions, then replace it.' : 'Usage is unavailable. The last successful reading is retained; retries are delayed.'}</p>
+  {/if}
+  {#if status.spend}
+   <p>{money.format(status.spend.spend_month)} organization spend this month (UTC)</p>
+   <p>{status.spend.num_model_requests.toLocaleString()} completions requests · {status.spend.input_tokens.toLocaleString()} input tokens · {status.spend.output_tokens.toLocaleString()} output tokens</p>
+  {/if}
+  {#if status.fetched_at}<p class="muted">Last successful update: {new Date(status.fetched_at).toLocaleString()}. Provider reporting may be delayed.</p>{/if}
  {:else if status}
-  {#if !status.browser_available}<p class="muted">Start the app’s browser in Settings → Browser, then check again to sign in.</p>{/if}
-  <div class="actions">
-   <button class="ed-btn" disabled={busy || !status.browser_available} onclick={() => bound || status?.status === 'reconnect_required' ? reconnecting = true : void begin()}>{bound || status.status === 'reconnect_required' ? 'Reconnect credits' : 'Sign in for credits'}</button>
-   <button class="ed-btn" disabled={busy} onclick={() => void load()}>Check status</button>
-   {#if bound || status.organization_id}<button class="ed-btn" disabled={busy} onclick={() => disconnecting = true}>Disconnect credits</button>{/if}
-  </div>
- {:else if error}<button class="ed-btn" onclick={() => void load()}>Try again</button>{/if}
- {#if reconnecting}
-  <div class="confirmation">
-   <p>Reconnect credit tracking? Your current organization stays connected until you confirm a new organization. This uses the app’s shared browser sign-in.</p>
-   <div class="actions"><button class="ed-btn primary" disabled={busy} onclick={begin}>Continue to sign-in</button><button class="ed-btn" disabled={busy} onclick={() => reconnecting = false}>Keep current connection</button></div>
-  </div>
+  <p>Admin usage access is not configured. Previous browser credit tracking is no longer used.</p>
  {/if}
- {#if disconnecting}
-  <div class="confirmation">
-   <p>Disconnect credit tracking? The saved balance will be removed. Your API key and shared browser sign-in stay unchanged.</p>
-   <div class="actions"><button class="ed-btn danger" disabled={busy} onclick={disconnect}>Disconnect credits</button><button class="ed-btn" disabled={busy} onclick={() => disconnecting = false}>Keep connected</button></div>
-  </div>
+ <form onsubmit={(event) => { event.preventDefault(); void save(); }}>
+  <label>Organization ID<input bind:value={organization} placeholder="org-…" required pattern="org-(?:[A-Za-z0-9_]|-)+" disabled={busy} /></label>
+  <label>Admin API key<input type="password" bind:value={adminKey} autocomplete="off" required disabled={busy} /></label>
+  <button type="submit" disabled={busy || !adminKey.trim() || !organization.trim()}>{status?.configured ? 'Replace admin key' : 'Save admin key'}</button>
+ </form>
+ <p class="muted">Usage refreshes on demand, no more than once every 15 minutes per endpoint and credential. Opening Usage cannot bypass this limit. Spend covers the organization; token counts cover completions, not every API product.</p>
+ <div class="actions">
+  <button type="button" onclick={() => void load()} disabled={busy}>Read cached status</button>
+  {#if status?.configured}<button type="button" onclick={() => removing = true} disabled={busy}>Disconnect usage</button>{/if}
+ </div>
+ {#if removing}
+  <p>Remove this worker’s admin key and saved usage? Your model API key will remain connected.</p>
+  <button type="button" onclick={() => void disconnect()} disabled={busy}>Remove admin key</button>
+  <button type="button" onclick={() => removing = false} disabled={busy}>Cancel</button>
  {/if}
- {#if error && !open}<p class="error" role="alert">{error}</p>{/if}
+ <a href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener noreferrer">View prepaid balance in OpenAI billing</a>
+ {#if error}<p role="alert">{error}</p>{/if}
 </section>
 
-<dialog bind:this={dialog} oncancel={event => { event.preventDefault(); void close(); }} aria-labelledby="credits-title-{provider.id}">
- {#if open}
- <div class="dialog-content">
-  <header>
-   <h2 id="credits-title-{provider.id}">Sign in for OpenAI credits</h2>
-   <div class="actions">
-    <button class="ed-btn" disabled={!keyboardOpen && (!keyboardEnabled || !liveView)} aria-pressed={keyboardOpen}
-     onpointerdown={event => event.preventDefault()}
-     onclick={() => { if (keyboardOpen) liveView?.dismissKeyboard(); else liveView?.openKeyboard(); }}
-    >{keyboardOpen ? 'Hide keyboard' : 'Show keyboard'}</button>
-    <button class="ed-btn" disabled={busy} onclick={close}>Close</button>
-   </div>
-  </header>
-  <p class="muted">This uses the app’s shared browser profile. Existing sign-ins may appear here. Complete sign-in and any verification in the browser below, then confirm the organization you want to track.</p>
-  <p class="muted">Closing cancels an unconfirmed connection. Disconnecting credit tracking does not sign out of the shared browser.</p>
-  {#if ownedFlow}
-   <div class="browser" bind:this={browserElement}>
-    {#if frame}<BrowserLiveView bind:this={liveView} bind:keyboardOpen {keyboardEnabled} {frame} interactive={keyboardEnabled} onInput={payload => stream?.send({ type: 'input', ...payload })} />
-    {:else}<p class="browser-message" role="status">{streamStatus === 'browser_off' ? 'The app’s browser is not running. Start it in Settings → Browser.' : 'Connecting to the sign-in browser…'}</p>{/if}
-   </div>
-   {#if streamStatus === 'disconnected'}<p role="status" class="muted">Reconnecting to the browser…</p>{/if}
-  {/if}
-  {#if ready && status}
-   <div class="confirmation">
-    <p>Track credits for this organization?</p>
-    <div class="review"><span class="organization">{status.organization_id}</span><strong>${status.credits!.balance_remaining.toFixed(2)} available</strong></div>
-    {#if status.fetched_at}<p class="muted">Observed {new Date(status.fetched_at).toLocaleTimeString()}</p>{/if}
-    <button class="ed-btn primary" disabled={busy} onclick={confirm}>Confirm organization</button>
-   </div>
-  {:else}<p role="status" class="state">{status ? labels[status.status] : 'Waiting for sign-in'}</p>{/if}
-  {#if !ownedFlow && status?.status !== 'connected' && status?.status !== 'other_installation'}
-   <p class="muted">This sign-in is no longer active. Close this dialog, then sign in for credits again.</p>
-  {/if}
-  {#if error}<p class="error" role="alert">{error}</p>{/if}
- </div>
- {/if}
-</dialog>
-
 <style>
- .credits { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 12px; }
- .heading { font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted-foreground); }
- p { margin: 8px 0; line-height: 1.5; }
- .state { font-weight: 600; }
- .muted { color: var(--muted-foreground); }
- .organization, .review strong { font-family: var(--font-mono, monospace); overflow-wrap: anywhere; }
- .actions, .review { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
- .review { justify-content: space-between; margin-bottom: 10px; }
- .ed-btn { font-size: 12px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--background); color: var(--foreground); cursor: pointer; }
- .ed-btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
- .ed-btn.danger { color: var(--destructive); }
- button:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
- button:disabled { opacity: .5; cursor: not-allowed; }
- .confirmation { padding: 12px; border: 1px solid var(--border); border-radius: 8px; margin-top: 12px; background: var(--muted); }
- .error { color: var(--destructive); }
- dialog { margin: auto; width: min(1000px, calc(100vw - 40px)); max-width: none; max-height: 94dvh; padding: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--foreground); }
- dialog::backdrop { background: rgb(0 0 0 / .6); }
- .dialog-content { padding: 18px; font-size: 12px; }
- header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
- h2 { font-size: 16px; font-weight: 600; margin: 0; }
- .browser { display: flex; flex-direction: column; height: clamp(260px, 48dvh, 560px); position: relative; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-top: 12px; background: var(--background); }
- .browser-message { display: grid; place-items: center; height: 100%; padding: 24px; text-align: center; color: var(--muted-foreground); }
- @media (max-width: 640px) {
-  dialog { width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; border: 0; border-radius: 0; }
-  .dialog-content { padding: max(12px, env(safe-area-inset-top)) 12px max(16px, env(safe-area-inset-bottom)); }
-  .browser { height: 50dvh; }
- }
+ .usage-admin { display: grid; gap: .7rem; padding: 1rem 0; min-width: 0; }
+ h4, p { margin: 0; }
+ p, a { font-size: .85rem; overflow-wrap: anywhere; }
+ .muted { opacity: .75; }
+ form, label { display: grid; gap: .4rem; min-width: 0; }
+ form { gap: .7rem; }
+ input { width: 100%; min-width: 0; box-sizing: border-box; padding: .6rem; background: var(--background); color: inherit; border: 1px solid var(--border); border-radius: .4rem; }
+ button { padding: .5rem .75rem; border-radius: .4rem; border: 1px solid var(--border); background: transparent; color: inherit; cursor: pointer; }
+ button:disabled { opacity: .5; cursor: default; }
+ .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+ .warning, [role='alert'] { color: var(--destructive); }
 </style>

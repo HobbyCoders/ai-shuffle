@@ -1,91 +1,9 @@
-"""Provider usage capture + polling (Chunks U2/U3 of the provider-usage program,
-plus the #757 follow-up: passive OpenAI/Anthropic API-key header capture).
+"""Passive inference usage capture and demand-driven account usage refreshes.
 
-Five data paths land in this module, per ``docs/PROVIDER_USAGE_CONTEXT_PLAN.md``
-(Codex/OpenRouter) and GitHub issue #757 (OpenAI/Anthropic API-key providers):
-
-**Codex passive capture (U2).** The fluid harness's native Codex leg receives
-``x-codex-*`` plan/rate-limit headers on every response. The response event
-hook installed by ``provider/harness_adapter.py::_usage_capture_http_client``
-calls ``capture_codex_headers``, which normalizes those headers into the shared
-``provider_usage_snapshots`` row shape and persists them fire-and-forget, off
-the streaming hot path. (Before the translator gateway was retired the same
-capture ran inside its Codex upstream leg.)
-
-**OpenAI passive capture (#757).** The fluid harness's native OpenAI-platform
-leg receives standard ``x-ratelimit-*`` headers; the same response hook calls
-``capture_openai_headers``, which follows the exact same fire-and-forget
-pattern as the Codex capture above, persisting ``provider_type="openai"``.
-
-**Anthropic passive capture (#757).** An Anthropic leg receives
-``anthropic-ratelimit-*`` headers on every successful response.
-``capture_anthropic_headers`` follows the same pattern, persisting
-``provider_type="anthropic"``.
-
-**OpenRouter poller (U3).** ``ProviderUsageMonitor`` polls every enabled
-``openrouter`` model-provider's key-info endpoint
-(``GET {origin of base_url}/api/v1/key``) on the same 5-minute cadence as the
-Claude usage-limits poller (``app.core.usage_limits``). Window/credits mapping
-is governed by AMENDMENT 1 of the plan doc: when the key's ``limit`` is
-non-null and positive, emit exactly ONE window —
-``{type: "credit_limit", utilization: usage / limit * 100}``. Daily/weekly/
-monthly spend never drives a window's utilization; it is always carried as
-dollar figures in ``credits`` (populated in both branches).
-
-**Grok SuperGrok poller.** The same monitor also polls every enabled
-``provider_type='grok'`` / ``auth_mode='grok'`` subscription row against
-``GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`` (OAuth
-access token from ``codex_access_token``, never the row's API-key
-``auth_token``). Settings (``subscription_tier_display``) is a separate
-short-timeout fetch whose failure must not drop an already-fetched billing
-snapshot. xAI API-key rows (``provider_type='xai'``) are never polled.
-
-**OpenAI platform credits poller.** Enabled ``provider_type='openai'`` rows
-whose ``base_url`` host is ``api.openai.com`` are polled against the dashboard
-credit-grants endpoint the platform console uses
-(``GET https://api.openai.com/v1/dashboard/billing/credit_grants``). This is
-undocumented and 403s for project/service-account keys without billing access;
-a 403 is logged at ERROR (time-de-duplicated, like every other poll failure)
-and skipped — a missing balance with no explanation anywhere an agent can read
-is exactly the silent failure this poller used to produce. Custom
-OpenAI-compatible gateways are never sent to that host. The decrypted key is
-used only as a Bearer header and is NEVER logged.
-
-Explicit Platform-browser connections take precedence over API-key billing.
-They refresh every five minutes on the owning installation and retain the last
-successful balance when reauthentication is needed. Browser observations are
-bound to one organization; authentication stays in the shared browser profile.
-ChatGPT/Codex OAuth credentials are not used for Platform billing. Subscription
-quotas and prepaid API balances belong to separate billing systems.
-
-**fal.ai credits poller.** The same monitor reads the install's
-``fal_api_key`` (not a model-provider row) and polls the official Platform
-API (``GET https://api.fal.ai/v1/account/billing?expand=credits``). Ordinary
-keys 403 there (admin-only); we then fall back to
-``GET https://rest.alpha.fal.ai/billing/user_balance``. The snapshot is
-stored under the synthetic id ``fal-ai``. Missing key deletes that row so
-the popover does not keep a stale balance.
-
-Security (S4 hard invariant): the allowlists below are the ONLY thing that
-ever reaches ``raw`` (and, transitively, the DB and any future API response).
-They never include ``Authorization``, ``chatgpt-account-id``, any cookie, or
-any other credential. The decrypted OpenRouter / OpenAI / fal keys are used
-only as Authorization header values and are NEVER logged, printed, or stored
-(not even truncated). Failures are logged without ever including header or key
-values.
-
-Failure logging (audit R6/2): a poll that could not fetch what it came for is
-logged at **ERROR** via :func:`_log_poll_failure`, not at warning or debug.
-Only ERROR+ reaches the durable ``error_log`` table, which is the only thing
-``GetAppErrors`` can see — so a 403 logged at debug meant an agent asked the
-tool why the balance was missing and was told ``{"errors": [], "count": 0}``.
-A poller repeats every five minutes forever, so the same failure is logged at
-ERROR the first time and on change, then at debug while it persists, with a
-periodic re-assertion (``_POLL_FAILURE_REASSERT_SECONDS``) so a long-standing
-outage stays visible without flooding. Strictly ADDITIVE fetches whose failure
-costs nothing (OpenRouter ``/credits`` on top of ``/key``, the Grok settings
-label, the fal admin-billing probe that ordinary keys are expected to 403)
-stay at debug: they are not poll failures.
+OpenAI account spend and completions usage use a separate local Admin API key.
+No dashboard endpoints, browser sign-ins or ChatGPT OAuth credentials are used
+for OpenAI Platform billing. Upstream reads share durable cooldowns; UI refresh
+requests cannot bypass those budgets. Raw snapshots never contain credentials.
 """
 
 from __future__ import annotations
@@ -102,6 +20,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from app.core import encryption
+from app.core.usage_polling import UsageDeferred, usage_get
 from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
@@ -897,10 +816,7 @@ async def _grok_get(
     """GET a pinned grok.com CLI-proxy URL. Never follows redirects."""
     if not _grok_url_is_pinned(url):
         raise ValueError("refusing non-pinned Grok billing host")
-    async with httpx.AsyncClient(
-        timeout=timeout, follow_redirects=False
-    ) as client:
-        resp = await client.get(url, headers=headers)
+    resp = await usage_get(url, headers=dict(headers), timeout=timeout)
     body: Optional[Any] = None
     try:
         body = resp.json()
@@ -1198,7 +1114,7 @@ def _allowlisted_fal_raw(payload: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 class ProviderUsageMonitor:
-    """Polls OpenRouter, SuperGrok, OpenAI credit-grants, and fal.ai billing.
+    """Fetches provider usage through credential-scoped, persistent request budgets.
 
     Best-effort, module-singleton, lifecycle mirrors
     ``app.core.usage_limits.UsageLimitsMonitor``: ``poll_once`` never raises,
@@ -1209,57 +1125,16 @@ class ProviderUsageMonitor:
     def __init__(self) -> None:
         self._poll_task: Optional[asyncio.Task] = None
         self._last_poll_finished: Optional[float] = None
-        self._billing_task: Optional[asyncio.Task] = None
 
     def start(self) -> None:
-        if self._billing_task is None or self._billing_task.done():
-            self._billing_task = asyncio.create_task(self._billing_loop())
+        # Account refreshes are demand-driven. Never launch billing browser tabs.
+        pass
 
     async def stop(self) -> None:
-        from app.core.openai_billing_browser import openai_billing_browser
-
-        tasks = [task for task in (self._billing_task, self._poll_task) if task]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._billing_task = self._poll_task = None
-        await openai_billing_browser.shutdown()
-
-    async def _reconcile_billing(self, rows: List[Dict[str, Any]]) -> None:
-        from app.core.config import settings
-        from app.core.openai_billing_browser import openai_billing_browser
-
-        active = {
-            row["id"] for row in rows if row.get("id") and _is_openai_platform_row(row)
-            and row.get("enabled", True)
-            and row.get("openai_billing_instance_id") in (None, settings.effective_instance_id)
-        }
-        await openai_billing_browser.reconcile(active)
-
-    async def _poll_billing_connections(self) -> None:
-        from app.db import database as db
-
-        rows = await run_sync(db.get_enabled_model_providers)
-        await self._reconcile_billing(rows)
-        semaphore = asyncio.Semaphore(4)
-
-        async def poll(row):
-            async with semaphore:
-                await self._poll_openai_provider(row)
-
-        await asyncio.gather(*(
-            poll(row) for row in rows if _is_openai_platform_row(row)
-            and row.get("openai_billing_org_id")
-        ), return_exceptions=True)
-
-    async def _billing_loop(self) -> None:
-        while True:
-            try:
-                await asyncio.wait_for(self._poll_billing_connections(), timeout=90)
-            except Exception:
-                logger.warning("OpenAI browser credit refresh failed")
-            await asyncio.sleep(300)
+        if self._poll_task:
+            self._poll_task.cancel()
+            await asyncio.gather(self._poll_task, return_exceptions=True)
+        self._poll_task = None
 
     @property
     def refreshing(self) -> bool:
@@ -1294,7 +1169,6 @@ class ProviderUsageMonitor:
             rows = await run_sync(
                 functools.partial(db.get_enabled_model_providers, include_token=True)
             )
-            await self._reconcile_billing(rows or [])
         except Exception:
             logger.debug("Provider usage poll: provider read skipped")
             rows = []
@@ -1331,8 +1205,7 @@ class ProviderUsageMonitor:
                 return
 
             url = _origin(base_url) + _KEY_PATH
-            async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
-                resp = await client.get(url, headers={"Authorization": f"Bearer {key}"})
+            resp = await usage_get(url, headers={"Authorization": f"Bearer {key}"})
 
             if resp.status_code != 200:
                 _log_poll_failure(
@@ -1370,6 +1243,8 @@ class ProviderUsageMonitor:
                 raw,
                 int(time.time() * 1000),
             )
+        except UsageDeferred:
+            return
         except Exception as e:
             # Never include `key` / the Authorization header value here.
             _log_poll_failure(
@@ -1392,11 +1267,7 @@ class ProviderUsageMonitor:
         debug for that reason (a warning would be noise on key-only setups).
         """
         try:
-            async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
-                resp = await client.get(
-                    origin + _CREDITS_PATH,
-                    headers={"Authorization": f"Bearer {key}"},
-                )
+            resp = await usage_get(origin + _CREDITS_PATH, headers={"Authorization": f"Bearer {key}"})
             if resp.status_code != 200:
                 logger.debug(
                     "OpenRouter /credits for provider %s returned HTTP %s; "
@@ -1410,6 +1281,8 @@ class ProviderUsageMonitor:
             if not isinstance(data, dict):
                 data = body if isinstance(body, dict) else {}
             return _merge_openrouter_credits(credits, data)
+        except UsageDeferred:
+            return credits
         except Exception as e:
             # Never include `key` / the Authorization header value here.
             logger.debug(
@@ -1514,6 +1387,8 @@ class ProviderUsageMonitor:
                 u.raw,
                 fetched_at,
             )
+        except UsageDeferred:
+            return
         except Exception as e:
             # Never include the bearer token here.
             _log_poll_failure(
@@ -1521,159 +1396,54 @@ class ProviderUsageMonitor:
                 "Grok usage poll for provider %s failed: %s", provider_id, e,
             )
 
-    async def _request_openai_credit_grants(
-        self, headers: Mapping[str, str]
-    ) -> Tuple[
-        Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[int]
-    ]:
-        """GET credit_grants (v1 then legacy). Returns (credits, raw, last_status)."""
-        last_status: Optional[int] = None
-        for url in (OPENAI_CREDIT_GRANTS_URL, OPENAI_CREDIT_GRANTS_URL_LEGACY):
-            if not _openai_credit_grants_url_is_pinned(url):
-                continue
-            resp = await _pinned_get(
-                url, headers, OPENAI_CREDIT_GRANTS_HOST, _REQUEST_TIMEOUT_SECONDS
-            )
-            last_status = resp.status_code
-            if resp.status_code != 200:
-                continue
-            try:
-                body = resp.json()
-            except Exception:
-                body = None
-            credits = normalize_openai_credit_grants(body)
-            if not credits:
-                continue
-            raw_body = body if isinstance(body, dict) else {}
-            if isinstance(raw_body.get("data"), dict):
-                raw_body = raw_body["data"]
-            raw = {
-                k: raw_body.get(k)
-                for k in _OPENAI_CREDITS_RAW_FIELDS
-                if k in raw_body
-            }
-            return credits, raw, last_status
-        return None, None, last_status
-
-    async def _record_openai_failure(
-        self, provider_id: str, error_kind: str,
-        expected_binding: Optional[tuple[str, str]] = None,
-    ) -> None:
-        from app.db.provider_usage_snapshots import record_provider_usage_failure
-
-        try:
-            await run_sync(
-                record_provider_usage_failure, provider_id, "openai", error_kind,
-                expected_binding=expected_binding,
-            )
-        except Exception:
-            logger.warning("OpenAI billing status could not be saved")
-
-    async def _fetch_openai_balance(self, provider_id: str, headers: Mapping[str, str]) -> bool:
-        from app.db import database as db
-
-        try:
-            credits, raw, status = await self._request_openai_credit_grants(headers)
-            if credits:
-                # Poll recovered: forget the suppressed-failure state so the
-                # next failure is reported at ERROR straight away.
-                _clear_poll_failure(f"openai-credits-poll:{provider_id}")
-                _clear_poll_failure(f"openai-credit-grants:{provider_id}")
-                await run_sync(
-                    db.upsert_provider_usage_snapshot,
-                    provider_id, "openai", None, [], credits, raw,
-                    int(time.time() * 1000),
-                )
-                return True
-            error = "billing_access_denied" if status in (401, 403) else "unavailable"
-            if status is not None:
-                # 401/403 used to be debug-only ("expected for project keys").
-                # That is exactly the silent failure an agent could not see:
-                # the balance is missing and NOTHING says why. It is an auth
-                # refusal on a poll that was configured to run, so it is an
-                # error — de-duplicated over time like every other one.
-                _log_poll_failure(
-                    f"openai-credit-grants:{provider_id}",
-                    "OpenAI credit_grants for provider %s failed: HTTP %s%s",
-                    provider_id,
-                    status,
-                    (
-                        " (the dashboard endpoint refuses project/service-account "
-                        "keys without billing access)"
-                        if status in (401, 403) else ""
-                    ),
-                )
-        except httpx.TimeoutException as e:
-            error = "timeout"
-            # Never include the Bearer key here.
-            _log_poll_failure(
-                f"openai-credits-poll:{provider_id}",
-                "OpenAI credits poll for provider %s timed out: %s", provider_id, e,
-            )
-        except Exception as e:
-            error = "unavailable"
-            # Never include the Bearer key here.
-            _log_poll_failure(
-                f"openai-credits-poll:{provider_id}",
-                "OpenAI credits poll for provider %s failed: %s", provider_id, e,
-            )
-        await self._record_openai_failure(provider_id, error)
-        return False
-
     async def _poll_openai_provider(self, row: Dict[str, Any]) -> bool:
         from app.core.config import settings
-        from app.core.openai_billing_browser import BillingBrowserError, openai_billing_browser
+        from app.core.openai_admin_usage import fetch
+        from app.core.usage_polling import UsageDeferred
         from app.db import database as db
 
         provider_id = row.get("id")
         if not provider_id:
             return False
-        async with openai_billing_browser.operation_lock(provider_id):
-            state = openai_billing_browser.status(provider_id)
-            if state["status"] in {"pending", "ready"}:
+        # Browser bindings from older versions never authorize Admin API access.
+        current = await run_sync(db.get_model_provider, provider_id, include_token=True)
+        if not current or not current.get("enabled", True) or not _is_openai_platform_row(current):
+            return False
+        encrypted = current.get("openai_admin_key")
+        org = current.get("openai_billing_org_id")
+        if not encrypted or not org or current.get("openai_billing_instance_id") != settings.effective_instance_id:
+            return False
+        binding = (org, settings.effective_instance_id)
+        try:
+            key = encryption.decrypt_value(encrypted)
+            results = await asyncio.gather(fetch(key, org, costs=True), fetch(key, org), return_exceptions=True)
+            failures = [r for r in results if isinstance(r, BaseException) and not isinstance(r, UsageDeferred)]
+            if failures:
+                raise failures[0]
+            if any(isinstance(r, UsageDeferred) for r in results):
                 return False
-            if row.get("openai_billing_org_id") or state["status"] != "not_connected":
-                row = await run_sync(db.get_model_provider, provider_id)
-                if not row or not row.get("enabled", True) or not _is_openai_platform_row(row):
-                    await openai_billing_browser.close(provider_id)
-                    return False
-            organization_id = row.get("openai_billing_org_id")
-            if organization_id:
-                instance_id = row.get("openai_billing_instance_id")
-                if instance_id != settings.effective_instance_id:
-                    return False
-                binding = (organization_id, instance_id)
-                try:
-                    observation = await openai_billing_browser.refresh(provider_id, organization_id)
-                    saved = await run_sync(
-                        db.upsert_provider_usage_snapshot,
-                        provider_id, "openai", None, [], observation["credits"], observation["raw"],
-                        observation["fetched_at"], expected_binding=binding,
-                    )
-                    return saved is not False
-                except BillingBrowserError as error:
-                    await self._record_openai_failure(provider_id, error.kind, binding)
-                    return False
-            try:
-                key = _decrypt_provider_auth_token(row)
-            except Exception:
-                key = None
-            if not key:
-                await self._record_openai_failure(provider_id, "missing_credentials")
-                return False
-            return await self._fetch_openai_balance(
-                provider_id, {"Authorization": f"Bearer {key}", "Accept": "application/json"}
+            credits = {**results[0], **results[1]}
+            return await run_sync(
+                db.upsert_provider_usage_snapshot, provider_id, "openai", None, [], credits,
+                {"source": "openai_admin", "organization_id": org}, int(time.time() * 1000),
+                expected_binding=binding, expected_admin_key=encrypted,
             )
+        except Exception as error:
+            status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+            kind = "billing_access_denied" if status in (401, 403) else "unavailable"
+            # Never log an exception with provider response text or credentials.
+            _log_poll_failure(f"openai-admin:{provider_id}", "OpenAI Admin usage failed for %s (%s)", provider_id, kind)
+            await run_sync(db.record_provider_usage_failure, provider_id, "openai", kind,
+                           expected_binding=binding, expected_admin_key=encrypted)
+            return False
 
     async def _poll_fal(self) -> None:
         """Fetch fal.ai account credits and upsert the synthetic snapshot. Never raises.
 
-        Fal is an integration key (``fal_api_key``), not a model-provider row.
+        Only the optional, separate local ``fal_billing_api_key`` is used.
         Credential mutations invalidate ``fal-ai`` inside their transaction;
         every result is conditionally committed against the captured revision.
-
-        Ordinary keys 403 on the documented admin billing endpoint; we then
-        fall back to ``rest.alpha.fal.ai/billing/user_balance``.
+        No ordinary-key probes or undocumented fallback endpoints are allowed.
         """
         from app.db import database as db
 
@@ -1681,9 +1451,9 @@ class ProviderUsageMonitor:
         try:
             from app.api.settings_crypto import get_decrypted_api_key
 
-            generation = await run_sync(db.get_system_setting_revision, "fal_api_key")
-            key = await run_sync(get_decrypted_api_key, "fal_api_key")
-            if generation != await run_sync(db.get_system_setting_revision, "fal_api_key"):
+            generation = await run_sync(db.get_system_setting_revision, "fal_billing_api_key")
+            key = await run_sync(get_decrypted_api_key, "fal_billing_api_key")
+            if generation != await run_sync(db.get_system_setting_revision, "fal_billing_api_key"):
                 return
             if not key:
                 return
@@ -1700,49 +1470,15 @@ class ProviderUsageMonitor:
             credits: Optional[Dict[str, Any]] = None
             raw: Dict[str, Any] = {}
 
-            if _fal_billing_url_is_pinned(FAL_BILLING_URL):
-                try:
-                    resp = await _pinned_get(
-                        FAL_BILLING_URL,
-                        headers,
-                        FAL_BILLING_HOST,
-                        _REQUEST_TIMEOUT_SECONDS,
-                    )
-                    if resp.status_code == 200:
-                        try:
-                            body = resp.json()
-                        except Exception:
-                            body = None
-                        credits = normalize_fal_billing(body)
-                        if credits:
-                            raw = _allowlisted_fal_raw(
-                                body if isinstance(body, dict) else {}
-                            )
-                            raw["source"] = "account/billing"
-                except Exception as e:
-                    logger.debug("fal.ai admin billing fetch failed: %s", e)
-
-            if credits is None and _fal_user_balance_url_is_pinned(FAL_USER_BALANCE_URL):
-                resp = await _pinned_get(
-                    FAL_USER_BALANCE_URL,
-                    headers,
-                    FAL_USER_BALANCE_HOST,
-                    _REQUEST_TIMEOUT_SECONDS,
-                )
-                if resp.status_code != 200:
-                    logger.debug(
-                        "fal.ai user_balance returned HTTP %s", resp.status_code
-                    )
-                    await failed("billing_access_denied" if resp.status_code in (401, 403) else "unavailable")
-                    return
-                try:
-                    body = resp.json()
-                except Exception:
-                    body = (resp.text or "").strip()
-                credits = normalize_fal_user_balance(body)
-                if credits:
-                    raw = {"source": "user_balance"}
-                    raw["current_balance"] = credits["balance_remaining"]
+            if not _fal_billing_url_is_pinned(FAL_BILLING_URL):
+                return
+            resp = await usage_get(FAL_BILLING_URL, headers=headers)
+            if resp.status_code != 200:
+                await failed("billing_access_denied" if resp.status_code in (401, 403) else "unavailable")
+                return
+            body = resp.json()
+            credits = normalize_fal_billing(body)
+            raw = {**_allowlisted_fal_raw(body), "source": "fal_admin"}
 
             if not credits:
                 await failed()
@@ -1761,6 +1497,8 @@ class ProviderUsageMonitor:
                 int(time.time() * 1000),
                 expected_credential_generation=generation,
             )
+        except UsageDeferred:
+            return
         except Exception as e:
             # Never include the Key credential here.
             _log_poll_failure("fal-credits-poll", "fal.ai credits poll failed: %s", e)

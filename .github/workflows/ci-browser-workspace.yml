@@ -5,7 +5,9 @@ on:
     paths:
       - 'app/api/browser_panel.py'
       - 'app/api/openai_billing.py'
-      - 'app/core/openai_billing_browser.py'
+      - 'app/core/openai_admin_usage.py'
+      - 'app/core/usage_polling.py'
+      - 'frontend/src/lib/api/openai-billing*'
       - 'app/api/ws_auth.py'
       - 'app/core/browser*.py'
       - 'app/core/native_chrome.py'

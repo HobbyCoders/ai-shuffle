@@ -91,7 +91,7 @@ _PUBLIC_COLUMNS = (
 # passes ``include_token=True`` (server-side use: env overlay / re-encryption /
 # the Codex refresh worker). Kept off ``_PUBLIC_COLUMNS`` so they never travel on
 # a normal read.
-_TOKEN_COLUMNS = "auth_token, codex_access_token, codex_refresh_token"
+_TOKEN_COLUMNS = "auth_token, codex_access_token, codex_refresh_token, openai_admin_key"
 
 # Columns that update_model_provider accepts as direct partial updates. JSON
 # columns are handled specially (see _dump_json_value); auth_token and the two
@@ -114,6 +114,7 @@ _UPDATABLE_COLUMNS = (
     "auth_mode",
     "codex_access_token",
     "codex_refresh_token",
+    "openai_admin_key",
     "codex_account_id",
     "codex_id_token_expires_at",
     "codex_last_refresh",
@@ -336,7 +337,7 @@ def update_model_provider(
         return _parse_json_columns(row_to_dict(cursor.fetchone()))
 
 
-def set_openai_billing_binding(provider_id: str, organization_id: str, instance_id: str) -> Optional[ModelProviderRow]:
+def set_openai_billing_binding(provider_id: str, organization_id: str, instance_id: str, admin_key: Optional[str] = None) -> Optional[ModelProviderRow]:
     """Bind credit tracking without changing model credentials."""
     from urllib.parse import urlsplit
 
@@ -362,8 +363,8 @@ def set_openai_billing_binding(provider_id: str, organization_id: str, instance_
         except ValueError:
             return None
         cursor.execute(
-            "UPDATE model_providers SET openai_billing_org_id = %s, openai_billing_instance_id = %s, updated_at = %s, revision = %s WHERE id = %s",
-            (organization_id, instance_id, datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
+            "UPDATE model_providers SET openai_billing_org_id = %s, openai_billing_instance_id = %s, openai_admin_key = %s, updated_at = %s, revision = %s WHERE id = %s",
+            (organization_id, instance_id, admin_key, datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
         )
         cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
     return get_model_provider(provider_id)
@@ -372,7 +373,7 @@ def set_openai_billing_binding(provider_id: str, organization_id: str, instance_
 def clear_openai_billing_binding(
     provider_id: str, expected_instance_id: Optional[str] = None,
 ) -> Optional[ModelProviderRow]:
-    """Forget the binding and its browser balance, not the shared browser login."""
+    """Remove local Admin API access and its usage snapshot, not the model key."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -382,7 +383,7 @@ def clear_openai_billing_binding(
         if not row or (expected_instance_id and row.get("openai_billing_instance_id") not in (None, expected_instance_id)):
             return None
         cursor.execute(
-            "UPDATE model_providers SET openai_billing_org_id = NULL, openai_billing_instance_id = NULL, updated_at = %s, revision = %s WHERE id = %s",
+            "UPDATE model_providers SET openai_billing_org_id = NULL, openai_billing_instance_id = NULL, openai_admin_key = NULL, updated_at = %s, revision = %s WHERE id = %s",
             (datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
         )
         cursor.execute("SELECT raw FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
@@ -393,7 +394,7 @@ def clear_openai_billing_binding(
                 raw = json.loads(raw)
             except (ValueError, TypeError):
                 raw = None
-        if isinstance(raw, dict) and raw.get("source") == "browser_platform":
+        if isinstance(raw, dict) and raw.get("source") in {"browser_platform", "openai_admin"}:
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
     return get_model_provider(provider_id)
 

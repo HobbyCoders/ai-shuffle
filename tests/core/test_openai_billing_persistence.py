@@ -8,13 +8,7 @@ import pytest
 
 from app.core import provider_usage as usage
 from app.core.config import settings
-from app.core import openai_billing_browser as browser_module
 from app.db import database as db
-
-
-@pytest.fixture(autouse=True)
-def no_live_browser(monkeypatch):
-    monkeypatch.setattr(browser_module.native_chrome, "create_page", AsyncMock(return_value=None))
 
 
 @pytest.fixture
@@ -111,86 +105,3 @@ def test_api_key_attempts_cannot_replace_bound_browser_balance(provider):
     row = snapshot(provider)
     assert row["credits"]["balance_remaining"] == 21.09
     assert row["raw"]["billing_fetched_at"] == 1000
-
-
-@pytest.fixture
-def service(monkeypatch):
-    service = Mock()
-    lock = asyncio.Lock()
-    service.operation_lock.return_value = lock
-    service.status.return_value = {"status": "connected"}
-    service.close = AsyncMock()
-    service.reconcile = AsyncMock()
-    service.shutdown = AsyncMock()
-    service.refresh = AsyncMock(return_value={
-        "credits": {"balance_remaining": 20.5},
-        "raw": {"source": "browser_platform", "organization_id": "org-test"},
-        "fetched_at": 2000,
-    })
-    monkeypatch.setattr(browser_module, "openai_billing_browser", service)
-    return service
-
-
-@pytest.mark.asyncio
-async def test_bound_poll_never_decrypts_model_key(provider, service, monkeypatch):
-    row = bind(provider)
-    decrypt = Mock(side_effect=AssertionError("model key must not be touched"))
-    monkeypatch.setattr(usage, "_decrypt_provider_auth_token", decrypt)
-    assert await usage.ProviderUsageMonitor()._poll_openai_provider(row)
-    assert snapshot(provider)["credits"]["balance_remaining"] == 20.5
-    decrypt.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_pending_login_and_remote_owner_are_not_polled(provider, service):
-    row = bind(provider)
-    service.status.return_value = {"status": "ready"}
-    assert not await usage.ProviderUsageMonitor()._poll_openai_provider(row)
-    service.refresh.assert_not_awaited()
-    db.clear_openai_billing_binding(provider)
-    row = bind(provider, instance="remote-installation")
-    service.status.return_value = {"status": "not_connected"}
-    assert not await usage.ProviderUsageMonitor()._poll_openai_provider(row)
-    service.refresh.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_bound_poll_failure_preserves_balance_without_key_fallback(provider, service, monkeypatch):
-    row = bind(provider)
-    save(provider)
-    service.refresh.side_effect = browser_module.BillingBrowserError("billing_organization_mismatch")
-    fallback = AsyncMock()
-    monitor = usage.ProviderUsageMonitor()
-    monkeypatch.setattr(monitor, "_fetch_openai_balance", fallback)
-    assert not await monitor._poll_openai_provider(row)
-    assert snapshot(provider)["credits"]["balance_remaining"] == 21.09
-    assert snapshot(provider)["raw"]["usage_error"] == "billing_organization_mismatch"
-    fallback.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_periodic_refresh_only_polls_bound_official_providers(provider, service):
-    bind(provider)
-    monitor = usage.ProviderUsageMonitor()
-    await monitor._poll_billing_connections()
-    service.refresh.assert_awaited_once_with(provider, "org-test")
-    db.set_model_provider_enabled(provider, False)
-    await monitor._poll_billing_connections()
-    assert provider not in service.reconcile.await_args.args[0]
-
-
-@pytest.mark.asyncio
-async def test_stop_cancels_periodic_work_and_owned_pages(service, monkeypatch):
-    monitor = usage.ProviderUsageMonitor()
-    entered = asyncio.Event()
-
-    async def pending():
-        entered.set()
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(monitor, "_poll_billing_connections", pending)
-    monitor.start()
-    await asyncio.wait_for(entered.wait(), 1)
-    await monitor.stop()
-    assert monitor._billing_task is None
-    service.shutdown.assert_awaited_once()

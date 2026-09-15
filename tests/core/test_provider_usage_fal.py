@@ -115,7 +115,7 @@ def monitor():
 @pytest.fixture(autouse=True)
 def _credential_generation(mock_db):
     from app.db import database as db
-    db.set_system_setting("fal_api_key", _KEY)
+    db.set_system_setting("fal_billing_api_key", _KEY)
 
 
 _RealAsyncClient = httpx.AsyncClient
@@ -194,7 +194,7 @@ class TestPollFal:
         assert credits == {"balance_remaining": 24.5, "currency": "USD"}
         assert raw["username"] == "my-team"
         assert raw["current_balance"] == 24.5
-        assert raw["source"] == "account/billing"
+        assert raw["source"] == "fal_admin"
         assert isinstance(fetched_at, int)
         assert recorded and recorded[0].get("follow_redirects") is False
         assert len(seen) == 1
@@ -215,7 +215,7 @@ class TestPollFal:
         upsert.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_admin_403_falls_back_to_user_balance(self, monitor):
+    async def test_admin_403_stops_without_alpha_fallback(self, monitor):
         upsert = MagicMock()
         seen = []
         with patch(
@@ -234,12 +234,8 @@ class TestPollFal:
         ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
             await monitor._poll_fal()
 
-        upsert.assert_called_once()
-        _id, _type, _plan, windows, credits, raw, _fetched = upsert.call_args[0]
-        assert windows == []
-        assert credits["balance_remaining"] == pytest.approx(18.11)
-        assert raw["source"] == "user_balance"
-        assert [r.url.host for r in seen] == [FAL_BILLING_HOST, FAL_USER_BALANCE_HOST]
+        upsert.assert_not_called()
+        assert [r.url.host for r in seen] == [FAL_BILLING_HOST]
 
     @pytest.mark.asyncio
     async def test_both_endpoints_fail_does_not_upsert(self, monitor):

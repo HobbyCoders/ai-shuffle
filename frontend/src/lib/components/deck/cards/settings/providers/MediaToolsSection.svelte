@@ -29,6 +29,9 @@
 
 	// ----- fal.ai key (self-contained, lifted verbatim from ConnectionsSection) -----
 	let falKeySet = $state(false);
+	let billingKeySet = $state(false);
+	let billingKey = $state('');
+	let removingBilling = $state(false);
 	let falKeyMasked = $state('');
 	let falKeyInput = $state('');
 	let falSaving = $state(false);
@@ -42,6 +45,7 @@
 			if (!res.ok) return;
 			const data = await res.json();
 			falKeySet = !!data.fal_api_key_set;
+			billingKeySet = !!data.fal_billing_api_key_set;
 			falKeyMasked = data.fal_api_key_masked ?? '';
 		} catch (e) {
 			// Silent — non-critical, user can retry by reopening settings
@@ -76,6 +80,20 @@
 		} finally {
 			falSaving = false;
 		}
+	}
+
+	async function saveBilling(remove = false) {
+		falSaving = true; falError = '';
+		try {
+			const res = await fetch(`${apiBase()}/settings/integrations/fal-billing`, withAuth({
+				method: remove ? 'DELETE' : 'POST',
+				headers: { 'content-type': 'application/json' },
+				...(remove ? {} : { body: JSON.stringify({ api_key: billingKey.trim() }) }),
+			}));
+			if (!res.ok) throw new Error('Could not update billing access.');
+			billingKeySet = !remove; removingBilling = false;
+		} catch { falError = 'Could not update billing access.'; }
+		finally { billingKey = ''; falSaving = false; }
 	}
 
 	async function removeFalKey() {
@@ -156,6 +174,20 @@
 	{#if falError}<div class="kc-foot err" role="alert">{falError}</div>{/if}
 	{#if falSuccess}<div class="kc-foot ok">{falSuccess}</div>{/if}
 
+	<section class="billing-access" aria-label="fal.ai billing access">
+		<h4>fal.ai billing access (optional)</h4>
+		<p>Uses the official billing API with a separate Admin API key, stored encrypted on this worker only. Your media key is never used to probe billing permissions. Alpha billing endpoints are no longer used.</p>
+		{#if billingKeySet}<p>Admin billing key saved. Open Usage to request a reading; requests respect a five-minute cooldown.</p>{/if}
+		<label>fal.ai Admin API key<input class="inp" type="password" autocomplete="off" bind:value={billingKey} disabled={falSaving} /></label>
+		<button class="ed-btn" type="button" onclick={() => saveBilling()} disabled={falSaving || !billingKey.trim()}>{billingKeySet ? 'Replace billing key' : 'Save billing key'}</button>
+		{#if billingKeySet}<button class="ed-btn" type="button" onclick={() => removingBilling = true} disabled={falSaving}>Disconnect billing</button>{/if}
+		{#if removingBilling}
+			<p>Remove the billing key and saved balance? Your media key will not change.</p>
+			<button class="ed-btn danger" type="button" onclick={() => saveBilling(true)} disabled={falSaving}>Remove billing key</button>
+			<button class="ed-btn" type="button" onclick={() => removingBilling = false}>Cancel</button>
+		{/if}
+	</section>
+
 	<GitHubConnection embedded />
 
 	<!-- AI media models (opens the manage-media-models drawer) -->
@@ -183,6 +215,12 @@
 {/if}
 
 <style>
+	.billing-access { display: grid; gap: 10px; padding: 16px; border-top: 1px solid var(--border); }
+	.billing-access h4, .billing-access p { margin: 0; }
+	.billing-access p { color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
+	.billing-access label { display: grid; gap: 6px; min-width: 0; }
+	.billing-access .inp { width: 100%; min-width: 0; box-sizing: border-box; }
+	.billing-access button { justify-self: start; }
 	.keycard {
 		display: flex;
 		gap: 10px;

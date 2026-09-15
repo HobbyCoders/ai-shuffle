@@ -386,10 +386,10 @@
 		// Keep credential problems actionable without narrating background refreshes.
 		const isOpenAI = pb.providerType?.toLowerCase() === 'openai';
 		if (pb.lastErrorKind === 'billing_access_denied') {
-			return isOpenAI ? 'This credential cannot read OpenAI Platform billing' : 'Billing access required';
+			return isOpenAI ? 'Admin usage access refused; polling paused' : 'Billing access required';
 		}
 		if (pb.lastErrorKind === 'missing_credentials') {
-			return isOpenAI ? 'OpenAI API credential required' : 'Sign in to view usage';
+			return isOpenAI ? 'Configure an Admin API key in provider settings' : 'Sign in to view usage';
 		}
 		return null;
 	}
@@ -399,6 +399,8 @@
 		providerType: string | null = null
 	): string | null {
 		if (!credits || typeof credits !== 'object') return null;
+		const spend = creditsNum(credits, 'spend_month');
+		if (spend != null) return `$${spend.toFixed(2)} spent this month (UTC)`;
 		// An account credit BALANCE (OpenRouter's /credits ledger) is the headline
 		// figure and outranks the key-scoped usage/limit fields below it.
 		const remaining = creditsNum(credits, 'balance_remaining');
@@ -434,6 +436,8 @@
 		providerType: string | null = null
 	): string | null {
 		if (!credits || typeof credits !== 'object') return null;
+		const spend = creditsNum(credits, 'spend_month');
+		if (spend != null) return `$${spend.toFixed(2)} spent this month (UTC)`;
 		const remaining = creditsNum(credits, 'balance_remaining');
 		if (remaining != null) return `$${remaining.toFixed(2)} left`;
 		if ((providerType || '').toLowerCase() === 'chatgpt') return null;

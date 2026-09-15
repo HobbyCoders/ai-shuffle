@@ -331,6 +331,7 @@ def _apply_token_flags(row: Dict[str, Any]) -> Dict[str, Any]:
     (``_codex_access_token_set`` / ``_codex_refresh_token_set``). The raw blobs
     never survive this call, so they can never reach ``_public_provider``.
     """
+    row.pop("openai_admin_key", None)
     token = row.pop("auth_token", None)
     row["_auth_token_set"] = bool(token)
     row["_auth_token_masked"] = mask_api_key(token) if token else ""
@@ -840,7 +841,7 @@ async def update_provider(
         updates["auth_token"] = _encrypt_token_or_400(raw_token)
 
     if updates:
-        async with openai_billing.openai_billing_browser.operation_lock(provider_id):
+        async with openai_billing.operation_lock(provider_id):
             row = await run_sync(db.update_model_provider, provider_id, **updates)
             if row is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
@@ -861,7 +862,7 @@ async def delete_provider(provider_id: str, token: str = Depends(require_admin))
     failure NEVER blocks deletion (the credential row is going away regardless).
     """
     await _best_effort_revoke_codex(provider_id)
-    async with openai_billing.openai_billing_browser.operation_lock(provider_id):
+    async with openai_billing.operation_lock(provider_id):
         await openai_billing.close_provider_billing(provider_id)
         deleted = await run_sync(db.delete_model_provider, provider_id)
         if not deleted:
@@ -899,7 +900,7 @@ async def toggle_provider(provider_id: str, token: str = Depends(require_admin))
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
-    async with openai_billing.openai_billing_browser.operation_lock(provider_id):
+    async with openai_billing.operation_lock(provider_id):
         row = await run_sync(
             db.set_model_provider_enabled, provider_id, not bool(existing.get("enabled"))
         )

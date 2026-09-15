@@ -307,8 +307,11 @@ class UsageLimitsMonitor:
             "anthropic-beta": _OAUTH_BETA_HEADER,
         }
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                resp = await client.get(USAGE_ENDPOINT, headers=headers)
+            from app.core.usage_polling import UsageDeferred, usage_get
+            try:
+                resp = await usage_get(USAGE_ENDPOINT, headers=headers)
+            except UsageDeferred:
+                return self._snapshot()
             if resp.status_code != 200:
                 if not self._warned:
                     logger.warning(

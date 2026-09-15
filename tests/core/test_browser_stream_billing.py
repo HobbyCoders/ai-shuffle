@@ -138,14 +138,15 @@ async def test_login_input_failure_reports_generic_error_and_closes(
 ):
     from fastapi import WebSocketDisconnect
 
-    from app.core.openai_billing_browser import BillingBrowserError
+    class LoginUnavailableError(RuntimeError):
+        pass
 
     env = login_panel
     env.socket.receive_text.side_effect = [json.dumps(payload), WebSocketDisconnect()]
     options = {}
     if owner != "absent":
         failure = (
-            BillingBrowserError("billing_browser_unavailable")
+            LoginUnavailableError("login_browser_unavailable")
             if owner == "unavailable"
             else RuntimeError("https://auth.openai.com/callback?code=test-private")
         )

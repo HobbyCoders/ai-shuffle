@@ -228,7 +228,10 @@ class TestFetch:
             with patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
                 await monitor.fetch()
 
-            # Then: two failing fetches — snapshot preserved, only one WARNING.
+            # Expire the previous success budget, then two failures coalesce.
+            from app.db import database as db
+            with db.get_db() as conn:
+                conn.cursor().execute("UPDATE usage_poll_state SET next_attempt = 0")
             with patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(500, {})), \
                  caplog.at_level(logging.WARNING):
                 snap1 = await monitor.fetch()
