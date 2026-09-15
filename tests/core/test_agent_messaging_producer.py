@@ -26,6 +26,8 @@ from app.core import (
 from app.core.session_pool import SessionState, get_session_pool
 from app.core.task_registry import task_registry
 from app.core.turn_scheduler import on_task_terminal as _real_task_terminal
+from app.core.turn_manager import interrupt_async as _real_interrupt_async
+from app.core.session_runtime import get_live_runtime as _real_get_live_runtime
 from tests.core import test_provider_agent
 
 dispatch_env = test_provider_agent.dispatch_env
@@ -478,3 +480,345 @@ async def test_worker_message_to_idle_parent_uses_owned_turn_queue(
         assert turns_db.get_queued_turns("root") == []
     finally:
         await engine.aclose()
+
+
+@pytest.mark.asyncio
+async def test_original_dispatch_cleanup_cannot_drop_new_continuation_owner(
+    workers, monkeypatch,
+):
+    from app.core import turn_scheduler
+    from app.core.query_session_lifecycle import stop_session_task
+    from app.db import turns as turns_db
+
+    await workers.start("racing-child")
+    context = turns_db.enqueue_turn("racing-child", "user", profile_id="profile")
+    turns_db.start_turn(context["id"], None, "runner")
+    turns_db.settle_turn(context["id"], "completed")
+    monkeypatch.setattr(turn_scheduler, "kick", lambda sid: None)
+
+    async def resume_before_dispatch_finally(owner, frame):
+        await turn_scheduler.on_agent_message(
+            "racing-child", owner, "Continue", reply_to=owner,
+        )
+
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", resume_before_dispatch_finally)
+    await workers.finish("racing-child")
+    record = provider_agent_supervisor.get_worker("root", "racing-child")
+    assert record is not None and record.continuation_turn_id
+    assert task_registry.get_task("root", "racing-child")["status"] == "running"
+    await stop_session_task("root", "racing-child")
+    assert provider_agent_supervisor.get_worker("root", "racing-child") is None
+    assert turns_db.get_queued_turns("racing-child") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", [
+    "completed", "error", "stop_task", "stop_all", "queued_stop", "parked_report",
+    *[f"overlap_{first}_{stop}" for first in ("completed", "error", "parked")
+      for stop in ("stop_task", "stop_all", "queued_stop", "completed", "error", "parked_report", "enqueue_race")],
+])
+async def test_dispatched_worker_native_continuation_lifecycle(
+    workers, dispatch_env, monkeypatch, ending,
+):
+    """Real dispatch registration -> SendMessage -> runtime/recorder -> native
+    adapter -> stop/report. Only provider I/O and the query setup pump are doubles.
+    """
+    from app.core import query_engine, session_runtime, turn_scheduler
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.core.provider.types import SessionOptions
+    from app.core.query_session_lifecycle import stop_session_task, stop_all_background_tasks
+    from app.db import turns as turns_db
+    from fluid.engine.native import NativeLoop
+    from fluid.providers.base import ProviderCaps, StreamChunk
+    from fluid.store.base import MemoryStore
+    from app.core.provider.events import AssistantMessage, TextBlock, ResultMessage
+
+    overlap = ending.startswith("overlap_")
+    first_ending, stop_kind = ending.split("_", 2)[1:] if overlap else (None, ending)
+    await workers.start("native-child")
+    await workers.finish("native-child")
+    assert provider_agent_supervisor.get_worker("root", "native-child") is None
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", _real_task_terminal)
+    monkeypatch.setattr(turn_scheduler, "kick", lambda sid: None)
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
+    monkeypatch.setattr(turn_manager, "interrupt_async", _real_interrupt_async)
+    monkeypatch.setattr(session_runtime, "get_live_runtime", _real_get_live_runtime)
+    monkeypatch.setattr(session_runtime, "start_idle_reader", lambda sid: None)
+    monkeypatch.setattr("app.core.turn_finalize.persist_turn_end_state", AsyncMock())
+    from app.db import database, sessions
+    sessions.create_session(session_id="native-child", profile_id=None)
+    sessions.create_session(session_id="root", profile_id=None)
+    get_session = database.get_session
+    monkeypatch.setattr(database, "get_session", lambda sid: {
+        **get_session(sid), "instance_id": None,
+    })
+
+    class Provider:
+        name = "fake"
+        caps = ProviderCaps()
+
+        def __init__(self):
+            self.requests = []
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def stream(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 2:
+                self.started.set()
+                if overlap and first_ending == "error":
+                    raise RuntimeError("first overlapping continuation failed")
+                if overlap and first_ending == "parked":
+                    await workers.start("native-grandchild", root="native-child")
+                if ending in {"stop_task", "stop_all"}:
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        self.cancelled.set()
+                if ending == "error":
+                    raise RuntimeError("continuation transport failed")
+                if ending == "parked_report":
+                    await workers.start("native-grandchild", root="native-child")
+            if overlap and len(self.requests) == 3 and stop_kind in {"stop_task", "stop_all", "enqueue_race"}:
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    self.cancelled.set()
+            if overlap and len(self.requests) == 4:
+                if stop_kind == "error":
+                    raise RuntimeError("last overlapping continuation failed")
+                if stop_kind == "parked_report":
+                    await workers.start("last-grandchild", root="native-child")
+            yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+            yield StreamChunk("text_delta", {"index": 0, "text": (
+                "original native report" if len(self.requests) == 1 else "new native report"
+            )})
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {"usage": {}, "stop_reason": "end_turn"})
+
+    provider = Provider()
+    engine = NativeLoop(provider=provider, store=MemoryStore(), model="fake")
+    adapter = HarnessAdapter()
+    adapter._engine = engine
+    adapter._options = SessionOptions(model="fake")
+    await engine._ensure_session()
+    adapter._connected = True
+    state = SessionState(adapter=adapter, is_connected=True)
+    get_session_pool().put("native-child", state)
+
+    async def pump(prompt, **kwargs):
+        await adapter.send_query(prompt)
+        async for message in adapter.receive_events():
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        yield {"type": "chunk", "content": block.text}
+            elif isinstance(message, ResultMessage):
+                if state.interrupt_requested or message.terminal_reason == "aborted_streaming":
+                    yield {"type": "interrupted", "message": "Stopped"}
+                elif message.is_error:
+                    yield {"type": "error", "message": message.result or "native error"}
+                else:
+                    yield {"type": "done", "metadata": {"stop_reason": "end_turn"}}
+
+    monkeypatch.setattr(query_engine, "_stream_to_websocket_impl", pump)
+    session_runtime.register_scheduler(turn_scheduler.on_turn_settled)
+    executor_jobs = []
+
+    async def interrupt(sid, mode, turn_id=None):
+        runtime = _real_get_live_runtime(sid)
+        if runtime:
+            await runtime.interrupt(mode)
+
+    def executor(*args):
+        job = asyncio.create_task(interrupt(*args))
+        executor_jobs.append(job)
+        return job
+
+    turn_manager.register_interrupt_executor(executor)
+    job = None
+    try:
+        original = turns_db.enqueue_turn("native-child", "user", prompt="Remember original work", profile_id="profile")
+        assert await session_runtime.execute(original) == "completed"
+        if overlap:
+            # Both callers must finish REAL admission against the completed row
+            # before either enqueue rearms it. No consumer-only registry seeds.
+            admission = messaging.resume_unavailable
+            admitted = 0
+            barrier = asyncio.Event()
+
+            async def admit(*args):
+                nonlocal admitted
+                error = await admission(*args)
+                assert error is None
+                admitted += 1
+                if admitted == 2:
+                    barrier.set()
+                await asyncio.wait_for(barrier.wait(), 10)
+                return error
+
+            monkeypatch.setattr(messaging, "resume_unavailable", admit)
+            results = await asyncio.gather(*[
+                send_message.handler({"to": "native-child", "message": f"Follow-up {i}"}, _ctx("root"))
+                for i in range(2)
+            ])
+            assert all(not result.is_error for result in results)
+            # This caller sees RUNNING with no stream yet: it must retain the
+            # continuation owner even though the last executed context is old.
+            first_job = None
+            first_turn = turns_db.get_queued_turns("native-child")[0]
+            if stop_kind == "enqueue_race":
+                enqueued, release_enqueue, settling = (asyncio.Event() for _ in range(3))
+                enqueue = turn_scheduler._enqueue_context_wake
+                finish = messaging.finish_message_resume
+
+                async def held_enqueue(*args, **kwargs):
+                    turn = await enqueue(*args, **kwargs)
+                    enqueued.set()
+                    await asyncio.wait_for(release_enqueue.wait(), 10)
+                    return turn
+
+                async def entering_finish(*args):
+                    settling.set()
+                    return await finish(*args)
+
+                monkeypatch.setattr(turn_scheduler, "_enqueue_context_wake", held_enqueue)
+                monkeypatch.setattr(messaging, "finish_message_resume", entering_finish)
+                send_job = asyncio.create_task(send_message.handler(
+                    {"to": "native-child", "message": "Follow-up 2"}, _ctx("root"),
+                ))
+                executor_jobs.append(send_job)
+                await asyncio.wait_for(enqueued.wait(), 10)
+                first_job = asyncio.create_task(session_runtime.execute(first_turn))
+                executor_jobs.append(first_job)
+                await asyncio.wait_for(settling.wait(), 10)
+                if first_ending != "parked":
+                    assert not first_job.done()
+                release_enqueue.set()
+                result = await asyncio.wait_for(send_job, 10)
+                monkeypatch.setattr(turn_scheduler, "_enqueue_context_wake", enqueue)
+            else:
+                result = await send_message.handler(
+                    {"to": "native-child", "message": "Follow-up 2"}, _ctx("root"),
+                )
+            assert not result.is_error, result.text
+            pending = turns_db.get_queued_turns("native-child")
+            if first_job:
+                pending.insert(0, first_turn)
+            assert len(pending) == 3
+            assert all(f"Follow-up {i}" in " ".join(t["prompt"] for t in pending) for i in range(3))
+            first, second, third = pending
+            assert all(t["payload"]["agent_message_reply_to"] == "root" for t in pending)
+            outcome = await asyncio.wait_for(first_job, 10) if first_job else await session_runtime.execute(first)
+            assert outcome == {"completed": "completed", "error": "aborted", "parked": "parked"}[first_ending]
+            assert task_registry.get_task("root", "native-child")["status"] == "running"
+            assert provider_agent_supervisor.get_worker("root", "native-child") is not None
+            if stop_kind in {"completed", "error", "parked_report"}:
+                await session_runtime.execute(second)
+                assert task_registry.get_task("root", "native-child")["status"] == "running"
+                final_outcome = await session_runtime.execute(third)
+                if first_ending == "parked" or stop_kind == "parked_report":
+                    assert task_registry.get_task("root", "native-child")["status"] == "running"
+                    for child in ("native-grandchild", "last-grandchild"):
+                        if child in workers.jobs:
+                            await workers.finish(child)
+                    (wake,) = turns_db.get_queued_turns("native-child")
+                    assert wake["payload"]["agent_message_reply_to"] == "root"
+                    final_outcome = await session_runtime.execute(wake)
+                expected = "error" if final_outcome == "aborted" else "completed"
+                assert task_registry.get_task("root", "native-child")["status"] == expected
+                assert provider_agent_supervisor.get_worker("root", "native-child") is None
+                await messaging.finish_message_resume("native-child", first, outcome)
+                assert task_registry.get_task("root", "native-child")["status"] == expected
+                assert turns_db.get_queued_turns("native-child") == []
+                if first_ending != "parked" and stop_kind != "parked_report":
+                    (parent_wake,) = turns_db.get_queued_turns("root")
+                    frames = parent_wake["payload"]["pending_frames"]
+                    assert [f["agent_message_turn_id"] for f in frames] == [t["id"] for t in pending]
+                    assert frames[-1]["status"] == expected
+                assert all(f"Follow-up {i}" in str(provider.requests) for i in range(3))
+                return
+            if stop_kind != "queued_stop":
+                provider.started.clear()
+                job = asyncio.create_task(session_runtime.execute(second))
+                await asyncio.wait_for(provider.started.wait(), 10)
+                # A delayed/repeated old callback must not retire the new stream.
+                await messaging.finish_message_resume("native-child", first, outcome)
+                assert task_registry.get_task("root", "native-child")["status"] == "running"
+            if stop_kind == "stop_all":
+                stopped = await stop_all_background_tasks("root", user_stop=True)
+                assert any(row["task_id"] == "native-child" for row in stopped)
+            else:
+                stopped = await stop_session_task("root", "native-child")
+                assert stopped["ok"] and stopped.get("detail") != "already finished"
+            if job:
+                await asyncio.wait_for(provider.cancelled.wait(), 10)
+                assert await asyncio.wait_for(job, 10) == "aborted"
+            assert turns_db.get_queued_turns("native-child") == []
+            assert turns_db.get_turn(third["id"])["state"] == "aborted"
+            assert len(provider.requests) == (2 if stop_kind == "queued_stop" else 3)
+            assert task_registry.get_task("root", "native-child")["status"] == "killed"
+            assert provider_agent_supervisor.get_worker("root", "native-child") is None
+            if first_ending == "parked":
+                workers.release["native-grandchild"].set()
+                descendant = await asyncio.wait_for(workers.jobs.pop("native-grandchild"), 10)
+                assert descendant.killed
+            return
+        result = await send_message.handler(
+            {"to": "native-child", "message": "Continue using the original work"}, _ctx("root")
+        )
+        assert not result.is_error, result.text
+        (continuation,) = turns_db.get_queued_turns("native-child")
+        assert provider_agent_supervisor.get_worker("root", "native-child") is not None
+        if ending == "queued_stop":
+            stopped = await stop_session_task("root", "native-child")
+            assert stopped["ok"] and "reaped" not in stopped.get("detail", "")
+            assert turns_db.get_queued_turns("native-child") == []
+            assert len(provider.requests) == 1
+        else:
+            job = asyncio.create_task(session_runtime.execute(continuation))
+            await asyncio.wait_for(provider.started.wait(), 10)
+            if ending in {"stop_task", "stop_all"}:
+                if ending == "stop_task":
+                    stopped = await stop_session_task("root", "native-child")
+                    assert stopped["ok"] and "reaped" not in stopped.get("detail", "")
+                else:
+                    await stop_all_background_tasks("root", user_stop=True)
+                await asyncio.wait_for(provider.cancelled.wait(), 10)
+            outcome = await asyncio.wait_for(job, 10)
+            if ending == "parked_report":
+                assert outcome == "parked"
+                assert provider_agent_supervisor.get_worker("root", "native-child") is not None
+                assert task_registry.get_task("root", "native-child")["status"] == "running"
+                assert turns_db.get_queued_turns("root") == []
+                await workers.finish("native-grandchild")
+                (continuation,) = turns_db.get_queued_turns("native-child")
+                assert continuation["source"] == "unpark"
+                assert continuation["payload"]["agent_message_reply_to"] == "root"
+                outcome = await session_runtime.execute(continuation)
+            assert outcome == ("completed" if ending in {"completed", "parked_report"} else "aborted")
+            assert len(provider.requests) == (3 if ending == "parked_report" else 2)
+            # The native engine resumed its own stored conversation, not a fresh loop.
+            assert "original native report" in str(provider.requests[1].messages)
+        assert provider_agent_supervisor.get_worker("root", "native-child") is None
+        row = task_registry.get_task("root", "native-child")
+        if ending in {"stop_task", "stop_all", "queued_stop"}:
+            assert row["status"] == "killed"
+            assert turns_db.get_queued_turns("root") == []
+        else:
+            assert row["status"] == ("completed" if ending in {"completed", "parked_report"} else "error")
+            (wake,) = turns_db.get_queued_turns("root")
+            assert "original native report" not in wake["prompt"]
+            if ending in {"completed", "parked_report"}:
+                assert "new native report" in wake["prompt"]
+            assert wake["payload"]["pending_frames"][0]["agent_message_turn_id"] == continuation["id"]
+    finally:
+        if job and not job.done():
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+        await asyncio.gather(*executor_jobs, return_exceptions=True)
+        turn_manager.register_interrupt_executor(None)
+        session_runtime.register_scheduler(None)
+        await adapter.disconnect()
+        await asyncio.gather(*get_session_pool()._background_teardowns)

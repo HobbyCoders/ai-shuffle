@@ -2395,7 +2395,11 @@ class SessionRuntime:
                 # this is the runner that actually owns them. Deliberately
                 # idempotent — the second call finds no active tasks and simply
                 # re-asserts the latch. See handle_stop's STOP SEMANTICS note.
-                await stop_all_background_tasks(sid, user_stop=True)
+                source = (interrupted_row.get("payload") or {}).get("interrupt_source", "user_stop")
+                user_stop = source in {"user_stop", "user_stopped"}
+                await stop_all_background_tasks(sid, user_stop=user_stop,
+                                                **({"source": source} if not user_stop else {}))
+                logger.info("SessionRuntime: background teardown for %s source=%s", sid, source)
         except Exception:
             logger.warning(
                 "SessionRuntime: background-task stop failed for %s", sid,

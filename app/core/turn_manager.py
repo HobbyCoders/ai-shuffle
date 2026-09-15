@@ -349,7 +349,7 @@ def remove_queued(turn_id: str) -> Optional[Dict[str, Any]]:
     return turns.remove_queued_turn(turn_id)
 
 
-def _interrupt_turn(session_id, mode, stop_background=False, turn_id=None):
+def _interrupt_turn(session_id, mode, stop_background=False, turn_id=None, source=None):
     # A dead runner cannot observe interrupt intent. Settle its turn and append
     # the terminal event so connected clients also leave their working state.
     if mode == "stop":
@@ -365,6 +365,7 @@ def _interrupt_turn(session_id, mode, stop_background=False, turn_id=None):
             return recovered[0]
     return turns.interrupt_turn(
         session_id, mode, stop_background=stop_background, turn_id=turn_id,
+        **({"source": source} if source else {}),
     )
 
 
@@ -413,6 +414,7 @@ async def interrupt_async(
     mode: str,
     stop_background: bool = False,
     turn_id: Optional[str] = None,
+    *, source: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """:func:`interrupt` for async callers — identical semantics, off the loop.
 
@@ -428,6 +430,7 @@ async def interrupt_async(
         mode,
         stop_background=stop_background,
         turn_id=turn_id,
+        **({"source": source} if source else {}),
     )
     if row is not None and row["state"] == "interrupting":
         _fire_interrupt_executor(session_id, mode, turn_id)

@@ -120,6 +120,8 @@ class WorkerRecord:
     #: via the task tools — so the turn-end teardown skips it. stop-all and the
     #: per-worker timeout still apply.
     background: bool = False
+    #: Explicit message continuation; guarded against an earlier dispatch cleanup.
+    continuation_turn_id: Optional[str] = None
 
 
 # parent_session_id -> {worker_session_id: WorkerRecord}
@@ -250,7 +252,7 @@ def attribution(parent_session_id: str) -> Dict[str, Any]:
 # Teardown
 # ---------------------------------------------------------------------------
 
-async def _kill_worker_session(worker_session_id: str) -> str:
+async def _kill_worker_session(worker_session_id: str, *, reason: str = "host_cleanup") -> str:
     """Kill ONE worker's session and its subprocess tree. Never raises.
 
     Two acts, in order, because either alone is insufficient:
@@ -282,7 +284,9 @@ async def _kill_worker_session(worker_session_id: str) -> str:
         # coroutine fn that needs a running loop, so calling the sync form from a
         # worker thread silently drops the SDK interrupt (the DB row flips but the
         # live runtime is never told to stop).
-        row = await turn_manager.interrupt_async(worker_session_id, "stop", True)
+        row = await turn_manager.interrupt_async(worker_session_id, "stop", True,
+                                                 source=reason)
+        logger.info("ProviderAgent supervisor: stopping %s source=%s", worker_session_id, reason)
         interrupted = row is not None
     except Exception:  # noqa: BLE001 — the pool eviction below still runs
         logger.debug(
@@ -551,9 +555,14 @@ async def teardown_worker(
     parent_session_id = record.parent_session_id
     record.torn_down = True
     record.torn_down_reason = reason
+    if record.continuation_turn_id:
+        # A continuation may still be queued or parked, with no live runtime to
+        # clear its queue or stop descendants when the interrupt is delivered.
+        from app.core.query_session_lifecycle import stop_all_background_tasks
+        await stop_all_background_tasks(record.worker_session_id, user_stop=True, source=reason)
     await _settle_card(record, preview, summary)
 
-    outcome = await _kill_worker_session(record.worker_session_id)
+    outcome = await _kill_worker_session(record.worker_session_id, reason=reason)
     # AFTER the kill, so the runtime has stopped appending to the event log the
     # flush reads, and BEFORE the registry row goes terminal, so the worker's
     # own rows are settled by the time anything reads the pair.

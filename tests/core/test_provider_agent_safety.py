@@ -233,7 +233,7 @@ class TestTurnEndTeardown:
             await session_runtime.SessionRuntime(turn).execute()
 
         # Durable interrupt of the WORKER's own turn, with background teardown.
-        spies["interrupt"].assert_called_once_with("w1", "stop", True)
+        spies["interrupt"].assert_called_once_with("w1", "stop", True, source=sup.TURN_END_REASON)
         # And the pooled client evicted — this is what ends the CLI subprocess
         # and its descendants.
         spies["pool"].remove_broken.assert_awaited_once_with("w1")

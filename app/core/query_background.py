@@ -26,6 +26,7 @@ from app.core.session_title import derive_session_title
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
     requires_reconnect,
+    reconnect_option_names,
 )
 from app.core.oauth import direct_oauth
 from app.core.profiles import get_profile
@@ -279,8 +280,9 @@ async def _run_background_query_impl(
                 state.streaming_started_at = None
                 raise
         else:
-            logger.info(f"[Background] Options changed for session {session_id}, creating fresh client")
-            await pool.remove(session_id)
+            logger.info("[Background] Options changed for session %s (%s), creating fresh client",
+                        session_id, ",".join(reconnect_option_names(existing_state, options)))
+            await pool.remove(session_id, preserve_session=True)
             existing_state = None
     elif existing_state:
         logger.warning(f"[Background] Subprocess dead for pooled session {session_id}, creating fresh client")

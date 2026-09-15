@@ -159,6 +159,21 @@ async def _run(session_id, prompt="hello"):
 # ─── full-turn recording ────────────────────────────────────────────────────
 
 
+async def test_background_options_change_preserves_session_ownership(mock_db):
+    sessions_db.create_session("bg-replace", "default")
+    pool = _StubPool(_fake_state())
+    pool.remove = AsyncMock()
+    # Stop this caller-contract test before a real provider connection.
+    pool.admission_check = MagicMock(return_value="fixture connection boundary")
+    with ExitStack() as stack:
+        _bg_patches(stack, pool)
+        stack.enter_context(patch.object(qb, "requires_reconnect", return_value=True))
+        stack.enter_context(patch.object(qb, "reconnect_option_names", return_value=["system_prompt"]))
+        with pytest.raises(RuntimeError, match="fixture connection boundary"):
+            await _run("bg-replace")
+    pool.remove.assert_awaited_once_with("bg-replace", preserve_session=True)
+
+
 async def test_background_turn_records_full_event_sequence(mock_db):
     sid = "bg-rec-1"
     sessions_db.create_session(sid, "default")

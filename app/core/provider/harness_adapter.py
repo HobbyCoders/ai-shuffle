@@ -1117,16 +1117,24 @@ class HarnessAdapter(ProviderAdapter):
         *,
         session_id: Optional[str] = None,
     ) -> None:
-        """Close the fluid engine (cancels any running turn, flushes the bus)."""
+        """End the session's workflows and close its transport."""
+        from app.core.swarm import close
+
+        try:
+            await close(session_id or self._resolve_app_session_id())
+        finally:
+            await self.disconnect_transport(session_id=session_id, grace_period=grace_period)
+
+    async def disconnect_transport(
+        self, *, session_id: Optional[str] = None,
+        grace_period: float = _ENGINE_CLOSE_GRACE_SECONDS,
+    ) -> None:
+        """Close only the engine; Task and Swarm jobs belong to the app session."""
         engine = self._engine
         if engine is None:
             return
         try:
-            from app.core.swarm import close
-            try:
-                await close(self._resolve_app_session_id())
-            finally:
-                await asyncio.wait_for(engine.aclose(), timeout=grace_period)
+            await asyncio.wait_for(engine.aclose(), timeout=grace_period)
         except asyncio.TimeoutError:
             logger.warning("[HarnessAdapter] engine.aclose() timed out after %.1fs", grace_period)
         except Exception as exc:  # never let teardown raise

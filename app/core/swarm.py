@@ -74,13 +74,14 @@ async def cancel_worker(task_id):
     from app.core.provider_agent_supervisor import _kill_worker_session
     launch = workers.get(task_id)
     ids = [key for key, value in workers.items() if value is launch] if launch else [task_id]
-    await asyncio.gather(*(_kill_worker_session(key) for key in ids))
+    reason = "session_closed" if launch and launch.coordinator.closed else "swarm_cancelled"
+    await asyncio.gather(*(_kill_worker_session(key, reason=reason) for key in ids))
     job = worker_jobs.get(task_id)
     if job is not None:
         job.cancel()
         await asyncio.gather(job, return_exceptions=True)
     if launch:
-        launch.finish("cancelled", "Cancelled by user")
+        launch.finish("cancelled", "Session closed" if reason == "session_closed" else "Swarm cancelled")
 
 async def cancel_all(session_id):
     coordinator = coordinators.get(session_id)
