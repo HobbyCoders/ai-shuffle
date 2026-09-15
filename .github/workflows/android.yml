@@ -87,6 +87,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Make gradlew executable
         run: chmod +x gradlew
@@ -206,6 +208,8 @@ jobs:
           # to android/, its working directory.
           path: android/instrumentation-apks
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Check emulator readiness and instrumentation result parsers
         run: |
           python3 ci/test-emulator-readiness.py
