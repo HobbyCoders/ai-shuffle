@@ -80,6 +80,93 @@ async def test_concurrent_start_and_agent_call_coalesce(fake):
 
 
 @pytest.mark.asyncio
+async def test_idle_does_not_retire_startup_and_grace_begins_when_ready(fake, monkeypatch):
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_start = runtime.RawMcpClient.start
+
+    async def slow_start(client):
+        entered.set()
+        await release.wait()
+        await original_start(client)
+
+    monkeypatch.setattr(runtime.RawMcpClient, "start", slow_start)
+    starting = asyncio.create_task(runtime.start("runtime-test"))
+    await asyncio.wait_for(entered.wait(), 2)
+    instance = runtime.get("runtime-test")
+    instance.idle.cancel()
+    await asyncio.gather(instance.idle, return_exceptions=True)
+    instance.touched = time.monotonic() - runtime.IDLE_SECONDS - 1
+    waits = 0
+
+    async def one_tick(delay):
+        nonlocal waits
+        waits += 1
+        if waits > 1:
+            raise asyncio.CancelledError
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime, "asyncio", SimpleNamespace(**(vars(asyncio) | {"sleep": one_tick})))
+            await instance._idle()
+        assert instance.active == 1
+        assert not instance.closed and not fake[0].closed and not starting.done()
+        completed_after = time.monotonic()
+        release.set()
+        await starting
+        assert instance.active == 0
+        assert instance.touched >= completed_after
+    finally:
+        release.set()
+        await asyncio.gather(starting, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["failure", "session_close", "request_cancel"])
+async def test_startup_activity_released_on_terminal_paths(fake, monkeypatch, terminal):
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_start = runtime.RawMcpClient.start
+
+    async def slow_start(client):
+        entered.set()
+        await release.wait()
+        if terminal == "failure":
+            raise ConnectionError("fixture startup failure")
+        await original_start(client)
+
+    monkeypatch.setattr(runtime.RawMcpClient, "start", slow_start)
+    request = asyncio.create_task(runtime.start("runtime-test"))
+    await asyncio.wait_for(entered.wait(), 2)
+    instance = runtime.get("runtime-test")
+    assert instance.active == 1
+    try:
+        if terminal == "failure":
+            release.set()
+            with pytest.raises(runtime.RuntimeUnavailable):
+                await request
+        elif terminal == "session_close":
+            await asyncio.wait_for(runtime.close_session("runtime-test"), 2)
+            with pytest.raises(asyncio.CancelledError):
+                await request
+        else:
+            # Losing the requesting HTTP client must not cancel the admitted
+            # startup. Its own activity is released when initialization ends.
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            assert instance.active == 1 and not instance.closed
+            release.set()
+            await asyncio.wait_for(instance.ready, 2)
+            assert instance.active == 0
+            await runtime.close_session("runtime-test")
+        assert instance.active == 0
+        assert instance.closed and fake[0].closed
+        assert "runtime-test" not in runtime._runtimes
+    finally:
+        release.set()
+        await asyncio.gather(request, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_reuse_does_not_enter_agent_admission(fake):
     await runtime.start("runtime-test")
     broker = control.get("runtime-test")
