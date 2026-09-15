@@ -23,7 +23,8 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { unreadCount } from '$lib/stores/notifications';
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
-	import SessionTitleMenu from '$lib/components/layout/SessionTitleMenu.svelte';
+	import SessionBreadcrumbs from '$lib/components/layout/SessionBreadcrumbs.svelte';
+	import { projects } from '$lib/stores/app-data.svelte';
 	import { chatHeaderTitle } from '$lib/components/layout/chat-empty-state';
 
 	interface Props {
@@ -111,7 +112,8 @@
 	</button>
 
 	{#if boundChatId}
-		<SessionTitleMenu title={mobileTitle} sessionId={boundChatId} variant="mobile" />
+		<SessionBreadcrumbs title={mobileTitle} sessionId={boundChatId}
+			projectLabel={$projects.find(p => p.id === $activeSession.project)?.name || 'Sessions'} mobile />
 	{:else}
 		<span class="tb-context-title">{mobileTitle}</span>
 	{/if}

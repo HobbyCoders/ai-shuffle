@@ -7,7 +7,7 @@ vi.mock('$lib/stores/auth.svelte', () => ({
 	username: writable<string | null>('Local owner'),
 	isAdmin: writable(true),
 }));
-vi.mock('$lib/stores/app-data.svelte', () => ({ appData: {} }));
+vi.mock('$lib/stores/app-data.svelte', () => ({ appData: {}, sessions: writable([]) }));
 vi.mock('$lib/stores/active-session', () => ({ activeSession: writable({}) }));
 vi.mock('$lib/api/client', () => ({
 	api: { get: vi.fn(), patch: vi.fn(), delete: vi.fn() },

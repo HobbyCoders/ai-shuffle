@@ -16,8 +16,8 @@
 	 * about those actions is reimplemented here.
 	 */
 	import type { Snippet } from 'svelte';
-	import { PanelLeft, ChevronRight } from 'lucide-svelte';
-	import SessionTitleMenu from './SessionTitleMenu.svelte';
+	import { PanelLeft } from 'lucide-svelte';
+	import SessionBreadcrumbs from './SessionBreadcrumbs.svelte';
 
 	interface Props {
 		/** Left crumb — the project (or section) the current view belongs to. */
@@ -58,21 +58,7 @@
 		</button>
 	{/if}
 
-	<nav class="crumbs" aria-label="Breadcrumb">
-		{#if projectLabel}
-			{#if onOpenProject}
-				<button class="crumb-proj" onclick={onOpenProject}>{projectLabel}</button>
-			{:else}
-				<span class="crumb-proj">{projectLabel}</span>
-			{/if}
-			{#if title}
-				<ChevronRight class="crumb-sep" size={14} strokeWidth={2} />
-			{/if}
-		{/if}
-		{#if title}
-			<SessionTitleMenu {title} sessionId={sessionId} />
-		{/if}
-	</nav>
+	<SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} />
 
 	<div class="tb-right">
 		{#if actions}
@@ -110,30 +96,6 @@
 	}
 	.tb-icon:hover { background: var(--accent); color: var(--foreground); }
 
-	.crumbs {
-		display: flex;
-		align-items: center;
-		gap: 7px;
-		min-width: 0;
-		flex: 0 1 auto;
-	}
-	.crumb-proj {
-		border: none;
-		background: transparent;
-		padding: 0;
-		font-size: 13px;
-		font-family: inherit;
-		color: var(--muted-foreground);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 220px;
-		cursor: pointer;
-		transition: color 0.13s ease;
-	}
-	.crumb-proj:hover { color: var(--foreground); }
-	.crumbs :global(.crumb-sep) { color: var(--subtle-foreground); flex: none; }
-
 	.tb-right {
 		margin-left: auto;
 		display: flex;
@@ -145,6 +107,6 @@
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 	@media (prefers-reduced-motion: reduce) {
-		.tb-icon, .crumb-proj { transition: none; }
+		.tb-icon { transition: none; }
 	}
 </style>
