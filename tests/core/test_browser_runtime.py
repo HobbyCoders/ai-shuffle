@@ -590,7 +590,7 @@ async def test_hung_call_returns_a_deadline_error_without_replaying(fake, monkey
 def test_call_timeout_defaults_and_rejects_nonsense(monkeypatch):
     monkeypatch.delenv("BROWSER_TOOL_TIMEOUT_SECONDS", raising=False)
     assert runtime.call_timeout() == runtime.DEFAULT_CALL_TIMEOUT
-    for bad in ("", "abc", "0", "-3"):
+    for bad in ("", "abc", "0", "-3", "nan", "inf", "-inf", "1e309"):
         monkeypatch.setenv("BROWSER_TOOL_TIMEOUT_SECONDS", bad)
         assert runtime.call_timeout() == runtime.DEFAULT_CALL_TIMEOUT
     monkeypatch.setenv("BROWSER_TOOL_TIMEOUT_SECONDS", "12.5")

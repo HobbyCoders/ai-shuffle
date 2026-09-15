@@ -9,6 +9,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import time
 from contextlib import suppress
@@ -62,7 +63,7 @@ def call_timeout():
         value = float(os.environ.get("BROWSER_TOOL_TIMEOUT_SECONDS", ""))
     except (TypeError, ValueError):
         return DEFAULT_CALL_TIMEOUT
-    return value if value > 0 else DEFAULT_CALL_TIMEOUT
+    return value if math.isfinite(value) and value > 0 else DEFAULT_CALL_TIMEOUT
 
 
 class RuntimeUnavailable(RuntimeError):
