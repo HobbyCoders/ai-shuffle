@@ -64,7 +64,7 @@ vi.mock('$lib/stores/git.svelte', () => ({
 
 import ExecutionModeBar from './ExecutionModeBar.svelte';
 import { activeSession } from '$lib/stores/active-session';
-import { listInstalls } from '$lib/api/installs';
+import { getClusterGitState, listInstalls } from '$lib/api/installs';
 import { getPersistedDeviceIntent } from '$lib/stores/worker-selection';
 import { composerPreferences } from '$lib/stores/composer-preferences';
 import { getPersistedWorktreeIntent } from '$lib/stores/session/session-switcher';
@@ -89,6 +89,26 @@ beforeEach(() => {
 
 
 describe('automatic non-git fallback', () => {
+	it('refreshes a canonical-only branch picker without GitHub credentials', async () => {
+		Object.assign(activeSession.current, { project: null, projectV2Id: 'pv2-shared' });
+		render(ExecutionModeBar);
+		mocks.loadWorktrees.mockClear();
+		mocks.loadBranches.mockClear();
+		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
+		expect(mocks.loadWorktrees).toHaveBeenCalledOnce();
+		expect(mocks.loadBranches).toHaveBeenCalledOnce();
+	});
+
+	it('uses canonical eligibility for an adopted session and never syncs its foreign legacy project', async () => {
+		Object.assign(activeSession.current, { sessionId: 'adopted', project: 'foreign-legacy', projectV2Id: 'pv2-shared' });
+		mocks.syncWorktrees.mockClear();
+		vi.mocked(getClusterGitState).mockClear();
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: /runner: local/i }));
+		expect(getClusterGitState).toHaveBeenCalledWith(null, 'pv2-shared');
+		expect(mocks.syncWorktrees).not.toHaveBeenCalled();
+	});
+
 	const nonGit = { projectId: 'repo', worktreeId: null, sessionId: null,
 		hydrated: true, status: { is_git_repo: false } };
 

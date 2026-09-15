@@ -113,6 +113,13 @@ def _worktree_deleted(
     if is_remote:
         if not pv2_id or not owner:
             return False
+        from app.network import runners
+
+        # Network checkouts and git_ops are worker-local, not replicated. Their
+        # absence here says nothing about the owner's disk. Owner-routed Git
+        # requests resolve that checkout; keep the viewer's metadata unknown.
+        if runners.self_device_id():
+            return False
         return not checkouts_db.has_active_checkout(pv2_id, owner, branch)
 
     if pv2_id:

@@ -72,16 +72,17 @@ class TestResolution:
         assert helpers.get_working_dir("p1", "missing") == "/checkouts/late"
 
 
+@pytest.mark.parametrize("worktree_id", [None, "wt-1"])
 @pytest.mark.parametrize("use_async", [False, True])
-def test_missing_v2_checkout_never_uses_legacy_path(db, resolvers, use_async):
+def test_missing_v2_checkout_never_uses_legacy_path(db, resolvers, use_async, worktree_id):
     db.get_session.return_value = {"id": "ses-1", "project_v2_id": "pv2-1"}
     with patch("app.core.project_resolver.resolve_existing_cwd", return_value=None), \
          patch("app.core.project_resolver.resolve_cwd") as materialize:
         with pytest.raises(HTTPException) as exc:
             if use_async:
-                asyncio.run(helpers.get_working_dir_async("p1", None, "ses-1"))
+                asyncio.run(helpers.get_working_dir_async("p1", worktree_id, "ses-1"))
             else:
-                helpers.get_working_dir("p1", None, "ses-1")
+                helpers.get_working_dir("p1", worktree_id, "ses-1")
         assert exc.value.status_code == 409
         assert "checkout is not available" in exc.value.detail
         materialize.assert_not_called()
@@ -89,6 +90,18 @@ def test_missing_v2_checkout_never_uses_legacy_path(db, resolvers, use_async):
         assert len(helpers._working_dir_cache) == 0
     # A later successful preparation is visible immediately (errors aren't cached).
     assert helpers.get_working_dir("p1", None, "ses-1") == "/checkouts/ses-1"
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+def test_adopted_v2_session_ignores_foreign_legacy_worktree(db, resolvers, use_async):
+    db.get_session.return_value = {"id": "ses-1", "project_v2_id": "pv2-1",
+                                   "project_id": "foreign-project", "worktree_id": "wt-1"}
+    if use_async:
+        result = asyncio.run(helpers.get_working_dir_async("pv2-1", "wt-1", "ses-1"))
+    else:
+        result = helpers.get_working_dir("pv2-1", "wt-1", "ses-1")
+    assert result == "/checkouts/ses-1"
+    db.get_worktree.assert_not_called()
 
 
 class TestCaching:

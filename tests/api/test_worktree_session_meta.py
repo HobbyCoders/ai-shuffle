@@ -205,6 +205,17 @@ def _backdate(op_id: str, minutes: int):
         )
 
 
+def test_network_remote_checkout_absence_is_unknown_not_deleted(monkeypatch):
+    """Network manifests do not replicate checkouts into the viewer's DB."""
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    monkeypatch.setattr("app.network.runners.self_device_id", lambda: "viewer-device")
+    with patch.object(checkouts_db, "has_active_checkout", return_value=False) as has_checkout:
+        meta = enrich_session_worktree_meta(_remote_session(pv2), _wt())
+    assert meta["worktree_deleted"] is False
+    has_checkout.assert_not_called()
+
+
 def test_remote_archived_oldest_plus_newer_active_is_not_deleted(monkeypatch):
     """get_checkout is LIMIT 1 oldest — an archived row must not hide the live one."""
     _patch(monkeypatch, existing=set())

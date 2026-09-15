@@ -304,15 +304,23 @@
 	// Load Git for the active session on its owning worker.
 	// Extract the project and worktree strings OUTSIDE the effect to avoid tracking the entire
 	// activeTab object, which changes on every streaming poll and would re-trigger load needlessly.
-	const activeProject = $derived(activeTab?.project || activeTab?.projectV2Id || null);
+	// A legacy worktree draft still needs its local project ID. Existing
+	// sessions and canonical drafts use the portable identity, not a previous
+	// owner's legacy project alias (which may not exist on this worker).
+	const activeProject = $derived(!activeTab?.sessionId && activeTab?.worktreeId
+		? activeTab.project || activeTab.projectV2Id || null
+		: activeTab?.projectV2Id || activeTab?.project || null);
 	const activeSessionId = $derived(activeTab?.sessionId ?? null);
+	const activeSessionRow = $derived($sessions.find((s) => s.id === activeSessionId));
+	// Adoption refreshes the session list, not the tab's initial snapshot.
+	const activeWorktreeDeleted = $derived(activeSessionRow?.worktree_deleted ?? activeTab?.worktreeDeleted ?? false);
 	const selectedWorkerTarget = $derived(!activeSessionId && (activeTab?.deviceIntent
-		|| (activeTab?.projectV2Id && !activeTab.project)
+		|| (activeTab?.projectV2Id && !activeTab.worktreeId)
 		|| (activeTab?.worktreeBranch && !activeTab.worktreeId))
 		? { workerId: activeTab?.deviceIntent?.id ?? 'local', branch: activeTab?.worktreeBranch || activeTab?.selectedWorktreeBranch || null }
 		: null);
 	const activeWorktreeId = $derived(
-		!selectedWorkerTarget && (activeTab?.worktreeId || activeTab?.worktreeBranch) && !activeTab?.worktreeDeleted
+		!selectedWorkerTarget && (activeTab?.worktreeId || activeTab?.worktreeBranch) && !activeWorktreeDeleted
 			? (activeTab.worktreeId ?? null)
 			: null
 	);
@@ -321,7 +329,7 @@
 	const activeSidePanel = $derived(sidePanel.forScope(panelScope));
 	// Session-scoped Git requests are executed by the owning worker.
 	const activeIsRemote = $derived(
-		$sessions.find((s) => s.id === activeSessionId)?.is_remote ?? false
+		activeSessionRow?.is_remote ?? false
 	);
 
 	const activeGithubAvailable = $derived(selectedWorkerTarget ? false : activeIsRemote
@@ -422,7 +430,7 @@
 				hasProject: !!activeProject,
 				githubAuthenticated: $githubAuthenticated,
 				githubAvailable: activeGithubAvailable,
-				worktreeDeleted: !!activeTab.worktreeDeleted,
+				worktreeDeleted: activeWorktreeDeleted,
 				isRemote: activeIsRemote,
 				sessionMode: activeTab.mode
 			})
@@ -863,7 +871,7 @@
 		hasProject: !!activeProject,
 		githubAuthenticated: $githubAuthenticated,
 		githubAvailable: activeGithubAvailable,
-		worktreeDeleted: !!activeTab.worktreeDeleted,
+		worktreeDeleted: activeWorktreeDeleted,
 		isRemote: activeIsRemote,
 		sessionMode: activeTab.mode
 	})}
