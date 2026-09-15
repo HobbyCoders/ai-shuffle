@@ -474,6 +474,53 @@ async def test_failed_writes_do_not_publish_phantom_events(mock_db, monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("committed", [False, True])
+async def test_native_failed_barrier_retains_accepted_deltas_for_retry(mock_db, monkeypatch, committed):
+    from app.core.provider import fluid_pg_store as module
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import TurnComplete
+    store = PgFluidStore()
+    store.STREAM_BATCH_SECONDS = 60
+    await store.create_session("retry-tail")
+    assert await store.events_since("retry-tail", 0) == []
+    loop = NativeLoop(provider=object(), store=store, model="test", session_id="retry-tail")
+    original = module._append_events_sync
+    try:
+        for _ in range(5):
+            await loop._emit(TextDelta(session_id="retry-tail", index=0, text="accepted "))
+        def fail(sid, events):
+            if committed:
+                original(sid, events)
+            raise RuntimeError("commit acknowledgement lost")
+        monkeypatch.setattr(module, "_append_events_sync", fail)
+        with pytest.raises(RuntimeError, match="commit acknowledgement lost"):
+            await loop._emit(TurnComplete(session_id="retry-tail", stop_reason="end_turn", num_model_calls=1))
+        monkeypatch.setattr(module, "_append_events_sync", original)
+        await store.flush_events("retry-tail")
+        expected = list(range(1, 7 if committed else 6))
+        assert [e.seq for e in await store.events_since("retry-tail", 0)] == expected
+        assert [e.seq async for e in PgFluidStore().iter_events("retry-tail", 0)] == expected
+        assert not store._pending_events
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_session_create_is_not_acknowledged_by_retry_cache(mock_db, monkeypatch):
+    from app.core.provider import fluid_pg_store as module
+    store = PgFluidStore()
+    original = module._create_session_sync
+    def fail(*args):
+        raise RuntimeError("create rejected")
+    monkeypatch.setattr(module, "_create_session_sync", fail)
+    with pytest.raises(RuntimeError, match="create rejected"):
+        await store.create_session("create-retry")
+    monkeypatch.setattr(module, "_create_session_sync", original)
+    await store.create_session("create-retry")
+    assert await PgFluidStore().get_session("create-retry") is not None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("engine", ["native", "delegated"])
 @pytest.mark.parametrize("indexed", [True, False])
 async def test_resume_sequence_read_failure_blocks_producer_until_retry(mock_db, monkeypatch, engine, indexed):

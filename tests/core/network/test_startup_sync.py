@@ -62,6 +62,28 @@ async def test_launch_applies_newer_peer_data_across_all_pages_before_returning(
         assert _pref(b, "theme") == "newer"
 
 
+async def test_catchup_reuses_the_post_apply_watermarks_for_the_next_page(workers, monkeypatch):
+    from unittest.mock import patch
+    a, b = workers("frontier-source"), workers("frontier-target")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    for i in range(8):
+        _set_pref(a, f"page-{i}", i)
+    served = connect(monkeypatch, a, b)
+    monkeypatch.setattr(transport, "BATCH_LIMIT", 2)
+    with b.active(), patch.object(store, "local_watermarks", wraps=store.local_watermarks) as heads:
+        async with httpx.AsyncClient() as client:
+            link = transport.PeerLink(a.device_id, [served.base_url])
+            await link.sync_once(client, engine.context(), catch_up=True)
+    pages = sum(path.endswith("/exchange") for _, path in served.requests)
+    assert pages > 1
+    # One initial pull frontier, one server and one post-apply frontier per
+    # page, then one push frontier. No duplicate read between pull pages.
+    assert heads.call_count == 2 * pages + 2
+    assert all(_pref(b, f"page-{i}") == i for i in range(8))
+
+
 async def test_snapshot_catchup_restores_peer_materialized_data(workers, monkeypatch):
     a, b, c = workers("a"), workers("b"), workers("c")
     with a.active():

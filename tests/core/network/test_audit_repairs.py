@@ -404,6 +404,24 @@ async def test_rollback_claim_without_proof_is_ignored(workers):
         assert await link._check_rollback(None, ctx, claims) is False
         assert engine.context().identity.incarnation == 1
 
+        with store.get_db() as conn:
+            held = store.own_watermark(conn.cursor(), ctx.device_id, 1)
+        for changes in ({"origin_seq": held}, {"origin_incarnation": 2},
+                        {"network_id": "another-network"}, {"origin_device_id": b.device_id}):
+            fields = dict(network_id=ctx.network_id, collection="user_preferences",
+                          record_id="admin|@owner|lost", op="upsert", clock=5,
+                          origin_device_id=ctx.device_id, origin_incarnation=1, origin_seq=held + 1,
+                          schema_version=1, key_version=ctx.key_version, network_key=ctx.network_key,
+                          signing_private=ctx.identity.signing_private, record={"key": "lost"})
+            fields.update(changes)
+            proof = envelope_mod.build(**fields)
+
+            async def mismatched_proof(client, method, path, **kwargs):
+                return {"op": proof.to_dict()}
+            link._request = mismatched_proof
+            assert await link._check_rollback(None, ctx, claims) is False
+            assert engine.context().identity.incarnation == 1
+
 
 def test_outbox_is_held_until_streams_were_compared(workers):
     a = workers("a")

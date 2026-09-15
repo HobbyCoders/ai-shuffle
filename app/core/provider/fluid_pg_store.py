@@ -661,17 +661,21 @@ class PgFluidStore:
         self._event_floor[session_id] = max(floor, tail[0].seq - 1) if len(events) > len(tail) else floor
 
     async def _write_pending(self, session_id: str, extra: Optional[Event] = None) -> None:
-        events = self._pending_events.pop(session_id, [])
-        self._pending_since.pop(session_id, None)
-        self._pending_bytes.pop(session_id, None)
+        # Accepted deltas remain retryable until the transaction acknowledges
+        # them. The caller owns retrying an unacknowledged durable extra.
+        events = list(self._pending_events.get(session_id, []))
         if extra is not None:
             events.append(extra)
         if not events:
             return
-        await run_sync(_append_events_sync, session_id, events)
-        # Invalidate rather than publishing uncommitted or duplicate objects.
+        # A lost commit acknowledgement can leave durable rows behind. Never
+        # serve a pre-write cache after either success or an uncertain failure.
         self._events.pop(session_id, None)
         self._event_floor.pop(session_id, None)
+        await run_sync(_append_events_sync, session_id, events)
+        self._pending_events.pop(session_id, None)
+        self._pending_since.pop(session_id, None)
+        self._pending_bytes.pop(session_id, None)
 
     async def append_stream_event(self, session_id: str, event: Event) -> None:
         """Optional native-loop hook; only reconstructible deltas may be buffered.
@@ -717,11 +721,11 @@ class PgFluidStore:
             session_id=session_id or new_id("ses"),
             project_root=project_root_for(cwd),
         )
+        await run_sync(_create_session_sync, meta)
         self._sessions[meta.session_id] = meta
         self._nodes[meta.session_id] = {}
         self._events[meta.session_id] = []
         self._loaded.add(meta.session_id)
-        await run_sync(_create_session_sync, meta)
         return meta
 
     async def get_session(self, session_id: str) -> Optional[SessionMeta]:
