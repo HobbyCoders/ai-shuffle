@@ -15,12 +15,23 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, AsyncIterator, Protocol
 
 from fluid.events.model import Event
 from fluid.messages import Message
 
 log = logging.getLogger(__name__)
+
+
+async def iter_events(store: SessionStore, session_id: str, seq: int) -> AsyncIterator[Event]:
+    """Use bounded replay when offered; retain compatibility with older stores."""
+    replay = getattr(store, "iter_events", None)
+    if callable(replay):
+        async for event in replay(session_id, seq):
+            yield event
+    else:
+        for event in await store.events_since(session_id, seq):
+            yield event
 
 
 def new_id(prefix: str) -> str:

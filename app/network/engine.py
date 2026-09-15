@@ -654,13 +654,17 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
 SCAN_PUBLISH_BATCH = 200
 
 
-def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = True, strict: bool = False) -> int:
+def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = True,
+             strict: bool = False, collections: Optional[Iterable[str]] = None) -> int:
     ctx = ctx or context()
     if ctx is None:
         return 0
     ctx = _ensure_safe_write_key(ctx)
     total = 0
+    selected = set(collections) if collections is not None else None
     for name in policy.SCANNED_COLLECTIONS:
+        if selected is not None and name not in selected:
+            continue
         try:
             total += scan_collection(name, ctx=ctx)
         except Exception:  # noqa: BLE001

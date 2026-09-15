@@ -17,6 +17,9 @@ class ScanClock:
         self.scans = []
         self.actions = []
         monkeypatch.setattr(transport, "_scan_wake", None)
+        monkeypatch.setattr(transport, "_dirty_collections", set())
+        monkeypatch.setattr(transport, "_full_scan_requested", False)
+        monkeypatch.setattr(transport, "time", SimpleNamespace(monotonic=lambda: self.now))
         monkeypatch.setattr(transport, "_loop", SimpleNamespace(
             call_soon_threadsafe=lambda callback: callback()))
         monkeypatch.setattr(transport, "asyncio", SimpleNamespace(
@@ -24,11 +27,11 @@ class ScanClock:
             TimeoutError=asyncio.TimeoutError, sleep=self.sleep,
             wait_for=self.wait_for, to_thread=self.to_thread))
 
-    async def to_thread(self, fn):
+    async def to_thread(self, fn, **kwargs):
         if len(self.scans) == self.passes:
             raise asyncio.CancelledError
         self.scans.append(self.now)
-        return fn()
+        return fn(**kwargs)
 
     def advance(self, until, *, interrupt=False):
         while self.actions and self.actions[0][0] <= until:
@@ -123,7 +126,7 @@ async def test_committed_profile_write_wakes_idle_scanner(monkeypatch, tmp_path)
             engine.create_network("Idle scanner test")
             # Isolate the real collection publisher from unrelated filesystem scans.
             engine.scan_collection("agents")
-            monkeypatch.setattr(engine, "scan_all", lambda: engine.scan_collection("agents"))
+            monkeypatch.setattr(engine, "scan_all", lambda **kwargs: engine.scan_collection("agents"))
             clock.actions = [(65, lambda: database.create_profile(
                 profile_id="wake-test", name="Wake test", description=None, config={}))]
             await clock.run()
@@ -136,3 +139,52 @@ async def test_committed_profile_write_wakes_idle_scanner(monkeypatch, tmp_path)
         worker.close()
         engine.reset_for_tests()
         tokens.reset_for_tests()
+
+
+async def test_known_write_wakes_only_its_collections(monkeypatch):
+    clock = ScanClock(monkeypatch, passes=3)
+    scan = Mock(return_value=0)
+    monkeypatch.setattr(engine, "scan_all", scan)
+    clock.actions = [(1, lambda: transport.request_scan(["agents"])),
+                     (1.5, lambda: transport.request_scan(["agents", "system_settings"]))]
+    await clock.run()
+    assert clock.scans == [0, 2, 6]
+    assert scan.call_args_list[0].kwargs == {}
+    assert scan.call_args_list[1].kwargs == dict(
+        collections={"agents", "system_settings"}, include_catalog=False, strict=True)
+    assert scan.call_args_list[2].kwargs == {}
+
+
+async def test_targeted_writes_during_pass_survive_and_cannot_starve_full_scan(monkeypatch):
+    clock = ScanClock(monkeypatch, passes=32)
+    calls = []
+    def scan(**kwargs):
+        calls.append(kwargs)
+        transport.request_scan(["agents"])
+        return 0
+    monkeypatch.setattr(engine, "scan_all", scan)
+    await clock.run()
+    assert clock.scans == list(range(0, 64, 2))
+    assert calls[0] == calls[30] == {}
+    assert all(calls[i].get("collections") == {"agents"} for i in range(1, 30))
+    assert calls[31]["collections"] == {"agents"}
+
+
+async def test_unknown_or_owner_ordered_writes_request_full_reconciliation(monkeypatch):
+    clock = ScanClock(monkeypatch, passes=2)
+    scan = Mock(return_value=0)
+    monkeypatch.setattr(engine, "scan_all", scan)
+    clock.actions = [(1, lambda: transport.request_scan(["agents"])),
+                     (1.5, lambda: transport.request_scan(["sessions"]))]
+    await clock.run()
+    assert [call.kwargs for call in scan.call_args_list] == [{}, {}]
+
+
+async def test_failed_targeted_scan_retries_full_reconciliation(monkeypatch):
+    clock = ScanClock(monkeypatch, passes=3)
+    scan = Mock(side_effect=[0, RuntimeError("failed targeted read"), 0])
+    monkeypatch.setattr(engine, "scan_all", scan)
+    clock.actions = [(1, lambda: transport.request_scan(["agents"]))]
+    await clock.run()
+    assert scan.call_args_list[1].kwargs["collections"] == {"agents"}
+    assert scan.call_args_list[2].kwargs == {}

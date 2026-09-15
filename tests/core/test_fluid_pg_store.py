@@ -309,6 +309,112 @@ async def test_resume_loads_nodes_not_events_and_bounds_replay_cache(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_paged_replay_uses_committed_frontier_and_tolerates_retention_gaps(mock_db):
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import TurnComplete
+    store = PgFluidStore()
+    store.STREAM_BATCH_SECONDS = 60
+    await store.create_session("paged")
+    loop = NativeLoop(provider=object(), store=store, model="test", session_id="paged")
+    try:
+        for i in range(300):
+            await loop._emit(TextDelta(session_id="paged", index=0, text=str(i)))
+        await loop._emit(TurnComplete(session_id="paged", stop_reason="end_turn", num_model_calls=1))
+        resumed = PgFluidStore()
+        pages = resumed.iter_events("paged", 0, page_size=17)
+        first = await anext(pages)
+        await loop._emit(TextDelta(session_id="paged", index=0, text="later"))
+        await store.flush_events("paged")
+        mock_db.execute("DELETE FROM fluid_session_events WHERE session_id = 'paged' AND seq = 40")
+        replay = [first] + [e async for e in pages]
+        assert [e.seq for e in replay] == [i for i in range(1, 302) if i != 40]
+        assert not resumed._events  # Paging never fills a full-history or stale-tail cache.
+        assert [e.seq async for e in resumed.iter_events("paged", 301)] == [302]
+        assert [e.seq async for e in resumed.iter_events("paged", 999)] == []
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_paged_replay_flush_failure_is_explicit_and_never_yields_phantoms(mock_db, monkeypatch):
+    from app.core.provider import fluid_pg_store as module
+    store = PgFluidStore()
+    await store.create_session("page-fail")
+    await store.append_stream_event("page-fail", TextDelta(session_id="page-fail", index=0, text="tail", seq=1))
+    def fail(*args):
+        raise RuntimeError("commit rejected")
+    monkeypatch.setattr(module, "_append_events_sync", fail)
+    with pytest.raises(RuntimeError, match="commit rejected"):
+        await anext(store.iter_events("page-fail", 0))
+    assert [e async for e in PgFluidStore().iter_events("page-fail", 0)] == []
+
+
+@pytest.mark.asyncio
+async def test_paged_replay_page_failure_can_retry_from_last_ack(mock_db, monkeypatch):
+    from app.core.provider import fluid_pg_store as module
+    store = PgFluidStore()
+    await store.create_session("page-retry")
+    for i in range(1, 6):
+        await store.append_event("page-retry", TextDelta(session_id="page-retry", index=0, text="x", seq=i))
+    original = module._events_page_sync
+    def fail_second(sid, seq, through, limit):
+        if seq == 2:
+            raise RuntimeError("page read failed")
+        return original(sid, seq, through, limit)
+    monkeypatch.setattr(module, "_events_page_sync", fail_second)
+    replay = store.iter_events("page-retry", 0, page_size=2)
+    assert (await anext(replay)).seq == 1
+    assert (await anext(replay)).seq == 2
+    with pytest.raises(RuntimeError, match="page read failed"):
+        await anext(replay)
+    monkeypatch.setattr(module, "_events_page_sync", original)
+    assert [e.seq async for e in store.iter_events("page-retry", 2)] == [3, 4, 5]
+
+
+@pytest.mark.asyncio
+async def test_native_resume_rehydrates_through_pages_not_full_history(mock_db, monkeypatch):
+    from fluid.engine.native import NativeLoop
+    from fluid.events import UserTurn
+    from fluid.providers.base import ProviderCaps, StreamChunk
+    class Provider:
+        name = "anthropic"
+        caps = ProviderCaps()
+        async def stream(self, request):
+            yield StreamChunk("message_start", {"usage": {"input_tokens": 1}})
+            yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+            for _ in range(160):
+                yield StreamChunk("text_delta", {"index": 0, "text": "short words. "})
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("message_stop", {"stop_reason": "end_turn", "usage": {"output_tokens": 160}})
+    first = NativeLoop(provider=Provider(), store=PgFluidStore(), model="claude-sonnet-5")
+    try:
+        await first.submit(UserTurn(content="First turn"))
+        await first.wait_turn()
+        sid = first.session_id
+    finally:
+        await first.aclose()
+    before = await PgFluidStore().last_event_seq(sid)
+    resumed_store = PgFluidStore()
+    unbounded_reads = []
+    async def unbounded(*args):
+        unbounded_reads.append(args)
+        raise AssertionError("resume materialized the entire event history")
+    monkeypatch.setattr(resumed_store, "events_since", unbounded)
+    resumed = NativeLoop(provider=Provider(), store=resumed_store, model="claude-sonnet-5", session_id=sid)
+    try:
+        await resumed.submit(UserTurn(content="Second turn"))
+        await resumed.wait_turn()
+        assert not unbounded_reads
+        replay = [e async for e in PgFluidStore().iter_events(sid, 0)]
+        assert [e.seq for e in replay] == list(range(1, replay[-1].seq + 1))
+        assert replay[-1].seq > before
+        assert replay[-1].type == "turn_complete"
+        assert not resumed_store._events
+    finally:
+        await resumed.aclose()
+
+
+@pytest.mark.asyncio
 async def test_node_append_and_replay_flush_pending_deltas(mock_db):
     store = PgFluidStore()
     await store.create_session("barriers")
