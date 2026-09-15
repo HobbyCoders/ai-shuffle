@@ -1,6 +1,7 @@
 package com.hobbycoders.aishuffle.tools
 
 import android.app.Activity
+import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import androidx.appcompat.app.AlertDialog
@@ -14,7 +15,13 @@ import java.lang.ref.WeakReference
 import java.util.UUID
 
 /** Authorization comes only from a visible local consent host, never from tool arguments. */
-data class PendingToolApproval(val id: String, val title: String, val detail: String, val expiresAt: Long)
+data class PendingToolApproval(
+    val id: String, val title: String, val detail: String, val expiresAt: Long,
+    val expiresElapsedAt: Long,
+) {
+    internal fun remainingMillis(wall: Long, elapsed: Long): Long =
+        minOf(expiresAt - wall, expiresElapsedAt - elapsed).coerceAtLeast(0)
+}
 
 object ToolApprovals {
     private val mutable = MutableStateFlow<PendingToolApproval?>(null)
@@ -50,7 +57,7 @@ object ToolApprovals {
                 shown.show()
                 launch {
                     while (pending.value?.id == request.id && shown.isShowing) {
-                        val remaining = ((request.expiresAt - System.currentTimeMillis() + 999) / 1000).coerceAtLeast(0)
+                        val remaining = (request.remainingMillis(System.currentTimeMillis(), SystemClock.elapsedRealtime()) + 999) / 1000
                         shown.setMessage("${request.detail}\n\nExpires in $remaining seconds. Allow authorizes this request only.")
                         delay(250)
                     }
@@ -70,19 +77,25 @@ object ToolApprovals {
     fun resolve(activity: Activity, requestId: String, approved: Boolean): Boolean {
         val request = mutable.value ?: return false
         if (host.get() !== activity || activity.isFinishing || activity.isDestroyed || request.id != requestId) return false
-        if (approved && (dialog?.window?.decorView?.hasWindowFocus() != true || System.currentTimeMillis() >= request.expiresAt)) return false
+        if (approved && (dialog?.window?.decorView?.hasWindowFocus() != true || request.remainingMillis(System.currentTimeMillis(), SystemClock.elapsedRealtime()) == 0L)) return false
         return answer?.complete(approved) == true
     }
 
     internal suspend fun request(title: String, detail: String, deadline: Long = System.currentTimeMillis() + 20_000): Boolean = withContext(Dispatchers.Main.immediate) {
         val activity = host.get()
         if (activity == null || activity.isFinishing || activity.isDestroyed || !activity.hasWindowFocus() || answer != null) return@withContext false
-        val expires = minOf(deadline, System.currentTimeMillis() + 20_000)
-        val duration = expires - System.currentTimeMillis()
+        val wall = System.currentTimeMillis()
+        val elapsed = SystemClock.elapsedRealtime()
+        val expires = minOf(deadline, wall + 20_000)
+        val duration = expires - wall
         if (duration <= 0) return@withContext false
         val deferred = CompletableDeferred<Boolean>(); answer = deferred
-        mutable.value = PendingToolApproval(UUID.randomUUID().toString(), title, detail.take(1500), expires)
-        try { withTimeoutOrNull(duration) { deferred.await() } == true && System.currentTimeMillis() < expires }
+        val request = PendingToolApproval(UUID.randomUUID().toString(), title, detail.take(1500), expires, elapsed + duration)
+        mutable.value = request
+        try {
+            withTimeoutOrNull(duration) { deferred.await() } == true &&
+                request.remainingMillis(System.currentTimeMillis(), SystemClock.elapsedRealtime()) > 0
+        }
         finally { answer = null; mutable.value = null }
     }
 }
