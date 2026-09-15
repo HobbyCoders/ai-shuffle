@@ -53,6 +53,12 @@ class OfflineDemoSmokeTest {
             while (evaluate(scenario, code) != "true") kotlinx.coroutines.delay(100)
         }
     }
+    private fun openSettings() {
+        // RESUMED/focused is not enough: launch windows can still mark a tap obscured.
+        // Synchronize with platform window events before injecting the single gesture.
+        instrumentation.uiAutomation.waitForIdle(500, 5_000)
+        onView(withContentDescription("Settings")).perform(click())
+    }
     @Test fun settingsEntryNeedsNoAccountAndReturnsToSettings() {
         instrumentation.runOnMainSync {
             DeviceToolsRuntime.stop(); ToolsPreferences(context).setEnabled(false)
@@ -61,7 +67,7 @@ class OfflineDemoSmokeTest {
         }
         ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use {
             onView(withText("Explore offline demo")).check(doesNotExist())
-            onView(withContentDescription("Settings")).perform(click())
+            openSettings()
             repeat(2) {
                 onView(withText("Explore offline demo")).perform(scrollTo(), click())
                 onView(withText("Exit offline demo")).perform(click())
@@ -87,6 +93,7 @@ class OfflineDemoSmokeTest {
         try {
             PresenceFixture().use {
                 val touches = java.util.concurrent.CopyOnWriteArrayList<String>()
+                val gestures = java.util.concurrent.CopyOnWriteArrayList<Pair<Int, Int>>()
                 val monitor = androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
                 val callback = androidx.test.runner.lifecycle.ActivityLifecycleCallback { activity, stage ->
                     if (activity is ServerListActivity && stage == androidx.test.runner.lifecycle.Stage.CREATED) {
@@ -100,6 +107,7 @@ class OfflineDemoSmokeTest {
                                 val detail = "action=${event.actionMasked} flags=${event.flags} x=${event.rawX} y=${event.rawY} " +
                                     "bounds=$bounds focused=${activity.hasWindowFocus()} pressed=${button.isPressed}"
                                 touches += detail
+                                gestures += event.actionMasked to event.flags
                                 android.util.Log.i("DemoNavigation", detail)
                                 return original.dispatchTouchEvent(event)
                             }
@@ -111,14 +119,14 @@ class OfflineDemoSmokeTest {
                     // Independent launches, never a retry of an ignored tap. Stop at the first failure.
                     repeat(10) { launch ->
                         touches.clear()
-                        ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use { scenario ->
+                        gestures.clear()
+                        ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use {
                             onView(withText("Workers")).check(matches(isDisplayed()))
                             onView(withText("Explore offline demo")).check(doesNotExist())
-                            onView(withContentDescription("Settings")).perform(click())
-                            try { onView(withText("Settings")).check(matches(isDisplayed())) }
-                            catch (failure: AssertionError) {
-                                throw AssertionError("Launch $launch single Settings tap: $touches; state=${scenario.state}", failure)
-                            }
+                            openSettings()
+                            assertEquals("Launch $launch must deliver one unobscured tap: $touches",
+                                listOf(android.view.MotionEvent.ACTION_DOWN to 0, android.view.MotionEvent.ACTION_UP to 0), gestures.toList())
+                            onView(withText("Settings")).check(matches(isDisplayed()))
                             if (launch == 0) TestScreenshots.capture("offline-demo-after-settings-tap")
                             onView(withText("Explore offline demo")).perform(scrollTo(), click())
                             onView(withText("Exit offline demo")).perform(click())
