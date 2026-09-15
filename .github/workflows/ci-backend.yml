@@ -141,6 +141,19 @@ jobs:
             -c "CREATE DATABASE shuffle_safety_test OWNER shuffle_safety_test"
           pg_isready -h 127.0.0.1 -p 5432
 
+      - name: Measure managed PostgreSQL checkpoints and crash recovery
+        env:
+          ALLOW_REAL_PG: '1'
+          TEST_POSTGRES_DSN: postgresql://shuffle_safety_test:safety-test-only@127.0.0.1:5432/shuffle_safety_test
+          CONTAINER_RUNTIME_TEST_PG: '1'
+          CONTAINER_RUNTIME_TEST_PRESSURE: '1'
+          AI_SHUFFLE_ENV_FILE: /dev/null
+          PYTHONPATH: .:fluid
+        run: |
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          python -c "import os; print('Pre-measurement load average:', os.getloadavg())"
+          python -m pytest tests/core/test_container_runtime.py tests/core/test_container_image_contract.py -o addopts="" -q -s -p no:cacheprovider --timeout=120
+
       - name: Mobile PostgreSQL contracts
         env:
           ALLOW_REAL_PG: '1'
