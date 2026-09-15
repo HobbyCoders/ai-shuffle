@@ -146,6 +146,25 @@ function freePort() {
 	});
 }
 
+test('isolated worker prepares redirected Windows AppData before spawning', async (t) => {
+	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-profile-'));
+	const port = await freePort();
+	const protectedPort = await freePort();
+	const profileDir = path.join(dir, 'profile');
+	const supervisor = new WorkerSupervisor({
+		runtime: { mode: 'repo', root: dir, serverDir: dir, python: process.execPath, toolsDir: dir, browserMcpEntry: path.join(dir, 'index.js') },
+		logDir: path.join(dir, 'logs'), dataDir: path.join(dir, 'data'), envFile: path.join(dir, 'worker', '.env'),
+		profileDir, port, protectedPort, allowAttach: false, baseEnv: process.env,
+		postgres: () => ({ host: '127.0.0.1', port: 5432, user: 'fixture', password: 'fixture', database: 'fixture' }),
+	});
+	t.after(async () => { await supervisor.stop(); await rm(dir, { recursive: true, force: true }); });
+	// Node refuses Python's -m switch; no app or database connection is made.
+	const state = await supervisor.start();
+	assert.equal(state.phase, 'failed');
+	assert.equal(existsSync(path.join(profileDir, 'AppData', 'Roaming')), true);
+	assert.equal(existsSync(path.join(profileDir, 'AppData', 'Local')), true);
+});
+
 /** A runtime whose "python" runs the fake worker; spawns are appended to `log`. */
 async function fakeSupervisor(t, extraEnv = {}, options = {}) {
 	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-supervisor-'));

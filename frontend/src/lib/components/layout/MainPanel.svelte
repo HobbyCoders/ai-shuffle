@@ -280,8 +280,6 @@
 	let showInitRepoModal = $state(false);
 
 	// Visibility is scoped, so switching sessions cannot show another checkout's diff.
-	const panelScope = $derived(activeTab?.sessionId ? sessionPanelKey(activeTab.sessionId) : null);
-	const activeSidePanel = $derived(sidePanel.forScope(panelScope));
 	function openDiffPanel() {
 		sidePanel.open(panelScope, 'changes');
 		git.refreshChangedFiles();
@@ -313,12 +311,18 @@
 			: null
 	);
 	const activeSessionId = $derived(activeTab?.sessionId ?? null);
+	const selectedWorkerTarget = $derived(!activeSessionId && (activeTab?.deviceIntent || (activeTab?.projectV2Id && !activeTab.project))
+		? { workerId: activeTab?.deviceIntent?.id ?? 'local', branch: activeTab?.worktreeBranch || activeTab?.selectedWorktreeBranch || null }
+		: null);
+	const panelScope = $derived(activeTab?.sessionId ? sessionPanelKey(activeTab.sessionId)
+		: activeProject ? `draft:${JSON.stringify([activeProject, selectedWorkerTarget, activeWorktreeId])}` : null);
+	const activeSidePanel = $derived(sidePanel.forScope(panelScope));
 	// Session-scoped Git requests are executed by the owning worker.
 	const activeIsRemote = $derived(
 		$sessions.find((s) => s.id === activeSessionId)?.is_remote ?? false
 	);
 
-	const activeGithubAvailable = $derived(activeIsRemote
+	const activeGithubAvailable = $derived(selectedWorkerTarget ? false : activeIsRemote
 		? $gitPrState?.has_github === true
 		: $githubFeaturesAvailable);
 
@@ -338,6 +342,7 @@
 		const project = activeProject;
 		const worktreeId = activeWorktreeId;
 		const isRemote = activeIsRemote;
+		const workerTarget = selectedWorkerTarget;
 		// Track session ID so the effect re-fires on every tab switch,
 		// even when two sessions share the same project/worktree.
 		// This ensures git state is always fresh after a session change.
@@ -353,6 +358,7 @@
 		// auth here is what made a `gh` blip call clearRepository() and hide the
 		// UI. GitHub-backed actions consult `githubFeaturesAvailable` instead.
 		if (project) {
+			git.setWorkerTarget(workerTarget);
 			git.setRemoteSession(sessionId, isRemote);
 			// IMMEDIATE: restore cached state so UI updates within the same frame.
 			// sessionId scopes v2 branch sessions to their own checkout — without it
@@ -579,6 +585,7 @@
 	 * already pushed if it drives its own push step.
 	 */
 	async function runCreatePR(opts: CreatePROptions, target = git.captureTarget()): Promise<{ url: string; number: number }> {
+		if (target.workerTarget) throw new Error('Create a session on the selected worker before opening a pull request');
 		const { projectId, worktreeId, sessionId } = target;
 		const base = opts.base ?? target.base ?? 'main';
 		const head = target.head;
@@ -620,7 +627,7 @@
 			let message = userMessage;
 			if (!message) {
 				gitOperations.setStep('message', 'running');
-				const gen = await generateCommitMessage(projectId, { include_unstaged: includeUnstaged }, target.worktreeId, target.sessionId);
+				const gen = await generateCommitMessage(projectId, { include_unstaged: includeUnstaged }, target.worktreeId, target.sessionId ?? target.workerTarget);
 				message = gen.message;
 				gitOperations.setStep('message', 'done');
 			}
@@ -736,6 +743,10 @@
 
 	async function handleShipIt(opts: ShipItOptions = {}) {
 		if (gitActionsBlocked()) return;
+		if (selectedWorkerTarget) {
+			notify('Create a session on the selected worker before shipping changes', { severity: 'error' });
+			return;
+		}
 		markGitActivity(); // user git action → responsive poll cadence
 		const projectId = activeProject!;
 		const origin: OperationOrigin = { sessionId: activeSessionId, projectId };

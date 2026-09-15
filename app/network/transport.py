@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 import tempfile
 from pathlib import Path
@@ -46,6 +47,9 @@ REQUEST_TIMEOUT = 15.0
 
 _wake: Optional[asyncio.Event] = None
 _scan_wake: Optional[asyncio.Event] = None
+_scan_requests_lock = threading.Lock()
+_dirty_collections: set[str] = set()
+_full_scan_requested = False
 _tasks: List[asyncio.Task] = []
 _links: Dict[str, "PeerLink"] = {}
 _last_contact: Dict[str, float] = {}
@@ -449,26 +453,44 @@ async def scan_loop() -> None:
     Unhooked changes (including external file edits) still get a full scan:
     the next pass starts within SCAN_IDLE_MAX_SECONDS of the last completion.
     """
-    global _scan_wake
+    global _scan_wake, _full_scan_requested
     _scan_wake = asyncio.Event()
     delay = SCAN_INTERVAL_SECONDS
+    last_full_scan = float("-inf")
     while True:
-        # Consume only requests preceding this pass. A write DURING the scan
-        # may touch a collection already read, so it must cause another pass.
+        # Snapshot before offloading. Writes during the scan remain queued for
+        # the next pass, including writes to a collection already visited.
         _scan_wake.clear()
+        with _scan_requests_lock:
+            dirty = set(_dirty_collections)
+            _dirty_collections.clear()
+            full = _full_scan_requested
+            _full_scan_requested = False
+        full = full or not dirty or time.monotonic() - last_full_scan >= SCAN_IDLE_MAX_SECONDS
         published = 0
         try:
-            published = await asyncio.to_thread(engine.scan_all)
+            if full:
+                published = await asyncio.to_thread(engine.scan_all)
+            else:
+                published = await asyncio.to_thread(
+                    engine.scan_all, collections=dirty, include_catalog=False, strict=True)
             if published:
                 logger.debug("Published %d changed records", published)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             logger.warning("Scan pass failed", exc_info=True)
+            if not full:
+                request_scan()  # Retry through full reconciliation after a failed narrow pass.
+        if full:
+            last_full_scan = time.monotonic()
         delay = (
             SCAN_INTERVAL_SECONDS if published
             else min(delay * 2, SCAN_IDLE_MAX_SECONDS)
         )
+        # Targeted writes must not postpone discovery of external edits/deletes.
+        delay = min(delay, max(SCAN_INTERVAL_SECONDS,
+                               SCAN_IDLE_MAX_SECONDS - (time.monotonic() - last_full_scan)))
         # Coalesce streaming writes and requests arriving during the scan.
         # Even a slow scan or repeated failure must leave the worker some rest.
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
@@ -510,8 +532,15 @@ async def presence_loop() -> None:
         await asyncio.sleep(PRESENCE_INTERVAL_SECONDS)
 
 
-def request_scan() -> None:
-    """Domain code changed something: scan soon, then sync."""
+def request_scan(collections: Optional[List[str]] = None) -> None:
+    """Coalesce known shared-collection writes; unknown changes reconcile fully."""
+    global _full_scan_requested
+    from app.network import policy
+    with _scan_requests_lock:
+        if not collections or any(name not in policy.SCANNED_COLLECTIONS for name in collections):
+            _full_scan_requested = True
+        else:
+            _dirty_collections.update(collections)
     _scan_kick_from_thread()
 
 
@@ -554,4 +583,8 @@ def forget_peers() -> None:
 
 
 def reset_for_tests() -> None:
+    global _full_scan_requested
     forget_peers()
+    with _scan_requests_lock:
+        _dirty_collections.clear()
+        _full_scan_requested = False

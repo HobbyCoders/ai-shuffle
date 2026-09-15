@@ -46,7 +46,7 @@
 	import ChatAccess from './ChatAccess.svelte';
 	import WorkLogGroup from './WorkLogGroup.svelte';
 	import {
-		buildTranscriptModel,
+		createTranscriptModelBuilder,
 		hasLinkedSubagent as hasLinkedSubagentIn,
 		type DisplayItem,
 		type TranscriptModel
@@ -411,6 +411,7 @@
 			}
 		};
 
+	const buildTranscript = createTranscriptModelBuilder();
 	const transcript: TranscriptModel = $derived.by(() => {
 		const messages = $activeSession.messages;
 		const sessionId = $activeSession.sessionId;
@@ -439,7 +440,7 @@
 			console.debug(`[displayItems] re-eval: ${messages.length} msgs, streaming=${isStreamingNow}, hasStreamingMsg=${hasStrmMsg}, aTexts=${aTexts.length} [${aTexts.map((m: ChatMessage) => `len=${(m.content||'').length}`).join(',')}]`);
 		}
 
-		const model = buildTranscriptModel(messages, {
+		const model = buildTranscript(messages, {
 			isStreaming: isStreamingNow,
 			latestTurnUnsettled: latestIsUnsettled,
 			sessionId,

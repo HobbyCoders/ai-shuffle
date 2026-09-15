@@ -19,8 +19,50 @@ _real_session_owner = chat_access.session_owner
 def broker(monkeypatch):
     monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("local", "worker")))
     from app.core import chat_vault
-    monkeypatch.setattr(chat_vault, "catalog", lambda owner: [])
+    monkeypatch.setattr(chat_vault, "catalog", lambda owner, **kwargs: [])
     return Broker()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_user_id, owner_kind", [(None, "admin"), (None, "account"), ("alice", "api_user")])
+async def test_request_producer_invalidates_global_owner_without_private_payload(broker, monkeypatch, api_user_id, owner_kind):
+    import json
+    from app.core.global_events import global_events
+    from app.core import preference_identity
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "worker", api_user_id)))
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "owner" if owner_kind == "account" else None)
+    monkeypatch.setattr(preference_identity, "account_identity", lambda identity: ("account", identity))
+    monkeypatch.setattr(preference_identity.owner_auth, "preference_identity", lambda: "owner")
+    class Socket:
+        def __init__(self):
+            self.sent = []
+        async def send_text(self, text):
+            self.sent.append(json.loads(text))
+    principals = [("admin", "owner"), ("api_user", "alice"), ("api_user", "bob"), ("paired", "device"), ("account", "owner"), ("account", "other")]
+    sockets = [Socket() for _ in principals]
+    ids = [global_events.register(ws, *principal) for ws, principal in zip(sockets, principals)]
+    request = asyncio.create_task(broker.request("private-session", "machine", "Private purpose never broadcast"))
+    try:
+        async with asyncio.timeout(3):
+            while not broker.requests:
+                await asyncio.sleep(0)
+            await asyncio.gather(*broker._notifications)
+            for _ in range(12):
+                await asyncio.sleep(0)
+        expected = {"type": "resources_changed", "resources": ["chat-access:private-session"]}
+        recipient = {"admin": 0, "api_user": 1, "account": 4}[owner_kind]
+        for index, ws in enumerate(sockets):
+            assert ws.sent == [{"type": "sync_ready"}] + ([expected] if index == recipient else [])
+        pending_request = next(iter(broker.requests.values()))
+        await broker.decline("private-session", pending_request.id)
+        with pytest.raises(AccessDenied):
+            await request
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+        await asyncio.gather(*broker._notifications)
+        for socket_id in ids:
+            await global_events.unregister(socket_id)
 
 
 @pytest_asyncio.fixture
@@ -196,7 +238,7 @@ def test_paths_fail_closed(path):
         chat_files.parts(path)
 
 
-@pytest.mark.skipif(not chat_files.available(), reason="Linux openat2 confinement required")
+@pytest.mark.skipif(os.name == "nt" or not chat_files.available(), reason="Linux openat2 confinement required")
 def test_folder_links_traversal_atomic_writes_and_bounds(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -240,6 +282,52 @@ async def test_folder_cannot_run_shell_and_writes_need_grant_and_approval(broker
     assert await task == {"written": True}
     assert (tmp_path / "x").read_text() == "yes"
     broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.skipif(not chat_files.available(), reason="Confined folders required")
+@pytest.mark.asyncio
+async def test_folder_request_produces_scoped_grant_and_one_shot_write(broker, tmp_path, monkeypatch):
+    from app.api import chat_access as api
+    monkeypatch.setattr(api, "broker", broker)
+    monkeypatch.setattr(api, "checked", AsyncMock())
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_admin] = lambda: "owner"
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+        requested = asyncio.create_task(broker.request("chat", "folder", "Read and update a test file"))
+        await asyncio.sleep(0)
+        request_id = next(iter(broker.requests))
+        endpoint = f"/api/v1/chat-access/chat/requests/{request_id}"
+        response = await client.post(endpoint, json={"connection": {
+            "kind": "folder", "label": "Test folder", "path": str(tmp_path), "writable": True,
+        }})
+        assert response.status_code == 200, response.text
+        handle = await requested
+        assert set(handle) == {"id", "kind", "expires_at", "writable"}
+        assert str(tmp_path) not in str(handle)
+        for session, operation, arguments in (
+            ("other", "read", {"path": "x"}),
+            ("chat", "read", {"path": "../outside"}),
+            ("chat", "command", {"command": "anything"}),
+        ):
+            with pytest.raises(AccessDenied):
+                await broker.run(session, handle["id"], operation, arguments)
+        for allow in (False, True):
+            task = asyncio.create_task(broker.run("chat", handle["id"], "write", {"path": "x", "content": "approved"}))
+            action = await pending(broker)
+            assert not (tmp_path / "x").exists()
+            response = await client.post(f"/api/v1/chat-access/chat/actions/{action.id}", json={"allow": allow})
+            assert response.status_code == 200
+            if allow:
+                assert await task == {"written": True}
+            else:
+                with pytest.raises(AccessDenied):
+                    await task
+        assert await broker.run("chat", handle["id"], "read", {"path": "x"}) == {"content": "approved"}
+        response = await client.delete(f"/api/v1/chat-access/chat/grants/{handle['id']}")
+        assert response.status_code == 200
+        with pytest.raises(AccessDenied):
+            await broker.run("chat", handle["id"], "read", {"path": "x"})
 
 
 def test_preview_cannot_grant_or_approve():

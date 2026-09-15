@@ -76,6 +76,7 @@ interface GitState {
 	/** Active session id — scopes git calls to a v2 branch session's own checkout
 	 *  when there is no legacy worktree row (worktreeId null). */
 	sessionId: string | null;
+	workerTarget: gitApi.WorkerGitTarget | null;
 	mode: GitMode;
 	status: gitApi.GitStatus | null;
 	branches: gitApi.Branch[];
@@ -120,6 +121,7 @@ const EMPTY_STATE: GitState = {
 	projectId: null,
 	worktreeId: null,
 	sessionId: null,
+	workerTarget: null,
 	mode: 'project',
 	status: null,
 	branches: [],
@@ -300,6 +302,8 @@ const _remoteSessions = new Set<string>();
 
 function _scopeKey(projectId: string, worktreeId?: string | null, sessionId?: string | null): string {
 	if (sessionId && _remoteSessions.has(sessionId)) return `${projectId}#remote:${sessionId}`;
+	const workerTarget = untrack(() => _state.workerTarget);
+	if (!sessionId && workerTarget) return `${projectId}#worker:${JSON.stringify(workerTarget)}`;
 	if (worktreeId) return `${projectId}#wt:${worktreeId}`;
 	if (sessionId) return `${projectId}#ses:${sessionId}`;
 	return `${projectId}#base`;
@@ -322,7 +326,7 @@ function _identityFor(scope: string): string {
  */
 function _learnIdentity(scope: string, projectId: string, branch: string | null | undefined): string {
 	const current = _identityFor(scope);
-	if (!branch || scope.includes("#remote:")) return current;
+	if (!branch || scope.includes("#remote:") || scope.includes("#worker:")) return current;
 	const canonical = `${projectId}#br:${branch}`;
 	if (canonical === current) return current;
 
@@ -472,8 +476,9 @@ async function _loadCore(
 	}));
 
 	const statusSeq = _nextSeq();
+	const requestScope = sessionId ?? _state.workerTarget ?? undefined;
 	try {
-		const status = await gitApi.getGitStatus(projectId, worktreeId, undefined, sessionId);
+		const status = await gitApi.getGitStatus(projectId, worktreeId, undefined, requestScope);
 		if (_loadInFlight !== scope) return;
 		// Resolve the scope onto its real checkout identity now that we know the
 		// branch, so sibling sessions on the same checkout share this entry.
@@ -482,17 +487,17 @@ async function _loadCore(
 
 		if (status.is_git_repo) {
 			const [branches, graphResponse, worktrees, diffStats, changedFilesResp, prState] = await Promise.all([
-				gitApi.getBranches(projectId, true, worktreeId, undefined, sessionId),
-				gitApi.getCommitGraph(projectId, 50, undefined, sessionId),
-				_remoteSessions.has(sessionId ?? "") ? Promise.resolve([]) : gitApi.getWorktrees(projectId).catch((e) => {
+				gitApi.getBranches(projectId, true, worktreeId, undefined, requestScope),
+				gitApi.getCommitGraph(projectId, 50, undefined, requestScope),
+				(_remoteSessions.has(sessionId ?? "") || (typeof requestScope === 'object' && requestScope.workerId !== 'local')) ? Promise.resolve([]) : gitApi.getWorktrees(projectId).catch((e) => {
 					// This legacy project-level list is optional. A resumed v2
 					// session can have a healthy checkout without a legacy project.
 					console.warn('Failed to load worktree list:', e);
 					return [];
 				}),
-				gitApi.getDiffStats(projectId, true, worktreeId, undefined, sessionId).catch(() => null),
-				gitApi.getChangedFiles(projectId, worktreeId, sessionId).catch(() => null),
-				gitApi.getPrState(projectId, worktreeId ?? undefined, sessionId ?? undefined).catch(() => null)
+				gitApi.getDiffStats(projectId, true, worktreeId, undefined, requestScope).catch(() => null),
+				gitApi.getChangedFiles(projectId, worktreeId, requestScope).catch(() => null),
+				gitApi.getPrState(projectId, worktreeId ?? undefined, requestScope).catch(() => null)
 			]);
 			if (_loadInFlight !== scope) return;
 			if (prState) _lastPrStateFetch.set(key, Date.now());
@@ -529,7 +534,7 @@ async function _loadCore(
 
 			_saveToCache(key, newState);
 
-			_backgroundFetch(key, projectId, worktreeId, sessionId);
+			_backgroundFetch(key, projectId, worktreeId, requestScope);
 		} else {
 			// Not a git repo — a POSITIVE answer, so clear ALL git state (stale
 			// cached diffStats/prState/branches from a previous load must not
@@ -608,7 +613,7 @@ function _keepPreviousPrState(
 /**
  * Background fetch from remote + silent refresh of status/branches.
  */
-function _backgroundFetch(key: string, projectId: string, worktreeId?: string, sessionId?: string) {
+function _backgroundFetch(key: string, projectId: string, worktreeId?: string, sessionId?: gitApi.GitRequestScope) {
 	if (_bgFetchRunning) return;
 	_bgFetchRunning = true;
 
@@ -709,7 +714,7 @@ async function _bgRefreshTick(): Promise<void> {
 		_bgRefreshFailures = 0;
 	}
 
-	if (!_state.githubAvailable || _remoteSessions.has(_state.sessionId ?? "")) return;
+	if (!_state.githubAvailable || _state.workerTarget || _remoteSessions.has(_state.sessionId ?? "")) return;
 
 	// Repo metadata (default branch, full name) — one call, TTL'd, not a poll.
 	const hasGithub = _state.prState?.has_github === true || !!_state.status?.github_repo_name;
@@ -759,6 +764,7 @@ export interface GitActionTarget {
 	projectId: string;
 	worktreeId?: string;
 	sessionId?: string;
+	workerTarget?: gitApi.WorkerGitTarget;
 	head?: string | null;
 	base?: string | null;
 }
@@ -766,14 +772,15 @@ export interface GitActionTarget {
 function _targetIsCurrent(target: GitActionTarget): boolean {
 	return target.projectId === _state.projectId &&
 		(target.sessionId ?? null) === _state.sessionId &&
-		(target.worktreeId ?? null) === _state.worktreeId;
+		(target.worktreeId ?? null) === _state.worktreeId &&
+		JSON.stringify(target.workerTarget ?? null) === JSON.stringify(_state.workerTarget);
 }
 
 export const git = {
 	captureTarget(): GitActionTarget {
 		if (!_state.projectId) throw new Error('No project selected');
 		return { projectId: _state.projectId, worktreeId: _state.worktreeId ?? undefined,
-			sessionId: _state.sessionId ?? undefined, head: _state.status?.current_branch,
+			sessionId: _state.sessionId ?? undefined, workerTarget: _state.workerTarget ?? undefined, head: _state.status?.current_branch,
 			base: _state.status?.default_branch };
 	},
 
@@ -782,6 +789,11 @@ export const git = {
 	},
 
 	subscribe,
+
+	setWorkerTarget(target: gitApi.WorkerGitTarget | null) {
+		if (JSON.stringify(untrack(() => _state.workerTarget)) === JSON.stringify(target)) return;
+		_update(s => ({ ...s, workerTarget: target, stale: true, hydrated: false }));
+	},
 
 	setRemoteSession(sessionId: string | undefined, remote: boolean) {
 		if (!sessionId) return;
@@ -962,7 +974,7 @@ export const git = {
 				projectId,
 				_state.worktreeId ?? undefined,
 				{ signal: controller.signal },
-				_state.sessionId ?? undefined
+				_state.sessionId ?? _state.workerTarget ?? undefined
 			);
 			if (_loadedKey !== key) return;
 			_clearServerBackoff();
@@ -1009,7 +1021,7 @@ export const git = {
 				true,
 				_state.worktreeId ?? undefined,
 				{ signal: controller.signal },
-				_state.sessionId ?? undefined
+				_state.sessionId ?? _state.workerTarget ?? undefined
 			);
 			if (_loadedKey !== key) return;
 			if (!_acceptSeq('branches', seq)) return;
@@ -1034,7 +1046,7 @@ export const git = {
 
 		const seq = _nextSeq();
 		try {
-			const graphResponse = await gitApi.getCommitGraph(_state.projectId, limit, _state.worktreeId ?? undefined, _state.sessionId ?? undefined);
+			const graphResponse = await gitApi.getCommitGraph(_state.projectId, limit, _state.worktreeId ?? undefined, _state.sessionId ?? _state.workerTarget ?? undefined);
 			if (_loadedKey !== key) return;
 			if (!_acceptSeq('commits', seq)) return;
 			_update((s) => ({ ...s, commits: graphResponse.commits }));
@@ -1047,7 +1059,7 @@ export const git = {
 	},
 
 	async loadWorktrees() {
-		if (!_state.projectId) return;
+		if (!_state.projectId || (_state.workerTarget && _state.workerTarget.workerId !== 'local') || _remoteSessions.has(_state.sessionId ?? "")) return;
 		const key = _loadedKey;
 
 		const seq = _nextSeq();
@@ -1069,7 +1081,7 @@ export const git = {
 		_update((s) => ({ ...s, loading: true, error: null }));
 
 		try {
-			await gitApi.createBranch(_state.projectId, name, startPoint, _state.sessionId ?? undefined);
+			await gitApi.createBranch(_state.projectId, name, startPoint, _state.sessionId ?? _state.workerTarget ?? undefined);
 			await git.loadBranches();
 			await git.refreshStatus();
 			_update((s) => ({ ...s, loading: false }));
@@ -1090,7 +1102,7 @@ export const git = {
 		_update((s) => ({ ...s, loading: true, error: null }));
 
 		try {
-			await gitApi.deleteBranch(_state.projectId, name, _state.sessionId ?? undefined);
+			await gitApi.deleteBranch(_state.projectId, name, _state.sessionId ?? _state.workerTarget ?? undefined);
 			await git.loadBranches();
 			_update((s) => ({ ...s, loading: false }));
 		} catch (e) {
@@ -1115,7 +1127,7 @@ export const git = {
 				ref,
 				_state.worktreeId ?? undefined,
 				autoStash,
-				_state.sessionId ?? undefined
+				_state.sessionId ?? _state.workerTarget ?? undefined
 			);
 			// Abort any in-flight poll requests so the post-checkout refreshes
 			// below aren't blocked by stale _branchesInFlight / _statusInFlight guards.
@@ -1152,7 +1164,7 @@ export const git = {
 		_update((s) => ({ ...s, loading: true, error: null }));
 
 		try {
-			await gitApi.fetchRemote(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId ?? undefined);
+			await gitApi.fetchRemote(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId ?? _state.workerTarget ?? undefined);
 			await git.loadBranches();
 			await git.loadGraph();
 			_update((s) => ({ ...s, loading: false }));
@@ -1177,18 +1189,20 @@ export const git = {
 	 */
 	async pull(
 		strategy: 'merge' | 'rebase' = 'merge',
-		autoStash: boolean = false
+		autoStash: boolean = false,
+		target: GitActionTarget = git.captureTarget()
 	): Promise<gitApi.PullResponse> {
 		if (!_state.projectId) throw new Error('No project selected');
 
 		try {
 			const response = await gitApi.pullFromRemote(
-				_state.projectId,
+				target.projectId,
 				{ strategy, auto_stash: autoStash },
-				_state.worktreeId ?? undefined,
-				_state.sessionId ?? undefined
+				target.worktreeId,
+				target.sessionId ?? target.workerTarget
 			);
 
+			if (!_targetIsCurrent(target)) return response;
 			_applyMutationPayload(response.status, response.diff_stats);
 
 			await Promise.all([
@@ -1210,6 +1224,9 @@ export const git = {
 
 	async deleteWorktree(worktreeId: string, keepBranch: boolean = true) {
 		if (!_state.projectId) return;
+		if (_state.workerTarget || _state.worktrees.some(w => w.id === worktreeId && w.resource_kind === 'checkout')) {
+			throw new Error('Use the session lifecycle for this checkout');
+		}
 
 		_update((s) => ({ ...s, loading: true, error: null }));
 
@@ -1249,7 +1266,7 @@ export const git = {
 				true,
 				_state.worktreeId ?? undefined,
 				{ signal: controller.signal },
-				_state.sessionId ?? undefined
+				_state.sessionId ?? _state.workerTarget ?? undefined
 			);
 			if (_loadedKey !== key) return;
 			_clearServerBackoff();
@@ -1302,7 +1319,7 @@ export const git = {
 			const prState = await gitApi.getPrState(
 				_state.projectId,
 				_state.worktreeId ?? undefined,
-				_state.sessionId ?? undefined
+				_state.sessionId ?? _state.workerTarget ?? undefined
 			);
 			if (_loadedKey !== key) return undefined; // context switched mid-flight
 			if (!_acceptSeq('prState', seq)) return undefined;
@@ -1357,7 +1374,7 @@ export const git = {
 					include_unstaged: includeUnstaged
 				},
 				target.worktreeId,
-				target.sessionId
+				target.sessionId ?? target.workerTarget
 			);
 
 			if (!_targetIsCurrent(target)) return response;
@@ -1398,7 +1415,7 @@ export const git = {
 					force
 				},
 				target.worktreeId,
-				target.sessionId
+				target.sessionId ?? target.workerTarget
 			);
 
 			if (!_targetIsCurrent(target)) return response;
@@ -1434,7 +1451,7 @@ export const git = {
 			const response = await gitApi.getChangedFiles(
 				_state.projectId,
 				_state.worktreeId ?? undefined,
-				_state.sessionId ?? undefined
+				_state.sessionId ?? _state.workerTarget ?? undefined
 			);
 			if (_loadedKey !== key) return;
 			_clearServerBackoff();
@@ -1468,7 +1485,7 @@ export const git = {
 				_state.projectId,
 				files,
 				_state.worktreeId ?? undefined,
-				_state.sessionId ?? undefined
+				_state.sessionId ?? _state.workerTarget ?? undefined
 			);
 			_applyMutationPayload(response.status, response.diff_stats);
 			await git.refreshChangedFiles();
@@ -1488,7 +1505,7 @@ export const git = {
 				_state.projectId,
 				files,
 				_state.worktreeId ?? undefined,
-				_state.sessionId ?? undefined
+				_state.sessionId ?? _state.workerTarget ?? undefined
 			);
 			_applyMutationPayload(response.status, response.diff_stats);
 			await git.refreshChangedFiles();
@@ -1509,7 +1526,7 @@ export const git = {
 				files,
 				fileStatuses,
 				_state.worktreeId ?? undefined,
-				_state.sessionId ?? undefined
+				_state.sessionId ?? _state.workerTarget ?? undefined
 			);
 			_applyMutationPayload(response.status, response.diff_stats);
 			await git.refreshChangedFiles();

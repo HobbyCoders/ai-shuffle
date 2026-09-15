@@ -27,16 +27,19 @@
 	let dirty = false;
 	let failures = 0;
 	let retryMs = 30_000;
+	let retryAt = 0;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	function schedule() {
 		clearTimeout(timer);
 		if (alive && !document.hidden && (!verified || enabled)) {
-			timer = setTimeout(() => void refresh(), retryMs);
+			timer = setTimeout(() => void refresh(), Math.max(0, retryAt - Date.now()));
 		}
 	}
 	const base = untrack(() => `/chat-access/${encodeURIComponent(sessionId)}`);
 	async function refresh() {
 		if (!alive || document.hidden) return;
+		// Resource broadcasts cannot shorten an authorization/error backoff.
+		if (failures && Date.now() < retryAt) { schedule(); return; }
 		// Preview cookies cannot use private resources, even on the owner's PC.
 		// This is a capability limit, not a failure of the conversation.
 		if (auth.current.status?.preview_access) {
@@ -72,6 +75,7 @@
 			error = '';
 			failures = 0;
 			retryMs = next.requests.length || next.actions.length || next.grants.length ? 2000 : 30_000;
+			retryAt = Date.now() + retryMs;
 		} catch (e) {
 			if (!alive) return;
 			error = getErrorMessage(e, 'Private access is unavailable.');
@@ -79,6 +83,7 @@
 			failures++;
 			retryMs = [401, 403, 404, 405].includes(status ?? 0)
 				? 300_000 : Math.min(300_000, 5000 * 2 ** Math.min(failures - 1, 6));
+			retryAt = Date.now() + retryMs;
 		} finally {
 			refreshing = false;
 			if (dirty && alive && !document.hidden) { dirty = false; void refresh(); }
@@ -91,18 +96,19 @@
 			if (!document.hidden) void refresh();
 		};
 		const reverify = () => { verified = false; resume(); };
+		const recover = () => { if (!document.hidden) retryAt = 0; reverify(); };
 		const unsubscribe = resourceSync.subscribe(
 			['chat-access', `chat-access:${sessionId}`, 'sessions', `sessions:${sessionId}`], reverify
 		);
-		document.addEventListener('visibilitychange', reverify);
-		window.addEventListener('online', reverify);
+		document.addEventListener('visibilitychange', recover);
+		window.addEventListener('online', recover);
 		void refresh();
 		return () => {
 			alive = false;
 			clearTimeout(timer);
 			unsubscribe();
-			document.removeEventListener('visibilitychange', reverify);
-			window.removeEventListener('online', reverify);
+			document.removeEventListener('visibilitychange', recover);
+			window.removeEventListener('online', recover);
 		};
 	});
 	async function revoke(id: string) {

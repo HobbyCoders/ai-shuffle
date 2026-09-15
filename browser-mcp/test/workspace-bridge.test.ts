@@ -31,6 +31,32 @@ function harness(options: { registerStatus?: number; reportFail?: boolean; pollS
   return {session,bridge,calls,fetcher,send:(commands:unknown[], viewerCount?:number) => { if (!deliver) throw new Error("no poll"); deliver(commands, viewerCount); }};
 }
 describe("runtime bridge", () => {
+  it("backs off passive viewers, ignores heartbeat activity, and refreshes on events", async () => {
+    vi.useFakeTimers();
+    const h = harness({viewerCount:1});
+    await vi.advanceTimersByTimeAsync(600);
+    h.send([{id:"take",runtime_id:h.bridge.workspace.runtimeId,tab_id:null,viewer_id:"owner",op:"takeover",args:{},expires_at:Date.now()+30000}]);
+    await vi.advanceTimersByTimeAsync(11000);
+    expect(h.bridge.workspace.state().control.owner).toBe("human");
+    const metadata = vi.mocked(h.session.workspaceMetadata);
+    metadata.mockClear();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(metadata).not.toHaveBeenCalled();
+    h.send([{id:"heartbeat",runtime_id:h.bridge.workspace.runtimeId,tab_id:null,viewer_id:"owner",op:"heartbeat",args:{},expires_at:Date.now()+30000}]);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(metadata).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(metadata).toHaveBeenCalledTimes(1);
+    metadata.mockClear();
+    h.session.onWorkspaceChange?.();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(metadata).toHaveBeenCalled();
+    metadata.mockClear();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(metadata).toHaveBeenCalled();
+    h.bridge.stop();
+  });
+
   it("pauses metadata without viewers and resumes for passive viewers, events and reopening", async () => {
     vi.useFakeTimers();
     const h = harness({viewerCount:0});

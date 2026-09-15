@@ -7,6 +7,27 @@ import { readEditors, editField, uploadField, rememberFileChooser } from '../src
 
 // Browser-dependent lane is opt-in; plain npm test must also work without Chrome.
 describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () => {
+  it('skips geometry for large hidden forms without losing visible editors or hidden choosers', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true, chromiumSandbox: true });
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<div hidden>' + '<input>'.repeat(50000) + '</div><input aria-label="Visible" value="kept"><input type="password" value="synthetic"><input type="file" id="chooser" hidden>');
+      await page.evaluate(() => {
+        const original = Element.prototype.getBoundingClientRect;
+        Element.prototype.getBoundingClientRect = function() {
+          if (this.closest('[hidden]')) throw new Error('hidden field geometry read');
+          return original.call(this);
+        };
+      });
+      expect(await readEditors(page)).toMatchObject([
+        { label: 'Visible', value: 'kept' }, { type: 'password', value: '' },
+      ]);
+      const input = await page.locator('#chooser').elementHandle();
+      await rememberFileChooser(page, input!);
+      expect((await readEditors(page))[0]).toMatchObject({ type: 'file', chooser: true });
+    } finally { await browser.close(); }
+  });
+
   it('uploads real bytes, supports hidden chooser targets, and rejects escaped or stale paths', async () => {
     const folder = mkdtempSync(join(tmpdir(), 'browser-picker-'));
     const allowed = join(folder, 'allowed.txt');

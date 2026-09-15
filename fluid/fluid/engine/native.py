@@ -150,7 +150,7 @@ from fluid.providers.pricing import PricingResolver
 from fluid.tools import read_window
 from fluid.providers.pricing import estimate_cost as estimate_cost_from_table
 from fluid.providers.windows import context_window_for
-from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
+from fluid.store.base import SessionMeta, SessionNode, SessionStore, iter_events, new_id
 from fluid.tools.builtins._util import resolve as resolve_tool_path
 from fluid.tools.builtins.tool_search import (
     parse_deferred_catalog,
@@ -1744,7 +1744,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         self._usage_rehydrated.add(sid)
         try:
-            events = await self.store.events_since(sid, 0)
+            events = [event async for event in iter_events(self.store, sid, 0)
+                      if isinstance(event, Usage)]
         except Exception:
             return None
         on_path = {n.node_id for n in nodes}
@@ -2336,7 +2337,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             return
         self._queued_peer_rehydrated = True
         try:
-            events = await self.store.events_since(sid, 0)
+            events = [event async for event in iter_events(self.store, sid, 0)
+                      if isinstance(event, (TurnStarted, SubagentEvent))]
         except Exception:  # noqa: BLE001 — stores without replay degrade in memory
             return
         queued: list[AgentMessage] = []
@@ -2407,7 +2409,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             return
         self._compaction_rehydrated = True
         try:
-            events = await self.store.events_since(sid, 0)
+            events = [event async for event in iter_events(self.store, sid, 0)
+                      if isinstance(event, ContextCompaction)]
         except Exception:  # a store that cannot replay just re-compacts later
             return
         self._compactor.rehydrate(
@@ -2441,7 +2444,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._prev_prefix_fingerprint is not None:
             return
         try:
-            events = await self.store.events_since(sid, 0)
+            events = [event async for event in iter_events(self.store, sid, 0)
+                      if isinstance(event, Usage)]
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             return
         for event in reversed(events):

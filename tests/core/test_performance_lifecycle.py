@@ -62,7 +62,7 @@ async def test_expired_access_does_not_create_refresh_feedback(monkeypatch):
     from app.core import chat_access, chat_vault
     owner = ("project", "worker", "user-7", "created")
     monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=owner))
-    monkeypatch.setattr(chat_vault, "catalog", lambda user: [])
+    monkeypatch.setattr(chat_vault, "catalog", lambda user, *, cache_empty: [])
     broker = chat_access.Broker()
     grant = chat_access.Grant(id="expired", session_id="session-7", owner=owner, label="fixture", kind="folder", target="fixture", expires_at=0)
     broker.grants[grant.id] = grant
@@ -80,7 +80,7 @@ async def test_empty_access_snapshot_authorizes_once(monkeypatch):
     owner = ("project", "worker", "user-7", "created")
     get_owner = AsyncMock(return_value=owner)
     monkeypatch.setattr(chat_access, "session_owner", get_owner)
-    monkeypatch.setattr(chat_vault, "catalog", lambda user: [])
+    monkeypatch.setattr(chat_vault, "catalog", lambda user, *, cache_empty: [])
     result = await chat_access.Broker().snapshot("session-7")
     assert result["grants"] == []
     get_owner.assert_awaited_once_with("session-7")
