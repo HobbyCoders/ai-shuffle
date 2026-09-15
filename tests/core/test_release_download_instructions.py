@@ -1,8 +1,12 @@
 """Release notes expose every distribution and safe, version-pinned Docker setup."""
 from pathlib import Path
+import os
 import re
 import shlex
+import shutil
 import subprocess
+
+from fluid.tools.shell import resolve_shell
 
 import yaml
 
@@ -57,21 +61,46 @@ def test_release_version_outputs_feed_play_and_docker(tmp_path):
     workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
     steps = workflow["jobs"]["create-release"]["steps"]
     script = next(step["run"] for step in steps if step.get("id") == "version")
+    # Windows' PATH may resolve "bash" to the WSL launcher. Use the same
+    # native Git Bash discovery as our tools, while Linux runs actual Bash.
+    if os.name == "nt":
+        shell = resolve_shell()
+        assert shell.name == "git-bash", "Install Git Bash to exercise the release script"
+        bash = shell.path
+    else:
+        bash = shutil.which("bash")
+        assert bash is not None, "Install Bash to exercise the release script"
+    # Preserve OS runtime inputs, not credentials, BASH_ENV or release outputs
+    # inherited from the worker. Git Bash needs SystemRoot on Windows.
+    runtime_env = {key: os.environ[key] for key in ("PATH", "SystemRoot", "WINDIR", "TEMP", "TMP")
+                   if key in os.environ}
+    output_dir = tmp_path / "release outputs with spaces"
+    output_dir.mkdir()
+    env_file, output = output_dir / "env", output_dir / "output"
     for raw in ("v1.2.3", "V1.2.3", " 1.2.3 ", "v1.2.3-rc.1"):
-        env_file, output = tmp_path / "env", tmp_path / "output"
         env_file.write_text("")
         output.write_text("")
-        result = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
-                                env={"VERSION": raw, "GITHUB_ENV": str(env_file),
-                                     "GITHUB_OUTPUT": str(output)})
-        assert result.returncode == 0, result.stderr
+        result = subprocess.run([bash, "-e", "-c", script], capture_output=True, text=True,
+                                cwd=tmp_path, timeout=15,
+                                env={**runtime_env, "VERSION": raw,
+                                     "GITHUB_ENV": env_file.as_posix(),
+                                     "GITHUB_OUTPUT": output.as_posix()})
+        assert result.returncode == 0, result.stdout + result.stderr
         version = raw.strip().lstrip("vV")
         assert output.read_text() == f"tag=v{version}\n"
         assert f"RELEASE_VERSION={version}\n" in env_file.read_text()
     for raw in ("main", "v1.2", "v1.2.3;exit 0", "../v1.2.3"):
-        result = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
-                                env={"VERSION": raw})
-        assert result.returncode != 0
+        env_file.write_text("")
+        output.write_text("")
+        result = subprocess.run([bash, "-e", "-c", script], capture_output=True, text=True,
+                                cwd=tmp_path, timeout=15,
+                                env={**runtime_env, "VERSION": raw,
+                                     "GITHUB_ENV": env_file.as_posix(),
+                                     "GITHUB_OUTPUT": output.as_posix()})
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "::error::Invalid release version" in result.stdout
+        assert env_file.read_text() == ""
+        assert output.read_text() == ""
 
 
 def test_release_orchestration_defaults_to_docker_and_play_only():
