@@ -9,6 +9,7 @@ import { app, ipcMain, Notification, shell, type IpcMainEvent, type IpcMainInvok
 import type { PostgresPhase } from './postgres';
 import type { Updater } from './updater';
 import { managedContext } from './managed-context';
+import { desktopSampler } from './diagnostics';
 import { MainWindow, TITLE_BAR_HEIGHT, type TitleBarTheme } from './window';
 import { type WorkerState, type WorkerSupervisor } from './worker';
 
@@ -75,6 +76,16 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 			updateState: updater.current
 		};
 	});
+
+	// Opt-in only, with the existing sender guard plus a main-frame origin check.
+	const sampleDesktop = desktopSampler(() => app.getAppMetrics());
+	handle('desktop:diagnostics', event => {
+		if (!fromMainWindow(event) || event.senderFrame !== event.sender.mainFrame) return false;
+		if (fromBundledPage(event)) return true;
+		try {
+			return !!window.currentWorkerUrl && new URL(event.senderFrame.url).origin === new URL(window.currentWorkerUrl).origin;
+		} catch { return false; }
+	}, () => sampleDesktop());
 
 	// Window and shell.
 	handle('desktop:window-action', fromMainWindow, (_e, action) => {

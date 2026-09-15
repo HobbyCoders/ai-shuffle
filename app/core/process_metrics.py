@@ -9,6 +9,7 @@ from pathlib import Path
 _LOCK = threading.Lock()
 _CACHE: dict[bool, tuple[float, dict]] = {}
 _PREVIOUS: dict[bool, tuple[float, dict]] = {}
+_COLLECTOR_CPU_SECONDS = 0.0
 CACHE_SECONDS = 5.0
 MAX_STACK_PROCESSES = 256
 
@@ -26,6 +27,8 @@ def _role(process, backend_pid):
             return "desktop_gpu_process_cpu"
         if "--type=renderer" in args:
             return "desktop_renderer"
+        if not any(arg.startswith("--type=") for arg in args):
+            return "desktop_main"
         return "desktop_other"
     if name in {"chrome", "chrome.exe", "msedge.exe", "chromium"}:
         return "agent_browser"
@@ -74,19 +77,26 @@ def collect_process_metrics(whole_stack=False):
     """
     import psutil
 
+    global _COLLECTOR_CPU_SECONDS
     with _LOCK:
         now = time.monotonic()
         cached = _CACHE.get(whole_stack)
         if cached and now - cached[0] < CACHE_SECONDS:
             return cached[1]
         started = time.perf_counter()
+        cpu_started = time.thread_time()
         backend = psutil.Process(os.getpid())
         root = backend
+        launcher_pids = set()
         if whole_stack:
             for parent in backend.parents():
                 try:
-                    if parent.name().lower() in {"electron", "electron.exe", "ai shuffle", "ai shuffle.exe"}:
+                    name = parent.name().lower()
+                    if name in {"python", "python.exe", "python3", "pythonw.exe"}:
+                        launcher_pids.add(parent.pid)
+                    if name in {"electron", "electron.exe", "ai shuffle", "ai shuffle.exe"}:
                         root = parent
+                        break  # Nearest shell owns us; outer shells may run unrelated workers.
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
         scope = "desktop_tree" if root.pid != backend.pid else "backend_tree"
@@ -114,10 +124,13 @@ def collect_process_metrics(whole_stack=False):
             try:
                 with process.oneshot():
                     key = (process.pid, process.create_time())
-                    role = _role(process, backend.pid)
+                    role = "python_launcher" if process.pid in launcher_pids else _role(process, backend.pid)
                     mem = process.memory_info()
                     cpu = process.cpu_times()
                     ticks = cpu.user + cpu.system
+                    if process.pid == backend.pid:
+                        # Subtract only this collector thread, not concurrent app work.
+                        ticks -= _COLLECTOR_CPU_SECONDS + time.thread_time() - cpu_started
                     row = {"rss_mib": mem.rss / 2**20,
                            "private_commit_mib": getattr(mem, "private", None),
                            "threads": process.num_threads()}
@@ -148,7 +161,13 @@ def collect_process_metrics(whole_stack=False):
                                         "cpu_pct_machine": cpu_pct, **row})
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 inaccessible += 1
+        collector_cpu = time.thread_time() - cpu_started
+        _COLLECTOR_CPU_SECONDS += collector_cpu
         result = {"scope": scope, "requested_whole_stack": whole_stack,
+                  "collector_cpu_seconds": collector_cpu,
+                  "collector_cpu_excluded_from_backend": True,
+                  "external_observer_cpu_included": False,
+                  "working_set_is_unique_ram": False,
                   "managed_database_identified": database is not None,
                   "scope_includes_all_desktop_descendants": scope == "desktop_tree",
                   "gpu_engine_utilization_measured": False,

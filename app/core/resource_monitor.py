@@ -40,6 +40,16 @@ async def _collect_metrics() -> dict:
     """Collect all resource metrics from across the application."""
     metrics = {}
 
+    # Read existing browser state only: no get(), CDP request or actor startup.
+    from app.core import browser_control, browser_runtime
+    brokers = tuple(browser_control._brokers.values())
+    metrics["browser_actors"] = len(browser_runtime._runtimes)
+    metrics["browser_active_calls"] = sum(r.active for r in browser_runtime._runtimes.values())
+    metrics["browser_viewers"] = sum(len(b.viewers) for b in brokers)
+    metrics["browser_tabs_reported"] = sum(len(b.state["tabs"]) for b in brokers if b.state["available"])
+    metrics["browser_available_workspaces"] = sum(bool(b.state["available"]) for b in brokers)
+    metrics["browser_tab_counts_are_last_reported"] = True
+
     # --- WebSocket tracking dicts ---
     try:
         from app.api.websocket import _active_chat_sessions

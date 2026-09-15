@@ -86,20 +86,60 @@ async def test_empty_access_snapshot_authorizes_once(monkeypatch):
     get_owner.assert_awaited_once_with("session-7")
 
 
+
+
+@pytest.mark.asyncio
+async def test_whole_stack_denies_non_owner_before_collecting(monkeypatch):
+    from fastapi import FastAPI, Request
+    import httpx
+    from app.api import system
+    from app.core import resource_monitor
+    collect = AsyncMock(return_value={})
+    monkeypatch.setattr(resource_monitor, "_collect_metrics", collect)
+    app = FastAPI()
+    app.include_router(system.router)
+    def member(request: Request):
+        request.state.is_admin = False
+        return "api_key:member"
+    app.dependency_overrides[system.require_auth] = member
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.get("/api/v1/diagnostics?whole_stack=true")).status_code == 403
+    collect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_browser_counts_follow_broker_lifecycle_without_starting_actor(monkeypatch):
+    from app.core import browser_control, browser_runtime, resource_monitor
+    monkeypatch.setattr(browser_control, "_brokers", {})
+    monkeypatch.setattr(browser_runtime, "_runtimes", {})
+    broker = browser_control.get("private-session-id")
+    broker.attach("private-viewer-id", AsyncMock())
+    before = await resource_monitor._collect_metrics()
+    assert before["browser_actors"] == 0
+    assert before["browser_viewers"] == 1
+    assert before["browser_tabs_reported"] == 0
+    browser_control.clear("private-session-id")
+    after = await resource_monitor._collect_metrics()
+    assert after["browser_viewers"] == 0
+    assert not browser_runtime._runtimes
+    assert "private-session-id" not in str(after)
+
+
 def test_process_scope_cache_and_cpu_accounting(monkeypatch):
     from app.core import process_metrics as module
     import psutil
     clock = SimpleNamespace(now=10.0)
-    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock.now, perf_counter=lambda: clock.now))
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock.now, perf_counter=lambda: clock.now, thread_time=lambda: 0.0))
     monkeypatch.setattr(module, "_CACHE", {})
     monkeypatch.setattr(module, "_PREVIOUS", {})
+    monkeypatch.setattr(module, "_COLLECTOR_CPU_SECONDS", 0.0)
     monkeypatch.setattr(module, "_managed_database_process", lambda psutil: None)
     class Process:
         def __init__(self, pid, name, children=()):
             self.pid, self._name, self._children = pid, name, list(children)
         def name(self): return self._name
         def children(self, recursive=False): return self._children
-        def parents(self): return [desktop]
+        def parents(self): return [desktop, outer_desktop]
         def create_time(self): return 1.0
         def cmdline(self): return []
         def memory_info(self): return SimpleNamespace(rss=2**20, private=2**19)
@@ -110,13 +150,18 @@ def test_process_scope_cache_and_cpu_accounting(monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *args): pass
     backend = Process(module.os.getpid(), "python.exe")
+    launcher = Process(91005, "python.exe")
+    backend.parents = lambda: [launcher, desktop, outer_desktop]
     database = Process(91001, "postgres.exe")
-    desktop = Process(91002, "electron.exe", [backend, database])
+    desktop = Process(91002, "electron.exe", [launcher, backend, database])
+    outer_desktop = Process(91003, "electron.exe", [desktop, Process(91004, "msedge.exe")])
     monkeypatch.setattr(psutil, "Process", lambda pid: backend)
     monkeypatch.setattr(psutil, "cpu_count", lambda: 4)
     first = module.collect_process_metrics(True)
     assert first["scope"] == "desktop_tree"
-    assert first["cpu_unmeasured_processes"] == 3
+    assert first["cpu_unmeasured_processes"] == 4
+    assert {p["pid"] for p in first["processes"]} == {launcher.pid, backend.pid, desktop.pid, database.pid}
+    assert first["groups"]["python_launcher"]["processes"] == 1
     assert first["groups"]["database"]["cpu_pct_machine"] is None
     assert module.collect_process_metrics(True) is first
     clock.now += 5
@@ -176,7 +221,11 @@ async def test_whole_stack_diagnostics_is_opt_in_and_runs_off_loop(monkeypatch):
     monkeypatch.setattr(fluid_memory, "journal_diagnostics", journal)
     app = FastAPI()
     app.include_router(system.router)
-    app.dependency_overrides[system.require_auth] = lambda: "test"
+    from fastapi import Request
+    def owner(request: Request):
+        request.state.is_admin = True
+        return "test"
+    app.dependency_overrides[system.require_auth] = owner
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         plain = await client.get("/api/v1/diagnostics")
         assert plain.status_code == 200 and "whole_stack" not in plain.json()["metrics"]
