@@ -57,7 +57,7 @@ TABS
 
 RESIZE AND UPLOAD
 - browser_resize sets the viewport: preset=mobile|tablet|desktop, or an explicit width+height (which overrides a preset). Provide exactly one of those forms.
-- browser_upload sets files on a file input you target by ref; pass absolute paths. Only files under the server's configured upload directory are accepted, 10MB per file.
+- browser_upload sets files on a file input you target by ref; pass absolute paths. Only files under the server's configured upload directory are accepted. The tool imposes no file-size cap; the destination site may have its own limits.
 
 BATCHING
 - browser_batch runs several of the tools above in order and stops at the first error. Because the schema stays flat, each action is a JSON STRING: {"tool":"browser_act","input":{"kind":"click","ref":"e5"}}. Pass them as the actions array (max 20). A batch cannot contain another batch. You get one result per attempted action ({tool, ok, summary|error}).

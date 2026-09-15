@@ -137,7 +137,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "browser_upload",
     description:
-      "Set files on a file input (by ref). paths must be under BROWSER_UPLOAD_DIR; 10MB/file cap.",
+      "Set files on a file input (by ref). paths must be under BROWSER_UPLOAD_DIR. No tool-imposed size cap.",
     inputSchema: uploadSchema,
     run: (session, input) => runUpload(session, input as unknown as UploadInput),
   },

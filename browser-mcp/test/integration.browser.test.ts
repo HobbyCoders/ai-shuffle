@@ -743,6 +743,38 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     delete process.env.BROWSER_UPLOAD_DIR;
   });
 
+  it("upload: accepts a 27 MiB file and preserves its bytes in the browser", async () => {
+    const previousDir = process.env.BROWSER_UPLOAD_DIR;
+    const path = join(uploadDir, "large-bundle.aab");
+    const size = 27 * 1024 * 1024;
+    writeFileSync(path, Buffer.alloc(size, 0x61));
+    process.env.BROWSER_UPLOAD_DIR = uploadDir;
+    try {
+      await runNavigate(session, { url: uploadFixtureUrl });
+      const snapshot = await runSnapshot(session, { filter: "all" });
+      const text = snapshot.content
+        .filter((item) => item.type === "text")
+        .map((item) => item.text)
+        .join("\n");
+      const ref = /button "Attachment"[^\n]*\[ref=(e\d+)\]/.exec(text)?.[1];
+      expect(ref).toBeTruthy();
+      const result = await runUpload(session, { ref: ref!, paths: [path] });
+      expect(result.isError, firstText(result)).not.toBe(true);
+      expect(JSON.parse(firstText(result))).toEqual({ ok: true, ref, count: 1 });
+      const page = await session.ensurePage();
+      const received = await page.evaluate(async () => {
+        const file = (document.getElementById("file") as HTMLInputElement).files![0];
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        return { name: file.name, size: file.size, intact: bytes.every((byte) => byte === 0x61) };
+      });
+      expect(received).toEqual({ name: "large-bundle.aab", size, intact: true });
+    } finally {
+      if (previousDir === undefined) delete process.env.BROWSER_UPLOAD_DIR;
+      else process.env.BROWSER_UPLOAD_DIR = previousDir;
+      rmSync(path, { force: true });
+    }
+  }, 45000);
+
   it("batch runs sequentially and stops on the first error", async () => {
     await runNavigate(session, { url: fixtureUrl });
     const lookup = (name: string) => {

@@ -4,7 +4,7 @@
  * Path safety: uploads are allowed ONLY for files under the directory named by
  * the process env `BROWSER_UPLOAD_DIR`. If that var is unset, ALL uploads are
  * rejected (safe default — the backend-wiring PR opts in by setting it). Each
- * file must exist, be a regular file, and be ≤ 10 MB. The ref must resolve to a
+ * file must exist and be a regular file. The ref must resolve to a
  * file input, else we reject with a clear error rather than a raw Playwright one.
  *
  * Symlink safety: the allowlist check runs on the REAL (symlink-resolved) path,
@@ -17,8 +17,6 @@ import { statSync, realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { StaleRefError, type Session } from "../session.js";
 import { jsonResult, errorResult, type McpToolResult } from "./result.js";
-
-export const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 
 export interface UploadInput {
   ref: string;
@@ -35,7 +33,7 @@ export function isUnderDir(candidate: string, dir: string): boolean {
 }
 
 /**
- * Validate every path against the allowlist + size cap. Returns the resolved
+ * Validate every path against the allowlist and require regular files. Returns the resolved
  * absolute paths, or an error string. Pure except for fs stat (injected in tests).
  */
 export function validatePaths(
@@ -82,9 +80,6 @@ export function validatePaths(
     if (!info.isFile()) {
       return { error: `not a regular file: ${p}` };
     }
-    if (info.size > UPLOAD_MAX_BYTES) {
-      return { error: `file exceeds 10MB limit: ${p} (${info.size} bytes)` };
-    }
     resolved.push(realPath);
   }
   return { paths: resolved };
@@ -115,7 +110,8 @@ export async function runUpload(session: Session, input: UploadInput): Promise<M
   }
 
   try {
-    await locator.setInputFiles(validated.paths, { timeout: 5000 });
+    // Larger files can take longer to attach over CDP, especially on Windows.
+    await locator.setInputFiles(validated.paths, { timeout: 30000 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return errorResult(`upload failed: ${msg}`);

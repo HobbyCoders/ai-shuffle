@@ -11,7 +11,7 @@ import {
 import { compileMatcher, PATTERN_MAX_LEN } from "../src/match.js";
 import { parseBatchAction, runBatch, BATCH_MAX_ACTIONS } from "../src/tools/batch.js";
 import { resolveDims, RESIZE_PRESET_DIMS } from "../src/tools/resize.js";
-import { validatePaths, isUnderDir, UPLOAD_MAX_BYTES } from "../src/tools/upload.js";
+import { validatePaths, isUnderDir } from "../src/tools/upload.js";
 import { runNetwork, NETWORK_BODY_MAX_BYTES } from "../src/tools/network.js";
 import { raceWithTimeout } from "../src/session.js";
 import type { Session } from "../src/session.js";
@@ -333,17 +333,28 @@ describe("upload path allowlist", () => {
     expect("error" in r && r.error).toMatch(/BROWSER_UPLOAD_DIR is not set/);
   });
 
-  it("accepts an in-dir file under the size cap", () => {
+  it("accepts an in-dir regular file", () => {
     const r = validatePaths(["/srv/uploads/a.png"], dir, stat(1234), idRealpath);
     expect("paths" in r && r.paths).toEqual(["/srv/uploads/a.png"]);
   });
 
-  it("rejects out-of-dir paths and oversize files", () => {
-    expect("error" in validatePaths(["/etc/passwd"], dir, stat(10), idRealpath) ? true : false).toBe(
-      true,
-    );
-    const big = validatePaths(["/srv/uploads/big.bin"], dir, stat(UPLOAD_MAX_BYTES + 1), idRealpath);
-    expect("error" in big && big.error).toMatch(/10MB/);
+  it.each([10 * 1024 * 1024, 10 * 1024 * 1024 + 1, 100 * 1024 * 1024, 5 * 1024 ** 3])(
+    "accepts an in-dir file of %i bytes without a size cap",
+    (size) => {
+      expect(validatePaths(["/srv/uploads/big.bin"], dir, stat(size), idRealpath)).toEqual({
+        paths: ["/srv/uploads/big.bin"],
+      });
+    },
+  );
+
+  it("rejects out-of-dir paths regardless of size", () => {
+    const result = validatePaths(["/etc/passwd"], dir, stat(100 * 1024 * 1024), idRealpath);
+    expect("error" in result && result.error).toMatch(/must be under BROWSER_UPLOAD_DIR/);
+  });
+
+  it("rejects non-regular files", () => {
+    const result = validatePaths(["/srv/uploads/subdir"], dir, stat(0, false), idRealpath);
+    expect("error" in result && result.error).toMatch(/not a regular file/);
   });
 
   it("rejects an empty path list", () => {
