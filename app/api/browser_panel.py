@@ -47,6 +47,8 @@ from app.core import browser_control, browser_stream
 from app.core import browser_panel_registry as registry
 from app.db import database
 from app.db.async_database import run_sync
+from app.network import browser_panel as remote_panel
+from app.network import control, tokens
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +155,10 @@ async def start_panel(
     request: Request, session_id: str, token: str = Depends(require_auth),
 ) -> dict:
     """Ready the shared workspace without taking control or navigating it."""
-    await require_session(request, session_id)
+    session = await require_session(request, session_id)
+    owner = control.owner_of(session)
+    if owner:
+        return await remote_panel.forward_http(request, owner, session_id, "start")
     from app.core import browser_runtime
     try:
         return await browser_runtime.start(session_id)
@@ -171,7 +176,10 @@ async def upload_panel_files(
     request: Request, session_id: str, viewer_id: str, runtime_id: str,
     tab_id: str, field: str, token: str = Depends(require_auth),
 ) -> dict:
-    await require_session(request, session_id)
+    session = await require_session(request, session_id)
+    owner = control.owner_of(session)
+    if owner:
+        return await remote_panel.forward_http(request, owner, session_id, "upload")
     from app.core import browser_uploads
     return await browser_uploads.upload(request, session_id, viewer_id, runtime_id, tab_id, field)
 
@@ -217,13 +225,48 @@ async def get_panel_status(
 ) -> dict:
     """Report whether a live panel target exists for this session."""
     async with api_error_handler("get browser panel status"):
-        await require_session(request, session_id)  # 404 / 403 access check
+        session = await require_session(request, session_id)  # 404 / 403 access check
+        owner = control.owner_of(session)
+        if owner:
+            return await remote_panel.forward_http(request, owner, session_id, "")
         target = registry.get_target(session_id)
         return {
             "has_target": bool(target is not None and target.target_id),
             "url": target.url if target is not None else None,
             "browser_running": await _browser_running(),
         }
+
+
+@router.get("/api/v1/network/peer/browser/{session_id}")
+async def peer_panel_status(session_id: str, device_id: str = Depends(tokens.require_device)) -> dict:
+    await remote_panel.require_owned(session_id)
+    target = registry.get_target(session_id)
+    return {"has_target": bool(target is not None and target.target_id),
+            "url": target.url if target is not None else None,
+            "browser_running": await _browser_running()}
+
+
+@router.post("/api/v1/network/peer/browser/{session_id}/start")
+async def peer_panel_start(session_id: str, device_id: str = Depends(tokens.require_device)) -> dict:
+    await remote_panel.require_owned(session_id)
+    from app.core import browser_runtime
+    try:
+        return await browser_runtime.start(session_id)
+    except browser_runtime.RuntimeUnavailable as exc:
+        raise HTTPException(503, str(exc) or "Browser runtime could not start") from None
+
+
+@router.post("/api/v1/network/peer/browser/{session_id}/upload")
+async def peer_panel_upload(request: Request, session_id: str, viewer_id: str, runtime_id: str,
+                            tab_id: str, field: str, device_id: str = Depends(tokens.require_device)) -> dict:
+    await remote_panel.require_owned(session_id)
+    from app.core import browser_uploads
+    return await browser_uploads.upload(request, session_id, viewer_id, runtime_id, tab_id, field)
+
+
+@router.websocket("/api/v1/network/peer/browser/{session_id}")
+async def peer_panel_websocket(websocket: WebSocket, session_id: str) -> None:
+    await remote_panel.serve_peer(websocket, session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +307,10 @@ async def browser_panel_websocket(
         await websocket.close(code=4003, reason="Access denied")
         return
 
+    owner = control.owner_of(session)
+    if owner:
+        await remote_panel.forward_websocket(websocket, owner, session_id)
+        return
     await serve_browser_panel(websocket, session_id)
 
 
