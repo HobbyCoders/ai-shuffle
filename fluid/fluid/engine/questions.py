@@ -8,7 +8,7 @@ from fluid.context.steering import format_steer, format_system_notice
 from fluid.events.model import QuestionRequest, QuestionAnswered, QuestionDelivered
 from fluid.events.ops import RespondQuestion, UserTurn
 from fluid.messages import Text
-from fluid.store.base import new_id
+from fluid.store.base import iter_events, new_id
 from fluid.tools.builtins.ask_user import _render_message, _resolve_answer
 from fluid.tools.hardening import defang_harness_markers
 
@@ -27,7 +27,9 @@ class QuestionLifecycleMixin:
         if self._questions_loaded:
             return
         meta = await self._ensure_session()
-        for event in await self.store.events_since(meta.session_id, 0):
+        events = [event async for event in iter_events(self.store, meta.session_id, 0)
+                  if isinstance(event, (QuestionRequest, QuestionAnswered, QuestionDelivered))]
+        for event in events:
             if isinstance(event, QuestionRequest) and event.nonblocking:
                 self._question_requests[event.request_id] = event
             elif isinstance(event, QuestionAnswered):

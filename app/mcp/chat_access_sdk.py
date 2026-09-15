@@ -21,7 +21,7 @@ addresses, passwords, private keys, or other connection details as chat text.
 The card sends those inputs directly to the worker; you receive only a temporary
 handle, resource kind, permissions and expiry. Never try to reveal private inputs.
 Grants expire and are lost on restart. This tool currently supports SSH machines
-and Linux folders, not arbitrary API keys; do not collect a secret without a tool
+and bounded folders on supported Windows/Linux workers, not arbitrary API keys; do not collect a secret without a tool
 which can consume it privately.
 Folder grants provide bounded text read/list/write operations, not Bash. Machine
 grants allow commands on that verified SSH target as the approved account; they
@@ -58,7 +58,7 @@ def create_chat_access_server(session_id: str):
             message = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
         return {"isError": True, "content": [{"type": "text", "text": message}]}
 
-    @tool("RequestChatAccess", "Show a private input card in this conversation for an SSH machine or Linux folder. Explain why access is needed. The user enters connection details privately; returns only an opaque temporary handle, never credentials or the address. Waits up to four minutes. Do not request arbitrary secrets without a supported private consumer.", {"kind": str, "purpose": str})
+    @tool("RequestChatAccess", "Show a private input card in this conversation for an SSH machine or bounded folder on a supported worker. Explain why access is needed. The user enters connection details privately; returns only an opaque temporary handle, never credentials or the address. Waits up to four minutes. Do not request arbitrary secrets without a supported private consumer.", {"kind": str, "purpose": str})
     async def request(args):
         return await invoke("request", args)
 

@@ -8,6 +8,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
+import time
 import uuid
 
 from app.core import encryption
@@ -43,13 +45,39 @@ def unpack(owner: tuple, connection_id: str, ciphertext: str):
         raise AccessDenied("Saved connection could not be unlocked on this worker.") from None
 
 
-def catalog(owner: tuple) -> list[dict]:
+# Only absence is cached: no credentials or decrypted catalogue entries survive a
+# snapshot. Saving/deleting invalidates all scopes, including concurrent readers.
+_EMPTY_CATALOG_TTL = 300
+_empty_catalog: dict[str, float] = {}
+_catalog_generation = 0
+_catalog_lock = threading.Lock()
+
+
+def _invalidate_catalog():
+    global _catalog_generation
+    with _catalog_lock:
+        _catalog_generation += 1
+        _empty_catalog.clear()
+
+
+def catalog(owner: tuple, *, cache_empty: bool = False) -> list[dict]:
     if not encryption.is_encryption_ready():
         return []
+    scope = prefix(owner)
+    with _catalog_lock:
+        generation = _catalog_generation
+        if cache_empty and _empty_catalog.get(scope, 0) > time.monotonic():
+            return []
     with database.get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT key, value FROM system_settings WHERE key LIKE %s ORDER BY key LIMIT 51", (prefix(owner) + "%",))
         rows = cursor.fetchall()
+    if cache_empty and not rows:
+        with _catalog_lock:
+            if generation == _catalog_generation:
+                if len(_empty_catalog) >= 128:
+                    _empty_catalog.clear()
+                _empty_catalog[scope] = time.monotonic() + _EMPTY_CATALOG_TTL
     result = []
     for row in rows:
         connection_id = row["key"].rsplit(":", 1)[-1]
@@ -84,9 +112,11 @@ def save(owner: tuple, spec) -> str:
     if not encryption.is_encrypted(ciphertext):
         raise AccessDenied("Secure storage refused an unencrypted value.")
     database.set_system_setting(binding, ciphertext)
+    _invalidate_catalog()
     return connection_id
 
 
 def delete(owner: tuple, connection_id: str):
     if not database.delete_system_setting(key(owner, connection_id)):
         raise AccessDenied("Unknown saved connection.")
+    _invalidate_catalog()

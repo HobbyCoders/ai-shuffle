@@ -64,7 +64,7 @@
 		{#if request.kind === 'folder'}
 			<label>Folder on this worker<input required placeholder="/home/me/documents" bind:value={path} /></label>
 			<label class="check"><input type="checkbox" bind:checked={writable} />Allow text writes, with approval for each write</label>
-			<p class="muted">Linux file confinement only. No shell, links, mount traversal, or files larger than 64 KiB.</p>
+			<p class="muted">Bounded folder access. No shell, links, mount traversal, or files larger than 64 KiB.</p>
 		{:else}
 			<div class="grid">
 				<label>Server IP address<input required placeholder="10.0.0.200" bind:value={host} /></label>

@@ -52,7 +52,7 @@ class Socket {
 }
 let stop:()=>void;
 function account(username:string|null) {m.listener?.({loading:false,status:{authenticated:!!username,username,preference_identity:username ? {user_type:'admin',user_id:username} : null}});}
-beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();Socket.all=[];localStorage.clear();sessionStorage.clear();vi.stubGlobal('WebSocket',Socket);});
+beforeEach(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:false});vi.useFakeTimers();vi.clearAllMocks();Socket.all=[];localStorage.clear();sessionStorage.clear();vi.stubGlobal('WebSocket',Socket);});
 afterEach(()=>{stop?.();vi.useRealTimers();vi.unstubAllGlobals();});
 describe('root authenticated live-sync lifecycle',()=>{
  it('delivers a scoped socket access change through the real resource subscriber to the approval card', async () => {
@@ -128,6 +128,24 @@ describe('root authenticated live-sync lifecycle',()=>{
   account(null);expect(old.close).toHaveBeenCalled();expect(m.stop).toHaveBeenLastCalledWith(true);
   m.refresh.mockClear();old.emit({type:'preferences_changed',keys:['theme']});expect(m.refresh).not.toHaveBeenCalled();
   account('carol');expect(Socket.all).toHaveLength(2);expect(m.start).toHaveBeenLastCalledWith(true,'admin:carol');
+ });
+ it('defers hidden list invalidations and reconciles once on visibility',async()=>{
+  Object.defineProperty(document,'hidden',{configurable:true,value:true});
+  Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});
+  stop=startLiveSync();account('alice');
+  for(let i=0;i<20;i++) {
+   Socket.all[0].emit({type:'resources_changed',resources:['sessions','projects']});
+   await vi.advanceTimersByTimeAsync(100);
+  }
+  expect(m.loadSessions).not.toHaveBeenCalled();
+  expect(m.loadProjects).not.toHaveBeenCalled();
+  Object.defineProperty(document,'hidden',{configurable:true,value:false});
+  Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});
+  document.dispatchEvent(new Event('visibilitychange'));
+  await vi.advanceTimersByTimeAsync(100);
+  expect(m.loadProjects).toHaveBeenCalledOnce();
+  // Both subscriptions enter the central coalescing loadSessions operation.
+  expect(m.loadSessions).toHaveBeenCalledTimes(2);
  });
  it('refreshes session project assignments when a project is changed or removed',async()=>{
   stop=startLiveSync();account('alice');

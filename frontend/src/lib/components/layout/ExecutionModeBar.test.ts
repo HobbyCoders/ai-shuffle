@@ -164,6 +164,21 @@ describe('worker picker persistence', () => {
 });
 
 describe('ExecutionModeBar merged worktree branch chip', () => {
+	it('selects canonical checkout branches without storing a legacy worktree ID', async () => {
+		mocks.worktrees.set([{ id: 'ck-local', resource_kind: 'checkout', runner_id: 'local-runner', branch_name: 'feature/native', exists: true }]);
+		activeSession.setDeviceIntent({ id: 'other-worker', name: 'Other worker' });
+		activeSession.selectWorktreeBranch('old-branch', 'legacy-worktree');
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
+		await fireEvent.click(screen.getByText('feature/native'));
+		expect(activeSession.current.worktreeId).toBeNull();
+		expect(activeSession.current.deviceIntent).toBeNull();
+		expect(activeSession.current.selectedWorktreeBranch).toBeNull();
+		expect(activeSession.current.worktreeBranch).toBe('feature/native');
+		expect(activeSession.current.worktreeMode).toBe('new');
+		expect(activeSession.current.worktreeCreateNewBranch).toBe(false);
+	});
+
 	it('does not render the new-worktree folder chip', () => {
 		const { container } = render(ExecutionModeBar);
 

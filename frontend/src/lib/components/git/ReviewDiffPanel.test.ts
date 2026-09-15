@@ -4,9 +4,9 @@ import ReviewDiffPanel from './ReviewDiffPanel.svelte';
 import DiffViewer from './DiffViewer.svelte';
 import type { FileChangeInfo } from '$lib/api/git';
 
-const api = vi.hoisted(() => ({ getFileDiff: vi.fn(), refreshChangedFiles: vi.fn() }));
+const api = vi.hoisted(() => ({ getFileDiff: vi.fn(), refreshChangedFiles: vi.fn(), target: { worktreeId: 'branch', sessionId: 'session', workerTarget: null } as { worktreeId: string | null; sessionId: string | null; workerTarget: {workerId: string; branch: string} | null } }));
 vi.mock('$lib/api/git', () => ({ getFileDiff: api.getFileDiff }));
-vi.mock('$lib/stores/git.svelte', () => ({ git: { current: { worktreeId: 'branch', sessionId: 'session' }, refreshChangedFiles: api.refreshChangedFiles } }));
+vi.mock('$lib/stores/git.svelte', () => ({ git: { get current() { return api.target; }, refreshChangedFiles: api.refreshChangedFiles } }));
 vi.mock('$lib/stores/notifications', () => ({ notify: vi.fn() }));
 vi.mock('$lib/utils/shiki', () => ({
 	resolveShikiLang: () => 'typescript',
@@ -24,6 +24,7 @@ function setup() {
 }
 beforeEach(() => {
 	vi.clearAllMocks();
+	api.target = { worktreeId: 'branch', sessionId: 'session', workerTarget: null };
 	api.getFileDiff.mockResolvedValue({ file: 'src/a.ts', diff: patch, is_binary: false, truncated: false });
 	api.refreshChangedFiles.mockResolvedValue(undefined);
 	vi.stubGlobal('IntersectionObserver', class { constructor(private cb: IntersectionObserverCallback) {} observe(target: Element) { this.cb([{ isIntersecting: true, target } as IntersectionObserverEntry], this as unknown as IntersectionObserver); } disconnect() {} });
@@ -32,6 +33,12 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('t3code-style review panel', () => {
+	it('loads diffs from the selected worker and branch without a session', async () => {
+		const workerTarget = { workerId: 'worker-b', branch: 'main' };
+		api.target = { worktreeId: null, sessionId: null, workerTarget };
+		setup();
+		await waitFor(() => expect(api.getFileDiff).toHaveBeenCalledWith('project', 'src/a.ts', false, undefined, workerTarget));
+	});
 	it('selects the first current entry when opened without a selection', async () => {
 		const onSelect = vi.fn();
 		render(ReviewDiffPanel, { projectId: 'project', files, loading: false, selected: null, onSelect, onClose: vi.fn(), embedded: true });

@@ -165,6 +165,11 @@ def _session_git_handler():
     return handle_session_git
 
 
+def _project_git_handler():
+    from app.api.git_owner import handle_project_git
+    return handle_project_git
+
+
 def _git_state_handler():
     from app.network import git
     return git.handle_state
@@ -204,6 +209,7 @@ _LAZY_HANDLERS = {
     "application-update": _application_update_handler,
     "rewind": _rewind_handler,
     "session-git": _session_git_handler,
+    "project-git": _project_git_handler,
     "git-state": _git_state_handler,
     "git-catalog": _git_catalog_handler,
     "git-op": _git_op_handler,

@@ -35,21 +35,27 @@ export function startLiveSync() {
  let retry: ReturnType<typeof setTimeout> | undefined;
  let heartbeat: ReturnType<typeof setInterval> | undefined;
  let generation = 0, attempts = 0;
+ // Keep lifecycle/permission delivery live; defer presentation-only catalogue
+ // reads until resume invalidates the full set once. In-flight dirty work stays
+ // coalesced by loadSessions/resourceSync, not queued per background event.
+ const visible = (refresh: () => void | Promise<unknown>) => () => {
+  if (!document.hidden) return refresh();
+ };
  const unsubscribeResources = [
-  resourceSync.subscribe(['sessions', 'tags'], () => appData.loadSessions()),
-  resourceSync.subscribe(['projects'], async () => {
+  resourceSync.subscribe(['sessions', 'tags'], visible(() => appData.loadSessions())),
+  resourceSync.subscribe(['projects'], visible(async () => {
    await Promise.all([appData.loadProjects(), appData.loadClusterProjects(), appData.loadSessions()]);
    activeSession.applyComposerDefaults();
-  }),
-  resourceSync.subscribe(['agents'], async () => {
+  })),
+  resourceSync.subscribe(['agents'], visible(async () => {
    await appData.loadProfiles();
    activeSession.applyComposerDefaults();
-  }),
-  resourceSync.subscribe(['settings'], async () => {
+  })),
+  resourceSync.subscribe(['settings'], visible(async () => {
    await hydrateModelRegistry();
    activeSession.applyComposerDefaults();
-  }),
-  resourceSync.subscribe(['notifications'], () => notify.loadHistory())
+  })),
+  resourceSync.subscribe(['notifications'], visible(() => notify.loadHistory()))
  ];
  function disconnect(reset: boolean) {
   generation++; if (retry) clearTimeout(retry); if (heartbeat) clearInterval(heartbeat);

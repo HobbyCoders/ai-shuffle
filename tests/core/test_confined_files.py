@@ -37,6 +37,20 @@ class ConfinedFilesTests(unittest.TestCase):
             except OSError as exc:
                 self.skipTest(f'Symlink unavailable: {exc}')
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows DOS aliases required')
+    def test_short_root_spelling_uses_same_pinned_directory(self):
+        import ctypes
+        from ctypes import wintypes
+        short_path = ctypes.WinDLL('kernel32', use_last_error=True).GetShortPathNameW
+        short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        short_path.restype = wintypes.DWORD
+        buffer = ctypes.create_unicode_buffer(32768)
+        self.assertGreater(short_path(str(self.root), buffer, len(buffer)), 0)
+        short = Path(buffer.value)
+        inside = files.upload(short, '', 'file.txt', b'inside')
+        with files.open_attachment(short, inside.resolve()) as stream:
+            self.assertEqual(stream.read(), b'inside')
+
     def test_duplicate_and_hardlink_destination_are_not_overwritten(self):
         os.link(self.secret, self.root / 'file.txt')
         new = files.upload(self.root, '', 'file.txt', b'new')
@@ -94,16 +108,16 @@ class ConfinedFilesTests(unittest.TestCase):
         self.assertEqual({p.read_text() for p in paths}, {str(i) for i in range(24)})
 
     def test_leaf_replacement_before_create(self):
-        original = os.open if os.name == 'nt' else files.chat_files.confined_open
+        original = files._windows_handle if os.name == 'nt' else files.chat_files.confined_open
         raced = False
         def opening(*args, **kwargs):
             nonlocal raced
-            flags = args[1] if os.name == 'nt' else args[2]
-            if flags & os.O_CREAT and not raced:
+            creating = kwargs.get('create_new', False) if os.name == 'nt' else args[2] & os.O_CREAT
+            if creating and not raced:
                 raced = True
                 os.link(self.secret, self.root / 'file.txt')
             return original(*args, **kwargs)
-        target = 'app.core.confined_files.os.open' if os.name == 'nt' else 'app.core.chat_files.confined_open'
+        target = 'app.core.confined_files._windows_handle' if os.name == 'nt' else 'app.core.chat_files.confined_open'
         with patch(target, side_effect=opening):
             new = files.upload(self.root, '', 'file.txt', b'new')
         self.assertTrue(raced)
@@ -113,13 +127,13 @@ class ConfinedFilesTests(unittest.TestCase):
     def test_parent_replacement_before_create(self):
         sub = self.root / 'sub'
         sub.mkdir()
-        original = os.open if os.name == 'nt' else files.chat_files.confined_open
+        original = files._windows_handle if os.name == 'nt' else files.chat_files.confined_open
         raced = False
         blocked = False
         def opening(*args, **kwargs):
             nonlocal raced, blocked
-            flags = args[1] if os.name == 'nt' else args[2]
-            if flags & os.O_CREAT and not raced:
+            creating = kwargs.get('create_new', False) if os.name == 'nt' else args[2] & os.O_CREAT
+            if creating and not raced:
                 raced = True
                 try:
                     sub.rename(self.root / 'old')
@@ -128,7 +142,7 @@ class ConfinedFilesTests(unittest.TestCase):
                 else:
                     self.link(sub, self.outside, directory=True)
             return original(*args, **kwargs)
-        target = 'app.core.confined_files.os.open' if os.name == 'nt' else 'app.core.chat_files.confined_open'
+        target = 'app.core.confined_files._windows_handle' if os.name == 'nt' else 'app.core.chat_files.confined_open'
         try:
             with patch(target, side_effect=opening):
                 if os.name == 'nt':

@@ -236,7 +236,7 @@
 	<span class="ctx-sep" aria-hidden="true"></span>
 
 	{#if isEmptyState}
-		{#if $githubAuthenticated}
+		{#if $activeSession.project || $activeSession.projectV2Id}
 			<ExecutionModeBar {sheetMode}>
 				{#snippet between()}
 					{@render repoChip()}
