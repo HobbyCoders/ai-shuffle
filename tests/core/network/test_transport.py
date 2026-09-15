@@ -217,6 +217,7 @@ async def test_rollback_proof_survives_peer_pruning(workers):
     exchange(b, a)
     with a.active():
         assert store.prune_ops(keep_days=-1) > 0
+        heads = store.local_watermarks()
         with store.get_db() as conn:
             assert store.get_op(conn.cursor(), b.device_id, 1, 1) is None
     with b.active():
@@ -225,7 +226,12 @@ async def test_rollback_proof_survives_peer_pruning(workers):
     async with httpx.AsyncClient(transport=served.transport()) as client:
         with b.active():
             link = transport.PeerLink(a.device_id, [served.base_url])
-            await link.sync_once(client, engine.context(), catch_up=True)
+            original_context = engine.context()
+            await link.sync_once(client, original_context, catch_up=True)
+            assert engine.context().identity.incarnation == 2
+            # A concurrent startup link can still hold the old context and
+            # the same signed proof after the first recovery completes.
+            await link._check_rollback(client, original_context, heads)
             assert engine.context().identity.incarnation == 2
         _set_pref(b, "after-restore", True)
         with b.active():

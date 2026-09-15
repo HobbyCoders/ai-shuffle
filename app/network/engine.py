@@ -47,6 +47,7 @@ from app.network.membership import Member
 logger = logging.getLogger(__name__)
 
 _lock = threading.RLock()
+_rollback_lock = threading.Lock()
 _context: Optional["NetworkContext"] = None
 _listeners: List[Callable[[List[Tuple[str, str, str]]], None]] = []
 _kick: Optional[Callable[[], None]] = None
@@ -1210,7 +1211,7 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext |
         elif outcome == "rejected":
             result.rejected += 1
     if result.own_ahead:
-        restored_from_backup(result.own_ahead)
+        restored_from_backup(result.own_ahead, ctx.identity.incarnation)
     if result.touched:
         touched = list(result.touched)
         if any(c in ("membership", "member_names") for c, _, _ in touched):
@@ -1220,22 +1221,27 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext |
     return result
 
 
-def restored_from_backup(evidence_seq: int) -> NetworkContext:
+def restored_from_backup(evidence_seq: int, evidence_incarnation: int) -> NetworkContext:
     """Start a fresh stream: an op this device signed exists that it does not hold.
 
     Called with proof only (an envelope that verifies under our own signing
     key, at a sequence past our outbox), never on a peer's bare claim.
     """
-    ctx = require_context()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        held = store.own_watermark(cursor, ctx.device_id, ctx.identity.incarnation)
-    if evidence_seq <= held:
-        return ctx
-    logger.error("An operation this device signed (seq %d) is not in its outbox (last %d); this worker was "
-                 "restored from a backup and moves to a new incarnation", evidence_seq, held)
-    identity_mod.bump_incarnation()
-    ctx = load_context()
+    with _rollback_lock:
+        ctx = require_context()
+        # Startup and background peer links can deliver the same proof. It
+        # belongs to its signed stream, not a newer incarnation's outbox.
+        if ctx.identity.incarnation != evidence_incarnation:
+            return ctx
+        with get_db() as conn:
+            cursor = conn.cursor()
+            held = store.own_watermark(cursor, ctx.device_id, evidence_incarnation)
+        if evidence_seq <= held:
+            return ctx
+        logger.error("An operation this device signed (seq %d) is not in its outbox (last %d); this worker was "
+                     "restored from a backup and moves to a new incarnation", evidence_seq, held)
+        identity_mod.bump_incarnation()
+        ctx = load_context()
     kick()
     return ctx
 
