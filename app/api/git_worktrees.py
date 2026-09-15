@@ -109,6 +109,11 @@ def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
     return WorktreeInfo(
         id=wt["id"],
         repository_id=wt["repository_id"],
+        checkout_id=wt.get("checkout_id"),
+        resource_kind=wt.get("resource_kind", "worktree"),
+        legacy_lifecycle_supported=wt.get("legacy_lifecycle_supported", True),
+        project_id=wt.get("project_id"),
+        runner_id=wt.get("runner_id"),
         session_id=wt.get("session_id"),  # Deprecated
         branch_name=wt["branch_name"],
         worktree_path=wt["worktree_path"],
@@ -398,16 +403,23 @@ async def list_worktrees(
     Query params:
         include_status: If True (default), includes git status (dirty state) for each worktree
     """
-    check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    from app.api.common import require_origin_access
+    from app.db.projects_v2 import get_project_v2
 
-    if not await run_git(git_service.is_git_repo, working_dir):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Project is not a git repository"
-        )
+    if await run_sync(get_project_v2, project_id):
+        # A canonical project need not have a legacy project or even a base
+        # checkout here. Listing is read-only and never materializes a checkout.
+        await run_sync(require_origin_access, request=request, project_v2_id=project_id)
+    else:
+        check_project_access(request, project_id)
+        working_dir = get_project_path(project_id)
+        if not await run_git(git_service.is_git_repo, working_dir):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Project is not a git repository"
+            )
 
-    worktrees = worktree_manager.get_worktrees_for_project(project_id)
+    worktrees = await run_sync(worktree_manager.get_worktrees_for_project, project_id)
 
     # Optionally fetch git status for each existing worktree.
     # Per-worktree `git status` calls run concurrently on a bounded dedicated

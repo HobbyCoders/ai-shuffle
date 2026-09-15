@@ -705,6 +705,11 @@ class WorktreeManager:
         - session_count: total number of sessions
         - active_session: currently active session (if any)
         """
+        from app.db.projects_v2 import get_project_v2
+
+        if get_project_v2(project_id):
+            return self._get_checkout_worktrees(project_id)
+
         repo = database.get_git_repository_by_project(project_id)
         if not repo:
             return []
@@ -737,6 +742,47 @@ class WorktreeManager:
                         wt["active_session"] = wt["sessions"][0]
 
         return worktrees
+
+    def _get_checkout_worktrees(self, project_id: str) -> List[Dict]:
+        """List physical branch checkouts on this runner, not replicated paths.
+
+        Checkout IDs are not legacy worktree IDs. Advertise that distinction so
+        clients cannot feed a checkout to the legacy delete/reopen endpoints.
+        Session association follows the current local cwd, including resumed
+        sessions whose legacy project/worktree IDs belong to another worker.
+        """
+        from app.core.checkout_manager import _dir_is_worktree, _resolve_checkout_path
+        from app.core.project_resolver import resolve_existing_cwd
+        from app.db.sessions import list_sessions_for_cleanup
+        from app.network.control import owner_of
+
+        sessions_by_path = {}
+        for session in list_sessions_for_cleanup(project_id, project_id):
+            if owner_of(session) is not None:
+                continue
+            cwd = resolve_existing_cwd(session)
+            if cwd:
+                key = os.path.normcase(os.path.normpath(cwd))
+                sessions_by_path.setdefault(key, []).append(session)
+
+        result = []
+        for checkout in checkouts_db.list_checkouts(project_id):
+            if checkout["runner_id"] != settings.effective_instance_id or not checkout.get("branch"):
+                continue
+            path = _resolve_checkout_path(checkout["path"])
+            sessions = sessions_by_path.get(os.path.normcase(os.path.normpath(path)), [])
+            result.append({
+                "id": checkout["id"], "checkout_id": checkout["id"],
+                "resource_kind": "checkout", "legacy_lifecycle_supported": False,
+                "repository_id": None, "project_id": project_id,
+                "runner_id": checkout["runner_id"], "branch_name": checkout["branch"],
+                "worktree_path": path, "status": checkout.get("status") or "active",
+                "created_at": checkout["created_at"], "sessions": sessions,
+                "session_count": len(sessions),
+                "active_session": next((s for s in sessions if s.get("status") == "active"), None),
+                "exists": _dir_is_worktree(path),
+            })
+        return result
 
     def get_worktree_details(self, worktree_id: str) -> Optional[Dict]:
         """Get detailed worktree information with session history."""

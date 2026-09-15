@@ -4,7 +4,7 @@ import { tick } from 'svelte';
 import { writable } from 'svelte/store';
 import ContextPillBar from './ContextPillBar.svelte';
 
-const { session } = vi.hoisted(() => ({ session: { store: null as any } }));
+const { session, execution } = vi.hoisted(() => ({ session: { store: null as any }, execution: vi.fn() }));
 vi.mock('$lib/stores/active-session', async () => {
 	const { writable } = await import('svelte/store');
 	session.store = writable({});
@@ -14,14 +14,17 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 	projects: writable([{ id: 'project', name: 'Project' }]),
 	clusterProjects: writable([]), sessions: writable([]), appData: {}
 }));
-vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(true) }));
+vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false) }));
 vi.mock('$lib/stores/git.svelte', () => ({
 	gitStatus: writable({ current_branch: 'main' }), git: {}
 }));
 vi.mock('./ProfileSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./WorkspaceFolderSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./BranchSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
-vi.mock('$lib/components/layout/ExecutionModeBar.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+vi.mock('$lib/components/layout/ExecutionModeBar.svelte', async () => {
+	const { default: component } = await import('$lib/test-stubs/EmptyRouteDependency.svelte');
+	return { default: (...args: Parameters<typeof component>) => { execution(); return component(...args); } };
+});
 vi.mock('$lib/components/git/CreateBranchModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 
 afterEach(cleanup);
@@ -33,6 +36,12 @@ const base = {
 };
 
 describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) => {
+	it.each(['project', 'canonical'])('offers worker and branch selection without GitHub auth for %s', kind => {
+		execution.mockClear();
+		session.store.set({ ...base, messages: [], project: kind === 'project' ? 'project' : null, projectV2Id: kind === 'canonical' ? 'pv2-project' : null });
+		render(ContextPillBar, { sheetMode });
+		expect(execution).toHaveBeenCalledOnce();
+	});
 	it('stays checked from auto naming through completed setup', async () => {
 		session.store.set({ ...base, isCreatingWorktree: true });
 		const { container } = render(ContextPillBar, { sheetMode });

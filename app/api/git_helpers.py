@@ -7,6 +7,7 @@ and repository record management used by git.py, git_worktrees.py, and git_ai.py
 
 import asyncio
 import concurrent.futures
+from contextvars import ContextVar
 import time
 import uuid
 import logging
@@ -21,6 +22,10 @@ from app.db import database
 from app.api.common import resolve_project_path
 
 logger = logging.getLogger(__name__)
+
+# Set only by authenticated, allowlisted project Git dispatch after resolving
+# a runner-local checkout. Never populated from a caller-supplied path.
+_worker_checkout_scope: ContextVar[Optional[Tuple[str, str]]] = ContextVar("worker_git_checkout", default=None)
 
 
 # =============================================================================
@@ -145,6 +150,11 @@ def get_project_path(project_id: str, allow_missing: bool = False) -> Optional[s
 
     .. deprecated:: Use :func:`app.api.common.resolve_project_path` instead.
     """
+    scoped = _worker_checkout_scope.get()
+    if scoped is not None:
+        if scoped[0] != project_id:
+            raise HTTPException(403, "Project does not match selected worker checkout")
+        return scoped[1]
     result = resolve_project_path(
         project_id, check_access=False, allow_missing=allow_missing
     )
@@ -245,6 +255,10 @@ def get_working_dir(
     hands the uncached resolution to a worker thread instead of blocking the
     event loop.
     """
+    if _worker_checkout_scope.get() is not None:
+        if worktree_id or session_id:
+            raise HTTPException(400, "Mixed worker and session checkout scope")
+        return get_project_path(project_id)
     key = _working_dir_cache_key(project_id, worktree_id, session_id)
     cached = _working_dir_cache.get_or_miss(key)
     if cached is not CACHE_MISS:
@@ -265,6 +279,10 @@ async def get_working_dir_async(
     A cache hit never touches a thread; a miss resolves in a worker so the DB
     round trip and the filesystem stat stay off the event loop.
     """
+    if _worker_checkout_scope.get() is not None:
+        if worktree_id or session_id:
+            raise HTTPException(400, "Mixed worker and session checkout scope")
+        return get_project_path(project_id)
     key = _working_dir_cache_key(project_id, worktree_id, session_id)
     cached = _working_dir_cache.get_or_miss(key)
     if cached is not CACHE_MISS:

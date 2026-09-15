@@ -145,6 +145,43 @@ describe('automatic non-git fallback', () => {
 });
 
 describe('worker picker persistence', () => {
+	it('selects the local owner when picking a legacy checkout after a remote worker', async () => {
+		activeSession.setDeviceIntent({ id: 'runner-1', name: 'Unraid' });
+		mocks.worktrees.set([{ id: 'legacy-local', branch_name: 'feature/local', exists: true }]);
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
+		await fireEvent.click(screen.getByText('feature/local'));
+		expect(activeSession.current.deviceIntent).toBeNull();
+		expect(activeSession.current.worktreeId).toBe('legacy-local');
+		expect(activeSession.current.selectedWorktreeBranch).toBe('feature/local');
+	});
+
+	it('converts a legacy checkout into a logical branch when changing workers', async () => {
+		vi.mocked(listInstalls).mockResolvedValue({ self_instance_id: 'local', installs: [{
+			id: 'runner-1', device_name: 'Unraid', online: true, base_url: null,
+			platform: 'linux', version: null, capabilities: {}, last_seen: null,
+		}] });
+		mocks.worktrees.set([{ id: 'legacy-worktree', branch_name: 'feature/shared', exists: true }]);
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
+		await fireEvent.click(screen.getByText('feature/shared'));
+		expect(activeSession.current.worktreeId).toBe('legacy-worktree');
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Other workers' }));
+		await fireEvent.click(screen.getByRole('menuitemradio', { name: /Unraid/ }));
+		expect(activeSession.current.deviceIntent?.id).toBe('runner-1');
+		expect(activeSession.current.worktreeId).toBeNull();
+		expect(activeSession.current.selectedWorktreeBranch).toBeNull();
+		expect(activeSession.current.worktreeBranch).toBe('feature/shared');
+		expect(activeSession.current.worktreeMode).toBe('new');
+		expect(activeSession.current.worktreeCreateNewBranch).toBe(false);
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Unraid' }));
+		await fireEvent.click(screen.getByRole('menuitemradio', { name: 'Local' }));
+		expect(activeSession.current.worktreeId).toBeNull();
+		expect(activeSession.current.worktreeBranch).toBe('feature/shared');
+		expect(activeSession.current.deviceIntent).toBeNull();
+	});
+
 	it('persists actual picker clicks and retains the worker on project changes', async () => {
 		vi.mocked(listInstalls).mockResolvedValueOnce({ self_instance_id: 'local', installs: [{
 			id: 'runner-1', device_name: 'Unraid', online: true, base_url: null,
@@ -164,6 +201,21 @@ describe('worker picker persistence', () => {
 });
 
 describe('ExecutionModeBar merged worktree branch chip', () => {
+	it('selects canonical checkout branches without storing a legacy worktree ID', async () => {
+		mocks.worktrees.set([{ id: 'ck-local', resource_kind: 'checkout', runner_id: 'local-runner', branch_name: 'feature/native', exists: true }]);
+		activeSession.setDeviceIntent({ id: 'other-worker', name: 'Other worker' });
+		activeSession.selectWorktreeBranch('old-branch', 'legacy-worktree');
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
+		await fireEvent.click(screen.getByText('feature/native'));
+		expect(activeSession.current.worktreeId).toBeNull();
+		expect(activeSession.current.deviceIntent).toBeNull();
+		expect(activeSession.current.selectedWorktreeBranch).toBeNull();
+		expect(activeSession.current.worktreeBranch).toBe('feature/native');
+		expect(activeSession.current.worktreeMode).toBe('new');
+		expect(activeSession.current.worktreeCreateNewBranch).toBe(false);
+	});
+
 	it('does not render the new-worktree folder chip', () => {
 		const { container } = render(ExecutionModeBar);
 
