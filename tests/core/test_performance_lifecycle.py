@@ -150,15 +150,18 @@ def test_process_scope_cache_and_cpu_accounting(monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *args): pass
     backend = Process(module.os.getpid(), "python.exe")
+    launcher = Process(91005, "python.exe")
+    backend.parents = lambda: [launcher, desktop, outer_desktop]
     database = Process(91001, "postgres.exe")
-    desktop = Process(91002, "electron.exe", [backend, database])
+    desktop = Process(91002, "electron.exe", [launcher, backend, database])
     outer_desktop = Process(91003, "electron.exe", [desktop, Process(91004, "msedge.exe")])
     monkeypatch.setattr(psutil, "Process", lambda pid: backend)
     monkeypatch.setattr(psutil, "cpu_count", lambda: 4)
     first = module.collect_process_metrics(True)
     assert first["scope"] == "desktop_tree"
-    assert first["cpu_unmeasured_processes"] == 3
-    assert {p["pid"] for p in first["processes"]} == {backend.pid, desktop.pid, database.pid}
+    assert first["cpu_unmeasured_processes"] == 4
+    assert {p["pid"] for p in first["processes"]} == {launcher.pid, backend.pid, desktop.pid, database.pid}
+    assert first["groups"]["python_launcher"]["processes"] == 1
     assert first["groups"]["database"]["cpu_pct_machine"] is None
     assert module.collect_process_metrics(True) is first
     clock.now += 5

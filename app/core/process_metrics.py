@@ -87,10 +87,14 @@ def collect_process_metrics(whole_stack=False):
         cpu_started = time.thread_time()
         backend = psutil.Process(os.getpid())
         root = backend
+        launcher_pids = set()
         if whole_stack:
             for parent in backend.parents():
                 try:
-                    if parent.name().lower() in {"electron", "electron.exe", "ai shuffle", "ai shuffle.exe"}:
+                    name = parent.name().lower()
+                    if name in {"python", "python.exe", "python3", "pythonw.exe"}:
+                        launcher_pids.add(parent.pid)
+                    if name in {"electron", "electron.exe", "ai shuffle", "ai shuffle.exe"}:
                         root = parent
                         break  # Nearest shell owns us; outer shells may run unrelated workers.
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -120,7 +124,7 @@ def collect_process_metrics(whole_stack=False):
             try:
                 with process.oneshot():
                     key = (process.pid, process.create_time())
-                    role = _role(process, backend.pid)
+                    role = "python_launcher" if process.pid in launcher_pids else _role(process, backend.pid)
                     mem = process.memory_info()
                     cpu = process.cpu_times()
                     ticks = cpu.user + cpu.system
