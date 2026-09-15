@@ -204,7 +204,7 @@ async def get_deployment_info(token: str = Depends(require_auth)):
 
 
 @router.get("/api/v1/diagnostics")
-async def get_diagnostics(token: str = Depends(require_auth), whole_stack: bool = False):
+async def get_diagnostics(request: Request, token: str = Depends(require_auth), whole_stack: bool = False):
     """
     On-demand resource diagnostics snapshot.
 
@@ -213,6 +213,8 @@ async def get_diagnostics(token: str = Depends(require_auth), whole_stack: bool 
     """
     from app.core.resource_monitor import _collect_metrics, _check_warnings
 
+    if whole_stack and not getattr(request.state, "is_admin", False):
+        raise HTTPException(status_code=403, detail="Whole-stack diagnostics require owner access")
     metrics = await _collect_metrics()
     if whole_stack:
         from app.core.process_metrics import collect_process_metrics
@@ -230,6 +232,12 @@ async def get_diagnostics(token: str = Depends(require_auth), whole_stack: bool 
         metrics["activity_scope"] = {
             "worker": "local", "cross_worker_activity_known": False,
             "whole_stack_idle_classified": False,
+            "local_concurrent_activity": bool(
+                metrics.get("pool_streaming", 0) or metrics.get("ws_active_chat_sessions", 0)
+                or metrics.get("browser_active_calls", 0)
+            ),
+            "local_streaming_sessions": metrics.get("pool_streaming", 0),
+            "local_browser_viewers": metrics.get("browser_viewers", 0),
         }
     warnings = _check_warnings(metrics)
 

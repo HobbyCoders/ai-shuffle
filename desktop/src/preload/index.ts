@@ -55,6 +55,9 @@ const bridge = {
 		onNativeTheme: (listener: Listener<{ dark: boolean }>) => subscribe('desktop:native-theme', listener)
 	},
 
+	/** Collect once on request; no background sampling or retained history. */
+	diagnostics: () => ipcRenderer.invoke('desktop:diagnostics'),
+
 	/** The local worker this window belongs to. */
 	worker: {
 		getState: () => ipcRenderer.invoke('desktop:worker-state'),
