@@ -211,6 +211,10 @@ class AccountActivity : NativeScreen() {
         row("Edit username", "Choose how your account appears in Shuffle", R.drawable.ic_account) { loadProfile(onboarding = false) }
         row("Trusted devices", "View devices and manage access", R.drawable.ic_phone) { runWork { devices(session) } }
         row("Add a trusted device", "Create a sign-in QR code or pairing code", R.drawable.ic_qr) { runWork { grant(session) } }
+        row("Delete account", "Permanently delete your Shuffle account in your browser", R.drawable.ic_account) {
+            androidx.browser.customtabs.CustomTabsIntent.Builder().build()
+                .launchUrl(this, android.net.Uri.parse("${session.hub.trimEnd('/')}/delete-account"))
+        }
         gap(16)
         button("Sign out") {
             confirm("Sign out?", "This removes your account connections from this phone. Direct worker connections stay saved. If you’re offline, revoke this device from another trusted device too.") {

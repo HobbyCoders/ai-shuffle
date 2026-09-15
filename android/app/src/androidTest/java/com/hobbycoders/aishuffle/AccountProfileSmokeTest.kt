@@ -108,6 +108,33 @@ class AccountProfileSmokeTest {
         instrumentation.addMonitor(monitor)
         try { block() } finally { instrumentation.removeMonitor(monitor); field.set(null, original) }
     }
+    @Test fun accountDeletionOpensPublicPageWithoutExportingCredentials() {
+        store.save(AccountSession(AccountStore.DEFAULT_HUB, "test-account-session", Instant.now().plusSeconds(3600).toString(),
+            store.installId, "test-account", "disposable-user", true))
+        var opened: Intent? = null
+        val browser = object : Instrumentation.ActivityMonitor() {
+            override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
+                if (intent.action != Intent.ACTION_VIEW) return null
+                opened = intent
+                return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
+            }
+        }
+        instrumentation.addMonitor(browser)
+        try {
+            withApi({ 200 to profile("disposable-user", true) }) {
+                ActivityScenario.launch<AccountActivity>(Intent(context, AccountActivity::class.java).putExtra("mode", "manage")).use {
+                    onView(withText("Delete account")).perform(scrollTo()).check(matches(isDisplayed()))
+                    TestScreenshots.capture("account-self-service-deletion-entry")
+                    onView(withText("Delete account")).perform(click())
+                    assertEquals("${AccountStore.DEFAULT_HUB}/delete-account", opened?.dataString)
+                    assertNull(opened?.data?.query)
+                    assertFalse(opened?.hasExtra("com.android.browser.headers") ?: true)
+                    assertEquals("test-account", store.session()?.accountId)
+                }
+            }
+        } finally { instrumentation.removeMonitor(browser); store.clear() }
+    }
+
     private fun startResponse() = JSONObject().put("issuer", "https://identity.example")
         .put("authorization_endpoint", "https://identity.example/oauth/authorize").put("token_endpoint", "https://identity.example/oauth/token")
         .put("redirect_uri", AccountOAuth.REDIRECT).put("client_id", "test-client").put("nonce", "test-nonce").put("request_id", "test-request")
