@@ -305,15 +305,17 @@
 	// Extract the project and worktree strings OUTSIDE the effect to avoid tracking the entire
 	// activeTab object, which changes on every streaming poll and would re-trigger load needlessly.
 	const activeProject = $derived(activeTab?.project || activeTab?.projectV2Id || null);
+	const activeSessionId = $derived(activeTab?.sessionId ?? null);
+	const selectedWorkerTarget = $derived(!activeSessionId && (activeTab?.deviceIntent
+		|| (activeTab?.projectV2Id && !activeTab.project)
+		|| (activeTab?.worktreeBranch && !activeTab.worktreeId))
+		? { workerId: activeTab?.deviceIntent?.id ?? 'local', branch: activeTab?.worktreeBranch || activeTab?.selectedWorktreeBranch || null }
+		: null);
 	const activeWorktreeId = $derived(
-		(activeTab?.worktreeId || activeTab?.worktreeBranch) && !activeTab?.worktreeDeleted
+		!selectedWorkerTarget && (activeTab?.worktreeId || activeTab?.worktreeBranch) && !activeTab?.worktreeDeleted
 			? (activeTab.worktreeId ?? null)
 			: null
 	);
-	const activeSessionId = $derived(activeTab?.sessionId ?? null);
-	const selectedWorkerTarget = $derived(!activeSessionId && (activeTab?.deviceIntent || (activeTab?.projectV2Id && !activeTab.project))
-		? { workerId: activeTab?.deviceIntent?.id ?? 'local', branch: activeTab?.worktreeBranch || activeTab?.selectedWorktreeBranch || null }
-		: null);
 	const panelScope = $derived(activeTab?.sessionId ? sessionPanelKey(activeTab.sessionId)
 		: activeProject ? `draft:${JSON.stringify([activeProject, selectedWorkerTarget, activeWorktreeId])}` : null);
 	const activeSidePanel = $derived(sidePanel.forScope(panelScope));

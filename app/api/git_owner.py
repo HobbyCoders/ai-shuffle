@@ -148,6 +148,7 @@ _PROJECT_ACTIONS = {
     "get_changed_files", "get_file_diff", "get_pr_state", "fetch_from_remote",
     "pull_from_remote", "push_commits", "create_commit", "stage_files", "unstage_files",
     "discard_changes", "create_branch", "checkout_branch", "delete_branch",
+    "generate_commit_message",
 }
 
 
@@ -224,9 +225,12 @@ async def handle_project_git(body, from_device):
             continue
         if branch is not None and actual != branch:
             continue
-        paths.append(path)
+        paths.append((path, row))
     if len(paths) != 1:
         return {"status": 409, "detail": "Selected checkout is missing or ambiguous on this worker"}
+    path, checkout = paths[0]
+    if name == "checkout_branch" and checkout.get("branch"):
+        return {"status": 400, "detail": "Cannot checkout branches in a worktree. Worktrees are bound to their branch."}
     try:
         values = {}
         for name, parameter in signature.parameters.items():
@@ -244,7 +248,7 @@ async def handle_project_git(body, from_device):
         request = Request({"type": "http", "method": "POST", "path": "/", "headers": [], "state": {}})
         request.state.api_user = None  # Authenticated peer membership authorizes this catalog.
         values.update(request=request, token="worker-control")
-        scope = _worker_checkout_scope.set((project_id, paths[0]))
+        scope = _worker_checkout_scope.set((project_id, path))
         try:
             result = await endpoint(**values)
         finally:

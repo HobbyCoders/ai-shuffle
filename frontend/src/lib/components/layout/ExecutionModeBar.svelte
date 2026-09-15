@@ -265,6 +265,7 @@
 			activeSession.setWorktreeMode('new');
 			activeSession.setWorktreeCreateNewBranch(false);
 		} else {
+			activeSession.setDeviceIntent(null);
 			activeSession.selectWorktreeBranch(wt.branch_name, wt.id);
 		}
 		showBranchDropdown = false;
