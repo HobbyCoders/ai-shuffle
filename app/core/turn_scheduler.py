@@ -913,7 +913,30 @@ def _dedupe_frames_by_task_id(
     return out
 
 
+_message_resume_locks: WeakValueDictionary = WeakValueDictionary()
+
+
+def message_resume_lock(session_id: str) -> asyncio.Lock:
+    # Admission and retirement share this lock, not execution: messages still
+    # queue independently while another continuation runs or waits on children.
+    return _message_resume_locks.setdefault(session_id, asyncio.Lock())
+
+
 async def on_agent_message(
+    session_id: str, sender: str, text: str, *, reply_to: str | None = None,
+) -> str | None:
+    from app.core.task_registry import task_registry
+
+    generation = task_registry.stop_generation(session_id)
+    owner_generation = task_registry.stop_generation(reply_to) if reply_to else None
+    async with message_resume_lock(session_id):
+        if (task_registry.stop_invalidated(session_id, generation)
+                or (reply_to and task_registry.stop_invalidated(reply_to, owner_generation))):
+            return None
+        return await _on_agent_message_locked(session_id, sender, text, reply_to=reply_to)
+
+
+async def _on_agent_message_locked(
     session_id: str, sender: str, text: str, *, reply_to: str | None = None,
 ) -> str | None:
     """Queue peer traffic that cannot join an app-owned live turn.
@@ -925,7 +948,17 @@ async def on_agent_message(
     from fluid.context.peer import format_peer_message
     from fluid.tools.hardening import defang_harness_markers
     from app.core.task_registry import task_registry
+    from app.core import provider_agent_supervisor as supervisor
 
+    if not reply_to:
+        # A later message can see the rearmed row before ANY continuation starts.
+        # Its saved context still belongs to the original dispatch, so inherit
+        # the live continuation owner, not just the last executed turn's payload.
+        for owner in task_registry.sessions_with_task(session_id):
+            record = supervisor.get_worker(owner, session_id)
+            if record and record.continuation_turn_id:
+                reply_to = owner
+                break
     owner_generation = task_registry.stop_generation(reply_to) if reply_to else None
     if reply_to and task_registry.is_user_stopped(reply_to):
         return None
@@ -941,12 +974,13 @@ async def on_agent_message(
                 return None
             task_registry.resume_task(reply_to, session_id)
             task_registry.mark_background_launch(reply_to, session_id)
-            from app.core import provider_agent_supervisor as supervisor
-            supervisor.register_worker(supervisor.WorkerRecord(
-                parent_session_id=reply_to, worker_session_id=session_id,
-                task_id=session_id, tool_use_id=session_id, background=True,
-                continuation_turn_id=turn["id"],
-            ))
+            record = supervisor.get_worker(reply_to, session_id)
+            if record is None or not record.continuation_turn_id:
+                supervisor.register_worker(supervisor.WorkerRecord(
+                    parent_session_id=reply_to, worker_session_id=session_id,
+                    task_id=session_id, tool_use_id=session_id, background=True,
+                    continuation_turn_id=turn["id"],
+                ))
         kick(session_id)
     return turn.get("id")
 

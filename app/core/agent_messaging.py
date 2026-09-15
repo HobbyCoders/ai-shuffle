@@ -208,15 +208,13 @@ async def finish_message_resume(session_id, settled, outcome):
     from app.core import provider_agent_supervisor as supervisor
     from app.db import turns as turns_db
 
-    record = supervisor.get_worker(owner, session_id)
-    try:
+    async with turn_scheduler.message_resume_lock(session_id):
+        record = supervisor.get_worker(owner, session_id)
         if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
             return
         # Read only this turn's report: an interrupted continuation must never
         # report the previous successful turn as its new result.
         events = await asyncio.to_thread(provider_agent._load_session_events, session_id)
-        if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
-            return
         events = [event for event in events if event.get("turn_id") == settled["id"]]
         text = ""
         for event in events:
@@ -234,16 +232,25 @@ async def finish_message_resume(session_id, settled, outcome):
                 text = str(payload.get("errors") or "Worker continuation failed")
         status = "completed" if outcome == "completed" else "error"
         summary, _ = provider_agent.bound_report(text or "Worker continuation ended without a report")
-        task_registry.complete_task(owner, session_id, status, summary=summary)
-        await turn_scheduler.on_task_terminal(owner, {
-            "task_id": session_id, "tool_use_id": session_id,
-            "status": status, "summary": summary,
-            "agent_message_turn_id": settled["id"],
-            "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
-        })
-    finally:
-        if record and record.continuation_turn_id:
-            queued = await asyncio.to_thread(turns_db.get_queued_turns, session_id)
-            if (not any(t["id"] == record.continuation_turn_id for t in queued)
+        # Read park BEFORE busy: unpark starts queued/running before clearing
+        # the parked row. The single busy query covers queued->running too.
+        # Admission holds this lock until both queue and ownership are written.
+        parked = await asyncio.to_thread(turn_scheduler._session_has_parked_turn, session_id)
+        busy = await asyncio.to_thread(turns_db.session_has_unsettled_turns, session_id)
+        latest = await asyncio.to_thread(turn_scheduler._latest_context_turn, session_id)
+        if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
+            return
+        if (not busy and not parked and (not latest or latest["id"] == settled["id"])
+                and not task_registry.is_woken(owner, session_id, completion_id=settled["id"])):
+            task_registry.complete_task(owner, session_id, status, summary=summary)
+            if (record and record.continuation_turn_id
                     and supervisor.get_worker(owner, session_id) is record):
                 supervisor.unregister_worker(owner, session_id)
+    # Completion dedupe is per turn, independent of the shared worker's status.
+    # Deliver outside the admission lock: a parent's wake may itself enqueue.
+    await turn_scheduler.on_task_terminal(owner, {
+        "task_id": session_id, "tool_use_id": session_id,
+        "status": status, "summary": summary,
+        "agent_message_turn_id": settled["id"],
+        "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
+    })
