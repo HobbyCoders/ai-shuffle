@@ -8,6 +8,7 @@
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { rewriteMediaMarkdown, clampRevealToMediaBoundary } from '$lib/utils/media';
 	import { renderChatMarkdown } from '$lib/utils/chat-markdown';
+	import { routeChatFiles } from '$lib/utils/chat-files';
 	import { rewriteWithGallery } from '$lib/utils/media-gallery';
 	import { highlightGenerationForSource, onHighlighterReady } from '$lib/utils/shiki';
 	import { Typewriter } from '$lib/utils/typewriter';
@@ -168,9 +169,13 @@
 	const _stopHighlightWatch = onHighlighterReady(() => { highlightEpoch += 1; });
 	onDestroy(_stopHighlightWatch);
 
-	const rendered = $derived(gallerySources?.size && !streaming
+	const unscopedRendered = $derived(gallerySources?.size && !streaming
 		? { prefix: sanitizeHtml(renderChatMarkdown(rewriteWithGallery(displayContent, gallerySources), true)), tail: '' }
 		: renderMarkdownMemoized(displayContent, streaming, highlightEpoch));
+	const rendered = $derived({
+		prefix: routeChatFiles(unscopedRendered.prefix, sessionId),
+		tail: routeChatFiles(unscopedRendered.tail, sessionId)
+	});
 
 	// `_epoch` is unused by the body: it exists so the $derived above tracks the
 	// highlighter-readiness signal as a dependency.
@@ -507,7 +512,7 @@
 				{/if}
 			</div>
 		</div>
-		<HtmlPreviews content={_twBestContent} {streaming} />
+		<HtmlPreviews content={_twBestContent} {streaming} {sessionId} />
 		{#if metadata && !streaming}
 			<div class="ameta">
 				{#if timestamp}<span>{formatMessageTime(timestamp)}</span>{/if}

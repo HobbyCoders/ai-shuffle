@@ -1,14 +1,14 @@
 <script lang="ts">
 	import { extractHtmlPreviews } from '$lib/utils/htmlPreview';
 	import HtmlPreview from './HtmlPreview.svelte';
-	let { content, streaming = false }: { content: string; streaming?: boolean } = $props();
+	let { content, streaming = false, sessionId }: { content: string; streaming?: boolean; sessionId?: string | null } = $props();
 	const previews = $derived(extractHtmlPreviews(content, !streaming));
 </script>
 
 {#if previews.length}
 	<div class="html-previews" aria-label="HTML previews">
 		{#each previews as preview (preview.href)}
-			<HtmlPreview href={preview.href} filename={preview.filename} />
+			<HtmlPreview href={preview.href} filename={preview.filename} {sessionId} />
 		{/each}
 	</div>
 {/if}

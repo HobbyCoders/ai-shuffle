@@ -21,6 +21,13 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe('HTML preview cards', () => {
+	it('passes chat ownership to the source loader', async () => {
+		load.mockResolvedValue('<h1>Remote</h1>');
+		render(HtmlPreviews, { content, sessionId: 'remote-chat' });
+		await waitFor(() => expect(load).toHaveBeenCalledWith(
+			'/api/files/by-path?path=%2Fwork%2Fdemo.html', expect.any(AbortSignal), 'remote-chat'
+		));
+	});
 	it('does not fetch or run streaming content or ordinary links', () => {
 		const view = render(HtmlPreviews, { content, streaming: true });
 		expect(view.container.querySelector('iframe')).toBeNull();

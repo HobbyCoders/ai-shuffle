@@ -1,5 +1,6 @@
 import { Marked, type Token } from 'marked';
-import { apiUrl, withAuth } from '$lib/api/runtime';
+import { withAuth } from '$lib/api/runtime';
+import { chatFileUrl } from './chat-files';
 
 export interface HtmlPreviewLink {
 	href: string;
@@ -54,11 +55,11 @@ export function extractHtmlPreviews(content: string, settled = true): HtmlPrevie
 }
 
 /** Fetch through the configured worker/auth policy, never directly into an iframe. */
-export async function loadHtmlPreview(href: string, signal: AbortSignal): Promise<string> {
+export async function loadHtmlPreview(href: string, signal: AbortSignal, sessionId?: string | null): Promise<string> {
 	const link = htmlPreviewLink(href);
 	if (!link) throw new Error('Only local HTML file links can be previewed.');
 	signal.throwIfAborted();
-	const response = await fetch(apiUrl(link.href), withAuth({
+	const response = await fetch(chatFileUrl(link.href, sessionId), withAuth({
 		signal,
 		redirect: 'error',
 		cache: 'no-store'

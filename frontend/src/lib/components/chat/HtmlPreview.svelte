@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { buildHtmlPreviewDocument, loadHtmlPreview, HTML_PREVIEW_SANDBOX } from '$lib/utils/htmlPreview';
-	import { resolveMediaUrl } from '$lib/utils/media';
+	import { chatFileUrl } from '$lib/utils/chat-files';
 	import { FileCode2, Monitor, Smartphone, RotateCw, Download, Maximize2, X, ShieldCheck, LoaderCircle, CircleAlert, ArrowUpRight } from 'lucide-svelte';
 
-	let { href, filename }: { href: string; filename: string } = $props();
+	let { href, filename, sessionId }: { href: string; filename: string; sessionId?: string | null } = $props();
 	let source = $state('');
 	let loading = $state(true);
 	let error = $state('');
@@ -30,7 +30,7 @@
 		loading = true;
 		error = '';
 		source = '';
-		loadHtmlPreview(url, controller.signal).then((html) => {
+		loadHtmlPreview(url, controller.signal, sessionId).then((html) => {
 			if (!controller.signal.aborted) { source = html; loading = false; }
 		}).catch((reason: unknown) => {
 			if (!controller.signal.aborted) {
@@ -73,7 +73,7 @@
 			<button class="icon-button" onclick={() => revision++} disabled={loading} aria-label="Refresh HTML preview" title="Reload the file">
 				<RotateCw size={13} strokeWidth={1.8} aria-hidden="true" />
 			</button>
-			<a class="icon-button" href={downloadUrl || resolveMediaUrl(href)} download={filename} aria-label="Download HTML file" title="Download HTML file">
+			<a class="icon-button" href={downloadUrl || chatFileUrl(href, sessionId)} download={filename} aria-label="Download HTML file" title="Download HTML file">
 				<Download size={14} strokeWidth={1.8} aria-hidden="true" />
 			</a>
 			{#if full}

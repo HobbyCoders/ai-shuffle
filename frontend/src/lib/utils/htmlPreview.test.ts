@@ -101,6 +101,12 @@ describe('HTML preview source loading', () => {
 		});
 	});
 
+	it('routes preview source to its owning session', async () => {
+		respond(new Response('<h1>Remote</h1>'));
+		await loadHtmlPreview(href, new AbortController().signal, 'remote-chat');
+		expect(fetchMock.mock.calls[0][0]).toContain('session_id=remote-chat');
+	});
+
 	it('uses the configured worker and bearer auth in the bundled runtime', async () => {
 		window.__SHUFFLE_MOBILE__ = { apiOrigin: 'https://worker.example', token: 'test-preview-token' };
 		respond(new Response('demo'));

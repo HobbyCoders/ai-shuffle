@@ -13,7 +13,10 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from fastapi.responses import FileResponse
 
-from app.api.auth import require_auth
+from app.api.auth import require_auth, get_api_user_from_request
+from app.api.sessions_helpers import require_session
+from app.network import control, tokens
+from app.network.files import forward_file
 from app.db.async_database import run_sync
 from app.api.common import require_file_access
 
@@ -119,13 +122,47 @@ def get_file_icon(filename: str) -> str:
 
 
 @router.get("/by-path")
-async def get_file_by_path(path: str = Query(..., description="Full path to the file"), _token: str = Depends(require_auth), request: Request = None):
+async def get_file_by_path(
+    path: str = Query(..., description="Full path to the file"),
+    _token: str = Depends(require_auth),
+    request: Request = None,
+    session_id: str | None = None,
+):
     """
     Serve a file by its full path.
 
     Security: Only serves files from within the workspace directory.
     Any file in the workspace can be made downloadable by the agent.
     """
+    if session_id:
+        session = await require_session(request, session_id)
+        owner = control.owner_of(session)
+        if owner:
+            project_id = (get_api_user_from_request(request) or {}).get("project_id")
+            return await forward_file(request, owner, session_id, path, project_id)
+    return await _serve_file(path, request)
+
+
+@router.get("/peer/{session_id}", include_in_schema=False)
+async def peer_file(
+    session_id: str, path: str, request: Request,
+    project_id: str | None = None,
+    _device: str = Depends(tokens.require_device),
+):
+    try:
+        session = await run_sync(control._require_owned, session_id)
+    except LookupError:
+        raise HTTPException(404, "Session not found") from None
+    except PermissionError:
+        raise HTTPException(409, "This worker does not own the session") from None
+    if project_id and session.get("project_id") != project_id:
+        raise HTTPException(403, "Session is outside the requested project")
+    # The authenticated viewer forwards scope, never its cookie or API key.
+    request.state.api_user = {"project_id": project_id} if project_id else None
+    return await _serve_file(path, request)
+
+
+async def _serve_file(path: str, request: Request):
     file_path = Path(path)
 
     # Security check: must be within workspace or a registered project/worktree
