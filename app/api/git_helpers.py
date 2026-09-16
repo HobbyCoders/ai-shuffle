@@ -180,6 +180,10 @@ _working_dir_cache = TTLCache(
 )
 
 
+class SessionCheckoutUnavailable(HTTPException):
+    """The session has no existing local checkout; writes must remain blocked."""
+
+
 def _resolve_working_dir(
     project_id: str,
     worktree_id: Optional[str] = None,
@@ -209,7 +213,7 @@ def _resolve_working_dir(
             if cwd:
                 return cwd, True
             if session.get("project_v2_id"):
-                raise HTTPException(
+                raise SessionCheckoutUnavailable(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
                         "This session's checkout is not available on this device. "

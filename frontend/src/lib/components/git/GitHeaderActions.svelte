@@ -712,8 +712,8 @@
 		</button>
 	{/if}
 
-	{:else}
-		<!-- No git repo: project name + Init button (profile selector lives in the header) -->
+	{:else if !isWorktreeMode}
+		<!-- Only non-repo projects can be initialized, not removed branch checkouts. -->
 		{#if projectName}
 			<span class="git-btn project-only-badge" title="Project: {projectName}">
 				<FolderClosed size={13} strokeWidth={1.5} />

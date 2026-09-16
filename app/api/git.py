@@ -43,6 +43,7 @@ from app.api.git_helpers import (  # noqa: F401
     get_project_path,
     get_working_dir,
     get_working_dir_async,
+    SessionCheckoutUnavailable,
     stage_and_commit,
     _repo_record_cache,
     _REPO_RECORD_TTL,
@@ -158,10 +159,13 @@ async def get_git_status(
 
     # A v2 branch session has session_id but no legacy worktree_id. Resolve
     # its own checkout, just like diff-stats and the other git endpoints.
-    # Only project-wide startup polls may fall back to an empty status when
-    # the project record has not been created yet.
+    # A removed or not-yet-materialized checkout has an empty status too, but
+    # must never fall back to another checkout or be recreated by this read.
     if worktree_id or session_id:
-        working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
+        try:
+            working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
+        except SessionCheckoutUnavailable:
+            return GitStatusResponse(is_git_repo=False)
     else:
         working_dir = get_project_path(project_id, allow_missing=True)
         if working_dir is None:

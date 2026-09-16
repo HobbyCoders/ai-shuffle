@@ -221,6 +221,7 @@ beforeEach(() => {
 	openHeaderDropdown.set(null);
 	mocks.githubChecks.set(null);
 	mocks.githubChecksStale.set(false);
+	mocks.gitMode.set('project');
 	vi.clearAllMocks();
 });
 
@@ -232,6 +233,21 @@ afterEach(() => {
 // ── Visibility matrix ───────────────────────────────────────────────────────
 
 describe('GitHeaderActions button visibility', () => {
+	it.each(['branch', 'mode'])('does not offer Init Repo for a removed worktree (%s)', (source) => {
+		setSnapshot({ status: { is_git_repo: false } });
+		if (source === 'mode') mocks.gitMode.set('worktree');
+		renderHeader({ isGitRepo: false, worktreeBranch: source === 'branch' ? 'feature/gone' : null });
+		expect(screen.queryByText('Init Repo')).toBeNull();
+		expect(screen.queryByText('Ship It')).toBeNull();
+		expect(screen.queryByText('Git unavailable · Retry')).toBeNull();
+	});
+
+	it('still offers Init Repo for an ordinary non-repository project', () => {
+		setSnapshot({ status: { is_git_repo: false } });
+		renderHeader({ isGitRepo: false });
+		expect(screen.getByText('Init Repo')).toBeTruthy();
+	});
+
 	it('shows only the merge step for an up-to-date open PR, even with no branch diff', async () => {
 		setSnapshot({
 			status: { is_git_repo: true, current_branch: 'feature/x', default_branch: 'main',

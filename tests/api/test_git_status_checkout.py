@@ -91,8 +91,78 @@ def test_unmaterialized_session_does_not_fall_back_to_dirty_base(checkout_client
     database.create_session(session_id="pending", profile_id="default", project_id="p1")
     database.set_session_branch("pending", "feature/pending", project["id"])
     response = client.get("/api/v1/projects/p1/git/status", params={"session_id": "pending"})
-    assert response.status_code == 409
-    assert "checkout is not available" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    assert response.json()["is_git_repo"] is False
+    assert response.json()["modified"] == []
     assert checkouts.get_checkout(
         project["id"], config.settings.effective_instance_id, branch="feature/pending",
     ) is None
+
+
+@pytest.mark.parametrize("legacy_id", [None, "old-worktree"])
+def test_ship_cleanup_status_is_empty_and_resume_restores_it(checkout_client, legacy_id):
+    import asyncio
+    from app.api import git_operations
+
+    client, base, branch, project = checkout_client
+    url = "/api/v1/projects/p1/git/status"
+    params = {"session_id": "s1"}
+    if legacy_id:
+        params["worktree_id"] = legacy_id
+    # Warm the real resolver cache before cleanup, just as the open UI does.
+    assert client.get(url, params=params).json()["is_git_repo"] is True
+    tip = _git(branch, "rev-parse", "HEAD")
+    op = git_operations.Operation(
+        project_id="p1", kind="ship", session_id="s1",
+        steps=[git_operations._step("cleanup", "Clean up branch")],
+    )
+    asyncio.run(git_operations._do_cleanup(
+        op, str(branch), None, "feature/new", "main", "s1",
+    ))
+    assert op.result["worktree_deleted"] is True
+    assert not (branch / ".git").exists()
+    checkout = checkouts.get_checkout(
+        project["id"], config.settings.effective_instance_id, branch="feature/new",
+    )
+    assert checkout["status"] == "archived"
+    assert checkout["head_sha"] == tip
+
+    for _ in range(2):
+        response = client.get(url, params=params)
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["is_git_repo"] is False
+        assert data["current_branch"] is None
+        assert data["modified"] == []
+        assert data["ahead"] == 0
+    assert not (branch / ".git").exists()  # Reads never rematerialize it.
+
+    # Mutations still fail closed, rather than touching the dirty base checkout.
+    response = client.post(
+        "/api/v1/projects/p1/git/stage", params=params, json={"files": ["."]},
+    )
+    assert response.status_code == 409, response.text
+    assert "checkout is not available" in response.json()["detail"]
+    assert _git(base, "diff", "--cached", "--name-only") == ""
+
+    restored = Path(checkout_manager.ensure_checkout(project, branch="feature/new"))
+    assert _git(restored, "rev-parse", "HEAD") == tip
+    response = client.get(url, params=params)
+    assert response.status_code == 200, response.text
+    assert response.json()["is_git_repo"] is True
+    assert response.json()["current_branch"] == "feature/new"
+
+
+@pytest.mark.parametrize("code", [403, 409, 503])
+def test_status_does_not_hide_other_resolution_errors(checkout_client, monkeypatch, code):
+    from fastapi import HTTPException
+
+    client, _, _, _ = checkout_client
+
+    async def fail(*args):
+        raise HTTPException(code, "Unrelated resolution failure")
+
+    monkeypatch.setattr(git_api, "get_working_dir_async", fail)
+    response = client.get("/api/v1/projects/p1/git/status", params={"session_id": "s1"})
+    assert response.status_code == code
+    assert response.json()["detail"] == "Unrelated resolution failure"
