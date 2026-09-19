@@ -224,7 +224,10 @@ export async function executeFalModel(input: RunFalModelInput): Promise<GenericR
 
   const apiKey = process.env.FAL_KEY;
   if (!apiKey) {
-    return { success: false, error: 'FAL_KEY environment variable is not set' };
+    return {
+      success: false,
+      error: 'No fal.ai credential available to this worker. Configure fal_api_key in Settings > Integrations (injected as FAL_KEY).',
+    };
   }
 
   const outputType = input.output_type || inferOutputType(endpoint_id);

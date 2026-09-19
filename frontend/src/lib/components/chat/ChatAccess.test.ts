@@ -10,6 +10,7 @@ import { resourceSync } from '$lib/services/resource-sync';
 const empty = () => ({ requests: [], actions: [], grants: [], saved_connections: [], vault_available: false });
 let snapshot: ReturnType<typeof empty> | Record<string, unknown>;
 const accessCalls = () => m.get.mock.calls.filter(([url]) => url.startsWith('/chat-access/'));
+const sessionCalls = () => m.get.mock.calls.filter(([url]) => url.startsWith('/sessions/'));
 const flush = async () => { await vi.advanceTimersByTimeAsync(0); await tick(); };
 function hidden(value: boolean) {
  Object.defineProperty(document, 'hidden', { configurable: true, value });
@@ -68,6 +69,7 @@ describe('private-access recovery and live invalidations', () => {
   resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
   expect(screen.getByText('Approve this remote command?')).toBeTruthy();
   expect(accessCalls()).toHaveLength(3);
+  expect(sessionCalls()).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(2000);
   expect(accessCalls()).toHaveLength(4);
   snapshot = empty();

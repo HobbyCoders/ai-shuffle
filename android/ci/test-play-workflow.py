@@ -45,6 +45,15 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertEqual(self.workflow["permissions"], {"contents": "read"})
         self.assertEqual(self.workflow["concurrency"]["cancel-in-progress"], "false")
 
+    def test_every_bundle_gets_a_version_from_full_source_history(self):
+        steps = self.jobs["bundle"]["steps"]
+        checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))
+        self.assertEqual(checkout["with"]["fetch-depth"], "0")
+        version = next(step for step in steps if step.get("name") == "Set source version name")
+        self.assertNotIn("if", version)
+        self.assertIn('resolve-version-name.py --release-tag "$RELEASE_TAG"', version["run"])
+        self.assertIn('ANDROID_VERSION_NAME=$name', version["run"])
+
     def test_readiness_guard_executes_fail_closed(self):
         guard = self.jobs["publish"]["steps"][0]["run"]
         ready = {"PLAY_SIGNING_READY": "true", "ANDROID_WORKERS_READY": "true",
@@ -91,9 +100,9 @@ class PlayWorkflowTests(unittest.TestCase):
         checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))
         self.assertEqual(checkout["with"]["ref"],
                          "${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.sha }}")
-        version = next(step for step in steps if step.get("name") == "Set release version name")
+        version = next(step for step in steps if step.get("name") == "Set source version name")
         self.assertEqual(version["env"]["RELEASE_TAG"], "${{ inputs.release_tag }}")
-        self.assertIn('ANDROID_VERSION_NAME=${RELEASE_TAG#v}', version["run"])
+        self.assertIn('resolve-version-name.py --release-tag "$RELEASE_TAG"', version["run"])
 
     def test_android_setup_explicitly_avoids_removed_tools_package(self):
         setups = 0

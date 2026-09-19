@@ -1,19 +1,31 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { writable } from 'svelte/store';
 import ContextPillBar from './ContextPillBar.svelte';
 
-const { session, execution } = vi.hoisted(() => ({ session: { store: null as any }, execution: vi.fn() }));
+const { session, execution, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
+	session: { store: null as any },
+	execution: vi.fn(),
+	appSessions: { store: null as any },
+	listInstallsMock: vi.fn(),
+	getClusterGitStateMock: vi.fn()
+}));
 vi.mock('$lib/stores/active-session', async () => {
 	const { writable } = await import('svelte/store');
 	session.store = writable({});
 	return { activeSession: session.store };
 });
-vi.mock('$lib/stores/app-data.svelte', () => ({
-	projects: writable([{ id: 'project', name: 'Project' }]),
-	clusterProjects: writable([]), sessions: writable([]), appData: {}
-}));
+vi.mock('$lib/stores/app-data.svelte', () => {
+	const sessions = writable([]);
+	appSessions.store = sessions;
+	return {
+		projects: writable([{ id: 'project', name: 'Project' }]),
+		clusterProjects: writable([]),
+		sessions,
+		appData: { loadSessions: vi.fn() }
+	};
+});
 vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false) }));
 vi.mock('$lib/stores/git.svelte', () => ({
 	gitStatus: writable({ current_branch: 'main' }), git: {}
@@ -26,11 +38,24 @@ vi.mock('$lib/components/layout/ExecutionModeBar.svelte', async () => {
 	return { default: (...args: Parameters<typeof component>) => { execution(); return component(...args); } };
 });
 vi.mock('$lib/components/git/CreateBranchModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+vi.mock('$lib/api/installs', () => ({
+	listInstalls: listInstallsMock,
+	getClusterGitState: getClusterGitStateMock
+}));
+vi.mock('$lib/api/sessions', () => ({ adoptSession: vi.fn(), moveSession: vi.fn() }));
 
-afterEach(cleanup);
+afterEach(() => {
+	cleanup();
+	execution.mockClear();
+	appSessions.store?.set([]);
+	listInstallsMock.mockReset();
+	listInstallsMock.mockResolvedValue({ installs: [] });
+	getClusterGitStateMock.mockReset();
+	getClusterGitStateMock.mockResolvedValue(null);
+});
 
 const base = {
-	project: 'project', mode: 'code', messages: [{ role: 'user', content: 'Fix bug' }],
+	sessionId: 'saved-session', project: 'project', mode: 'code', messages: [{ role: 'user', content: 'Fix bug' }],
 	worktreeIntent: 'worktree', worktreeId: null, worktreeBranch: null,
 	selectedWorktreeBranch: null, isCreatingWorktree: false
 };
@@ -38,9 +63,39 @@ const base = {
 describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) => {
 	it.each(['project', 'canonical'])('offers worker and branch selection without GitHub auth for %s', kind => {
 		execution.mockClear();
-		session.store.set({ ...base, messages: [], project: kind === 'project' ? 'project' : null, projectV2Id: kind === 'canonical' ? 'pv2-project' : null });
+		session.store.set({ ...base, sessionId: null, messages: [], project: kind === 'project' ? 'project' : null, projectV2Id: kind === 'canonical' ? 'pv2-project' : null });
 		render(ContextPillBar, { sheetMode });
 		expect(execution).toHaveBeenCalledOnce();
+	});
+	it('keeps a persisted zero-message remote session in the runner view', async () => {
+		session.store.set({
+			...base,
+			sessionId: 'remote-empty',
+			messages: [],
+			projectV2Id: 'pv2-project'
+		});
+		appSessions.store.set([
+			{
+				id: 'remote-empty',
+				project_id: null,
+				project_v2_id: 'pv2-project',
+				instance_id: 'owner',
+				device_name: 'Other worker',
+				device_online: true,
+				is_remote: true,
+				controllable: true
+			}
+		]);
+		const { container } = render(ContextPillBar, { sheetMode });
+		expect(execution).not.toHaveBeenCalled();
+		const runner = container.querySelector<HTMLButtonElement>('.ctx-chip.runner');
+		expect(runner).not.toBeNull();
+		expect(runner?.textContent).toContain('Other worker');
+
+		listInstallsMock.mockResolvedValue({ installs: [] });
+		getClusterGitStateMock.mockResolvedValue(null);
+		await fireEvent.click(runner!);
+		await waitFor(() => expect(container.querySelector('.runner-item')?.textContent).toContain('Continue here'));
 	});
 	it('stays checked from auto naming through completed setup', async () => {
 		session.store.set({ ...base, isCreatingWorktree: true });

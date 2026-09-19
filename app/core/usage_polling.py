@@ -17,6 +17,14 @@ class UsageDeferred(Exception):
     """A cached read must not bypass an upstream cooldown."""
 
 
+# Authentication refusals and permanently unsupported capabilities should not
+# be retried on the normal exponential schedule.  The state row is durable,
+# so this negative cache also survives a worker restart.  A changed
+# credential produces a different identity; callers that repair/reconfigure
+# the same credential use ``resume_authentication`` to clear the old state.
+_PAUSE_STATUSES = frozenset((401, 403, 405, 410, 501))
+
+
 def identity(url, headers):
     # Include scope but never retain a credential in the state table or logs.
     credential = headers.get("Authorization", "")
@@ -51,7 +59,7 @@ def finish(key, now, status, retry_after=0, interval=300):
         cur.execute("""
             UPDATE usage_poll_state SET next_attempt = %s, failures = %s, paused = %s
             WHERE identity = %s
-        """, (now + delay, failures, status in (401, 403), key))
+        """, (now + delay, failures, status in _PAUSE_STATUSES, key))
 
 
 def resume_authentication(url, headers):

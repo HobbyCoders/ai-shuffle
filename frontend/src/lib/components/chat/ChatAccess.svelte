@@ -97,8 +97,15 @@
 		};
 		const reverify = () => { verified = false; resume(); };
 		const recover = () => { if (!document.hidden) retryAt = 0; reverify(); };
-		const unsubscribe = resourceSync.subscribe(
-			['chat-access', `chat-access:${sessionId}`, 'sessions', `sessions:${sessionId}`], reverify
+		// Access mutations already carry a session-scoped invalidation. Refresh the
+		// snapshot directly so approvals/grants do not also query the session row.
+		// Session invalidations still re-check ownership and persisted mode before
+		// touching the owner-only endpoint.
+		const unsubscribeSession = resourceSync.subscribe(
+			['sessions', `sessions:${sessionId}`], reverify
+		);
+		const unsubscribeAccess = resourceSync.subscribe(
+			['chat-access', `chat-access:${sessionId}`], resume
 		);
 		document.addEventListener('visibilitychange', recover);
 		window.addEventListener('online', recover);
@@ -106,7 +113,8 @@
 		return () => {
 			alive = false;
 			clearTimeout(timer);
-			unsubscribe();
+			unsubscribeSession();
+			unsubscribeAccess();
 			document.removeEventListener('visibilitychange', recover);
 			window.removeEventListener('online', recover);
 		};

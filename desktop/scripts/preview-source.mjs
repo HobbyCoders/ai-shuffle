@@ -41,7 +41,11 @@ export function previewOptions(env = process.env, repo = sourceRoot) {
     // process essentials, not arbitrary inherited tokens, proxies or config paths.
     baseEnv: { ...Object.fromEntries(Object.entries(env).filter(([key]) =>
       /^(PATH|SYSTEMROOT|WINDIR|COMSPEC|PATHEXT|TEMP|TMP|LANG|LC_[A-Z_]+|PROCESSOR_ARCHITECTURE|NUMBER_OF_PROCESSORS)$/i.test(key))),
-      AI_SHUFFLE_PREVIEW: '1', SHUFFLE_LOCAL_ACCESS: 'true' },
+      AI_SHUFFLE_PREVIEW: '1', SHUFFLE_LOCAL_ACCESS: 'true',
+      // A checkout can enable Git's detached fsmonitor daemon. Preview Git
+      // children must not leave a daemon holding the disposable profile open.
+      // Process-local config overrides repository config without changing it.
+      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.fsmonitor', GIT_CONFIG_VALUE_0: 'false' },
   };
 }
 

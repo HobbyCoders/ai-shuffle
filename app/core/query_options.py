@@ -11,6 +11,7 @@ sibling modules and re-exported for backward compatibility.
 """
 
 import asyncio
+import hashlib
 import logging
 import time
 from pathlib import Path
@@ -53,6 +54,19 @@ from app.core.environment import (  # noqa: F401
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _ai_tools_credential_fingerprint(tool_env: Optional[Dict[str, str]]) -> Optional[str]:
+    """Return a non-secret identity for the fal credential carried by tools.
+
+    The persistent ``ai-tools`` Node worker captures its environment at spawn
+    time. A fingerprint lets the session pool detect credential rotation or
+    first configuration without storing or comparing the secret itself.
+    """
+    key = (tool_env or {}).get("FAL_KEY")
+    if not isinstance(key, str) or not key:
+        return None
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 # The CLI's interactive question tool, blocked for ProviderAgent worker
@@ -1454,9 +1468,10 @@ def build_options_from_profile(
     # picker's selection is projected back onto that shape. (The credential ENV
     # above is deliberately still built from the raw config: which API keys a
     # session carries is a credentials question, not a tool-access one.)
+    ai_tools_server_config = ai_tools_config_from_names(ai_tool_names)
     mcp_servers_dict = _build_mcp_servers_dict_with_ai_tools(
         project_dir=Path(working_dir) if working_dir else None,
-        ai_tools_config=ai_tools_config_from_names(ai_tool_names),
+        ai_tools_config=ai_tools_server_config,
         tool_env=ai_tool_env,
         session_id=session_id,
     ) or {}
@@ -1774,6 +1789,14 @@ def build_options_from_profile(
     # the OpenAI Responses lane into ``service_tier: priority``. None/False both
     # mean standard; stamped unconditionally so presence is not a signal.
     options.aih_fast = fast
+    # ``ai-tools`` owns a persistent Node worker whose FAL_KEY is fixed at
+    # spawn. Force a fresh pooled session when the configured credential moves
+    # absent → set, rotates, or is removed; the fingerprint contains no secret.
+    options.aih_ai_tools_credential_fingerprint = (
+        _ai_tools_credential_fingerprint(ai_tool_env)
+        if ai_tools_server_config and any(ai_tools_server_config.values())
+        else None
+    )
 
     # The bound row's SHAPE, carried alongside the id so the fluid
     # HarnessAdapter can decide the leg from the provider row instead of

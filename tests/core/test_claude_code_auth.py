@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import app.core.environment as env_mod
 from app.core.environment import inject_claude_code_auth, _build_env_with_ai_tools
+from app.core.query_options import _ai_tools_credential_fingerprint
 
 
 class TestInjectClaudeCodeAuth:
@@ -89,3 +90,36 @@ class TestMainSubprocessEnvAlwaysOnInjection:
         with patch.object(env_mod, "_get_decrypted_api_key", return_value=None):
             env = _build_env_with_ai_tools(base_env=None, ai_tools_config=None)
         assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_ai_tools_credential_fingerprint_is_non_secret_and_stable():
+    first = _ai_tools_credential_fingerprint({"FAL_KEY": "fal-a"})
+    assert first == _ai_tools_credential_fingerprint({"FAL_KEY": "fal-a"})
+    assert first != "fal-a"
+    assert _ai_tools_credential_fingerprint({}) is None
+
+
+def test_ai_tools_server_passes_current_fal_key_to_fresh_node_worker():
+    from app.mcp import ai_tools_sdk
+
+    captured = {}
+
+    class CapturingWorker:
+        def __init__(self, worker_script, env=None, cwd=None):
+            captured.update(worker_script=worker_script, env=env, cwd=cwd)
+
+        async def call(self, *_args, **_kwargs):
+            raise AssertionError("tool execution is outside this wiring test")
+
+    with patch.object(ai_tools_sdk, "NodeWorker", CapturingWorker):
+        server = ai_tools_sdk.create_ai_tools_server(
+            {"image_generation": True},
+            "C:/tools",
+            tool_env={"FAL_KEY": "fal-current"},
+            tool_cwd="C:/workspace",
+        )
+
+    assert server is not None
+    assert captured["env"] == {"FAL_KEY": "fal-current"}
+    assert captured["worker_script"].endswith("/dist/worker.js")
+    assert captured["cwd"] == "C:/workspace"

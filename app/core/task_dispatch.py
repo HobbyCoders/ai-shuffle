@@ -26,11 +26,12 @@ What this module adds on top of raw ``dispatch_worker``:
   ``settings.task_worker_max_per_provider`` to queue excess workers. This is
   a Shuffle concurrency policy, not a provider token quota. It is disabled by
   default; actual rate-limit feedback and resource guards still apply;
-* worker liveness — a worker that never streams a frame has not started, and
-  is failed at ``settings.task_worker_first_frame_seconds`` with the existing
-  "worker failed to start" summary rather than after fifteen silent minutes.
-  A zero-frame failure is then re-dispatched automatically (transport: once;
-  provider capacity: with backoff), each attempt its own visible task row.
+* worker liveness — a worker that never streams a frame is stopped at
+  ``settings.task_worker_first_frame_seconds`` with a clear no-output summary
+  rather than after fifteen silent minutes.
+  The watchdog interruption is not retried because the admitted provider
+  request may already have started. Explicit transport failures still retry
+  once; provider capacity refusals retry with backoff.
   A WORKING worker stays unbounded; a SYNCHRONOUS one additionally gets the
   hard cap ``settings.task_worker_sync_max_seconds``, because it is holding
   the parent's turn while it waits;
@@ -713,15 +714,16 @@ async def _reserve_admission(
 # ---------------------------------------------------------------------------
 # Automatic re-dispatch (2026-09-05 audit, A + C)
 # ---------------------------------------------------------------------------
-# A worker that forwarded ZERO frames never started: it died at or before
-# provider connect, so nothing it was asked to do has been done and re-running
-# the same brief costs exactly one worker. The audit found ten such deaths in
-# seven sessions — transport drops ("peer closed connection without sending
-# complete message body") and org TPM refusals ("Please try again in 1.049s") —
-# each reported ~900s late, each re-dispatched BY THE MODEL, by hand, from a
-# woken turn. Two of them were dispatched three times and executed once.
+# A worker that forwarded ZERO frames may have died at provider connect, but a
+# watchdog interruption can also catch an admitted provider request before its
+# first frame reaches the parent. The audit found ten such deaths in seven
+# sessions — transport drops ("peer closed connection without sending complete
+# message body") and org TPM refusals ("Please try again in 1.049s") — each
+# reported ~900s late, each re-dispatched BY THE MODEL, by hand, from a woken
+# turn. Two of them were dispatched three times and executed once.
 #
-# So the harness re-dispatches instead. Deliberately narrow:
+# So the harness re-dispatches only explicit preflight/transport failures.
+# Deliberately narrow:
 #
 # * only a ZERO-FRAME failure. A worker that streamed anything did real work,
 #   and repeating real work is not free (nor idempotent — it may have edited
@@ -729,6 +731,8 @@ async def _reserve_admission(
 # * only an ``error`` terminal. A ``killed`` one is a teardown or a Stop: the
 #   answer is the kill, not a retry;
 # * a transport start failure gets ONE retry (``task_worker_start_retries``);
+#   the first-frame watchdog error is permanent because its interrupted work is
+#   not safely distinguishable from a request that never began;
 # * a CAPACITY refusal gets up to ``task_worker_rate_limit_retries``
 #   reschedules with backoff seeded from the provider's own retry-after, which
 #   is what "reschedule, do not terminate" means for a 429;
@@ -758,6 +762,10 @@ _PERMANENT_START_FAILURES = (
     "is disabled",
     "did not finish within the",
     "server is at capacity",
+    # The first-frame watchdog interrupts an admitted/running worker. Its
+    # provider request may already have started even though no progress frame
+    # reached the parent, so automatic replay is never safe here.
+    "forwarded no output within",
 )
 
 
@@ -974,12 +982,9 @@ async def _dispatch_worker_with_retries(
         attempt_kwargs = dict(attempt_kwargs)
         attempt_kwargs["worker_session_id"] = retry_worker_id
         if kind == "start":
-            # The first-frame watchdog cannot tell a dead provider connection
-            # from a reasoning model whose first token is simply late — the
-            # worker's event log is empty in both cases. So the RETRY gets twice
-            # the leash: a genuinely slow model survives it (having cost one
-            # wasted start), a connection that never opens fails both and is
-            # reported, which is the whole point of the deadline.
+            # Only explicit transport start failures reach this branch. The
+            # first-frame watchdog is classified as permanent above because
+            # its interrupt may have caught provider work in flight.
             leash = attempt_kwargs.get("first_frame_seconds")
             if leash is None:
                 leash = provider_agent._worker_deadlines(background, None, None)[0]

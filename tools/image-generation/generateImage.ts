@@ -241,7 +241,7 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
   if (!apiKey) {
     return {
       success: false,
-      error: `No API key configured for ${provider.name}. Set IMAGE_API_KEY or provider-specific key.`
+      error: 'No fal.ai credential available to this worker. Configure fal_api_key in Settings > Integrations (injected as FAL_KEY).'
     };
   }
 

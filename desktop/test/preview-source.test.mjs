@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { previewOptions, previewUrl, reservePreviewRoot, stopPreview } from '../scripts/preview-source.mjs';
 const require = createRequire(import.meta.url);
 const { buildWorkerEnv } = require('../dist/main/worker.js');
@@ -68,6 +69,30 @@ test('preview rejects missing, relative, shared or invalid settings', () => {
     { SHUFFLE_PREVIEW_PROTECTED_PORT: '65536' }, { SHUFFLE_PREVIEW_PORT: '18001' }]) {
     assert.throws(() => previewOptions({ ...base, ...override }, repo));
   }
+});
+
+test('preview Git overrides repository fsmonitor without changing it or leaving a daemon', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'shuffle-preview-git-'));
+  const checkout = path.join(root, 'workspace');
+  try {
+    await mkdir(checkout);
+    const options = previewOptions({ ...process.env, ...base, SHUFFLE_PREVIEW_ROOT: root }, repo);
+    const env = buildWorkerEnv(options);
+    await mkdir(env.HOME, { recursive: true });
+    const git = (...args) => execFileSync('git', args, { cwd: checkout, env, windowsHide: true, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('config', '--local', 'core.fsmonitor', 'true');
+    assert.equal(git('config', '--get', 'core.fsmonitor'), 'false');
+    assert.equal(git('config', '--local', '--get', 'core.fsmonitor'), 'true');
+    git('status', '--porcelain');
+    if (process.platform === 'win32') {
+      const status = spawnSync('git', ['fsmonitor--daemon', 'status'], { cwd: checkout, env, windowsHide: true });
+      assert.equal(status.status, 1, 'preview status must not start a detached fsmonitor');
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+  await assert.rejects(lstat(root), { code: 'ENOENT' });
 });
 
 test('failed protection explains recovery, preserves its cause and removes only the empty root', async () => {

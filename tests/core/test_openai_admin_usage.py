@@ -40,6 +40,24 @@ def test_budget_survives_new_monitor_and_credential_changes(test_db):
     assert polling.claim(changed, 100)
 
 
+@pytest.mark.parametrize("status", [405, 410, 501])
+def test_unsupported_capability_is_negative_cached_until_resume(test_db, status):
+    key = polling.identity("https://example.test/unsupported", {})
+    assert polling.claim(key, 0)
+    polling.finish(key, 0, status)
+    assert not polling.claim(key, 10_000_000)
+
+    polling.resume_authentication("https://example.test/unsupported", {})
+    assert polling.claim(key, 10_000_000)
+
+
+def test_not_found_uses_bounded_backoff_instead_of_permanent_pause(test_db):
+    key = polling.identity("https://example.test/maybe-transient", {})
+    assert polling.claim(key, 0)
+    polling.finish(key, 0, 404)
+    assert polling.claim(key, 10_000_000)
+
+
 def test_retry_after_and_minimum_interval(test_db, monkeypatch):
     monkeypatch.setattr(polling.random, "uniform", lambda *_: 0)
     assert polling.claim("a", 0)

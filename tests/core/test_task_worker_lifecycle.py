@@ -184,12 +184,11 @@ class TestFirstFrameWatchdog:
         assert outcome.frames_forwarded == 0
         assert outcome.killed is False
         assert "forwarded no output" in outcome.error
-        # The registry row carries the wording a parent can act on — the same
-        # "worker failed to start" prefix the audit's stalled workers only got
-        # fifteen minutes late.
+        # The registry row distinguishes a watchdog stop from a preflight
+        # failure because the provider-side request state is unknown.
         record = task_registry.get_task("parent-1", outcome.session_id)
         assert record["status"] == "error"
-        assert record["summary"].startswith("worker failed to start:")
+        assert record["summary"].startswith("worker stopped before first output:")
         # And the wedged turn is stopped rather than left running.
         assert worker_env.tm.interrupts == [(outcome.session_id, "stop")]
 
@@ -302,7 +301,7 @@ class TestZeroFrameRedispatch:
             return WorkerOutcome(
                 ok=False,
                 session_id=kwargs["worker_session_id"],
-                error="The worker forwarded no output within 90s.",
+                error="RemoteProtocolError: peer closed connection",
                 frames_forwarded=0,
             )
 
@@ -355,6 +354,95 @@ class TestZeroFrameRedispatch:
 
         assert outcome.ok is False
         assert len(calls) == 1, "repeating real work is not free"
+
+    def test_no_first_frame_watchdog_is_never_re_dispatched(self, monkeypatch):
+        """An interrupted admitted worker may already have provider work in flight."""
+        from app.core import config as cfg
+
+        monkeypatch.setattr(cfg.settings, "task_worker_start_retries", 1, raising=False)
+        calls = []
+        wakes = []
+
+        async def dispatcher(**kwargs):
+            calls.append(kwargs)
+            wakes.append(kwargs["suppress_caller_wake"](
+                "error", "The worker forwarded no output within 90s.", 0
+            ))
+            return WorkerOutcome(
+                ok=False,
+                session_id=kwargs["worker_session_id"],
+                error="The worker forwarded no output within 90s.",
+                frames_forwarded=0,
+            )
+
+        outcome = _run(self._run_retries(dispatcher))
+
+        assert outcome.ok is False
+        assert len(calls) == 1
+        # The final watchdog failure still wakes the parent; only a real retry
+        # is allowed to suppress an intermediate attempt's wake.
+        assert wakes == [False]
+
+    def test_actual_watchdog_dispatch_does_not_launch_a_replacement(
+        self, worker_env, mock_db, monkeypatch
+    ):
+        """The real producer path leaves a late-settling child as one child."""
+        from app.core import config as cfg
+
+        monkeypatch.setattr(cfg.settings, "task_worker_start_retries", 1, raising=False)
+        worker_env.tm.hang = True
+        calls = []
+
+        async def producer(**kwargs):
+            calls.append(kwargs)
+            return await pa.dispatch_worker(**kwargs)
+
+        outcome = _run(td._dispatch_worker_with_retries(
+            kwargs=dict(
+                parent_session_id="root-1",
+                profile_id="p1",
+                prompt="the brief",
+                label="brief",
+                worker_session_id="w-1",
+                first_frame_seconds=0.01,
+            ),
+            background=True,
+            lane="native",
+            provider_id=None,
+            parent_session_id="root-1",
+            dispatcher=producer,
+        ))
+
+        assert outcome.ok is False
+        assert "forwarded no output" in outcome.error
+        assert outcome.frames_forwarded == 0
+        assert len(calls) == 1
+
+    def test_user_stop_between_transport_attempts_cancels_the_retry(self, monkeypatch):
+        from app.core import config as cfg
+
+        monkeypatch.setattr(cfg.settings, "task_worker_start_retries", 1, raising=False)
+        monkeypatch.setattr(td, "_START_RETRY_BACKOFF_SECONDS", 0.01)
+        calls = []
+
+        async def dispatcher(**kwargs):
+            calls.append(kwargs)
+            task_registry.mark_user_stopped("root-1")
+            return WorkerOutcome(
+                ok=False,
+                session_id=kwargs["worker_session_id"],
+                error="RemoteProtocolError: peer closed connection",
+                frames_forwarded=0,
+            )
+
+        try:
+            outcome = _run(self._run_retries(dispatcher))
+        finally:
+            task_registry.clear_user_stop("root-1")
+
+        assert outcome.ok is False
+        assert outcome.killed is True
+        assert len(calls) == 1
 
     def test_a_torn_down_worker_is_never_re_dispatched(self, monkeypatch):
         from app.core import config as cfg
@@ -1097,13 +1185,13 @@ class TestRateLimitMisclassification:
 
     def test_a_uuid_containing_429_is_not_a_rate_limit(self):
         text = (
-            "The worker forwarded no output within 90s, so its provider "
-            "connection never opened. Its session is "
+            "The worker forwarded no output within 90s; its provider "
+            "request state is unknown after the watchdog interrupt. Its session is "
             "d59fe8cf-d16d-429c-b22f-bcd47a15d6fc."
         )
         assert pa.looks_rate_limited(text) is False
         assert pa._failure_summary("error", text, 0).startswith(
-            "worker failed to start:"
+            "worker stopped before first output:"
         )
 
     def test_a_real_429_still_reads_as_one(self):

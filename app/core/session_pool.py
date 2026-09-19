@@ -1819,6 +1819,15 @@ def reconnect_option_names(state: SessionState, new_options: ClaudeAgentOptions)
     ):
         changed.append("aih_fast")
 
+    # The ai-tools MCP server owns a persistent Node worker whose FAL_KEY is
+    # captured at spawn. Compare only the non-secret fingerprint stamped by
+    # query_options so a credential add, rotation, or removal respawns that
+    # worker without broadening MCP identity comparison.
+    if getattr(old, "aih_ai_tools_credential_fingerprint", None) != getattr(
+        new_options, "aih_ai_tools_credential_fingerprint", None
+    ):
+        changed.append("ai_tools_credentials")
+
     # Directory grants are fixed at connection time. Reconnect after either
     # adding or removing a workspace so stale access never survives a turn.
     if set(getattr(old, "add_dirs", None) or []) != set(getattr(new_options, "add_dirs", None) or []):

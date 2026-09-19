@@ -131,9 +131,11 @@ function makeDeps(initial?: Partial<ActiveSessionState>) {
 			pendingQuestions: (state.pendingQuestions ?? []).filter((q) => q.request_id !== requestId),
 		};
 	});
+	const requestPendingQuestions = vi.fn();
 	return {
 		update,
 		getState,
+		requestPendingQuestions,
 		resolveInteractionByRequestId,
 		get state() {
 			return state;
@@ -835,7 +837,70 @@ describe('feedController cross-device interaction settle (#606 item 4)', () => {
 		expect(perms.map((p) => p.request_id)).toEqual(['perm-1']);
 	});
 
-	it('other event types never trigger a settle', () => {
+	it('a durable question request triggers one authoritative pending-row resync', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		for (const seq of [1, 2, 3]) {
+			hoisted.onEvent!({
+				type: 'interaction.requested',
+				id: `evt-req-${seq}`,
+				seq,
+				session_id: 's1',
+				kind: 'question',
+				request_id: `question-${seq}`,
+			});
+		}
+		expect(deps.requestPendingQuestions).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(0);
+		expect(deps.requestPendingQuestions).toHaveBeenCalledTimes(1);
+	});
+
+	it('coalesces requested events spread across hydration chunks until caught_up', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		for (const seq of [1, 2, 3]) {
+			hoisted.onEvent!({
+				type: 'interaction.requested',
+				id: `evt-history-${seq}`,
+				seq,
+				session_id: 's1',
+				kind: 'question',
+				request_id: `history-question-${seq}`,
+			});
+			vi.advanceTimersByTime(0);
+		}
+		expect(deps.requestPendingQuestions).not.toHaveBeenCalled();
+
+		hoisted.onEvent!(caughtUp(3));
+		vi.advanceTimersByTime(0);
+		expect(deps.requestPendingQuestions).toHaveBeenCalledTimes(1);
+	});
+
+	it('flushes the deferred resync when the hydration floor completes without a sentinel', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!({
+			type: 'interaction.requested',
+			id: 'evt-floor',
+			seq: 1,
+			session_id: 's1',
+			kind: 'question',
+			request_id: 'floor-question',
+		});
+		hoisted.onEvent!(textDelta('floor-text', 'still loading'));
+
+		vi.advanceTimersByTime(FIRST_FRAME_BUDGET_MS);
+		vi.runOnlyPendingTimers();
+		expect(deps.requestPendingQuestions).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not resync for permission requests or another session', () => {
 		const deps = makeDeps({
 			pendingPermissions: [{ request_id: 'perm-1' }],
 		} as unknown as Partial<ActiveSessionState>);
@@ -843,19 +908,29 @@ describe('feedController cross-device interaction settle (#606 item 4)', () => {
 		feedController.start('s1');
 		hoisted.onEvent!(caughtUp(0));
 
-		// A requested event (card creation stays on the legacy relay) and a text
-		// delta must NOT settle anything.
+		// Permission requests are handled by their existing relay. A request for a
+		// different feed session must never refresh this session's queue.
 		hoisted.onEvent!({
 			type: 'interaction.requested',
 			id: 'evt-req',
 			seq: 0,
 			session_id: 's1',
+			kind: 'permission',
 			request_id: 'perm-1',
+		});
+		hoisted.onEvent!({
+			type: 'interaction.requested',
+			id: 'evt-other',
+			seq: 1,
+			session_id: 's2',
+			kind: 'question',
+			request_id: 'q-other',
 		});
 		hoisted.onEvent!(textDelta('e1', 'foo'));
 		flushRaf();
 
 		expect(deps.resolveInteractionByRequestId).not.toHaveBeenCalled();
+		expect(deps.requestPendingQuestions).not.toHaveBeenCalled();
 		const perms = deps.state.pendingPermissions as Array<{ request_id: string }>;
 		expect(perms.map((p) => p.request_id)).toEqual(['perm-1']);
 	});

@@ -13,7 +13,7 @@ respawns on benign env churn, killing background subagents) and not a
 narrower 3-key tuple (would miss provider config edits).
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions
@@ -76,6 +76,104 @@ def test_context_window_change_forces_reconnect():
     new = _new_options({})
     new.aih_context_window = 1_000_000
     assert requires_reconnect(state, new) is True
+
+
+@pytest.mark.parametrize("old_fp,new_fp,expected", [
+    (None, "fp-a", True),
+    ("fp-a", "fp-b", True),
+    ("fp-a", None, True),
+    ("fp-a", "fp-a", False),
+])
+def test_ai_tools_credential_fingerprint_controls_reconnect(old_fp, new_fp, expected):
+    """A pooled Node worker must not retain an old fal credential."""
+    state = _make_state({})
+    state.connect_options.aih_ai_tools_credential_fingerprint = old_fp
+    new = _new_options({})
+    new.aih_ai_tools_credential_fingerprint = new_fp
+    assert requires_reconnect(state, new) is expected
+
+
+def test_fal_rotation_reconnects_even_when_sdk_server_identity_is_equivalent():
+    """A fresh Fluid SDK instance must replace the stale worker on rotation."""
+    old_server = {"type": "sdk", "name": "ai-tools", "instance": object()}
+    new_server = {"type": "sdk", "name": "ai-tools", "instance": object()}
+    state = _make_state({})
+    state.connect_options.mcp_servers = {"ai-tools": old_server}
+    state.connect_options.aih_ai_tools_credential_fingerprint = "fp-a"
+    new = _new_options({})
+    new.mcp_servers = {"ai-tools": new_server}
+    new.aih_ai_tools_credential_fingerprint = "fp-b"
+
+    assert requires_reconnect(state, new) is True
+
+
+def test_build_options_propagates_fal_credential_and_reconnects_pooled_worker(tmp_path):
+    """The real profile builder bridges the settings key to the MCP worker.
+
+    The MCP factory is captured before it starts a subprocess; the resulting
+    options still carry the producer's fingerprint used by the live pool.
+    """
+    import app.core.environment as environment
+    import app.core.query_options as query_options
+
+    profile = {
+        "id": "fal-profile",
+        "config": {
+            "model": "claude-sonnet-4-5",
+            "cwd": str(tmp_path),
+            "tools_preset": "claude_code",
+            "ai_tools": {"image_generation": True},
+        },
+    }
+    captured_envs = []
+    captured_configs = []
+
+    def capture_mcp_servers(**kwargs):
+        captured_envs.append(kwargs["tool_env"])
+        captured_configs.append(kwargs["ai_tools_config"])
+        return {}
+
+    def build(fal_key):
+        def get_key(name):
+            return fal_key if name == "fal_api_key" else None
+
+        with (
+            patch.object(query_options, "get_security_instructions", return_value=""),
+            patch.object(
+                query_options,
+                "_build_mcp_servers_dict_with_ai_tools",
+                side_effect=capture_mcp_servers,
+            ),
+            patch.object(query_options, "_ai_tools_available", return_value=True),
+            patch.object(environment, "_get_decrypted_api_key", side_effect=get_key),
+        ):
+            options, _ = query_options.build_options_from_profile(profile=profile)
+        return options
+
+    absent = build(None)
+    first = build("fal-a")
+    rotated = build("fal-b")
+    removed = build(None)
+
+    assert "FAL_KEY" not in captured_envs[0]
+    assert captured_envs[1]["FAL_KEY"] == "fal-a"
+    assert captured_envs[2]["FAL_KEY"] == "fal-b"
+    assert "FAL_KEY" not in captured_envs[3]
+    assert captured_configs[1]["image_generation"] is True
+    assert any(captured_configs[1].values())
+    assert absent.aih_ai_tools_credential_fingerprint is None
+    assert first.aih_ai_tools_credential_fingerprint
+    assert first.aih_ai_tools_credential_fingerprint != rotated.aih_ai_tools_credential_fingerprint
+    assert removed.aih_ai_tools_credential_fingerprint is None
+
+    state = _make_state({})
+    state.connect_options = absent
+    assert requires_reconnect(state, first) is True
+    state.connect_options = first
+    assert requires_reconnect(state, rotated) is True
+    assert requires_reconnect(state, first) is False
+    state.connect_options = rotated
+    assert requires_reconnect(state, removed) is True
 
 
 def test_identity_env_keys_covered_individually():

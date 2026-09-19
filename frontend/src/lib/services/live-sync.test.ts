@@ -72,6 +72,7 @@ describe('root authenticated live-sync lifecycle',()=>{
    await vi.advanceTimersByTimeAsync(100);await tick();
    expect(screen.getByText('Approve this remote command?')).toBeTruthy();
    expect(access.get.mock.calls.filter(([url])=>url.startsWith('/chat-access/'))).toHaveLength(2);
+   expect(access.get.mock.calls.filter(([url])=>url.startsWith('/sessions/'))).toHaveLength(1);
   } finally {view.unmount();cleanup();resourceSync.clear();}
  });
  it.each(['settings','agents'])('refreshes synced %s and reapplies composer defaults without opening Settings',async(resource)=>{

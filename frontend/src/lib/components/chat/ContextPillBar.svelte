@@ -3,7 +3,7 @@
 	 * ContextPillBar - the loose row of context chips that floats above the
 	 * chat composer box: agent · | · runner · repository · branch · worktree.
 	 *
-	 * New session (no messages yet): every chip is a selector, because the
+	 * New draft (no durable session ID yet): every chip is a selector, because the
 	 * execution context (runner / repository / branch / worktree) has to be
 	 * chosen before the first send. The runner and worktree chips come from
 	 * ExecutionModeBar; the repository chip and the local-mode branch chip are
@@ -66,8 +66,17 @@
 	// runner online).
 	const degraded = $derived(sessionRow?.degraded ?? false);
 
-	// New-session state: no messages yet. Every chip is a selector here.
-	const isEmptyState = $derived($activeSession.messages.length === 0);
+	// A persisted session can legitimately have no messages while it is being
+	// restored, or before its first message is submitted. Its durable ID is the
+	// distinction from a compose-time draft; message count alone would render
+	// that session as a new execution-mode selector row.
+	const isEmptyState = $derived($activeSession.sessionId == null);
+	// The context badge/branch helpers historically use messageCount as their
+	// "active chat" gate. Keep that gate true for a durable zero-message
+	// session, while retaining zero for a genuine compose-time draft.
+	const contextMessageCount = $derived(
+		isEmptyState ? 0 : Math.max(1, $activeSession.messages.length)
+	);
 
 	const isWorktreeSession = $derived(!!($activeSession.worktreeId || $activeSession.worktreeBranch));
 	// Auto naming starts before the session has a worktree ID or branch.
@@ -77,7 +86,7 @@
 	// read-only context instead.
 	const showBranch = $derived(
 		shouldShowBranchPill({
-			messageCount: $activeSession.messages.length,
+			messageCount: contextMessageCount,
 			project: $activeSession.project || null,
 			githubAuthenticated: $githubAuthenticated,
 			isRemote: sessionRow?.is_remote ?? false,
@@ -91,7 +100,7 @@
 	// add a second branch control. See contextPills.shouldShowEmptyStateBranchPill.
 	const showEmptyStateBranch = $derived(
 		shouldShowEmptyStateBranchPill({
-			messageCount: $activeSession.messages.length,
+			messageCount: contextMessageCount,
 			project: $activeSession.project || null,
 			githubAuthenticated: $githubAuthenticated,
 			worktreeIntent: $activeSession.worktreeIntent,
@@ -104,7 +113,7 @@
 	// active chat — see contextPills.computeContextBadge for the gating.
 	const badge = $derived(
 		computeContextBadge({
-			messageCount: $activeSession.messages.length,
+			messageCount: contextMessageCount,
 			projectName,
 			isWorktree: isWorktreeSession,
 			selectedWorktreeBranch: $activeSession.selectedWorktreeBranch,

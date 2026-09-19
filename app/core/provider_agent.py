@@ -474,10 +474,9 @@ class WorkerOutcome:
     truncated: bool = False
     usage: Dict[str, Any] = field(default_factory=dict)
     #: Progress frames the worker streamed before it settled. ``0`` means the
-    #: worker never started — it died at or before provider connect — which is
-    #: the ONLY failure shape a re-dispatch can honestly fix (a worker that ran
-    #: and failed did real work whose repetition is not free). Read by
-    #: :mod:`app.core.task_dispatch` to decide whether to retry.
+    #: parent saw no worker progress; it does not prove that an admitted
+    #: provider request never began. :mod:`app.core.task_dispatch` combines this
+    #: with the failure reason before deciding whether a retry is safe.
     frames_forwarded: int = 0
     #: True when the worker was TORN DOWN (stop-all, parent turn end, tripped
     #: circuit breaker) rather than failing on its own. Never retried: the
@@ -827,12 +826,11 @@ async def _await_worker_idle(
     a description of anything:
 
     * ``first_frame_deadline`` — an absolute ``loop.time()`` by which the feed
-      must have forwarded at least one frame. Zero frames means the worker died
-      at or before provider connect, which is exactly what
-      :func:`_failure_summary` already calls "worker failed to start"; the
-      audit found ten of them reported ~900s late, one after fifteen minutes of
-      a parent parked on a corpse. Once ANY frame has been forwarded the
-      deadline stops applying, permanently.
+      must have forwarded at least one frame. Zero frames means the parent saw
+      no progress; it does not prove that an admitted provider request never
+      began. The audit found ten of them reported ~900s late, one after fifteen
+      minutes of a parent parked on a corpse. Once ANY frame has been forwarded
+      the deadline stops applying, permanently.
     * ``hard_deadline`` — an absolute ``loop.time()`` ceiling for a dispatch
       whose caller cannot survive an unbounded wait. Only the SYNCHRONOUS lane
       passes one: it blocks the parent's turn, so "no timeout" means "no
@@ -974,15 +972,16 @@ def _worker_deadlines(
 
 
 def _no_first_frame_error(worker_session_id: str, seconds: float) -> str:
-    """The failure text for a worker that never streamed anything.
+    """The failure text for a worker that produced no parent-visible frame.
 
     Worded so :func:`_failure_summary` — which prefixes ``"worker failed to
-    start"`` on exactly this condition — reads as one sentence on the registry
-    row, and so the parent can tell it apart from a worker that ran and failed.
+    start"`` on ordinary zero-progress failures — reads as one sentence on the
+    registry row. The request's provider-side state is deliberately left
+    unknown; this error is what makes the watchdog non-retryable.
     """
     return (
-        f"The worker forwarded no output within {seconds:.0f}s, so its provider "
-        "connection never opened and it has done nothing. Its session is "
+        f"The worker forwarded no output within {seconds:.0f}s; its provider "
+        "request state is unknown after the watchdog interrupt. Its session is "
         f"{worker_session_id}."
     )
 
@@ -1004,9 +1003,8 @@ async def _stop_wedged_worker(worker_session_id: str) -> None:
     Deliberately NOT the supervisor's teardown: teardown latches ``torn_down``,
     which makes ``dispatch_worker``'s ``finally`` skip the registry completion
     and the caller wake — and a watchdog verdict is precisely the case where
-    the parent MUST be told, with the "worker failed to start" summary the
-    audit's ten stalled workers never got in time. So this only stops the turn
-    and lets the normal failure path do the reporting. Never raises.
+    the parent MUST be told with a clear no-output summary. So this only stops
+    the turn and lets the normal failure path do the reporting. Never raises.
     """
     from app.core import turn_manager
 
@@ -1439,10 +1437,9 @@ def _failure_summary(
     leaving TaskList/TaskOutput showing a dead worker with no reason. A failure
     status therefore replaces that summary with the failure text.
 
-    ``frames_forwarded == 0`` means the worker never streamed anything, i.e. it
-    died at or before provider connect (the ``ProviderCredentialError`` case) —
-    worth saying explicitly, because "failed to start" and "failed while working"
-    call for very different responses from the parent.
+    ``frames_forwarded == 0`` means the parent saw no worker progress. It can
+    describe a preflight failure, a transport failure, or a watchdog interrupt
+    that caught an admitted request before its first frame.
 
     The text is re-ordered MESSAGE-FIRST (:func:`_message_first`) before the cap
     so the sentence that explains the failure survives it.
@@ -1454,16 +1451,17 @@ def _failure_summary(
     if len(text) > _FAILURE_SUMMARY_CHARS:
         text = text[: _FAILURE_SUMMARY_CHARS - 1].rstrip() + "…"
     if not frames_forwarded:
-        # Say WHICH kind of "never started" this is. A capacity refusal is a
+        # Say WHICH kind of no-progress failure this is. A capacity refusal is a
         # queueing problem the harness has already retried; a parent that reads
         # only the raw provider string ("Rate limit reached for gpt-5.6-luna in
         # organization org-…") learns to work around the harness instead — an
         # audited model started capping its own workers at three tool calls.
-        prefix = (
-            "worker failed to start (provider at capacity, already retried)"
-            if looks_rate_limited(text)
-            else "worker failed to start"
-        )
+        if "forwarded no output within" in text:
+            prefix = "worker stopped before first output"
+        elif looks_rate_limited(text):
+            prefix = "worker failed to start (provider at capacity, already retried)"
+        else:
+            prefix = "worker failed to start"
     else:
         prefix = "worker failed"
     return f"{prefix}: {text}"
@@ -1654,16 +1652,18 @@ async def dispatch_worker(
     bounded exceptions, added by the 2026-09-05 audit, cover the states that
     are not "working" at all — see :func:`_await_worker_idle`:
 
-    * ``first_frame_seconds`` — a worker that has streamed NOTHING by then never
-      connected, and is failed with the "worker failed to start" summary the
-      audit's ten stalled workers only got ~900s late;
+    * ``first_frame_seconds`` — a worker that has streamed NOTHING by then is
+      failed with the "worker failed to start" summary the audit's ten stalled
+      workers only got ~900s late. No progress frame does not prove that the
+      provider request never began;
     * ``max_wall_seconds`` — a hard cap the SYNCHRONOUS lane passes, because a
       sync dispatch blocks the parent's turn for as long as it waits.
 
     ``None`` for either takes the configured default (:func:`_worker_deadlines`).
     Every failure path still returns a :class:`WorkerOutcome` with ``ok=False``,
-    now carrying ``frames_forwarded`` (0 = it never started, the only failure a
-    re-dispatch can honestly fix) and ``killed`` (a teardown, never retried).
+    now carrying ``frames_forwarded`` (0 = no parent progress) and ``killed``
+    (a teardown, never retried). Retry safety is decided from the failure reason
+    by :mod:`app.core.task_dispatch`.
 
     ``suppress_caller_wake`` lets a RETRYING caller keep the doomed attempt's
     failure off the parent's wake lane: it is handed
@@ -2141,7 +2141,7 @@ async def dispatch_worker(
             # The watchdog, not the provider, is ending this. Stop the turn (the
             # worker may be wedged on a connection that will never open) and let
             # the ordinary failure path do the reporting — the parent needs the
-            # "worker failed to start" summary now, not in fifteen minutes.
+            # no-output summary now, not in fifteen minutes.
             error = (
                 _no_first_frame_error(worker_session_id, first_frame_seconds)
                 if wait_verdict == WAIT_NO_FIRST_FRAME
