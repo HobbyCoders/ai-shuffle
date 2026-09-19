@@ -29,6 +29,20 @@
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git.svelte';
 	import { ChevronDown, ChevronRight, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { untrack, type Snippet } from 'svelte';
+
+	function keepInViewport(node: HTMLElement) {
+		const reposition = () => {
+			node.style.translate = '';
+			const rect = node.getBoundingClientRect();
+			const shift = rect.left < 12 ? 12 - rect.left : Math.min(0, window.innerWidth - 12 - rect.right);
+			node.style.translate = `${shift}px 0`;
+		};
+		const observer = new ResizeObserver(reposition);
+		observer.observe(node);
+		window.addEventListener('resize', reposition);
+		reposition();
+		return { destroy() { observer.disconnect(); window.removeEventListener('resize', reposition); } };
+	}
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 
@@ -363,7 +377,7 @@
 			</button>
 
 			{#if showModeDropdown}
-				<div class="mode-dropdown branch-dropdown" role="menu" aria-label="Runner selection">
+				<div use:keepInViewport class="mode-dropdown branch-dropdown" role="menu" aria-label="Runner selection">
 					<!-- Base mode: Local -->
 					<button
 						type="button"

@@ -750,6 +750,13 @@ def _run_column_migrations(cursor):
     # records only the fresh input tokens, so replaying the log can never
     # reconstruct what a cache-heavy turn actually sent to the provider.
     if table_exists(cursor, "usage_log"):
+        if not column_exists(cursor, "usage_log", "settlement_key"):
+            cursor.execute("ALTER TABLE usage_log ADD COLUMN settlement_key TEXT")
+            migrations_applied.append("usage_log.settlement_key")
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_log_settlement_key "
+            "ON usage_log(settlement_key)"
+        )
         if not column_exists(cursor, "usage_log", "cache_read_tokens"):
             cursor.execute(
                 "ALTER TABLE usage_log ADD COLUMN cache_read_tokens BIGINT DEFAULT 0"
@@ -2907,6 +2914,7 @@ from app.db.sessions import (  # noqa: F401
 
 from app.db.analytics import (  # noqa: F401
     log_usage,
+    settle_turn_usage,
     get_last_session_usage,
     get_all_session_usage,
     get_usage_stats,

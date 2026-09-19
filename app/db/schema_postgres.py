@@ -368,6 +368,7 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS usage_log (
             id BIGSERIAL PRIMARY KEY,
+            settlement_key TEXT UNIQUE,
             session_id TEXT,
             profile_id TEXT,
             model TEXT,
@@ -1369,6 +1370,13 @@ def create_postgres_schema(cursor) -> None:
     # the ``UPDATE usage_log SET session_id = NULL`` unlink in delete_session)
     # sequentially scanned the whole ledger without this (v84).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_session ON usage_log(session_id)")
+    # One booking per execution attempt (#1407). The startup migration adds the
+    # same index to existing installs (app.db.database._run_column_migrations);
+    # settle_turn_usage's ON CONFLICT claim needs it on both paths.
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_log_settlement_key "
+        "ON usage_log(settlement_key)"
+    )
 
     # -- auth_sessions
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")

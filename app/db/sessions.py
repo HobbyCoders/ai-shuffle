@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, TypedDict
@@ -747,6 +748,7 @@ def update_session(
     cache_read_tokens: Optional[int] = None,
     launched_model: Optional[str] = None,
     v2_stream: Optional[bool] = None,
+    _conn=None,
 ) -> Optional[SessionRow]:
     """Update a session with usage stats
 
@@ -853,7 +855,7 @@ def update_session(
 
     # RETURNING * folds the old UPDATE-then-SELECT into one statement on a path
     # every turn hits several times (finding B8).
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph} RETURNING *",

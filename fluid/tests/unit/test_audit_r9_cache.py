@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
+import pytest
+
 from fluid.context.cache_probe import (
     SYSTEM_PARAGRAPHS_KEY,
     cache_read_report,
@@ -104,6 +106,117 @@ def test_cache_read_report_distinguishes_partial_and_full() -> None:
                                input_includes_cached=True)
     assert openai["verdict"] == "full_hit" and openai["prompt_tokens_total"] == 100_000
     assert cache_read_report({"input_tokens": 10}, input_includes_cached=True)["verdict"] == "small_prompt"
+
+
+@pytest.mark.parametrize("provider_name", ["openai_responses", "openrouter", "anthropic"])
+@pytest.mark.parametrize("created", [0, 4_000])
+async def test_normalized_provider_usage_reaches_engine_cache_report(provider_name, created):
+    from fluid.providers.openai_responses.serialize import ResponsesStreamNormalizer
+    from fluid.providers.openrouter.serialize import ChatCompletionsNormalizer
+    from fluid.providers.anthropic.serialize import sse_to_chunk
+
+    class WireProvider:
+        name = provider_name
+        caps = ProviderCaps(explicit_cache_breakpoints=provider_name == "anthropic")
+
+        async def stream(self, request):
+            total = 9_896 + 34_560 + created
+            if self.name == "openai_responses":
+                normalizer = ResponsesStreamNormalizer()
+                events = [
+                    ("response.created", {"response": {}}),
+                    ("response.output_text.delta", {"item_id": "msg", "delta": "ok"}),
+                    ("response.completed", {"response": {"status": "completed", "usage": {
+                        "input_tokens": total, "output_tokens": 5,
+                        "input_tokens_details": {"cached_tokens": 34_560, "cache_write_tokens": created},
+                    }}}),
+                ]
+                for name, data in events:
+                    for chunk in normalizer.consume(name, data):
+                        yield chunk
+            elif self.name == "openrouter":
+                normalizer = ChatCompletionsNormalizer()
+                for data in [
+                    {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+                    {"choices": [], "usage": {
+                        "prompt_tokens": total, "completion_tokens": 5,
+                        "prompt_tokens_details": {"cached_tokens": 34_560, "cache_write_tokens": created},
+                    }},
+                ]:
+                    for chunk in normalizer.consume("", data):
+                        yield chunk
+            else:
+                for name, data in [
+                    ("message_start", {"message": {"usage": {
+                        "input_tokens": 9_896, "cache_read_input_tokens": 34_560,
+                        "cache_creation_input_tokens": created,
+                    }}}),
+                    ("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}}),
+                    ("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": "ok"}}),
+                    ("content_block_stop", {"index": 0}),
+                    ("message_delta", {"usage": {"output_tokens": 5}, "delta": {"stop_reason": "end_turn"}}),
+                    ("message_stop", {}),
+                ]:
+                    chunk = sse_to_chunk(name, data)
+                    assert chunk is not None
+                    yield chunk
+
+    loop = NativeLoop(provider=WireProvider(), store=MemoryStore(), model="m")
+    try:
+        await loop.submit(UserTurn(content="test"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=5)
+        usages = [e for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+        assert len(usages) == 1
+        usage = usages[0]
+        assert (usage.input_tokens, usage.cache_read_tokens, usage.cache_creation_tokens) == (9_896, 34_560, created)
+        report = usage.raw["cache_read_report"]
+        assert report["prompt_tokens_total"] == 44_456 + created
+        assert report["cached_fraction"] == round(34_560 / (44_456 + created), 3)
+        assert report["verdict"] == "partial_hit"
+        assert report["input_includes_cached"] is False
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("includes_cached", [False, True])
+@pytest.mark.parametrize("value", [-5, "bad", None, float("nan"), float("inf"), -float("inf"), {}, 10**400])
+@pytest.mark.parametrize("key", ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"])
+def test_cache_read_report_bounds_malformed_counts(key, value, includes_cached):
+    usage = {"input_tokens": 9_896, "cache_read_input_tokens": 34_560, "cache_creation_input_tokens": 0}
+    usage[key] = value
+    report = cache_read_report(usage, input_includes_cached=includes_cached)
+    assert 0 <= report["cached_fraction"] <= 1
+    assert report["prompt_tokens_total"] >= 0
+    assert report["provider_cached_tokens"] >= 0
+    assert report["provider_cache_creation_tokens"] >= 0
+
+
+@pytest.mark.parametrize("fresh,cached,old_fraction", [
+    (9_896, 34_560, 3.492), (50_000, 45_000, 0.9),
+    (9_896, 34_560, float("nan")), (9_896, 34_560, -1),
+])
+async def test_stored_cache_reports_are_recomputed_on_replay(tmp_path, fresh, cached, old_fraction):
+    from fluid.store.jsonl import JsonlStore
+
+    store = JsonlStore(tmp_path)
+    session = await store.create_session()
+    historical = {
+        "provider_cached_tokens": cached, "provider_cache_creation_tokens": 0,
+        "prompt_tokens_total": fresh, "cached_fraction": old_fraction,
+        "verdict": "full_hit", "input_includes_cached": True,
+    }
+    original = Usage(session_id=session.session_id, seq=0, input_tokens=fresh,
+                     cache_read_tokens=cached, raw={"cache_read_report": historical, "other": "preserved"})
+    await store.append_event(session.session_id, original)
+    replayed = (await JsonlStore(tmp_path).events_since(session.session_id, -1))[0]
+    report = replayed.raw["cache_read_report"]
+    assert report["verdict"] == "partial_hit"
+    assert report["cached_fraction"] == round(cached / (fresh + cached), 3)
+    assert report["prompt_tokens_total"] == fresh + cached
+    assert report["input_includes_cached"] is False
+    assert replayed.raw["other"] == "preserved"
+    assert original.raw["cache_read_report"] == historical
+    assert original.raw["cache_read_report"]["verdict"] == "full_hit"
 
 
 class _ScriptedProvider:

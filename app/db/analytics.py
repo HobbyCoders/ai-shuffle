@@ -150,6 +150,50 @@ def log_usage(
         append_usage_entry(session_id, cost_usd, duration_ms, tokens_in, tokens_out, model)
 
 
+def settle_turn_usage(
+    session_id: str, settlement_key: str, *, profile_id=None, model=None,
+    tokens_in=0, tokens_out=0, cache_read_tokens=0, cache_creation_tokens=0,
+    cost_usd=0, duration_ms=0, model_calls=0, turn_increment=0,
+) -> bool:
+    """Claim an execution attempt and book its ledger/counters in one commit.
+
+    The key is captured by the producer, never inferred from token equality or
+    whichever turn happens to be live during finalization. A unique INSERT waits
+    for competing transactions in PostgreSQL; a rollback releases the claim too.
+    """
+    from app.db.sessions import update_session
+
+    if not settlement_key:
+        raise ValueError("Usage settlement requires an execution identity")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO usage_log (settlement_key, session_id, profile_id, model, "
+            "tokens_in, tokens_out, cache_read_tokens, cache_creation_tokens, "
+            "cost_usd, duration_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (settlement_key) DO NOTHING RETURNING id",
+            (settlement_key, session_id, profile_id, model, tokens_in or 0,
+             tokens_out or 0, cache_read_tokens or 0, cache_creation_tokens or 0,
+             cost_usd or 0, duration_ms or 0),
+        )
+        if cursor.fetchone() is None:
+            return False
+        row = update_session(
+            session_id, cost_increment=cost_usd or 0,
+            tokens_in_increment=tokens_in or 0, tokens_out_increment=tokens_out or 0,
+            cache_read_increment=cache_read_tokens or 0,
+            cache_creation_increment=cache_creation_tokens or 0,
+            model_calls_increment=model_calls or 0, turn_increment=turn_increment,
+            _conn=conn,
+        )
+        if row is None:
+            raise ValueError(f"Unknown usage session: {session_id}")
+    # Only committed bookings invalidate the cache; never append speculatively.
+    from app.core.cost_utils import invalidate_usage_cache
+    invalidate_usage_cache(session_id)
+    return True
+
+
 def get_last_session_usage(session_id: str) -> Optional[LastSessionUsage]:
     """Get the most recent usage entry for a session.
 

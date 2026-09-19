@@ -16,6 +16,13 @@
 	const resolvedIndex = $derived(Math.max(0, Math.min(items.length - 1, currentIndex)));
 
 	function onKeydown(event: KeyboardEvent) {
+		// Leave native option navigation to the select control.
+		if (event.target instanceof HTMLSelectElement) return;
+		if (event.key === 'Home' || event.key === 'End') {
+			event.preventDefault();
+			onSelect(event.key === 'Home' ? 0 : items.length - 1);
+			return;
+		}
 		if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
 		event.preventDefault();
 		const destination = resolveTurnNavigationIndex(
@@ -30,12 +37,24 @@
 <nav
 	class="turn-nav"
 	class:is-focused={focused}
+	class:long-history={items.length > 30}
 	style="--count: {items.length}"
 	aria-label="Navigate user turns"
 	onfocusin={() => (focused = true)}
 	onfocusout={() => (focused = false)}
 	onmouseleave={() => (hoveredIndex = null)}
 >
+	{#if items.length > 30}
+		<button type="button" aria-label="First user turn" onclick={() => onSelect(0)}>First</button>
+		<button type="button" aria-label="Previous user turn" disabled={resolvedIndex === 0} onclick={() => onSelect(resolvedIndex - 1)}>Previous</button>
+		<select aria-label="Select user turn" value={resolvedIndex} onchange={(event) => onSelect(Number(event.currentTarget.value))}>
+			{#each items as item, index (item.id)}
+				<option value={index}>User message {index + 1} of {items.length}: {item.label}</option>
+			{/each}
+		</select>
+		<button type="button" aria-label="Next user turn" disabled={resolvedIndex === items.length - 1} onclick={() => onSelect(resolvedIndex + 1)}>Next</button>
+		<button type="button" aria-label="Last user turn" onclick={() => onSelect(items.length - 1)}>Last</button>
+	{:else}
 	{#each items as item, index (item.id)}
 		<button
 			type="button"
@@ -62,6 +81,7 @@
 			</span>
 		</button>
 	{/each}
+	{/if}
 </nav>
 
 <style>
@@ -79,6 +99,23 @@
 		padding: 10px 12px 10px 2px;
 		transform: translateY(-50%);
 		pointer-events: auto;
+	}
+
+	.long-history {
+		left: 8px;
+		max-width: min(120px, 24vw);
+		gap: 6px;
+		padding: 6px;
+		border-radius: 8px;
+		background: var(--card);
+	}
+
+	.long-history button, .long-history select {
+		pointer-events: auto;
+		width: 100%;
+		min-height: 28px;
+		min-width: 0;
+		font-size: 11px;
 	}
 
 	.tick {
@@ -191,7 +228,17 @@
 	/* Desktop reading aid. On compact/coarse-pointer surfaces it competes with
 	   transcript scrolling and the composer island. */
 	@media (max-width: 639px), (pointer: coarse) {
-		.turn-nav { display: none; }
+		.turn-nav:not(.long-history) { display: none; }
+		.long-history {
+			left: 6px;
+			top: 6px;
+			transform: none;
+			width: calc(100% - 12px);
+			max-width: none;
+			flex-direction: row;
+		}
+		.long-history button { width: auto; min-height: 36px; }
+		.long-history select { flex: 1; min-height: 36px; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {

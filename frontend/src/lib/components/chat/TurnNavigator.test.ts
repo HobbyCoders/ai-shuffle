@@ -16,6 +16,22 @@ const items = [
 afterEach(cleanup);
 
 describe('TurnNavigator', () => {
+	it('keeps every long-history target available through bounded controls', async () => {
+		const onSelect = vi.fn();
+		const many = Array.from({ length: 1000 }, (_, i) => ({ id: String(i), label: `Turn ${i}`, title: `Turn ${i}`, preview: '' }));
+		render(TurnNavigator, { props: { items: many, currentIndex: 500, onSelect } });
+		expect(screen.getAllByRole('option')).toHaveLength(1000);
+		expect(screen.getAllByRole('button')).toHaveLength(4);
+		await fireEvent.click(screen.getByRole('button', { name: 'First user turn' }));
+		expect(onSelect).toHaveBeenLastCalledWith(0);
+		await fireEvent.click(screen.getByRole('button', { name: 'Last user turn' }));
+		expect(onSelect).toHaveBeenLastCalledWith(999);
+		await fireEvent.change(screen.getByRole('combobox'), { target: { value: '123' } });
+		expect(onSelect).toHaveBeenLastCalledWith(123);
+		onSelect.mockClear();
+		await fireEvent.keyDown(screen.getByRole('combobox'), { key: 'ArrowDown' });
+		expect(onSelect).not.toHaveBeenCalled();
+	});
 	it('selects a turn from the timeline', async () => {
 		const onSelect = vi.fn();
 		render(TurnNavigator, { props: { items, currentIndex: 1, onSelect } });

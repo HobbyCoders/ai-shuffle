@@ -8,6 +8,8 @@ import asyncio
 import collections
 import collections.abc
 import logging
+import json
+import uuid
 from typing import Any, Deque, Optional, Callable, Set
 
 from app.db import database
@@ -335,6 +337,25 @@ def _row_for_plugin(session_id: str, pm: dict, profile_id: Optional[str]) -> dic
     }
 
 
+def usage_settlement_key(session_id: str, turn: dict) -> str:
+    """Identity includes the lease attempt: a requeued turn is new paid work."""
+    return json.dumps(
+        [session_id, turn["id"], turn.get("run_id"), str(turn.get("started_at"))],
+        separators=(",", ":"),
+    )
+
+
+async def capture_usage_identity(session_id: str) -> str:
+    """Capture before execution, while the owning turn is still live."""
+    from app.db import turns as turns_db
+
+    turn = await run_sync(turns_db.get_live_turn, session_id)
+    if turn:
+        return usage_settlement_key(session_id, turn)
+    # Legacy non-queued entry points still need a distinct producer identity.
+    return json.dumps([session_id, "legacy", str(uuid.uuid4())])
+
+
 async def _persist_turn_results(
     session_id: str,
     sdk_session_id: Optional[str],
@@ -424,42 +445,6 @@ async def _persist_turn_results(
                 database.update_session,
                 session_id=session_id,
                 sdk_session_id=sdk_session_id,
-                # `or 0` (not a .get default): these keys can be PRESENT with a
-                # None value on the fluid path, so the default never fires and a
-                # None would poison the additive SQL update.
-                cost_increment=metadata.get("total_cost_usd") or 0,
-                tokens_in_increment=metadata.get("tokens_in") or 0,
-                tokens_out_increment=metadata.get("tokens_out") or 0,
-                # Usage is normalized Anthropic-style: `tokens_in` is FRESH input
-                # and EXCLUDES cache reads. Sending only that to the cumulative
-                # column booked a 253k-token research child as 15 tokens, because
-                # the cache numbers went exclusively to the overwrite snapshot
-                # columns below. Accumulate them too.
-                cache_read_increment=metadata.get("cache_read_tokens") or 0,
-                cache_creation_increment=metadata.get("cache_creation_tokens") or 0,
-                # `num_turns` on the fluid path is the MODEL-CALL count
-                # (harness_adapter sets num_turns=event.num_model_calls), so
-                # feeding it to turn_count made a 1-turn child read as 16 turns.
-                # One completed turn increments turn_count by one; the model calls
-                # get their own column. An errored turn counts neither — same
-                # gating as the usage log below.
-                turn_increment=0 if metadata.get("error") else 1,
-                # NOT the same as SUM(TurnComplete.num_model_calls) over the
-                # fluid event log, and deliberately so — an audit compared the
-                # two, found this column roughly double, and read it as a
-                # double count. It is not. This is the ONLY runtime writer of
-                # ``total_model_calls`` per turn (the kill path in
-                # ``settle_killed_session`` books instead of it, never as well:
-                # the atomic ``settle_turn`` claim lets exactly one of them
-                # win), and it counts the calls of EVERY terminal — the
-                # Interrupted and ErrorEvent ones too, which a
-                # TurnComplete-only sum cannot see. Those are real spend: a
-                # stopped turn's calls were billed, and a failover retry runs
-                # the work twice for one user-visible turn. Booking only
-                # completed turns is the undercount this column was created to
-                # fix (a session with 167 calls read as 11 — see
-                # harness_adapter's Interrupted branch).
-                model_calls_increment=metadata.get("num_turns") or 0,
                 # Persist per-turn context-window values so /live can render
                 # the context bar on session reload without scanning JSONL.
                 last_input_tokens=last_input_tokens,
@@ -600,25 +585,29 @@ async def _persist_turn_results(
         except Exception as e:
             logger.error(f"{log_prefix}Failed to add sync log for session {session_id}: {e}")
 
-    # 5. Log usage
-    if metadata and not metadata.get("error"):
+    # Counters and ledger must share one durable claim, including errors.
+    settlement_key = metadata.get("usage_settlement_key")
+    if settlement_key:
         try:
             await run_sync(
-                database.log_usage,
-                session_id=session_id,
-                profile_id=profile_id,
-                model=metadata.get("model"),
-                tokens_in=metadata.get("tokens_in", 0),
-                tokens_out=metadata.get("tokens_out", 0),
-                # The rest of the prompt. Without these the log can never
-                # reconstruct what a cache-heavy turn actually sent.
+                database.settle_turn_usage,
+                session_id=session_id, settlement_key=settlement_key,
+                profile_id=profile_id, model=metadata.get("model"),
+                tokens_in=metadata.get("tokens_in") or 0,
+                tokens_out=metadata.get("tokens_out") or 0,
                 cache_read_tokens=metadata.get("cache_read_tokens") or 0,
                 cache_creation_tokens=metadata.get("cache_creation_tokens") or 0,
-                cost_usd=metadata.get("total_cost_usd", 0),
-                duration_ms=metadata.get("duration_ms", 0)
+                cost_usd=metadata.get("total_cost_usd") or 0,
+                duration_ms=metadata.get("duration_ms") or 0,
+                model_calls=metadata.get("num_turns") or 0,
+                turn_increment=0 if interrupted or metadata.get("error")
+                or metadata.get("is_error") else 1,
             )
-        except Exception as e:
-            logger.error(f"{log_prefix}Failed to log usage for session {session_id}: {e}")
+        except Exception:
+            logger.exception("%sUsage settlement failed for %s", log_prefix, session_id)
+    else:
+        logger.warning("%sUsage not settled: missing producer identity for %s",
+                       log_prefix, session_id)
 
     return assistant_msg
 
@@ -728,12 +717,9 @@ async def settle_killed_session(
     Nothing settled the child's own rows, because the kill removes the very
     runtime that would have.
 
-    THE CLAIM IS THE TURN SETTLE, and it comes first. ``settle_turn`` only
-    transitions a row that is not already terminal and returns the row it moved,
-    so exactly one writer can win: if the child's own runtime got far enough to
-    finalize, it settled and booked the turn and this returns ``False`` without
-    touching a number. Only when the kill genuinely beat the runtime do we
-    reconstruct the usage from the event log and book it.
+    The turn transition selects the recovery owner. Accounting has a separate
+    durable execution claim shared with normal finalization, so both paths
+    may reach booking but only one increments the ledger and counters.
 
     Never raises — a kill must complete whatever the accounting does.
     Returns ``True`` when this call is what settled the turn.
@@ -748,6 +734,8 @@ async def settle_killed_session(
         if live:
             was_live = True
             turn_id = live.get("id")
+            run_id = live.get("run_id")
+            started_at = live.get("started_at")
             settled = await run_sync(
                 turns_db.settle_turn, turn_id, "aborted", stop_reason
             )
@@ -773,42 +761,32 @@ async def settle_killed_session(
             or totals["cost_usd"] or totals["model_calls"]
         ):
             try:
-                await run_sync(
-                    database.update_session,
-                    session_id=session_id,
-                    cost_increment=totals["cost_usd"],
-                    tokens_in_increment=totals["tokens_in"],
-                    tokens_out_increment=totals["tokens_out"],
-                    cache_read_increment=totals["cache_read_tokens"],
-                    cache_creation_increment=totals["cache_creation_tokens"],
-                    # The turn never completed, so it is not a user-visible turn
-                    # — but its API hops are real and get their own column.
-                    turn_increment=0,
-                    model_calls_increment=totals["model_calls"],
-                )
-            except Exception:
-                logger.warning(
-                    "settle_killed_session: session-row increment failed for %s",
-                    session_id, exc_info=True,
-                )
-            try:
-                await run_sync(
-                    database.log_usage,
-                    session_id=session_id,
-                    profile_id=profile_id,
-                    model=totals["model"],
+                key = usage_settlement_key(session_id, {
+                    "id": turn_id, "run_id": run_id, "started_at": started_at,
+                })
+                settled = await run_sync(
+                    database.settle_turn_usage,
+                    session_id=session_id, settlement_key=key,
+                    profile_id=profile_id, model=totals["model"],
                     tokens_in=totals["tokens_in"],
                     tokens_out=totals["tokens_out"],
                     cache_read_tokens=totals["cache_read_tokens"],
                     cache_creation_tokens=totals["cache_creation_tokens"],
                     cost_usd=totals["cost_usd"],
-                    duration_ms=0,
+                    model_calls=totals["model_calls"],
+                    turn_increment=0,
                 )
             except Exception:
                 logger.warning(
-                    "settle_killed_session: usage_log write failed for %s",
-                    session_id, exc_info=True,
+                    "settle_killed_session: settlement failed for %s", session_id,
+                    exc_info=True,
                 )
+            else:
+                if not settled:
+                    logger.debug(
+                        "settle_killed_session: usage for %s was already booked "
+                        "by the turn's own finalization", session_id,
+                    )
 
     # The session row's own verdict — the half the observed drift was missing
     # (``sessions.status='active'`` next to a ``killed`` background-task row).

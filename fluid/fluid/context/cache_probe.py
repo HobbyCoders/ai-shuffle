@@ -233,20 +233,20 @@ def cache_read_report(
     Recorded on EVERY call, hit or miss, so a partial hit (some prefix reused)
     and a full miss (zero reused) are distinguishable in the event log without
     re-deriving them from four usage counters. ``input_includes_cached`` says
-    which accounting the provider uses: OpenAI-shaped APIs count cached
-    tokens inside ``input_tokens``; Anthropic reports them alongside it.
+    which accounting the caller supplies. Engine usage is always normalized
+    to exclusive input, regardless of the provider's wire format.
     """
     def _int(key: str) -> int:
         try:
-            return int(usage.get(key, 0) or 0)
-        except (TypeError, ValueError):
+            return max(0, int(usage.get(key, 0) or 0))
+        except (TypeError, ValueError, OverflowError):
             return 0
 
     input_tokens = _int("input_tokens")
     cached = _int("cache_read_input_tokens") or _int("cache_read_tokens")
     created = _int("cache_creation_input_tokens") or _int("cache_creation_tokens")
     total = input_tokens if input_includes_cached else input_tokens + cached + created
-    fraction = round(cached / total, 3) if total > 0 else 0.0
+    fraction = round(min(cached, total) / total, 3) if total > 0 else 0.0
     if total < 1_000:
         verdict = "small_prompt"
     elif fraction >= 0.9:

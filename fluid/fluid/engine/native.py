@@ -3362,7 +3362,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             # so partial and full misses are told apart in the event log.
             out["cache_read_report"] = cache_read_report(
                 usage,
-                input_includes_cached=not self.provider.caps.explicit_cache_breakpoints,
+                # Every provider normalizes input to exclude cache reads/writes.
+                input_includes_cached=False,
             )
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             pass

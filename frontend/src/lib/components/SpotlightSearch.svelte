@@ -23,8 +23,8 @@
   onNewChat, onOpenSettings, onImportSession, onManageTags, onManageKnowledge }: Props = $props();
  let query = $state('');
  let selectedIndex = $state(0);
- let input: HTMLInputElement;
- let list: HTMLDivElement;
+ let input = $state<HTMLInputElement>();
+ let list = $state<HTMLDivElement>();
  let results = $state<SearchGroup[]>([]);
  let failures = $state<string[]>([]);
  let searching = $state(false);

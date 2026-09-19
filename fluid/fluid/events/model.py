@@ -511,8 +511,9 @@ class SwarmUpdated(Event):
 #
 # The EventBus keeps an in-process log; durable replay across restarts belongs
 # to the SessionStore, which serializes events with these helpers. Round-trips
-# by concrete class name so ``events_since`` returns byte-identical events after
-# a reload. Every row carries ``_v``, the codec schema version, so a future
+# by concrete class name so ``events_since`` restores events after a reload.
+# Derived cache reports are repaired from counters on read. Every row carries
+# ``_v``, the codec schema version, so a future
 # incompatible change can be told apart from a row of this shape.
 
 SCHEMA_VERSION = 1
@@ -604,6 +605,18 @@ def event_from_dict(d: dict[str, Any]) -> Event:
         return _unknown_event(cls_name, raw)
     known = {f.name: f for f in dataclasses.fields(cls) if f.init}
     kwargs = {k: v for k, v in d.items() if k in known}
+    if cls is Usage and isinstance(kwargs.get("raw"), dict):
+        usage_raw = kwargs["raw"]
+        if "cache_read_report" in usage_raw:
+            # Stored reports predating #1406 used provider capabilities to
+            # interpret already-normalized input. Recompute from the durable
+            # exclusive counters, including plausible but incorrect full hits.
+            from fluid.context.cache_probe import cache_read_report
+
+            kwargs["raw"] = {
+                **usage_raw,
+                "cache_read_report": cache_read_report(kwargs, input_includes_cached=False),
+            }
     for name, f in known.items():
         # JSON round-trips every tuple back as a list; the annotation (a
         # string, this module defers annotations) says which fields to

@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.hoisted(() => {
+	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
 		ok: false,
 		status: 404,

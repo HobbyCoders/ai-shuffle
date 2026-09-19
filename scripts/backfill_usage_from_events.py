@@ -268,6 +268,15 @@ def main() -> int:
         help="repair a single app session id instead of every session",
     )
     parser.add_argument(
+        "--dedupe-cancelled", action="store_true",
+        help=(
+            "report historical duplicate usage rows, provable only by the "
+            "shared settlement identity on the usage_log rows (never by "
+            "equal token totals). Read-only: prints the duplicate groups "
+            "and writes nothing."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="debug logging",
     )
     args = parser.parse_args()
@@ -278,6 +287,14 @@ def main() -> int:
     )
 
     from app.db.base import close_pool, init_pool
+
+    if args.dedupe_cancelled:
+        init_pool(min_conn=1, max_conn=2)
+        try:
+            from scripts.dedupe_cancelled_usage import report_duplicate_cancelled_usage
+            return report_duplicate_cancelled_usage(session_id=args.session_id)
+        finally:
+            close_pool()
 
     init_pool(min_conn=1, max_conn=2)
     try:

@@ -100,6 +100,7 @@ from app.core.query_persistence import (  # noqa: F401 — re-exports
     _wrap_stderr_capture,
     _extract_connection_error,
     _persist_turn_results,
+    capture_usage_identity,
     schedule_context_usage_capture,
     log_captured_cli_stderr,
 )
@@ -926,7 +927,7 @@ async def execute_query(
     # Execute query and collect response
     response_text = []
     tool_messages = []  # Collect tool use/result messages for storage
-    metadata = {}
+    metadata = {"usage_settlement_key": await capture_usage_identity(session_id)}
     sdk_session_id = None
     sdk_link_persisted = False
 
@@ -1578,7 +1579,7 @@ async def stream_query(
         response_text = []
         tool_messages = []  # Collect tool use/result messages for storage
         tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
-        metadata = {}
+        metadata = {"usage_settlement_key": await capture_usage_identity(session_id)}
         sdk_session_id = resume_id  # Start with existing SDK session ID if resuming
         # Persist-on-init guard (see stream_to_websocket): write the SDK session id
         # to the sessions row the moment it's captured so a mid-turn crash can't
@@ -2829,7 +2830,7 @@ async def _stream_to_websocket_impl(
                 "_cross_turn": True,
             }
         tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
-        metadata = {}
+        metadata = {"usage_settlement_key": await capture_usage_identity(session_id)}
         interrupted = False
         # Last `model` value emitted via a `model_info` system note THIS turn.
         # Seeded from the SDK init frame so init + first AssistantMessage with

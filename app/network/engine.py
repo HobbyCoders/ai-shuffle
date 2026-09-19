@@ -47,7 +47,17 @@ from app.network.membership import Member
 logger = logging.getLogger(__name__)
 
 _lock = threading.RLock()
-_rollback_lock = threading.Lock()
+_rollback_lock = threading.RLock()
+
+
+def _network_transition(fn):
+    """Serialize enrollment changes with proof-driven identity recovery."""
+    from functools import wraps
+    @wraps(fn)
+    def guarded(*args, **kwargs):
+        with _rollback_lock:
+            return fn(*args, **kwargs)
+    return guarded
 _context: Optional["NetworkContext"] = None
 _listeners: List[Callable[[List[Tuple[str, str, str]]], None]] = []
 _kick: Optional[Callable[[], None]] = None
@@ -271,6 +281,7 @@ def new_network_id() -> str:
     return "net_" + secrets.token_hex(12)
 
 
+@_network_transition
 def create_network(name: Optional[str] = None, *, device_name: Optional[str] = None,
                    legacy_instance_id: Optional[str] = None) -> NetworkContext:
     """Make this worker the founder of a fresh network."""
@@ -303,6 +314,7 @@ def create_network(name: Optional[str] = None, *, device_name: Optional[str] = N
     return context(refresh=True)
 
 
+@_network_transition
 def leave_network() -> dict:
     """Forget this worker's network so it can join another one.
 
@@ -1211,7 +1223,8 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext |
         elif outcome == "rejected":
             result.rejected += 1
     if result.own_ahead:
-        restored_from_backup(result.own_ahead, ctx.identity.incarnation)
+        restored_from_backup(result.own_ahead, ctx.identity.incarnation,
+                             evidence_network_id=ctx.network_id, evidence_device_id=ctx.device_id)
     if result.touched:
         touched = list(result.touched)
         if any(c in ("membership", "member_names") for c, _, _ in touched):
@@ -1221,14 +1234,18 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext |
     return result
 
 
-def restored_from_backup(evidence_seq: int, evidence_incarnation: int) -> NetworkContext:
+def restored_from_backup(evidence_seq: int, evidence_incarnation: int, *,
+                         evidence_network_id: str, evidence_device_id: str) -> Optional[NetworkContext]:
     """Start a fresh stream: an op this device signed exists that it does not hold.
 
     Called with proof only (an envelope that verifies under our own signing
     key, at a sequence past our outbox), never on a peer's bare claim.
     """
     with _rollback_lock:
-        ctx = require_context()
+        ctx = load_context()
+        if (ctx is None or ctx.network_id != evidence_network_id
+                or ctx.device_id != evidence_device_id):
+            return ctx
         # Startup and background peer links can deliver the same proof. It
         # belongs to its signed stream, not a newer incarnation's outbox.
         if ctx.identity.incarnation != evidence_incarnation:
@@ -1520,6 +1537,7 @@ def _public_member(row: Mapping[str, Any]) -> dict:
                                     "capabilities", "version")}
 
 
+@_network_transition
 def enroll_from_response(response: Mapping[str, Any], *, device_name: str,
                          legacy_instance_id: Optional[str] = None) -> NetworkContext:
     """Install the network state a join (or recovery) handed us; start in Syncing."""

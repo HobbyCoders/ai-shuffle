@@ -275,7 +275,14 @@ class PeerLink:
                 or not env.verify_signature(ctx.identity.signing_public)):
             logger.warning("Peer %s offered an op of our stream that does not verify; claim ignored", self.device_id)
             return False
-        await asyncio.to_thread(engine.restored_from_backup, env.origin_seq, env.origin_incarnation)
+        recovered = await asyncio.to_thread(
+            engine.restored_from_backup, env.origin_seq, env.origin_incarnation,
+            evidence_network_id=env.network_id, evidence_device_id=env.origin_device_id,
+        )
+        if (recovered is None or recovered.network_id != env.network_id
+                or recovered.device_id != env.origin_device_id
+                or recovered.identity.incarnation <= env.origin_incarnation):
+            return False
         await asyncio.to_thread(engine.publish_presence, capabilities=_capabilities(), version=settings.version)
         return True
 

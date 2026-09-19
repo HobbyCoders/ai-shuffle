@@ -606,3 +606,29 @@ def test_unreadable_row_is_skipped_without_publishing_a_deletion(workers, monkey
     ops = _pref_ops(a)
     assert any(o["record_id"] == "admin|@owner|fine" and o["op"] == "upsert" for o in ops[-1:])
     assert not any(o["record_id"] == "admin|@owner|locked" and o["op"] == "delete" for o in ops)
+
+
+async def test_old_network_proof_is_rejected_at_recovery_boundary(workers, monkeypatch):
+    a = workers("a")
+    with a.active():
+        old = engine.create_network("Old")
+        link = transport.PeerLink("peer", ["http://peer.local:8000"])
+        proof = envelope_mod.build(
+            network_id=old.network_id, collection="user_preferences",
+            record_id="admin|@owner|lost", op="upsert", clock=999,
+            origin_device_id=old.device_id, origin_incarnation=old.identity.incarnation,
+            origin_seq=1000000, schema_version=1, key_version=old.key_version,
+            network_key=old.network_key, signing_private=old.identity.signing_private,
+            record={"key": "lost"})
+        async def answer(*args, **kwargs):
+            return {"op": proof.to_dict()}
+        monkeypatch.setattr(link, "_request", answer)
+        recover = engine.restored_from_backup
+        def switch_after_validation(*args, **kwargs):
+            engine.leave_network()
+            engine.create_network("New")
+            return recover(*args, **kwargs)
+        monkeypatch.setattr(engine, "restored_from_backup", switch_after_validation)
+        assert await link._check_rollback(None, old, {old.device_id: {"1": 1000000}}) is False
+        assert engine.context().network_id != old.network_id
+        assert engine.context().identity.incarnation == old.identity.incarnation
