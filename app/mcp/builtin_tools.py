@@ -2489,6 +2489,38 @@ def create_builtin_tools_server(
 
     all_tools.append(get_app_logs)
 
+    # Cache-only usage inspection for the delegated leg. The native leg uses
+    # Fluid's bare GetUsage builtin with the same host callback; this copy is
+    # needed because the Claude CLI receives app tools through MCP.
+    @tool(
+        "GetUsage",
+        "Read the latest cached subscription and provider usage observed by "
+        "the host. Reports used and remaining percentages, reset timestamps, "
+        "source, freshness, and unavailable data explicitly. Read-only: it "
+        "never refreshes providers or reads credentials.",
+        {"type": "object", "properties": {}, "additionalProperties": False},
+    )
+    async def get_usage(args: dict) -> dict:
+        try:
+            from app.api.usage import get_cached_usage_payload
+            from fluid.tools.builtins.usage import _payload as format_usage_payload
+
+            return _ok(format_usage_payload(await get_cached_usage_payload()))
+        except Exception:  # noqa: BLE001 — usage is informational
+            logger.debug("GetUsage failed", exc_info=True)
+            return _ok({
+                "available": False,
+                "source": "host_snapshot",
+                "freshness": "unavailable",
+                "windows": [],
+                "accounts": [],
+                "providers": [],
+                "session_usage": {"available": False},
+                "reason": "usage snapshot is unavailable",
+            })
+
+    all_tools.append(get_usage)
+
     # ------------------------------------------------------------------
     # App-memory bridge — Remember / Recall / SessionSearch / SessionView.
     # These exist for the DELEGATED (claude CLI) leg, which otherwise sees
@@ -2553,6 +2585,7 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__ToolSearch",
         "mcp__builtins__GetAppErrors",
         "mcp__builtins__GetAppLogs",
+        "mcp__builtins__GetUsage",
         # The app-memory bridge (delegated leg; shadowed on native legs where
         # fluid's bare-named builtins serve the same stores). Allow-listed
         # unconditionally — per-session registration gates real availability.

@@ -88,7 +88,7 @@ async def test_session_shutdown_releases_real_windows_cwd_lock(
     bt._background_tasks[task.task_id] = task
     monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: None)
     monkeypatch.setattr(session_runtime, "active_executions", lambda: {})
-    monkeypatch.setattr(session_pool, "get_session_pool", lambda: SimpleNamespace(remove=AsyncMock()))
+    monkeypatch.setattr(session_pool, "get_session_pool", lambda: SimpleNamespace(remove=AsyncMock(), items=lambda: []))
     monkeypatch.setattr(bt, "_settle_reaped_shell", AsyncMock())
     try:
         assert (await asyncio.wait_for(proc.stdout.readline(), 5)).strip() == b"ready"

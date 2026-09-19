@@ -33,7 +33,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from fluid.codemode.kernel import HostReply
 from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus, hook_reminder
@@ -45,11 +45,39 @@ from fluid.permissions.engine import (
 from fluid.tools.mrtr import resolve_input_required, unresolved_notice
 from fluid.tools.registry import InputRequired, ToolCtx, ToolRegistry
 
+
+def _approved_input_error(spec: Any, input: dict[str, Any]) -> str | None:
+    """Return a concise schema error for a responder-supplied payload.
+
+    The registry performs the normal coercion and handler-level validation for
+    ordinary calls. An approval rewrite needs one host-side check before that
+    dispatch so a malformed responder payload cannot reach a side-effecting
+    handler with required fields missing.
+    """
+    required = spec.input_schema.get("required", ())
+    if not isinstance(required, (list, tuple)):
+        return None
+    missing = [name for name in required if name not in input]
+    if missing:
+        return "missing required argument(s): " + ", ".join(map(str, missing))
+    return None
+
 # Injected permission round-trip: the engine says "ask", the bridge calls this
 # to surface a PermissionRequest and await the user's answer. In production the
 # engine loop backs it with a PermissionRequest/RespondPermission pair; tests
-# inject a fake that returns a bool.
-OnPermission = Callable[[Any, dict[str, Any]], Awaitable[bool]]
+# inject a fake that returns a bool. Structured responses mirror the native
+# path and carry an approved rewritten input through the gate.
+@dataclass(frozen=True, kw_only=True)
+class PermissionResult:
+    decision: str
+    message: str | None = None
+    updated_input: dict[str, Any] | None = None
+
+
+OnPermission = Callable[
+    [Any, dict[str, Any]],
+    Awaitable[bool | PermissionResult | tuple[str, str | None, dict[str, Any] | None]],
+]
 
 # Injected MRTR round-trip: the tool pauses on ``input_required``, the bridge
 # calls this with (tool name, this call's tool_use_id, marker) to surface one
@@ -172,7 +200,7 @@ class HostBridge:
             verdict = "allow"
             decided = None
         else:
-            decided = self._permissions.decide(spec, tool_input)
+            decided = self._permissions.decide(spec, tool_input, cwd=self._ctx.cwd)
             verdict = decided.decision
         if verdict != "deny" and self._doom_loop:
             if self._permissions.note_execution(tool_name, tool_input):
@@ -190,8 +218,47 @@ class HostBridge:
                     denied=True,
                     message=non_interactive_denial(tool_name, "no permission handler is wired"),
                 )
-            if not await self._on_permission(spec, tool_input):
-                return HostReply(denied=True, message=PROMPT_DENIAL)
+            response = await self._on_permission(spec, tool_input)
+            if isinstance(response, bool):
+                permission = PermissionResult(
+                    decision="allow" if response else "deny"
+                )
+            elif isinstance(response, PermissionResult):
+                permission = response
+            elif isinstance(response, tuple) and len(response) == 3:
+                permission = PermissionResult(
+                    decision=response[0],
+                    message=response[1],
+                    updated_input=response[2],
+                )
+            else:
+                return HostReply(
+                    denied=True,
+                    message="permission callback returned an invalid decision",
+                )
+            if permission.decision != "allow":
+                return HostReply(
+                    denied=True,
+                    message=permission.message or PROMPT_DENIAL,
+                )
+            if permission.updated_input is not None:
+                if not isinstance(permission.updated_input, dict):
+                    return HostReply(
+                        denied=True,
+                        message="permission callback returned invalid tool arguments",
+                    )
+                # Hooks have already run. Apply the approved payload only now,
+                # so they cannot cause the original input to execute instead.
+                tool_input = dict(permission.updated_input)
+                input_error = _approved_input_error(spec, tool_input)
+                if input_error is not None:
+                    return HostReply(
+                        denied=True,
+                        message=(
+                            "permission callback returned invalid tool arguments: "
+                            + input_error
+                        ),
+                    )
 
         outcome = await self._registry.dispatch(
             tool_name, tool_input, self._ctx, raw_shell_output=True,

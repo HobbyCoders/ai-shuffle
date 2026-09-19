@@ -4064,6 +4064,15 @@ async def test_max_turns_becomes_model_call_budget(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_native_get_usage_receives_the_cache_only_host_callback(monkeypatch, tmp_path):
+    captured = await _connect_capturing_native(monkeypatch, tmp_path)
+    callback = captured["ctx"].extra.get("usage_snapshot")
+    from app.api.usage import get_cached_usage_payload
+
+    assert callback is get_cached_usage_payload
+
+
+@pytest.mark.asyncio
 async def test_no_max_turns_adds_no_automatic_call_limit(monkeypatch, tmp_path):
     """Only an explicitly configured profile may cap native model calls."""
     for kwargs in ({}, {"max_turns": 0}):

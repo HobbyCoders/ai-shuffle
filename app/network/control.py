@@ -322,6 +322,8 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
         existing = database.get_session(session_id)
         if existing is not None:
             return existing
+        if database.get_profile(profile_id) is None:
+            raise ValueError(f"Unknown profile: {profile_id}")
         return database.create_session(session_id=session_id, profile_id=profile_id, project_id=None,
                                        is_active=True, **fields)
 

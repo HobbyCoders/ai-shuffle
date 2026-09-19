@@ -100,6 +100,15 @@ Long-running work leaves the turn: `Monitor` detaches a shell command and
 wakes with the result. The standalone CLI hosts both; see
 [docs/background-tasks.md](docs/background-tasks.md).
 
+`GetUsage` is a read-only builtin for the latest cached subscription and
+provider usage. It reports used and remaining percentages, reset timestamps,
+freshness, source, and unavailable data separately; it never refreshes a
+provider or reads credentials. The AI Shuffle embedding wires the app's
+cache-only snapshot, while a standalone Fluid host returns an explicit
+unavailable result until the host injects a `ToolCtx.extra["usage_snapshot"]`
+callback. The HTTP `/api/v1/usage/limits` endpoint may refresh stale data for
+the UI; `GetUsage` deliberately does not.
+
 ## Under the hood
 
 A few of the ideas that make fluid different, in plain terms:

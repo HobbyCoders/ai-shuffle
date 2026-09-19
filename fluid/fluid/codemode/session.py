@@ -47,7 +47,7 @@ from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 from fluid.codemode.verify import verify_sources, verify_store
-from fluid.events.model import ToolResult, ToolUse
+from fluid.events.model import HookEvent, ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
 from fluid.store.base import new_id
 from fluid.tools.hardening import fence_shell_output
@@ -284,6 +284,8 @@ class CodeModeSession:
         # Not cleared per turn: the point is exactly to notice a re-fetch many
         # turns later.
         self._docs_served: set[str] = set()
+        self._verification_degraded: str | None = None
+        self._verification_degraded_reported = False
     @property
     def skills(self) -> SkillStore | None:
         return self._skills
@@ -378,15 +380,21 @@ class CodeModeSession:
         broken ones are excluded from the mount and flagged in
         ``list_tools``, and ones the budget did not reach wait for the next
         mount. Verification failure of the *pass* itself (e.g. kernel spawn
-        issues) degrades to mounting as-is — the continual layer must never
-        take down run_python.
+        issues) degrades to an empty skill mount. Ordinary projected tools
+        remain available, and the session reports the degraded state.
         """
         if self._skills is None:
             return {}
         try:
             await verify_store(self._skills, config=self._config)
-        except Exception:
-            return self._skills.sources()
+        except Exception as exc:
+            self._verification_degraded = (
+                "skill verification unavailable; saved skills were withheld "
+                f"from this code-mode kernel ({type(exc).__name__})"
+            )
+            return {}
+        self._verification_degraded = None
+        self._verification_degraded_reported = False
         return {
             s.name: s.source for s in self._skills.list()
             if s.broken is None and s.source
@@ -417,6 +425,15 @@ class CodeModeSession:
         except (TypeError, ValueError):
             timeout = self._exec_timeout
         kernel = await self._ensure_kernel()
+        if self._verification_degraded and not self._verification_degraded_reported:
+            await loop._emit(HookEvent(
+                session_id=sid,
+                turn_id=turn_id,
+                level="warning",
+                message=self._verification_degraded,
+                hook_event="skill_verification",
+            ))
+            self._verification_degraded_reported = True
 
         # Every second this cell spends waiting on a HUMAN. The kernel credits
         # it back against the per-host-call ceiling, so a permission prompt or
@@ -428,12 +445,14 @@ class CodeModeSession:
         # Bridge: the JSON-path gate for in-kernel tool calls. Its ``ask`` verdict
         # is surfaced as an engine PermissionRequest (parking the turn until the
         # client answers) via on_permission.
-        async def _on_permission(spec: ToolSpec, tool_input: dict) -> bool:
+        async def _on_permission(
+            spec: ToolSpec, tool_input: dict
+        ) -> tuple[str, str | None, dict | None]:
             with human_wait:
-                verdict, _message, _updated_input = await loop._await_permission(
+                verdict, message, updated_input = await loop._await_permission(
                     sid, turn_id, spec.name, new_id("call"), tool_input, spec.risk
                 )
-            return verdict == "allow"
+            return verdict, message, updated_input
 
         # MRTR round-trip: an in-kernel AskUser (or an elicitating
         # MCP tool) pauses on ``input_required``, and the engine turns that into

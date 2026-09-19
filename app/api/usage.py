@@ -280,3 +280,26 @@ async def get_usage_limits(
     return UsageSnapshot(
         **snapshot, providers=providers, provider_refreshing=refreshing
     )
+
+
+async def get_cached_usage_snapshot() -> UsageSnapshot:
+    """Return the latest persisted usage observation without refreshing it.
+
+    This is intentionally separate from :func:`get_usage_limits`: a model
+    tool may inspect cached state, but must not initiate provider billing or
+    subscription requests, bypass a refresh cooldown, or use credentials.
+    """
+    from app.core.provider_usage import provider_usage_monitor
+
+    snapshot = await usage_limits_monitor.get_cached_cluster_snapshot()
+    providers = await _load_provider_usage()
+    return UsageSnapshot(
+        **snapshot,
+        providers=providers,
+        provider_refreshing=provider_usage_monitor.refreshing,
+    )
+
+
+async def get_cached_usage_payload() -> dict:
+    """JSON-safe cache-only usage payload for native/tool host callbacks."""
+    return (await get_cached_usage_snapshot()).model_dump(mode="json")

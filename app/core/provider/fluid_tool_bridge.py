@@ -172,6 +172,7 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "ExitWorktree": "write",
     "GetAppErrors": "safe",
     "GetAppLogs": "safe",
+    "GetUsage": "safe",
     "ToolSearch": "safe",
     "RemoteTrigger": "write",
     # Dispatching an agent spawns a session that can act — gated like a write.
@@ -281,7 +282,7 @@ DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
 # leg's app-memory bridge; native legs run fluid's originals over the same
 # stores via ctx.extra.
 NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
-    "Task", "Monitor", "ToolSearch",
+    "Task", "Monitor", "ToolSearch", "GetUsage",
     "Remember", "Recall", "Forget", "SessionSearch", "SessionView",
 })
 

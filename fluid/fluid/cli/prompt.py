@@ -60,7 +60,7 @@ BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill", "Note", "Task",
     "Monitor", "ToolSearch", "HistoryExpand", "HistorySearch", "Ledger",
     "AskUser", "SessionSearch", "SessionView", "WebFetch", "WebSearch",
-    "Remember", "Recall", "Forget", "ListAgents", "SendMessage", "Swarm",
+    "Remember", "Recall", "Forget", "ListAgents", "SendMessage", "Swarm", "GetUsage",
 )
 
 _FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES)

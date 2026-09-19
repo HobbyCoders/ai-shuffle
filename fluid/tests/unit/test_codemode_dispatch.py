@@ -216,6 +216,161 @@ async def test_ask_permission_deny_raises_in_kernel() -> None:
     assert "permission denied" in result.error
 
 
+async def test_ask_permission_applies_approved_rewrite() -> None:
+    registry = _wx_registry()
+    seen: list[dict] = []
+
+    async def approve(spec, input):
+        seen.append(dict(input))
+        return "allow", "approved rewrite", {"city": "Paris"}
+
+    bridge = HostBridge(registry, PermissionEngine("always_ask"), on_permission=approve)
+    reply = await bridge.on_host_call(
+        "mcp__wx__get_weather", {"city": "Original"}
+    )
+    assert not reply.denied
+    assert reply.result == "Paris: sunny"
+    assert seen == [{"city": "Original"}]
+
+
+async def test_session_permission_applies_approved_rewrite() -> None:
+    from fluid.codemode.session import CodeModeSession
+    from fluid.tools.registry import ToolCtx
+
+    registry = _wx_registry()
+    session = CodeModeSession(registry)
+    seen: list[dict] = []
+
+    class _FakeLoop:
+        permissions = PermissionEngine("always_ask")
+        hooks = None
+        ctx = ToolCtx()
+
+        async def _await_permission(self, sid, turn_id, name, call_id, input, risk):
+            seen.append(dict(input))
+            return "allow", "approved", {"city": "Paris"}
+
+        async def _emit(self, event) -> None:
+            pass
+
+    try:
+        result = await session.run_python(
+            sid="s", turn_id="t",
+            input={
+                "code": "from tools.get_weather import get_weather\n"
+                "get_weather(city='Original')"
+            },
+            loop=_FakeLoop(),
+        )
+        assert not result.is_error and "Paris: sunny" in result.text
+        assert seen == [{"city": "Original"}]
+    finally:
+        await session.aclose()
+
+
+async def test_approval_rewrite_wins_after_pre_hook_rewrite() -> None:
+    from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
+
+    registry = _wx_registry()
+    hooks = HookBus()
+
+    async def rewrite(_event, _payload):
+        return HookDecision(
+            action="modify", replacement_input={"city": "Hook"},
+            permission_decision="ask",
+        )
+
+    hooks.on(PRE_TOOL_USE, rewrite)
+    seen: list[dict] = []
+
+    async def approve(spec, input):
+        seen.append(dict(input))
+        return "allow", None, {"city": "Approved"}
+
+    bridge = HostBridge(
+        registry, PermissionEngine("never_ask"), hooks=hooks,
+        on_permission=approve,
+    )
+    reply = await bridge.on_host_call(
+        "mcp__wx__get_weather", {"city": "Original"}
+    )
+    assert reply.result == "Approved: sunny"
+    assert seen == [{"city": "Hook"}]
+
+
+async def test_structured_permission_deny_or_invalid_rewrite_skips_dispatch() -> None:
+    from fluid.tools.inproc import create_inproc_server, tool
+
+    calls: list[dict] = []
+
+    @tool("record", "Record a value", {
+        "type": "object", "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+    })
+    async def record(args: dict) -> dict:
+        calls.append(dict(args))
+        return {"content": [{"type": "text", "text": args["value"]}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("approval", [record]))
+
+    async def deny(spec, input):
+        return "deny", "blocked by responder", {"value": "never"}
+
+    bridge = HostBridge(registry, PermissionEngine("always_ask"), on_permission=deny)
+    reply = await bridge.on_host_call(
+        "mcp__approval__record", {"value": "original"}
+    )
+    assert reply.denied and reply.message == "blocked by responder"
+    assert calls == []
+
+    async def malformed(spec, input):
+        return "allow", None, ["not", "a", "mapping"]
+
+    bridge = HostBridge(
+        registry, PermissionEngine("always_ask"), on_permission=malformed
+    )
+    reply = await bridge.on_host_call(
+        "mcp__approval__record", {"value": "original"}
+    )
+    assert reply.denied and "invalid tool arguments" in (reply.message or "")
+    assert calls == []
+
+    async def missing_required(spec, input):
+        return "allow", None, {}
+
+    bridge = HostBridge(
+        registry, PermissionEngine("always_ask"), on_permission=missing_required
+    )
+    reply = await bridge.on_host_call(
+        "mcp__approval__record", {"value": "original"}
+    )
+    assert reply.denied and "missing required" in (reply.message or "")
+    assert calls == []
+
+
+async def test_relative_path_permission_uses_context_cwd(tmp_path) -> None:
+    from fluid.permissions.rules import Rule
+    from fluid.tools.builtins import read
+    from fluid.tools.registry import ToolCtx
+
+    target = tmp_path / "blocked.txt"
+    target.write_text("secret", encoding="utf-8")
+    registry = ToolRegistry()
+    registry.register_builtin(read.SPEC, read.handler)
+    permissions = PermissionEngine(
+        "never_ask",
+        rules=[Rule(
+            tool="Read", decision="deny",
+            input_globs={"file_path": str(target)},
+        )],
+    )
+    bridge = HostBridge(registry, permissions, ctx=ToolCtx(cwd=str(tmp_path)))
+    reply = await bridge.on_host_call("Read", {"file_path": "blocked.txt"})
+    assert reply.denied
+    assert not reply.result
+
+
 async def test_large_result_stays_behind_a_result_ref() -> None:
     @tool("dump", "Dump a large blob", {"type": "object", "properties": {}})
     async def dump(args: dict) -> dict:

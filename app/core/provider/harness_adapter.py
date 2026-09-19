@@ -532,6 +532,15 @@ class HarnessAdapter(ProviderAdapter):
             # for every fresh native session. The supplier resolves the id at
             # dispatch time instead — see _resolve_app_session_id.
             native_ctx = ToolCtx(cwd=options.cwd or ".", session_id=fluid_session_id)
+            # GetUsage is deliberately cache-only: the tool may inspect the
+            # app's last observed snapshot, but a model call must never start
+            # provider billing/subscription polling or touch credentials.
+            try:
+                from app.api.usage import get_cached_usage_payload
+
+                native_ctx.extra["usage_snapshot"] = get_cached_usage_payload
+            except Exception:  # noqa: BLE001 — standalone Fluid still reports unavailable
+                logger.debug("usage snapshot injection unavailable", exc_info=True)
             # This ctx also accompanies delayed Swarm dependency launches. Keep
             # their originating engine effort, even after a later parent turn.
             native_ctx.extra["app_caller_effort"] = options.effort

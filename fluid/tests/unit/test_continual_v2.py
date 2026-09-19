@@ -324,3 +324,57 @@ async def test_mount_excludes_skills_the_budget_did_not_reach(tmp_path, monkeypa
     monkeypatch.setattr(session_mod, "verify_store", out_of_time)
     session = CodeModeSession(ToolRegistry(), skills=store)
     assert set(await session._mountable_skills()) == {"done"}
+
+
+async def test_verifier_exception_withholds_skills_and_reports_degraded_mode(
+    tmp_path, monkeypatch
+) -> None:
+    import fluid.codemode.session as session_mod
+    from fluid.tools.inproc import create_inproc_server, tool
+
+    store = SkillStore(tmp_path)
+    store.save("pending", '"""Pending."""\nvalue = "secret"\n')
+
+    @tool("echo", "Echo a value", {
+        "type": "object", "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+    })
+    async def echo(args: dict) -> dict:
+        return {"content": [{"type": "text", "text": args["value"]}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("ordinary", [echo]))
+
+    async def verifier_outage(*args, **kwargs):
+        raise RuntimeError("verifier unavailable")
+
+    monkeypatch.setattr(session_mod, "verify_store", verifier_outage)
+    session = CodeModeSession(registry, skills=store)
+    events = []
+
+    class _FakeLoop:
+        permissions = None
+        hooks = None
+        ctx = ToolCtx()
+
+        async def _emit(self, event) -> None:
+            events.append(event)
+
+    try:
+        result = await session.run_python(
+            sid="s", turn_id="t",
+            input={
+                "code": "from tools.echo import echo\n"
+                "echo(value='ordinary tool available')"
+            },
+            loop=_FakeLoop(),
+        )
+        assert not result.is_error and "ordinary tool available" in result.text
+        assert await session._mountable_skills() == {}
+        assert any(
+            getattr(event, "level", None) == "warning"
+            and "verification unavailable" in getattr(event, "message", "")
+            for event in events
+        )
+    finally:
+        await session.aclose()

@@ -9,6 +9,7 @@ overridden, matching tests/api/test_health_ready.py.
 """
 
 import time
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -63,7 +64,6 @@ class TestUsageLimitsEndpoint:
         # New cluster fields present.
         assert body["snapshots"] == []
         assert body["self_instance_id"] == "local-1"
-
     def test_accepts_int_epoch_resets_at(self):
         """Newer Claude CLI usage payloads carry ``resets_at`` as int epoch
         seconds; cross-install rows persisted that way can't be retro-fixed, so
@@ -452,7 +452,6 @@ class TestUsageLimitsProviders:
         body = resp.json()
         _assert_claude_fields_unchanged(body)
         assert body["providers"] == []
-
     @pytest.mark.parametrize("provider_type", ["grok", "chatgpt", "openrouter", "openai"])
     def test_account_deletion_removes_usage_and_hides_late_poll(self, provider_type):
         from app.api.model_providers import router as providers_router
@@ -674,3 +673,28 @@ class TestUsageLimitsProviders:
         body = resp.json()
         _assert_claude_fields_unchanged(body)
         assert body["providers"] == []
+
+
+class TestCachedUsageToolSnapshot:
+    def test_cached_payload_does_not_refresh_or_use_stale_fetch_path(self):
+        from app.api.usage import get_cached_usage_payload
+
+        cached = {
+            "windows": [{"type": "five_hour", "utilization": 25}],
+            "fetched_at": 1_700_000_000,
+            "available": True,
+            "generation": 1,
+            "snapshots": [],
+            "self_instance_id": "local-1",
+        }
+        with patch("app.api.usage.usage_limits_monitor") as monitor, \
+             patch("app.api.usage._load_provider_usage", new=AsyncMock(return_value=[])):
+            monitor.get_cached_cluster_snapshot = AsyncMock(return_value=cached)
+            monitor.get_cluster_snapshot = AsyncMock(
+                side_effect=AssertionError("cache-only tool called refresh path")
+            )
+            payload = asyncio.run(get_cached_usage_payload())
+
+        assert payload["available"] is True
+        assert payload["windows"][0]["utilization"] == 25
+        monitor.get_cluster_snapshot.assert_not_awaited()

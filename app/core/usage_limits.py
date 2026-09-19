@@ -397,6 +397,16 @@ class UsageLimitsMonitor:
         # Assembly reads the DB — offload it so it never blocks the event loop.
         return await run_sync(self._cluster_snapshot)
 
+    async def get_cached_cluster_snapshot(self) -> Dict[str, Any]:
+        """Return the assembled snapshot without fetching or persisting.
+
+        Model-callable usage inspection must be a read of the last observed
+        state.  In particular, it must not turn a tool call into an upstream
+        billing request merely because the normal REST endpoint considers the
+        local snapshot stale.
+        """
+        return await run_sync(self._cluster_snapshot)
+
     def _read_cluster_rows(self, self_id: str) -> Optional[List[Dict[str, Any]]]:
         """Read + assemble the per-install snapshot list from the DB (cached).
 

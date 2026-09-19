@@ -17,7 +17,12 @@ Public seams:
   that distills the exec journal into new ones.
 """
 
-from fluid.codemode.bridge import HostBridge, OnInputRequired, OnPermission
+from fluid.codemode.bridge import (
+    HostBridge,
+    OnInputRequired,
+    OnPermission,
+    PermissionResult,
+)
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.kernel import (
     HostCall,
@@ -53,6 +58,7 @@ __all__ = [
     "KernelResult",
     "OnInputRequired",
     "OnPermission",
+    "PermissionResult",
     "Projection",
     "ResultRef",
     "Skill",

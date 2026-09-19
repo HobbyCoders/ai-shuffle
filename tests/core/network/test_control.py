@@ -338,6 +338,9 @@ async def test_remote_owner_receives_turns_interrupts_and_answers(workers, monke
         await control.answer_question(owner, request_id="q1", session_id="s1", answers={"Q": "A"},
                                       answered_by_device=None, dismissed=False, skipped=None)
         assert questions[0]["answered_by_device"] == b.device_id
+        # Invalid profiles are refused by the peer API before inserting a row.
+        with pytest.raises(control.ControlRefused, match="Unknown profile: missing-profile"):
+            await control.create_session(owner, {"id": "s-invalid", "profile_id": "missing-profile"}, None)
         # A session created on B but owned by A is created on A too.
         result = await control.create_session(owner, {"id": "s2", "profile_id": "default", "title": "Born on B"},
                                               {"prompt": "first", "source": "user"})
@@ -348,6 +351,7 @@ async def test_remote_owner_receives_turns_interrupts_and_answers(workers, monke
         hydrated = await control.hydrate(owner, "s1")
         assert hydrated["published"] == 0  # already published
     with a.active():
+        assert database.get_session("s-invalid") is None
         assert database.get_session("s2")["owner_device_id"] == a.device_id
         assert database.get_session("s2")["title"] == "Born on B"
     # Unreachable owner surfaces as RunnerUnreachable.
