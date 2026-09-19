@@ -1,281 +1,227 @@
 # AI Shuffle
 
-> A self-hosted web UI for AI Agents — run locally on your desktop or deploy via Docker for remote access from any device.
+> A self-hosted workspace for AI agents, powered by the Fluid harness.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.8.6-green.svg)](https://github.com/HobbyCoders/ai-shuffle/releases)
+[Releases](https://github.com/HobbyCoders/ai-shuffle/releases) · [Desktop](desktop/README.md) · [Android](android/README.md) · [Fluid](fluid/README.md)
 
-## What Is AI Shuffle?
+AI Shuffle brings your agents, projects, conversations, and tools into one workspace. Use it to build software, research a problem, automate recurring work, browse the web, or generate media. Run a worker on your computer or server, then work through the browser, desktop app, or Android app.
 
-AI Shuffle puts AI agents in a browser. Instead of a terminal, you get a full GUI with persistent sessions, multi-tab workflows, voice input, AI-powered media generation, and a plugin system — all accessible from your phone, laptop, or any device with a browser.
+**Fluid is the agent harness underneath it.** A harness is the software that turns a model into a working agent: it builds context, runs tools, handles approvals, keeps the session, and manages what happens when a conversation grows. Fluid has its own execution loop for API and local models, plus a delegated path for Claude subscription sessions.
 
-**Two ways to run it:**
+## AI Shuffle and Fluid
 
-- **Local mode** — Replace the Claude Code CLI on your desktop (`localhost:8000`)
-- **Docker** — Self-host on a server or NAS for access from anywhere
+| | What it does |
+| --- | --- |
+| **AI Shuffle — the app** | Gives you the interface, projects, session management, model-provider configuration, voice, connectors, automations, and network of workers. |
+| **Fluid — the harness** | Runs agent sessions, manages tools and permissions, preserves searchable history, compacts context, and supports reusable skills and memory. |
+| **Your model provider** | Supplies the model's reasoning and generation. Capabilities, context limits, availability, and billing depend on the provider and model you choose. |
 
-**Three ways to open it:** any browser, the [Android app](android/README.md), or
-the [desktop app](desktop/README.md) for Windows, macOS and Linux. The desktop
-app runs the worker and its private bundled PostgreSQL on your computer and shows the
-same web UI in a native window; the Android app connects to your workers.
+Fluid lives in this repository as an independently installable Python package. You can use it through AI Shuffle, run its standalone CLI, or embed it in another application.
 
----
+## What you can do with AI Shuffle
 
-## Feature Overview
+### Work with agents in a full interface
 
-### Chat Interface
-Real-time streaming with WebSocket, rich text input (TipTap editor), `@file` autocomplete, drag-and-drop file upload, inline thinking blocks, tool use visualization, voice input (STT), and a permission queue that surfaces Claude's approval requests as interactive prompts.
+Stream responses and tool activity as they happen. Attach files, reference project files with autocomplete, dictate a prompt, and respond to permission requests in the conversation. Keep multiple sessions open, search their history, organize them with tags and favorites, and fork a conversation to explore another direction.
 
-### Profiles
-Create specialized AI configurations with custom system prompts, model selection from a built-in model registry (Anthropic's Claude models by default; admins can also add OpenRouter, custom Anthropic-compatible gateways, or a Codex / ChatGPT-subscription provider), thinking modes, permission modes, tool allowlists, and per-profile subagent and plugin controls. Generate profiles from natural language descriptions.
+Profiles define instructions and the tools, plugins, and subagents available to an agent. Choose the model, reasoning effort, and permission mode for each session. The same profile can serve different tasks with different models.
 
-### Voice Mode
-Talk to a voice agent (OpenAI Realtime, direct browser connection) that hands real work to your agents, steers or stops them mid-task, relays their permission prompts, and can manage automations, hooks, agents, MCP servers and connectors by voice. Each agent opts in with a per-agent Voice model assignment.
+### Build and maintain projects
 
-### Sessions
-Multi-tab persistent sessions with full history. Fork conversations at any point, rewind to prior states, tag, favorite, search, group, and import/export. Token usage and cost tracking per session.
+Browse files, inspect diffs, work on branches and worktrees, commit changes, create pull requests, and inspect GitHub CI from the app. Give specialized agents focused tasks and follow their progress alongside the main conversation.
 
-### 14 Connectors
-Bridge Claude to external platforms — each connector supports triggers, actions, and tools:
+### Connect tools and services
 
-| Messaging | Smart Home & Services |
-|---|---|
-| Telegram, Discord, WhatsApp, Slack, Signal, MS Teams, LINE, iMessage, BlueBubbles | Home Assistant, Philips Hue, Spotify, Gmail, Webhook |
+Add MCP servers and plugins to extend an agent's capabilities. The bundled browser tools can navigate pages, interact with forms, inspect content, and take screenshots. AI media tools integrate with fal.ai for images, video, audio, and 3D generation.
 
-Connectors relay permission requests as interactive approve/deny buttons on their platforms.
+Connectors bring agents into services such as Telegram, Discord, Slack, WhatsApp, Gmail, Home Assistant, and Spotify. See the [connector guides](docs/content/connectors/) for each integration's setup and supported actions.
 
-### Automations
-Run AI workflows without manual intervention. Trigger via cron, interval, webhook, connector events, or connector triggers. Supports prompt templates with variable substitution, budget controls (cost/run/day caps), human-in-the-loop approval, and output routing to sessions, connectors, or webhooks.
+### Run work on a schedule or event
 
-### Hooks
-Execute custom code at lifecycle events: `PreToolUse`, `PostToolUse`, `Stop`, `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreCompact`, `SubagentStop`, `Notification`. Run bash commands or fire webhooks with HMAC signing. Filter by tool name.
+Automations can start from schedules, intervals, webhooks, and connector events. Configure prompts, budgets, approval requirements, and where results should go. Hooks add custom behavior around supported lifecycle events.
 
-### Subagents
-Specialized AI agents Claude can invoke mid-conversation. Create custom subagents with model selection and tool restrictions. Autocomplete via `/agent-name` in chat.
+### Talk to your agents
 
-### MCP Servers (Model Context Protocol)
-Manage stdio, SSE, and HTTP MCP servers across four scopes (user, local, project, installed). A built-in `browser` MCP server (Playwright over CDP) is bundled for web automation — see [Browser Automation](#browser-automation).
+Voice mode uses OpenAI Realtime for the conversation and can hand work to agents, steer or stop their tasks, and relay approval requests. Configure voice separately from the model doing the delegated work. See [voice mode](docs/content/features/voice.md).
 
-### Projects & Git
-Full project management with file browser, git status/diff, branch management, commit (with AI-generated messages), push, pull request creation, GitHub CI status, and worktree support.
+### Use your own machines together
 
-### AI Media Tools (fal.ai)
-Image generation & editing, video generation & extension, image-to-video, text/image-to-3D, text-to-speech, and speech-to-text — powered by 600+ fal.ai models. Configurable per profile.
+Each worker has its own managed PostgreSQL database and can run independently. Pair workers over your local network or link them through a Shuffle account to synchronize shared settings, profiles, notes, memory, plugins, and the session catalog.
 
-### Plugins
-Extend AI Shuffle with external packages from git-based marketplaces. Plugins contribute hooks, commands, agents, skills, and MCP servers. Enable globally or per profile.
+A session executes on one worker at a time. Connected clients can see network sessions and direct work to the worker that owns them. Synced payloads are end-to-end encrypted. See the [worker network](docs/network/README.md) for synchronization, ownership, recovery, and offline behavior.
 
-### Notes
-Global markdown notes with tags, pinning, and search. Each note backed by a physical file on disk.
+## Why Fluid
 
-### Built-in Documentation
-Full documentation rendered in-app covering getting started, all features, connectors, and API reference.
+### Recoverable compaction for long-running work
 
-### Worker network
-Every worker runs by itself with its own PostgreSQL (the desktop app and Docker image both bundle one). Workers connect into one network by pairing on the local network or by signing every worker into the same Shuffle account, and then converge on the same settings, provider keys, profiles, preferences, UI state, notes, plugins, memory and session catalog. A session executes on exactly one worker; any worker's UI can see every session and drive any runner, and forks the transcript when an owner is offline. Everything synced is end-to-end encrypted with one network key; the account keeps an encrypted copy so a new device restores from a recovery key when every worker is off. See [docs/network/README.md](docs/network/README.md).
+A long conversation contains more history than the model needs for its next decision. Fluid manages the active context as a working set while retaining the stored conversation for later retrieval.
 
-### Mobile & PWA
-The web UI served by workers is the desktop layout at every window size; narrow windows collapse the sidebar into an overlay and tighten spacing. The Android app bundles its own mobile UI (`mobile/`) and talks to workers only through their APIs, so a worker's version never changes what the phone shows. PWA install support and offline detection work in the web UI. See [docs/mobile-desktop-ui-split.md](docs/mobile-desktop-ui-split.md).
+Its native engine uses a three-stage compaction layer:
 
-Pair another browser, phone, tablet, or worker with a short-lived,
-one-time code or locally rendered QR. Local/LAN use requires no Shuffle account; optionally link a worker to an account for managed remote access.
+| Stage | What changes in the model's context |
+| --- | --- |
+| **Trim tool results** | Older tool output becomes compact placeholders with references to the stored content. |
+| **Digest older turns** | Older conversation spans become deterministic, extractive digests. |
+| **Fold older digests** | Groups of digests become smaller epoch stubs, still carrying history references. |
 
-### Security
-Local/LAN owner access is isolated from the authenticated remote listener. Remote browser and Android access use Clerk-backed owner identity and revocable device sessions. Integration API keys (`aih_`) remain scoped and non-admin. Stored credentials use Fernet with protected persistent key custody; existing password-derived keys are adopted once without rewriting their ciphertext. See [local and remote access](docs/LOCAL_ACCESS.md) and [recovery](docs/RESTORE.md).
+These transformations change the **model-facing view**, not the stored session nodes. `HistorySearch` searches the stored text, including compacted turns; `HistoryExpand` retrieves original text by reference in bounded windows. The agent can return to an earlier decision, error, or tool result when it becomes relevant again.
 
-### Analytics
-Usage dashboard with token counts, cost breakdowns by model/profile/project, daily trends, and top sessions by cost.
+Compaction is mechanical: it does not need a separate model call to invent a summary. It normally protects recent turns, keeps bounded error details, and applies changes in batches to limit disruption to the cached prompt prefix. If the provider rejects an oversized request, an escalation path can reclaim more recent content and retry.
 
----
+This is recoverable history, not unlimited active context. Retrieval depends on the retained session store and available history tools; content truncated before storage cannot be reconstructed. History expansion is text-only, so images may need to be read again. On the delegated Claude path, the Claude CLI manages compaction instead.
 
-## Quick Start
+### Python tool orchestration
 
-### Android
+With code mode enabled, the model can discover tools and call them as Python functions inside a persistent subprocess kernel. A single cell can combine calls, filter large results, and carry intermediate values into later cells.
 
-**[Get AI Shuffle on Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle)** · [Release notes](https://github.com/HobbyCoders/ai-shuffle/releases)
+Tool calls still cross back to the host for permission and hook checks. Large results can remain behind references instead of filling the conversation with raw output. This can reduce model round trips for workflows that benefit from batching and data processing.
 
-Requires Android 8.0 or newer. Install and update through Google Play; availability
-is subject to release-track access and Play review. Testing releases require tester
-enrollment with the Google account used in Play. Do not uninstall the existing app
-when updating. See [Android installation and builds](android/README.md).
+The kernel has import restrictions, audit guards, timeouts, and memory limits. It is **not an OS security sandbox**; host tools run with the access granted to the worker.
 
-### Local (Desktop)
+### Memory and reusable workflows
 
-Install the [desktop app](desktop/README.md) for your operating system. It bundles
-PostgreSQL and supervises the worker; no database setup, credentials or import is
-needed for a fresh installation. On first launch choose a clean install, sign in
-to your Shuffle account, or join another worker with its invite; then pick your
-workspace and add model providers or GitHub. No local username, password, or
-Shuffle account is required.
+Fluid supports explicit remembered facts, scoped memory, cross-session recall, and an optional continual-learning process. The learner reads a journal of activity and can distill useful workflows into saved Python skills.
 
-For source development, `python run_local.py --setup` installs dependencies and
-builds assets; it does not create a standalone database. Worker startup requires
-the managed supervisor and its private runtime descriptor. Use the desktop
-runtime or the Docker source build below rather than launching `app.main` directly.
+Skills are imported in a verification kernel and can supply a pure `_selftest`. Memory and skill curation bound what stays active. Learning here means updating stored knowledge and reusable code; it does not train model weights or guarantee that every learned workflow is correct.
+
+In AI Shuffle, code mode and continual learning default on for eligible native sessions. In the standalone CLI they are opt-in. Delegated sessions have a different capability set.
+
+### Inspectable context and execution
+
+Fluid exposes context usage, provider-reported cache metrics where available, and a sequence-numbered event stream for integrations. Its session store supports branching history, and compaction decisions can be replayed when a native session resumes.
+
+Prompt caching and compaction work together: stable content stays reusable between requests, while occasional compaction batches reduce the active history. Actual cost and speed depend on the model, provider, workload, and cache behavior.
+
+### Multiple providers, explicit configuration
+
+Fluid provides native adapters for Anthropic Messages, OpenAI Responses, OpenRouter, and local OpenAI-compatible endpoints. The standalone local adapter also offers an optional text tool-call protocol for models that struggle with native tool calling.
+
+Instructions, skills, agents, and settings use Fluid's own paths. `fluid import-settings` previews portable content from Claude or Codex setups before copying it; provider configuration is not silently adopted.
+
+## How sessions run
+
+AI Shuffle uses Fluid as its provider backend. Fluid then chooses the execution path appropriate to the configured provider.
+
+| Connection | Execution path | What manages tools and context |
+| --- | --- | --- |
+| Anthropic API or a compatible Messages endpoint | Fluid native loop | Fluid |
+| OpenAI API / Responses endpoint | Fluid native loop | Fluid |
+| Configured ChatGPT/Codex subscription connection | Fluid native Responses adapter with the configured OAuth credentials | Fluid; this does not launch the Codex CLI |
+| OpenRouter or a custom OpenAI-compatible endpoint | Fluid native loop | Fluid |
+| Claude subscription account | Fluid delegated loop, launching the official Claude CLI | Claude CLI, with AI Shuffle/Fluid integration |
+
+Native Fluid features such as Python code mode and the compaction ladder do not replace the Claude CLI's internals on delegated sessions. Provider integrations also differ in supported tools, reasoning controls, authentication, and usage limits.
+
+For local models, the standalone Fluid CLI has a dedicated `local` provider. AI Shuffle routes compatible custom endpoints through its configured API dialect; standalone configuration options are not all exposed in the app. See [Fluid configuration](fluid/docs/configuration.md) and [local models](fluid/docs/local-models.md).
+
+## Quick start
+
+### Desktop
+
+Install the [desktop app](desktop/README.md) for Windows, macOS, or Linux. It packages the worker and its private PostgreSQL database and opens the web interface in a native window.
+
+On first launch, choose a fresh setup, sign in to your Shuffle account, or join an existing worker network. Select a workspace and configure a model provider. Local use does not require a Shuffle account.
 
 ### Docker
 
-**Existing non-managed database installation?** Keep it on its current release
-with its original data, configuration and protected backup. This release supports
-only embedded PostgreSQL; it does not connect to or automatically import an old
-database. Do not run it over production as a migration shortcut. Never remove
-volumes, use `down -v` or `--remove-orphans`, or replace the retained production
-configuration. See [backup and recovery](docs/RESTORE.md) for isolation and recovery.
+For a **fresh installation**, clone this repository and run Docker Compose 2.24 or newer:
 
-For a **fresh installation**, Docker Compose 2.24 or newer needs no `.env` or
-database password:
-
-```bash
+~~~sh
+git clone https://github.com/HobbyCoders/ai-shuffle.git
+cd ai-shuffle
 docker compose up -d --build
-```
+~~~
 
-This starts **one container**, including managed PostgreSQL **16**. Open
-`http://localhost:8000` and choose your workspace and model providers. No local
-username, password, or Shuffle account is required. An optional `.env` can set
-other options; `.env.example` contains no database connection settings.
+Open [localhost:8000](http://localhost:8000), choose your workspace, and add a model provider. The container includes managed PostgreSQL 16; a fresh install needs no database password or `.env`.
 
-The app port is published on the host's loopback interface only
-(`127.0.0.1:8000`). Docker-published ports bypass host firewall rules, and the
-worker grants owner authority to local peers, so keep it on loopback unless you
-mean to share it: set `BIND_HOST=0.0.0.0` (or one LAN address) in `.env` to
-expose it on the LAN deliberately, ideally behind a reverse proxy or VPN.
+The default port binding is `127.0.0.1:8000`. To deliberately share the local listener on your LAN, set `BIND_HOST` in `.env` and review [local and remote access](docs/LOCAL_ACCESS.md): the local listener grants owner authority, and Docker-published ports can bypass host firewall rules.
 
-Keep the existing `ai-shuffle-data:/data` mount: it contains the database at
-`/data/postgres/data`, private lifecycle files in `/data/postgres`, app credential
-keys, memory and identity. PostgreSQL is private to the container; publish only
-the app port. Keep the workspace and existing auth/settings/browser mounts too.
-Compose allows **90 seconds** for ordered shutdown; use `docker stop --time 90
-ai-shuffle` (or longer) with plain Docker, and set the equivalent stop timeout in
-Unraid. A ten-second default stop can interrupt database shutdown.
+**Updating an older installation:** this release requires managed embedded PostgreSQL. It does not automatically import an existing external database. Keep a non-managed installation on its existing release with its data, configuration, and protected backups until a tested migration is available. Do not use `down -v` or remove retained volumes. Follow [backup and recovery](docs/RESTORE.md).
 
-The runtime manages database credentials and writes the private
-`DATA_DIR/managed-postgres.json` descriptor before starting the worker. Database
-connection and tuning environment settings are not supported. Do not edit or
-publish the descriptor. Ambiguous retained state, missing lifecycle credentials
-or another PostgreSQL major version fails closed; image replacement is **not**
-a PostgreSQL major upgrade or downgrade. See [backup and recovery](docs/RESTORE.md)
-before changing storage.
+Retain the `ai-shuffle-data:/data` volume, workspace, and authentication/settings/browser volumes. The data volume includes PostgreSQL, identity, and credential keys. Compose allows 90 seconds for shutdown; use at least that timeout with other container launchers. The runtime owns database credentials and its private descriptor; external database connection settings are not supported.
 
-**Key environment variables:**
+### Android
 
-| Variable | Default | Description |
-|---|---|---|
-| `ADMIN_PASSWORD` | — | Upgrade only: unlock legacy ciphertext for its first verified key adoption, then remove. Never needed on a fresh installation |
-| `SHUFFLE_LOCAL_ACCESS` | `true` | Allow owner access on the local/LAN listener. Set `false` during a staged upgrade until managed tunnel ingress is verified |
-| `PUID` / `PGID` | `99` / `100` (Compose) | Non-root runtime user/group for persistent volume permissions; retain existing custom mappings |
-| `AUTO_UPDATE` | `true` | Auto-update the GitHub CLI on startup (the Claude engine ships with `claude-agent-sdk`) |
-| `LOCAL_MODE` | `false` | Use local filesystem paths |
-| `COMMAND_TIMEOUT` | `300` | Subprocess timeout (seconds) |
-| `CHROME_CDP_PORT` | `9221` | Loopback DevTools (CDP) port the browser listens on and the tools attach to |
-| `CHROME_EXECUTABLE` | auto | Path to the Chrome / Chromium / Edge binary (auto-detected; set if yours is elsewhere) |
-| `BROWSER_MCP_ENTRY` | packaged | Override the browser-mcp entry point (defaults to the packaged Docker path, else `<repo>/browser-mcp/dist/index.js`) |
-| `CHROME_MAX_RESTARTS` | `8` | Circuit breaker: after this many *rapid* crash-restarts the supervisor stops relaunching the browser for the container's lifetime (protects the PID budget). `0` = retry forever |
-| `CHROME_HEALTHY_SECS` | `60` | A browser that stays up at least this long counts as healthy and resets the crash counter/backoff |
-| `CHROME_BACKOFF_MAX` | `300` | Cap (seconds) on the exponential backoff between rapid restarts |
+[Get AI Shuffle on Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle).
 
-### Browser Automation
+The Android app connects to workers and bundles its own mobile interface. It requires Android 8.0 or newer. Availability depends on the release track and Play review; testing tracks require enrollment. See [Android setup and builds](android/README.md).
 
-AI Shuffle ships its own **browser MCP server** — `browser-mcp`, a
-provider-agnostic, token-conservative server built on Playwright over CDP — so
-agent sessions can drive a real browser through `mcp__browser__*` tools (navigate,
-snapshot, click/type, screenshot, find, read-text, eval, tabs, network, and more).
-There's **no browser extension, no separate account, and no pairing** — it just
-works once enabled.
+### Fluid on its own
 
-- **Docker:** the image bundles Chromium and supervises it automatically
-  (headless, as the app user) over a loopback DevTools port (`CHROME_CDP_PORT`,
-  default `9221`). A per-session MCP server attaches to it.
-- **Native installs:** the backend auto-launches and supervises a local
-  Chrome / Chromium / Edge the same way. Point `CHROME_EXECUTABLE` at your binary
-  if it isn't auto-detected. To run your own browser instead, just start it on
-  the CDP port — if the port already answers, the app won't spawn another.
+From this repository, with Python 3.12+:
 
-Enable it under **Settings → Browser** (admin): a single toggle turns the tools on
-or off and a health dot shows whether the browser is reachable. The browser profile
-persists in the `browser-profile` volume, so logins survive restarts.
+~~~sh
+cd fluid
+python -m pip install -e '.[mcp]'
+export ANTHROPIC_API_KEY=your-api-key
+fluid chat
+~~~
 
-**Where the browser may connect.** Cloud metadata (`169.254.0.0/16`) is always
-refused and no setting re-enables it. Private LAN ranges and the public internet
-are allowed. Loopback — `127.0.0.1`, `localhost`, `::1` — is the one range that
-depends on how you run the app:
+Use the environment-variable syntax for your shell. To try native Python tool orchestration and continual learning:
 
-| Setting | Default | Description |
-|---|---|---|
-| `BROWSER_SSRF_ALLOW_LOOPBACK` | auto | Whether the agent's browser may open `localhost` URLs. Unset = allowed in local mode, refused in Docker. Set `true` on a single-user self-hosted install so an agent can view a dev server it started itself; leave it off if untrusted people can prompt this install |
-| `BROWSER_SSRF_ALLOW` | — | Comma-separated CIDRs to allow outright (e.g. `127.0.0.0/8,::1/128`). Set explicitly, it replaces the automatic choice above |
-| `BROWSER_SSRF_BLOCK` | — | Comma-separated CIDRs to refuse. Wins over any allow entry |
+~~~sh
+fluid chat --continual
+~~~
 
-Turning loopback on lets a page the agent visits reach services bound to
-`127.0.0.1` inside the container — including this app's own API, using whatever
-session the browser profile holds. That is a fair trade on a machine with one
-user and no fair trade on a shared one, which is why Docker defaults to off. A
-refused address explains itself in the tool result, naming the setting that
-would allow it.
+For a single task, use `fluid run "explain this project"`; resume an interactive session with `fluid chat --continue`. See the [CLI guide](fluid/docs/cli.md) for provider selection, approvals, and non-interactive behavior.
 
-> 🔒 The DevTools port is bound to `127.0.0.1` only and is never published to the
-> network. Egress filtering aside, the agent drives a real browser with your
-> profile and your logins — isolate the container if you run untrusted prompts.
-> Diagnose the browser from the Settings panel, or with
-> `docker exec -u appuser -e HOME=/home/appuser ai-shuffle chrome-doctor`.
+## Browser automation
 
----
+The bundled `browser-mcp` server uses Playwright over CDP. Enable it in **Settings → Browser**. Docker includes supervised Chromium; native installs can use an available Chrome, Chromium, or Edge binary. Set `CHROME_EXECUTABLE` if auto-detection cannot find it.
 
-## Prerequisites
+The browser profile persists, including its logged-in sessions. The DevTools port stays on loopback and should not be published. Browser tools act with that profile's access.
 
-- **Python 3.12+**
-- **Node.js 22.12+** — For building the frontend and the bundled `browser-mcp` server
-- **PostgreSQL 16** — Included and managed by the Docker image. Source deployments need a configured PostgreSQL server.
-- **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
+Cloud metadata addresses are blocked. Private LAN destinations are allowed; loopback destinations are allowed by default in local mode and refused by default in Docker. `BROWSER_SSRF_ALLOW_LOOPBACK=true` permits local preview servers in a trusted single-user Docker deployment, but also exposes other loopback services to pages the browser visits. Explicit `BROWSER_SSRF_ALLOW` and `BROWSER_SSRF_BLOCK` CIDR settings refine this behavior; block entries win.
 
----
+## Permissions and data
 
-## Tech Stack
+AI Shuffle separates local owner access from authenticated remote access. Remote access uses owner identity and revocable device sessions; integration API keys are scoped. Stored credentials use protected key custody. See [access boundaries](docs/LOCAL_ACCESS.md) and [recovery requirements](docs/RESTORE.md).
 
-| Layer | Technology |
-|---|---|
-| **Frontend** | SvelteKit · Svelte 5 · Tailwind CSS · TipTap |
-| **Backend** | FastAPI · WebSockets · PostgreSQL |
-| **AI Engine** | Claude Agent SDK (Python) · pluggable model providers |
-| **Media** | fal.ai (image, video, 3D, audio) |
-| **Browser** | `browser-mcp` — bundled Playwright-over-CDP MCP server driving a headless Chrome / Chromium |
-| **CI/CD** | GitHub Actions |
+Fluid adds tool approvals, rules, hooks, sensitive-file checks, and defenses against untrusted tool output. These controls complement the permissions of the machine or container running the worker. Use isolation appropriate to the tools and projects you expose. See [Fluid's security model and limitations](fluid/docs/security.md).
 
----
+Self-hosting controls where the app runs and its data is stored. Configured cloud models, connectors, and tools still receive the data needed to perform their work.
 
-## Project Structure
+## For contributors
 
-```
-ai-shuffle/
-├── app/               # FastAPI backend (API, WebSocket, DB, services)
-├── frontend/          # SvelteKit frontend (Svelte 5, Tailwind)
-├── fluid/             # The fluid agent harness (own pyproject; package is fluid/fluid)
-├── android/           # Android app (Kotlin/Gradle) and the Cloudflare account hub (android/hub)
-├── browser-mcp/       # Bundled browser-control MCP server (Playwright/CDP)
-├── tools/             # AI tool scripts (fal.ai integrations)
-├── docs/              # Technology documentation
-├── tests/             # Backend test suite (fluid's own suite lives in fluid/tests)
-├── .github/           # CI/CD workflows
-├── docker-compose.yml
-├── run_local.py       # Cross-platform local launcher
-├── run_local.sh       # macOS/Linux launcher
-└── run_local.bat      # Windows launcher
-```
+The app uses Python 3.12+, FastAPI, PostgreSQL 16, Svelte 5/SvelteKit, TypeScript, and Tailwind. Building the web and tool packages requires Node.js 22.12+. The desktop shell uses Electron; Android uses Kotlin.
 
----
+| Directory | Responsibility |
+| --- | --- |
+| `app/` | APIs, session orchestration, Fluid adapter, database, and worker services |
+| `fluid/` | Standalone harness package, CLI, provider adapters, tools, and unit tests |
+| `frontend/` | Worker-served web interface |
+| `desktop/` | Desktop shell and managed local runtime |
+| `mobile/`, `android/` | Mobile interface, Android app, and account hub |
+| `browser-mcp/` | Browser automation server |
+| `tools/` | Media tools and supporting integrations |
+| `tests/`, `docs/` | App tests and documentation |
 
-## API
+For source development, `python run_local.py --setup` prepares dependencies and assets; it does not provision a standalone database. Use the Docker source build or the [desktop development supervisor](desktop/README.md#develop) to run the worker. That supervisor manages a private database; pointing it at PostgreSQL binaries does not select an external database server.
 
-AI Shuffle exposes a full REST + WebSocket API. See the [API Reference](docs/content/api-reference/) or browse the built-in docs at `http://your-host:8000` → Documentation.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and test workflows. Fluid's suite runs in its own environment:
+
+~~~sh
+python -m pip install -e './fluid[dev]'
+python -m pytest fluid/tests/unit -q
+~~~
+
+Keep that environment separate from the app's dependency environment. For harness evaluation, the repository includes a [Harbor / Terminal-Bench adapter](fluid/benchmarks/harbor/README.md). Architectural benefits are not a claim of benchmark superiority over another harness.
+
+## Documentation
+
+| Topic | Guide |
+| --- | --- |
+| Fluid CLI, providers, code mode, and memory | [Fluid](fluid/README.md) · [Configuration](fluid/docs/configuration.md) |
+| Background agents and shell tasks | [Fluid background tasks](fluid/docs/background-tasks.md) |
+| Profiles and tools | [Profiles](docs/content/features/profiles.md) · [MCP](docs/content/features/mcp-servers.md) · [Plugins](docs/content/features/plugins.md) |
+| Automations and hooks | [Automations](docs/content/features/automations.md) · [Hooks](docs/content/features/hooks.md) |
+| Workers and devices | [Network](docs/network/README.md) · [Mobile/web interface split](docs/mobile-desktop-ui-split.md) |
+| Installation and recovery | [Desktop](desktop/README.md) · [Android](android/README.md) · [Backups](docs/RESTORE.md) |
+| API integrations | [REST and WebSocket reference](docs/content/api-reference/) |
+
+Documentation is also available inside the app.
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
-
-### Refreshing a native checkout
-
-After `git pull`, run `python run_local.py --update` (or the platform launcher with
-`--update`). This installs the checked-in Fluid harness and locked Node packages,
-then rebuilds the frontend, browser MCP and AI tools. It does not reconfigure the
-database or restart an already running server. Restart the backend after it succeeds.
-Native release archives already contain the frontend; replace the archive to update
-that frontend, then run `--update` to install/build its runtime tools.
+MIT — see [LICENSE](LICENSE).
