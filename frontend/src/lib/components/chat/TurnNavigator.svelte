@@ -87,7 +87,7 @@
 <style>
 	.turn-nav {
 		position: absolute;
-		left: max(8px, calc((100% - 768px) / 2 - 34px));
+		left: 2px;
 		top: 50%;
 		z-index: 12;
 		display: flex;
@@ -96,7 +96,7 @@
 		align-items: flex-start;
 		gap: clamp(3px, calc(42vh / var(--count, 4) - 2px), 9px);
 		max-height: 56vh;
-		padding: 10px 12px 10px 2px;
+		padding: 10px 12px 10px 0;
 		transform: translateY(-50%);
 		pointer-events: auto;
 	}
@@ -134,10 +134,11 @@
 	.bar {
 		display: block;
 		height: 2px;
-		width: 20px;
+		width: 14px;
 		border-radius: 999px;
 		background: color-mix(in oklch, var(--subtle-foreground) 72%, transparent);
-		transform: translateX(calc(var(--proximity, 0) * 6px));
+		transform: translateX(calc(var(--proximity, 0) * 4px)) scaleX(calc(1 + var(--proximity, 0) * 0.8));
+		transform-origin: left center;
 		transition:
 			background-color 180ms ease,
 			transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
@@ -157,6 +158,8 @@
 	.tick.is-hovered .bar,
 	.tick:focus-visible .bar {
 		background: var(--foreground);
+		height: 3px;
+		transform: translateX(0) scaleX(2.2);
 	}
 
 	.tick:focus-visible {
@@ -219,10 +222,6 @@
 		font-size: 12px;
 		line-height: 1.45;
 		color: var(--muted-foreground);
-	}
-
-	@media (max-width: 880px) {
-		.turn-nav { left: 6px; }
 	}
 
 	/* Desktop reading aid. On compact/coarse-pointer surfaces it competes with
