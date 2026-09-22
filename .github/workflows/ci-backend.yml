@@ -210,7 +210,7 @@ jobs:
           python -m pytest tests/integration/test_postgres_safety.py \
             --confcutdir=tests/integration -o addopts="" -p no:cacheprovider \
             --timeout=120 -v
-          python -m pytest tests/db/test_usage_budget_postgres.py \
+          python -m pytest tests/db/test_usage_budget_postgres.py tests/db/test_openrouter_usage_postgres.py \
             -o addopts="" -p no:cacheprovider --timeout=120 -v
 
       - name: Audit public Python dependencies

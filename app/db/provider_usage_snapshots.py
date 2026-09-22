@@ -69,8 +69,8 @@ def upsert_provider_usage_snapshot(
         raw = {**(raw or {}), "billing_fetched_at": fetched_at}
     with get_db() as conn:
         cursor = conn.cursor()
-        if provider_type == "fal":
-            if not _lock_fal_generation(cursor, expected_credential_generation):
+        if provider_type in {"fal", "openrouter_account"}:
+            if not _lock_usage_generation(cursor, provider_id, provider_type, expected_credential_generation):
                 return False
             raw = {**(raw or {}), "credential_generation": expected_credential_generation}
         if provider_type == "openai":
@@ -131,7 +131,7 @@ def record_provider_usage_failure(
     now = datetime.now(timezone.utc)
     with get_db() as conn:
         cursor = conn.cursor()
-        if provider_type == "fal" and not _lock_fal_generation(cursor, expected_credential_generation):
+        if provider_type in {"fal", "openrouter_account"} and not _lock_usage_generation(cursor, provider_id, provider_type, expected_credential_generation):
             return
         if provider_type == "openai":
             cursor.execute(
@@ -153,7 +153,7 @@ def record_provider_usage_failure(
         rows = rows_to_list(cursor.fetchall())
         previous = rows[0] if rows else {}
         previous_raw = _parse_json_dict(previous.get("raw")) or {}
-        if provider_type == "fal" and previous_raw.get("credential_generation") != expected_credential_generation:
+        if provider_type in {"fal", "openrouter_account"} and previous_raw.get("credential_generation") != expected_credential_generation:
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
             previous = {}
             previous_raw = {}
@@ -161,13 +161,13 @@ def record_provider_usage_failure(
             "billing_fetched_at", previous.get("fetched_at") if previous.get("credits") else None
         )
         metadata = {}
-        if previous_raw.get("source") in {"browser_platform", "openai_admin"}:
+        if previous_raw.get("source") in {"browser_platform", "openai_admin", "openrouter_management"}:
             metadata = {key: previous_raw.get(key) for key in ("source", "organization_id")}
         if provider_type == "openai" and expected_admin_key is not None:
             metadata.update(source="openai_admin", organization_id=current[0])
         raw = json.dumps({
             **metadata,
-            **({"credential_generation": expected_credential_generation} if provider_type == "fal" else {}),
+            **({"credential_generation": expected_credential_generation} if provider_type in {"fal", "openrouter_account"} else {}),
             "usage_error": error_kind,
             "usage_attempted_at": int(now.timestamp() * 1000),
             "billing_fetched_at": billing_fetched_at,
@@ -185,10 +185,22 @@ def record_provider_usage_failure(
         )
 
 
-def _lock_fal_generation(cursor, expected: Optional[str]) -> bool:
+def _lock_usage_generation(cursor, provider_id, provider_type, expected: Optional[str]) -> bool:
+    setting = "fal_billing_api_key"
+    if provider_type == "openrouter_account":
+        from app.core.openrouter_usage import SETTING_PREFIX, SNAPSHOT_PREFIX, supported
+
+        if not provider_id.startswith(SNAPSHOT_PREFIX):
+            return False
+        parent_id = provider_id.removeprefix(SNAPSHOT_PREFIX)
+        cursor.execute("SELECT * FROM model_providers WHERE id = %s FOR UPDATE", (parent_id,))
+        parent = cursor.fetchone()
+        if not parent or not supported(parent) or not parent.get("enabled", True):
+            return False
+        setting = SETTING_PREFIX + parent_id
     # Lock the credential row until the usage write commits. Credential writes
     # and deletion take this same lock before invalidating the cached balance.
-    cursor.execute("SELECT revision FROM system_settings WHERE key = %s FOR UPDATE", ("fal_billing_api_key",))
+    cursor.execute("SELECT revision FROM system_settings WHERE key = %s FOR UPDATE", (setting,))
     row = cursor.fetchone()
     return bool(expected and row and row["revision"] == expected)
 
@@ -202,8 +214,10 @@ def get_all_provider_usage_snapshots() -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT p.provider_id, p.provider_type, p.plan_type, p.windows, p.credits, "
-            "p.raw, p.fetched_at, s.revision AS fal_credential_generation "
-            "FROM provider_usage_snapshots p LEFT JOIN system_settings s ON s.key = 'fal_billing_api_key'"
+            "p.raw, p.fetched_at, s.revision AS credential_generation "
+            "FROM provider_usage_snapshots p LEFT JOIN system_settings s ON s.key = CASE "
+            "WHEN p.provider_type = 'fal' THEN 'fal_billing_api_key' "
+            "WHEN p.provider_type = 'openrouter_account' THEN 'openrouter_billing_key:' || SUBSTR(p.provider_id, 20) END"
         )
         rows = rows_to_list(cursor.fetchall())
     valid_rows = []
@@ -211,8 +225,8 @@ def get_all_provider_usage_snapshots() -> List[Dict[str, Any]]:
         row["windows"] = _parse_json_list(row.get("windows"))
         row["credits"] = _parse_json_dict(row.get("credits"))
         row["raw"] = _parse_json_dict(row.get("raw"))
-        generation = row.pop("fal_credential_generation", None)
-        if row["provider_type"] != "fal" or (generation and
+        generation = row.pop("credential_generation", None)
+        if row["provider_type"] not in {"fal", "openrouter_account"} or (generation and
                 (row["raw"] or {}).get("credential_generation") == generation):
             valid_rows.append(row)
     return valid_rows

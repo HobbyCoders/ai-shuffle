@@ -882,6 +882,9 @@
 					{/if}
 				</div>
 				{#if pbOpen}
+					{#if pb.source}<div class="row-reset">Source: {pb.source}</div>{/if}
+					{#if pb.scope}<div class="row-reset">{pb.scope}</div>{/if}
+					{#if pb.source && pb.fetchedAt}<div class="row-reset">Last successful update: {new Date(pb.fetchedAt).toLocaleString()}</div>{/if}
 					{#each pbWindows as w (w.type)}
 						{@const display = providerWindowPercent(w, now, pbShowsRemaining)}
 						{@const countdown = formatCountdown(w.resets_at, now)}

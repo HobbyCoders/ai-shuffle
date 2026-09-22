@@ -406,6 +406,8 @@ def delete_model_provider(provider_id: str) -> bool:
         cursor.execute("DELETE FROM model_providers WHERE id = %s", (provider_id,))
         deleted = cursor.rowcount > 0
         cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
+        cursor.execute("DELETE FROM system_settings WHERE key = %s", ("openrouter_billing_key:" + provider_id,))
+        cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("openrouter-account:" + provider_id,))
         return deleted
 
 

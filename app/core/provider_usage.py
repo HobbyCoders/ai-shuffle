@@ -499,7 +499,6 @@ async def _persist_anthropic_capture(provider_id: str, headers: Dict[str, str]) 
 _KEY_PATH = "/api/v1/key"
 # Account-level credit ledger (lifetime purchased vs lifetime spent). Distinct
 # from /key's `usage`/`limit`, which describe the API KEY's own spend cap.
-_CREDITS_PATH = "/api/v1/credits"
 _REQUEST_TIMEOUT_SECONDS = 20.0
 
 # Allowlist for `raw` / `credits` sourced from the OpenRouter /key response.
@@ -558,31 +557,6 @@ def _openrouter_windows_and_credits(
                 }
             )
     return windows, credits
-
-
-def _merge_openrouter_credits(
-    credits: Dict[str, Any], data: Any
-) -> Dict[str, Any]:
-    """Fold an OpenRouter ``/credits`` payload into an existing credits dict.
-
-    ``/credits`` reports the ACCOUNT ledger (``total_credits`` purchased,
-    ``total_usage`` spent all-time); ``balance_remaining`` is their difference
-    and is what the popover headlines. Pure and defensive: a non-dict payload or
-    a non-numeric field leaves ``credits`` untouched (the caller keeps whatever
-    ``/key`` produced), and the existing ``usage`` key — the API KEY's spend, a
-    different number — is never clobbered.
-    """
-    if not isinstance(data, dict):
-        return credits
-    total_credits = _as_float(data.get("total_credits"))
-    total_usage = _as_float(data.get("total_usage"))
-    if total_credits is None or total_usage is None:
-        return credits
-    merged = dict(credits)
-    merged["total_credits"] = total_credits
-    merged["total_usage"] = total_usage
-    merged["balance_remaining"] = total_credits - total_usage
-    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -1183,11 +1157,14 @@ class ProviderUsageMonitor:
                     logger.warning("Provider usage job failed")
                     return False
 
+        from app.core.openrouter_usage import poll as poll_openrouter_account
+
         jobs = [bounded(self._poll_fal)]
         for row in rows or []:
             r = row or {}
             if r.get("provider_type") == "openrouter":
                 jobs.append(bounded(self._poll_provider, r))
+                jobs.append(bounded(poll_openrouter_account, r))
             elif _is_grok_subscription_row(r):
                 jobs.append(bounded(self._poll_grok_provider, r))
             elif _is_openai_platform_row(r):
@@ -1224,9 +1201,6 @@ class ProviderUsageMonitor:
                 data = body if isinstance(body, dict) else {}
 
             windows, credits = _openrouter_windows_and_credits(data)
-            credits = await self._merge_account_credits(
-                provider_id, _origin(base_url), key, credits
-            )
             raw = {k: data.get(k) for k in _OPENROUTER_KEY_FIELDS if k in data}
 
             # Poll recovered: forget the suppressed-failure state so the
@@ -1251,44 +1225,6 @@ class ProviderUsageMonitor:
                 f"openrouter-poll:{provider_id}",
                 "OpenRouter usage poll for provider %s failed: %s", provider_id, e,
             )
-
-    async def _merge_account_credits(
-        self,
-        provider_id: Optional[str],
-        origin: str,
-        key: str,
-        credits: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Add the account credit balance from ``/api/v1/credits``, if reachable.
-
-        Strictly additive and non-fatal: /credits is a separate endpoint from
-        /key, so a non-200, a timeout or a malformed body must leave the /key
-        snapshot exactly as it was rather than failing the whole poll. Logged at
-        debug for that reason (a warning would be noise on key-only setups).
-        """
-        try:
-            resp = await usage_get(origin + _CREDITS_PATH, headers={"Authorization": f"Bearer {key}"})
-            if resp.status_code != 200:
-                logger.debug(
-                    "OpenRouter /credits for provider %s returned HTTP %s; "
-                    "keeping /key credits only",
-                    provider_id,
-                    resp.status_code,
-                )
-                return credits
-            body = resp.json() or {}
-            data = body.get("data") if isinstance(body, dict) else None
-            if not isinstance(data, dict):
-                data = body if isinstance(body, dict) else {}
-            return _merge_openrouter_credits(credits, data)
-        except UsageDeferred:
-            return credits
-        except Exception as e:
-            # Never include `key` / the Authorization header value here.
-            logger.debug(
-                "OpenRouter /credits fetch for provider %s failed: %s", provider_id, e
-            )
-            return credits
 
     async def _poll_grok_provider(self, row: Dict[str, Any]) -> None:
         """Fetch SuperGrok billing + settings and upsert a snapshot. Never raises.

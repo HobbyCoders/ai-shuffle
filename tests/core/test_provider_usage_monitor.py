@@ -1,23 +1,7 @@
-"""Tests for the OpenRouter usage poller (app/core/provider_usage.py, Chunk U3).
+"""OpenRouter model-key snapshots and provider refresh scheduling.
 
-Covers:
-  * ``_openrouter_windows_and_credits`` — AMENDMENT 1 window/credits mapping:
-    a non-null ``limit`` produces exactly one clamped ``credit_limit`` window
-    plus full dollar figures in ``credits``; a null ``limit`` produces empty
-    windows with credits still populated.
-  * ``_merge_openrouter_credits`` — folds the ACCOUNT ledger from
-    ``/api/v1/credits`` (``total_credits``/``total_usage`` and the derived
-    ``balance_remaining``) into the ``/key`` credits blob without clobbering
-    ``usage``; any unusable payload leaves the blob untouched.
-  * ``ProviderUsageMonitor.poll_once`` — polls ``openrouter``, Grok
-    subscription, official OpenAI platform, and fal.ai rows; skips
-    chatgpt/anthropic/xai API-key rows and OpenAI rows on a non-api.openai.com
-    host; a read failure is swallowed (never raises) and still attempts fal.
-  * ``ProviderUsageMonitor._poll_provider`` — upserts a normalised snapshot on
-    a 200 response (raw whitelist enforced — the key never lands in ``raw``);
-    a non-200 response, a decrypt failure, and a network exception are all
-    swallowed without raising and without an upsert; the Bearer key never
-    appears in any captured log record.
+The inference key only reads /key. Account ledgers use the independent
+management-key reader covered in test_openrouter_account_usage.py.
 """
 
 import asyncio
@@ -28,7 +12,6 @@ import pytest
 
 from app.core.provider_usage import (
     ProviderUsageMonitor,
-    _merge_openrouter_credits,
     _openrouter_windows_and_credits,
 )
 
@@ -187,65 +170,6 @@ class TestOpenrouterWindowsAndCredits:
         assert windows == []
         assert credits["limit"] is None
         assert credits["usage"] is None
-
-
-# ---------------------------------------------------------------------------
-# _merge_openrouter_credits
-# ---------------------------------------------------------------------------
-
-class TestMergeOpenrouterCredits:
-    def test_adds_totals_and_derived_balance(self):
-        merged = _merge_openrouter_credits(
-            {"usage": 3.0, "limit": None},
-            {"total_credits": 25.0, "total_usage": 4.25},
-        )
-        assert merged["total_credits"] == 25.0
-        assert merged["total_usage"] == 4.25
-        assert merged["balance_remaining"] == pytest.approx(20.75)
-
-    def test_key_usage_field_is_not_clobbered(self):
-        # /key's `usage` is the API KEY's spend; /credits' `total_usage` is the
-        # ACCOUNT's lifetime spend. They must coexist.
-        merged = _merge_openrouter_credits(
-            {"usage": 3.0},
-            {"total_credits": 25.0, "total_usage": 4.25},
-        )
-        assert merged["usage"] == 3.0
-        assert merged["total_usage"] == 4.25
-
-    def test_input_dict_is_not_mutated(self):
-        original = {"usage": 3.0}
-        _merge_openrouter_credits(original, {"total_credits": 5.0, "total_usage": 1.0})
-        assert original == {"usage": 3.0}
-
-    def test_negative_balance_is_preserved(self):
-        merged = _merge_openrouter_credits(
-            {}, {"total_credits": 1.0, "total_usage": 2.5}
-        )
-        assert merged["balance_remaining"] == pytest.approx(-1.5)
-
-    def test_numeric_strings_are_coerced(self):
-        merged = _merge_openrouter_credits(
-            {}, {"total_credits": "25", "total_usage": "4.25"}
-        )
-        assert merged["balance_remaining"] == pytest.approx(20.75)
-
-    @pytest.mark.parametrize(
-        "data",
-        [
-            None,
-            [],
-            "nope",
-            {},
-            {"total_credits": 25.0},
-            {"total_usage": 4.25},
-            {"total_credits": "oops", "total_usage": 4.25},
-            {"total_credits": None, "total_usage": None},
-        ],
-    )
-    def test_unusable_payload_leaves_credits_untouched(self, data):
-        credits = {"usage": 3.0, "limit": 10.0}
-        assert _merge_openrouter_credits(credits, data) == credits
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +364,7 @@ class TestPollProvider:
         assert raw["limit"] == 10.0
 
     @pytest.mark.asyncio
-    async def test_urls_are_key_and_credits_endpoints_off_base_url_origin(self, monitor):
+    async def test_model_key_is_only_sent_to_key_endpoint(self, monitor):
         calls = []
 
         def _client_factory(*args, **kwargs):
@@ -471,7 +395,6 @@ class TestPollProvider:
         auth = {"Authorization": "Bearer sk-or-super-secret"}
         assert calls == [
             ("https://openrouter.ai/api/v1/key", auth),
-            ("https://openrouter.ai/api/v1/credits", auth),
         ]
 
     @pytest.mark.asyncio
@@ -523,7 +446,7 @@ class TestPollProvider:
         upsert.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_credits_endpoint_balance_lands_in_snapshot(self, monitor):
+    async def test_key_snapshot_never_includes_account_balance(self, monitor):
         upsert = MagicMock()
         with patch(
             "app.core.provider_usage._decrypt_provider_auth_token",
@@ -535,10 +458,10 @@ class TestPollProvider:
             await monitor._poll_provider(_PROVIDER_ROW)
 
         credits = upsert.call_args[0][4]
-        assert credits["total_credits"] == 25.0
-        assert credits["total_usage"] == 4.25
-        assert credits["balance_remaining"] == pytest.approx(20.75)
-        # /key's own figures survive alongside the account ledger.
+        assert "total_credits" not in credits
+        assert "total_usage" not in credits
+        assert "balance_remaining" not in credits
+        # The model key only describes its own spending and configured limit.
         assert credits["usage"] == 3.0
         assert credits["limit"] == 10.0
 

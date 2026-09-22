@@ -121,6 +121,8 @@ class ProviderUsageEntry(BaseModel):
     fetched_at: Optional[int] = None
     status: Literal["fresh", "stale", "unavailable", "never_fetched"] = "never_fetched"
     last_error_kind: Optional[str] = None
+    source: str | None = None
+    scope: str | None = None
 
 
 class UsageSnapshot(BaseModel):
@@ -160,6 +162,11 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
         rows = await run_sync(db.get_all_provider_usage_snapshots)
         providers = await run_sync(db.get_all_model_providers)
         names = {p["id"]: p.get("name") for p in providers}
+        from app.core.openrouter_usage import SNAPSHOT_PREFIX, supported
+
+        for provider in providers:
+            if supported(provider) and provider.get("enabled", True):
+                names[SNAPSHOT_PREFIX + provider["id"]] = (provider.get("name") or "OpenRouter") + " account"
 
         from app.core.provider_usage import (
             FAL_USAGE_PROVIDER_ID,
@@ -209,6 +216,18 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
             # prepaid API balance. That figure belongs to configured OpenAI rows.
             if ptype == "chatgpt":
                 credits = None
+            if ptype == "openrouter" and isinstance(credits, dict):
+                # Old snapshots mixed /key limits with account-wide /credits.
+                credits = {k: v for k, v in credits.items()
+                           if k not in {"total_credits", "total_usage", "balance_remaining"}}
+            source, scope = {
+                "openrouter": ("OpenRouter key API", "This model key's reported spend and limit (USD)"),
+                "openrouter_account": ("OpenRouter management API", "Account credit ledger (USD)"),
+                "openai": ("OpenAI organization Admin API", "Organization spend and completions usage this month (UTC)"),
+                "fal": ("fal account billing API", "Account credit balance"),
+                "chatgpt": ("Inference response metadata", "Subscription usage windows; not API credit"),
+                "grok": ("Subscription endpoint; support unverified", "Subscription allowance; not API credit"),
+            }.get(ptype, (None, None))
             name = names.get(row["provider_id"])
             if not name and row["provider_id"] == FAL_USAGE_PROVIDER_ID:
                 name = FAL_USAGE_PROVIDER_NAME
@@ -223,11 +242,13 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
                     fetched_at=fetched_at,
                     status=(
                         "stale" if fetched_at and (
-                            error or time.time() * 1000 - fetched_at > 300_000
+                            error or time.time() * 1000 - fetched_at > (900_000 if ptype == "openai" else 300_000)
                         ) else "fresh" if fetched_at else
                         "unavailable" if error else "never_fetched"
                     ),
                     last_error_kind=error,
+                    source=source,
+                    scope=scope,
                 )
             )
         return entries

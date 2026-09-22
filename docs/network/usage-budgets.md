@@ -53,3 +53,6 @@ with separate worker databases, including simultaneous refresh, auth pauses,
 Retry-After, credential changes, cancellation, coordinator outage and late
 completion. Opt-in PostgreSQL contracts cover competing connections, pool
 restart and migration of existing paused rows.
+
+The [provider source matrix](../provider-usage-sources.md) describes credentials,
+account scopes, support gaps and remaining live acceptance.

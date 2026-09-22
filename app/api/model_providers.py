@@ -43,12 +43,13 @@ from app.core import (
 from app.db import database as db
 from app.db.async_database import run_sync
 
-from app.api import openai_billing
+from app.api import openai_billing, openrouter_billing
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/model-providers", tags=["Model Providers"])
 router.include_router(openai_billing.router)
+router.include_router(openrouter_billing.router)
 
 _VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt", "xai", "grok")
 

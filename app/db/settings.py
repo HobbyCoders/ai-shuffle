@@ -260,6 +260,9 @@ def set_system_setting(key: str, value: str) -> None:
         if key == "fal_billing_api_key":
             # Same transaction and lock order as conditional billing writes.
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("fal-ai",))
+        if key.startswith("openrouter_billing_key:"):
+            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s",
+                           ("openrouter-account:" + key.removeprefix("openrouter_billing_key:"),))
     # Explicit invalidation: the memo must never outlive a write we made.
     invalidate_system_setting_memo(key)
 
@@ -272,6 +275,9 @@ def delete_system_setting(key: str) -> bool:
         deleted = cursor.rowcount > 0
         if key == "fal_billing_api_key":
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("fal-ai",))
+        if key.startswith("openrouter_billing_key:"):
+            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s",
+                           ("openrouter-account:" + key.removeprefix("openrouter_billing_key:"),))
     invalidate_system_setting_memo(key)
     return deleted
 

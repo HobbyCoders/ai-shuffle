@@ -82,6 +82,8 @@ export type ProviderUsageStatus = 'fresh' | 'stale' | 'unavailable' | 'never_fet
 export type ProviderUsageErrorKind = 'billing_access_denied' | 'missing_credentials' | 'timeout' | 'unavailable';
 
 export interface ProviderUsageBucket {
+	source?: string | null;
+	scope?: string | null;
 	status?: ProviderUsageStatus;
 	lastErrorKind?: ProviderUsageErrorKind | null;
 	providerId: string;
@@ -162,6 +164,8 @@ export interface SnapshotInstance {
  * Claude `SnapshotWindow` shape (`type` / `utilization` 0–100 / `resets_at`).
  */
 export interface ProviderUsageEntry {
+	source?: string | null;
+	scope?: string | null;
 	status?: ProviderUsageStatus;
 	last_error_kind?: ProviderUsageErrorKind | null;
 	provider_id: string;
@@ -581,6 +585,8 @@ export const rateLimit = {
 					if (!p?.provider_id) continue;
 					providerBuckets[p.provider_id] = {
 						providerId: p.provider_id,
+						source: p.source ?? null,
+						scope: p.scope ?? null,
 						status: p.status,
 						lastErrorKind: p.last_error_kind ?? null,
 						providerName: p.provider_name ?? null,

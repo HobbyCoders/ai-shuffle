@@ -9,7 +9,7 @@
  * The `rateLimit` store is a singleton; each test resets it via
  * `__resetForTests` and clears localStorage between tests.
  */
-import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, cleanup, fireEvent, waitFor, screen } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ContextUsageBar from './ContextUsageBar.svelte';
 import { rateLimit } from '$lib/stores/rate-limit';
@@ -1407,6 +1407,22 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		expect(accounts).toEqual(['prolite', 'API']);
 		expect(container.querySelectorAll('.popover-section').length).toBe(3);
 	});
+
+	it('shows the account source, scope and successful observation time separately from the key row', async () => {
+        rateLimit.applySnapshot({ available: false, windows: [], providers: [
+            { provider_id: 'or-key', provider_type: 'openrouter', provider_name: 'OpenRouter',
+              credits: { usage: 3, limit: 10 }, source: 'OpenRouter key API', scope: 'This model key spend', fetched_at: 1000 },
+            { provider_id: 'openrouter-account:or-key', provider_type: 'openrouter_account', provider_name: 'OpenRouter account',
+              credits: { balance_remaining: 20.75 }, source: 'OpenRouter management API', scope: 'Account credit ledger (USD)', fetched_at: 2000 }
+        ] });
+        const { container } = render(ContextUsageBar);
+        await openPopover(container);
+        expect(screen.getByRole('button', { name: 'OpenRouter account usage — collapse' })).toBeTruthy();
+        expect(screen.getByText('Source: OpenRouter management API')).toBeTruthy();
+        expect(screen.getByText('Account credit ledger (USD)')).toBeTruthy();
+        expect(screen.getAllByText(/Last successful update:/)).toHaveLength(2);
+        expect(screen.getByRole('button', { name: 'OpenRouter usage — collapse' })).toBeTruthy();
+    });
 
 	it('sorts subscription rows A–Z above API rows A–Z', async () => {
 		rateLimit.applySnapshot({

@@ -40,6 +40,8 @@
 	import { getModels } from '$lib/constants/models.svelte';
 	import BankedResetsPanel from './BankedResetsPanel.svelte';
 	import OpenAICredits from './OpenAICredits.svelte';
+	import OpenRouterCredits from './OpenRouterCredits.svelte';
+	import { supportsOpenRouterBilling } from '$lib/api/openrouter-billing';
 	import { supportsOpenAIBilling } from '$lib/api/openai-billing';
 
 	interface Props {
@@ -553,6 +555,10 @@
 			{/each}
 		</div>
 	</div>
+{/if}
+
+{#if provider && supportsOpenRouterBilling(provider)}
+	{#key provider.id}<OpenRouterCredits {provider} />{/key}
 {/if}
 
 {#if provider && supportsOpenAIBilling(provider)}
