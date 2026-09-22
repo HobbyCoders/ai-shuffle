@@ -242,6 +242,7 @@
 
 <div class="context-pill-bar" class:sheet-mode={sheetMode} role="toolbar" aria-label="Session context">
 	<ProfileSelector {sheetMode} />
+	{#if $activeSession.mode !== 'chat'}
 	<span class="ctx-sep" aria-hidden="true"></span>
 
 	{#if isEmptyState}
@@ -349,9 +350,10 @@
 		{/if}
 		</div>
 	{/if}
+	{/if}
 </div>
 
-{#if $activeSession.project}
+{#if $activeSession.mode !== 'chat' && $activeSession.project}
 	<CreateBranchModal
 		open={showCreateBranchModal}
 		projectId={$activeSession.project}

@@ -3018,6 +3018,13 @@ class HarnessAdapter(ProviderAdapter):
             from fluid.tools.builtins import register_builtins
 
             register_builtins(registry)
+            if self._provider_kind == "openai_responses":
+                from app.core.provider.native_images import SPEC, make_handler
+
+                registry.register_builtin(SPEC, make_handler(
+                    lambda: self._engine, self._resolve_app_session_id,
+                    chat_mode=_session_mode(options) == "chat",
+                ))
             builtins_registered = True
             logger.info(
                 "[HarnessAdapter] registered fluid builtin tools for native leg",

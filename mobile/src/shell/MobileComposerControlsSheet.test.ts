@@ -3,8 +3,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import '$lib/test-stubs/composer-dom';
+import { get } from 'svelte/store';
+import { activeSession } from '$lib/stores/active-session';
+import { appMode } from '$lib/stores/sessionMode.svelte';
+import { appData } from '$lib/stores/app-data.svelte';
+import { api } from '$lib/api/client';
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); platform.set('desktop'); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); platform.set('desktop'); appMode.set('code'); activeSession.newChat(); });
 afterAll(() => vi.unstubAllGlobals());
 vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }));
@@ -195,8 +200,21 @@ describe('integrated mobile composer controls', () => {
 		expect(container.querySelector('select')).toBeNull();
 	});
 
-	it('drops setup and tool access outside the code lane', () => {
+	it('lets a fresh chat choose its required agent without exposing code controls', async () => {
+		appMode.set('chat');
+		activeSession.newChat();
+		activeSession.setProfile('');
+		const request = vi.spyOn(api, 'get').mockResolvedValue([{ id: 'image-test', name: 'Image test', config: {} }]);
+		await appData.loadProfiles();
+		request.mockRestore();
 		render(MobileComposerControlsSheet, { props: props({ showCodeControls: false }) });
+		await fireEvent.click(screen.getByRole('button', { name: 'Agent: Agent' }));
+		await fireEvent.click(screen.getByRole('button', { name: /^Image test$/ }));
+		expect(get(activeSession).profile).toBe('image-test');
+		expect(get(activeSession).mode).toBe('chat');
+		expect(screen.getByRole('button', { name: 'Agent: Image test' })).toBeTruthy();
+		expect(screen.queryByText('Local', { exact: true })).toBeNull();
+		expect(document.querySelector('.wt-indicator')).toBeNull();
 		expect(screen.queryByRole('button', { name: 'Chat setup' })).toBeNull();
 		expect(screen.queryByRole('group', { name: 'Tool access' })).toBeNull();
 		expect(screen.getByRole('button', { name: /model: sonnet/i })).toBeTruthy();

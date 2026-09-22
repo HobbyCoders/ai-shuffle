@@ -31,7 +31,8 @@ class StreamChunk:
     """Normalized streaming event.
 
     kind ∈ {provider_request, message_start, block_start, text_delta, thinking_delta,
-            tool_args_delta, block_stop, usage, message_stop, rate_limit}
+            tool_args_delta, block_stop, usage, message_stop, rate_limit,
+            image_generation, image_generation_progress}
     """
 
     kind: str

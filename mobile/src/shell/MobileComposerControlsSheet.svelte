@@ -147,7 +147,7 @@
 					<span class="control-label">Model</span><strong>{modelLabel}</strong>{#if modelLocked}<Lock size={16} aria-hidden="true" />{:else}<ChevronRight size={16} aria-hidden="true" />{/if}
 				</button>
 				{#if modelNotice}<p class="model-notice">{modelNotice}</p>{/if}
-				{#if showCodeControls && open}
+				{#if open}
 					<ContextPillBar sheetMode />
 				{/if}
 				<div class="quick-setting" role="group" aria-label="Reasoning effort">

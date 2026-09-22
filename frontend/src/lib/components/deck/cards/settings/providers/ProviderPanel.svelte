@@ -561,6 +561,14 @@
 	{#key provider.id}<OpenRouterCredits {provider} />{/key}
 {/if}
 
+{#if provider?.enabled && (['openai', 'chatgpt', 'xai', 'grok'].includes(provider.provider_type) || ['chatgpt', 'grok'].includes(provider.auth_mode ?? ''))}
+	<section aria-label="Native image generation">
+		<h4>Native image generation</h4>
+		<p>GenerateNativeImage uses this session’s Responses provider and credential. Model and account support are checked when an image is requested. It is separate from fal.ai and never switches providers automatically.</p>
+		<p>Generated images are saved with the session. The provider may charge for generation; session cost estimates do not include native image charges.</p>
+	</section>
+{/if}
+
 {#if provider && supportsOpenAIBilling(provider)}
 	{#key provider.id}
 		<OpenAICredits {provider} />

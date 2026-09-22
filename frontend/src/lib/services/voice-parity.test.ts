@@ -10,7 +10,9 @@ describe('voice composer parity', () => {
 		expect(view).toMatch(/<VoiceCallPanel[^>]+compact \/>\s*\{\/if\}\s*\{#key \$sessionOwnerBoundary\}\s*<QuestionTray[^>]+\/>\s*<ChatInput/);
 	});
 	it('uses code context and permission controls for voice on desktop and mobile', () => {
-		expect(source('components/chat/ChatInput.svelte')).toContain("{#if composerMode !== 'chat'}");
+  expect(source('components/chat/ChatInput.svelte')).toContain('<ContextPillBar />');
+  // The agent picker also serves chat; only the execution controls are gated.
+  expect(source('components/chat/ContextPillBar.svelte')).toContain("{#if $activeSession.mode !== 'chat'}");
 		const dock = source('components/chat/ControlsDock.svelte');
 		expect(dock).toContain("$activeSession.mode !== 'chat'");
 		expect(dock).toContain('showCodeControls={isCodeLane}');

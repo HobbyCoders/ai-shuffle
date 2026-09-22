@@ -89,6 +89,8 @@ CHAT_MODE_RESOURCE_TOOLS: List[str] = [
 ]
 CHAT_MODE_TOOL_SURFACE: List[str] = [
     "WebSearch", "WebFetch", "Read", "mcp__attachments__Read",
+    # Native generation stores only session-owned artifacts in chat mode.
+    "GenerateNativeImage",
     *CHAT_MODE_MEMORY_TOOLS, *CHAT_MODE_RESOURCE_TOOLS
 ]
 

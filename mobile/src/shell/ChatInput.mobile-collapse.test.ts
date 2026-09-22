@@ -190,12 +190,9 @@ describe('ChatInput mobile collapsed surface', () => {
 		expect(chatInput).toContain('armExpandPointerGuard()');
 	});
 
-	it('renders the context chip row in code and voice lanes', () => {
-		// Chat and voice sessions bind no repository, worktree or agent, so the
-		// whole chip row goes rather than showing selectors that cannot apply.
-		expect(chatInput).toMatch(
-			/\{#if composerMode !== 'chat'\}\s*<div class="context-pill-row">/
-		);
+	it('keeps the agent context row available in every lane', () => {
+		expect(chatInput).toContain('<div class="context-pill-row"><ContextPillBar /></div>');
+		expect(chatInput).not.toMatch(/\{#if composerMode !== 'chat'\}\s*<div class="context-pill-row">/);
 	});
 
 	it('no longer carries a send-later button to hide', () => {

@@ -185,6 +185,12 @@ def _message_items(msg: Message, model: str) -> Iterator[dict[str, Any]]:
 def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for tool in tools:
+        if tool.get("type") == "image_generation":
+            # Provider-native tools have no function name or input_schema.
+            # Support is determined by the configured endpoint/account response,
+            # not by recognizing a GPT-looking model name.
+            out.append(dict(tool))
+            continue
         out.append(
             {
                 "type": "function",
@@ -353,6 +359,7 @@ class ResponsesStreamNormalizer:
 
     def __init__(self) -> None:
         self._started = False
+        self._image_items: set[str] = set()
         self._index_of: dict[str, int] = {}
         self._next_index = 0
         self._has_function_call = False
@@ -442,6 +449,15 @@ class ResponsesStreamNormalizer:
         name = name or data.get("type", "")
         out: list[StreamChunk] = []
 
+        if name.startswith("response.image_generation_call."):
+            # Partial previews are observations, never completed artifacts.
+            return [StreamChunk("image_generation_progress", {
+                "item_id": data.get("item_id"),
+                "status": name.rsplit(".", 1)[-1],
+                "partial_image_index": data.get("partial_image_index"),
+                "partial_image_b64": data.get("partial_image_b64"),
+            })]
+
         if name in ("response.created", "response.in_progress"):
             if not self._started:
                 self._started = True
@@ -530,6 +546,8 @@ class ResponsesStreamNormalizer:
             # output is empty).
             item = data.get("item", {}) or {}
             itype = item.get("type", "")
+            if itype == "image_generation_call":
+                return self._image_result(item)
             if itype == "function_call":
                 self._has_function_call = True
             block_type = _ITEM_BLOCK_TYPE.get(itype, "text")
@@ -581,6 +599,11 @@ class ResponsesStreamNormalizer:
 
         if name == "response.completed":
             response = data.get("response", {}) or {}
+            # Some Responses endpoints include final images only here; others
+            # repeat output_item.done. Deliver each artifact once in either case.
+            for item in response.get("output") or ():
+                if isinstance(item, dict) and item.get("type") == "image_generation_call":
+                    out += self._image_result(item)
             out += self._close_open_blocks()
             out += self._terminal(response)
             return out
@@ -622,3 +645,18 @@ class ResponsesStreamNormalizer:
         # content_part.added/done, reasoning_summary_part.*, in-progress skeletons
         # and unknown future events are not load-bearing — ignored.
         return out
+
+    def _image_result(self, item: dict[str, Any]) -> list[StreamChunk]:
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id or item_id in self._image_items:
+            return []
+        if item.get("status") == "completed" and isinstance(item.get("result"), str) and item["result"]:
+            self._image_items.add(item_id)
+        return [StreamChunk("image_generation", {
+            "item_id": item_id,
+            "status": item.get("status"),
+            "result": item.get("result"),
+            "output_format": item.get("output_format", "png"),
+            "revised_prompt": item.get("revised_prompt"),
+            "usage": item.get("usage"),
+        })]

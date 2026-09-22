@@ -4538,6 +4538,28 @@ class NativeLoop(BackgroundLifecycleMixin):
             if isinstance(value, int):
                 totals[key] = max(totals.get(key, 0), value)
 
+    async def record_auxiliary_usage(
+        self, usage: dict[str, Any], *, model: str, turn_id: str | None, source: str,
+    ) -> None:
+        """Record provider-observed usage from a tool's call, including on cancel.
+
+        Native media costs are not inferred from the orchestrator's text-token
+        pricing. Retain observed counts and explicitly mark cost as incomplete.
+        """
+        if not usage:
+            return
+        observed = dict(usage)
+        observed.update(model=model, auxiliary_source=source, cost_incomplete=True)
+        self._accumulate_usage(self._turn_usage, usage)
+        await self._emit(Usage(
+            session_id=self.session_id, turn_id=turn_id,
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            cache_read_tokens=usage.get("cache_read_input_tokens", 0),
+            cache_creation_tokens=usage.get("cache_creation_input_tokens", 0),
+            raw=observed,
+        ))
+
     def _fold_call_usage(self, totals: dict[str, Any], usage: dict[str, Any]) -> None:
         """Fold one model call's usage into the turn totals, filling in an
         estimated cost when the provider reported none.

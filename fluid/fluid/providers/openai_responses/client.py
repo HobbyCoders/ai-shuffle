@@ -147,6 +147,11 @@ class OpenAIResponsesClient:
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
         body = build_request_body(request)
+        # An uncertain media request can already have generated a billed image.
+        # Keep an explicit auth-refresh retry, but never replay a native image
+        # generation after a transport failure or an ambiguous server error.
+        native_image = any(t.get("type") == "image_generation" for t in (body.get("tools") or ()) if isinstance(t, dict))
+        transport_retries = 0 if native_image else self._retry.transport_retries
         owned: httpx.AsyncClient | None = None
         attempt = 0
         refreshed_401 = False
@@ -186,7 +191,7 @@ class OpenAIResponsesClient:
                             refreshed_401 = True
                             continue
                         retriable = resp.status_code in RETRIABLE_STATUSES
-                        if retriable and attempt < self._retry.max_retries:
+                        if retriable and not native_image and attempt < self._retry.max_retries:
                             await asyncio.sleep(self._retry.delay(
                                 attempt, resp.headers.get("retry-after")))
                             attempt += 1
@@ -211,7 +216,7 @@ class OpenAIResponsesClient:
                     if not is_closed_client_error(exc):
                         raise
                     self._http = None
-                    if not yielded and attempt < self._retry.transport_retries:
+                    if not yielded and attempt < transport_retries:
                         await asyncio.sleep(self._retry.delay(attempt))
                         attempt += 1
                         continue
@@ -226,11 +231,11 @@ class OpenAIResponsesClient:
                 except httpx.TransportError as exc:
                     evidence = diagnostics.failure(
                         exc, yielded=yielded,
-                        retrying=not yielded and attempt < self._retry.transport_retries,
+                        retrying=not yielded and attempt < transport_retries,
                     )
                     # Pre-stream connection failures retry; mid-stream ones
                     # don't (chunks were already delivered downstream).
-                    if not yielded and attempt < self._retry.transport_retries:
+                    if not yielded and attempt < transport_retries:
                         await asyncio.sleep(self._retry.delay(attempt))
                         attempt += 1
                         continue

@@ -998,14 +998,9 @@
 			     selectors and which are read-only). Mobile hides this row; the
 			     mobile sheet's Chat-setup section carries the same selectors.
 
-			     One row carries every project-shaped control the composer has, so
-			     dropping it is the whole of "chat mode hides the code controls" on
-			     desktop: chat and voice sessions bind no repository, worktree or
-			     agent, and a row of inapplicable selectors would only invite the
-			     user to configure something that cannot take effect. -->
-			{#if composerMode !== 'chat'}
-				<div class="context-pill-row"><ContextPillBar /></div>
-			{/if}
+			     Chat still requires an agent. ContextPillBar keeps its selector
+			     visible while hiding the repository and execution controls. -->
+			<div class="context-pill-row"><ContextPillBar /></div>
 
 			<!-- The box: a flat hairline rectangle holding the editor, the send
 			     cluster on the right, and the bare-text controls row. -->
