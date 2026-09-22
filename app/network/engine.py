@@ -612,7 +612,18 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
     with get_db() as conn:
         cursor = conn.cursor()
         known = store.records_for_collection(cursor, collection)
-        cursor.execute(f"SELECT * FROM {coll.table}")
+        query = f"SELECT * FROM {coll.table}"
+        params: tuple[Any, ...] = ()
+        if owner_only:
+            # Keep mirrored payloads out of this process. Match the legacy
+            # NULL/empty-instance rule below; runtime rows have no instance.
+            legacy = "owner_device_id IS NULL"
+            params = (ctx.device_id,)
+            if "instance_id" in coll.local_fields:
+                legacy += " AND (instance_id IS NULL OR instance_id = '' OR instance_id = %s)"
+                params += (_my_instance_id(),)
+            query += f" WHERE owner_device_id = %s OR ({legacy})"
+        cursor.execute(query, params)
         rows = [dict(r) for r in cursor.fetchall()]
     seen = set()
     skipped = 0

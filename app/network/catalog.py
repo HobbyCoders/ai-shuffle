@@ -127,7 +127,12 @@ def _publish_child_rows(collection: str, ctx: engine.NetworkContext) -> int:
         if not owned:
             return 0
         known = store.records_for_collection(cursor, collection)
-        cursor.execute(f"SELECT * FROM {coll.table}")
+        # Filter at the database boundary instead of loading every mirrored
+        # tag/prompt payload. Keep the same ownership rule as `owned` above.
+        cursor.execute(
+            f"SELECT child.* FROM {coll.table} child JOIN sessions s ON s.id = child.session_id "
+            "WHERE s.owner_device_id = %s OR (s.owner_device_id IS NULL AND s.instance_id = %s)",
+            (ctx.device_id, _my_instance_id()))
         seen = set()
         for row in [dict(r) for r in cursor.fetchall()]:
             if row.get("session_id") not in owned:
