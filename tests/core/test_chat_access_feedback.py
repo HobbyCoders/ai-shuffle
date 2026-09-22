@@ -45,7 +45,7 @@ async def test_failed_ssh_submission_can_be_corrected_without_replacing_request(
             expected = "SSH sign-in was rejected."
         else:
             body["connection"]["fingerprint"] = asyncssh.generate_private_key("ssh-ed25519").get_fingerprint("sha256")
-            expected = "The SSH host key did not match."
+            expected = "No host key on this server matches that fingerprint."
         endpoint = f"/api/v1/chat-access/chat/requests/{request_id}"
         response = await client.post(endpoint, json=body)
         assert response.status_code == 400

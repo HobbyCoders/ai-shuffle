@@ -244,9 +244,11 @@ SERVER_RISK_MAPS: Mapping[str, Mapping[str, str]] = {
     "ai-tools": AI_TOOLS_RISK_MAP,
     "computer-use": COMPUTER_USE_RISK_MAP,
     "provider-agent": PROVIDER_AGENT_RISK_MAP,
+    # Writes and commands wait for the broker's one-shot approval card, which
+    # applies even in bypass mode. Gating them here too asked the user twice.
     "chat-access": {
         "RequestChatAccess": "safe", "ChatResources": "safe", "ChatListFiles": "safe", "ChatReadFile": "safe",
-        "ChatWriteFile": "write", "ChatRunCommand": "write",
+        "ChatWriteFile": "safe", "ChatRunCommand": "safe",
     },
 }
 

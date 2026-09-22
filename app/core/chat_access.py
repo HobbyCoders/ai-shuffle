@@ -23,6 +23,13 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool
 from app.core import chat_files
 from app.core.chat_files import AccessDenied
 
+# Host-key types tried when pinning, most preferred first. RSA is one key
+# under several signature names; the first that the server accepts is used.
+HOST_KEY_ALGS = ("ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
+                 "ecdsa-sha2-nistp521", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa")
+HOST_KEY_NAMES = {"ssh-ed25519": "ED25519", "ecdsa-sha2-nistp256": "ECDSA", "ecdsa-sha2-nistp384": "ECDSA",
+                  "ecdsa-sha2-nistp521": "ECDSA", "rsa-sha2-512": "RSA", "rsa-sha2-256": "RSA", "ssh-rsa": "RSA"}
+
 
 class GrantInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -63,6 +70,7 @@ class Grant:
     port: int = 22
     username: str = ""
     fingerprint: str = ""
+    host_key_alg: str = ""
     password: str = ""
     key: object = None
     revoked: bool = False
@@ -208,7 +216,10 @@ class Broker:
             grant = await self.create(session_id, spec)
             saved_id = submission.saved_id
             if submission.save_connection:
-                saved_id = await run_sync(chat_vault.save, request.owner, spec)
+                # Save the key actually pinned, so later uses verify against it
+                # even when the user left the fingerprint blank.
+                pinned = spec.model_copy(update={"fingerprint": grant["fingerprint"]})
+                saved_id = await run_sync(chat_vault.save, request.owner, pinned)
             if request.result.done() or request.expires_at <= time.time():
                 raise AccessDenied("The request expired while connecting. Session access was not retained.")
             current = await self.get(session_id, grant["id"])
@@ -237,6 +248,57 @@ class Broker:
             raise AccessDenied("This private access request is no longer available.")
         request.result.set_result(None)
 
+    async def host_key(self, host: str, port: int, alg: str) -> str | None:
+        """The server's ``alg`` host-key fingerprint, read before any authentication.
+
+        The handshake is abandoned at host-key validation, so no username
+        secret, password or key is sent. ``None`` means the server has no key
+        of that type.
+        """
+        seen: list[str] = []
+
+        class Recorder(asyncssh.SSHClient):
+            def validate_host_public_key(self, host, addr, port, key):
+                seen.append(key.get_fingerprint("sha256"))
+                return False
+
+        try:
+            conn = await asyncssh.connect(
+                host, port, username="host-key-probe", password=None, client_keys=[],
+                agent_path=None, config=None, known_hosts=([], [], []),
+                client_factory=Recorder, server_host_key_algs=[alg],
+                connect_timeout=10, login_timeout=10,
+            )
+            conn.close()  # Unreachable: the recorder rejects every key.
+        except (asyncssh.HostKeyNotVerifiable, asyncssh.KeyExchangeFailed, asyncssh.ProtocolError):
+            pass
+        except (asyncssh.ConnectionLost, ConnectionResetError):
+            pass  # OpenSSH drops the connection when asked for a key type it lacks.
+        return seen[0] if seen else None
+
+    async def pin_host_key(self, grant: Grant, fingerprint: str) -> None:
+        """Pin one of the server's host keys to ``grant``.
+
+        With a fingerprint, any key type the server offers may match it (a
+        client without known_hosts would otherwise negotiate just one type,
+        often RSA, and reject a correct ED25519 fingerprint). Without one, the
+        first key offered in ``HOST_KEY_ALGS`` order is trusted for this grant
+        and reported back so the user can check it.
+        """
+        offered: list[tuple[str, str]] = []
+        for alg in HOST_KEY_ALGS:
+            found = await self.host_key(grant.host, grant.port, alg)
+            if found is None or any(found == seen for _, seen in offered):
+                continue
+            offered.append((alg, found))
+            if not fingerprint or hmac.compare_digest(found, fingerprint):
+                grant.fingerprint, grant.host_key_alg = found, alg
+                return
+        if not offered:
+            raise AccessDenied("The SSH server offered no supported host key.")
+        keys = ", ".join(f"{HOST_KEY_NAMES[alg]} {found}" for alg, found in offered)
+        raise AccessDenied(f"No host key on this server matches that fingerprint. The server offered: {keys}.")
+
     async def connection(self, grant: Grant):
         class PinnedHost(asyncssh.SSHClient):
             def validate_host_public_key(self, host, addr, port, key):
@@ -250,6 +312,7 @@ class Broker:
             client_keys=[grant.key] if grant.key else [],
             agent_path=None, config=None, known_hosts=([], [], []),
             client_factory=PinnedHost, agent_forwarding=False,
+            server_host_key_algs=[grant.host_key_alg],
             preferred_auth=("publickey", "password"),
             connect_timeout=10, login_timeout=10,
         )
@@ -274,12 +337,14 @@ class Broker:
                 address = ipaddress.ip_address(spec.host)
                 if address.is_unspecified or address.is_multicast or address.is_link_local:
                     raise AccessDenied("Use a unicast IP address for this machine.")
-                if not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", spec.fingerprint):
-                    raise AccessDenied("Enter the server's SHA256 SSH host-key fingerprint from a trusted source.")
+                fingerprint = spec.fingerprint.strip()
+                if fingerprint and not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}=?", fingerprint):
+                    raise AccessDenied("A host-key fingerprint looks like SHA256: followed by 43 characters. "
+                                       "Leave it blank to trust the key the server presents now.")
                 if not spec.username.strip() or not (spec.password.get_secret_value() or spec.private_key.get_secret_value()):
                     raise AccessDenied("Supply an SSH username and password or private key.")
                 grant.host, grant.port, grant.username = str(address), spec.port, spec.username
-                grant.fingerprint = spec.fingerprint
+                await self.pin_host_key(grant, fingerprint.rstrip("="))
                 grant.password = spec.password.get_secret_value()
                 grant.key = asyncssh.import_private_key(
                     spec.private_key.get_secret_value(), spec.passphrase.get_secret_value() or None

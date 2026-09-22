@@ -1,6 +1,7 @@
 """Resource authorization, real SSH transport, one-shot approval, and file fences."""
 import asyncio
 import os
+import re
 from unittest.mock import AsyncMock
 
 import asyncssh
@@ -140,11 +141,81 @@ async def test_real_pinned_ssh_needs_exact_one_shot_approval(broker, ssh_target)
 async def test_wrong_host_key_or_password_never_creates_grant(broker, ssh_target):
     spec, commands, _ = ssh_target
     other = asyncssh.generate_private_key("ssh-ed25519").get_fingerprint("sha256")
-    for updates in ({"fingerprint": other}, {"password": "wrong"}):
-        bad = GrantInput.model_validate({**spec.model_dump(), **updates})
-        with pytest.raises(asyncssh.Error):
-            await broker.create("chat", bad)
+    bad = GrantInput.model_validate({**spec.model_dump(), "fingerprint": other})
+    with pytest.raises(AccessDenied, match=re.escape(f"offered: ED25519 {spec.fingerprint}")):
+        await broker.create("chat", bad)
+    bad = GrantInput.model_validate({**spec.model_dump(), "password": "wrong"})
+    with pytest.raises(asyncssh.Error):
+        await broker.create("chat", bad)
     assert not broker.grants and not commands
+
+
+@pytest_asyncio.fixture
+async def multi_key_target():
+    """A server with ED25519 and RSA keys: a client without known_hosts negotiates RSA first."""
+    keys = {alg: asyncssh.generate_private_key(alg) for alg in ("ssh-ed25519", "ssh-rsa")}
+    auths = []
+
+    class Server(asyncssh.SSHServer):
+        def begin_auth(self, username):
+            auths.append(username)
+            return True
+        def password_auth_supported(self):
+            return True
+        def validate_password(self, username, password):
+            return username == "operator" and password == "test-only-password"
+
+    server = await asyncssh.create_server(Server, "127.0.0.1", 0, server_host_keys=list(keys.values()))
+    spec = GrantInput(kind="machine", label="Test SSH", host="127.0.0.1", port=server.get_port(),
+                      username="operator", password="test-only-password")
+    try:
+        yield spec, {alg: key.get_fingerprint("sha256") for alg, key in keys.items()}, auths
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supplied", ["ssh-ed25519", "ssh-rsa"])
+async def test_fingerprint_of_any_offered_key_type_is_accepted(broker, multi_key_target, supplied):
+    spec, fingerprints, auths = multi_key_target
+    grant = await broker.create("chat", spec.model_copy(update={"fingerprint": fingerprints[supplied]}))
+    pinned = broker.grants[grant["id"]]
+    assert grant["fingerprint"] == fingerprints[supplied]
+    assert pinned.host_key_alg == supplied if supplied == "ssh-ed25519" else pinned.host_key_alg.startswith("rsa-")
+    async with await broker.connection(pinned):
+        pass  # Later connections negotiate the same pinned key type.
+    # Only the credentialed connections reach authentication; key probes stop before it.
+    assert set(auths) == {"operator"}
+    broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.asyncio
+async def test_blank_fingerprint_trusts_and_pins_the_presented_key(broker, multi_key_target):
+    spec, fingerprints, auths = multi_key_target
+    grant = await broker.create("chat", spec)
+    assert grant["fingerprint"] == fingerprints["ssh-ed25519"]
+    assert broker.grants[grant["id"]].host_key_alg == "ssh-ed25519"
+    assert set(auths) == {"operator"}
+    broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.asyncio
+async def test_mismatched_fingerprint_lists_offered_keys_before_any_sign_in(broker, multi_key_target):
+    spec, fingerprints, auths = multi_key_target
+    other = asyncssh.generate_private_key("ssh-ed25519").get_fingerprint("sha256")
+    with pytest.raises(AccessDenied) as denied:
+        await broker.create("chat", spec.model_copy(update={"fingerprint": other}))
+    assert fingerprints["ssh-ed25519"] in str(denied.value) and fingerprints["ssh-rsa"] in str(denied.value)
+    assert not auths and not broker.grants
+
+
+@pytest.mark.asyncio
+async def test_malformed_fingerprint_is_refused_without_connecting(broker, multi_key_target):
+    spec, _, auths = multi_key_target
+    with pytest.raises(AccessDenied, match="Leave it blank"):
+        await broker.create("chat", spec.model_copy(update={"fingerprint": "ab:cd"}))
+    assert not auths
 
 
 @pytest.mark.asyncio
@@ -398,8 +469,11 @@ async def test_saved_connection_requires_new_request_and_approval(broker, ssh_ta
     first = asyncio.create_task(broker.request("chat", "machine", "Initial access"))
     await asyncio.sleep(0)
     request = next(iter(broker.requests.values()))
-    await broker.fulfill("chat", request.id, GrantSubmission(connection=spec, save_connection=True))
+    blank = spec.model_copy(update={"fingerprint": ""})
+    await broker.fulfill("chat", request.id, GrantSubmission(connection=blank, save_connection=True))
     handle = await first
+    # A blank fingerprint saves the key that was actually pinned.
+    assert saved["c" * 32].fingerprint == spec.fingerprint
     assert set(handle) == {"id", "kind", "expires_at", "writable"}
     broker.revoke("chat", handle["id"])
     assert saved and not broker.grants

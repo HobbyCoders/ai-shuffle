@@ -4,8 +4,10 @@
 	import { auth } from '$lib/stores/auth.svelte';
 	import { resourceSync } from '$lib/services/resource-sync';
 	import PrivateAccessRequest from './PrivateAccessRequest.svelte';
+	import '../deck/cards/card-design-system.css';
+	import './private-access.css';
 	let { sessionId }: { sessionId: string } = $props();
-	type Grant = { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean };
+	type Grant = { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean; fingerprint?: string };
 	type Action = { id: string; grant_id: string; operation: string; arguments: Record<string, string>; expires_at: number };
 	type Request = { id: string; kind: string; purpose: string; expires_at: number };
 	type Saved = {id: string; label: string; target: string; fingerprint: string};
@@ -133,39 +135,107 @@
 	}
 </script>
 
+{#snippet chevron()}
+	<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" /></svg>
+{/snippet}
+{#snippet serverIcon()}
+	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" /><path stroke-linecap="round" d="M7 7.5h.01M7 16.5h.01" /></svg>
+{/snippet}
+{#snippet folderIcon()}
+	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" /></svg>
+{/snippet}
+
 {#if data.requests.length || data.actions.length || data.grants.length || data.saved_connections.length || error}
-	<div class="private-access" aria-label="Temporary access in this conversation">
-		{#if error}<p class="error" role="alert">{error}</p>{/if}
+	<div class="private-access card-system" aria-label="Temporary access in this conversation">
+		{#if error}<p class="pa-error" role="alert">{error}</p>{/if}
 		{#each data.requests as request (request.id)}
 			<PrivateAccessRequest {sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} onComplete={() => void refresh()} />
 		{/each}
 		{#each data.actions as action (action.id)}
-			<section class="card" aria-label="One-shot action approval">
-				<h3>Approve this {action.operation === 'command' ? 'remote command' : 'file write'}?</h3>
-				<p>{data.grants.find(g => g.id === action.grant_id)?.label ?? 'Temporary resource'}</p>
-				<pre>{action.operation === 'command' ? action.arguments.command : `${action.arguments.path}\n\n${action.arguments.content}`}</pre>
-				<p class="muted">This approval applies only to the action shown. Remote commands can change files and use the server’s network.</p>
-				<div class="buttons"><button disabled={busy} onclick={() => decide(action.id, false)}>Deny</button><button disabled={busy} onclick={() => decide(action.id, true)}>Approve once</button></div>
+			{@const grant = data.grants.find(g => g.id === action.grant_id)}
+			<section class="pa-card" aria-label="One-shot action approval">
+				<header class="pa-head">
+					<div class="pa-icon" aria-hidden="true">
+						{#if action.operation === 'command'}
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+						{:else}
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.4-9.4a2 2 0 112.8 2.8L11.8 15H9v-2.8l8.6-8.6z" /></svg>
+						{/if}
+					</div>
+					<div class="pa-title">
+						<h3><span>Approve this {action.operation === 'command' ? 'remote command' : 'file write'}?</span><span class="card-badge card-badge--muted">Once</span></h3>
+						<p class="pa-subtitle">{grant ? `${grant.label} · ${grant.target}` : 'Temporary resource'}</p>
+					</div>
+				</header>
+				<div class="pa-body">
+					{#if action.operation === 'command'}
+						<pre class="pa-mono"><span class="prompt">$ </span>{action.arguments.command}</pre>
+					{:else}
+						<pre class="pa-mono"><span class="prompt">{action.arguments.path}</span>{`\n\n${action.arguments.content}`}</pre>
+					{/if}
+					<p class="pa-hint">{action.operation === 'command' ? 'Runs once on the server with this account’s authority. It can change files and use the server’s network.' : 'Writes this text once. Later writes ask again.'}</p>
+				</div>
+				<div class="pa-section">
+					<div class="pa-actions">
+						<button class="card-btn-secondary" disabled={busy} onclick={() => decide(action.id, false)}>Deny</button>
+						<button class="card-btn-primary" disabled={busy} onclick={() => decide(action.id, true)}>Approve once</button>
+					</div>
+				</div>
 			</section>
 		{/each}
-		{#if data.saved_connections.length}
-			<details class="card"><summary>Saved connections · {data.saved_connections.length}</summary>
-				<p class="muted">Encrypted on this worker, not synced to other devices. Saving credentials does not grant session access. Deleting also revokes active grants using this saved connection; backups may retain encrypted copies.</p>
-				{#each data.saved_connections as saved (saved.id)}
-					<div class="grant"><strong>{saved.label}</strong><span>{saved.target}</span>
-						{#if confirmingDelete === saved.id}<div class="buttons"><button disabled={busy} onclick={() => removeSaved(saved.id)}>Delete saved connection and revoke access</button><button onclick={() => confirmingDelete = null}>Keep connection</button></div>{:else}<button onclick={() => confirmingDelete = saved.id}>Delete saved connection</button>{/if}
-					</div>
-				{/each}
-			</details>
-		{/if}
-		{#if data.grants.length}
-			<details class="card"><summary>Temporary access · {data.grants.length} active</summary>
-				<p class="muted">Connection details stay out of chat history. Worker restart or expiry removes access. Revocation closes active connections; it cannot undo changes or guarantee detached remote processes stop.</p>
+		{#if data.grants.length || data.saved_connections.length}
+			<details class="pa-card access-panel" open={data.grants.length > 0}>
+				<summary class="pa-summary">
+					<span class="pa-icon">
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.6-4.6A12 12 0 0112 3a12 12 0 01-8.6 3.4A12 12 0 003 9c0 5.6 3.8 10.3 9 11.6 5.2-1.3 9-6 9-11.6 0-1.2-.2-2.4-.4-3.6z" /></svg>
+					</span>
+					<span class="pa-summary-lead">
+						Private access
+						{#if data.grants.length}<span class="card-badge card-badge--primary">{data.grants.length} active</span>{/if}
+						{#if data.saved_connections.length}<span class="card-badge card-badge--muted">{data.saved_connections.length} saved</span>{/if}
+					</span>
+					{@render chevron()}
+				</summary>
 				{#each data.grants as grant (grant.id)}
-					<div class="grant"><strong>{grant.label}</strong><span>{grant.target}</span><span class="muted">{grant.kind === 'machine' ? 'Machine administration' : grant.writable ? 'Read/write text' : 'Read-only text'} · expires {new Date(grant.expires_at * 1000).toLocaleTimeString()}</span>
-						{#if confirmingRevoke === grant.id}<div class="buttons"><button disabled={busy} onclick={() => revoke(grant.id)}>Confirm revoke</button><button onclick={() => confirmingRevoke = null}>Keep access</button></div>{:else}<button onclick={() => confirmingRevoke = grant.id}>Revoke access</button>{/if}
+					<div class="pa-row">
+						<span class="pa-icon row-icon">{#if grant.kind === 'machine'}{@render serverIcon()}{:else}{@render folderIcon()}{/if}</span>
+						<div class="pa-row-main">
+							<strong>{grant.label}</strong>
+							<code>{grant.target}</code>
+							<small>{grant.kind === 'machine' ? 'Commands need approval' : grant.writable ? 'Read and approved writes' : 'Read only'} · until {new Date(grant.expires_at * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})}{#if grant.kind === 'machine' && grant.fingerprint} · host key {grant.fingerprint.slice(0, 19)}…{/if}</small>
+						</div>
+						<div class="pa-row-actions">
+							{#if confirmingRevoke === grant.id}
+								<button class="pa-small-btn" onclick={() => confirmingRevoke = null}>Keep</button>
+								<button class="pa-small-btn danger solid" disabled={busy} onclick={() => revoke(grant.id)}>Revoke</button>
+							{:else}
+								<button class="pa-small-btn danger" onclick={() => confirmingRevoke = grant.id}>Revoke</button>
+							{/if}
+						</div>
 					</div>
 				{/each}
+				{#if data.saved_connections.length}
+					<p class="pa-group">Saved connections</p>
+					{#each data.saved_connections as saved (saved.id)}
+						<div class="pa-row">
+							<span class="pa-icon row-icon">{@render serverIcon()}</span>
+							<div class="pa-row-main">
+								<strong>{saved.label}</strong>
+								<code>{saved.target}</code>
+								<small>Encrypted on this worker{#if saved.fingerprint} · host key {saved.fingerprint.slice(0, 19)}…{/if}</small>
+							</div>
+							<div class="pa-row-actions">
+								{#if confirmingDelete === saved.id}
+									<button class="pa-small-btn" onclick={() => confirmingDelete = null}>Keep</button>
+									<button class="pa-small-btn danger solid" disabled={busy} onclick={() => removeSaved(saved.id)}>Delete</button>
+								{:else}
+									<button class="pa-small-btn danger" onclick={() => confirmingDelete = saved.id}>Delete</button>
+								{/if}
+							</div>
+						</div>
+					{/each}
+				{/if}
+				<p class="pa-hint panel-foot">Worker restart or expiry ends access. Revoking closes open connections but can’t undo changes already made. Deleting a saved connection also revokes access that uses it.</p>
 			</details>
 		{/if}
 	</div>
@@ -173,16 +243,9 @@
 
 <style>
 	.private-access { min-width: 0; display: grid; gap: .75rem; margin-block: .5rem; }
-	.card { min-width: 0; padding: 1rem; border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--foreground); }
-	h3 { font-size: .95rem; margin: 0; }
-	p { font-size: .85rem; line-height: 1.5; }
-	pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; padding: .7rem; background: var(--muted); border-radius: 6px; font-size: .8rem; }
-	.buttons { display: flex; gap: .5rem; justify-content: flex-end; flex-wrap: wrap; }
-	button { font: inherit; font-size: .8rem; padding: .5rem .75rem; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; background: var(--background); color: var(--foreground); }
-	button:disabled { opacity: .5; cursor: default; }
-	.grant { display: grid; gap: .35rem; overflow-wrap: anywhere; border-top: 1px solid var(--border); padding-top: .7rem; margin-top: .7rem; font-size: .85rem; }
-	.grant > button { justify-self: start; }
-	.muted { color: var(--muted-foreground); font-size: .8rem; }
-	.error { color: var(--destructive); }
-	summary { cursor: pointer; font-size: .85rem; }
+	.access-panel { box-shadow: none; animation: none; }
+	.row-icon { width: 2rem; height: 2rem; border-radius: .5rem; }
+	.row-icon :global(svg) { width: .9rem; height: .9rem; }
+	.pa-group { margin: 0; padding: .5rem 1rem .25rem; border-top: 1px solid color-mix(in oklch, var(--border) 40%, transparent); font-size: .6875rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted-foreground); }
+	.panel-foot { padding: .625rem 1rem .75rem; border-top: 1px solid color-mix(in oklch, var(--border) 40%, transparent); }
 </style>

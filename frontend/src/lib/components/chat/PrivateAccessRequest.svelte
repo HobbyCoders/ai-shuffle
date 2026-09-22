@@ -1,12 +1,26 @@
 <script lang="ts">
+	import '../deck/cards/card-design-system.css';
+	import './private-access.css';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { onMount, untrack } from 'svelte';
 	let { sessionId, request, savedConnections, vaultAvailable, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number }; savedConnections: {id: string; label: string; target: string; fingerprint: string}[]; vaultAvailable: boolean; onComplete: () => void } = $props();
+	const machine = untrack(() => request.kind === 'machine');
 	let secureContext = $state(false);
-	onMount(() => { secureContext = window.isSecureContext; });
-	let savedId = $state('');
+	let now = $state(Date.now());
+	onMount(() => {
+		secureContext = window.isSecureContext;
+		const tick = setInterval(() => { now = Date.now(); }, 1000);
+		return () => clearInterval(tick);
+	});
+	// Offer the saved server the model asked for (by host in its request), else
+	// the first saved one; "New connection" stays one choice away.
+	let savedId = $state(untrack(() => {
+		if (!machine || !savedConnections.length) return '';
+		const host = (target: string) => target.split('@').pop()?.split(':')[0] ?? '';
+		return (savedConnections.find(s => host(s.target) && request.purpose.includes(host(s.target))) ?? savedConnections[0]).id;
+	}));
 	let saveConnection = $state(false);
-	let label = $state('Temporary access');
+	let label = $state(machine ? 'SSH server' : 'Folder');
 	let minutes = $state(60);
 	let path = $state('');
 	let writable = $state(false);
@@ -17,15 +31,23 @@
 	let password = $state('');
 	let privateKey = $state('');
 	let passphrase = $state('');
-	let acknowledged = $state(false);
+	let useKey = $state(false);
+	let verifyKey = $state(false);
 	let busy = $state(false);
 	let error = $state('');
+	const durations = [[15, '15 minutes'], [30, '30 minutes'], [60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours']] as const;
+	const remaining = $derived(Math.max(0, Math.floor(request.expires_at - now / 1000)));
+	const expired = $derived(remaining <= 0);
+	const clock = $derived(`${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`);
+	const saved = $derived(savedConnections.find(s => s.id === savedId));
 	const endpoint = untrack(() => `/chat-access/${encodeURIComponent(sessionId)}/requests/${encodeURIComponent(request.id)}`);
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
-		if (!acknowledged || busy || !secureContext) return;
+		if (busy || expired || !secureContext) return;
 		busy = true; error = '';
-		const connection = {kind: request.kind, label, minutes, path, writable, host, port, username, fingerprint, password, private_key: privateKey, passphrase};
+		const connection = {kind: request.kind, label, minutes, path, writable, host: host.trim(), port, username: username.trim(),
+			fingerprint: verifyKey ? fingerprint.trim() : '', password: useKey ? '' : password,
+			private_key: useKey ? privateKey : '', passphrase: useKey ? passphrase : ''};
 		const body = {connection: savedId ? null : connection, saved_id: savedId, minutes, save_connection: !savedId && saveConnection};
 		// No transcript, localStorage, sessionStorage, analytics, or generic question API.
 		password = ''; privateKey = ''; passphrase = '';
@@ -41,77 +63,108 @@
 	}
 </script>
 
-<section class="private-card" aria-label="Private access request">
-	<header><span aria-hidden="true">🔒</span><h3>Private access request</h3><span class="badge">Not sent to the model</span></header>
-	<p class="purpose">{request.purpose}</p>
-	<p class="muted">Submit by {new Date(request.expires_at * 1000).toLocaleTimeString()}. This request closes after four minutes. The access duration below is separate.</p>
-	<p class="muted">These inputs go directly to this worker, not into chat history. The model receives only a temporary access handle. Session access expires or ends on worker restart. Connection details are retained only if you choose to save them encrypted.</p>
-	{#if error}<p class="error" role="alert">{error}</p>{/if}
-	{#if !secureContext}<p class="error" role="alert">Open the desktop app or an HTTPS connection before entering private details.</p>{/if}
-	<form onsubmit={submit} autocomplete="off">
-		{#if request.kind === 'machine' && savedConnections.length}
-			<label>Connection<select bind:value={savedId}><option value="">Enter new private details</option>{#each savedConnections as saved}<option value={saved.id}>{saved.label}</option>{/each}</select></label>
-		{/if}
-		{#if savedId}
-			<p>{savedConnections.find(s => s.id === savedId)?.target}</p>
-			<p class="muted">Pinned host key: {savedConnections.find(s => s.id === savedId)?.fingerprint}</p>
-			<label>Access duration (minutes)<input required type="number" min="1" max="480" bind:value={minutes} /></label>
-			<p class="warning">Approve new session access using the saved credentials. This account can access its server’s files and network. Commands still require approval.</p>
-		{:else}
-		<div class="grid">
-			<label>Resource name<input required maxlength="80" bind:value={label} /></label>
-			<label>Access duration (minutes)<input required type="number" min="1" max="480" bind:value={minutes} /></label>
+{#snippet chevron()}
+	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" /></svg>
+{/snippet}
+
+<section class="card-system pa-card" aria-label="Private access request">
+	<header class="pa-head">
+		<div class="pa-icon" aria-hidden="true">
+			{#if machine}
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" /><path stroke-linecap="round" d="M7 7.5h.01M7 16.5h.01" /></svg>
+			{:else}
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" /></svg>
+			{/if}
 		</div>
-		{#if request.kind === 'folder'}
-			<label>Folder on this worker<input required placeholder="/home/me/documents" bind:value={path} /></label>
-			<label class="check"><input type="checkbox" bind:checked={writable} />Allow text writes, with approval for each write</label>
-			<p class="muted">Linux file confinement only. No shell, links, mount traversal, or files larger than 64 KiB.</p>
-		{:else}
-			<div class="grid">
-				<label>Server IP address<input required placeholder="10.0.0.200" bind:value={host} /></label>
-				<label>SSH port<input required type="number" min="1" max="65535" bind:value={port} /></label>
-				<label>Username<input required autocomplete="off" bind:value={username} /></label>
-				<label>Password<input type="password" autocomplete="new-password" bind:value={password} /></label>
+		<div class="pa-title">
+			<h3><span>{machine ? 'SSH access' : 'Folder access'}</span><span class="card-badge card-badge--muted">Private</span></h3>
+			<p class="pa-subtitle" title={request.purpose}>{request.purpose}</p>
+		</div>
+		<span class="pa-timer" class:urgent={remaining < 60} role="timer" aria-label="Time left to respond">{expired ? 'Expired' : clock}</span>
+	</header>
+
+	<form onsubmit={submit} autocomplete="off">
+		<div class="pa-body">
+			{#if error}<p class="pa-error" role="alert">{error}</p>{/if}
+			{#if !secureContext}<p class="pa-error" role="alert">Open the desktop app or an HTTPS connection before entering private details.</p>{/if}
+
+			{#if machine && savedConnections.length}
+				<label class="pa-field"><span>Connection</span>
+					<select class="card-form-input" bind:value={savedId}>
+						<option value="">New connection</option>
+						{#each savedConnections as option}<option value={option.id}>{option.label} · {option.target}</option>{/each}
+					</select>
+				</label>
+			{/if}
+
+			{#if saved}
+				<p class="pa-note">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.6-4.6A12 12 0 0112 3a12 12 0 01-8.6 3.4A12 12 0 003 9c0 5.6 3.8 10.3 9 11.6 5.2-1.3 9-6 9-11.6 0-1.2-.2-2.4-.4-3.6z" /></svg>
+					<span>Uses the saved sign-in for <strong>{saved.target}</strong>. Host key {saved.fingerprint}.</span>
+				</p>
+			{:else if machine}
+				<div class="pa-grid host">
+					<label class="pa-field"><span>Server IP address</span><input class="card-form-input" required inputmode="decimal" spellcheck="false" bind:value={host} /></label>
+					<label class="pa-field"><span>Port</span><input class="card-form-input" required type="number" min="1" max="65535" bind:value={port} /></label>
+				</div>
+				<div class="pa-grid">
+					<label class="pa-field"><span>Username</span><input class="card-form-input" required autocomplete="off" spellcheck="false" bind:value={username} /></label>
+					{#if !useKey}
+						<label class="pa-field"><span>Password</span><input class="card-form-input" type="password" required autocomplete="new-password" bind:value={password} /></label>
+					{/if}
+				</div>
+				<button type="button" class="pa-toggle" aria-expanded={useKey} onclick={() => useKey = !useKey}>{@render chevron()}Use a private key instead of a password</button>
+				{#if useKey}
+					<div class="pa-reveal">
+						<label class="pa-field"><span>Private key</span><textarea class="card-form-input" rows="3" required autocomplete="off" spellcheck="false" bind:value={privateKey}></textarea></label>
+						<label class="pa-field"><span>Key passphrase</span><input class="card-form-input" type="password" autocomplete="new-password" bind:value={passphrase} /></label>
+					</div>
+				{/if}
+				<button type="button" class="pa-toggle" aria-expanded={verifyKey} onclick={() => verifyKey = !verifyKey}>{@render chevron()}Verify the host key</button>
+				{#if verifyKey}
+					<div class="pa-reveal">
+						<label class="pa-field"><span>Host-key fingerprint</span><input class="card-form-input card-form-input--mono" placeholder="SHA256:…" spellcheck="false" bind:value={fingerprint} /></label>
+						<p class="pa-hint">Optional. Any key type the server offers is accepted. When left blank, the key the server presents now is pinned for this access and shown once connected.</p>
+					</div>
+				{/if}
+			{:else}
+				<label class="pa-field"><span>Folder on this worker</span><input class="card-form-input card-form-input--mono" required placeholder="/home/me/documents" spellcheck="false" bind:value={path} /></label>
+				<label class="pa-option"><input type="checkbox" bind:checked={writable} /><strong>Allow text writes</strong><small>Each write still needs your approval.</small></label>
+			{/if}
+
+			<div class="pa-grid">
+				{#if !saved}<label class="pa-field"><span>Resource name</span><input class="card-form-input" required maxlength="80" bind:value={label} /></label>{/if}
+				<label class="pa-field"><span>Access for</span>
+					<select class="card-form-input" bind:value={minutes}>{#each durations as [value, text]}<option {value}>{text}</option>{/each}</select>
+				</label>
 			</div>
-			<label>SSH host-key fingerprint<input required placeholder="SHA256:…" spellcheck="false" bind:value={fingerprint} /></label>
-			<p class="muted">Obtain the fingerprint from the server console or another trusted source. It prevents connecting to an impersonated server.</p>
-			<details><summary>Use a private key instead of a password</summary>
-				<label>Private key<textarea rows="3" autocomplete="off" spellcheck="false" bind:value={privateKey}></textarea></label>
-				<label>Key passphrase<input type="password" autocomplete="new-password" bind:value={passphrase} /></label>
-			</details>
-			<p class="warning">Machine access uses this account’s authority, including its files and network. It is not a sandbox on the server. Each command still needs your approval.</p>
-		{/if}
-		{#if request.kind === 'machine'}
-			<label class="check"><input type="checkbox" disabled={!vaultAvailable} bind:checked={saveConnection} />Save this connection encrypted on this worker for future requests</label>
-			{#if !vaultAvailable}<p class="muted">Secure storage is locked or unavailable. Temporary access still works.</p>{/if}
-		{/if}
-		{/if}
-		<label class="check"><input required type="checkbox" bind:checked={acknowledged} />I approve this temporary access for this conversation.</label>
-		<div class="buttons"><button type="button" disabled={busy} onclick={decline}>Decline</button><button class="primary" type="submit" disabled={busy || !acknowledged || !secureContext}>{busy ? 'Connecting…' : 'Connect privately'}</button></div>
+
+			<p class="pa-note">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2" /><path stroke-linecap="round" d="M8 11V7a4 4 0 118 0v4" /></svg>
+				<span>
+					{#if machine}Sent only to this worker, never to the model or chat history. Commands run with this account’s authority, and each one needs your approval.
+					{:else}Sent only to this worker. Linux file confinement: no shell, links or mount traversal, and files up to 64 KiB.{/if}
+				</span>
+			</p>
+		</div>
+
+		<div class="pa-section">
+			{#if machine && !saved}
+				<label class="pa-option" class:disabled={!vaultAvailable}>
+					<input type="checkbox" disabled={!vaultAvailable} bind:checked={saveConnection} />
+					<strong>Save this connection</strong>
+					<small>{vaultAvailable ? 'Encrypted on this worker for future requests. Access still needs approval each time.' : 'Secure storage is locked or unavailable. Temporary access still works.'}</small>
+				</label>
+			{/if}
+			<div class="pa-actions">
+				<button type="button" class="card-btn-secondary" disabled={busy} onclick={decline}>Decline</button>
+				<button type="submit" class="card-btn-primary" disabled={busy || expired || !secureContext}>{busy ? 'Connecting…' : machine ? 'Connect' : 'Grant access'}</button>
+			</div>
+		</div>
 	</form>
 </section>
 
 <style>
-	.private-card { min-width: 0; max-height: calc(100dvh - 230px); overflow: auto; overscroll-behavior: contain; padding: 1rem; border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--foreground); }
-	header { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
-	h3 { margin: 0; font-size: 1rem; }
-	.badge { font-size: .7rem; color: var(--muted-foreground); }
-	p { margin: .65rem 0; font-size: .85rem; line-height: 1.5; overflow-wrap: anywhere; }
-	.purpose { white-space: pre-wrap; }
-	.muted { color: var(--muted-foreground); }
-	.warning { border-left: 2px solid var(--border); padding-left: .6rem; }
-	.error { color: var(--destructive); }
-	form, label { display: flex; flex-direction: column; gap: .4rem; }
-	form { gap: .8rem; }
-	label { min-width: 0; font-size: .8rem; }
-	.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: .8rem; }
-	input:not([type=checkbox]), textarea, select { width: 100%; min-width: 0; box-sizing: border-box; padding: .5rem; color: var(--foreground); background: var(--background); border: 1px solid var(--border); border-radius: 6px; font: inherit; }
-	textarea { resize: vertical; }
-	.check { flex-direction: row; align-items: flex-start; }
-	.check input { margin-top: .2rem; flex-shrink: 0; }
-	.buttons { display: flex; justify-content: flex-end; gap: .5rem; flex-wrap: wrap; }
-	button { font: inherit; padding: .5rem .75rem; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; background: var(--background); color: var(--foreground); }
-	.primary { background: var(--primary); color: var(--primary-foreground); }
-	button:disabled { opacity: .5; cursor: default; }
-	summary { cursor: pointer; font-size: .8rem; }
+	.pa-card { max-height: calc(100dvh - 230px); overflow: auto; overscroll-behavior: contain; }
+	form { display: contents; }
 </style>

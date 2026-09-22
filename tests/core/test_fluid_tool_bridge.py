@@ -71,6 +71,9 @@ def test_real_chat_access_tools_have_serializable_provider_schemas():
     ))
     encoded = json.dumps(wire)
     assert "RequestChatAccess" in encoded and "ChatWriteFile" in encoded
+    # The broker's one-shot card is the approval; the generic gate would ask twice.
+    for name in ("ChatRunCommand", "ChatWriteFile"):
+        assert registry.get(f"mcp__chat-access__{name}").risk == "safe"
 
 
 def test_shorthand_schema_matches_pinned_sdk_semantics():
