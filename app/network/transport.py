@@ -30,7 +30,7 @@ import httpx
 
 from app.core.config import settings
 from app.db import network as store
-from app.network import engine, identity as identity_mod, membership, tokens
+from app.network import engine, identity as identity_mod, membership, policy, tokens
 from app.network.endpoints import validate_endpoints
 from app.network.envelope import Envelope
 
@@ -486,7 +486,8 @@ async def scan_loop() -> None:
                 published = await asyncio.to_thread(engine.scan_all)
             else:
                 published = await asyncio.to_thread(
-                    engine.scan_all, collections=dirty, include_catalog=False, strict=True)
+                    engine.scan_all, collections=dirty,
+                    include_catalog=bool(dirty.intersection(policy.CATALOG_COLLECTIONS)), strict=True)
             if published:
                 logger.debug("Published %d changed records", published)
         except asyncio.CancelledError:
@@ -546,11 +547,12 @@ async def presence_loop() -> None:
 
 
 def request_scan(collections: Optional[List[str]] = None) -> None:
-    """Coalesce known shared-collection writes; unknown changes reconcile fully."""
+    """Coalesce shared/catalog writes; unknown changes reconcile fully."""
     global _full_scan_requested
-    from app.network import policy
     with _scan_requests_lock:
-        if not collections or any(name not in policy.SCANNED_COLLECTIONS for name in collections):
+        if not collections or any(
+                name not in policy.SCANNED_COLLECTIONS and name not in policy.CATALOG_COLLECTIONS
+                for name in collections):
             _full_scan_requested = True
         else:
             _dirty_collections.update(collections)

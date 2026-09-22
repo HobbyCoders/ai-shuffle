@@ -369,6 +369,12 @@ SCANNED_COLLECTIONS: Tuple[str, ...] = tuple(
     c.name for c in ordered_collections()
     if c.mode == MODE_SHARED and c.name not in ("membership", "plugins_desired", "memory"))
 
+# These collections share one publisher: a session wake must reconcile its
+# catalog, runtime, children and transcript together.
+CATALOG_COLLECTIONS: tuple[str, ...] = tuple(
+    c.name for c in ordered_collections()
+    if c.mode == MODE_OWNER_ORDERED and c.resource == "sessions")
+
 
 def settings_policy_table() -> List[Dict[str, Any]]:
     """Human-readable dump of the settings policy for the docs and the API."""

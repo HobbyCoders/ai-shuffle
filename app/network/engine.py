@@ -680,6 +680,11 @@ SCAN_PUBLISH_BATCH = 200
 
 def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = True,
              strict: bool = False, collections: Optional[Iterable[str]] = None) -> int:
+    """Reconcile selected shared collections and, if selected, the whole catalog.
+
+    With no selection, include the memory/plugin file publishers too. A narrow
+    catalog pass preserves ordering between session rows and their children.
+    """
     ctx = ctx or context()
     if ctx is None:
         return 0
@@ -695,7 +700,7 @@ def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = Tr
             logger.warning("Scan of %s failed", name, exc_info=True)
             if strict:
                 raise
-    if include_catalog:
+    if include_catalog and (selected is None or selected.intersection(policy.CATALOG_COLLECTIONS)):
         try:
             from app.network import catalog
             total += catalog.publish_owned(ctx=ctx)
@@ -703,6 +708,7 @@ def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = Tr
             logger.warning("Catalog publish failed", exc_info=True)
             if strict:
                 raise
+    if include_catalog and selected is None:
         for module_name in ("memory_records", "plugins_sync"):
             try:
                 import importlib
