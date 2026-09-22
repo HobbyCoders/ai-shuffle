@@ -16,6 +16,7 @@
 	interface Props {
 		placeholder?: string;
 		suggestion?: string;
+		onAcceptSuggestion?: () => void;
 		initialContent?: string;
 		disabled?: boolean;
 		onTextChange?: (text: string) => void;
@@ -28,6 +29,7 @@
 	let {
 		placeholder = 'Message...',
 		suggestion = '',
+		onAcceptSuggestion,
 		initialContent = '',
 		disabled = false,
 		onTextChange,
@@ -40,6 +42,7 @@
 	let editorElement = $state<HTMLDivElement | null>(null);
 	let editor = $state<Editor | null>(null);
 	let isFocused = $state(false);
+	let editorEmpty = $state(false);
 	let liveDictation: ReturnType<typeof createLiveDictation> | null = null;
 
 	// Store reference for cleanup to handle edge cases where editorElement might change
@@ -56,6 +59,7 @@
 					// Use getMessage() to include chip @path references in the text
 					// This ensures send button enables when chips are present
 					if (editor) {
+						editorEmpty = editor.isEmpty;
 						onTextChange?.(serializeToMessage(editor));
 					}
 				},
@@ -73,6 +77,7 @@
 					});
 				}
 			});
+			editorEmpty = editor.isEmpty;
 
 			liveDictation = createLiveDictation(editor);
 
@@ -105,7 +110,7 @@
 
 	// Update TipTap's placeholder when the prop changes (e.g. when profile changes)
 	$effect(() => {
-		const newPlaceholder = suggestion || placeholder;
+		const newPlaceholder = suggestion && onAcceptSuggestion && !disabled ? '' : suggestion || placeholder;
 		if (!editor) return;
 		setEditorPlaceholder(editor, newPlaceholder);
 	});
@@ -316,16 +321,47 @@
 	}
 </script>
 
-<div
-	bind:this={editorElement}
-	class="tiptap-editor"
-	class:has-suggestion={!!suggestion}
-	data-testid={suggestion ? 'composer-suggestion' : undefined}
-	class:focused={isFocused}
-	class:disabled
-></div>
+<div class="editor-shell">
+	<div
+		bind:this={editorElement}
+		class="tiptap-editor"
+		class:has-suggestion={!!suggestion}
+		data-testid={suggestion ? 'composer-suggestion' : undefined}
+		class:focused={isFocused}
+		class:disabled
+	></div>
+	{#if suggestion && onAcceptSuggestion && !disabled && editorEmpty}
+		<button type="button" class="inline-suggestion" aria-label={`Use suggested reply: ${suggestion}`}
+			title="Use suggested reply (Tab)"
+			onkeydown={(event) => { if (event.key === 'Escape') handleEditorKeyDown(event); }}
+			onclick={() => { if (editor?.isEmpty) onAcceptSuggestion?.(); }}>
+			{suggestion}
+		</button>
+	{/if}
+</div>
 
 <style>
+	.editor-shell { position: relative; width: 100%; min-width: 0; }
+	.inline-suggestion {
+		position: absolute;
+		top: 50%;
+		transform: translateY(-50%);
+		inset-inline-start: 0;
+		max-width: 100%;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: var(--subtle-foreground);
+		font: inherit;
+		font-size: 14.5px;
+		line-height: 1.55;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		text-align: start;
+		cursor: pointer;
+	}
+	.inline-suggestion:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.tiptap-editor {
 		width: 100%;
 		min-height: 24px;

@@ -1052,6 +1052,7 @@
 							onBeforeDestroy={detachComposerDictation}
 							placeholder={composerPlaceholder}
 							suggestion={ghostReply}
+							onAcceptSuggestion={acceptSuggestion}
 							initialContent={initialComposerDraft}
 							disabled={!$anyCredential}
 							onTextChange={(text) => {
@@ -1069,12 +1070,6 @@
 								else scheduleMobileComposerReconciliation();
 							}}
 						/>
-						{#if ghostReply}
-							<div class="flex gap-2" aria-label="Reply suggestion actions">
-								<button type="button" class="min-h-11 px-3 text-sm" onclick={acceptSuggestion}>Use reply</button>
-								<button type="button" class="min-h-11 px-3 text-sm" onclick={() => composerSuggestion.invalidate()}>Dismiss</button>
-							</div>
-						{/if}
 					</div>
 
 					<!-- During a turn, show Send for a draft and Stop for an empty

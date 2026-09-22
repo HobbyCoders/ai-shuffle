@@ -170,7 +170,7 @@
 	onDestroy(_stopHighlightWatch);
 
 	const unscopedRendered = $derived(gallerySources?.size && !streaming
-		? { prefix: sanitizeHtml(renderChatMarkdown(rewriteWithGallery(displayContent, gallerySources), true)), tail: '' }
+		? { prefix: sanitizeHtml(renderChatMarkdown(rewriteWithGallery(displayContent, gallerySources, sessionId), true)), tail: '' }
 		: renderMarkdownMemoized(displayContent, streaming, highlightEpoch));
 	const rendered = $derived({
 		prefix: routeChatFiles(unscopedRendered.prefix, sessionId),

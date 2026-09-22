@@ -723,7 +723,7 @@ export function buildTranscriptModel(
 		for (const segment of segments) {
 			const prefix = segment.slice(0, 1);
 			const response = segment.slice(1);
-			const gallery = galleryMediaForTurn(response.map((entry) => entry.message));
+			const gallery = galleryMediaForTurn(response.map((entry) => entry.message), options.sessionId);
 			const terminalAssistant = response.findLast((entry) => isAssistantText(entry.message)) ?? null;
 			const shouldHide = (entry: Positioned) =>
 				isCompletedRoutineWork(entry.message, gallery.length > 1) ||

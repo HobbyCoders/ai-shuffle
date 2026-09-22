@@ -186,7 +186,7 @@
 
 	<!-- Outside the collapsible body on purpose: the screenshot is the result. -->
 	{#if screenshot}
-		<ToolScreenshot {screenshot} {name} />
+		<ToolScreenshot {screenshot} {name} {sessionId} />
 	{/if}
 </div>
 {/if}

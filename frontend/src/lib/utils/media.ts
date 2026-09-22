@@ -11,6 +11,7 @@
  */
 
 import { apiUrl } from '$lib/api/runtime';
+import { chatFileUrl } from './chat-files';
 
 export type MediaKind = 'image' | 'video' | 'audio';
 
@@ -19,8 +20,9 @@ export type MediaKind = 'image' | 'video' | 'audio';
  * same-origin on the web UI but must point at the worker when the page is the
  * app-bundled mobile UI. Everything else (data:, blob:, absolute) is untouched.
  */
-export function resolveMediaUrl(url: string): string {
-	return url.startsWith('/api/') ? apiUrl(url) : url;
+export function resolveMediaUrl(url: string, sessionId?: string | null): string {
+	const routed = chatFileUrl(url, sessionId);
+	return routed.startsWith('/api/') ? apiUrl(routed) : routed;
 }
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif']);

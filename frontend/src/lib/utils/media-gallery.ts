@@ -14,10 +14,10 @@ export function safeMediaSource(src: string): boolean {
 	return /^(?:https?:\/\/|blob:|data:(?:image|video)\/|\/(?!\/))/i.test(src);
 }
 
-export function galleryMediaForTurn(messages: ChatMessage[]): GalleryMedia[] {
+export function galleryMediaForTurn(messages: ChatMessage[], sessionId?: string | null): GalleryMedia[] {
 	const found = new Map<string, GalleryMedia>();
 	function add(kind: 'image' | 'video', raw: string, label: string) {
-		const src = resolveMediaUrl(raw);
+		const src = resolveMediaUrl(raw, sessionId);
 		if (!safeMediaSource(src) || found.has(src)) return;
 		found.set(src, { kind, src, label: label || `${kind === 'image' ? 'Image' : 'Video'} ${found.size + 1}` });
 	}
@@ -41,8 +41,8 @@ export function galleryMediaForTurn(messages: ChatMessage[]): GalleryMedia[] {
 }
 
 /** Suppress only media represented by the gallery; keep prose, audio and links. */
-export function rewriteWithGallery(text: string, sources: ReadonlySet<string>): string {
+export function rewriteWithGallery(text: string, sources: ReadonlySet<string>, sessionId?: string | null): string {
 	return rewriteMediaMarkdown(text, (kind, src, label) =>
-		sources.has(resolveMediaUrl(src)) ? '' : mediaHtml(kind, src, label)
+		sources.has(resolveMediaUrl(src, sessionId)) ? '' : mediaHtml(kind, src, label)
 	);
 }

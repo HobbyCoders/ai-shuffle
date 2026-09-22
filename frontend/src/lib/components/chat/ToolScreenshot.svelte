@@ -9,7 +9,7 @@
 	 * either way it sits OUTSIDE the collapsible <details> so it's visible
 	 * regardless of expand state (a screenshot the user can't see is useless).
 	 */
-	import { mediaHtml } from '$lib/utils/media';
+	import { mediaHtml, resolveMediaUrl } from '$lib/utils/media';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 
 	interface Props {
@@ -17,9 +17,11 @@
 		screenshot: string;
 		/** Tool name, used for alt/aria text ("Screenshot from <name>"). */
 		name: string;
+		sessionId?: string | null;
 	}
 
-	let { screenshot, name }: Props = $props();
+	let { screenshot, name, sessionId }: Props = $props();
+	const source = $derived(resolveMediaUrl(screenshot, sessionId));
 
 	let container: HTMLElement | undefined = $state();
 
@@ -29,7 +31,8 @@
 	// before giving up.
 	const MAX_RETRIES = 3;
 	$effect(() => {
-		if (!container || screenshot.startsWith('data:')) return;
+		if (!container || source.startsWith('data:')) return;
+		const retrySource = source;
 		const img = container.querySelector('img');
 		if (!img) return;
 		let attempts = 0;
@@ -38,7 +41,7 @@
 			if (attempts >= MAX_RETRIES) return;
 			attempts += 1;
 			timer = setTimeout(() => {
-				img.src = `${screenshot}${screenshot.includes('?') ? '&' : '?'}retry=${attempts}`;
+				img.src = `${retrySource}${retrySource.includes('?') ? '&' : '?'}retry=${attempts}`;
 			}, 500 * 2 ** (attempts - 1));
 		};
 		img.addEventListener('error', onError);
@@ -50,7 +53,7 @@
 </script>
 
 <div class="tool-screenshot" bind:this={container}>
-	{@html sanitizeHtml(mediaHtml('image', screenshot, `Screenshot from ${name}`))}
+	{@html sanitizeHtml(mediaHtml('image', source, `Screenshot from ${name}`))}
 </div>
 
 <style>

@@ -16,6 +16,17 @@ const answer = message('a', { type: 'text', content: `My choices.
 const options = { isStreaming: false, groupingEnabled: true };
 
 describe('settled turn media gallery', () => {
+	it('keeps gallery, inline suppression and downloads on the owning session', () => {
+		const items = buildDisplayItems([user, tool, answer], { ...options, sessionId: 'remote-chat' });
+		const gallery = items.find(item => item.kind === 'work_log')?.gallery ?? [];
+		expect(gallery).toHaveLength(2);
+		for (const item of gallery) {
+			expect(new URL(item.src, 'https://viewer').searchParams.get('session_id')).toBe('remote-chat');
+		}
+		const html = rewriteWithGallery(answer.content, new Set(gallery.map(item => item.src)), 'remote-chat');
+		expect(html).toContain('My choices.');
+		expect(html).not.toContain('<img');
+	});
 	it('ignores markdown examples in fenced and inline code', () => {
 		expect(galleryMediaForTurn([message('code', { content: '`![sample](/a.png)`\n\n```md\n![sample](/b.png)\n```' })])).toEqual([]);
 	});

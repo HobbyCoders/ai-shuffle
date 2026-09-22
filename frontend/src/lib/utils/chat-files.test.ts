@@ -2,6 +2,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { chatFileUrl, routeChatFiles } from './chat-files';
 afterEach(() => { delete window.__SHUFFLE_MOBILE__; });
 describe('chat file URLs', () => {
+ it.each(['images', 'videos', 'audio'])('routes generated %s players and downloads', (kind) => {
+  const html = `<video src="/api/generated-${kind}/clip.mp4"></video><a href="/api/generated-${kind}/by-path?path=%2Fwork%2Fa%20%26%20b.mp4&amp;session_id=old">Download</a>`;
+  const routed = routeChatFiles(html, 'owner-chat');
+  expect(routed).toContain(`/clip.mp4?session_id=owner-chat`);
+  expect(routed).toContain('path=%2Fwork%2Fa+%26+b.mp4&amp;session_id=owner-chat');
+  window.__SHUFFLE_MOBILE__ = { apiOrigin: 'https://viewer', token: 'test' };
+  expect(chatFileUrl(`https://viewer/api/generated-${kind}/clip.mp4`, 'chat')).toBe(`https://viewer/api/generated-${kind}/clip.mp4?session_id=chat`);
+  expect(chatFileUrl(`https://external/api/generated-${kind}/clip.mp4`, 'chat')).toBe(`https://external/api/generated-${kind}/clip.mp4`);
+ });
  it('preserves special filenames and replaces stale session hints', () => {
   const path = '/work/a & # (新).zip';
   const url = new URL(chatFileUrl(`/api/files/by-path?path=${encodeURIComponent(path)}&session_id=old`, 'new'), 'https://viewer');

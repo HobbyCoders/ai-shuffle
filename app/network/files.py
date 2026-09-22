@@ -7,10 +7,20 @@ from fastapi import HTTPException, Request
 from starlette.responses import StreamingResponse
 
 from app.network import transport
-from app.network.browser_panel import peer_link, UNAVAILABLE
+from app.network.browser_panel import UNAVAILABLE, peer_link
 
 
 async def forward_file(request: Request, owner: str, session_id: str, path: str, project_id: str | None):
+    params = {"path": path}
+    if project_id:
+        params["project_id"] = project_id
+    return await forward_download(
+        request, owner, "/api/files/peer/" + quote(session_id, safe=""), params,
+    )
+
+
+async def forward_download(request: Request, owner: str, endpoint: str, params: dict):
+    """Proxy a server-selected download endpoint, preserving byte ranges."""
     ctx, link = await peer_link(owner)
     client = httpx.AsyncClient(follow_redirects=False)
     response = None
@@ -21,11 +31,8 @@ async def forward_file(request: Request, owner: str, session_id: str, path: str,
             for name in ("range", "if-range"):
                 if name in request.headers:
                     headers[name] = request.headers[name]
-            params = {"path": path}
-            if project_id:
-                params["project_id"] = project_id
             upstream = client.build_request(
-                "GET", link.base_url + "/api/files/peer/" + quote(session_id, safe=""),
+                "GET", link.base_url + endpoint,
                 params=params, headers=headers, timeout=60,
             )
             response = await client.send(upstream, stream=True)

@@ -373,7 +373,12 @@ class TestDatabasePaths:
         if kind == "symlink":
             target = tmp_path / "target"
             path.rename(target)
-            path.symlink_to(target)
+            try:
+                path.symlink_to(target)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("Windows account lacks permission to create symlinks")
+                raise
         elif kind == "public":
             if os.name == "nt":
                 pytest.skip("Windows privacy is enforced by supervisor ACLs")

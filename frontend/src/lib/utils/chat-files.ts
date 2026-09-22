@@ -3,8 +3,9 @@ import { apiOrigin, apiUrl } from '$lib/api/runtime';
 /** Keep file requests on the authenticated viewer, with explicit chat ownership. */
 export function chatFileUrl(href: string, sessionId?: string | null): string {
 	const origin = apiOrigin();
-	if (origin && href.startsWith(`${origin}/api/files/by-path?`)) href = href.slice(origin.length);
-	if (!href.startsWith('/api/files/by-path?')) return href;
+	const local = origin && href.startsWith(`${origin}/api/`) ? href.slice(origin.length) : href;
+	if (!/^\/api\/(?:files\/by-path\?|generated-(?:images|videos|audio)\/[^/?#])/.test(local)) return href;
+	href = local;
 	if (!sessionId) return apiUrl(href);
 	const url = new URL(href, 'https://file.invalid');
 	url.searchParams.set('session_id', sessionId);

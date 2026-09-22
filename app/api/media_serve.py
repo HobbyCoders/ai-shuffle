@@ -23,20 +23,24 @@ public URLs and the module symbols (``router``, ``settings``, ``is_path_safe``,
 frontend, ``app.main`` and the test-suite rely on remain byte-identical.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Set
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 
+from app.api.auth import get_api_user_from_request, require_auth
+from app.api.common import is_path_safe, is_path_served, require_file_access
+from app.api.sessions_helpers import require_session
 from app.core.config import settings
-from app.api.common import is_path_served, require_file_access, is_path_safe
 from app.db.async_database import run_sync
-from app.api.auth import require_auth
+from app.network import control, tokens
+from app.network.files import forward_download
 
 # Re-exported so importers can keep doing ``from app.api.media_serve import ...``.
-__all__ = ["MediaConfig", "build_media_module", "settings", "is_path_safe", "is_path_served"]
+__all__ = ["MediaConfig", "build_media_module", "is_path_safe", "is_path_served", "settings"]
 
 
 @dataclass(frozen=True)
@@ -50,9 +54,9 @@ class MediaConfig:
     # Name of the on-disk subdirectory, e.g. "generated-images"
     directory: str
     # Allowed lowercase file extensions (with leading dot)
-    allowed_extensions: Set[str]
+    allowed_extensions: set[str]
     # Extension -> MIME type
-    media_types: Dict[str, str]
+    media_types: dict[str, str]
     # MIME type used when an allowed extension is missing from media_types
     default_media_type: str
     # Key used in the list-endpoint JSON response, e.g. "images"
@@ -65,7 +69,7 @@ class MediaConfig:
 
 def build_media_module(
     config: MediaConfig,
-    workspace_dir_getter: Optional[Callable[[], Path]] = None,
+    workspace_dir_getter: Callable[[], Path] | None = None,
 ):
     """
     Build a router plus the three named handlers for one media kind.
@@ -81,18 +85,54 @@ def build_media_module(
     symbol names the tests and callers expect.
     """
     if workspace_dir_getter is None:
-        workspace_dir_getter = lambda: settings.effective_workspace_dir  # noqa: E731
+        workspace_dir_getter = lambda: settings.effective_workspace_dir
 
     router = APIRouter(prefix=config.prefix, tags=[config.tag])
 
     ALLOWED_EXTENSIONS = config.allowed_extensions
     MEDIA_TYPES = config.media_types
 
+    async def route_to_owner(request, session_id, **params):
+        if not session_id:
+            return None
+        session = await require_session(request, session_id)
+        owner = control.owner_of(session)
+        if not owner:
+            return None
+        project_id = (get_api_user_from_request(request) or {}).get("project_id")
+        if project_id:
+            params["project_id"] = project_id
+        return await forward_download(
+            request, owner, config.prefix + "/peer/" + quote(session_id, safe=""), params,
+        )
+
+    @router.get("/peer/{session_id}", include_in_schema=False)
+    async def peer_media(
+        session_id: str, request: Request, path: str | None = None,
+        filename: str | None = None, project_id: str | None = None,
+        _device: str = Depends(tokens.require_device),
+    ):
+        try:
+            session = await run_sync(control._require_owned, session_id)
+        except LookupError:
+            raise HTTPException(404, "Session not found") from None
+        except PermissionError:
+            raise HTTPException(409, "This worker does not own the session") from None
+        if project_id and session.get("project_id") != project_id:
+            raise HTTPException(403, "Session is outside the requested project")
+        if (path is None) == (filename is None):
+            raise HTTPException(400, "Supply exactly one media path or filename")
+        request.state.api_user = {"project_id": project_id} if project_id else None
+        if path is not None:
+            return await by_path(path=path, request=request)
+        return await by_filename(filename=filename, request=request)
+
     @router.get("/by-path")
     async def by_path(
         path: str = Query(..., description=f"Full path to the {config.noun_lower} file"),
         token: str = Depends(require_auth),
         request: Request = None,
+        session_id: str | None = None,
     ):
         """
         Serve a generated media file by its full path.
@@ -100,6 +140,9 @@ def build_media_module(
         Security: Only serves files from within the workspace directory and
         from inside a ``generated-<kind>`` directory.
         """
+        forwarded = await route_to_owner(request, session_id, path=path)
+        if forwarded is not None:
+            return forwarded
         file_path = Path(path)
 
         # Validate extension
@@ -137,7 +180,10 @@ def build_media_module(
         )
 
     @router.get("/{filename}")
-    async def by_filename(filename: str, token: str = Depends(require_auth), request: Request = None):
+    async def by_filename(
+        filename: str, token: str = Depends(require_auth), request: Request = None,
+        session_id: str | None = None,
+    ):
         """
         Serve a generated media file by filename from the default workspace.
 
@@ -147,6 +193,9 @@ def build_media_module(
         Security: Only serves files from the ``generated-<kind>`` directory,
         preventing path traversal attacks.
         """
+        forwarded = await route_to_owner(request, session_id, filename=filename)
+        if forwarded is not None:
+            return forwarded
         # Sanitize filename - remove any path components
         safe_filename = Path(filename).name
 
