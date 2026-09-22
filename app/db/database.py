@@ -1367,15 +1367,19 @@ def _run_column_migrations(cursor):
         """)
         migrations_applied.append("provider_usage_snapshots")
 
-    # Local durable upstream request budgets; never replicated as account data.
+    # Durable upstream request budgets. Network peers coordinate with the founder;
+    # replicating these rows asynchronously would allow duplicate claims.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS usage_poll_state (
             identity TEXT PRIMARY KEY,
             next_attempt DOUBLE PRECISION NOT NULL DEFAULT 0,
             failures INTEGER NOT NULL DEFAULT 0,
-            paused BOOLEAN NOT NULL DEFAULT FALSE
+            paused BOOLEAN NOT NULL DEFAULT FALSE,
+            lease_token TEXT
         )
     """)
+    if not column_exists(cursor, "usage_poll_state", "lease_token"):
+        cursor.execute("ALTER TABLE usage_poll_state ADD COLUMN lease_token TEXT")
 
     # pending_wakeups (v68). Durable per-session wakeups (#598): ScheduleWakeup
     # and the idle-at-edge watchdog persist their pending wake here so an app

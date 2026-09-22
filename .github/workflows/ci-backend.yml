@@ -203,12 +203,15 @@ jobs:
           ALLOW_REAL_PG: '1'
           PG_SAFETY_TEST: '1'
           TESTING: '1'
+          TEST_POSTGRES_DSN: postgresql://shuffle_safety_test:safety-test-only@127.0.0.1:5432/shuffle_safety_test
           AI_SHUFFLE_ENV_FILE: /dev/null
           PYTHONPATH: .
-        run: >-
-          python -m pytest tests/integration/test_postgres_safety.py
-          --confcutdir=tests/integration -o addopts="" -p no:cacheprovider
-          --timeout=120 -v
+        run: |
+          python -m pytest tests/integration/test_postgres_safety.py \
+            --confcutdir=tests/integration -o addopts="" -p no:cacheprovider \
+            --timeout=120 -v
+          python -m pytest tests/db/test_usage_budget_postgres.py \
+            -o addopts="" -p no:cacheprovider --timeout=120 -v
 
       - name: Audit public Python dependencies
         run: |

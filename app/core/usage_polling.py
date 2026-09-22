@@ -1,15 +1,15 @@
 """Durable, credential-scoped budgets for account usage requests."""
 
+import asyncio
 import hashlib
 import math
 import random
+import secrets
 import time
-from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 import httpx
 
-from app.db.async_database import run_sync
 from app.db.base import get_db
 
 
@@ -32,43 +32,48 @@ def identity(url, headers):
     return hashlib.sha256(f"{url}\0{org}\0{credential}".encode()).hexdigest()
 
 
-def claim(key, now):
+def claim(key, now, interval=300):
+    lease = secrets.token_hex(16)
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO usage_poll_state (identity, next_attempt, failures, paused)
-            VALUES (%s, %s, 0, FALSE)
-            ON CONFLICT(identity) DO UPDATE SET next_attempt = EXCLUDED.next_attempt
+            INSERT INTO usage_poll_state (identity, next_attempt, failures, paused, lease_token)
+            VALUES (%s, %s, 0, FALSE, %s)
+            ON CONFLICT(identity) DO UPDATE SET next_attempt = EXCLUDED.next_attempt,
+                lease_token = EXCLUDED.lease_token
             WHERE usage_poll_state.paused = FALSE AND usage_poll_state.next_attempt <= %s
             RETURNING identity
-        """, (key, now + 600, now))
-        return cur.fetchone() is not None
+        """, (key, now + max(600, interval + 30), lease, now))
+        return lease if cur.fetchone() is not None else None
 
 
-def finish(key, now, status, retry_after=0, interval=300):
+def finish(key, now, status, retry_after=0, interval=300, *, lease=None):
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT failures FROM usage_poll_state WHERE identity = %s FOR UPDATE", (key,))
+        cur.execute("SELECT failures, lease_token FROM usage_poll_state WHERE identity = %s FOR UPDATE", (key,))
         row = cur.fetchone()
-        if row is None:
+        if row is None or (lease is not None and row["lease_token"] != lease):
             return
         success = status is not None and 200 <= status < 300
         failures = 0 if success else min(int(row["failures"]) + 1, 10)
         delay = interval if success else min(3600, interval * 2 ** (failures - 1))
         delay = max(delay + random.uniform(0, 30), retry_after)
         cur.execute("""
-            UPDATE usage_poll_state SET next_attempt = %s, failures = %s, paused = %s
+            UPDATE usage_poll_state SET next_attempt = %s, failures = %s, paused = %s, lease_token = NULL
             WHERE identity = %s
         """, (now + delay, failures, status in _PAUSE_STATUSES, key))
 
 
 def resume_authentication(url, headers):
     """Only explicit credential configuration resumes an authentication refusal."""
-    from app.db.base import get_db
+    resume_identity(identity(url, headers))
+
+
+def resume_identity(key):
     with get_db() as conn:
         conn.cursor().execute(
-            "UPDATE usage_poll_state SET paused = FALSE, next_attempt = 0, failures = 0 WHERE identity = %s AND paused = TRUE",
-            (identity(url, headers),),
+            "UPDATE usage_poll_state SET paused = FALSE, next_attempt = 0, failures = 0, lease_token = NULL WHERE identity = %s AND paused = TRUE",
+            (key,),
         )
 
 
@@ -92,11 +97,13 @@ async def usage_get(url, *, headers, params=None, timeout=20, paginate=False, in
     Authentication refusals stay paused across restart, until the key changes.
     """
     key = identity(url, headers)
-    if not await run_sync(claim, key, time.time()):
-        raise UsageDeferred()
+    from app.network.usage_budget import acquire
+    budget = await acquire(key, interval)
     status, retry = None, 0
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        # A socket read timeout alone doesn't bound a trickling response. Finish
+        # before the coordinator's ten-minute lease can expire and be reclaimed.
+        async with asyncio.timeout(240), httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             query = dict(params or {})
             buckets, cursors = [], set()
             for _ in range(8 if paginate else 1):
@@ -122,4 +129,4 @@ async def usage_get(url, *, headers, params=None, timeout=20, paginate=False, in
         status = None
         raise
     finally:
-        await run_sync(finish, key, time.time(), status, retry, interval)
+        await budget.finish(status, retry, interval)

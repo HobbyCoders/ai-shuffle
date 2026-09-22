@@ -158,9 +158,14 @@ async def set_fal_billing_key(request: FalAIKeyRequest, token: str = Depends(req
     if not key or len(key) > 4096 or any(c.isspace() for c in key):
         raise HTTPException(400, "Enter an Admin API key without whitespace")
     await run_sync(set_encrypted_api_key, "fal_billing_api_key", key)
-    from app.core.usage_polling import resume_authentication
     from app.core.provider_usage import FAL_BILLING_URL
-    await run_sync(resume_authentication, FAL_BILLING_URL, {"Authorization": f"Key {key}"})
+    from app.core.usage_polling import UsageDeferred
+    from app.network.usage_budget import resume_authentication
+
+    try:
+        await resume_authentication(FAL_BILLING_URL, {"Authorization": f"Key {key}"})
+    except UsageDeferred:
+        raise HTTPException(503, "Key saved. Reconnect the network founder and save again to resume usage polling.") from None
     return {"success": True}
 
 

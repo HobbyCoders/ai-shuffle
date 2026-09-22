@@ -39,6 +39,7 @@ describes what was built, where it lives, and where it deviates from the plan.
 | `app/network/catalog.py` | Owner-ordered session catalog, tags, prompts and transcript mirrors. |
 | `app/network/control.py` | Driving a session on another device: turns, session creation, interrupt, prompt answers, hydrate; fork on offline. |
 | `app/network/ownership.py` | Which device fires an automation or holds a connector. |
+| `app/network/usage_budget.py` | Shared provider usage request budgets coordinated by the founder; see [usage-budgets.md](usage-budgets.md) for outage and upgrade behavior. |
 | `app/network/memory_records.py` | Facts and skills as records. |
 | `app/network/plugins_sync.py` | Desired plugin state. |
 | `app/network/blobs.py` | Content-addressed bytes for artifacts and note attachments. |

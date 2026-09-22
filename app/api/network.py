@@ -28,10 +28,12 @@ from app.db import network as store
 from app.db.async_database import run_sync
 from app.network import engine, enrollment, identity as identity_mod, policy, recovery, runners, tokens, transport
 from app.network import endpoints as endpoints_mod
+from app.api.network_usage import router as usage_budget_router
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/network", tags=["Network"])
+router.include_router(usage_budget_router)
 _join_limiter = _ExchangeRateLimiter(limit=10, window_seconds=60)
 # A peer authenticates at most a few times a minute per endpoint it tries.
 _challenge_limiter = _ExchangeRateLimiter(limit=60, window_seconds=60)

@@ -91,10 +91,15 @@ async def configure_usage(provider_id: str, body: AdminUsageConfig, _: None = De
         if saved is None:
             raise HTTPException(409, "Provider changed while saving usage configuration")
         from app.core.openai_admin_usage import BASE
-        from app.core.usage_polling import resume_authentication
+        from app.core.usage_polling import UsageDeferred
+        from app.network.usage_budget import resume_authentication
+
         headers = {"Authorization": f"Bearer {key}", "OpenAI-Organization": body.organization_id}
-        for endpoint in ("costs", "usage/completions"):
-            await run_sync(resume_authentication, BASE + "/" + endpoint, headers)
+        try:
+            for endpoint in ("costs", "usage/completions"):
+                await resume_authentication(BASE + "/" + endpoint, headers)
+        except UsageDeferred:
+            raise HTTPException(503, "Key saved. Reconnect the network founder and save again to resume usage polling.") from None
         from app.core.provider_usage import provider_usage_monitor
         provider_usage_monitor.request_refresh(force=True)
         return await _status(await _provider(provider_id))

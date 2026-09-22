@@ -863,7 +863,8 @@ def create_postgres_schema(cursor) -> None:
             identity TEXT PRIMARY KEY,
             next_attempt DOUBLE PRECISION NOT NULL DEFAULT 0,
             failures INTEGER NOT NULL DEFAULT 0,
-            paused BOOLEAN NOT NULL DEFAULT FALSE
+            paused BOOLEAN NOT NULL DEFAULT FALSE,
+            lease_token TEXT
         )
     """)
 
