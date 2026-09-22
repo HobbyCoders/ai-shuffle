@@ -24,7 +24,7 @@ import threading
 import time
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
 
@@ -40,6 +40,9 @@ SYNC_IDLE_SECONDS = 10.0
 SYNC_ACTIVE_SECONDS = 1.0
 SCAN_INTERVAL_SECONDS = 2.0
 SCAN_IDLE_MAX_SECONDS = 60.0
+# Past this many dirty sessions in one burst, a catalog wake reconciles the
+# whole catalog instead of listing ids.
+SCAN_DIRTY_SESSIONS_MAX = 128
 PRESENCE_INTERVAL_SECONDS = 300.0
 ONLINE_WINDOW_SECONDS = 90
 BATCH_LIMIT = 500
@@ -49,6 +52,9 @@ _wake: Optional[asyncio.Event] = None
 _scan_wake: Optional[asyncio.Event] = None
 _scan_requests_lock = threading.Lock()
 _dirty_collections: set[str] = set()
+# Catalog wakes name their sessions when the hook knows them. ``None`` means
+# a catalog wake without ids (or too many): reconcile the whole catalog.
+_dirty_sessions: Optional[set[str]] = set()
 _full_scan_requested = False
 _tasks: List[asyncio.Task] = []
 _links: Dict[str, "PeerLink"] = {}
@@ -466,7 +472,7 @@ async def scan_loop() -> None:
     Unhooked changes (including external file edits) still get a full scan:
     the next pass starts within SCAN_IDLE_MAX_SECONDS of the last completion.
     """
-    global _scan_wake, _full_scan_requested
+    global _scan_wake, _full_scan_requested, _dirty_sessions
     _scan_wake = asyncio.Event()
     delay = SCAN_INTERVAL_SECONDS
     last_full_scan = float("-inf")
@@ -477,6 +483,8 @@ async def scan_loop() -> None:
         with _scan_requests_lock:
             dirty = set(_dirty_collections)
             _dirty_collections.clear()
+            sessions = None if _dirty_sessions is None else set(_dirty_sessions)
+            _dirty_sessions = set()
             full = _full_scan_requested
             _full_scan_requested = False
         full = full or not dirty or time.monotonic() - last_full_scan >= SCAN_IDLE_MAX_SECONDS
@@ -485,9 +493,10 @@ async def scan_loop() -> None:
             if full:
                 published = await asyncio.to_thread(engine.scan_all)
             else:
+                catalog = bool(dirty.intersection(policy.CATALOG_COLLECTIONS))
+                narrow = {"session_ids": sorted(sessions)} if catalog and sessions else {}
                 published = await asyncio.to_thread(
-                    engine.scan_all, collections=dirty,
-                    include_catalog=bool(dirty.intersection(policy.CATALOG_COLLECTIONS)), strict=True)
+                    engine.scan_all, collections=dirty, include_catalog=catalog, strict=True, **narrow)
             if published:
                 logger.debug("Published %d changed records", published)
         except asyncio.CancelledError:
@@ -546,9 +555,14 @@ async def presence_loop() -> None:
         await asyncio.sleep(PRESENCE_INTERVAL_SECONDS)
 
 
-def request_scan(collections: Optional[List[str]] = None) -> None:
-    """Coalesce shared/catalog writes; unknown changes reconcile fully."""
-    global _full_scan_requested
+def request_scan(collections: Optional[List[str]] = None, *,
+                 session_ids: Optional[Iterable[str]] = None) -> None:
+    """Coalesce shared/catalog writes; unknown changes reconcile fully.
+
+    ``session_ids`` names the sessions a catalog write touched. Without it,
+    the next catalog pass covers every session.
+    """
+    global _full_scan_requested, _dirty_sessions
     with _scan_requests_lock:
         if not collections or any(
                 name not in policy.SCANNED_COLLECTIONS and name not in policy.CATALOG_COLLECTIONS
@@ -556,6 +570,11 @@ def request_scan(collections: Optional[List[str]] = None) -> None:
             _full_scan_requested = True
         else:
             _dirty_collections.update(collections)
+            if any(name in policy.CATALOG_COLLECTIONS for name in collections) and _dirty_sessions is not None:
+                ids = {sid for sid in (session_ids or ()) if isinstance(sid, str) and sid}
+                _dirty_sessions.update(ids)
+                if not ids or len(_dirty_sessions) > SCAN_DIRTY_SESSIONS_MAX:
+                    _dirty_sessions = None
     _scan_kick_from_thread()
 
 
@@ -598,8 +617,9 @@ def forget_peers() -> None:
 
 
 def reset_for_tests() -> None:
-    global _full_scan_requested
+    global _full_scan_requested, _dirty_sessions
     forget_peers()
     with _scan_requests_lock:
         _dirty_collections.clear()
+        _dirty_sessions = set()
         _full_scan_requested = False

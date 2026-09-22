@@ -151,9 +151,16 @@ def _install_resource_hook() -> None:
         original(resource, scope, arguments, before, result)
         collections = policy.collections_for_resource(resource)
         if collections:
+            # Every registered session mutation names one ``session_id`` and
+            # writes only that session's rows, except ``delete_session``, which
+            # also unlinks forks; a missing session widens the pass to the
+            # whole catalog (``catalog.publish_owned``). Otherwise leave the
+            # ids out so the next catalog pass covers every session.
+            session_id = arguments.get("session_id") if resource == "sessions" and scope == "session" else None
             try:
                 from app.network import transport
-                transport.request_scan([collection.name for collection in collections])
+                transport.request_scan([collection.name for collection in collections],
+                                       session_ids=[session_id] if isinstance(session_id, str) and session_id else None)
             except Exception:  # noqa: BLE001
                 pass
 

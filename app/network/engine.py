@@ -598,12 +598,25 @@ def record_after_commit(collection: str, record_id: str) -> None:
 # Scanning (change detection without per-function hooks)
 # ---------------------------------------------------------------------------
 
-def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, owner_only: bool = False) -> int:
-    """Publish every row that differs from the network's view; return the count."""
+def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, owner_only: bool = False,
+                    record_ids: Optional[Iterable[str]] = None) -> int:
+    """Publish every row that differs from the network's view; return the count.
+
+    ``record_ids`` limits the pass to those records of a single-key
+    collection: their rows are published and those that no longer match are
+    retracted, as a whole-collection pass would for the same ids.
+    """
     ctx = ctx or context()
     if ctx is None or ctx.bootstrap_state != BOOTSTRAP_READY:
         return 0
     coll = policy.collection(collection)
+    ids: Optional[List[str]] = None
+    if record_ids is not None:
+        if len(coll.keys) != 1:
+            raise ValueError("record_ids needs a single-key collection")
+        ids = sorted(set(record_ids))
+        if not ids:
+            return 0
     published = 0
     # Phase one reads without publishing, so the state row lock that
     # ``record`` takes is held only while the changed rows are written out
@@ -611,9 +624,13 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
     changed: List[Tuple[str, Optional[dict]]] = []
     with get_db() as conn:
         cursor = conn.cursor()
-        known = store.records_for_collection(cursor, collection)
+        if ids is None:
+            known = store.records_for_collection(cursor, collection)
+        else:
+            known = store.records_for_ids(cursor, collection, ids)
         query = f"SELECT * FROM {coll.table}"
         params: tuple[Any, ...] = ()
+        where: List[str] = []
         if owner_only:
             # Keep mirrored payloads out of this process. Match the legacy
             # NULL/empty-instance rule below; runtime rows have no instance.
@@ -622,7 +639,12 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
             if "instance_id" in coll.local_fields:
                 legacy += " AND (instance_id IS NULL OR instance_id = '' OR instance_id = %s)"
                 params += (_my_instance_id(),)
-            query += f" WHERE owner_device_id = %s OR ({legacy})"
+            where.append(f"(owner_device_id = %s OR ({legacy}))")
+        if ids is not None:
+            where.append(f"{coll.keys[0]} IN ({', '.join(['%s'] * len(ids))})")
+            params += tuple(ids)
+        if where:
+            query += " WHERE " + " AND ".join(where)
         cursor.execute(query, params)
         rows = [dict(r) for r in cursor.fetchall()]
     seen = set()
@@ -679,11 +701,14 @@ SCAN_PUBLISH_BATCH = 200
 
 
 def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = True,
-             strict: bool = False, collections: Optional[Iterable[str]] = None) -> int:
-    """Reconcile selected shared collections and, if selected, the whole catalog.
+             strict: bool = False, collections: Optional[Iterable[str]] = None,
+             session_ids: Optional[Iterable[str]] = None) -> int:
+    """Reconcile selected shared collections and, if selected, the catalog.
 
     With no selection, include the memory/plugin file publishers too. A narrow
     catalog pass preserves ordering between session rows and their children.
+    ``session_ids`` limits a selected catalog pass to those sessions (see
+    ``catalog.publish_owned``); without it the whole catalog is reconciled.
     """
     ctx = ctx or context()
     if ctx is None:
@@ -703,7 +728,8 @@ def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = Tr
     if include_catalog and (selected is None or selected.intersection(policy.CATALOG_COLLECTIONS)):
         try:
             from app.network import catalog
-            total += catalog.publish_owned(ctx=ctx)
+            total += catalog.publish_owned(
+                ctx=ctx, session_ids=None if selected is None else session_ids)
         except Exception:  # noqa: BLE001
             logger.warning("Catalog publish failed", exc_info=True)
             if strict:

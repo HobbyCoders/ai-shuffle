@@ -4,7 +4,7 @@ Only the session owner samples its execution tables. Peers consume this small
 summary through session-list enrichment; they cannot schedule work from it.
 The regular catalog pump publishes transitions (including returning to idle).
 """
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from app.db.base import get_db
 from app.network import engine
@@ -12,8 +12,16 @@ from app.network import engine
 STATES = frozenset({"working", "parked", "permission", "question", "idle"})
 
 
-def publish_owned(ctx: engine.NetworkContext) -> int:
+def publish_owned(ctx: engine.NetworkContext, *, session_ids: Optional[List[str]] = None) -> int:
+    """Refresh and publish owned runtime summaries (only ``session_ids``, if given)."""
     from app.network.catalog import _my_instance_id
+
+    if session_ids is not None and not session_ids:
+        return 0
+    only_params = tuple(session_ids or ())
+
+    def only(column: str) -> str:
+        return f" AND {column} IN ({', '.join(['%s'] * len(only_params))})" if only_params else ""
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -22,7 +30,7 @@ def publish_owned(ctx: engine.NetworkContext) -> int:
         cursor.execute("""DELETE FROM network_session_runtime
             WHERE owner_device_id = %s AND NOT EXISTS
                 (SELECT 1 FROM sessions s WHERE s.id = network_session_runtime.session_id)
-        """, (ctx.device_id,))
+        """ + only("session_id"), (ctx.device_id, *only_params))
         cursor.execute("""
             SELECT s.id, CASE
                 WHEN EXISTS (SELECT 1 FROM pending_interactions p
@@ -41,11 +49,12 @@ def publish_owned(ctx: engine.NetworkContext) -> int:
                     AND b.status = 'running') THEN 'working'
                 ELSE 'idle' END AS state
             FROM sessions s
-            WHERE s.owner_device_id = %s OR
-                (s.owner_device_id IS NULL AND s.instance_id = %s)
-        """, (ctx.device_id, _my_instance_id()))
+            WHERE (s.owner_device_id = %s OR
+                (s.owner_device_id IS NULL AND s.instance_id = %s))
+        """ + only("s.id"), (ctx.device_id, _my_instance_id(), *only_params))
         summaries = [dict(r) for r in cursor.fetchall()]
-        cursor.execute("SELECT session_id, owner_device_id, state FROM network_session_runtime")
+        cursor.execute("SELECT session_id, owner_device_id, state FROM network_session_runtime WHERE 1 = 1" + only("session_id"),
+                       only_params)
         previous = {r["session_id"]: dict(r) for r in cursor.fetchall()}
         for row in summaries:
             old = previous.get(row["id"], {})
@@ -57,7 +66,7 @@ def publish_owned(ctx: engine.NetworkContext) -> int:
                     owner_device_id = EXCLUDED.owner_device_id, state = EXCLUDED.state,
                     updated_at = NOW()
             """, (row["id"], ctx.device_id, row["state"]))
-    return engine.scan_collection("session_runtime", ctx=ctx, owner_only=True)
+    return engine.scan_collection("session_runtime", ctx=ctx, owner_only=True, record_ids=session_ids)
 
 
 def for_sessions(session_ids: List[str]) -> Dict[str, dict]:

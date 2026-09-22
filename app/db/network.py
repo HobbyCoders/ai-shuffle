@@ -733,6 +733,27 @@ def records_for_collection(cursor, collection: str) -> Dict[str, dict]:
     return {r["record_id"]: row_to_dict(r) for r in cursor.fetchall()}
 
 
+def records_for_ids(cursor, collection: str, record_ids: List[str]) -> Dict[str, dict]:
+    """The records among ``record_ids`` (primary-key lookups, not a collection walk)."""
+    if not record_ids:
+        return {}
+    placeholders = ", ".join(["%s"] * len(record_ids))
+    cursor.execute(f"SELECT * FROM sync_records WHERE collection = %s AND record_id IN ({placeholders})",
+                   (collection, *record_ids))
+    return {r["record_id"]: row_to_dict(r) for r in cursor.fetchall()}
+
+
+def records_with_prefixes(cursor, collection: str, prefixes: List[str]) -> Dict[str, dict]:
+    """Records whose id starts with one of ``prefixes`` (``session_id|`` for session children)."""
+    if not prefixes:
+        return {}
+    likes = " OR ".join(["record_id LIKE %s ESCAPE '!'"] * len(prefixes))
+    patterns = [prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%" for prefix in prefixes]
+    cursor.execute(f"SELECT * FROM sync_records WHERE collection = %s AND ({likes})", (collection, *patterns))
+    return {r["record_id"]: row_to_dict(r) for r in cursor.fetchall()
+            if any(r["record_id"].startswith(prefix) for prefix in prefixes)}
+
+
 def count_records(_conn=None) -> Dict[str, int]:
     def _query(cursor):
         cursor.execute("SELECT collection, COUNT(*) AS n FROM sync_records WHERE deleted = FALSE GROUP BY collection")

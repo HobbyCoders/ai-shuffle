@@ -8,6 +8,8 @@ answering a prompt or interrupting goes to the owner through ``control``.
 
 ``publish_owned()`` runs from the scanner. It is incremental: sessions by
 content hash, events by a per-session cursor (``network_catalog_cursors``).
+Given ``session_ids`` it reconciles only those sessions' rows (see its
+docstring); the scanner's periodic whole pass still covers every session.
 Transcripts older than ``HISTORY_DAYS`` are published on demand only
 (``hydrate``), so a large backlog never delays a sidebar width.
 """
@@ -16,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from app.db import network as store
 from app.db.base import get_db
@@ -33,7 +35,7 @@ MAX_EVENT_BYTES = (1 << 22) * 3 // 4 - 4096
 
 
 def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_held: bool = False,
-                       unpublished_only: bool = False) -> List[str]:
+                       unpublished_only: bool = False, session_ids: Optional[List[str]] = None) -> List[str]:
     """Sessions this device publishes.
 
     Owned rows always. With ``include_held``, also rows this worker still
@@ -50,6 +52,11 @@ def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_hel
                "OR (s.owner_device_id IS NOT NULL AND s.owner_device_id <> %s AND s.instance_id IS NOT NULL "
                "AND (r.origin_device_id IS NULL OR r.origin_device_id = %s)))")
         params = [device_id, _my_instance_id(), device_id, device_id]
+    if session_ids is not None:
+        if not session_ids:
+            return []
+        sql += f" AND {'s.id' if include_held else 'id'} IN ({', '.join(['%s'] * len(session_ids))})"
+        params.extend(session_ids)
     if recent_only:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)).isoformat()
         column = "s.updated_at" if include_held else "updated_at"
@@ -73,18 +80,38 @@ def _my_instance_id() -> str:
     return settings.effective_instance_id
 
 
-def publish_owned(*, ctx: Optional[engine.NetworkContext] = None) -> int:
-    """Publish this device's sessions, tags, prompts and recent transcript tail."""
+def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
+                  session_ids: Optional[Iterable[str]] = None) -> int:
+    """Publish this device's sessions, tags, prompts and recent transcript tail.
+
+    With ``session_ids``, the session rows, runtime summaries and child rows
+    are reconciled for those sessions only. If any of them is not currently
+    an owned session (deleted, handed off, or never ours), the whole catalog
+    is reconciled instead: a deletion can change other sessions' rows (their
+    ``parent_session_id``), and prompt record ids do not name their session.
+    Transcripts always use the incremental all-session probe because event
+    appends have no post-commit hook of their own.
+    """
     ctx = ctx or engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return 0
+    ids: Optional[List[str]] = None
+    if session_ids is not None:
+        ids = sorted(set(session_ids))
+        if ids:
+            with get_db() as conn:
+                owned = _owned_session_ids(conn.cursor(), ctx.device_id, recent_only=False, session_ids=ids)
+            if len(owned) != len(ids):
+                ids = None
     published = 0
-    published += engine.scan_collection("sessions", ctx=ctx, owner_only=True)
-    published += _publish_held_sessions(ctx)
+    published += engine.scan_collection("sessions", ctx=ctx, owner_only=True, record_ids=ids)
+    if ids is None:
+        # Held sessions have a foreign owner, so a narrow set (all owned) has none.
+        published += _publish_held_sessions(ctx)
     from app.network.session_runtime import publish_owned as publish_runtime
-    published += publish_runtime(ctx)
-    published += _publish_child_rows("session_tags", ctx)
-    published += _publish_child_rows("pending_interactions", ctx)
+    published += publish_runtime(ctx, session_ids=ids)
+    published += _publish_child_rows("session_tags", ctx, session_ids=ids)
+    published += _publish_child_rows("pending_interactions", ctx, session_ids=ids)
     published += publish_events(ctx=ctx, recent_only=True)
     if published:
         engine.kick()
@@ -117,33 +144,53 @@ def _publish_held_sessions(ctx: engine.NetworkContext) -> int:
     return count
 
 
-def _publish_child_rows(collection: str, ctx: engine.NetworkContext) -> int:
-    """Rows keyed by session (tags, prompts) for the sessions we own."""
+def _publish_child_rows(collection: str, ctx: engine.NetworkContext, *,
+                        session_ids: Optional[List[str]] = None) -> int:
+    """Rows keyed by session (tags, prompts) for the sessions we own.
+
+    ``session_ids`` (all currently owned, see ``publish_owned``) limits the
+    pass to those sessions' rows. Tag retractions then cover only records
+    whose id starts with one of those sessions. Prompt ids do not name their
+    session and prompt rows are deleted only with it, so a narrow pass
+    publishes prompt upserts only; a deleted session reconciles in full.
+    """
     coll = policy.collection(collection)
     count = 0
     with get_db() as conn:
         cursor = conn.cursor()
-        owned = set(_owned_session_ids(cursor, ctx.device_id, recent_only=False))
+        owned = set(_owned_session_ids(cursor, ctx.device_id, recent_only=False, session_ids=session_ids))
         # Even after the last owned session disappears, its previously
         # published children need tombstones. Peer-origin records stay intact.
-        known = store.records_for_collection(cursor, collection)
+        if session_ids is None:
+            known = store.records_for_collection(cursor, collection)
+        elif coll.keys[0] == "session_id":
+            known = store.records_with_prefixes(cursor, collection, [sid + "|" for sid in sorted(owned)])
+        else:
+            known = {}
         rows = []
         if owned:
             # Filter at the database boundary instead of loading every mirrored
             # tag/prompt payload. Keep the same ownership rule as `owned` above.
-            cursor.execute(
-                f"SELECT child.* FROM {coll.table} child JOIN sessions s ON s.id = child.session_id "
-                "WHERE s.owner_device_id = %s OR (s.owner_device_id IS NULL AND s.instance_id = %s)",
-                (ctx.device_id, _my_instance_id()))
+            sql = (f"SELECT child.* FROM {coll.table} child JOIN sessions s ON s.id = child.session_id "
+                   "WHERE (s.owner_device_id = %s OR (s.owner_device_id IS NULL AND s.instance_id = %s))")
+            params: List[Any] = [ctx.device_id, _my_instance_id()]
+            if session_ids is not None:
+                sql += f" AND child.session_id IN ({', '.join(['%s'] * len(owned))})"
+                params.extend(sorted(owned))
+            cursor.execute(sql, tuple(params))
             rows = [dict(r) for r in cursor.fetchall()]
-        seen = set()
+        candidates = []
         for row in rows:
             if row.get("session_id") not in owned:
                 continue
             plaintext = engine.serialize_row(coll, row)
             if plaintext is None:
                 continue
-            record_id = coll.record_id(plaintext)
+            candidates.append((coll.record_id(plaintext), row, plaintext))
+        if session_ids is not None and coll.keys[0] != "session_id":
+            known = store.records_for_ids(cursor, collection, [record_id for record_id, _, _ in candidates])
+        seen = set()
+        for record_id, row, plaintext in candidates:
             seen.add(record_id)
             existing = known.get(record_id)
             if existing is not None and not bool(existing["deleted"]) and \
