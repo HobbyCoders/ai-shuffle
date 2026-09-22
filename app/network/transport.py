@@ -210,11 +210,17 @@ class PeerLink:
                 break
             pushed = await self._request(client, "POST", "/api/v1/network/peer/ops", json_body={"ops": outbound})
             summary["sent"] += len(outbound)
+            if pushed.get("retry") or pushed.get("pending"):
+                # The peer kept some ops out of its stream for now; resend soon.
+                summary["unsettled"] = True
             for env in outbound:
                 bucket = theirs.setdefault(env["origin_device_id"], {})
                 key = str(env["origin_incarnation"])
                 bucket[key] = max(int(bucket.get(key, 0)), int(env["origin_seq"]))
-            if len(outbound) < BATCH_LIMIT or pushed.get("rejected", 0) == len(outbound):
+            if len(outbound) < BATCH_LIMIT:
+                break
+            if pushed.get("rejected", 0) == len(outbound):
+                summary["unsettled"] = True  # a full batch was refused; the rest follows on the next pass
                 break
         if exchange.get("snapshot_required"):
             summary["snapshot_required"] = True
@@ -360,6 +366,17 @@ def note_contact(device_id: str) -> None:
     _last_contact[device_id] = time.monotonic()
 
 
+def forward_pushed(sender: str) -> None:
+    """Wake the sync loop for ops a peer pushed only if another peer may lack them.
+
+    The sender exchanged frontiers with us just before pushing, so a pass back
+    to it moves nothing: in a two-worker network every remote write used to
+    cost the receiver one extra exchange.
+    """
+    if any(device_id != sender and link.endpoints for device_id, link in _links.items()):
+        engine.kick()
+
+
 # ---------------------------------------------------------------------------
 # Loops
 # ---------------------------------------------------------------------------
@@ -429,7 +446,9 @@ async def sync_loop() -> None:
             except Exception:  # noqa: BLE001
                 logger.warning("Sync pass failed", exc_info=True)
                 results = {}
-            busy = any((r.get("received") or r.get("sent")) for r in results.values())
+            # A push that landed completely needs no follow-up exchange: the
+            # peer already compared frontiers with us before we pushed.
+            busy = any((r.get("received") or r.get("unsettled")) for r in results.values())
             try:
                 from app.network import blobs
                 busy = bool(await blobs.fetch_missing(limit=4)) or busy

@@ -514,7 +514,7 @@ async def peer_ops(body: OpsRequest, device_id: str = Depends(tokens.require_dev
     transport.note_contact(device_id)
     result = await run_sync(engine.apply_batch, body.ops)
     if result.applied:
-        engine.kick()
+        transport.forward_pushed(device_id)
     return result.as_dict()
 
 
