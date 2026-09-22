@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { onMount, untrack } from 'svelte';
-	let { sessionId, request, savedConnections, vaultAvailable, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string }; savedConnections: {id: string; label: string; target: string; fingerprint: string}[]; vaultAvailable: boolean; onComplete: () => void } = $props();
+	let { sessionId, request, savedConnections, vaultAvailable, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number }; savedConnections: {id: string; label: string; target: string; fingerprint: string}[]; vaultAvailable: boolean; onComplete: () => void } = $props();
 	let secureContext = $state(false);
 	onMount(() => { secureContext = window.isSecureContext; });
 	let savedId = $state('');
@@ -44,6 +44,7 @@
 <section class="private-card" aria-label="Private access request">
 	<header><span aria-hidden="true">🔒</span><h3>Private access request</h3><span class="badge">Not sent to the model</span></header>
 	<p class="purpose">{request.purpose}</p>
+	<p class="muted">Submit by {new Date(request.expires_at * 1000).toLocaleTimeString()}. This request closes after four minutes. The access duration below is separate.</p>
 	<p class="muted">These inputs go directly to this worker, not into chat history. The model receives only a temporary access handle. Session access expires or ends on worker restart. Connection details are retained only if you choose to save them encrypted.</p>
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
 	{#if !secureContext}<p class="error" role="alert">Open the desktop app or an HTTPS connection before entering private details.</p>{/if}
@@ -54,12 +55,12 @@
 		{#if savedId}
 			<p>{savedConnections.find(s => s.id === savedId)?.target}</p>
 			<p class="muted">Pinned host key: {savedConnections.find(s => s.id === savedId)?.fingerprint}</p>
-			<label>Expires in (minutes)<input required type="number" min="1" max="480" bind:value={minutes} /></label>
+			<label>Access duration (minutes)<input required type="number" min="1" max="480" bind:value={minutes} /></label>
 			<p class="warning">Approve new session access using the saved credentials. This account can access its server’s files and network. Commands still require approval.</p>
 		{:else}
 		<div class="grid">
 			<label>Resource name<input required maxlength="80" bind:value={label} /></label>
-			<label>Expires in (minutes)<input required type="number" min="1" max="480" bind:value={minutes} /></label>
+			<label>Access duration (minutes)<input required type="number" min="1" max="480" bind:value={minutes} /></label>
 		</div>
 		{#if request.kind === 'folder'}
 			<label>Folder on this worker<input required placeholder="/home/me/documents" bind:value={path} /></label>

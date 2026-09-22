@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+
+import asyncssh
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.auth import require_admin
@@ -42,9 +44,18 @@ async def grant(session_id: str, request_id: str, request: Request, body: dict, 
         return await broker.fulfill(session_id, request_id, spec)
     except AccessDenied as exc:
         raise HTTPException(400, str(exc)) from None
-    except Exception as exc:
+    except asyncssh.PermissionDenied:
+        raise HTTPException(400, "SSH sign-in was rejected. Check the username and password or private key.") from None
+    except asyncssh.HostKeyNotVerifiable:
+        raise HTTPException(400, "The SSH host key did not match. Verify the server fingerprint using a trusted source.") from None
+    except TimeoutError:
+        raise HTTPException(400, "The SSH connection timed out. Check the server address, port and reachability.") from None
+    except (asyncssh.Error, ValueError, OSError) as exc:
+        logger.warning("Chat access connection failed: %s", type(exc).__name__)
+        raise HTTPException(400, "Could not connect. Check the path or SSH address, host-key fingerprint and credentials.") from None
+    except Exception as exc:  # noqa: BLE001 — never echo private inputs from unexpected failures
         logger.warning("Chat access grant failed: %s", type(exc).__name__)
-        raise HTTPException(400, "Could not grant access. Check the path or SSH address, host-key fingerprint and credentials.") from None
+        raise HTTPException(500, "Private access is unavailable on this worker. Check the worker log before retrying.") from None
 
 
 @router.delete("/{session_id}/saved/{connection_id}")
