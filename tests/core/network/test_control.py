@@ -82,6 +82,44 @@ def test_catalog_mirrors_sessions_and_events_to_peers(workers):
         assert rows[0]["is_remote"] and rows[0]["device_name"] == "A"
 
 
+def test_last_owned_session_deletion_retracts_children_but_preserves_peer_records(workers):
+    a, b = workers("last-owner"), workers("remaining-peer")
+    with a.active():
+        engine.create_network("Final session")
+    join(a, b)
+    for worker, sid in ((a, "local-last"), (b, "peer-kept")):
+        with worker.active():
+            database.create_session(session_id=sid, profile_id="default", project_id=None, title=sid)
+            with store.get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("INSERT INTO tags(id,name) VALUES (%s,%s)", (sid, sid))
+                cur.execute("INSERT INTO session_tags(session_id,tag_id) VALUES (%s,%s)", (sid, sid))
+                cur.execute("INSERT INTO pending_interactions(id,session_id,kind,payload) VALUES (%s,%s,%s,%s)",
+                            (sid, sid, "question", '{"question":"test"}'))
+            engine.scan_all(strict=True)
+    converge([a, b])
+    with a.active():
+        database.delete_session("local-last")
+        catalog.publish_owned()
+        with store.get_db() as conn:
+            cur = conn.cursor()
+            for collection, local_id, peer_id in (
+                    ("session_tags", "local-last|local-last", "peer-kept|peer-kept"),
+                    ("pending_interactions", "local-last", "peer-kept")):
+                assert store.get_record(cur, collection, local_id)["deleted"]
+                assert not store.get_record(cur, collection, peer_id)["deleted"]
+                assert store.get_record(cur, collection, peer_id)["origin_device_id"] == b.device_id
+        assert catalog.publish_owned() == 0
+    converge([a, b])
+    with b.active():
+        assert database.get_session("local-last") is None
+        assert database.get_session("peer-kept") is not None
+        with store.get_db() as conn:
+            cur = conn.cursor()
+            assert store.get_record(cur, "session_tags", "local-last|local-last")["deleted"]
+            assert store.get_record(cur, "pending_interactions", "local-last")["deleted"]
+
+
 def test_quiet_catalog_uses_one_query_and_finds_later_appends(workers):
     worker = workers("quiet-catalog")
     with worker.active():
