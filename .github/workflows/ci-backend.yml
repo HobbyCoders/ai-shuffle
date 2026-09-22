@@ -194,6 +194,7 @@ jobs:
           PYTHONPATH: .
         run: >-
           python -m pytest tests/integration/test_network_migration_postgres.py
+          tests/integration/test_network_heads_postgres.py
           --confcutdir=tests/integration -o addopts="" -p no:cacheprovider
           --timeout=120 -v
 

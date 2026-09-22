@@ -558,6 +558,49 @@ def insert_op(cursor, env: dict, lane: str) -> bool:
     return bool(cursor.rowcount)
 
 
+# Most retained logs have many operations per origin/incarnation. Seek between
+# streams in the existing unique index, then read each stream's last entry.
+# Bound the walk: an unusually wide log falls back to the aggregate instead of
+# doing an unbounded number of index probes. No separately maintained head can
+# drift from the log after pruning, restore, rollback or direct maintenance.
+HEAD_PROBE_LIMIT = 256
+_LOG_HEADS_QUERY = """
+    WITH RECURSIVE sync_streams(origin_device_id, incarnation, depth) AS (
+        SELECT origin_device_id, incarnation, 1
+        FROM (SELECT origin_device_id, incarnation FROM sync_ops
+              ORDER BY origin_device_id, incarnation LIMIT 1) first_stream
+        UNION ALL
+        SELECT
+            (SELECT op.origin_device_id FROM sync_ops op
+             WHERE (op.origin_device_id, op.incarnation) > (previous.origin_device_id, previous.incarnation)
+             ORDER BY op.origin_device_id, op.incarnation LIMIT 1),
+            (SELECT op.incarnation FROM sync_ops op
+             WHERE (op.origin_device_id, op.incarnation) > (previous.origin_device_id, previous.incarnation)
+             ORDER BY op.origin_device_id, op.incarnation LIMIT 1),
+            previous.depth + 1
+        FROM sync_streams previous
+        WHERE previous.origin_device_id IS NOT NULL AND previous.depth < %s
+    )
+    SELECT origin_device_id, incarnation,
+           (SELECT MAX(seq) FROM sync_ops op
+            WHERE op.origin_device_id = sync_streams.origin_device_id
+              AND op.incarnation = sync_streams.incarnation) AS s
+    FROM sync_streams WHERE origin_device_id IS NOT NULL
+"""
+
+
+def _log_heads(cursor) -> list[dict]:
+    cursor.execute(_LOG_HEADS_QUERY, (HEAD_PROBE_LIMIT,))
+    rows = cursor.fetchall()
+    if len(rows) >= HEAD_PROBE_LIMIT:
+        # The bounded probe may not have reached the final stream. Re-read a
+        # complete frontier in one statement, never advertise a partial one.
+        cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS s FROM sync_ops "
+                       "GROUP BY origin_device_id, incarnation")
+        rows = cursor.fetchall()
+    return rows
+
+
 def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: Optional[str] = None,
               exclude_origin: Optional[str] = None, _conn=None,
               _heads: Optional[Dict[str, Dict[str, int]]] = None) -> List[dict]:
@@ -569,9 +612,8 @@ def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: 
     """
     def _query(cursor):
         if _heads is None:
-            cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS head FROM sync_ops "
-                           "GROUP BY origin_device_id, incarnation ORDER BY origin_device_id, incarnation")
-            streams = [(r["origin_device_id"], int(r["incarnation"]), int(r["head"])) for r in cursor.fetchall()]
+            streams = sorted((r["origin_device_id"], int(r["incarnation"]), int(r["s"]))
+                             for r in _log_heads(cursor))
         else:
             streams = sorted((origin, int(inc), int(head))
                              for origin, incarnations in _heads.items() for inc, head in incarnations.items())
@@ -624,9 +666,8 @@ def local_watermarks(_conn=None) -> Dict[str, Dict[str, int]]:
     Includes our own outbox (from sync_ops) so a peer knows what to skip.
     """
     def _query(cursor):
-        cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS s FROM sync_ops GROUP BY origin_device_id, incarnation")
         out: Dict[str, Dict[str, int]] = {}
-        for row in cursor.fetchall():
+        for row in _log_heads(cursor):
             out.setdefault(row["origin_device_id"], {})[str(int(row["incarnation"]))] = int(row["s"] or 0)
         cursor.execute("SELECT origin_device_id, incarnation, last_seq FROM sync_watermarks")
         for row in cursor.fetchall():

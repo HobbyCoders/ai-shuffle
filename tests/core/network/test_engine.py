@@ -265,7 +265,7 @@ def test_exchange_batch_bounds_queries_frontier_and_detects_pruned_gaps(workers,
             assert store.exchange_batch(marks) == ([], marks, False)
         finally:
             a.raw.set_trace_callback(None)
-        assert len([q for q in queries if q.lstrip().upper().startswith("SELECT")]) == 2
+        assert len([q for q in queries if q.lstrip().upper().startswith(("SELECT", "WITH"))]) == 2
         read_heads = store.local_watermarks
 
         def append_after_frontier(conn=None):
