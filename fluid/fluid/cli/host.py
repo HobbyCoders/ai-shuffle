@@ -663,6 +663,15 @@ class CliHost:
             return ToolOutcome(
                 text=f"could not deliver to {target.name}: {exc}", is_error=True,
             )
+        if getattr(target.engine, "last_held_message", None) is message:
+            return ToolOutcome(
+                text=(
+                    f"Held for {target.name} until it wakes: it is parked "
+                    "waiting on background work and reads your message with "
+                    "its next wake. Do not wait for a reply. Send again with "
+                    "urgent=true only if you are blocked on its answer."
+                )
+            )
         return ToolOutcome(
             text=(
                 f"Delivered to {target.name}. It picks the message up at its "

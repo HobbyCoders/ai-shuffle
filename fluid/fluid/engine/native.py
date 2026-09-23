@@ -971,6 +971,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # instead of each waking the parent on its own.
         self._queued_peer_messages: list[AgentMessage] = []
         self._queued_peer_rehydrated = False
+        # The last AgentMessage op submit() held rather than delivered, so a
+        # host can tell its sender "held" instead of "delivered".
+        self.last_held_message: AgentMessage | None = None
         # Runtime-facts block bookkeeping (see _environment_reminder): the
         # facts text last sent to the model, and whether this engine has
         # already harvested them into the memory store.
@@ -1469,6 +1472,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # (wake=False) message to a parked parent back to the host,
                 # which woke the parent for it.
                 if not op.urgent and await self._queue_if_parked(replace(op, text=text)):
+                    self.last_held_message = op
                     return
                 if not op.wake:
                     raise RuntimeError("no turn is running; peer message was not delivered")
