@@ -31,10 +31,12 @@ import time
 from typing import Any
 
 from fluid.codemode.skills import (
+    LEARNER_SILENCE_ALARM_SECONDS,
     MAX_LOG_BYTES,
     MAX_LOG_ENTRIES,
     SkillStore,
     journal_lock,
+    learner_silence_seconds,
     referenced_skills,
     trim_jsonl,
     validate_skill,
@@ -375,6 +377,8 @@ CONSOLIDATE_RETRY_SECONDS = 6 * 3600.0
 # How often one synthesizer may record that it found the synthesis lock
 # held for longer than a pass can legitimately take.
 LOCK_BUSY_LOG_INTERVAL = 600.0
+# How often the yield alarm repeats while the learner stays silent.
+YIELD_ALARM_REPEAT_SECONDS = 86400.0
 # A pass costs one of the day's 48 inference calls (facts.MAX_INFERENCE_CALLS_
 # PER_DAY), so it has to see a real slice: a turn writes its user prompt, its
 # assistant reply and a handful of cells, so 20 is roughly three turns of
@@ -478,6 +482,8 @@ class Synthesizer:
         self._lock_busy_since: float | None = None
         self._lock_logged_at = float("-inf")
         self._kick_warned = False
+        # This replica's store id, for log lines (see _store_label).
+        self._store_id: str | None = None
 
     # ─── triggering ──────────────────────────────────────────────────────
     def mark_urgent(self) -> None:
@@ -515,9 +521,10 @@ class Synthesizer:
             if not self._kick_warned:
                 self._kick_warned = True
                 _log.warning(
-                    "Memory learner: a pass is due but kick() was called with "
-                    "no running event loop; synthesis will wait for the next "
-                    "kick from the loop thread or session close"
+                    "Memory learner (store=%s): a pass is due but kick() was "
+                    "called with no running event loop; synthesis will wait "
+                    "for the next kick from the loop thread or session close",
+                    self._store_label(),
                 )
             return
         self._task = loop.create_task(self._run_safe())
@@ -668,6 +675,7 @@ class Synthesizer:
                 f"at least {busy:.0f}s (longer than the {self._pass_timeout:.0f}s "
                 "pass limit); a holder may be wedged"
             ),
+            ran=False,
         )
 
     async def _run_locked(self) -> list[str]:
@@ -769,8 +777,12 @@ class Synthesizer:
         provider_status: int | None = None,
         retry_after_s: float | None = None,
         deferred: int | None = None,
+        ran: bool = True,
     ) -> None:
         """Append one pass record to ``.synthesis-log.jsonl`` (best-effort).
+
+        ``ran=False`` marks a row for a pass that never started (the lock
+        was held elsewhere); it does not count toward the yield alarm.
 
         ``last_error`` dies with the process, and a background pass that
         silently fails — or silently decides NO_CHANGES — is otherwise
@@ -785,6 +797,10 @@ class Synthesizer:
         """
         record: dict[str, Any] = {"ts": time.time(), "kind": kind, "changed": changed}
         record["model"] = self._model
+        store = self._store_label()
+        # Replicas merge memories.json but each keeps its own log; the id
+        # says which learner wrote a row once logs are compared.
+        record["store_id"] = store
         if consumed is not None:
             record["consumed"] = consumed
         if deferred:
@@ -808,20 +824,22 @@ class Synthesizer:
         if error and consumed:
             # The pass ran; some proposals were rejected by validation.
             _log.warning(
-                "Memory learner %s pass (model=%s): consumed %s, changed %s, rejected: %s",
-                kind, self._model, consumed, changed or "nothing", error,
+                "Memory learner %s pass (model=%s, store=%s): consumed %s, changed %s, rejected: %s",
+                kind, self._model, store, consumed, changed or "nothing", error,
             )
         elif error:
             _log.warning(
-                "Memory learner %s pass failed (model=%s, store=%s): %s%s",
-                kind, self._model, self._store.root, error,
+                "Memory learner %s pass failed (model=%s, store=%s, root=%s): %s%s",
+                kind, self._model, store, self._store.root, error,
                 f"; next attempt in {retry_after_s:.0f}s" if retry_after_s else "",
             )
         else:
             _log.info(
-                "Memory learner %s pass (model=%s): consumed %s, changed %s",
-                kind, self._model, consumed, changed or "nothing",
+                "Memory learner %s pass (model=%s, store=%s): consumed %s, changed %s",
+                kind, self._model, store, consumed, changed or "nothing",
             )
+        if ran:
+            self._track_yield(changed, store)
         path = self._store.root / ".synthesis-log.jsonl"
         try:
             with path.open("a", encoding="utf-8") as fh:
@@ -832,6 +850,43 @@ class Synthesizer:
             if path.stat().st_size > MAX_LOG_BYTES:
                 trim_jsonl(path, MAX_LOG_ENTRIES)
         except OSError:
+            pass
+
+    def _store_label(self) -> str:
+        """This replica's store id for log lines ("new" until memories.json
+        exists; the id is fixed once it does, so it is read once)."""
+        if self._store_id is None:
+            try:
+                self._store_id = self._store.store_id()
+            except Exception:
+                self._store_id = None
+        return self._store_id or "new"
+
+    def _track_yield(self, changed: list[str], store: str) -> None:
+        """Count a pass toward the store's yield record and warn when the
+        learner has run passes for ``LEARNER_SILENCE_ALARM_SECONDS`` without
+        writing anything (once a day while the silence lasts). Deletions do
+        not count as a write. Best-effort, never raises."""
+        now = time.time()
+        wrote = any(not name.startswith("-") for name in changed)
+        try:
+            record = self._store.note_learner_pass(wrote, now=now)
+            silent = learner_silence_seconds(record, now)
+            if silent < LEARNER_SILENCE_ALARM_SECONDS:
+                return
+            if now - float(record.get("alarm_at", 0) or 0) < YIELD_ALARM_REPEAT_SECONDS:
+                return
+            last = record.get("last_write_at")
+            _log.warning(
+                "Memory learner yield alarm (store=%s, model=%s): no fact written "
+                "in %.1f days across %d passes (last write: %s). Recent pass "
+                "outcomes are in %s",
+                store, self._model, silent / 86400, int(record.get("silent_passes", 0)),
+                time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(float(last))) if last else "never",
+                self._store.root / ".synthesis-log.jsonl",
+            )
+            self._store.note_learner_yield_alarm(now)
+        except Exception:
             pass
 
     # ─── consolidation (whole-store curation, interval-gated) ────────────
@@ -1172,8 +1227,8 @@ class Synthesizer:
             # _prompt keeps the journal inside the limit; reaching this cut
             # means an oversized guidance file, and it is worth a line.
             _log.warning(
-                "Memory learner prompt of %d chars cut to %d (model=%s)",
-                len(prompt), PROMPT_CHAR_LIMIT, self._model,
+                "Memory learner prompt of %d chars cut to %d (model=%s, store=%s)",
+                len(prompt), PROMPT_CHAR_LIMIT, self._model, self._store_label(),
             )
             prompt = prompt[:PROMPT_CHAR_LIMIT]
         request = ProviderRequest(

@@ -74,7 +74,9 @@ def journal_diagnostics() -> dict:
     import os
     import stat
     import time
-    from fluid.codemode.skills import JOURNAL_MAX_BYTES, journal_metrics
+    from fluid.codemode.skills import (
+        JOURNAL_MAX_BYTES, LEARNER_SILENCE_ALARM_SECONDS, journal_metrics, learner_silence_seconds,
+    )
 
     started = time.perf_counter()
     root = skills_root()
@@ -106,6 +108,10 @@ def journal_diagnostics() -> dict:
         "pending_entries_known": 0, "journals_at_byte_cap": 0,
         "bytes_scanned": 0, "scan_budget_bytes": JOURNAL_DIAGNOSTIC_BYTES,
         "per_journal_byte_cap": JOURNAL_MAX_BYTES,
+        # Stores whose learner has run passes for the alarm window without
+        # writing a fact (meta.json "learner_yield"; see Synthesizer._track_yield).
+        "learner_silent_stores": 0,
+        "learner_silence_alarm_seconds": LEARNER_SILENCE_ALARM_SECONDS,
     }
 
     def read_regular(path, limit):
@@ -149,9 +155,12 @@ def journal_diagnostics() -> dict:
             meta, meta_size, meta_stable = read_regular(directory / "meta.json", JOURNAL_DIAGNOSTIC_META_BYTES)
             if not meta_stable or len(meta) != meta_size:
                 raise ValueError("Incomplete metadata")
-            cursor = json.loads(meta).get("synth_cursor", 0)
+            meta_doc = json.loads(meta)
+            cursor = meta_doc.get("synth_cursor", 0)
             if type(cursor) is not int or cursor < 0:
                 raise ValueError("Invalid cursor")
+            silence = learner_silence_seconds(meta_doc.get("learner_yield"), time.time())
+            result["learner_silent_stores"] += int(silence >= LEARNER_SILENCE_ALARM_SECONDS)
         except FileNotFoundError:
             cursor = 0
         except (OSError, ValueError, AttributeError):

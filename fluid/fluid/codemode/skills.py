@@ -922,7 +922,8 @@ class SkillStore:
                 # journal; this sweep repairs such stores.
                 _log.warning(
                     "Memory journal cursor %d was past the journal's %d lines "
-                    "in %s; clamped", cursor, total, self._journal_path,
+                    "in %s (store=%s); clamped", cursor, total, self._journal_path,
+                    self.store_id() or "new",
                 )
                 self.set_synth_cursor(total)
                 cursor = total
@@ -960,8 +961,9 @@ class SkillStore:
                 _log.warning(
                     "Memory journal backlog overflow: dropped %d unsynthesized "
                     "entries (oldest first) from %s; synthesis has not been "
-                    "consuming the journal, see .synthesis-log.jsonl beside it",
-                    len(backlog), self._journal_path,
+                    "consuming the journal, see .synthesis-log.jsonl beside it "
+                    "(store=%s)", len(backlog), self._journal_path,
+                    self.store_id() or "new",
                 )
             return len(removed)
 
@@ -1522,6 +1524,74 @@ class SkillStore:
         meta = self._load_meta()
         meta["consolidation_retry_at"] = float(ts)
         self._save_meta(meta)
+
+    # ─── learner yield (see Synthesizer._track_yield) ─────────────────────
+    #
+    # ``meta.json["learner_yield"]``: ``last_write_at``, ``silent_passes``
+    # (passes since the last write) and ``silent_since`` (the first of them),
+    # plus ``alarm_at`` for the last silence warning. Shared by every session
+    # over the store; the app's diagnostics read it without a SkillStore.
+
+    def learner_yield(self) -> dict:
+        record = self._load_meta().get("learner_yield")
+        return dict(record) if isinstance(record, dict) else {}
+
+    def note_learner_pass(self, wrote: bool, *, now: float) -> dict:
+        """Record one learner pass; returns the updated yield record."""
+        meta = self._load_meta()
+        record = meta.get("learner_yield")
+        record = dict(record) if isinstance(record, dict) else {}
+        if wrote:
+            record = {"last_write_at": now, "silent_passes": 0}
+        else:
+            try:
+                record["silent_passes"] = int(record.get("silent_passes", 0)) + 1
+            except (TypeError, ValueError):
+                record["silent_passes"] = 1
+            record.setdefault("silent_since", now)
+        meta["learner_yield"] = record
+        self._save_meta(meta)
+        return record
+
+    def note_learner_yield_alarm(self, now: float) -> None:
+        meta = self._load_meta()
+        record = meta.get("learner_yield")
+        if isinstance(record, dict):
+            record["alarm_at"] = now
+            self._save_meta(meta)
+
+    def store_id(self) -> str | None:
+        """This replica's id from ``memories.json`` (the ``origin`` of the
+        facts it writes), or None before the file first exists. Read-only:
+        naming a store in a log line must not create or migrate it."""
+        try:
+            doc = json.loads(self.memories_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        value = doc.get("store_id") if isinstance(doc, dict) else None
+        return value if isinstance(value, str) and value else None
+
+
+# A learner that has run passes for this long without writing anything is
+# reported (Synthesizer._track_yield, and the app's journal diagnostics). Both
+# replicas' learners were silent for 13 days in September 2026 and nothing
+# said so.
+LEARNER_SILENCE_ALARM_SECONDS = 3 * 86400.0
+
+
+def learner_silence_seconds(record: object, now: float) -> float:
+    """How long a ``learner_yield`` record has run passes without a write;
+    0 when the last pass wrote or no pass has run."""
+    if not isinstance(record, dict):
+        return 0.0
+    try:
+        passes = int(record.get("silent_passes", 0) or 0)
+        since = float(record.get("silent_since", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if passes <= 0 or since <= 0:
+        return 0.0
+    return max(0.0, now - since)
 
 
 # Referenced-skill extraction: ``skills.foo`` attribute use, the
