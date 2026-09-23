@@ -113,6 +113,31 @@ logger = logging.getLogger(__name__)
 _BUNDLED_PREFIX = "mcp__fluid_bundled__"
 
 
+CLAUDE_CLI_MISSING_MESSAGE = (
+    "Claude Code CLI not found. Install it with Anthropic's installer, "
+    "then sign in with `claude`"
+)
+
+
+class ClaudeCliMissingError(RuntimeError):
+    """The ``claude`` binary is not installed where the loop can run it.
+
+    A setup problem, not a crash: the message is written for the user and a
+    turn reports it as its error event. The CLI must come from Anthropic's own
+    installer; nothing here falls back to another copy.
+    """
+
+    def __init__(self, message: str = CLAUDE_CLI_MISSING_MESSAGE) -> None:
+        super().__init__(message)
+
+
+def _spawn_failure_message(exc: BaseException) -> str:
+    """User-facing text for a CLI that could not be started."""
+    if isinstance(exc, ClaudeCliMissingError):
+        return str(exc)
+    return f"spawn failed: {exc!r}"
+
+
 def _matches_tool_pattern(name: str, patterns: list[str]) -> bool:
     """Exact name or case-sensitive fnmatch pattern (same rule as NativeLoop)."""
     return any(name == p or fnmatchcase(name, p) for p in patterns)
@@ -459,13 +484,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     # ─── process lifecycle ───────────────────────────────────────────────
 
     async def _version_guard(self) -> None:
-        """Best-effort ``claude --version`` capture; never fatal."""
+        """Best-effort ``claude --version`` capture.
+
+        Fatal only when the binary does not exist: that raises
+        :class:`ClaudeCliMissingError` so the turn reports a setup message.
+        Any other failure just leaves ``cli_version`` unset.
+        """
         try:
             proc = await asyncio.create_subprocess_exec(
                 *self.claude_cmd, "--version",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                 env=self._child_env(),
             )
+        except FileNotFoundError as exc:
+            self.cli_version = None
+            raise ClaudeCliMissingError() from exc
+        except Exception:
+            self.cli_version = None
+            return
+        try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
             text = out.decode(errors="replace").strip()
             self.cli_version = text or None
@@ -662,7 +699,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 await self._ensure_process()
             except Exception as exc:
                 await self._emit_terminal_with_park(ErrorEvent(
-                    session_id=sid, turn_id=turn_id, message=f"spawn failed: {exc!r}"
+                    session_id=sid, turn_id=turn_id, message=_spawn_failure_message(exc)
                 ))
                 return
             if reused:
@@ -729,7 +766,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     await self._ensure_process()
                 except Exception as exc:
                     await self._emit_terminal_with_park(ErrorEvent(
-                        session_id=sid, turn_id=turn_id, message=f"spawn failed: {exc!r}"
+                        session_id=sid, turn_id=turn_id, message=_spawn_failure_message(exc)
                     ))
                     return mapper
             mapper = StreamJsonMapper(

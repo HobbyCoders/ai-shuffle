@@ -147,10 +147,16 @@ def _extract_connection_error(
     """Extract the most useful error message from a connection failure.
 
     Priority order:
+    0. A missing ``claude`` CLI: its setup message, verbatim
     1. Captured CLI stderr lines (real subprocess output)
     2. ProcessError.stderr attribute (if not a placeholder)
     3. Exception message as-is
     """
+    from fluid.engine.delegated import ClaudeCliMissingError
+
+    if isinstance(exc, ClaudeCliMissingError):
+        return str(exc)
+
     # 1. Prefer captured stderr lines — these are the real subprocess output
     if cli_stderr_lines:
         stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())

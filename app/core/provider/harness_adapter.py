@@ -253,7 +253,7 @@ from fluid.codemode.skills import SkillStore, project_key_for
 from fluid.codemode.subprocess_kernel import KernelConfig
 from fluid.context.compaction import CompactionConfig
 from fluid.engine.native import NativeLoop
-from fluid.engine.delegated import DelegatedLoop
+from fluid.engine.delegated import ClaudeCliMissingError, DelegatedLoop
 from fluid.events.ops import (
     BackgroundTaskFinished,
     Interrupt,
@@ -458,7 +458,8 @@ class HarnessAdapter(ProviderAdapter):
                 delegated_system, delegated_append = _with_agents_index(
                     system, append_system, agents_index
                 )
-            # shutil.which + the bundled-CLI resolver stat the filesystem.
+            # shutil.which stats the filesystem. A missing CLI raises
+            # ClaudeCliMissingError here, before any engine is built.
             claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
             self._engine = DelegatedLoop(
                 store=store,
@@ -3154,29 +3155,36 @@ class HarnessAdapter(ProviderAdapter):
 # ─── Module-level helpers ─────────────────────────────────────────────────────
 
 
-def _resolve_claude_cmd() -> Optional[list]:
-    """Command for the delegated ``claude`` CLI, or None for PATH default.
+def _is_vendored_cli(path: str) -> bool:
+    """True for a ``claude`` binary that lives inside a Python package dir.
 
-    In the Docker image the CLI is not on PATH — only the copy bundled inside
-    the claude_agent_sdk package files exists — so fall back to the shared
-    resolver in ``app.core.claude_cli_path`` (the same one the interrupt patcher
-    uses to locate the binary it patches). Returning None lets DelegatedLoop try
-    bare ``claude`` (dev machines with a global install).
+    That is where the copy bundled in the ``claude_agent_sdk`` wheel sits
+    (``site-packages/claude_agent_sdk/_bundled``). It is vendored and
+    version-frozen, so it must never run, even when a PATH entry points at it.
+    """
+    parts = {part.lower() for part in Path(path).resolve().parts}
+    return bool(parts & {"site-packages", "dist-packages"})
+
+
+def _resolve_claude_cmd() -> list:
+    """Command for the delegated ``claude`` CLI: the one on PATH, nothing else.
+
+    The CLI must be the stock binary from Anthropic's installer, found on PATH.
+    There is deliberately no fallback to the copy bundled inside the
+    ``claude_agent_sdk`` wheel, and a PATH entry that points into a Python
+    package dir is skipped for the same reason. A missing CLI raises
+    :class:`ClaudeCliMissingError`, whose message tells the user how to
+    install it.
     """
     import shutil
 
-    found = shutil.which("claude")
-    if found:
-        return [found]
-    try:
-        from app.core.claude_cli_path import resolve_bundled_cli_path
-
-        bundled = resolve_bundled_cli_path()
-        if bundled is not None:
-            return [str(bundled)]
-    except Exception:  # pragma: no cover — resolver is best-effort
-        logger.debug("bundled claude CLI resolution failed", exc_info=True)
-    return None
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        found = shutil.which("claude", path=entry)
+        if found and not _is_vendored_cli(found):
+            return [found]
+    raise ClaudeCliMissingError()
 
 
 def _system_parts(system_prompt: Any) -> tuple[Optional[str], Optional[str]]:

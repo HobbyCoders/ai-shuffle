@@ -182,7 +182,7 @@ COPY --chown=appuser:appuser .env.example .
 COPY entrypoint.sh /entrypoint.sh
 COPY docker/container_runtime.py docker/application_updates.py docker/update_contract.py ./docker/
 COPY Dockerfile entrypoint.sh ./
-COPY docker/start-chrome.sh docker/chrome-supervisor.sh docker/chrome-doctor.sh ./docker/
+COPY docker/start-chrome.sh docker/chrome-supervisor.sh docker/chrome-doctor.sh docker/install-claude-cli.sh ./docker/
 COPY desktop/build/application-update-key.pem ./docker/application-update-key.pem
 COPY docker/start-chrome.sh /usr/local/bin/start-chrome
 COPY docker/chrome-supervisor.sh /usr/local/bin/chrome-supervisor
