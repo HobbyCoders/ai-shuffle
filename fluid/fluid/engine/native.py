@@ -2059,7 +2059,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._emit(TurnStarted(
             session_id=sid, node_id=node_id, turn_id=turn_id,
             model=self.model, provider=self.provider.name,
-                thinking=self._session_thinking.get(sid),
+            thinking=self._session_thinking.get(sid),
         ))
         blocked, hook_context = await self._turn_start_hook(sid, turn_id, prompt_text)
         if blocked:
@@ -2470,7 +2470,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             # event scan.
             self._session_thinking[sid] = None
             return
-        recorded: list[TurnStarted] = []
         try:
             recorded = [event async for event in iter_events(self.store, sid, 0)
                         if isinstance(event, TurnStarted)]
