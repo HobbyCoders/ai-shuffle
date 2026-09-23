@@ -45,6 +45,10 @@ Frame vocabulary handled (see ``claude_agent_sdk`` message_parser + query.py):
   * ``{"type":"control_request","request":{"subtype":"can_use_tool",...}}`` —
     a PermissionRequest event plus a ``PermissionBridge`` the loop uses to answer
     with the matching ``control_response`` frame.
+  * ``{"type":"control_request","request":{"subtype":"hook_callback",
+    "callback_id":...,"input":{...},"tool_use_id":...}}`` — one of the hooks
+    the loop registered in its ``initialize`` request fired; surfaced as a
+    ``HookCallbackRequest`` the loop answers through its HookBus. No event.
   * ``{"type":"control_response","response":{...}}`` — the CLI's reply to a
     control_request the LOOP sent (``get_context_usage``, ``mcp_status``, …),
     surfaced as a ``ControlReply`` the loop correlates by request_id. Two
@@ -163,6 +167,23 @@ def parse_control_response(frame: dict[str, Any]) -> ControlReply | None:
     )
 
 
+def parse_hook_callback(frame: dict[str, Any]) -> HookCallbackRequest | None:
+    """A ``hook_callback`` control_request as a record, or None for any
+    other frame."""
+    if not isinstance(frame, dict) or frame.get("type") != "control_request":
+        return None
+    req = frame.get("request")
+    if not isinstance(req, dict) or req.get("subtype") != "hook_callback":
+        return None
+    data = req.get("input")
+    return HookCallbackRequest(
+        cli_request_id=str(frame.get("request_id") or ""),
+        callback_id=str(req.get("callback_id") or ""),
+        input=data if isinstance(data, dict) else {},
+        tool_use_id=req.get("tool_use_id"),
+    )
+
+
 def _int_or_zero(value: Any) -> int:
     """A reported token count, or 0 when the CLI omitted it (or sent junk)."""
     try:
@@ -200,6 +221,17 @@ class PermissionBridge:
 
 
 @dataclass(frozen=True)
+class HookCallbackRequest:
+    """A ``hook_callback`` control_request: the CLI ran a hook event the
+    loop registered at ``initialize`` and waits for its output."""
+
+    cli_request_id: str
+    callback_id: str
+    input: dict[str, Any]
+    tool_use_id: str | None = None
+
+
+@dataclass(frozen=True)
 class ControlReply:
     """The CLI's answer to a control_request the loop sent.
 
@@ -225,6 +257,7 @@ class Mapped:
     node_id: str | None = None
     permission: PermissionBridge | None = None
     control_reply: ControlReply | None = None
+    hook_request: HookCallbackRequest | None = None
     is_result: bool = False
     # Set with ``is_result`` when the CLI reported the turn as failed.
     error: str | None = None
@@ -591,8 +624,10 @@ class StreamJsonMapper:
 
     def _on_control_request(self, frame: dict[str, Any]) -> Mapped:
         req = frame.get("request", {}) or {}
+        if req.get("subtype") == "hook_callback":
+            return Mapped(hook_request=parse_hook_callback(frame))
         if req.get("subtype") != "can_use_tool":
-            return Mapped()  # hook_callback / mcp_message / etc. are loop-internal
+            return Mapped()  # mcp_message / etc. are loop-internal
         fluid_rid = new_id("perm")
         tool_name = req.get("tool_name", "")
         tid = req.get("tool_use_id") or ""

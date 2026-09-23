@@ -123,3 +123,108 @@ async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_
     assert all(_flag(argv, "--system-prompt") is None for argv in _ArgvLoop.argvs)
     # The second spawn resumed the same CLI conversation.
     assert _flag(_ArgvLoop.argvs[1], "--resume") is not None
+
+
+# ─── Hooks: the delegated leg feeds the same HookBus the native leg does ────
+
+
+class _KwargsLoop:
+    """Records the kwargs an engine is built with."""
+
+    captured: dict = {}
+
+    def __init__(self, **kwargs):
+        type(self).captured = dict(kwargs)
+        self.agents = []
+
+    async def _ensure_session(self):
+        class _Meta:
+            session_id = "ses_x"
+
+        return _Meta()
+
+    async def aclose(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_both_legs_get_the_adapters_hook_bus(monkeypatch, tmp_path):
+    """One bus per adapter, handed to whichever loop the connect builds, so a
+    callback on ``adapter.hooks`` observes either leg."""
+
+    async def _client(kind, options):
+        return object(), None
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _KwargsLoop)
+    delegated = ha.HarnessAdapter()
+    await delegated.connect(_preset_options(tmp_path))
+    assert _KwargsLoop.captured["hooks"] is delegated.hooks
+    assert callable(_KwargsLoop.captured["tool_policy"])
+
+    monkeypatch.setattr(ha, "NativeLoop", _KwargsLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _client)
+    native = ha.HarnessAdapter()
+    await native.connect(SessionOptions(
+        model="claude-sonnet-4-5", cwd=str(tmp_path),
+        extra={"fluid_engine": "native", "fluid_provider": "anthropic"},
+    ))
+    assert _KwargsLoop.captured["hooks"] is native.hooks
+
+
+def test_delegated_tool_policy_denies_what_the_app_denies(tmp_path):
+    """The PreToolUse policy refuses the blocklist, anything off the surface
+    and a permission-engine deny rule; everything else is left to the CLI."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.permissions.rules import Rule
+
+    options = _preset_options(tmp_path)
+    options.tool_allowlist = ["Bash", "Read", "mcp__browser__*"]
+    permissions = PermissionEngine(
+        "on_write", rules=[Rule(tool="Read", decision="deny", input_globs={"file_path": "*.env"})],
+    )
+    policy = ha._delegated_tool_policy(options, permissions, ["Task", "Agent"])
+
+    assert policy("Task", {}) == "Tool 'Task' is disabled in this profile"
+    assert policy("WebFetch", {"url": "x"}) == "Tool 'WebFetch' is not enabled in this profile"
+    assert "configured rule" in policy("Read", {"file_path": "prod.env"})
+    assert policy("Read", {"file_path": "notes.txt"}) is None
+    assert policy("Bash", {"command": "ls"}) is None
+    assert policy("mcp__browser__navigate", {}) is None
+
+
+@pytest.mark.asyncio
+async def test_delegated_pre_tool_use_reaches_the_bus_and_the_policy_blocks(
+    monkeypatch, tmp_path
+):
+    """End to end against the fake CLI: the CLI's PreToolUse for Bash lands
+    on ``adapter.hooks`` as the native loop's PreToolUse event, and the
+    profile blocklist denies the call there, so the model gets the denial as
+    the tool's result."""
+    from fluid.events.model import ToolResult
+    from fluid.hooks.bus import PRE_TOOL_USE
+
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    seen: list = []
+
+    async def observe(event, payload):
+        seen.append((event, payload["name"], payload["input"]))
+        return None
+
+    options = _preset_options(tmp_path)
+    options.disallowed_tools = ["Bash"]
+    options.env = {"FAKE_CLAUDE_SCENARIO": "u"}
+    adapter = ha.HarnessAdapter()
+    adapter.hooks.on(PRE_TOOL_USE, observe)
+    await adapter.connect(options)
+    try:
+        result = await _run_turn(adapter, "run it")
+        events = adapter.engine.bus.log(adapter.engine.session_id)
+    finally:
+        await adapter.disconnect()
+
+    assert not result.is_error
+    assert seen == [(PRE_TOOL_USE, "Bash", {"command": "echo hooked"})]
+    results = [e for e in events if isinstance(e, ToolResult)]
+    assert [(r.is_error, r.output) for r in results] == [
+        (True, "Tool 'Bash' is disabled in this profile"),
+    ]

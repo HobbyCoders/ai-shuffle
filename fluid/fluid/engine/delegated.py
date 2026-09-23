@@ -37,6 +37,18 @@ conversation rather than a session that fails forever while reporting success.
 The same frame announces the child's tool surface, kept on the loop as
 ``cli_tools`` / ``cli_mcp_servers`` and published as ``DelegatedSurface``.
 
+Hooks: with a ``HookBus`` (or a deny policy) the loop sends the CLI an
+``initialize`` control_request registering its own hook callbacks, the same
+mechanism the Agent SDK uses. The CLI then asks the loop over
+``hook_callback`` control_requests, and each one is forwarded into the HookBus
+event the native loop emits at the same point (PreToolUse, PostToolUse,
+TurnStart for UserPromptSubmit, TurnEnd for Stop, SessionStart, PreCompact,
+SubagentStop), so a host observing the native loop observes this one the same
+way. PreToolUse also applies the deny policy (``tool_policy``, else the
+permission engine's deny rules), and a deny from either the hooks or the policy
+wins over any allow. A SessionStart with source ``compact`` re-injects the
+session ledger, the way the native loop recites it on every user turn.
+
 Continual learning rides along when the loader wires a ``journal``: every
 tool result the CLI reports is journaled with the input that produced it, the
 user and assistant text of each turn become episodic entries, and Recall and
@@ -54,7 +66,7 @@ import secrets
 import signal
 import socket
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
@@ -62,14 +74,18 @@ from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps
 from fluid.engine.delegated_proto import (
     ControlReply,
+    HookCallbackRequest,
     PermissionBridge,
     StreamJsonMapper,
+    flatten_tool_content,
     parse_control_response,
+    parse_hook_callback,
 )
 from fluid.events.bus import EventBus
 from fluid.events.model import (
     ErrorEvent,
     Event,
+    HookEvent,
     Interrupted,
     PermissionRequest,
     SteerDelivered,
@@ -89,6 +105,15 @@ from fluid.events.ops import (
     SetPermissionMode,
     Steer,
     UserTurn,
+)
+from fluid.hooks.bus import (
+    POST_TOOL_USE,
+    PRE_COMPACT,
+    PRE_TOOL_USE,
+    SESSION_START,
+    SUBAGENT_STOP,
+    TURN_END,
+    TURN_START,
 )
 from fluid.messages import Image, Message, Text
 from fluid.store.base import (
@@ -121,6 +146,32 @@ def _matches_tool_pattern(name: str, patterns: list[str]) -> bool:
 # caller gives up and reports "unavailable". Short on purpose: these are
 # snapshot queries a UI polls between turns, never something worth stalling on.
 CONTROL_TIMEOUT = 5.0
+
+# How long the CLI gets to answer the ``initialize`` request that registers
+# the loop's hook callbacks. The SDK allows 60 s because MCP servers may still
+# be starting. A CLI that never answers costs the hooks, never the turn.
+INITIALIZE_TIMEOUT = 60.0
+
+# The CLI hook events the loop registers when it has a HookBus, each with the
+# HookBus event it forwards into (the one the native loop emits at the same
+# point). PostToolUseFailure feeds PostToolUse with ``is_error`` set, which is
+# how the native loop reports a failed call to the same hooks.
+_CLI_HOOK_EVENTS: dict[str, str] = {
+    "PreToolUse": PRE_TOOL_USE,
+    "PostToolUse": POST_TOOL_USE,
+    "PostToolUseFailure": POST_TOOL_USE,
+    "UserPromptSubmit": TURN_START,
+    "Stop": TURN_END,
+    "SubagentStop": SUBAGENT_STOP,
+    "PreCompact": PRE_COMPACT,
+    "SessionStart": SESSION_START,
+}
+# Registered with only a deny policy and no HookBus: the policy gate, and the
+# ledger re-injection after a compaction.
+_POLICY_HOOK_EVENTS = ("PreToolUse", "SessionStart")
+# Callback ids name their event, so an answer never depends on registration
+# order surviving a respawn.
+_HOOK_CALLBACK_PREFIX = "fluid_"
 
 # Poll interval while another reader (a live turn) owns stdout and is expected
 # to deliver our reply. Also caps a single pump read, so the pump notices a turn
@@ -183,6 +234,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         setting_sources: tuple[str, ...] | None = None,
         permissions: PermissionEngine | None = None,
         hooks: HookBus | None = None,
+        tool_policy: Callable[[str, dict[str, Any]], str | None] | None = None,
         journal: Any | None = None,
     ) -> None:
         self.store = store
@@ -215,6 +267,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # native loop's hook + permission treatment. Optional; None skips.
         self.permissions = permissions
         self.hooks = hooks
+        # Deny-only policy for the CLI's own tool calls, applied at the
+        # PreToolUse hook: (tool name, input) -> the denial text, or None to
+        # let the CLI's permission flow decide. None falls back to the
+        # permission engine's deny rules. Bridge-served calls are gated at the
+        # bridge instead and never reach it.
+        self.tool_policy = tool_policy
+        # True once the CLI accepted the ``initialize`` request that registered
+        # this loop's hook callbacks (per process; reset on every spawn).
+        self.cli_hooks_registered = False
+        # Frames read while waiting for the ``initialize`` reply that belong
+        # to the turn about to start (the CLI's init frame among them). The
+        # turn's reader drains these before it reads stdout.
+        self._stdout_backlog: list[bytes] = []
+        # Stop hooks that sent the model back to work this turn (capped the
+        # way the native loop caps them).
+        self._stop_continuations = 0
         # The continual journal (fluid.codemode.journal.ToolJournal), fed from
         # the frames the CLI reports; None when learning is off.
         self._journal = journal
@@ -489,6 +557,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         only the CLI and left those children orphaned.
         """
         proc, self._proc = self._proc, None
+        self._stdout_backlog.clear()
         if proc is None or proc.returncode is not None:
             return
         try:
@@ -640,6 +709,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             limit=STREAM_LINE_LIMIT,
             **spawn_kwargs,
         )
+        self._stdout_backlog.clear()
+        self.cli_hooks_registered = False
+        if self._cli_hook_events():
+            async with self._stdout_lock:
+                await self._initialize_cli_hooks()
         return self._proc
 
     # ─── turn lifecycle ──────────────────────────────────────────────────
@@ -650,6 +724,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         turn_id = new_id("turn")
         self._background_turn_terminal = False
         self._active_turn_id = turn_id
+        self._stop_continuations = 0
         mapper: StreamJsonMapper | None = None
         # Everything from here to the result sits under one guard: a failure
         # anywhere in it must still end the turn with a terminal event, or
@@ -954,6 +1029,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # exact request_id (a context-usage snapshot taken as this turn
                 # was starting). Route it instead of dropping it on the floor.
                 continue
+            if await self._answer_hook_line(text):
+                # A hook the CLI is blocked on: never stale either.
+                continue
             logger.warning("discarding stale between-turn CLI frame: %.300s", text)
         logger.warning("stale-frame drain hit its line cap; continuing turn anyway")
 
@@ -968,7 +1046,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         parent = user_node
         last_assistant: Message | None = None
         while True:
-            line = await self._proc.stdout.readline()
+            line = await self._next_stdout_line()
             if not line:
                 return "claude stream closed before result"
             text = line.decode(errors="replace").strip()
@@ -980,6 +1058,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 continue  # non-JSON diagnostic line — skip
 
             mapped = mapper.feed(frame)
+            if mapped.hook_request is not None:
+                # The CLI waits on this answer before it goes on, so it is
+                # given here, in stream order.
+                await self._answer_hook_request(mapped.hook_request)
+                continue
             # Claude's native question tool is a posting operation, not a
             # permission decision. Never fabricate synchronous user answers.
             if mapped.permission is not None and mapped.permission.tool_name == "AskUserQuestion":
@@ -1171,6 +1254,425 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             },
         })
 
+    # ─── Claude Code hooks ───────────────────────────────────────────────
+
+    def _cli_hook_events(self) -> tuple[str, ...]:
+        """The CLI hook events this loop registers; empty registers none."""
+        if self.hooks is not None:
+            return tuple(_CLI_HOOK_EVENTS)
+        if self.tool_policy is not None or self._has_deny_rules():
+            return _POLICY_HOOK_EVENTS
+        return ()
+
+    def _has_deny_rules(self) -> bool:
+        rules = getattr(self.permissions, "rules", None) or ()
+        return any(getattr(rule, "decision", None) == "deny" for rule in rules)
+
+    async def _initialize_cli_hooks(self) -> None:
+        """Register this loop's hook callbacks with a freshly spawned CLI.
+
+        Sends the ``initialize`` control_request the Agent SDK sends, with one
+        callback per event, and reads stdout until its reply. The reply can
+        trail frames that belong to the first turn (the CLI's ``init`` frame),
+        so those are kept for the turn's reader, and a hook the CLI fires in
+        the meantime is answered. Never raises: a CLI that refuses, stays
+        silent or has already exited leaves the hooks unregistered and the
+        turn to report whatever is wrong with the process.
+        """
+        assert self._proc is not None and self._proc.stdout is not None
+        events = self._cli_hook_events()
+        request_id = self._next_req_id()
+        try:
+            await self._write_frame({
+                "type": "control_request",
+                "request_id": request_id,
+                "request": {
+                    "subtype": "initialize",
+                    "hooks": {
+                        event: [{
+                            "matcher": None,
+                            "hookCallbackIds": [_HOOK_CALLBACK_PREFIX + event],
+                        }]
+                        for event in events
+                    },
+                },
+            })
+        except (OSError, RuntimeError):
+            # The CLI already closed stdin (a rejected --resume handle does
+            # that); the turn's own write meets the same error and retries.
+            logger.debug("claude CLI closed stdin before initialize", exc_info=True)
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + INITIALIZE_TIMEOUT
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning(
+                    "claude CLI did not answer initialize within %.0fs; its "
+                    "hooks are not registered for this process", INITIALIZE_TIMEOUT,
+                )
+                return
+            try:
+                line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=remaining)
+            except TimeoutError:
+                continue
+            if not line:
+                return  # EOF: the turn's reader reports the closed stream
+            text = line.decode(errors="replace").strip()
+            try:
+                frame = json.loads(text) if text else None
+            except json.JSONDecodeError:
+                frame = None
+            if isinstance(frame, dict) and frame.get("type") == "control_response":
+                reply = parse_control_response(frame)
+                if reply is not None and reply.request_id == request_id:
+                    if reply.ok:
+                        self.cli_hooks_registered = True
+                    else:
+                        logger.warning(
+                            "claude CLI refused initialize (%s); its hooks are "
+                            "not registered for this process", reply.error,
+                        )
+                    return
+                if reply is not None:
+                    self._resolve_control(reply)
+                continue
+            hook = parse_hook_callback(frame) if isinstance(frame, dict) else None
+            if hook is not None:
+                await self._answer_hook_request(hook)
+                continue
+            self._stdout_backlog.append(line)
+
+    async def _next_stdout_line(self) -> bytes:
+        """The turn reader's next line: what ``initialize`` read ahead first."""
+        if self._stdout_backlog:
+            return self._stdout_backlog.pop(0)
+        assert self._proc is not None and self._proc.stdout is not None
+        return await self._proc.stdout.readline()
+
+    async def _answer_hook_line(self, text: str) -> bool:
+        """Answer ``text`` if it is a hook_callback control_request."""
+        try:
+            frame = json.loads(text)
+        except json.JSONDecodeError:
+            return False
+        hook = parse_hook_callback(frame)
+        if hook is None:
+            return False
+        await self._answer_hook_request(hook)
+        return True
+
+    async def _answer_hook_request(self, request: HookCallbackRequest) -> None:
+        """Run one CLI hook through the HookBus and write the CLI's answer.
+
+        An unknown callback id or a failure inside the forwarding answers with
+        the error subtype, which the CLI treats as a failed hook and carries
+        on; it never ends the turn.
+        """
+        event = None
+        if request.callback_id.startswith(_HOOK_CALLBACK_PREFIX):
+            event = request.callback_id[len(_HOOK_CALLBACK_PREFIX):]
+        response: dict[str, Any]
+        try:
+            if event not in _CLI_HOOK_EVENTS:
+                raise ValueError(f"unknown hook callback: {request.callback_id!r}")
+            output = await self._run_cli_hook(event, request.input, request.tool_use_id)
+            response = {
+                "subtype": "success",
+                "request_id": request.cli_request_id,
+                "response": output,
+            }
+        except Exception as exc:  # noqa: BLE001 — a hook never ends the turn
+            logger.warning("delegated %s hook failed", event or request.callback_id, exc_info=True)
+            response = {
+                "subtype": "error",
+                "request_id": request.cli_request_id,
+                "error": str(exc) or type(exc).__name__,
+            }
+        try:
+            await self._write_frame({"type": "control_response", "response": response})
+        except (OSError, RuntimeError):
+            logger.debug("could not answer the CLI's hook callback", exc_info=True)
+
+    async def _run_cli_hook(
+        self, event: str, data: dict[str, Any], tool_use_id: str | None,
+    ) -> dict[str, Any]:
+        """The CLI's hook output for one ``event``, decided by the HookBus."""
+        if event == "PreToolUse":
+            return await self._cli_pre_tool_use(data, tool_use_id)
+        if event in ("PostToolUse", "PostToolUseFailure"):
+            return await self._cli_post_tool_use(event, data, tool_use_id)
+        if event == "UserPromptSubmit":
+            return await self._cli_prompt_submit(data)
+        if event == "Stop":
+            return await self._cli_stop(data)
+        if event == "SubagentStop":
+            return await self._cli_subagent_stop(data)
+        if event == "PreCompact":
+            return await self._cli_pre_compact(data)
+        return await self._cli_session_start(data)
+
+    def _cli_hook_payload(self, data: dict[str, Any], **fields: Any) -> dict[str, Any]:
+        """The native loop's payload shape: fluid's session id, the transcript
+        path (the CLI's own here), then the event's fields."""
+        return {
+            "session_id": self._session.session_id if self._session else "",
+            "transcript_path": str(data.get("transcript_path") or ""),
+            **fields,
+        }
+
+    async def _hook_event(
+        self, level: str, message: str, hook_event: str, tool_name: str | None = None,
+    ) -> None:
+        if self._session is None:
+            return
+        await self._emit(HookEvent(
+            session_id=self._session.session_id, turn_id=self._active_turn_id,
+            level=level, message=message, hook_event=hook_event, tool_name=tool_name,
+        ))
+
+    async def _report_hook_warnings(
+        self, hook_event: str, decision: Any, tool_name: str | None = None,
+    ) -> None:
+        """Hook diagnostics and ``systemMessage`` as warning HookEvents, as
+        the native loop reports them."""
+        messages = [*getattr(decision, "warnings", ())]
+        if getattr(decision, "system_message", None):
+            messages.append(decision.system_message)
+        for message in messages:
+            await self._hook_event("warning", message, hook_event, tool_name)
+
+    def _bridge_serves(self, tool_name: str) -> bool:
+        """True for a call the bundled bridge serves: the bridge runs that
+        call's hooks and gates it, so the CLI's hooks leave it alone."""
+        return tool_name.startswith(_BUNDLED_PREFIX) and self._socket_server is not None
+
+    def _policy_denial(self, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+        """Why the deny policy refuses this call, or None."""
+        if self.tool_policy is not None:
+            try:
+                return self.tool_policy(tool_name, tool_input) or None
+            except Exception:  # noqa: BLE001 — the CLI's own permission flow still runs
+                logger.warning("tool policy failed for %s", tool_name, exc_info=True)
+                return None
+        if self.permissions is None:
+            return None
+        from fluid.permissions.engine import Verdict
+        from fluid.permissions.rules import match_rule
+
+        rule = match_rule(self.permissions.rules, tool_name, tool_input, cwd=self.ctx.cwd)
+        if rule is None or rule.decision != "deny":
+            return None
+        return Verdict("deny", "rule", "", rule).deny_message()
+
+    async def _cli_pre_tool_use(
+        self, data: dict[str, Any], tool_use_id: str | None,
+    ) -> dict[str, Any]:
+        """PreToolUse: the HookBus first, then the deny policy; a deny from
+        either wins, even over a hook's ``allow``."""
+        name = str(data.get("tool_name") or "")
+        raw_input = data.get("tool_input")
+        tool_input: dict[str, Any] = raw_input if isinstance(raw_input, dict) else {}
+        if self._bridge_serves(name):
+            return {}
+        specific: dict[str, Any] = {"hookEventName": "PreToolUse"}
+        if self.hooks is not None:
+            decision = await self.hooks.emit(PRE_TOOL_USE, self._cli_hook_payload(
+                data, name=name, input=tool_input,
+                tool_use_id=data.get("tool_use_id") or tool_use_id,
+                turn_id=self._active_turn_id,
+            ))
+            await self._report_hook_warnings(PRE_TOOL_USE, decision, name)
+            if decision.action == "deny" or decision.stop:
+                reason = decision.note or ("stopped by hook" if decision.stop else "denied")
+                await self._hook_event("deny", reason, PRE_TOOL_USE, name)
+                output: dict[str, Any] = {"hookSpecificOutput": {
+                    **specific,
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": f"blocked by hook: {reason}",
+                }}
+                if decision.stop:
+                    self._hook_stop_reason = reason
+                    output.update({"continue": False, "stopReason": reason})
+                return output
+            if decision.action == "modify" and decision.replacement_input is not None:
+                tool_input = decision.replacement_input
+                specific["updatedInput"] = tool_input
+            if decision.permission_decision in ("allow", "ask"):
+                specific["permissionDecision"] = decision.permission_decision
+                if decision.note:
+                    specific["permissionDecisionReason"] = decision.note
+            if decision.additional_context:
+                specific["additionalContext"] = decision.additional_context
+        denial = self._policy_denial(name, tool_input)
+        if denial is not None:
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": denial,
+            }}
+        if specific.get("permissionDecision") == "allow":
+            await self._hook_event(
+                "info", f"hook approved {name}; permission prompt skipped", PRE_TOOL_USE, name,
+            )
+        return {"hookSpecificOutput": specific} if len(specific) > 1 else {}
+
+    async def _cli_post_tool_use(
+        self, event: str, data: dict[str, Any], tool_use_id: str | None,
+    ) -> dict[str, Any]:
+        name = str(data.get("tool_name") or "")
+        if self.hooks is None or self._bridge_serves(name):
+            return {}
+        failed = event == "PostToolUseFailure"
+        raw_input = data.get("tool_input")
+        decision = await self.hooks.emit(POST_TOOL_USE, self._cli_hook_payload(
+            data, name=name,
+            tool_use_id=data.get("tool_use_id") or tool_use_id,
+            input=raw_input if isinstance(raw_input, dict) else {},
+            output=str(data.get("error") or "") if failed else _hook_text(data.get("tool_response")),
+            is_error=failed, turn_id=self._active_turn_id,
+        ))
+        await self._report_hook_warnings(POST_TOOL_USE, decision, name)
+        output: dict[str, Any] = {}
+        if decision.stop:
+            reason = decision.note or "stopped by hook"
+            self._hook_stop_reason = reason
+            await self._hook_event("warning", f"stopped by hook: {reason}", POST_TOOL_USE, name)
+            output = {"continue": False, "stopReason": reason}
+        elif decision.action == "deny":
+            reason = decision.note or "blocked by hook"
+            await self._hook_event("info", f"PostToolUse hook on {name}: {reason}", POST_TOOL_USE, name)
+            output = {"decision": "block", "reason": reason}
+        if decision.additional_context:
+            output["hookSpecificOutput"] = {
+                "hookEventName": event, "additionalContext": decision.additional_context,
+            }
+        return output
+
+    async def _cli_prompt_submit(self, data: dict[str, Any]) -> dict[str, Any]:
+        if self.hooks is None:
+            return {}
+        decision = await self.hooks.emit(TURN_START, self._cli_hook_payload(
+            data, turn_id=self._active_turn_id, prompt=str(data.get("prompt") or ""),
+        ))
+        await self._report_hook_warnings(TURN_START, decision)
+        if decision.action == "deny" or decision.stop:
+            reason = decision.note or "blocked by hook"
+            await self._hook_event("deny", reason, TURN_START)
+            output: dict[str, Any] = {"decision": "block", "reason": reason}
+            if decision.stop:
+                output.update({"continue": False, "stopReason": reason})
+            return output
+        if decision.additional_context:
+            return {"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": decision.additional_context,
+            }}
+        return {}
+
+    async def _cli_stop(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Stop (TurnEnd): a deny sends the model back to work, capped per
+        turn at the native loop's limit; ``continue: false`` just ends it."""
+        if self.hooks is None:
+            return {}
+        from fluid.engine.native import MAX_STOP_HOOK_CONTINUATIONS
+
+        decision = await self.hooks.emit(TURN_END, self._cli_hook_payload(
+            data, turn_id=self._active_turn_id,
+            text=str(data.get("last_assistant_message") or ""),
+            stop_reason="end_turn",
+            stop_hook_active=bool(data.get("stop_hook_active")),
+        ))
+        await self._report_hook_warnings(TURN_END, decision)
+        if decision.stop:
+            await self._hook_event(
+                "warning", f"stopped by hook: {decision.note or 'no reason given'}", TURN_END,
+            )
+            return {}
+        if decision.action != "deny":
+            return {}
+        reason = decision.note or "a Stop hook asked the model to continue"
+        if self._stop_continuations >= MAX_STOP_HOOK_CONTINUATIONS:
+            await self._hook_event(
+                "warning",
+                f"Stop hook asked to continue ({reason}) but the turn already "
+                f"continued {self._stop_continuations} times; ending it",
+                TURN_END,
+            )
+            return {}
+        self._stop_continuations += 1
+        await self._hook_event("info", f"Stop hook asked to continue: {reason}", TURN_END)
+        return {"decision": "block", "reason": reason}
+
+    async def _cli_subagent_stop(self, data: dict[str, Any]) -> dict[str, Any]:
+        """SubagentStop: observational, as on the native host — the subagent
+        has already finished, so a block is reported and nothing else."""
+        if self.hooks is None:
+            return {}
+        decision = await self.hooks.emit(SUBAGENT_STOP, {
+            "session_id": self._session.session_id if self._session else "",
+            "turn_id": self._active_turn_id,
+            "task_id": data.get("agent_id"),
+            "worker_session_id": None,
+            "status": "completed",
+            "summary": str(data.get("last_assistant_message") or ""),
+            "agent_type": data.get("agent_type"),
+        })
+        await self._report_hook_warnings(SUBAGENT_STOP, decision)
+        if decision.action == "deny":
+            logger.warning(
+                "SubagentStop hook asked to block %s (%s) but the subagent had "
+                "already finished", data.get("agent_id"), decision.note,
+            )
+        return {}
+
+    async def _cli_pre_compact(self, data: dict[str, Any]) -> dict[str, Any]:
+        """PreCompact: observational, as on the native loop."""
+        if self.hooks is None:
+            return {}
+        decision = await self.hooks.emit(PRE_COMPACT, self._cli_hook_payload(
+            data, turn_id=self._active_turn_id,
+            trigger=str(data.get("trigger") or "auto"),
+            custom_instructions=str(data.get("custom_instructions") or ""),
+            tiers=[],
+        ))
+        await self._report_hook_warnings(PRE_COMPACT, decision)
+        return {}
+
+    async def _cli_session_start(self, data: dict[str, Any]) -> dict[str, Any]:
+        """SessionStart. After a compaction (source ``compact``) the session
+        ledger goes back into context first: the CLI's summary may have
+        dropped it, and it is the state that must survive every compaction."""
+        source = str(data.get("source") or "startup")
+        parts: list[str] = []
+        if source == "compact":
+            ledger = self._ledger_context()
+            if ledger:
+                parts.append(ledger)
+        if self.hooks is not None:
+            decision = await self.hooks.emit(
+                SESSION_START, self._cli_hook_payload(data, source=source),
+            )
+            await self._report_hook_warnings(SESSION_START, decision)
+            if decision.additional_context:
+                parts.append(decision.additional_context)
+        if not parts:
+            return {}
+        return {"hookSpecificOutput": {
+            "hookEventName": "SessionStart", "additionalContext": "\n\n".join(parts),
+        }}
+
+    def _ledger_context(self) -> str | None:
+        """The session ledger in the native loop's reminder form, or None."""
+        from fluid.tools.builtins.ledger import read_ledger, render_ledger_reminder
+
+        try:
+            text = read_ledger(self.ctx, self._session.session_id if self._session else None)
+        except Exception:  # noqa: BLE001 — a reminder never fails a hook
+            logger.debug("reading the session ledger failed", exc_info=True)
+            return None
+        return render_ledger_reminder(text) if text else None
+
     # ─── control frames ──────────────────────────────────────────────────
 
     def _next_req_id(self) -> str:
@@ -1340,8 +1842,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             text = line.decode(errors="replace").strip()
             if not text:
                 continue
-            if not self._route_control_response(text):
-                logger.warning("discarding between-turn CLI frame: %.300s", text)
+            if self._route_control_response(text) or await self._answer_hook_line(text):
+                continue
+            logger.warning("discarding between-turn CLI frame: %.300s", text)
         return _PumpOutcome.REPLY
 
     async def get_context_usage(self) -> dict[str, Any] | None:
@@ -1434,6 +1937,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         assert self._proc is not None and self._proc.stdin is not None
         self._proc.stdin.write((json.dumps(frame) + "\n").encode())
         await self._proc.stdin.drain()
+
+
+def _hook_text(value: Any) -> str:
+    """A CLI ``tool_response`` as the text a PostToolUse hook sees.
+
+    MCP tools answer with content blocks, the CLI's own tools with a dict
+    (Bash: stdout/stderr/interrupted), so both are flattened to one string,
+    the shape the native loop hands its hooks.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return flatten_tool_content(value)
+    if value is None:
+        return ""
+    try:
+        return json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _content_to_cli(content: list[Any]) -> list[dict[str, Any]]:

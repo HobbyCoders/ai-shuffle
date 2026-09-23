@@ -127,7 +127,14 @@ HONORED:
 
 DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``thinking`` — fluid manages thinking via provider caps, not passed through.
-  * ``hooks`` / ``include_hook_events`` — fluid has its own HookBus; app SDK hooks not wired.
+  * ``hooks`` / ``include_hook_events`` — SDK-shaped hook callbacks from the
+    options object are not wired. The app's hook seam is fluid's HookBus
+    instead: every connect hands both legs the adapter's one bus
+    (:attr:`HarnessAdapter.hooks`). The native loop emits into it itself; the
+    delegated loop registers Claude Code hook callbacks with the CLI and
+    forwards each one into the same bus event, so a callback on the bus sees
+    both legs alike. The delegated leg's PreToolUse also applies
+    :func:`_delegated_tool_policy`, so a deny there wins over any allow.
   * ``extra_args`` — SDK/CLI-specific, ignored. (``setting_sources`` is now
     HONORED on native legs: it maps onto fluid's own scope filter — see
     ``_fluid_setting_sources`` — gating instruction files, skills, agents, and
@@ -257,6 +264,7 @@ from fluid.codemode.subprocess_kernel import KernelConfig
 from fluid.context.compaction import CompactionConfig
 from fluid.engine.native import NativeLoop
 from fluid.engine.delegated import DelegatedLoop
+from fluid.hooks.bus import HookBus
 from fluid.events.ops import (
     BackgroundTaskFinished,
     Interrupt,
@@ -378,6 +386,10 @@ class HarnessAdapter(ProviderAdapter):
         # real spend missing across several errored turns in one session.
         self._turn_usage_totals: Dict[str, float] = {}
         self._turn_model_calls: int = 0
+        # The HookBus both legs emit into. One bus per adapter, so a callback
+        # registered on it keeps observing across the reconnects that rebuild
+        # the engine.
+        self._hooks: HookBus = HookBus()
 
     # ─── Transition helper ────────────────────────────────────────────
 
@@ -385,6 +397,18 @@ class HarnessAdapter(ProviderAdapter):
     def engine(self) -> Optional[Any]:
         """Direct access to the underlying fluid engine (parallels sdk_client)."""
         return self._engine
+
+    @property
+    def hooks(self) -> HookBus:
+        """fluid's HookBus for this session, on whichever leg it runs.
+
+        Register with ``hooks.on(event, callback)``. The native loop emits
+        PreToolUse, PostToolUse, TurnStart, TurnEnd, SessionStart, PreCompact
+        and SubagentStop into it directly; the delegated loop forwards the
+        claude CLI's matching hooks into the same events with the same payload
+        shape.
+        """
+        return self._hooks
 
     @property
     def provider_kind(self) -> Optional[str]:
@@ -466,6 +490,7 @@ class HarnessAdapter(ProviderAdapter):
                 )
             # shutil.which + the bundled-CLI resolver stat the filesystem.
             claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
+            delegated_blocked = _delegated_disallowed(options)
             self._engine = DelegatedLoop(
                 store=store,
                 model=options.model,
@@ -512,7 +537,7 @@ class HarnessAdapter(ProviderAdapter):
                 # The bridged app builtin mcp__builtins__ScheduleWakeup
                 # (wakeup_service-backed) is the one supported wake path on this
                 # leg. See _delegated_disallowed for the full derivation.
-                disallowed_tools=_delegated_disallowed(options),
+                disallowed_tools=delegated_blocked,
                 # The session's tool surface: the agent's ``allow`` list (T3)
                 # intersected with a file-agent worker's definition list (CE12).
                 # The CLI reads --allowed-tools as PERMISSION rules, so on this
@@ -523,6 +548,12 @@ class HarnessAdapter(ProviderAdapter):
                 # the tool before the app's permission callback is consulted.
                 allowed_tools=_delegated_allowed(options),
                 claude_cmd=claude_cmd,
+                # The CLI's hooks, forwarded into the same bus the native leg
+                # emits into; PreToolUse also enforces the deny policy, so a
+                # call the app would refuse is refused even in a mode where
+                # the CLI never asks can_use_tool (bypassPermissions).
+                hooks=self._hooks,
+                tool_policy=_delegated_tool_policy(options, permissions, delegated_blocked),
             )
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
@@ -877,6 +908,7 @@ class HarnessAdapter(ProviderAdapter):
                 bus=engine_bus,
                 registry=self._registry,
                 permissions=permissions,
+                hooks=self._hooks,
                 ctx=native_ctx,
                 session_id=fluid_session_id,
                 # Same scope filter the prompt compiled under, so fluid's
@@ -3481,6 +3513,44 @@ def _delegated_disallowed(options: SessionOptions) -> list:
                 "for this connect"
             )
     return sorted(banned)
+
+
+def _delegated_tool_policy(
+    options: SessionOptions,
+    permissions: Optional[PermissionEngine],
+    blocked: List[str],
+):
+    """The deny policy the delegated leg's PreToolUse hook applies.
+
+    ``(tool name, input) -> denial text | None`` over the claude CLI's own
+    tool calls (the bundled bridge gates the calls it serves). It refuses
+    what the app refuses on this leg's other seams, with the same messages:
+    a tool on the CLI blocklist (``blocked``, i.e. ``--disallowed-tools``), a
+    tool outside the session's surface, and a deny rule of the session's
+    permission engine. Asks are not its business: those stay with the CLI's
+    own ``can_use_tool`` prompt. It exists because that prompt is never
+    raised in bypass mode, and because ``--disallowed-tools`` misses a
+    surface the CLI tool cache did not know yet.
+    """
+    from app.core.tool_access import matches_any, tool_permitted
+    from fluid.permissions.engine import Verdict
+    from fluid.permissions.rules import match_rule
+
+    surface = _tool_allowlist(options)
+    rules = list(getattr(permissions, "rules", None) or ())
+    cwd = options.cwd
+
+    def policy(name: str, tool_input: Dict[str, Any]) -> Optional[str]:
+        if blocked and matches_any(name, blocked):
+            return f"Tool '{name}' is disabled in this profile"
+        if surface and not tool_permitted(name, surface, None):
+            return f"Tool '{name}' is not enabled in this profile"
+        rule = match_rule(rules, name, tool_input, cwd=cwd)
+        if rule is not None and rule.decision == "deny":
+            return Verdict("deny", "rule", "", rule).deny_message()
+        return None
+
+    return policy
 
 
 def _compaction_config() -> CompactionConfig:
