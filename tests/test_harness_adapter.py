@@ -6562,6 +6562,57 @@ def test_safety_block_keeps_the_prefix_stable_across_turns():
     assert first.text.index(ha.SAFETY_BLOCK) < first.text.index(ACT_GUIDANCE_BLOCK)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "model"),
+    [
+        ("openai_responses", "gpt-6-astra"),
+        ("anthropic", "opus"),
+        ("openrouter", "z-ai/glm-5.3"),
+        ("openrouter", "stealth/union-alpha"),
+    ],
+)
+async def test_safety_block_rides_the_engine_prompt_unchanged_across_turns(
+    monkeypatch, tmp_path, kind, model
+):
+    """The prompt the engine is built with carries the safety block on every
+    native lane, and two user turns later it is still the same bytes."""
+    import app.core.agent_provider_models as agent_models
+    import app.core.provider.harness_adapter as ha
+
+    class _Loop(_CapturingLoop):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.system = kwargs.get("system")
+            self.submitted = []
+
+        async def submit(self, op):
+            self.submitted.append(op)
+
+    monkeypatch.setattr(agent_models, "available_subagents", lambda *a, **k: [])
+    monkeypatch.setattr("fluid.context.agents.discover_agents", lambda *a, **k: [])
+    monkeypatch.setattr(ha, "NativeLoop", _Loop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(SessionOptions(
+        model=model,
+        system_prompt="BASE PROMPT",
+        cwd=str(tmp_path),
+        extra={"fluid_provider": kind, "app_session_id": "safety-session"},
+    ))
+    engine = adapter._engine
+    assert engine.system.count(ha.SAFETY_BLOCK) == 1
+    before = engine.system
+
+    await adapter.send_query("first turn")
+    await adapter.send_query("second turn")
+
+    assert adapter._engine is engine
+    assert len(engine.submitted) == 2
+    assert engine.system == before
+
+
 @pytest.mark.parametrize(
     ("model", "expected"),
     [
