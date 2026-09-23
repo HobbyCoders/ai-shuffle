@@ -169,7 +169,7 @@ def make_message(supplier):
             )
         else:
             turn_id = await turn_scheduler.on_agent_message(
-                target, session_id, text, urgent=urgent,
+                target, session_id, text, **({"urgent": True} if urgent else {}),
             )
         if not turn_id:
             return ToolOutcome(
