@@ -25,3 +25,4 @@ jobs:
       - run: python -m pip install PyYAML==6.0.3
       - run: python scripts/ci/test-artifact-policy.py
       - run: python scripts/ci/test-cost-policy.py
+      - run: python scripts/ci/test-merge-gate.py

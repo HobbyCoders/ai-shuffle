@@ -92,11 +92,12 @@ jobs:
         run: docker compose config --quiet
       - name: Verify actual container lifecycle and UI
         run: python scripts/verify_container_postgres.py --image ai-shuffle:postgres-candidate --artifacts "$RUNNER_TEMP/container-postgres"
+      # Diagnostics only; release evidence is uploaded by docker-publish.yml.
       - name: Upload container evidence
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          retention-days: 7
+          retention-days: 3
           name: container-postgres-${{ github.sha }}
           path: ${{ runner.temp }}/container-postgres
           if-no-files-found: ignore

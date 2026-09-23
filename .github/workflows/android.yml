@@ -261,11 +261,13 @@ jobs:
       - name: Collect emulator host diagnostics
         if: always()
         run: bash ci/emulator-diagnostics.sh after-emulator
+      # Diagnostics only: a passing run is proven by the job result, so keep
+      # reports, logcat and screenshots only when verification fails.
       - name: Upload test reports
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          retention-days: 7
+          retention-days: 3
           name: android-ui-verification-api-${{ matrix.api }}
           path: |
             ${{ runner.temp }}/android-emulator/

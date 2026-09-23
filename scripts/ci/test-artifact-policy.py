@@ -136,6 +136,24 @@ class ArtifactPolicyTests(unittest.TestCase):
                 with self.subTest(workflow=file, mode=mode):
                     subprocess.run(["node", "-e", CLEANUP_RUNNER], input=json.dumps({"script": cleanup["with"]["script"], "names": names, "mode": mode}), text=True, check=True)
 
+    def test_ci_diagnostics_upload_only_on_failure(self):
+        diagnostics = {
+            ("android.yml", "android-ui"): "android-ui-verification-api-${{ matrix.api }}",
+            ("ci-browser-workspace.yml", "workspace"): "browser-workspace-screenshots",
+            ("container-postgres.yml", "container-postgres"): "container-postgres-${{ github.sha }}",
+            ("build-branch.yml", "build"): "container-postgres-${{ github.sha }}",
+        }
+        for (file, job), name in diagnostics.items():
+            with self.subTest(file=file):
+                step = next(s for s in uploads(workflow(file)["jobs"][job]) if s["with"]["name"] == name)
+                self.assertEqual(step["if"], "failure()")
+                self.assertEqual(step["with"]["retention-days"], "3")
+        # Release evidence is kept whatever the outcome; this policy must not touch it.
+        release = uploads(workflow("docker-publish.yml")["jobs"]["build"])[0]
+        self.assertTrue(release["if"].startswith("always() && "))
+        installer = next(s for s in uploads(workflow("desktop-installer.yml")["jobs"]["verify"]) if s["with"]["name"] == "installed-desktop-evidence")
+        self.assertEqual(installer["if"], "always()")
+
     def test_manual_play_bundle_and_failed_installer_remain_recoverable(self):
         play = workflow("android-play.yml")
         self.assertEqual(uploads(play["jobs"]["bundle"])[0]["with"]["retention-days"], PLAY_RETENTION)
