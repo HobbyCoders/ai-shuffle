@@ -374,9 +374,22 @@ def workflows_for(api, repo, pull):
     return fetch_workflows(api, repo, head)[0]
 
 
+def with_known_runs(listed, known):
+    """Add runs the event already delivered to the listed ones.
+
+    The ``head_sha`` run search lags: evaluated straight after a run
+    completed, it returned no run at all for that suite, and nothing fired
+    afterwards to correct the resulting failure. The completed run in the
+    event payload is authoritative for its own id.
+    """
+    known = [r for r in known if r.get("id") is not None]
+    ids = {r["id"] for r in known}
+    return [r for r in listed if r.get("id") not in ids] + known
+
+
 def evaluate_pr(api, repo, number, *, expected_sha=None, label_action=None, label_changed_at=None,
                 grace_seconds=0, poll_seconds=POLL_SECONDS, sleep=time.sleep, clock=time.monotonic,
-                include_closed=False):
+                include_closed=False, known_runs=()):
     """Return (head_sha, Verdict), or None when the PR is closed or has moved on."""
     pull = api.get(f"repos/{repo}/pulls/{number}")
     if pull.get("state") != "open" and not include_closed:
@@ -396,6 +409,7 @@ def evaluate_pr(api, repo, number, *, expected_sha=None, label_action=None, labe
     while True:
         expired = clock() >= deadline
         runs = api.paginate(f"repos/{repo}/actions/runs", {"head_sha": head_sha}, key="workflow_runs") if suites else []
+        runs = with_known_runs(runs, [r for r in known_runs if r.get("head_sha") == head_sha]) if suites else []
         verdict = decide(suites, runs, head_sha, labels, grace_expired=expired,
                          label_action=label_action, label_changed_at=label_changed_at)
         if expired or not verdict.waiting_for_runs:
@@ -430,7 +444,7 @@ def run(api, repo, event_name, payload, *, dry_run=False, run_url="", summary_pa
             return None
         sha = workflow_run["head_sha"]
         numbers = open_prs_for_sha(api, repo, sha, workflow_run.get("pull_requests"))
-        options = {"expected_sha": sha}
+        options = {"expected_sha": sha, "known_runs": [workflow_run]}
     elif event_name == "workflow_dispatch":
         sha, numbers, options = None, [int(payload["pr_number"])], {}
     elif event_name == "local":

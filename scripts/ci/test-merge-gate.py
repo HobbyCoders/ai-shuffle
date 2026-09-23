@@ -252,6 +252,19 @@ class OrchestrationTests(unittest.TestCase):
         self.execute(api, "workflow_run", payload)
         self.assertEqual(api.statuses, [(HEAD, "success", api.statuses[0][2])])
 
+    def test_triggering_run_counts_when_the_run_search_lags(self):
+        # The search has not indexed the run that just completed yet.
+        api = FakeGitHub(runs=[])
+        payload = {"workflow_run": run(BACKEND, number=9) | {"pull_requests": []}}
+        self.execute(api, "workflow_run", payload)
+        self.assertEqual([s[1] for s in api.statuses], ["success"])
+
+    def test_triggering_run_replaces_its_stale_listing(self):
+        api = FakeGitHub(runs=[run(BACKEND, number=9, status="in_progress", conclusion=None)])
+        payload = {"workflow_run": run(BACKEND, number=9, conclusion="failure") | {"pull_requests": []}}
+        self.execute(api, "workflow_run", payload)
+        self.assertEqual([s[1] for s in api.statuses], ["failure"])
+
     def test_workflow_run_for_an_old_sha_writes_nothing(self):
         api = FakeGitHub(runs=[run(BACKEND, sha=OLD)])
         payload = {"workflow_run": {"head_sha": OLD, "event": "pull_request", "pull_requests": [{"number": 7, "head": {"sha": OLD}}]}}
