@@ -242,9 +242,19 @@ export function normalizePermissionMode(mode: string | null | undefined): string
 	return mode === 'plan' ? 'default' : mode ?? null;
 }
 
+/**
+ * The permission mode a NEW session may inherit from the last pick. Bypass is
+ * never carried over: choosing it once must not leave later sessions unguarded
+ * without anyone noticing, so it falls back to `default`.
+ */
+export function rememberablePermissionMode(mode: string | null | undefined): string | null {
+	const normalized = normalizePermissionMode(mode);
+	return normalized === 'bypassPermissions' ? 'default' : normalized;
+}
+
 export function getPersistedPermissionMode(): string | null {
 	if (typeof window === 'undefined') return null;
-	return normalizePermissionMode(localStorage.getItem('aihub_lastPermissionMode'));
+	return rememberablePermissionMode(localStorage.getItem('aihub_lastPermissionMode'));
 }
 
 /** Last-used fast-tier pick. Stored as `'1'` / absent, so anything else is off. */
@@ -264,6 +274,7 @@ export function setPersistedRunBinding(
 	key: 'model' | 'effort' | 'permissionMode' | 'contextWindowChoice' | 'fastMode',
 	value: string | null
 ): void {
+	if (key === 'permissionMode') value = rememberablePermissionMode(value);
 	composerPreferences.set(key, value);
 	if (typeof window === 'undefined') return;
 	const storageKey = {

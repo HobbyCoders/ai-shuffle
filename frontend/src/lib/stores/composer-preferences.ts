@@ -48,6 +48,9 @@ function normalize<K extends keyof Picks>(key: K, value: unknown): Picks[K] {
   return null as Picks[K];
  }
  if (key === 'worktreeIntent') return (value === 'worktree' ? 'worktree' : 'local') as Picks[K];
+ // Bypass is a per-session choice. A remembered (or synced, or legacy) bypass
+ // default falls back to `default` so a new session never starts unguarded.
+ if (key === 'permissionMode' && value === 'bypassPermissions') return 'default' as Picks[K];
  return (typeof value === 'string' ? value : defaults[key]) as Picks[K];
 }
 function store<K extends keyof Picks>(key: K, value: unknown) {
