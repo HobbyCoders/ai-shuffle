@@ -36,6 +36,16 @@ Keep the license key private. The pull token is less sensitive (it only download
 2. Paste your license key and activate.
 3. The card shows the plan, how many of your 3 seats are in use, and the date the current lease runs until.
 
+### Key given at install
+
+You can hand AI Shuffle the key before its first start, and it activates on its own:
+
+- **Desktop app:** when the first download needs a license, the first-run launcher asks for the key in its window. The worker activates that key when it first starts, and the app deletes its saved copy once the license is in use.
+- **Docker Compose:** `LICENSE_KEY=` in `.env`.
+- **Unraid:** the **License key** field in the template.
+
+Each key is tried once. If it is not accepted (a typo, or all 3 seats taken), **Settings → License** says why; activate there instead. After the first start, `LICENSE_KEY` and the template field are ignored and you can clear them.
+
 When you activate, the worker sends the license key, a random install ID, a fingerprint made from that ID and the machine ID, the host name (as the worker's display name) and the app version. It never sends prompts, files, model traffic or AI provider credentials.
 
 ### All 3 seats are taken

@@ -174,6 +174,14 @@ async def lifespan(app: FastAPI):
             logger.info("Owner password set from OWNER_PASSWORD (first boot)")
     except Exception:
         logger.exception("Could not apply OWNER_PASSWORD (non-fatal)")
+    # LICENSE_KEY (Docker, Unraid) is likewise taken out of the environment
+    # now; the license refresh task activates it once in the background.
+    from app.core import license as licensing
+    try:
+        if licensing.capture_env_key():
+            logger.info("License key found in LICENSE_KEY; it is activated in the background")
+    except Exception:
+        logger.exception("Could not read LICENSE_KEY (non-fatal)")
     # A network database and its device keys belong together. Do not start
     # schedulers/connector workers against another device's private database.
     from app.network import startup as network_startup

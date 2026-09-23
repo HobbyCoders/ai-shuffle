@@ -47,6 +47,10 @@ It is used on the **first start only**. After that, AI Shuffle keeps its own cop
 
 You can also leave it empty and create the password on your first visit instead; until you do, any browser that can reach AI Shuffle can create it, so do it right after the first start. Either way, choose a long password (at least 12 characters) you do not use anywhere else. The field is masked, but anyone with access to the Unraid web interface can read container settings, so creating it on first visit keeps it out of the template.
 
+### License key (optional here)
+
+The **License key** field takes your license key (`ASH-XXXXX-XXXXX-XXXXX-XXXXX`). AI Shuffle activates it on the first start and ignores the field after that, so you can clear it once the license shows in **Settings → License**. Leave it empty to paste the key there instead. While the beta runs, no key is needed.
+
 ## 5. Check the paths
 
 Everything is stored under `/mnt/user/appdata/ai-shuffle/`:

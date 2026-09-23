@@ -23,6 +23,15 @@ What the worker sends to the license server: the license key (on activation
 only), a random install id, a SHA-256 fingerprint of that id and the machine
 id, the host name as a display name, and the app version. Never prompts,
 model traffic or provider credentials.
+
+First-install key: a key given before the worker ever ran is activated on its
+own when the worker starts (:func:`activate_first_install_key`). It comes from
+the desktop launcher's ``license-key.json`` in the update folder
+(``SHUFFLE_SOURCE_ROOT``; the desktop deletes that file itself once a lease
+has opened its update feed) or from ``LICENSE_KEY`` in the environment
+(Docker, Unraid), which is taken out of the environment at startup so agents
+never inherit it. Each key is tried once: after the license server answered,
+yes or no, the same key is not sent again.
 """
 from __future__ import annotations
 
@@ -32,6 +41,7 @@ import binascii
 import hashlib
 import json
 import logging
+import os
 import random
 import socket
 import threading
@@ -562,8 +572,123 @@ def _seconds_until_refresh(now: float) -> float:
     return max(FIRST_CHECK_DELAY, due - now)
 
 
+# ---------------------------------------------------------------------------
+# First-install key
+# ---------------------------------------------------------------------------
+
+LICENSE_KEY_ENV = "LICENSE_KEY"
+SOURCE_ROOT_ENV = "SHUFFLE_SOURCE_ROOT"
+DESKTOP_KEY_FILE = "license-key.json"
+FIRST_KEY_MARK_PREFIX = "license_first_key:"
+FIRST_KEY_ATTEMPTS = 5
+
+_env_key: str | None = None
+
+
+def capture_env_key(environ=None) -> bool:
+    """Take ``LICENSE_KEY`` out of the environment and keep it for
+    :func:`activate_first_install_key`. Called once at startup, before any
+    agent can start, like ``OWNER_PASSWORD``. Returns whether one was set."""
+    global _env_key
+    environ = os.environ if environ is None else environ
+    value = (environ.pop(LICENSE_KEY_ENV, None) or "").strip()
+    if value:
+        _env_key = value
+    return bool(value)
+
+
+def _desktop_key() -> str | None:
+    """The key the desktop launcher saved at first install, if any."""
+    root = os.environ.get(SOURCE_ROOT_ENV) or ""
+    if not root or not os.path.isabs(root):
+        return None
+    try:
+        raw = (Path(root) / DESKTOP_KEY_FILE).read_bytes()
+        if len(raw) > 4096:
+            return None
+        key = json.loads(raw).get("key")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return key.strip() if isinstance(key, str) and 0 < len(key.strip()) <= 64 else None
+
+
+def first_install_key() -> tuple[str, str] | None:
+    """(key, where it came from): the environment first, then the desktop file."""
+    if _env_key:
+        return _env_key, "environment"
+    key = _desktop_key()
+    return (key, "desktop") if key else None
+
+
+def _first_key_mark() -> str:
+    return FIRST_KEY_MARK_PREFIX + settings.effective_instance_id
+
+
+def _key_digest(key: str) -> str:
+    canonical = "".join(ch for ch in key.upper() if ch.isalnum())
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+async def activate_first_install_key() -> str:
+    """Activate the key given at install time, once. Returns what happened:
+    none, beta, licensed (this worker already has a license), used (this key
+    was tried before), activated, refused, or unavailable (try again later)."""
+    global _env_key
+    found = first_install_key()
+    if not found:
+        return "none"
+    key, source = found
+    if beta_mode():
+        return "beta"
+    state = await asyncio.to_thread(_load_state)
+    if state.get("install_token") or state.get("lease"):
+        _env_key = None
+        return "licensed"
+    digest = _key_digest(key)
+    if await asyncio.to_thread(database.get_system_setting, _first_key_mark()) == digest:
+        _env_key = None
+        return "used"
+    try:
+        await activate(key)
+    except LicenseError as exc:
+        if exc.status in (502, 503):
+            logger.warning("First-install license key not activated yet: %s", exc.message)
+            return "unavailable"
+        await asyncio.to_thread(database.set_system_setting, _first_key_mark(), digest)
+        _env_key = None
+        where = "LICENSE_KEY" if source == "environment" else "the key entered at install"
+        message = f"{where} was not accepted: {exc.message}"
+        logger.warning("First-install license key refused (%s): %s", source, exc.message)
+        async with _state_lock():
+            current = await asyncio.to_thread(_load_state)
+            if not current.get("lease"):
+                current["last_error"] = message[:300]
+                await asyncio.to_thread(_save_state, current)
+        return "refused"
+    await asyncio.to_thread(database.set_system_setting, _first_key_mark(), digest)
+    _env_key = None
+    logger.info("License activated from the key given at install (%s)", source)
+    return "activated"
+
+
+async def _first_install_activation() -> None:
+    """Startup: activate a first-install key, retrying while the server is unreachable."""
+    for attempt in range(FIRST_KEY_ATTEMPTS):
+        try:
+            if await activate_first_install_key() != "unavailable":
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("First-install license activation failed")
+            return
+        await asyncio.sleep(_retry_delay(attempt + 1))
+
+
 async def refresh_loop() -> None:
-    """Background task: renew the lease daily, with jittered backoff on failure."""
+    """Background task: activate a first-install key, then renew the lease
+    daily, with jittered backoff on failure."""
+    await _first_install_activation()
     while True:
         try:
             if beta_mode():

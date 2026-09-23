@@ -61,6 +61,8 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Seeds the owner password on the first start only (see env.example).
       OWNER_PASSWORD: ${OWNER_PASSWORD:-}
+      # Activates your license on the first start (see env.example).
+      LICENSE_KEY: ${LICENSE_KEY:-}
 
     # Loopback only by default: the web UI is reachable from this computer.
     # To use it from another device, set BIND_HOST in .env to one address of
@@ -152,6 +154,15 @@ COOKIE_SECURE=false
 # browser on first visit instead. At least 12 characters.
 OWNER_PASSWORD=
 
+# --- License key ---------------------------------------------------------------
+
+# Optional. Your license key (ASH-XXXXX-XXXXX-XXXXX-XXXXX) from your license
+# email. On the first start AI Shuffle activates it for this install, then
+# ignores this line: the license lives in AI Shuffle from then on, so you can
+# clear it. Leave it empty to paste the key in Settings > License instead.
+# While the beta runs, no key is needed and this line is not used.
+LICENSE_KEY=
+
 # --- Files and permissions ---------------------------------------------------
 
 # The folder on this host where your projects live. Created on first start.
@@ -168,6 +179,8 @@ PGID=1000
 Paste your pull token after `AI_SHUFFLE_PULL_TOKEN=`. It is part of the image name, so Docker downloads the image without `docker login`, and pulls keep working after a reboot.
 
 The pull token only downloads the image; it is not your license key and cannot sign in to anything. It shows in `docker ps` and in logs, so if you share it by accident, get a new one from your account on hobbycoders.com, put it in `.env` and run `docker compose up -d`. The old token stops working within a minute; the running container is not affected.
+
+Optionally, paste your **license key** (`ASH-XXXXX-XXXXX-XXXXX-XXXXX`) after `LICENSE_KEY=` too. AI Shuffle activates it on the first start and ignores the line after that, so you can clear it once the license shows in **Settings → License**. Leave it empty to paste the key there instead. While the beta runs, no key is needed. See [License](/docs/getting-started/license).
 
 ## 3. Choose who can reach it
 

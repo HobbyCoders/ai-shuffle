@@ -42,6 +42,8 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Seeds the owner password on the first start only (see env.example).
       OWNER_PASSWORD: ${OWNER_PASSWORD:-}
+      # Activates your license on the first start (see env.example).
+      LICENSE_KEY: ${LICENSE_KEY:-}
 
     # Loopback only by default: the web UI is reachable from this computer.
     # To use it from another device, set BIND_HOST in .env to one address of

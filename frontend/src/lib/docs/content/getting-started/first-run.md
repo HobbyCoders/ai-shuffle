@@ -29,7 +29,7 @@ To change the password later, open **Settings → Account → Owner access**. Th
 
 ## 3. License
 
-The wizard asks for your license key (`ASH-XXXXX-XXXXX-XXXXX-XXXXX`, from your license email). While the beta runs, this step reads **Beta: no license needed** and you can continue. You can also add the key later in **Settings → License**. See [License](/docs/getting-started/license).
+The wizard asks for your license key (`ASH-XXXXX-XXXXX-XXXXX-XXXXX`, from your license email). While the beta runs, this step reads **Beta: no license needed** and you can continue. You can also add the key later in **Settings → License**. If you gave the key when installing (the desktop launcher, `LICENSE_KEY` in `.env`, or **License key** in the Unraid template), it is already active. See [License](/docs/getting-started/license).
 
 ## 4. Choose how Claude Code is paid for
 
