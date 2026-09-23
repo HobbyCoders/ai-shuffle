@@ -452,6 +452,21 @@ async def deactivate() -> dict:
     return status() | {"seat_released": released}
 
 
+async def release_seat(key: str, install_id: str) -> dict:
+    """Free the seat of another worker on the same license (one that is gone),
+    so this worker can activate. Needs the license key."""
+    if beta_mode():
+        raise LicenseError(409, "This build is part of the beta and needs no license key.")
+    if not isinstance(key, str) or not key.strip() or len(key) > 64:
+        raise LicenseError(400, "Enter a license key.")
+    if not isinstance(install_id, str) or not 8 <= len(install_id) <= 128:
+        raise LicenseError(400, "Choose a worker to deactivate.")
+    code, data = await _post("deactivate", {"key": key.strip(), "install_id": install_id})
+    if code != 200:
+        raise LicenseError(code if code in (400, 404) else 502, _server_message(data, "The license server could not free that seat."))
+    return {"ok": True, "seats_used": data.get("seats_used")}
+
+
 def _next_daily(now: float) -> float:
     return now + REFRESH_INTERVAL + random.uniform(-REFRESH_JITTER, REFRESH_JITTER)
 

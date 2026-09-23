@@ -18,9 +18,15 @@ def client(monkeypatch):
 
     async def activate(key):
         calls.append(("activate", key))
-        if key == "bad":
-            raise api.licensing.LicenseError(409, "All 3 workers on this license are in use.", code="seats_full", installs=[{"install_id": "x"}])
+        if key == "full":
+            raise api.licensing.LicenseError(409, "All 3 workers on this license are in use.", code="seats_full", seats=3, installs=[{"install_id": "x"}])
+        if key == "unknown":
+            raise api.licensing.LicenseError(404, "License key not recognised")
         return {"state": "active", "allowed": True}
+
+    async def release_seat(key, install_id):
+        calls.append(("release", key, install_id))
+        return {"ok": True, "seats_used": 2}
 
     async def deactivate():
         calls.append(("deactivate",))
@@ -32,6 +38,7 @@ def client(monkeypatch):
 
     monkeypatch.setattr(api.licensing, "activate", activate)
     monkeypatch.setattr(api.licensing, "deactivate", deactivate)
+    monkeypatch.setattr(api.licensing, "release_seat", release_seat)
     monkeypatch.setattr(api.licensing, "refresh", refresh)
     monkeypatch.setattr(api.licensing, "status", lambda: {"mode": "beta", "state": "beta", "allowed": True})
     with TestClient(app) as test_client:
@@ -47,10 +54,16 @@ def test_status_is_readable_by_any_signed_in_user(client):
 def test_owner_activates_and_errors_keep_their_status_and_details(client):
     c, _, calls = client
     ok = c.post("/api/v1/license/activate", json={"key": "ASH-AAAAA-AAAAA-AAAAA-AAAAA"})
-    assert ok.status_code == 200 and ok.json()["state"] == "active"
-    full = c.post("/api/v1/license/activate", json={"key": "bad"})
-    assert full.status_code == 409
-    assert full.json() == {"detail": "All 3 workers on this license are in use.", "code": "seats_full", "installs": [{"install_id": "x"}]}
+    assert ok.status_code == 200 and ok.json() == {"activated": True, "state": "active", "allowed": True}
+    # Seats full is an answer the card acts on, so it comes back as data.
+    full = c.post("/api/v1/license/activate", json={"key": "full"})
+    assert full.status_code == 200
+    assert full.json() == {"activated": False, "detail": "All 3 workers on this license are in use.", "code": "seats_full", "seats": 3, "installs": [{"install_id": "x"}]}
+    unknown = c.post("/api/v1/license/activate", json={"key": "unknown"})
+    assert unknown.status_code == 404 and unknown.json() == {"detail": "License key not recognised"}
+    released = c.post("/api/v1/license/release", json={"key": "full", "install_id": "install-x1"})
+    assert released.json() == {"ok": True, "seats_used": 2}
+    assert c.post("/api/v1/license/release", json={"key": "full", "install_id": "x"}).status_code == 422
     assert c.post("/api/v1/license/activate", json={"key": ""}).status_code == 422
     assert c.post("/api/v1/license/activate", json={"key": "k", "extra": 1}).status_code == 422
     assert c.post("/api/v1/license/deactivate").json()["seat_released"] is True
@@ -61,8 +74,8 @@ def test_owner_activates_and_errors_keep_their_status_and_details(client):
 def test_only_the_owner_changes_the_license(client):
     c, app, calls = client
     app.dependency_overrides.pop(require_admin)
-    for path in ("/api/v1/license/activate", "/api/v1/license/deactivate", "/api/v1/license/refresh"):
-        assert c.post(path, json={"key": "ASH-AAAAA-AAAAA-AAAAA-AAAAA"}).status_code in (401, 403)
+    for path in ("/api/v1/license/activate", "/api/v1/license/deactivate", "/api/v1/license/refresh", "/api/v1/license/release"):
+        assert c.post(path, json={"key": "ASH-AAAAA-AAAAA-AAAAA-AAAAA", "install_id": "install-x1"}).status_code in (401, 403)
     assert calls == []
 
 

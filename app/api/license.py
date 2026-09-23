@@ -1,7 +1,7 @@
 """/api/v1/license: license status, activation and deactivation for this worker.
 
 Anyone signed in can read the status (the banner needs it). Only the owner can
-activate or deactivate. Nothing here touches user data.
+activate, deactivate or free a seat. Nothing here touches user data.
 """
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -17,6 +17,12 @@ router = APIRouter(prefix="/api/v1/license", tags=["License"])
 
 class ActivateRequest(BaseModel):
     key: str = Field(min_length=1, max_length=64)
+    model_config = {"extra": "forbid"}
+
+
+class ReleaseRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=64)
+    install_id: str = Field(min_length=8, max_length=128)
     model_config = {"extra": "forbid"}
 
 
@@ -37,8 +43,21 @@ async def license_status(_=Depends(require_auth)):
 
 @router.post("/activate")
 async def activate_license(body: ActivateRequest, _=Depends(require_license_owner)):
+    """Activate with a key. When every seat is taken the answer is 200 with
+    ``activated: false`` and the workers holding seats, so the Settings card
+    can offer to free one (the API client does not expose error bodies)."""
     try:
-        return await licensing.activate(body.key)
+        return {"activated": True, **await licensing.activate(body.key)}
+    except licensing.LicenseError as exc:
+        if exc.extra.get("code") == "seats_full":
+            return {"activated": False, "detail": exc.message, **exc.extra}
+        return _error(exc)
+
+
+@router.post("/release")
+async def release_seat(body: ReleaseRequest, _=Depends(require_license_owner)):
+    try:
+        return await licensing.release_seat(body.key, body.install_id)
     except licensing.LicenseError as exc:
         return _error(exc)
 

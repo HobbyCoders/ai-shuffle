@@ -290,6 +290,16 @@ async def test_deactivation_offline_still_forgets_the_lease(store, keys, server)
     assert s["seat_released"] is False and s["state"] == "unlicensed"
 
 
+async def test_release_seat_uses_the_key_to_free_another_worker(store, server):
+    server.answers["deactivate"] = (200, {"ok": True, "seats_used": 2})
+    assert await licensing.release_seat(" ASH-AAAAA-AAAAA-AAAAA-AAAAA ", "other-install") == {"ok": True, "seats_used": 2}
+    assert server.requests == [("deactivate", {"key": "ASH-AAAAA-AAAAA-AAAAA-AAAAA", "install_id": "other-install"})]
+    server.answers["deactivate"] = (404, {"error": "No such worker on this license"})
+    with pytest.raises(licensing.LicenseError) as err:
+        await licensing.release_seat("ASH-AAAAA-AAAAA-AAAAA-AAAAA", "other-install")
+    assert err.value.status == 404 and err.value.message == "No such worker on this license"
+
+
 def test_refresh_schedule(store, keys):
     now = time.time()
     assert licensing._seconds_until_refresh(now) == licensing.REFRESH_INTERVAL  # nothing to renew
