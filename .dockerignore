@@ -7,6 +7,8 @@
 README.md
 LICENSE
 *.md
+# Shipped in the image as /app/THIRD_PARTY_NOTICES.md.
+!THIRD_PARTY_NOTICES.md
 docs/
 
 # Python
