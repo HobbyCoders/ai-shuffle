@@ -550,6 +550,73 @@ def arm_persisted(row: Dict[str, Any]) -> None:
     _arm(row, max(0.0, float(row.get("fire_at") or 0.0) - _now_epoch()))
 
 
+def _held_merge_kwargs(
+    session_id: str, prompt: str, delay_seconds: float, *, prepend: bool,
+    profile_id: Optional[str], project_id: Optional[str], model: Optional[str],
+) -> Dict[str, Any]:
+    return dict(
+        id=f"wake-{uuid.uuid4().hex}",
+        session_id=session_id,
+        source=HELD_PEER_SOURCE,
+        prompt=prompt,
+        fire_at=_now_epoch() + max(0.0, float(delay_seconds)),
+        prepend=prepend,
+        profile_id=profile_id,
+        project_id=project_id,
+        reason="peer messages held while parked",
+        model=model,
+        instance_id=settings.effective_instance_id,
+    )
+
+
+async def hold_peer_messages(
+    session_id: str, prompt: str, *, delay_seconds: float,
+    profile_id: Optional[str], project_id: Optional[str], model: Optional[str],
+) -> Dict[str, Any]:
+    """Add ``prompt`` to the session's held peer messages and return the row.
+
+    The session keeps one :data:`HELD_PEER_SOURCE` row: the messages so far
+    plus this one, promoted at the earliest deadline already set, or
+    ``delay_seconds`` from now for the first message. The fold is one
+    transaction (:func:`wakeups_db.merge_session_wakeup`), so a promotion
+    that fires meanwhile is never delivered twice and earlier text is never
+    lost. Refused (``{}``) for a session the user stopped.
+    """
+    if _session_user_stopped(session_id):
+        logger.info(
+            "held peer message refused for stopped session %s", session_id,
+        )
+        return {}
+    row, replaced = await asyncio.to_thread(
+        wakeups_db.merge_session_wakeup,
+        **_held_merge_kwargs(
+            session_id, prompt, delay_seconds, prepend=False,
+            profile_id=profile_id, project_id=project_id, model=model,
+        ),
+    )
+    _disarm(replaced)
+    _arm(row, max(0.0, float(row["fire_at"]) - _now_epoch()))
+    return row
+
+
+def restore_held_peer_messages(
+    session_id: str, prompt: str, *, delay_seconds: float,
+    profile_id: Optional[str], project_id: Optional[str], model: Optional[str],
+) -> Dict[str, Any]:
+    """Sync form of :func:`hold_peer_messages` for messages that were held
+    before any still in the store, so they go first. No stop check: the
+    caller is putting back text it already took."""
+    row, replaced = wakeups_db.merge_session_wakeup(
+        **_held_merge_kwargs(
+            session_id, prompt, delay_seconds, prepend=True,
+            profile_id=profile_id, project_id=project_id, model=model,
+        ),
+    )
+    _disarm(replaced)
+    arm_persisted(row)
+    return row
+
+
 async def schedule(
     *,
     session_id: str,

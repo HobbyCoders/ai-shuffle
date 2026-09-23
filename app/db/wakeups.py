@@ -178,6 +178,74 @@ def take_session_wakeups(session_id: str, source: str) -> List[Dict[str, Any]]:
     return taken
 
 
+def merge_session_wakeup(
+    *,
+    id: str,
+    session_id: str,
+    source: str,
+    prompt: str,
+    fire_at: float,
+    prepend: bool = False,
+    profile_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    model: Optional[str] = None,
+    instance_id: Optional[str] = None,
+) -> tuple[Dict[str, Any], List[str]]:
+    """Fold a session's pending wakeups of one ``source`` into one new row.
+
+    In one transaction: delete the existing rows, then insert one row whose
+    prompt is theirs (oldest ``fire_at`` first) joined with ``prompt`` by a
+    blank line (``prompt`` goes first when ``prepend``), and whose ``fire_at``
+    is the earliest of theirs, or ``fire_at`` when there were none. A row a
+    timer claimed before the delete is not folded in, so its text is never
+    written twice; no crash between the delete and the insert can lose the
+    old text. Returns the new row and the ids of the rows it replaced.
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT id, prompt, fire_at FROM pending_wakeups "
+            f"WHERE session_id = {_ph} AND source = {_ph} ORDER BY fire_at ASC",
+            (session_id, source),
+        )
+        existing = rows_to_list(list(cursor.fetchall() or []))
+        kept = []
+        for row in existing:
+            cursor.execute(
+                f"DELETE FROM pending_wakeups WHERE id = {_ph}", (row["id"],)
+            )
+            if cursor.rowcount and cursor.rowcount > 0:
+                kept.append(row)
+        texts = [str(r.get("prompt") or "") for r in kept]
+        parts = [prompt, *texts] if prepend else [*texts, prompt]
+        text = "\n\n".join(p.strip() for p in parts if p and p.strip())
+        if kept:
+            fire_at = min(float(r.get("fire_at") or 0.0) for r in kept)
+        cursor.execute(
+            f"""INSERT INTO pending_wakeups
+                (id, session_id, profile_id, project_id, prompt, reason, model,
+                 source, instance_id, fire_at)
+                VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph})""",
+            (id, session_id, profile_id, project_id, text, reason, model,
+             source, instance_id, float(fire_at)),
+        )
+    row = {
+        "id": id,
+        "session_id": session_id,
+        "profile_id": profile_id,
+        "project_id": project_id,
+        "prompt": text,
+        "reason": reason,
+        "model": model,
+        "source": source,
+        "instance_id": instance_id,
+        "fire_at": float(fire_at),
+    }
+    return row, [str(r["id"]) for r in kept]
+
+
 def get_session_wakeups(session_id: str, source: str) -> List[Dict[str, Any]]:
     """A session's pending wakeups of one ``source``, oldest ``fire_at`` first."""
     _ph = ph()

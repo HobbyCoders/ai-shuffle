@@ -117,3 +117,63 @@ async def test_a_user_message_supersedes_armed_wakes_but_keeps_held_messages(moc
     assert not wakeups_db.session_has_pending("s5", "schedule_wakeup")
     (held,) = _held("s5")
     assert "note" in held["prompt"]
+
+
+async def test_a_promotion_that_fires_while_a_message_is_held_is_not_delivered_twice(
+    mock_db, monkeypatch,
+):
+    """The promotion timer claims the held row outside the scheduler's lock.
+    A message held at that moment must not copy the claimed text into the
+    new row, or the promotion delivers it and the next wake does again."""
+    _parked("s6")
+    assert await turn_scheduler.on_agent_message("s6", "w1", "first") == turn_scheduler.HELD
+    (row,) = _held("s6")
+
+    real = turn_scheduler._latest_context_turn
+
+    def claim_then_read(session_id):
+        # The timer fires between the hold's read and its write.
+        assert wakeups_db.claim_wakeup(row["id"])
+        return real(session_id)
+
+    monkeypatch.setattr(turn_scheduler, "_latest_context_turn", claim_then_read)
+    assert await turn_scheduler.on_agent_message("s6", "w1", "second") == turn_scheduler.HELD
+
+    (held,) = _held("s6")
+    assert "second" in held["prompt"]
+    assert "first" not in held["prompt"]
+
+
+def _fail_enqueue(*args, **kwargs):
+    raise RuntimeError("database went away")
+
+
+async def test_held_messages_survive_an_unpark_that_fails_to_enqueue(mock_db, monkeypatch):
+    _parked("s7")
+    assert await turn_scheduler.on_agent_message("s7", "w1", "note") == turn_scheduler.HELD
+
+    monkeypatch.setattr(turn_scheduler, "_enqueue", _fail_enqueue)
+    frame = _frame("w1")
+    with pytest.raises(RuntimeError):
+        await turn_scheduler._enqueue_context_wake(
+            "s7", "unpark", [frame], ["w1"],
+            turn_scheduler._build_task_notification_prompt([frame]),
+        )
+
+    (held,) = _held("s7")
+    assert "note" in held["prompt"]
+
+
+async def test_held_messages_survive_an_urgent_message_that_fails_to_enqueue(
+    mock_db, monkeypatch,
+):
+    _parked("s8")
+    assert await turn_scheduler.on_agent_message("s8", "w1", "note") == turn_scheduler.HELD
+
+    monkeypatch.setattr(turn_scheduler, "_enqueue", _fail_enqueue)
+    with pytest.raises(RuntimeError):
+        await turn_scheduler.on_agent_message("s8", "w1", "blocked", urgent=True)
+
+    (held,) = _held("s8")
+    assert "note" in held["prompt"]
+    assert "blocked" not in held["prompt"]
