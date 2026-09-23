@@ -71,6 +71,12 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
           echo "sequence=$(git rev-list --first-parent --count HEAD)" >> "$GITHUB_OUTPUT"
+          # The release tag is the version source: "0.8.18" on a tag,
+          # "0.8.18-dev.N+g<sha>" on main. Empty (tags not fetched) falls back
+          # to the checked-in app.__version__.
+          echo "app_version=$(python3 "$GITHUB_WORKSPACE/android/ci/resolve-version-name.py" --release-tag "$RELEASE_TAG" 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
 
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v2
@@ -128,6 +134,7 @@ jobs:
             ${{ inputs.no_cache && format('CACHEBUST={0}', github.run_id) || '' }}
             GIT_SHA=${{ steps.source.outputs.sha }}
             APPLICATION_SEQUENCE=${{ steps.source.outputs.sequence }}
+            APP_VERSION=${{ steps.source.outputs.app_version }}
           # Layer caching is automatic via Blacksmith's sticky disk:
           # useblacksmith/setup-docker-builder persists /var/lib/buildkit across
           # runs, so no cache-from/cache-to registry round-trip is needed.

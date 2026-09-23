@@ -41,7 +41,7 @@
 			   bg-(--color-bg-secondary) border border-border
 			   rounded-lg shadow-lg p-4 animate-slide-up"
 		role="dialog"
-		aria-label="Install AI Hub"
+		aria-label="Install AI Shuffle"
 	>
 		<div class="flex items-start gap-3">
 			<!-- App Icon -->
@@ -56,7 +56,7 @@
 			<!-- Content -->
 			<div class="flex-1 min-w-0">
 				<h3 class="text-sm font-semibold text-(--color-text-primary)">
-					Install AI Hub
+					Install AI Shuffle
 				</h3>
 				<p class="text-xs text-(--color-text-secondary) mt-1">
 					Add to your home screen for quick access and offline support.

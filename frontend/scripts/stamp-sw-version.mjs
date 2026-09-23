@@ -5,7 +5,7 @@
  * Runs as the npm "postbuild" step (after `vite build`). Rewrites the
  * `const CACHE_VERSION = ...;` line in build/sw.js (the build OUTPUT copy,
  * not the tracked static/sw.js source) with a value derived from
- * package.json version + git short SHA, e.g. "0.8.5-a2850458". If any single
+ * the app version (APP_VERSION, else package.json) + git short SHA, e.g. "0.8.5-a2850458". If any single
  * build changes app code, the SHA changes → CACHE_VERSION changes → clients
  * drop the old cache on activate.
  *
@@ -24,11 +24,11 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { appVersion } from '../app-version.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(__dirname, '..');
 const swPath = join(frontendRoot, 'build', 'sw.js');
-const pkgPath = join(frontendRoot, 'package.json');
 
 function shortSha() {
   try {
@@ -54,8 +54,7 @@ function main() {
     process.exit(1);
   }
 
-  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-  const version = pkg.version || '0.0.0';
+  const version = appVersion || '0.0.0';
   const sha = shortSha();
   const stamp = `${version}-${sha}`;
 

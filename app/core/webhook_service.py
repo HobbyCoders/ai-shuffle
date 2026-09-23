@@ -171,7 +171,7 @@ async def _deliver_webhook(
     # Build headers
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "AI-Hub-Webhook/1.0",
+        "User-Agent": "AI-Shuffle-Webhook/1.0",
         "X-Webhook-Event": payload["event"],
         "X-Webhook-Delivery-Id": f"{webhook_id}-{int(time.time() * 1000)}",
     }
@@ -270,7 +270,7 @@ async def send_test_webhook(webhook: Dict[str, Any]) -> WebhookTestResponse:
         "event": "test",
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "data": {
-            "message": "This is a test webhook from AI Hub",
+            "message": "This is a test webhook from AI Shuffle",
             "webhook_id": webhook["id"]
         }
     }
@@ -280,7 +280,7 @@ async def send_test_webhook(webhook: Dict[str, Any]) -> WebhookTestResponse:
     # Build headers
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "AI-Hub-Webhook/1.0",
+        "User-Agent": "AI-Shuffle-Webhook/1.0",
         "X-Webhook-Event": "test",
         "X-Webhook-Delivery-Id": f"{webhook['id']}-test-{int(time.time() * 1000)}",
     }

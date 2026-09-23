@@ -358,7 +358,7 @@ async def export_session(
 
         # Footer
         md_lines.append("---")
-        md_lines.append(f"*Exported from AI Hub on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+        md_lines.append(f"*Exported from AI Shuffle on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
 
         filename = f"{safe_title}-{date_str}.md"
         content = "\n".join(md_lines)
@@ -381,7 +381,7 @@ async def import_session(
     """
     Import a session from a JSON file export.
 
-    Accepts AI Hub JSON export format with session metadata and messages.
+    Accepts the AI Shuffle JSON export format with session metadata and messages.
     Creates a new session with a new ID to avoid conflicts.
 
     Args:

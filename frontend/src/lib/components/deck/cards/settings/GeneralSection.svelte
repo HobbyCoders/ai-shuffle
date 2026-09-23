@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Palette, FolderOpen, RefreshCw } from 'lucide-svelte';
+	import { Palette, FolderOpen, RefreshCw, Info } from 'lucide-svelte';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import ApplicationUpdates from './ApplicationUpdates.svelte';
 	import { theme, themePreference, currentPresetId, themePresets } from '$lib/stores/theme.svelte';
@@ -149,6 +149,17 @@
 	</div>
 </div>
 
+<!-- About -->
+<div class="set-group">
+	<div class="set-grouphead">
+		<h3><Info />About</h3>
+	</div>
+	<div class="set-row">
+		<div class="lab"><h4>Version</h4></div>
+		<div class="ctl"><span class="version">AI Shuffle {__APP_VERSION__}</span></div>
+	</div>
+</div>
+
 <style>
 	.ws-row {
 		display: flex;
@@ -159,6 +170,10 @@
 	.ws-input {
 		flex: 1;
 		min-width: 220px;
+	}
+	.version {
+		font-family: var(--font-mono);
+		font-size: 12.5px;
 	}
 	.msg {
 		margin: 8px 0 0;

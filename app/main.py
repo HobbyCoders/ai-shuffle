@@ -1,5 +1,5 @@
 """
-AI Hub - Claude Code Web Interface and API
+AI Shuffle web interface and API.
 Main FastAPI application entry point
 """
 
@@ -158,7 +158,7 @@ async def lifespan(app: FastAPI):
     install_asyncio_exception_handler()
 
     logger.info("=" * 60)
-    logger.info(f"Starting AI Hub v{settings.version}")
+    logger.info(f"Starting AI Shuffle v{settings.version}")
     logger.info("=" * 60)
 
     # Startup phases
@@ -322,15 +322,15 @@ async def lifespan(app: FastAPI):
         uninstall_error_log_handler()
     except Exception:
         pass
-    logger.info("Shutting down AI Hub...")
+    logger.info("Shutting down AI Shuffle...")
     from app.core.file_logging import log_shutdown_banner
     log_shutdown_banner()
 
 
 # Create FastAPI application
 app = FastAPI(
-    title="AI Hub",
-    description="Claude Code Web Interface and OpenAI-compatible API",
+    title="AI Shuffle",
+    description="AI Shuffle web interface and OpenAI-compatible API",
     version=settings.version,
     lifespan=lifespan,
     docs_url="/docs",

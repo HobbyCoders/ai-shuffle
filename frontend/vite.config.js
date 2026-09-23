@@ -1,11 +1,15 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
+import { appVersion } from './app-version.js';
 
 export default defineConfig({
 	// Worktrees may share installed packages; keep generated caches in this tree.
 	cacheDir: '.svelte-kit/vite-cache',
 	plugins: [tailwindcss(), sveltekit()],
+	define: {
+		__APP_VERSION__: JSON.stringify(appVersion)
+	},
 	build: {
 		// Post-split budget. The primary route no longer carries the feature
 		// panels (Settings/Notes/Build/Docs/Stats/Automations/Files/Browser/

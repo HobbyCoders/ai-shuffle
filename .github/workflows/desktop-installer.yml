@@ -55,6 +55,8 @@ jobs:
           "DESKTOP_VERSION=$($env:RELEASE_TAG.Substring(1))" >> $env:GITHUB_ENV
       - name: Build frontend
         working-directory: frontend
+        env:
+          APP_VERSION: ${{ inputs.release_tag }}
         run: npm ci && npm run build
       - name: Test desktop and build bundled runtime
         working-directory: desktop

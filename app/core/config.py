@@ -15,8 +15,10 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import ClassVar, Optional
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings
+
+from app import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +257,13 @@ class Settings(BaseSettings):
 
     # Service info
     service_name: str = "ai-shuffle"
-    version: str = "0.8.9"
+    # The release tag is the version source. Release builds pass it as the
+    # APP_VERSION build arg (docker-publish.yml); app.__version__ is only the
+    # fallback for source runs.
+    version: str = Field(
+        default=__version__,
+        validation_alias=AliasChoices("APP_VERSION", "VERSION", "version"),
+    )
 
     # Deployment mode (auto-detected if not set)
     local_mode: Optional[bool] = None  # None = auto-detect, True = local, False = docker
@@ -952,6 +960,15 @@ class Settings(BaseSettings):
     # install sharing the DB) still take the legacy resolver ladder. The
     # ``AI_SHUFFLE_V2_PROJECTS`` kill switch was removed in PR-B — rollback is now
     # git-revert, not a flag flip.
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def _normalise_version(cls, value):
+        """Accept a raw tag ("v0.8.18") and treat an empty build arg as unset."""
+        text = str(value or "").strip()
+        if text[:1] in ("v", "V") and text[1:2].isdigit():
+            text = text[1:]
+        return text or cls.model_fields["version"].default
 
     class Config:
         env_file = _resolve_env_file()

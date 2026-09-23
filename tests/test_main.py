@@ -35,7 +35,7 @@ class TestMainModuleImports:
     def test_app_title(self):
         """App should have correct title."""
         from app.main import app
-        assert app.title == "AI Hub"
+        assert app.title == "AI Shuffle"
 
     def test_app_has_docs_url(self):
         """App should have docs URL configured."""
@@ -480,7 +480,7 @@ class TestAppAttributes:
     def test_app_description(self):
         """App should have description set."""
         from app.main import app
-        assert app.description == "Claude Code Web Interface and OpenAI-compatible API"
+        assert app.description == "AI Shuffle web interface and OpenAI-compatible API"
 
     def test_app_has_lifespan(self):
         """App should have lifespan configured."""
@@ -580,7 +580,7 @@ class TestMainBlock:
         from app.main import app
         assert app is not None
         # The module is app.main
-        assert app.title == "AI Hub"
+        assert app.title == "AI Shuffle"
 
 
 # =============================================================================
