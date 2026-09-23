@@ -129,14 +129,18 @@ DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``thinking`` — forwarded (with ``thinking_display``) on the native
     anthropic lane only, and only to new sessions; fluid fits it to the model
     (``_native_thinking``). The openai_responses and openrouter lanes ignore it.
-  * ``hooks`` / ``include_hook_events`` — SDK-shaped hook callbacks from the
-    options object are not wired. The app's hook seam is fluid's HookBus
-    instead: every connect hands both legs the adapter's one bus
-    (:attr:`HarnessAdapter.hooks`). The native loop emits into it itself; the
-    delegated loop registers Claude Code hook callbacks with the CLI and
-    forwards each one into the same bus event, so a callback on the bus sees
-    both legs alike. The delegated leg's PreToolUse also applies
-    :func:`_delegated_tool_policy`, so a deny there wins over any allow.
+  * ``include_hook_events`` — ignored. ``hooks`` (the SDK callbacks
+    ``hook_service.attach_hooks_to_options`` builds: DB hooks, plugin
+    hooks.json scripts, the Stop handler) run on fluid's HookBus: every
+    connect hands both legs the adapter's one bus
+    (:attr:`HarnessAdapter.hooks`), and ``sdk_hook_bridge`` registers each
+    callback on it with Claude Code's hook input and output shapes. The
+    native loop emits into the bus itself; the delegated loop registers
+    Claude Code hook callbacks with the CLI and forwards each one into the
+    same bus event, so a callback on the bus sees both legs alike. The
+    delegated leg's PreToolUse also applies :func:`_delegated_tool_policy`,
+    so a deny there wins over any allow, and a CLI that does not register
+    the hooks does not get a turn (fail closed).
   * ``extra_args`` — SDK/CLI-specific, ignored. (``setting_sources`` is now
     HONORED on native legs: it maps onto fluid's own scope filter — see
     ``_fluid_setting_sources`` — gating instruction files, skills, agents, and
@@ -428,6 +432,15 @@ class HarnessAdapter(ProviderAdapter):
         # registered on it keeps observing across the reconnects that rebuild
         # the engine.
         self._hooks: HookBus = HookBus()
+        # The app's Agent SDK hooks (``options.hooks``: DB hooks, plugin
+        # hooks.json scripts, the Stop handler) on their own bus, rebuilt at
+        # every connect. One dispatcher per event on ``self._hooks`` runs it
+        # first, so an app deny reaches both legs like any bus deny.
+        self._sdk_hook_bus: Optional[HookBus] = None
+        from app.core.provider.sdk_hook_bridge import BUS_EVENTS
+
+        for bus_event in BUS_EVENTS:
+            self._hooks.on(bus_event, self._run_sdk_hooks)
 
     # ─── Transition helper ────────────────────────────────────────────
 
@@ -450,6 +463,13 @@ class HarnessAdapter(ProviderAdapter):
         """
         return self._hooks
 
+    async def _run_sdk_hooks(self, event: str, payload: Dict[str, Any]) -> Optional[Any]:
+        """HookBus dispatcher for the SDK hooks of the current connect."""
+        bus = self._sdk_hook_bus
+        if bus is None:
+            return None
+        return await bus.emit(event, payload)
+
     @property
     def provider_kind(self) -> Optional[str]:
         """The leg this adapter connected on, or None before connect().
@@ -467,6 +487,9 @@ class HarnessAdapter(ProviderAdapter):
     async def connect(self, options: SessionOptions) -> None:
         """Build the fluid engine from SessionOptions and prime its session."""
         self._options = options
+        from app.core.provider.sdk_hook_bridge import sdk_hooks_bus
+
+        self._sdk_hook_bus = sdk_hooks_bus(options.hooks, options.cwd)
         # Kept in a local as well as on ``self``: the engine constructors below
         # take a non-optional store, and the local is what carries that
         # non-optional fact to a reader (``self._store`` stays Optional because
@@ -1115,6 +1138,9 @@ class HarnessAdapter(ProviderAdapter):
             # onto fluid's setting_sources (see _fluid_setting_sources); the
             # delegated leg already carries it to the CLI. None = every scope.
             setting_sources=getattr(sdk_options, "setting_sources", None),
+            # The app's SDK hooks (hook_service.attach_hooks_to_options). Run
+            # on fluid's HookBus by connect (see sdk_hook_bridge).
+            hooks=getattr(sdk_options, "hooks", None),
         )
         # The session's bound model provider (``sessions.provider_id``) rides on
         # the SDK options object as ``aih_provider_id`` (stamped by

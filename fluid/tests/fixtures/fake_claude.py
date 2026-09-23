@@ -240,7 +240,17 @@ HOOK_CALLBACKS: dict[str, str] = {}
 
 
 def answer_initialize(msg: dict) -> None:
-    """Record the registered hook callbacks and accept, as the real CLI does."""
+    """Record the registered hook callbacks and accept, as the real CLI does.
+
+    ``FAKE_CLAUDE_REFUSE_INITIALIZE=1`` refuses instead, with the error
+    subtype, and registers nothing.
+    """
+    if os.environ.get("FAKE_CLAUDE_REFUSE_INITIALIZE") == "1":
+        emit({"type": "control_response", "response": {
+            "subtype": "error", "request_id": msg.get("request_id", ""),
+            "error": "initialize refused",
+        }})
+        return
     hooks = (msg.get("request") or {}).get("hooks") or {}
     for event, matchers in hooks.items():
         for matcher in matchers or ():

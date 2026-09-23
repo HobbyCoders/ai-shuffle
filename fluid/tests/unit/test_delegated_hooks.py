@@ -373,3 +373,36 @@ async def test_policy_deny_blocks_a_cli_tool_call_end_to_end(tmp_path, policy_de
     else:
         assert not results[0].is_error and results[0].output == "hooked"
     assert [(event, payload["name"]) for event, payload in rec.seen] == [(PRE_TOOL_USE, "Bash")]
+
+
+@pytest.mark.parametrize("with_policy", [True, False])
+async def test_a_refused_initialize_fails_closed_when_a_deny_policy_rides_it(
+    tmp_path, with_policy,
+) -> None:
+    """Without its PreToolUse hook the deny policy is off for the whole CLI
+    process. With a policy the turn is not started; without one the CLI's
+    refusal only costs the hooks, as before."""
+    from fluid.events.model import ErrorEvent
+
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=[sys.executable, FAKE],
+        env={"FAKE_CLAUDE_SCENARIO": "u", "FAKE_CLAUDE_REFUSE_INITIALIZE": "1"},
+        cwd=str(tmp_path), hooks=HookBus(),
+        tool_policy=(lambda name, _i: "no shells here") if with_policy else None,
+    )
+    try:
+        await loop.submit(UserTurn(content="run it"))
+        await loop.wait_turn()
+        events = loop.bus.log(loop.session_id)
+    finally:
+        await loop.aclose()
+
+    assert loop.cli_hooks_registered is False
+    results = [e for e in events if isinstance(e, ToolResult)]
+    if with_policy:
+        assert isinstance(events[-1], ErrorEvent)
+        assert "did not register its hooks (refused)" in events[-1].message
+        assert results == []
+    else:
+        assert isinstance(events[-1], TurnComplete)
+        assert len(results) == 1

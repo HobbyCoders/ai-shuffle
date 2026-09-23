@@ -99,6 +99,62 @@ def matcher_matches(matcher: str | None, tool_name: str | None) -> bool:
     return False
 
 
+def claude_hook_input(event: str, payload: dict[str, Any], *, cwd: str = ".") -> dict[str, Any]:
+    """A HookBus payload in Claude Code's hook-input shape.
+
+    What a command hook reads on stdin, and what the app hands the Agent
+    SDK hook callbacks it registers on the bus.
+
+    Claude Code's fields come first (``hook_event_name``, ``session_id``,
+    ``transcript_path``, ``cwd``, then the per-event ones); fluid keeps
+    its own spellings next to them (``event``, ``tool_output``) so older
+    scripts keep working.
+    """
+    body: dict[str, Any] = {
+        "hook_event_name": claude_event_name(event),
+        "event": event,
+        "session_id": payload.get("session_id"),
+        "transcript_path": payload.get("transcript_path") or "",
+        "cwd": cwd,
+    }
+    if event in _TOOL_EVENTS:
+        body["tool_name"] = payload.get("name")
+        body["tool_input"] = payload.get("input")
+        body["tool_use_id"] = payload.get("tool_use_id")
+    if event == POST_TOOL_USE:
+        # The engine says ``output``; the code-mode bridge says ``result``.
+        output = payload.get("output", payload.get("result"))
+        body["tool_response"] = output
+        body["tool_output"] = output
+        body["is_error"] = bool(payload.get("is_error", False))
+    if event in _TURN_EVENTS:
+        body["turn_id"] = payload.get("turn_id")
+    if event == TURN_START:
+        body["prompt"] = payload.get("prompt", "")
+    if event == TURN_END:
+        body["stop_hook_active"] = bool(payload.get("stop_hook_active", False))
+        body["stop_reason"] = payload.get("stop_reason", "end_turn")
+        body["text"] = payload.get("text", "")
+    if event == SESSION_START:
+        body["source"] = payload.get("source", "startup")
+    if event == SESSION_END:
+        body["reason"] = payload.get("reason", "other")
+    if event == PRE_COMPACT:
+        body["trigger"] = payload.get("trigger", "auto")
+        body["custom_instructions"] = payload.get("custom_instructions", "")
+        body["tiers"] = list(payload.get("tiers") or ())
+    if event == SUBAGENT_STOP:
+        body["stop_hook_active"] = False
+        for key in ("task_id", "worker_session_id", "status", "summary"):
+            body[key] = payload.get(key)
+    if event == NOTIFICATION:
+        body["message"] = payload.get("message", "")
+        body["notification_type"] = payload.get("notification_type", "")
+        body["tool_name"] = payload.get("name")
+        body["tool_use_id"] = payload.get("tool_use_id")
+    return body
+
+
 @dataclass(frozen=True, kw_only=True)
 class CommandHook:
     event: str
@@ -116,56 +172,9 @@ class CommandHook:
         return matcher_matches(self.matcher, tool_name)
 
     def build_payload(self, event: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """The JSON object written to the hook's stdin.
-
-        Claude Code's fields come first (``hook_event_name``, ``session_id``,
-        ``transcript_path``, ``cwd``, then the per-event ones); fluid keeps
-        its own spellings next to them (``event``, ``tool_output``) so older
-        scripts keep working.
-        """
-        body: dict[str, Any] = {
-            "hook_event_name": claude_event_name(event),
-            "event": event,
-            "session_id": payload.get("session_id"),
-            "transcript_path": payload.get("transcript_path") or "",
-            "cwd": self.cwd,
-        }
-        if event in _TOOL_EVENTS:
-            body["tool_name"] = payload.get("name")
-            body["tool_input"] = payload.get("input")
-            body["tool_use_id"] = payload.get("tool_use_id")
-        if event == POST_TOOL_USE:
-            # The engine says ``output``; the code-mode bridge says ``result``.
-            output = payload.get("output", payload.get("result"))
-            body["tool_response"] = output
-            body["tool_output"] = output
-            body["is_error"] = bool(payload.get("is_error", False))
-        if event in _TURN_EVENTS:
-            body["turn_id"] = payload.get("turn_id")
-        if event == TURN_START:
-            body["prompt"] = payload.get("prompt", "")
-        if event == TURN_END:
-            body["stop_hook_active"] = bool(payload.get("stop_hook_active", False))
-            body["stop_reason"] = payload.get("stop_reason", "end_turn")
-            body["text"] = payload.get("text", "")
-        if event == SESSION_START:
-            body["source"] = payload.get("source", "startup")
-        if event == SESSION_END:
-            body["reason"] = payload.get("reason", "other")
-        if event == PRE_COMPACT:
-            body["trigger"] = payload.get("trigger", "auto")
-            body["custom_instructions"] = payload.get("custom_instructions", "")
-            body["tiers"] = list(payload.get("tiers") or ())
-        if event == SUBAGENT_STOP:
-            body["stop_hook_active"] = False
-            for key in ("task_id", "worker_session_id", "status", "summary"):
-                body[key] = payload.get(key)
-        if event == NOTIFICATION:
-            body["message"] = payload.get("message", "")
-            body["notification_type"] = payload.get("notification_type", "")
-            body["tool_name"] = payload.get("name")
-            body["tool_use_id"] = payload.get("tool_use_id")
-        return body
+        """The JSON object written to the hook's stdin (see
+        :func:`claude_hook_input`)."""
+        return claude_hook_input(event, payload, cwd=self.cwd)
 
     async def __call__(self, event: str, payload: dict[str, Any]) -> HookDecision | None:
         if event != self.event:

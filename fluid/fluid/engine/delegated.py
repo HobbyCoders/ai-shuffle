@@ -716,8 +716,23 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.cli_hooks_registered = False
         if self._cli_hook_events():
             async with self._stdout_lock:
-                await self._initialize_cli_hooks()
+                outcome = await self._initialize_cli_hooks()
+            if outcome in ("refused", "timeout") and self._needs_policy_hook():
+                # Fail closed: without its PreToolUse hook the deny policy is
+                # off for this whole process, and in bypass mode nothing else
+                # stops an outward write (invariant I10). The spawn fails, so
+                # the turn ends with an error and a wake stays undelivered.
+                await self._stop_process()
+                raise RuntimeError(
+                    f"the claude CLI did not register its hooks ({outcome}), so "
+                    "the tool deny policy could not be enforced; the turn was "
+                    "not started"
+                )
         return self._proc
+
+    def _needs_policy_hook(self) -> bool:
+        """True when a deny policy rides the CLI's PreToolUse hook."""
+        return self.tool_policy is not None or self._has_deny_rules()
 
     # ─── turn lifecycle ──────────────────────────────────────────────────
 
@@ -1279,16 +1294,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         rules = getattr(self.permissions, "rules", None) or ()
         return any(getattr(rule, "decision", None) == "deny" for rule in rules)
 
-    async def _initialize_cli_hooks(self) -> None:
+    async def _initialize_cli_hooks(self) -> str:
         """Register this loop's hook callbacks with a freshly spawned CLI.
 
         Sends the ``initialize`` control_request the Agent SDK sends, with one
         callback per event, and reads stdout until its reply. The reply can
         trail frames that belong to the first turn (the CLI's ``init`` frame),
         so those are kept for the turn's reader, and a hook the CLI fires in
-        the meantime is answered. Never raises: a CLI that refuses, stays
-        silent or has already exited leaves the hooks unregistered and the
-        turn to report whatever is wrong with the process.
+        the meantime is answered. Never raises. Returns ``"ok"``,
+        ``"refused"`` or ``"timeout"``, or ``"closed"`` when the CLI already
+        closed stdin or stdout: that process is dying, and the turn reports
+        what is wrong with it (a rejected ``--resume`` handle exits this way,
+        and the turn's retry spawns a fresh process).
         """
         assert self._proc is not None and self._proc.stdout is not None
         events = self._cli_hook_events()
@@ -1312,7 +1329,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # The CLI already closed stdin (a rejected --resume handle does
             # that); the turn's own write meets the same error and retries.
             logger.debug("claude CLI closed stdin before initialize", exc_info=True)
-            return
+            return "closed"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + INITIALIZE_TIMEOUT
         while True:
@@ -1322,13 +1339,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     "claude CLI did not answer initialize within %.0fs; its "
                     "hooks are not registered for this process", INITIALIZE_TIMEOUT,
                 )
-                return
+                return "timeout"
             try:
                 line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=remaining)
             except TimeoutError:
                 continue
             if not line:
-                return  # EOF: the turn's reader reports the closed stream
+                return "closed"  # EOF: the turn's reader reports the closed stream
             text = line.decode(errors="replace").strip()
             try:
                 frame = json.loads(text) if text else None
@@ -1339,12 +1356,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 if reply is not None and reply.request_id == request_id:
                     if reply.ok:
                         self.cli_hooks_registered = True
-                    else:
-                        logger.warning(
-                            "claude CLI refused initialize (%s); its hooks are "
-                            "not registered for this process", reply.error,
-                        )
-                    return
+                        return "ok"
+                    logger.warning(
+                        "claude CLI refused initialize (%s); its hooks are "
+                        "not registered for this process", reply.error,
+                    )
+                    return "refused"
                 if reply is not None:
                     self._resolve_control(reply)
                 continue
