@@ -177,3 +177,212 @@ async def test_held_messages_survive_an_urgent_message_that_fails_to_enqueue(
     (held,) = _held("s8")
     assert "note" in held["prompt"]
     assert "blocked" not in held["prompt"]
+
+
+# ---------------------------------------------------------------------------
+# Held messages ride the parent's next turn, however it starts
+# ---------------------------------------------------------------------------
+
+async def _run_turn(turn):
+    """Run ``turn`` through a real SessionRuntime with the pump stubbed;
+    return the prompt the engine was given."""
+    from app.core import session_runtime
+    from tests.core.test_send_steering import _pump_env
+
+    seen = {}
+
+    async def _impl(**kwargs):
+        seen["prompt"] = kwargs.get("prompt")
+        yield {"type": "done", "metadata": {}}
+
+    with _pump_env(_impl):
+        await session_runtime.SessionRuntime(turn).execute()
+    return seen.get("prompt") or ""
+
+
+def _seed(session_id):
+    from app.db import database
+
+    database.create_session(session_id=session_id, profile_id=None, title="t")
+
+
+@pytest.fixture
+def _clean_delivered():
+    getattr(turn_scheduler, "_delivered_held", {}).clear()
+    yield
+    getattr(turn_scheduler, "_delivered_held", {}).clear()
+
+
+async def test_a_user_turn_carries_held_messages_once(mock_db, _clean_delivered):
+    _seed("g1")
+    _parked("g1")
+    assert await turn_scheduler.on_agent_message("g1", "w1", "halfway") == turn_scheduler.HELD
+
+    first = turns_db.enqueue_turn("g1", "user", prompt="how is it going?")
+    prompt = await _run_turn(first)
+    assert prompt.startswith("how is it going?")
+    assert prompt.count("halfway") == 1
+    assert "[held-peer-message" not in prompt
+    assert _held("g1") == []
+
+    second = turns_db.enqueue_turn("g1", "user", prompt="and now?")
+    assert "halfway" not in await _run_turn(second)
+
+
+async def test_an_unpark_wake_carries_held_messages_once(mock_db, _clean_delivered):
+    _seed("g2")
+    _parked("g2")
+    assert await turn_scheduler.on_agent_message("g2", "w1", "halfway") == turn_scheduler.HELD
+    (held_row,) = _held("g2")
+
+    frame = _frame("w1")
+    async with turn_scheduler._terminal_delivery_lock("g2"):
+        await turn_scheduler._enqueue_context_wake(
+            "g2", "unpark", [frame], ["w1"],
+            turn_scheduler._build_task_notification_prompt([frame]),
+        )
+    (wake,) = turns_db.get_queued_turns("g2")
+    # A stray copy of the same message reaching the store again (a restore
+    # racing the wake) must not be delivered a second time.
+    await wakeup_service.hold_peer_messages(
+        "g2", held_row["prompt"], delay_seconds=600,
+        profile_id="profile", project_id=None, model=None,
+    )
+
+    prompt = await _run_turn(wake)
+    assert prompt.count("halfway") == 1
+    assert _held("g2") == []
+
+
+async def test_a_steered_completion_carries_held_messages_once(
+    mock_db, monkeypatch, _clean_delivered,
+):
+    from app.core import session_runtime
+    from app.core.task_registry import task_registry
+
+    _parked("g3")
+    assert await turn_scheduler.on_agent_message("g3", "w1", "halfway") == turn_scheduler.HELD
+
+    steered = []
+
+    async def _steer(session_id, prompt, **kwargs):
+        steered.append((prompt, kwargs))
+        return True
+
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: object())
+    monkeypatch.setattr(session_runtime, "try_steer_task_notification", _steer)
+    monkeypatch.setattr(task_registry, "is_own_background_task", lambda *a, **k: True)
+    monkeypatch.setattr(turn_scheduler, "_cli_owns_at_rest_wake", lambda *a, **k: False)
+
+    await turn_scheduler.on_task_terminal("g3", _frame("w2"))
+
+    assert len(steered) == 1
+    prompt, kwargs = steered[0]
+    assert "w2 done" in prompt
+    assert prompt.count("halfway") == 1
+    assert "halfway" in kwargs["held_peer_messages"]
+    assert _held("g3") == []
+    assert turns_db.get_queued_turns("g3") == []
+    # The next turn does not get it again.
+    assert await turn_scheduler.fold_held_peer_messages_for_turn(
+        "g3", {"id": "next", "payload": {}},
+    ) == ""
+
+
+async def test_a_steer_the_turn_never_delivers_hands_held_messages_to_the_wake(
+    mock_db, _clean_delivered,
+):
+    _parked("g4")
+    assert await turn_scheduler.on_agent_message("g4", "w1", "halfway") == turn_scheduler.HELD
+    async with turn_scheduler._terminal_delivery_lock("g4"):
+        held = await turn_scheduler._take_held_peer_messages("g4")
+    turn_scheduler._mark_held_delivered("g4", turn_scheduler._held_ids(held))
+
+    await turn_scheduler.on_task_notification_stranded(
+        "g4", [_frame("w2")], ["w2"], held_peer_messages=held,
+    )
+
+    (wake,) = turns_db.get_queued_turns("g4")
+    assert wake["prompt"].count("halfway") == 1
+
+
+async def test_a_cli_owned_wake_delivers_held_messages_when_it_comes_to_rest(
+    mock_db, monkeypatch, _clean_delivered, _quiet,
+):
+    from unittest.mock import AsyncMock
+
+    from app.core import idle_reader
+    from app.core.task_registry import task_registry
+
+    _parked("g5")
+    assert await turn_scheduler.on_agent_message("g5", "w1", "halfway") == turn_scheduler.HELD
+    monkeypatch.setattr(task_registry, "is_own_background_task", lambda *a, **k: True)
+    monkeypatch.setattr(turn_scheduler, "_cli_owns_at_rest_wake", lambda *a, **k: True)
+
+    assert await turn_scheduler.on_task_terminal("g5", _frame("w1")) == "cli-owned-wake"
+    # The CLI writes its own wake; nothing is queued for it.
+    assert turns_db.get_queued_turns("g5") == []
+
+    monkeypatch.setattr(
+        "app.core.turn_recorder.record_cli_wake_turn_completed", AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "app.core.turn_finalize.persist_turn_end_state", AsyncMock(),
+    )
+    await idle_reader._close_open_wake_turn("g5", "cliwake-1")
+
+    (turn,) = turns_db.get_queued_turns("g5")
+    assert turn["prompt"].count("halfway") == 1
+    assert _held("g5") == []
+    assert _quiet == ["g5"]
+    # Resting again delivers nothing new, and the queued turn adds nothing.
+    assert await turn_scheduler.on_cli_wake_rested("g5") is None
+    assert await turn_scheduler.fold_held_peer_messages_for_turn("g5", turn) == ""
+
+
+async def test_a_message_after_the_unpark_is_claimed_is_not_held_for_the_deadline(
+    mock_db, _clean_delivered,
+):
+    import asyncio
+    import time
+
+    _parked("g6")
+    wake = _queued_unpark("g6", "w1")
+    # The wake is claimed; the park row has not settled yet.
+    assert turns_db.start_turn(wake["id"], None, "runner") is not None
+
+    assert await turn_scheduler.on_agent_message("g6", "w2", "late news") == turn_scheduler.HELD
+    rows = _held("g6")
+    assert all(float(r["fire_at"]) <= time.time() + 1 for r in rows)
+
+    carried = await turn_scheduler.fold_held_peer_messages_for_turn(
+        "g6", turns_db.get_turn(wake["id"]),
+    )
+    await asyncio.sleep(0.2)  # let an immediate promotion run if it won
+    queued = [t["prompt"] for t in turns_db.get_queued_turns("g6")]
+    assert (carried + "".join(queued)).count("late news") == 1
+    assert _held("g6") == []
+
+
+async def test_held_message_defaults(mock_db, monkeypatch, _clean_delivered):
+    from app.core import query_session_lifecycle
+
+    assert turn_scheduler.HELD_PEER_PROMOTION_SECONDS == 600.0
+    _parked("g7")
+    now = [1_000_000.0]
+    monkeypatch.setattr(wakeup_service, "_now_epoch", lambda: now[0])
+
+    assert await turn_scheduler.on_agent_message("g7", "w1", "one") == turn_scheduler.HELD
+    (row,) = _held("g7")
+    assert float(row["fire_at"]) == 1_000_600.0
+    # A later message does not extend the deadline.
+    now[0] += 300
+    assert await turn_scheduler.on_agent_message("g7", "w1", "two") == turn_scheduler.HELD
+    (row,) = _held("g7")
+    assert float(row["fire_at"]) == 1_000_600.0
+
+    # Stop drops held messages, and a stopped session holds no new ones.
+    await query_session_lifecycle.enter_user_stop("g7")
+    assert _held("g7") == []
+    assert await turn_scheduler.on_agent_message("g7", "w1", "three") is None
+    assert _held("g7") == []

@@ -61,8 +61,10 @@ boot; tests call it directly.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import re
 import time
 from weakref import WeakValueDictionary
 from typing import Any, Dict, List, Optional, Set
@@ -958,14 +960,44 @@ def _dedupe_frames_by_task_id(
 # to start a turn for the parent to read it, causing needless wakes in an
 # audit. The message is held instead. The durable copy is ONE
 # ``pending_wakeups`` row per session (``source=HELD_PEER_SOURCE``) whose prompt
-# is every held message so far and whose ``fire_at`` is the promotion deadline,
-# fixed by the first message. Three ways out:
+# is every held message so far and whose ``fire_at`` is the promotion deadline.
 #
-# * the parent's next unpark wake takes the row and carries the messages in a
-#   system-reminder (:func:`_enqueue_context_wake`);
-# * the deadline fires: the wakeup service promotes the messages to a
-#   ``source="promotion"`` turn (:func:`promote_held_peer_messages`);
-# * an urgent message takes them along into its own wake.
+# Held messages ride the parent's NEXT turn, however that turn starts:
+#
+# * a queued turn of any source (user message, unpark, promotion, agent
+#   message, scheduled wakeup): the pump takes them at start
+#   (:func:`fold_held_peer_messages_for_turn`); an unpark, promotion or urgent
+#   wake that already carries some in its payload gets only the rest;
+# * a completion steered into a live turn carries them in the same steer
+#   (:func:`_try_steer_terminal_notification`); a steer the turn never
+#   delivers puts them back for the wake that replaces it;
+# * a CLI-owned wake on the delegated leg: the CLI writes that wake's prompt
+#   itself, so the app cannot add to it. The messages are queued the moment
+#   that wake comes to rest (:func:`on_cli_wake_rested`) instead of waiting
+#   for the deadline;
+# * an urgent message takes them along into its own wake;
+# * the deadline fires: the wakeup service promotes them to a
+#   ``source="promotion"`` turn (:func:`promote_held_peer_messages`).
+#
+# Each held message carries an id (:func:`_held_entry`). Every path that
+# delivers held messages records their ids for the session, and every take
+# drops ids already delivered, so a message is delivered once and only once
+# even when a restore puts back text that a turn already carried.
+#
+# A message that arrives while a turn is live but the park has not settled
+# yet (the unpark wake was just claimed) is not held for the deadline: its row
+# is armed to fire now, so either the live turn's start takes it or it is
+# promoted straight away.
+#
+# Policy defaults (deliberate, not configurable):
+#
+# * Stop drops held messages: ``query_session_lifecycle.enter_user_stop``
+#   cancels every pending wakeup of the session, this row included, and a
+#   stopped session refuses new holds.
+# * The promotion deadline is fixed at :data:`HELD_PEER_PROMOTION_SECONDS`
+#   (10 minutes) from the FIRST held message.
+# * Later messages do not extend it: the row keeps the earliest ``fire_at``
+#   (``wakeups_db.merge_session_wakeup``).
 #
 # A queued unpark wake that has not started yet takes a held message directly.
 # Appends and takes run under the session's terminal-delivery lock, the lock
@@ -975,7 +1007,7 @@ def _dedupe_frames_by_task_id(
 HELD = "held"
 
 #: How long a held message waits for the parent's own wake before it is
-#: promoted to a wake of its own.
+#: promoted to a wake of its own. Fixed; later messages do not extend it.
 HELD_PEER_PROMOTION_SECONDS = 600.0
 
 _NOT_PARKED = object()
@@ -990,10 +1022,84 @@ _PROMOTED_PEER_HEADER = (
     "now because none came in time; the background work may still be running:"
 )
 
+#: The id line in front of each held message. Stripped when rendered.
+_HELD_MARK_RE = re.compile(r"^\[held-peer-message ([A-Za-z0-9_-]+)\]$", re.M)
+
+#: How many delivered held-message ids each session remembers.
+_DELIVERED_HELD_CAP = 512
+_delivered_held: Dict[str, Dict[str, None]] = {}
+
+
+def _held_entry(prompt: str) -> str:
+    """One formatted peer message, tagged with a fresh id."""
+    return f"[held-peer-message hp_{uuid4().hex}]\n{prompt.strip()}"
+
+
+def _held_entries(held: Optional[str]) -> List[tuple]:
+    """``(id, text)`` for each message in ``held``, oldest first, duplicates
+    dropped. Text written before ids existed becomes one entry keyed by its
+    hash."""
+    held = held or ""
+    marks = list(_HELD_MARK_RE.finditer(held))
+    out: List[tuple] = []
+    seen: Set[str] = set()
+    lead = (held[:marks[0].start()] if marks else held).strip()
+    if lead:
+        key = "legacy-" + hashlib.sha1(lead.encode("utf-8")).hexdigest()[:16]
+        out.append((key, lead))
+        seen.add(key)
+    for i, mark in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(held)
+        text = held[mark.end():end].strip()
+        if text and mark.group(1) not in seen:
+            seen.add(mark.group(1))
+            out.append((mark.group(1), text))
+    return out
+
+
+def _join_entries(entries: List[tuple]) -> str:
+    return "\n\n".join(f"[held-peer-message {key}]\n{text}" for key, text in entries)
+
+
+def _held_ids(held: Optional[str]) -> List[str]:
+    return [key for key, _ in _held_entries(held)]
+
+
+def _delivered_held_ids(session_id: str) -> Set[str]:
+    return set(_delivered_held.get(session_id) or ())
+
+
+def _mark_held_delivered(session_id: str, ids: List[str]) -> None:
+    if not ids:
+        return
+    seen = _delivered_held.setdefault(session_id, {})
+    for key in ids:
+        seen.pop(key, None)
+        seen[key] = None
+    while len(seen) > _DELIVERED_HELD_CAP:
+        seen.pop(next(iter(seen)))
+
+
+def _unmark_held_delivered(session_id: str, ids: List[str]) -> None:
+    seen = _delivered_held.get(session_id)
+    if seen:
+        for key in ids:
+            seen.pop(key, None)
+
+
+def _undelivered(session_id: str, held: Optional[str], skip: Set[str] = frozenset()) -> str:
+    """``held`` without the messages already delivered to the session or
+    listed in ``skip``."""
+    delivered = _delivered_held_ids(session_id) | set(skip)
+    return _join_entries([
+        (key, text) for key, text in _held_entries(held) if key not in delivered
+    ])
+
 
 def _held_peer_block(held: str, *, promoted: bool = False) -> str:
     header = _PROMOTED_PEER_HEADER if promoted else _HELD_PEER_HEADER
-    return f"<system-reminder>\n{header}\n\n{held}\n</system-reminder>"
+    body = "\n\n".join(text for _, text in _held_entries(held))
+    return f"<system-reminder>\n{header}\n\n{body}\n</system-reminder>"
 
 
 def _join_held(*parts: Optional[str]) -> str:
@@ -1015,13 +1121,14 @@ def _terminal_delivery_lock(session_id: str) -> asyncio.Lock:
 
 async def _take_held_peer_messages(session_id: str) -> str:
     """Remove the session's held messages from the durable store and return
-    them, oldest first ("" when none). Caller holds the terminal lock."""
+    them, oldest first ("" when none). Messages already delivered to the
+    session are dropped. Caller holds the terminal lock."""
     from app.core import wakeup_service
 
     rows = await wakeup_service.take_session_wakeups(
         session_id, wakeup_service.HELD_PEER_SOURCE,
     )
-    return _join_held(*(row.get("prompt") for row in rows))
+    return _undelivered(session_id, _join_held(*(row.get("prompt") for row in rows)))
 
 
 async def _hold_in_queued_unpark(session_id: str, held: str) -> Optional[Dict[str, Any]]:
@@ -1049,6 +1156,7 @@ async def _hold_peer_message(session_id: str, prompt: str) -> Any:
     """
     from app.core import wakeup_service
 
+    prompt = _held_entry(prompt)
     async with _terminal_delivery_lock(session_id):
         if not await asyncio.to_thread(_session_has_parked_turn, session_id):
             return _NOT_PARKED
@@ -1058,10 +1166,17 @@ async def _hold_peer_message(session_id: str, prompt: str) -> Any:
                 "unpark wake", session_id,
             )
             return HELD
+        # A live turn next to the park means the parent's wake was just
+        # claimed (or another turn runs beside its background work). Holding
+        # for the full deadline would strand the message behind a turn that
+        # is already running, so the row fires now: the live turn's start
+        # takes it if it has not passed that point, else it is promoted.
+        live = await asyncio.to_thread(turns_db.get_live_turn, session_id)
+        delay = 0.0 if live is not None else HELD_PEER_PROMOTION_SECONDS
         context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
         row = await wakeup_service.hold_peer_messages(
             session_id, prompt,
-            delay_seconds=HELD_PEER_PROMOTION_SECONDS,
+            delay_seconds=delay,
             profile_id=context.get("profile_id"),
             project_id=context.get("project_id"),
             model=(context.get("overrides") or {}).get("model"),
@@ -1082,6 +1197,7 @@ def _restore_held_peer_messages(session_id: str, held: str) -> None:
     raises."""
     if not held:
         return
+    _unmark_held_delivered(session_id, _held_ids(held))
     try:
         from app.core import wakeup_service
 
@@ -1108,6 +1224,7 @@ async def promote_held_peer_messages(session_id: str, held: str) -> Optional[str
     ``source="promotion"`` context wake. Returns the turn id, or None when
     nothing could be queued (the wakeup service then re-arms the row).
     """
+    held = _undelivered(session_id, held)
     if not held.strip():
         return None
     async with _terminal_delivery_lock(session_id):
@@ -1122,6 +1239,73 @@ async def promote_held_peer_messages(session_id: str, held: str) -> Optional[str
         logger.info(
             "turn_scheduler: held peer messages for %s promoted to turn %s",
             session_id, turn["id"],
+        )
+        kick(session_id)
+    return turn.get("id")
+
+
+async def fold_held_peer_messages_for_turn(
+    session_id: str, turn: Dict[str, Any],
+) -> str:
+    """Take the held peer messages a starting turn must carry.
+
+    Called by the pump as ``turn`` starts, whatever its source. Messages the
+    turn already carries in ``payload.held_peer_messages`` (an unpark,
+    promotion or urgent wake) are recorded as delivered and not returned
+    again; the rest of the store is taken, recorded and returned as raw held
+    text for :func:`held_peer_block` ("" when there is nothing to add). The
+    caller hands the result to :func:`restore_held_peer_messages` if the turn
+    fails before the engine got its prompt.
+    """
+    carried = _held_ids(((turn or {}).get("payload") or {}).get("held_peer_messages"))
+    _mark_held_delivered(session_id, carried)
+    async with _terminal_delivery_lock(session_id):
+        taken = await _take_held_peer_messages(session_id)
+    fresh = _undelivered(session_id, taken, set(carried))
+    _mark_held_delivered(session_id, _held_ids(fresh))
+    if fresh:
+        logger.info(
+            "turn_scheduler: %d held peer message(s) for %s ride turn %s",
+            len(_held_ids(fresh)), session_id, (turn or {}).get("id"),
+        )
+    return fresh
+
+
+def held_peer_block(held: str) -> str:
+    """The system-reminder that carries ``held`` into a prompt."""
+    return _held_peer_block(held)
+
+
+def restore_held_peer_messages(session_id: str, held: str) -> None:
+    """Public form of :func:`_restore_held_peer_messages` for the pump."""
+    _restore_held_peer_messages(session_id, held)
+
+
+async def on_cli_wake_rested(session_id: str) -> Optional[str]:
+    """A CLI-owned wake on the delegated leg came to rest: deliver held
+    messages now.
+
+    The CLI writes that wake's prompt itself, so held messages cannot ride
+    it. Without this they waited for the promotion deadline although the
+    parent had just been awake. Queues one context wake carrying them and
+    kicks it; returns its id, or None when nothing was held.
+    """
+    async with _terminal_delivery_lock(session_id):
+        held = await _take_held_peer_messages(session_id)
+        if not held:
+            return None
+        try:
+            turn = await _enqueue_context_wake(
+                session_id, "promotion", [], [], _held_peer_block(held),
+                extra_payload={"held_peer_messages": held},
+            )
+        except Exception:
+            _restore_held_peer_messages(session_id, held)
+            raise
+    if turn.get("id"):
+        logger.info(
+            "turn_scheduler: held peer messages for %s queued after its "
+            "CLI-owned wake as turn %s", session_id, turn["id"],
         )
         kick(session_id)
     return turn.get("id")
@@ -1516,6 +1700,8 @@ async def _try_steer_terminal_notification(
     prompt: str,
     frames: List[Dict[str, Any]],
     task_ids: List[str],
+    *,
+    carry_held: bool = False,
 ) -> bool:
     """Try to hand ``prompt`` to the session's RUNNING turn as a steer.
 
@@ -1525,25 +1711,42 @@ async def _try_steer_terminal_notification(
     a turn already being interrupted, a backend with no steering channel), which
     is also the at-rest case: the caller falls through to the ordinary wake.
 
+    ``carry_held`` (the caller holds the terminal lock): held peer messages
+    ride the same steer. They go back to the store when the steer is refused,
+    and when the turn ends without delivering it
+    (:func:`on_task_notification_stranded`).
+
     Never raises — :func:`session_runtime.try_steer_task_notification` swallows
     its own failures, and this wrapper covers the import.
     """
+    held = ""
+    steered = False
     try:
         from app.core import session_runtime
 
-        return await session_runtime.try_steer_task_notification(
+        if carry_held and session_runtime.get_live_runtime(session_id) is not None:
+            held = await _take_held_peer_messages(session_id)
+        steer_prompt = f"{prompt}\n\n{_held_peer_block(held)}" if held else prompt
+        steered = await session_runtime.try_steer_task_notification(
             session_id,
-            prompt,
+            steer_prompt,
             notification_id=f"{TASK_STEER_ID_PREFIX}{uuid4().hex}",
             frames=frames,
             task_ids=task_ids,
+            **({"held_peer_messages": held} if held else {}),
         )
     except Exception:  # noqa: BLE001 — the queued wake is the correctness path.
         logger.warning(
             "turn_scheduler: mid-turn notification steer failed for %s",
             session_id, exc_info=True,
         )
-        return False
+        steered = False
+    if held:
+        if steered:
+            _mark_held_delivered(session_id, _held_ids(held))
+        else:
+            _restore_held_peer_messages(session_id, held)
+    return bool(steered)
 
 
 def on_task_notification_delivered(session_id: str, task_ids: List[str]) -> None:
@@ -1563,6 +1766,8 @@ async def on_task_notification_stranded(
     session_id: str,
     frames: List[Dict[str, Any]],
     task_ids: List[str],
+    *,
+    held_peer_messages: str = "",
 ) -> None:
     """Fallback: a steered notification the turn ended without ever delivering.
 
@@ -1573,7 +1778,12 @@ async def on_task_notification_stranded(
 
     Deliberately bypasses the ``mark_woken`` latch: the caller already spent it
     on the steer attempt, and this is that same single delivery arriving by the
-    other road. Never raises — called from ``_finalize``, which must settle."""
+    other road. Never raises — called from ``_finalize``, which must settle.
+
+    Held peer messages that rode the steer go back to the store first, so the
+    wake enqueued here carries them."""
+    if held_peer_messages:
+        _restore_held_peer_messages(session_id, held_peer_messages)
     frames = [f for f in (frames or []) if isinstance(f, dict)]
     if not frames:
         return
@@ -1875,7 +2085,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
             # to the queued wake below. Latch only after acceptance; the
             # session delivery lock prevents concurrent duplicate submissions.
             if await _try_steer_terminal_notification(
-                session_id, prompt, [frame], wake_task_ids
+                session_id, prompt, [frame], wake_task_ids, carry_held=True,
             ):
                 task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
                 logger.info(

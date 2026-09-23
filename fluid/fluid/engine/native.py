@@ -799,6 +799,11 @@ def _parse_tool_args(raw_args: str) -> tuple[dict[str, Any], str | None]:
     return decoded, None
 
 
+
+def _held_peer_id(seq: int) -> str:
+    """The id of a peer message held while parked: its progress event's seq."""
+    return f"held-peer:{seq}"
+
 class NativeLoop(BackgroundLifecycleMixin):
     caps = EngineCaps(
         inproc_tools=True,
@@ -2420,13 +2425,18 @@ class NativeLoop(BackgroundLifecycleMixin):
         if not parked:
             return False
         meta = await self._ensure_session()
-        self._queued_peer_messages.append(op)
-        await self._emit(SubagentEvent(
+        # Read the log first: once this message is in it, a later first read
+        # would find it there as well as in memory and deliver it twice.
+        await self._rehydrate_queued_peer_messages(meta.session_id)
+        event = await self._emit(SubagentEvent(
             session_id=meta.session_id, turn_id=None,
             task_id=f"peer:{op.sender}", kind="progress",
             description=op.sender, summary=op.text,
             wake=False, wake_disposition=WAKE_NOT_APPLICABLE,
         ))
+        # The event's seq is the message's id: the in-memory copy and the one
+        # a rebuilt engine reads back from the log share it.
+        self._queued_peer_messages.append(replace(op, id=_held_peer_id(event.seq)))
         return True
 
     async def _rehydrate_queued_peer_messages(self, sid: str) -> None:
@@ -2455,6 +2465,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             ):
                 queued.append(AgentMessage(
                     text=str(event.summary), sender=str(event.description or "peer"),
+                    id=_held_peer_id(event.seq),
                 ))
         if queued:
             self._queued_peer_messages = queued + self._queued_peer_messages
@@ -2462,6 +2473,17 @@ class NativeLoop(BackgroundLifecycleMixin):
     def _queued_peer_reminder(self) -> str | None:
         """Peer messages held while parked, rendered once for this turn."""
         queued, self._queued_peer_messages = self._queued_peer_messages, []
+        # Once and only once: the same message can reach the queue from memory
+        # and from the log.
+        seen: set[str] = set()
+        unique = []
+        for message in queued:
+            if message.id is not None and message.id in seen:
+                continue
+            if message.id is not None:
+                seen.add(message.id)
+            unique.append(message)
+        queued = unique
         if not queued:
             return None
         from fluid.context.peer import format_peer_message

@@ -538,6 +538,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                 # and settles speculative subagent cards (#691 symptom 2). Then
                 # persist end-of-turn state so park-pollers render the wake, and
                 # keep draining for any further background work.
+                cli_wake_closed = wake_turn_id is not None
                 if wake_turn_id is not None:
                     await record_cli_wake_turn_completed(
                         session_id, wake_turn_id,
@@ -578,6 +579,8 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                             )
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("idle_reader: settle_parked_turns failed: %s", exc)
+                if cli_wake_closed:
+                    await _deliver_held_after_cli_wake(session_id)
                 # Capture the SDK context-usage breakdown for this CLI-owned wake
                 # turn while its adapter is still live and pooled. Detached and
                 # self-guarding, so it never delays draining.
@@ -751,3 +754,17 @@ async def _close_open_wake_turn(
                 )
     except Exception as exc:  # noqa: BLE001
         logger.debug("idle_reader: settle_parked_turns failed: %s", exc)
+    await _deliver_held_after_cli_wake(session_id)
+
+
+async def _deliver_held_after_cli_wake(session_id: str) -> None:
+    """Peer messages held while the parent was parked could not ride the
+    CLI's own wake (the CLI writes that prompt); queue them now that it came
+    to rest instead of leaving them for the promotion deadline. Never
+    raises."""
+    try:
+        from app.core import turn_scheduler
+
+        await turn_scheduler.on_cli_wake_rested(session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("idle_reader: held peer delivery after CLI wake failed: %s", exc)

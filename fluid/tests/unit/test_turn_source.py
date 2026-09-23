@@ -179,3 +179,35 @@ async def test_turn_running_tracks_the_turn_task() -> None:
         assert loop.turn_running is False
     finally:
         await loop.aclose()
+
+
+async def test_a_rebuilt_parked_engine_delivers_a_held_message_once() -> None:
+    """A host that evicts the parked engine and rebuilds it holds the next
+    message on the new engine. The new engine reads the log on its first
+    turn; the message it just held is there too, so without an id check the
+    wake carried it twice."""
+    store = MemoryStore()
+    first = await _parked_loop_on(_Provider(), store)
+    provider = _Provider()
+    rebuilt = NativeLoop(
+        provider=provider, store=store, model="m", session_id=first.session_id,
+    )
+    try:
+        await rebuilt.submit(AgentMessage(text="halfway", sender="worker", wake=False))
+        assert not rebuilt.turn_running
+        await rebuilt.submit(BackgroundTaskFinished(task_id="task_1", summary="done"))
+        await asyncio.wait_for(rebuilt.wait_turn(), 5)
+        assert provider.requests[-1].messages[-1].text().count("halfway") == 1
+    finally:
+        await rebuilt.aclose()
+        await first.aclose()
+
+
+async def _parked_loop_on(provider: _Provider, store: MemoryStore) -> NativeLoop:
+    loop = NativeLoop(provider=provider, store=store, model="m")
+    await loop.submit(UserTurn(content="delegate"))
+    await asyncio.wait_for(loop.wait_turn(), 5)
+    await loop._background_task_started(BackgroundTaskReceipt(
+        task_id="task_1", worker_session_id=None, description="worker",
+    ))
+    return loop
