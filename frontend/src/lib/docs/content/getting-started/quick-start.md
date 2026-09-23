@@ -22,11 +22,11 @@ Profiles control how the agent behaves. To create one:
 1. Navigate to **Profiles** in the sidebar
 2. Click **Create Profile**
 3. Configure:
-   - **Name** — A descriptive name
-   - **System Prompt** — Instructions for the agent
-   - **Model** — any model offered by the providers you set up
-   - **Allowed Tools** — Which tools the agent can use
-   - **Thinking Mode** — How deeply the model reasons
+   - **Name**: a descriptive name
+   - **System Prompt**: instructions for the agent
+   - **Model**: any model offered by the providers you set up
+   - **Allowed Tools**: which tools the agent can use
+   - **Thinking Mode**: how deeply the model reasons
 4. Save the profile
 
 You can also use **AI Generate** to create a profile from a description.
@@ -70,7 +70,7 @@ curl -X POST http://localhost:8000/api/v1/query \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Explain the difference between let and const in JavaScript",
-    "profile_id": "default"
+    "profile": "your-profile-id"
   }'
 ```
 
@@ -81,14 +81,14 @@ curl -X POST http://localhost:8000/api/v1/conversation/start \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Help me refactor this function",
-    "profile_id": "default",
-    "project_id": "my-project-id"
+    "profile": "your-profile-id",
+    "project": "your-project-id"
   }'
 ```
 
 ## Next Steps
 
-- **[Connectors](/docs/connectors)** — Set up Telegram, Discord, and more
-- **[Automations](/docs/features/automations)** — Schedule AI workflows
-- **[API Reference](/docs/api-reference)** — Full endpoint documentation
-- **[Hooks](/docs/features/hooks)** — Custom event handlers
+- **[Connectors](/docs/connectors)**: set up Telegram, Discord, and more
+- **[Automations](/docs/features/automations)**: schedule AI workflows
+- **[API Reference](/docs/api-reference)**: full endpoint documentation
+- **[Hooks](/docs/features/hooks)**: custom event handlers

@@ -13,7 +13,7 @@ AI Shuffle is a self-hosted workspace for AI agents, made by HobbyCoders. It run
 ### Chat Interface
 A real-time chat workspace for the model and provider you choose. Features include:
 - Streaming responses with tool use visualization
-- Session management with search, tags, and an Active group — sessions you're working in stay in Active until you mark them Complete, which moves them to Recent
+- Session management with search, tags, and an Active group: sessions you're working in stay in Active until you mark them Complete, which moves them to Recent
 - Session forking to branch conversations
 - Git worktree integration for isolated development
 - File sharing and media generation
@@ -25,7 +25,7 @@ Connect AI Shuffle to external platforms so an agent can respond to messages fro
 - **Smart Home:** Home Assistant, Philips Hue
 - **Other:** Spotify, Gmail, Webhooks
 
-Each connector creates a bridge — messages from the platform flow to the agent, and responses flow back.
+Each connector creates a bridge: messages from the platform flow to the agent, and responses flow back.
 
 ### Automations
 Schedule and trigger AI workflows:

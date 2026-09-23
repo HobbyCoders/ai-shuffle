@@ -2,7 +2,9 @@ name: CI JavaScript
 run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '4' }} vCPU)"
 
 # One runner checks only the JavaScript packages changed by a PR. Scheduled
-# canaries check all three packages; documentation-only PRs do not start it.
+# canaries check all three packages. A PR that changes only docs/content gets
+# the two cheap docs checks (the two docs copies match, and the website's
+# rendered docs.json is current) and nothing else.
 #
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
@@ -12,6 +14,10 @@ on:
       - 'tools/**'
       - 'browser-mcp/**'
       - 'app/contract/schema/**'
+      # Docs: the in-app copy must match, and the website renders the buyer pages.
+      - 'docs/content/**'
+      - 'android/site/scripts/render-docs.mjs'
+      - 'android/site/src/content/docs.json'
       - '.github/workflows/ci-frontend.yml'
   # Daily main-branch canary catches interactions between merged PRs within
   # roughly a day. Skip the paid runner when main has not moved since a green
@@ -92,6 +98,14 @@ jobs:
             browser:
               - 'browser-mcp/**'
               - '.github/workflows/ci-frontend.yml'
+            docs:
+              - 'docs/content/**'
+              - 'frontend/src/lib/docs/content/**'
+              - 'android/site/scripts/render-docs.mjs'
+              - 'android/site/src/content/docs.json'
+              - 'android/site/package.json'
+              - 'android/site/package-lock.json'
+              - '.github/workflows/ci-frontend.yml'
 
 
       # Upstream actions/setup-* on purpose: Blacksmith archived its
@@ -106,6 +120,7 @@ jobs:
             frontend/package-lock.json
             tools/package-lock.json
             browser-mcp/package-lock.json
+            android/site/package-lock.json
 
       - name: Install dependencies
         if: github.event_name != 'pull_request' || steps.changes.outputs.frontend == 'true'
@@ -140,3 +155,20 @@ jobs:
         if: github.event_name != 'pull_request' || steps.changes.outputs.browser == 'true'
         working-directory: browser-mcp
         run: npm ci --ignore-scripts && npm run build && npm test && npm audit --audit-level=high
+
+      # The in-app Docs panel bundles its own copy of docs/content; the backend
+      # serves docs/content itself. tests/test_buyer_docs.py checks the same
+      # thing, but backend CI does not start for a docs-only PR.
+      - name: Docs copies match
+        if: github.event_name != 'pull_request' || steps.changes.outputs.docs == 'true'
+        working-directory: .
+        run: diff -r docs/content frontend/src/lib/docs/content
+
+      # hobbycoders.com serves /docs and /changelog from the committed
+      # android/site/src/content/docs.json. A docs change without a fresh
+      # render (npm run render-docs in android/site) fails here, as does an em
+      # dash the renderer cannot turn into site style.
+      - name: Website docs render check
+        if: github.event_name != 'pull_request' || steps.changes.outputs.docs == 'true'
+        working-directory: android/site
+        run: npm ci && node scripts/render-docs.mjs --check

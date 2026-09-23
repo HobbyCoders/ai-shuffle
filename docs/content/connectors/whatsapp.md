@@ -95,7 +95,7 @@ Temporary tokens expire after 24 hours. For production use:
 | `phone_number_id` | string | Yes | The WhatsApp Business phone number ID from the Meta dashboard. This identifies which phone number the bot sends messages from. |
 | `access_token` | string | Yes | A valid access token for the WhatsApp Business API. Use a System User token for production (does not expire) or a temporary token for development (expires in 24 hours). |
 | `verify_token` | string | Yes | A secret string used to verify webhook requests from Meta. Must match the value configured in the Meta app dashboard webhook settings. |
-| `app_secret` | string | No | The Meta app secret. If set, the connector validates the `X-Hub-Signature-256` header on incoming webhook requests, rejecting payloads with a missing or mismatched signature. If empty, signature verification is skipped. |
+| `app_secret` | string | Yes | The Meta app secret (App settings, Basic). Every incoming webhook must carry a valid `X-Hub-Signature-256` header made with it; payloads with a missing or mismatched signature are rejected, and a connector without an app secret accepts no webhooks. |
 | `allowed_phone_numbers` | array of strings | No | List of phone numbers (in international E.164 format, e.g., `+14155551234`) that the bot is allowed to communicate with. If empty, the bot responds to all incoming messages. |
 | `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `messages`, `reactions`, `templates`, `media`, `account`. |
 | `auto_approve_destructive` | string | No | Reserved for forward compatibility. The current action catalog has no destructive actions, so this has no effect today. |
@@ -111,7 +111,7 @@ The WhatsApp connector supports the following capabilities:
 | Reactions | Yes | Available to the AI via the `send_reaction`/`remove_reaction` actions (see below). Not sent automatically. |
 | Rich text | Yes | Supports bold (`*text*`), italic (`_text_`), strikethrough (`~text~`), and monospace (`` ```text``` ``) formatting |
 | File upload | Yes | Send images, documents, audio, video, and stickers. File size limits: 16 MB for media, 100 MB for documents |
-| Buttons | Yes | Used for interactive permission prompts, where the agent sends Approve/Deny reply buttons |
+| Buttons | Yes | Supported by the platform. Tool approvals are answered by the owner in the app; the chat only sees a waiting notice |
 | Threads | No | WhatsApp does not have a thread model |
 
 **Message Length Limit:** 4,096 characters per message. Messages exceeding this limit are automatically split.
