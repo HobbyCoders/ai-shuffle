@@ -14,17 +14,28 @@ Python, Node and PostgreSQL; startup does not need to build or download code.
 No account is needed for downloads or updates.
 
 Stable milestones include an NSIS installer, built by `desktop-installer.yml`.
-Between releases, the installed app downloads and builds signed code from `main`
-through its in-app update controls. No new tag or installer build is required.
+Between installers, the installed app downloads and builds signed release code
+through its in-app update controls. No new installer build is required.
 Build processes run with hidden consoles and show progress inside the app.
 The installed EXE remains the shortcut and restart target. It selects the updated
 code and matching runtimes while preserving the original Electron profile,
 browser session, settings and PostgreSQL directory. Source versions and caches
 live in the existing desktop profile's `updates` subdirectory.
 
-Updates follow `main`, not tagged releases. The small `desktop-source.yml` job
-stores GitHub's source ZIP as an immutable asset in the private `desktop-sources`
-GitHub release and signs its revision, checksum and size. It uses a standard
+Installed apps follow the **stable** channel: tagged releases signed by
+`release.yml` after the release image passed verification
+(docs/ci/release-channels.md). The updater accepts a manifest only when its
+signed `channel` is the one this install follows, it carries a signed source
+`tree` digest, and the signature, size, checksum and sequence checks pass. It
+recomputes the tree digest over the extracted files and refuses to build on a
+mismatch. For your own testing you can follow **edge** (every `main` revision)
+on one install by writing `{"channel": "edge"}` to `update-channel.json` in the
+profile's `updates` folder; delete the file to return to stable.
+
+The `desktop-source.yml` job publishes edge builds on every push to `main`:
+it stores the runtime-only source archive as an immutable asset in the private
+`desktop-sources` GitHub release and signs its revision, checksum, size, channel,
+version, release notes and tree digest. It uses a standard
 GitHub-hosted runner and performs no application or installer build. The existing
 account-hub D1 database holds signed metadata and the GitHub asset ID. No R2
 subscription is needed. Downloads and updates are public and require no account.

@@ -52,9 +52,13 @@ produced on the worker and are not in the signed listing. A separate uid for
 agent tools (SEC-04) is the fix for those. Node packages are pinned by their
 lockfiles' integrity hashes through `npm ci`.
 
-Desktop reads the same stable feed but does not yet check `channel` or `tree`,
-and its build still installs from `requirements.txt`. That work belongs to the
-desktop updater (`desktop/src/main/source-updates.ts`, `source-build.ts`).
+The desktop updater (`desktop/src/main/source-updates.ts`) follows the same
+rules: it accepts only a manifest signed for its channel (`stable` unless the
+owner writes `{"channel": "edge"}` to `update-channel.json` in the install's
+`updates` folder) that carries a tree digest, keeps the signature, size,
+checksum and sequence checks, and recomputes the tree digest over the
+extracted files before building. Its build still installs from
+`requirements.txt`; that belongs to `desktop/src/main/source-build.ts`.
 
 ## One-time steps for the owner
 

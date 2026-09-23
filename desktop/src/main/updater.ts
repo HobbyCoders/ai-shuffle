@@ -83,7 +83,7 @@ export class Updater {
   stop(): void { if (this.bridgeTimer) clearInterval(this.bridgeTimer); this.bridgeTimer = null; if (this.initialCheck) clearTimeout(this.initialCheck); this.initialCheck = null; if (this.timer) clearInterval(this.timer); this.timer = null; }
   async check(interactive = false): Promise<void> {
     if (!this.applications || this.checking || this.downloading || this.installing || this.state.phase === 'ready') return;
-    this.checking = true; this.set({ phase: 'checking', error: null, percent: null, message: 'Checking main for updates…' });
+    this.checking = true; this.set({ phase: 'checking', error: null, percent: null, message: 'Checking for updates…' });
     try {
       if (!await this.permitted()) { this.set({ phase: 'idle' }); return; }
       const result = await this.applications.check(undefined, interactive);
