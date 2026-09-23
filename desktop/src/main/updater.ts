@@ -77,7 +77,8 @@ export class Updater {
     }
     if (!this.applications || this.timer) return;
     this.initialCheck = setTimeout(() => { this.initialCheck = null; void this.check(); }, 15_000);
-    this.timer = setInterval(() => void this.check(), 10 * 60 * 1000);
+    // Once on launch (above), then daily; users can still check from the app.
+    this.timer = setInterval(() => void this.check(), 24 * 60 * 60 * 1000);
   }
   stop(): void { if (this.bridgeTimer) clearInterval(this.bridgeTimer); this.bridgeTimer = null; if (this.initialCheck) clearTimeout(this.initialCheck); this.initialCheck = null; if (this.timer) clearInterval(this.timer); this.timer = null; }
   async check(interactive = false): Promise<void> {

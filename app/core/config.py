@@ -352,8 +352,8 @@ class Settings(BaseSettings):
     # A paired device's hub verdict is reused for this long before the hub is
     # asked again, and honored for the grace window when the hub is down or
     # rate limiting. Both bound hub traffic; the hub allows 120 requests a
-    # minute per source IP. Hub-side revocation takes effect within the TTL.
-    mobile_account_hub_verify_ttl_seconds: float = 20.0
+    # minute per worker. Hub-side revocation takes effect within the TTL.
+    mobile_account_hub_verify_ttl_seconds: float = 90.0
     mobile_account_hub_grace_seconds: float = 1800.0
 
     # Security - Request limits
