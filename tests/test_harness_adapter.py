@@ -6820,7 +6820,8 @@ def test_code_mode_section_names_both_skill_paths_and_the_error_rule():
     assert "delete_skill(name=...)" in text
     # 8b: the try/except sentence that contradicted run_python is gone.
     assert "Wrap calls that may fail in try/except" not in text
-    assert "Catch only MissingPathError" in text
+    assert "returns a falsy MissingFile instead of raising" in text
+    assert "Grep of a path you guessed" not in text
     assert "other tool errors come back as results and do not abort" in text
 
 

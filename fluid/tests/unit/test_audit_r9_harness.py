@@ -234,13 +234,14 @@ async def test_grep_and_glob_missing_paths_are_soft_results(tmp_path, call, mark
     assert "needle" in result.stdout  # the cell kept going
 
 
-async def test_read_missing_path_still_raises(tmp_path) -> None:
+async def test_read_missing_path_returns_a_falsy_missing_file(tmp_path) -> None:
     registry = _builtins_registry()
     bridge = HostBridge(registry, PermissionEngine("never_ask"), ctx=ToolCtx(cwd=str(tmp_path)))
     result = await _run(registry, bridge,
-        "from tools import Read\nRead(file_path='absent.txt')\nprint('unreachable')\n")
+        "from tools import Read\nr = Read(file_path='absent.txt')\n"
+        "print('reached', bool(r))\nr.splitlines()\n")
+    assert "reached False" in result.stdout
     assert "MissingPathError" in (result.error or "")
-    assert "unreachable" not in result.stdout
 
 
 async def test_edit_mismatch_is_a_soft_result_and_nothing_lands(tmp_path) -> None:
@@ -494,7 +495,7 @@ def test_note_monitor_and_run_python_wording() -> None:
     monitor = monitor_mod.describe()
     assert "BOUNDED summary" in monitor and "TaskOutput has the full buffer" in monitor
     assert "exit code of 0 needs no TaskOutput" in monitor
-    assert "Catch only MissingPathError around discovery" in _RUN_PYTHON_DESC
+    assert "returns a falsy MissingFile instead of raising" in _RUN_PYTHON_DESC
     assert "other errors now return as results and do not abort the cell" in _RUN_PYTHON_DESC
     assert "Never continue past permission denials" not in _RUN_PYTHON_DESC
     addendum = compose_code_mode_addendum()
