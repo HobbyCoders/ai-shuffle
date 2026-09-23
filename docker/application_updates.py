@@ -109,6 +109,12 @@ def build_environment(home):
             "NPM_CONFIG_USERCONFIG": os.devnull, "ELECTRON_SKIP_BINARY_DOWNLOAD": "1"}
 
 
+# Check the release manifest shortly after launch, then once a day. A
+# check can also be requested from the app at any time.
+FIRST_CHECK_SECONDS = 15
+CHECK_INTERVAL_SECONDS = 24 * 3600
+
+
 class ContainerUpdates:
     def __init__(self, root, image, public_key, allowed, lifecycle):
         self.root = Path(root)
@@ -121,7 +127,7 @@ class ContainerUpdates:
         self.thread = None
         self.install_requested = threading.Event()
         self.running = None
-        self.next_check = time.monotonic() + 15
+        self.next_check = time.monotonic() + FIRST_CHECK_SECONDS
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.state_path = self.root / "state.json"
         self.request_path = self.root / "request.json"
@@ -366,7 +372,7 @@ class ContainerUpdates:
                 self.install_requested.set()
                 return
             if action in ("check", "download") or time.monotonic() >= self.next_check:
-                self.next_check = time.monotonic() + 600
+                self.next_check = time.monotonic() + CHECK_INTERVAL_SECONDS
                 if self.allowed():
                     self.check(download=action == "download")
         except Exception as exc:
