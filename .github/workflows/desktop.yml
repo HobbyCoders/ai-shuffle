@@ -2,6 +2,7 @@ name: Desktop CI
 
 # Validate native desktop packaging and the preview installer; ordinary application checks have separate
 # coverage.
+
 on:
   pull_request:
     # Add ci:full when ready to merge. Keeping it applied rechecks every push;

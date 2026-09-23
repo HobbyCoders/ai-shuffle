@@ -246,41 +246,8 @@ assembles a real one on Linux.
 
 ## Release
 
-`.github/workflows/release.yml` creates the GitHub release, then assembles the
-runtime and builds the installer on each supported target and uploads them,
-with the `latest*.yml` update metadata, to that release. The desktop version
-is stamped from the tag, so the app carries the same version number as the
-server it ships. Supported downloads are the Windows x64 EXE, the macOS arm64
-DMG (plus an arm64 ZIP for updates), and the Linux x64 AppImage or amd64
-Debian package. The workflow no longer publishes standalone server archives;
-Docker remains the headless option.
-
-Older releases may retain Windows ARM update files so the shared Windows
-update feed does not hand an ARM client an x64 installer. Windows ARM is no
-longer built or listed as a supported download.
-
-### Test desktop updates
-
-Use a packaged stable app on Windows with a lower version than the target
-release. To test the Settings controls, the starting build must already include
-them; an older installed UI cannot acquire the controls before updating.
-
-1. Publish the higher stable GitHub release with its Windows installer and
-   `latest.yml` metadata. Drafts and prereleases are not the stable update feed.
-2. In the older app, open Settings → Downloads and choose Check for updates.
-   Confirm that the new version and download progress appear.
-3. Choose Restart and update once the download is ready. Confirm that the app
-   reopens, the installed version changes, and existing data is still available.
-4. Check again and confirm that the UI says it is up to date.
-
-For an older starting build without the Settings controls, the automatic check
-runs about 15 seconds after launch, and the notification bell offers Restart
-and update when the download finishes. Preview builds and development runs
-cannot exercise the release update path.
-
-Code signing is not configured yet. Windows and Linux builds install and
-update unsigned (Windows shows a SmartScreen prompt on first install). macOS
-requires a Developer ID certificate and notarisation before the built-in
-updater can replace the app, and until then Gatekeeper may also quarantine the
-bundled Python: after copying the app to Applications run
-`xattr -dr com.apple.quarantine "/Applications/AI Shuffle.app"` once.
+See [RELEASING.md](RELEASING.md): which workflow builds which installer,
+Windows Authenticode, macOS Developer ID signing and notarization, unsigned
+Linux packages with checksums, every GitHub secret involved, and how update
+checks work. Installed Windows apps update in place from signed `main` source
+(above); macOS and Linux installers are rebuilt and downloaded again.

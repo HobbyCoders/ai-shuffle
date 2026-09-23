@@ -1,0 +1,101 @@
+name: Build Linux desktop artifact (manual opt-in)
+
+# AppImage and deb for x64. Linux packages ship unsigned; SHA256SUMS next to
+# them is the integrity check (desktop/RELEASING.md). No secrets are used, so
+# this also runs on forks.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Desktop version to build (for example 0.8.18)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux x64 AppImage and deb with checksums
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+        shell: bash
+    env:
+      REQUESTED_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Validate version
+        run: |
+          version="${REQUESTED_VERSION#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo '::error::Invalid desktop version'; exit 1; }
+          echo "DESKTOP_VERSION=$version" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          APP_VERSION: v${{ env.DESKTOP_VERSION }}
+        run: npm ci && npm run build
+      - name: Install desktop build tools and stamp version
+        run: |
+          npm ci
+          npm version --no-git-tag-version --allow-same-version "$DESKTOP_VERSION"
+      - name: Test desktop
+        run: npm test
+      - name: Assemble native worker and record exact source
+        run: |
+          npm run build:worker -- --frontend-build ../frontend/build
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          fs.writeFileSync('worker/build-source.json', JSON.stringify({
+            version: process.env.DESKTOP_VERSION,
+            sourceCommit: process.env.GITHUB_SHA,
+            buildUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+          }, null, 2) + '\n');
+          NODE
+      - name: Choose code signing
+        run: node scripts/signing.mjs linux --github-env
+      - name: Build AppImage and deb
+        run: |
+          npm run build
+          node node_modules/electron-builder/cli.js --publish never --linux AppImage deb --x64
+      - name: Record checksums and provenance
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import { createHash } from 'node:crypto';
+          const source = JSON.parse(fs.readFileSync('worker/build-source.json', 'utf8'));
+          const worker = JSON.parse(fs.readFileSync('worker/manifest.json', 'utf8'));
+          const files = fs.readdirSync('release').filter(name => /\.(AppImage|deb)$/.test(name));
+          if (!files.some(name => name.endsWith('.AppImage')) || !files.some(name => name.endsWith('.deb'))) throw new Error('Missing Linux packages');
+          const artifacts = files.map(name => {
+            const bytes = fs.readFileSync(`release/${name}`);
+            return { name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+          });
+          fs.writeFileSync('release/SHA256SUMS', artifacts.map(a => `${a.sha256}  ${a.name}\n`).join(''));
+          fs.writeFileSync('release/linux-build-provenance.json', JSON.stringify({ ...source, signing: 'unsigned', cloudflared: worker.cloudflared, artifacts }, null, 2) + '\n');
+          NODE
+          (cd release && sha256sum --check SHA256SUMS)
+      - name: Upload Linux packages and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-desktop-${{ env.DESKTOP_VERSION }}-${{ github.sha }}
+          path: |
+            desktop/release/*.AppImage
+            desktop/release/*.deb
+            desktop/release/SHA256SUMS
+            desktop/release/linux-build-provenance.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
