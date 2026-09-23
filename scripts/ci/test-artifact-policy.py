@@ -165,6 +165,31 @@ class ArtifactPolicyTests(unittest.TestCase):
         download = next(s for s in installer["jobs"]["verify"]["steps"] if s.get("uses", "").startswith("actions/download-artifact@"))
         self.assertEqual(download["with"]["run-id"], "${{ inputs.candidate_run_id || github.run_id }}")
 
+    def test_platform_installer_publishes_the_tagged_android_download(self):
+        config = workflow("platform-installer.yml")
+        self.assertEqual(config["on"]["workflow_dispatch"]["inputs"]["platform"]["options"], ["mac", "linux", "android"])
+        build = config["jobs"]["android-build"]
+        # The APK comes from Android CI's own release path, built for this tag.
+        self.assertEqual(build["uses"], "./.github/workflows/android.yml")
+        self.assertEqual(build["with"], {"publish_download": "true", "release_tag": "${{ github.ref_name }}"})
+        self.assertIn("inputs.platform == 'android'", build["if"])
+        self.assertIn("github.ref_type == 'tag'", build["if"])
+        publish = config["jobs"]["publish"]
+        self.assertEqual(publish["needs"], "android-build")
+        self.assertEqual(publish["environment"], "release-signing")
+        self.assertIn("needs.android-build.result == 'success'", publish["if"])
+        self.assertNotIn("always()", publish["if"])
+        download = next(s for s in publish["steps"] if s.get("uses", "").startswith("actions/download-artifact@"))
+        self.assertEqual(download["with"]["run-id"], "${{ inputs.build_run_id || github.run_id }}")
+        # android.yml uploads exactly this artifact name; the publisher reads its files.
+        uploaded = {s["with"]["name"] for s in uploads(workflow("android.yml")["jobs"]["build"])}
+        self.assertIn("android-download", uploaded)
+        run = "\n".join(s.get("run", "") for s in publish["steps"])
+        self.assertIn("name=android-download", run)
+        self.assertIn("sha256sum --check AI-Shuffle-Android.apk.sha256", run)
+        self.assertIn('publish-platform-installer.mjs "$PLATFORM" artifact "$RELEASE_TAG"', run)
+        self.assertFalse((WORKFLOWS / "desktop-platform-installer.yml").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

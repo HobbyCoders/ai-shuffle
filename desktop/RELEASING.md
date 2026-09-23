@@ -179,13 +179,14 @@ download folder.
 3. Run `desktop-linux-artifact.yml` with the same version.
    Run both builds with **Use workflow from** set to the tag, so the artifact
    name carries the tag's commit.
-4. Within a day (the artifacts expire), run `desktop-platform-installer.yml`
+4. Within a day (the artifacts expire), run `platform-installer.yml`
    from the tag once per platform (`mac`, `linux`) with that build's run ID. It
    attaches the DMG, ZIP, AppImage, deb, provenance and `SHA256SUMS-macos` /
    `SHA256SUMS-linux` to the release, then signs the DMG or AppImage entry and
    points `/v1/desktop/installers` at it. It refuses a Mac build that is not
    notarized, an artifact built from another commit or version, and a
-   version older than the one already published.
+   version older than the one already published. The same workflow publishes
+   the Android APK (platform `android`); see `android/RELEASING.md`.
 5. Install each on a clean machine. Windows: the installer's Properties >
    Digital Signatures tab shows the publisher. macOS: it opens without
    `xattr` or right-click > Open.

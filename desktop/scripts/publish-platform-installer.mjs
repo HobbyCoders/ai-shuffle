@@ -1,16 +1,18 @@
-// Register a verified macOS or Linux desktop installer with the account hub.
+// Register a verified installer with the account hub: a macOS or Linux
+// desktop build, or the Android release APK.
 //
-//   node desktop/scripts/publish-platform-installer.mjs <mac|linux> <artifact dir> <vX.Y.Z>
+//   node desktop/scripts/publish-platform-installer.mjs <mac|linux|android> <artifact dir> <vX.Y.Z>
 //
-// <artifact dir> is the downloaded artifact of desktop-macos-artifact.yml
-// (macos-desktop-<version>-<sha>) or desktop-linux-artifact.yml
-// (linux-desktop-<version>-<sha>), built from the tag's commit. The installer
-// (the .dmg for mac, the .AppImage for linux) must already be uploaded to the
-// GitHub release of that tag. This script checks the build provenance and
-// checksums, checks the uploaded asset has the same bytes, signs an installer
-// payload with the application update key, and writes the platform's row in
-// desktop_platform_installers, which /v1/desktop/installers lists and
-// /v1/desktop/installer/<platform> serves. The Windows pointer
+// <artifact dir> is the downloaded artifact of the platform's build of the tag:
+//   mac      desktop-macos-artifact.yml (macos-desktop-<version>-<sha>)
+//   linux    desktop-linux-artifact.yml (linux-desktop-<version>-<sha>)
+//   android  android.yml called with the tag as release_tag (android-download)
+// The installer (the .dmg, the .AppImage or the .apk) must already be uploaded
+// to the GitHub release of that tag. This script checks the build provenance
+// and checksum file, checks the uploaded asset has the same bytes, signs an
+// installer payload with the application update key, and writes the
+// platform's row in desktop_platform_installers, which /v1/desktop/installers
+// lists and /v1/desktop/installer/<platform> serves. The Windows pointer
 // (desktop_installers, publish-installer.mjs) is not touched.
 //
 // Environment: GH_TOKEN, DESKTOP_APPLICATION_SIGNING_KEY,
@@ -22,13 +24,17 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 
 const repo = 'HobbyCoders/ai-shuffle';
+// provenance and sums are the build's own record of what it made
+// (android/ci/prepare-apk-download.py writes the Android pair).
 const PLATFORMS = {
- mac: { arch: 'arm64', extension: '.dmg', provenance: 'macos-build-provenance.json' },
- linux: { arch: 'x64', extension: '.AppImage', provenance: 'linux-build-provenance.json' },
+ mac: { arch: 'arm64', extension: '.dmg', provenance: 'macos-build-provenance.json', sums: 'SHA256SUMS' },
+ linux: { arch: 'x64', extension: '.AppImage', provenance: 'linux-build-provenance.json', sums: 'SHA256SUMS' },
+ // One universal APK; its name carries no version, the provenance does.
+ android: { arch: 'universal', extension: '.apk', provenance: 'android-build.json', sums: 'AI-Shuffle-Android.apk.sha256' },
 };
 const [platform, dir, tag] = process.argv.slice(2);
 const target = PLATFORMS[platform];
-if (!target || !dir || !/^v\d+\.\d+\.\d+$/.test(tag ?? '')) throw Error('Usage: publish-platform-installer.mjs <mac|linux> <artifact dir> <vX.Y.Z>');
+if (!target || !dir || !/^v\d+\.\d+\.\d+$/.test(tag ?? '')) throw Error('Usage: publish-platform-installer.mjs <mac|linux|android> <artifact dir> <vX.Y.Z>');
 const version = tag.slice(1);
 const key = process.env.DESKTOP_APPLICATION_SIGNING_KEY, token = process.env.GH_TOKEN, database = process.env.ACCOUNT_HUB_DATABASE_ID;
 if (!key || !token || !/^[a-f0-9-]{36}$/.test(database ?? '')) throw Error('Publisher configuration missing');
@@ -42,22 +48,30 @@ catch { throw Error(`${tag} (${revision}) is not on main; refusing to publish it
 
 // The artifact must be the build of this tag's commit, at this version.
 const provenance = JSON.parse(await readFile(path.join(dir, target.provenance), 'utf8'));
-if (provenance.version !== version) throw Error(`Artifact version ${provenance.version} is not ${version}`);
-if (provenance.sourceCommit !== revision) throw Error(`Artifact was built from ${provenance.sourceCommit}, not ${tag} (${revision})`);
+if (platform === 'android') {
+ // android-build.json: Gradle's versionName and the commit Android CI checked out.
+ if (provenance.versionName !== version) throw Error(`APK versionName ${provenance.versionName} is not ${version}; build it with ${tag} as the release tag`);
+ if (provenance.commit !== revision) throw Error(`APK was built from ${provenance.commit}, not ${tag} (${revision})`);
+} else {
+ if (provenance.version !== version) throw Error(`Artifact version ${provenance.version} is not ${version}`);
+ if (provenance.sourceCommit !== revision) throw Error(`Artifact was built from ${provenance.sourceCommit}, not ${tag} (${revision})`);
+}
 // D12: desktop sells signed. A Mac build must be Developer ID signed and notarized.
 if (platform === 'mac' && !/^developer-id\+notary/.test(provenance.signing ?? '')) throw Error(`Mac artifact signing is "${provenance.signing}"; a notarized Developer ID build is required`);
 
 const candidates = (await readdir(dir)).filter(name => name.endsWith(target.extension));
 if (candidates.length !== 1) throw Error(`Expected exactly one ${target.extension} in ${dir}, found ${candidates.length}`);
 const file = candidates[0];
-if (!/^[A-Za-z0-9._-]+$/.test(file) || !file.includes(version)) throw Error(`Unexpected installer name ${file}`);
+if (!/^[A-Za-z0-9._-]+$/.test(file) || (platform !== 'android' && !file.includes(version))) throw Error(`Unexpected installer name ${file}`);
 let size = 0; const hash = createHash('sha256');
 for await (const chunk of createReadStream(path.join(dir, file))) { size += chunk.length; hash.update(chunk); }
 const sha256 = hash.digest('hex');
-const recorded = provenance.artifacts?.find(a => a.name === file);
+const recorded = platform === 'android'
+ ? { name: file, bytes: size, sha256: provenance.sha256 } // android-build.json records the digest only
+ : provenance.artifacts?.find(a => a.name === file);
 if (recorded?.bytes !== size || recorded?.sha256 !== sha256) throw Error('Installer does not match its build provenance');
-const sums = await readFile(path.join(dir, 'SHA256SUMS'), 'utf8');
-if (!sums.split('\n').includes(`${sha256}  ${file}`)) throw Error('Installer does not match SHA256SUMS');
+const sums = await readFile(path.join(dir, target.sums), 'utf8');
+if (!sums.split('\n').includes(`${sha256}  ${file}`)) throw Error(`Installer does not match ${target.sums}`);
 
 const response = await fetch(`https://api.github.com/repos/${repo}/releases/tags/${tag}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'AI-Shuffle-Installer-Publisher' } });
 if (!response.ok) throw Error(`Release lookup failed (${response.status})`);
