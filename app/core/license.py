@@ -445,7 +445,7 @@ async def activate(key: str) -> dict:
         }
         await asyncio.to_thread(_save_state, state)
     logger.info("License activated on this worker (plan %s)", payload.get("plan"))
-    return status()
+    return await asyncio.to_thread(status)
 
 
 async def deactivate() -> dict:
@@ -465,7 +465,7 @@ async def deactivate() -> dict:
         # Keep the install id so a later activation reuses the same seat record.
         await asyncio.to_thread(_save_state, {"install_id": state.get("install_id")} if state.get("install_id") else {})
     logger.info("License deactivated on this worker (seat released on server: %s)", released)
-    return status() | {"seat_released": released}
+    return (await asyncio.to_thread(status)) | {"seat_released": released}
 
 
 async def release_seat(key: str, install_id: str) -> dict:
@@ -495,13 +495,13 @@ def _retry_delay(failures: int) -> float:
 async def refresh() -> dict:
     """Renew the lease now. Failures are recorded, never raised to callers."""
     if beta_mode():
-        return status()
+        return await asyncio.to_thread(status)
     async with _state_lock():
         state = await asyncio.to_thread(_load_state)
         token = _unseal(state.get("install_token"))
         install_id = state.get("install_id")
         if not install_id or not token:
-            return status()
+            return await asyncio.to_thread(status)
         now = time.time()
         body = {"install_id": install_id, "install_token": token,
                 "fingerprint": _install_fingerprint(install_id), "app_version": _app_version()}
@@ -513,7 +513,7 @@ async def refresh() -> dict:
                       "next_refresh_at": now + _retry_delay(failures)}
             await asyncio.to_thread(_save_state, state)
             logger.warning("License renewal failed (attempt %d): %s", failures, exc.message)
-            return status()
+            return await asyncio.to_thread(status)
         if code == 200:
             try:
                 verify_lease(data.get("lease"), install_id)
@@ -523,7 +523,7 @@ async def refresh() -> dict:
                           "next_refresh_at": now + _retry_delay(failures)}
                 await asyncio.to_thread(_save_state, state)
                 logger.error("License renewal returned an unverifiable lease: %s", exc)
-                return status()
+                return await asyncio.to_thread(status)
             state |= {"lease": data["lease"], "last_refresh_at": now, "next_refresh_at": _next_daily(now),
                       "failures": 0, "last_error": None, "server_status": None}
         else:
@@ -535,7 +535,7 @@ async def refresh() -> dict:
                                         "message": _server_message(data, "The license server no longer renews this worker.")}}
             logger.warning("License server declined renewal: %s", code_name)
         await asyncio.to_thread(_save_state, state)
-    return status()
+    return await asyncio.to_thread(status)
 
 
 def _seconds_until_refresh(now: float) -> float:
