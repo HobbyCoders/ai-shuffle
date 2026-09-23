@@ -971,6 +971,63 @@ def test_verified_false_window_protection_passes_no_longer_compact() -> None:
         assert not c._digested and not c.trimmer._trimmed
 
 
+def test_measured_calibration_sizes_the_optional_trigger_and_the_stop_target() -> None:
+    # Calibration used to reach only the window-protection check. The
+    # optional meaningful_reclaim trigger and the ladder's stop target still
+    # read raw chars/4, so a real batch such as 63844 (211.9k estimated,
+    # 140.5k billed) could still compact mid-turn, as meaningful_reclaim.
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    # Trimming off, so only the digest rung reclaims, one turn at a time: its
+    # stop target decides how much history goes.
+    cfg = _cfg(trigger_tokens=1_000, trigger_window_ratio=0.6, target_ratio=0.7,
+               headroom_tokens=1_000,
+               trim=TrimConfig(trigger_tokens=1_000, keep_recent_tool_results=2,
+                               min_result_chars=10**6))
+    nodes = _history(20, result_chars=2_000)
+    estimate = estimate_tokens_of_messages(Compactor(config=cfg).view(nodes))
+    reserve = 1_000
+    # The estimate is over the 0.6 * window trigger with plenty to reclaim;
+    # the measured prompt (the 63844 ratio) is under it.
+    window = int(estimate / 0.7)
+    measured = int(estimate * 140_502 / 211_906)
+    trigger = int(window * 0.6)
+    assert measured < trigger < estimate
+
+    blind = Compactor(config=cfg)
+    _, promotions = blind.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve, turn_boundary=False,
+    )
+    assert promotions, "the history offers more than the 5% floor to reclaim"
+    assert blind.last_decision["reason"] == "meaningful_reclaim"
+
+    calibrated = Compactor(config=cfg)
+    rendered, promotions = calibrated.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve,
+        turn_boundary=False, measured_prompt_tokens=measured,
+    )
+    assert promotions == [] and rendered == calibrated.view(nodes)
+    assert calibrated.last_decision["reason"] != "meaningful_reclaim"
+    assert not calibrated._digested and not calibrated.trimmer._trimmed
+
+    # Over the trigger on the measurement too: it compacts, and stops at the
+    # target in measured tokens, which leaves more history than the blind
+    # pass that aimed at the same number in chars/4.
+    over = int(trigger * 1.05)
+    scale = over / estimate
+    sized = Compactor(config=cfg)
+    _, sized_promotions = sized.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve,
+        turn_boundary=False, measured_prompt_tokens=over,
+    )
+    assert sized_promotions
+    sized_after = sized.last_decision["after_tokens"]
+    blind_after = blind.last_decision["after_tokens"]
+    assert sized_after > blind_after
+    # The stop target, 0.7 of the trigger, is met in measured tokens.
+    assert sized_after * scale <= int(trigger * 0.7)
+
+
 async def test_engine_sizes_window_protection_on_the_billed_prompt(tmp_path) -> None:
     # The engine hands the compactor the last call's billed prompt carried
     # forward; with none on the path the decision says it used the estimate.

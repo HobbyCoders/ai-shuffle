@@ -137,6 +137,17 @@ class CompactionConfig:
 MIN_TRIGGER_TOKENS = 1_000
 
 
+def _in_estimate_units(tokens: int, scale: float) -> int:
+    """A measured-token threshold expressed in chars/4 estimate units.
+
+    ``scale`` is measured/estimated (at most 1), so the estimate that
+    matches ``tokens`` measured is ``tokens / scale``.
+    """
+    if scale <= 0 or scale >= 1.0:
+        return tokens
+    return int(tokens / scale)
+
+
 def derive_trigger_tokens(
     *,
     base: int,
@@ -628,7 +639,11 @@ class Compactor:
         a measurement exists the window decision is sized on it: the estimate
         is scaled by ``clamp(measured / estimate, 0.6, 1.0)``. The factor never
         exceeds 1, so a stale measurement falls back to the estimate and can
-        never inflate it.
+        never inflate it. The same factor sizes the optional trigger and every
+        stop target the ladder and the guarded escalation compare against:
+        each is divided by it, which puts it in chars/4 units, so a batch that
+        is not needed on the measured prompt does not run as
+        ``meaningful_reclaim`` either.
         """
         before_view = self.view(nodes)
         before = overhead_tokens + estimate_tokens_of_messages(before_view)
@@ -664,6 +679,7 @@ class Compactor:
         rendered, promotions = self._apply_candidate(
             nodes, overhead_tokens=overhead_tokens, context_window=context_window,
             output_reserve_tokens=output_reserve_tokens, turn_boundary=turn_boundary,
+            scale=scale,
         )
         if mandatory and self._estimate(nodes, overhead_tokens) * scale >= limit:
             # Recency-guarded rungs only. The unguarded ones trim and digest
@@ -672,6 +688,7 @@ class Compactor:
             promotions.extend(self.escalate(
                 nodes, overhead_tokens=overhead_tokens, context_window=context_window,
                 output_reserve_tokens=output_reserve_tokens, guarded_only=True,
+                scale=scale,
             ))
             rendered = self.view(nodes)
         after = overhead_tokens + estimate_tokens_of_messages(rendered)
@@ -704,9 +721,13 @@ class Compactor:
         context_window: int | None = None,
         output_reserve_tokens: int = 0,
         turn_boundary: bool = True,
+        scale: float = 1.0,
     ) -> tuple[list[Message], list[Promotion]]:
         """Render history; when the estimated total crosses the threshold,
         run the ladder as one amortized batch and return what it did.
+
+        ``scale`` is the measured/estimated calibration from ``apply``; the
+        threshold is divided by it so it compares against chars/4 totals.
 
         ``turn_boundary`` says whether this is the FIRST model call of a turn.
         The image rung waits for one — rewriting a result between two calls of
@@ -724,11 +745,12 @@ class Compactor:
                 context_window=context_window,
                 output_reserve_tokens=output_reserve_tokens,
                 turn_boundary=turn_boundary,
+                scale=scale,
             )
         rendered = self._render(nodes)
-        threshold = self._threshold(
+        threshold = _in_estimate_units(self._threshold(
             self.config.trigger_tokens, context_window, output_reserve_tokens
-        )
+        ), scale)
         total = overhead_tokens + estimate_tokens_of_messages(rendered)
         # Consume-once image trims: a rung like any other, so they wait for
         # pressure and for a turn boundary. They used to run unconditionally
@@ -876,6 +898,7 @@ class Compactor:
         context_window: int | None,
         output_reserve_tokens: int,
         turn_boundary: bool = True,
+        scale: float = 1.0,
     ) -> tuple[list[Message], list[Promotion]]:
         """Tier 1 on its own: trim tool results, never digest a turn.
 
@@ -884,12 +907,12 @@ class Compactor:
         image consumption included, which this path used to run unguarded.
         """
         rendered = self._render(nodes)
-        threshold = self._threshold(
+        threshold = _in_estimate_units(self._threshold(
             self.config.trim.trigger_tokens,
             context_window,
             output_reserve_tokens,
             window_ratio=self.config.trim.trigger_window_ratio,
-        )
+        ), scale)
         total = overhead_tokens + estimate_tokens_of_messages(rendered)
         promotions: list[Promotion] = []
         if turn_boundary and total > self._image_threshold(threshold):
@@ -923,6 +946,7 @@ class Compactor:
         context_window: int | None = None,
         output_reserve_tokens: int = 0,
         guarded_only: bool = False,
+        scale: float = 1.0,
     ) -> list[Promotion]:
         """Overflow recovery: the provider rejected the prompt, so reclaim.
 
@@ -942,7 +966,9 @@ class Compactor:
         ``guarded_only`` drops the two unguarded rungs. ``apply`` sets it for
         window protection, which acts on a size check before any request is
         sent; only a prompt the provider actually rejected may reach into the
-        in-flight turn.
+        in-flight turn. ``scale`` is ``apply``'s measured/estimated factor;
+        the stop target is divided by it. Provider-overflow recovery leaves
+        it at 1.
         """
         if not self.active:
             return []
@@ -961,6 +987,8 @@ class Compactor:
                     self.config.trigger_tokens, context_window, output_reserve_tokens
                 )
             )
+        if target is not None:
+            target = _in_estimate_units(target, scale)
         digest_target = target or 0
 
         def images() -> Promotion | None:
