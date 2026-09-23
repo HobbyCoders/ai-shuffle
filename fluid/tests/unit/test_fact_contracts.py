@@ -130,6 +130,47 @@ def test_inferred_and_harvested_facts_survive_protected_flood(tmp_path):
     assert len(body) <= facts.MAX_PROMPT_CHARS
 
 
+def test_six_live_shaped_unprotected_facts_all_render_under_a_protected_flood(tmp_path):
+    # The verified claim is "0 of 6 to 6 of 6": the desktop store's six
+    # in-scope unprotected facts, at its median line length of about 306
+    # chars, four of them tool-harvested with the 80-char hint. Together
+    # they need about 2.2k chars, more than the first 2,000-char reserve.
+    store = SkillStore(tmp_path)
+    scope = "project:pv2-5ed440e85cf268c371bfd3db"
+    for i in range(92):
+        store.save_memory(f"Explicit project note {i} " + "x" * 280, protected=True, scope=scope)
+    unprotected = [
+        ("user", None, "global"),
+        ("tool", "env.pytest", scope),
+        ("tool", "env.node_modules", scope),
+        ("tool", "env.browser_host", scope),
+        ("tool", None, scope),
+        ("session", None, scope),
+    ]
+    for n, (provenance, key, where) in enumerate(unprotected):
+        store.save_memory(
+            f"Unprotected fact {n} " + "y" * 255, provenance=provenance, key=key, scope=where,
+        )
+    out = store.render_memory_section(scope)
+    shown = [n for n in range(6) if f"Unprotected fact {n} " in out]
+    assert shown == list(range(6))
+    assert "Explicit project note" in out  # protected still fills the rest
+    body = out.split("\n\n")[1]
+    assert len(body) <= facts.MAX_PROMPT_CHARS
+
+
+def test_a_fact_larger_than_the_budget_is_not_reported_as_no_facts(tmp_path, monkeypatch):
+    # A fact line longer than the whole budget used to produce "(no saved
+    # facts yet)" next to "1 saved fact omitted for space".
+    monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", 200)
+    store = SkillStore(tmp_path)
+    store.save_memory("Long note " + "z" * 300, protected=True)
+    out = store.render_memory_section()
+    assert "(no saved facts yet)" not in out
+    assert "(no saved fact fits in this snapshot)" in out
+    assert "(1 saved fact omitted for space; Recall finds it by keyword.)" in out
+
+
 def test_memory_footer_counts_scope_and_space_drops_separately(tmp_path):
     store = SkillStore(tmp_path)
     store.save_memory("A fact about another project.", protected=True, scope="project:other")

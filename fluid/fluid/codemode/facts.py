@@ -24,8 +24,11 @@ MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 MAX_PROMPT_CHARS = 8000
 # Part of MAX_PROMPT_CHARS that unprotected facts (learner output, env.*
 # harvests) claim before protected facts fill the rest. Without it a store of
-# protected Remember facts alone hides every learned and harvested fact.
-RESERVED_INFERRED_CHARS = 2000
+# protected Remember facts alone hides every learned and harvested fact. Sized
+# on the desktop store: its 6 in-scope unprotected facts render at about 2.2k
+# chars (median line 306 chars, plus the 80-char "harvested" hint on the
+# tool-sourced ones), which 2,000 did not cover.
+RESERVED_INFERRED_CHARS = 3000
 INFERRED_TTL = 90 * 86400
 MAX_INFERENCE_CALLS_PER_DAY = 48
 HISTORY_TTL = 30 * 86400
