@@ -32,9 +32,6 @@ services:
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}
       - PUID=${PUID:-99}
       - PGID=${PGID:-100}
-      # Pull a new image for updates; startup needs no package downloads.
-      # The legacy GitHub CLI updater is bounded and explicit opt-in.
-      - AUTO_UPDATE=${AUTO_UPDATE:-false}
       # Delegated Claude CLI stream-close timeout in ms.
       - CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=${CLAUDE_CODE_STREAM_CLOSE_TIMEOUT:-120000}
       # Git identity used for commits made inside the container. Seeded into
@@ -157,7 +154,7 @@ services:
 
     # Network
     networks:
-      - claude-network
+      - ai-shuffle
 
     # Enable TTY for interactive commands (like login)
     tty: true
@@ -182,5 +179,5 @@ volumes:
     driver: local
 
 networks:
-  claude-network:
+  ai-shuffle:
     driver: bridge

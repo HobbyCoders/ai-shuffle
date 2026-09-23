@@ -30,8 +30,12 @@ def test_docker_supervisor_owns_signals_and_persistent_storage():
 def test_image_startup_does_not_require_network_package_installation():
     entrypoint = (ROOT / "entrypoint.sh").read_text()
     compose = (ROOT / "docker-compose.yml").read_text()
-    assert "AUTO_UPDATE=${AUTO_UPDATE:-false}" in entrypoint
-    assert "AUTO_UPDATE=${AUTO_UPDATE:-false}" in compose
-    assert "timeout 60s" in entrypoint
+    # Updates arrive by pulling a new image. Compose no longer offers the
+    # legacy AUTO_UPDATE switch; while the entrypoint still carries it, it
+    # must stay opt-in and time-bounded.
+    assert "AUTO_UPDATE" not in compose
+    if "AUTO_UPDATE" in entrypoint:
+        assert "AUTO_UPDATE=${AUTO_UPDATE:-false}" in entrypoint
+        assert "timeout 60s" in entrypoint
     assert "DATABASE_URL=${DATABASE_URL:-}" not in compose
     assert "DATABASE_MODE=${DATABASE_MODE:-auto}" not in compose
