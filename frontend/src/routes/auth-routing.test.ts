@@ -41,7 +41,8 @@ vi.mock('$lib/components/SpotlightSearch.svelte', () => import('$lib/test-stubs/
 vi.mock('$lib/components/Banner.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('lucide-svelte', async () => {
 	const { default: icon } = await import('$lib/test-stubs/EmptyRouteDependency.svelte');
-	return { Link2: icon, ShieldCheck: icon, Smartphone: icon, KeyRound: icon, Loader2: icon };
+	return { Link2: icon, ShieldCheck: icon, Smartphone: icon, KeyRound: icon, Loader2: icon,
+		Check: icon, ExternalLink: icon, RefreshCw: icon, Wallet: icon };
 });
 
 let Harness: Component;
@@ -229,4 +230,33 @@ it('blocks an owner without a password on the set-password step', async () => {
 	const view = render(Harness);
 	await waitFor(() => expect(view.getByRole('heading', { name: 'Set an owner password' })).toBeTruthy());
 	expect(view.getByLabelText('Repeat it')).toBeTruthy();
+});
+
+it('shows a fresh install the wizard welcome, then the owner password step, before anything else', async () => {
+	try { sessionStorage.clear(); } catch { /* not available */ }
+	let created = false;
+	const create = vi.fn(() => { created = true; return Promise.resolve(Response.json({ status: 'ok' })); });
+	const fresh = { ...ownerStatus, password_set: false, setup_allowed: true, required: true, login_available: false };
+	vi.stubGlobal('fetch', vi.fn((url: string) => url === '/api/v1/auth/status'
+		? Promise.resolve(Response.json(created ? { ...signedIn, is_admin: true, onboarding_complete: false, setup_required: true }
+			: { ...anonymous, onboarding_complete: false, setup_required: true }))
+		: url === '/api/v1/owner/status' ? Promise.resolve(Response.json(created ? { ...fresh, password_set: true, setup_allowed: false } : fresh))
+		: url === '/api/v1/owner/password' ? create()
+		: Promise.resolve(Response.json([]))));
+	const view = render(Harness);
+	await waitFor(() => expect(view.getByRole('heading', { name: 'Welcome to AI Shuffle' })).toBeTruthy());
+	expect(view.getByText('You bring your own AI account')).toBeTruthy();
+	expect(view.getByText('Update checks')).toBeTruthy();
+	expect(view.getByRole('link', { name: /What is sent/ }).getAttribute('href')).toBe('https://hobbycoders.com/privacy#updates');
+	const progress = view.getByRole('navigation', { name: 'Setup progress' });
+	for (const label of ['Welcome', 'Password', 'License', 'Mode', 'Sign in', 'Workspace', 'First run', 'Account & GitHub'])
+		expect(progress.textContent).toContain(label);
+	await fireEvent.click(view.getByRole('button', { name: 'Continue' }));
+	await waitFor(() => expect(view.getByRole('heading', { name: 'Set an owner password' })).toBeTruthy());
+	await fireEvent.input(view.getByLabelText(/New password/), { target: { value: 'correct horse battery' } });
+	await fireEvent.input(view.getByLabelText('Repeat it'), { target: { value: 'correct horse battery' } });
+	await fireEvent.click(view.getByRole('button', { name: 'Save password' }));
+	await waitFor(() => expect(create).toHaveBeenCalledOnce());
+	await waitFor(() => expect(view.queryByRole('heading', { name: 'Set an owner password' })).toBeNull());
+	expect(sessionStorage.getItem('ai-shuffle.setup.welcome-seen')).toBe('1');
 });
