@@ -263,11 +263,17 @@ def memory_provenance(text: str, entries: list[dict]) -> str:
     purpose: the model that proposed the memory is the one an injected
     document may have steered, so it does not get to vouch for itself.
     """
+    from fluid.codemode.journal import strip_reminders
+
     words = _content_words(text)
     if not words:
         return "session"
+    # Journals written before reminders were stripped at append time still
+    # carry the app's "# Memory" snapshot in user entries. Counting it would
+    # label a re-proposed tool fact as something the user said.
     user_words = _content_words(" ".join(
-        str(e.get("text", "")) for e in entries if e.get("kind") in _USER_KINDS
+        strip_reminders(str(e.get("text", "")))
+        for e in entries if e.get("kind") in _USER_KINDS
     ))
     if len(words & user_words) / len(words) >= _PROVENANCE_MATCH:
         return "user"

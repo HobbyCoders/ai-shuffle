@@ -41,7 +41,7 @@ from collections.abc import Callable
 from typing import Any
 
 from fluid.codemode.bridge import HostBridge
-from fluid.codemode.journal import FrictionDetector, append_friction
+from fluid.codemode.journal import FrictionDetector, append_friction, strip_reminders
 from fluid.codemode.kernel import HostReply
 from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
@@ -683,6 +683,11 @@ class CodeModeSession:
         ran and whether the user accepted it. No-op without a store; never
         raises (called from the engine's turn path).
         """
+        if kind == "user":
+            # The prompt carries the app's memory snapshot and the engine's
+            # reminders; journaling them made learner evidence an echo of
+            # facts that are already saved.
+            text = strip_reminders(text)
         if self._skills is None or not (text or "").strip():
             return
         try:
