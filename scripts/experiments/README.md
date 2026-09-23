@@ -76,9 +76,12 @@ goes in `request.extra["_fluid_turn_id"]`, as fix #1 describes.
   copies of arm A. `--skip-contract-check` overrides this. Only the arms the
   run will measure (`--arms`) are checked.
 - Arm D: the p0/responses-wire client implements it as a logged no-op, because
-  `generate:false` exists only on the Responses WebSocket. Until a transport
-  that can prewarm lands, run `--arms A,B,C`. The summary then asks for 120
-  calls only from the arms that were run, plus A and E.
+  `generate:false` exists only on the Responses WebSocket. `run` therefore
+  skips D, even from the default arm list, and prints one line saying so; it
+  runs A, B and C. The summary asks for 120 calls only from the arms that were
+  run, plus A and E, and lists the "TRANSPORT via D" verdict as unreachable.
+  When a transport that can prewarm lands, set `PREWARM_IMPLEMENTED` in the
+  runner.
 - Arm C keeps its turn-state token in the request's `wire_state` (invariant
   I1), so the runner gives each session one `WireState` and passes it on every
   call of that session.

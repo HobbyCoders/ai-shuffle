@@ -246,9 +246,10 @@ def test_dry_run_cli_runs_the_whole_path_and_logs_every_field(tmp_path, capsys):
                     "--seed", "7", "--out", str(out)])
     assert code == 0
     rows = list(read_jsonl([out]))
-    assert len(rows) == 24
-    assert {r["arm"] for r in rows} == {"A", "B", "C", "D"}
-    assert all(sum(1 for r in rows if r["arm"] == a) == 6 for a in "ABCD")
+    # D is a logged no-op in the client: the default arm list runs A, B, C.
+    assert len(rows) == 18
+    assert {r["arm"] for r in rows} == {"A", "B", "C"}
+    assert all(sum(1 for r in rows if r["arm"] == a) == 6 for a in "ABC")
     row = rows[-1]
     for key in ("arm", "prompt_tokens", "cached_tokens", "zero_cache", "latency_s", "ttft_s",
                 "quota", "session", "cluster", "call_index", "block", "block_edge", "dry_run"):
@@ -262,6 +263,8 @@ def test_dry_run_cli_runs_the_whole_path_and_logs_every_field(tmp_path, capsys):
     assert len({r["session"] for r in rows if r["arm"] == "A"}) >= 2
     printed = capsys.readouterr().out
     assert "Arm contract check" in printed and "Verdict:" in printed
+    assert printed.count(e1.PREWARM_SKIP_LINE) == 1
+    assert f"Unreachable: {e1.D_VERDICT_UNREACHABLE}" in printed
 
 
 async def test_each_call_runs_with_its_own_arm_selected(tmp_path):
@@ -360,12 +363,24 @@ def test_rule_names_the_single_arm_that_ships():
     assert e1.summarize(rows)["verdict"] == "SHIP HEADERS: arm B meets the rule"
 
 
-def test_rule_points_to_transport_when_only_prewarm_closes_the_gap():
+def test_rule_points_to_transport_when_only_prewarm_closes_the_gap(monkeypatch):
+    monkeypatch.setattr(e1, "PREWARM_IMPLEMENTED", True)
     rows = []
     for day in ("2026-10-01", "2026-10-02", "2026-10-03"):
         rows += _day(day, b=6, c=6, d=0)
     s = e1.summarize(rows)
     assert s["verdict"].startswith("TRANSPORT: only the prewarm arm (D)")
+    assert s["unreachable_verdicts"] == []
+
+
+def test_the_prewarm_verdict_is_unreachable_while_d_is_a_no_op():
+    rows = []
+    for day in ("2026-10-01", "2026-10-02", "2026-10-03"):
+        rows += _day(day, b=6, c=6, d=0)
+    s = e1.summarize(rows)
+    assert not s["verdict"].startswith("TRANSPORT: only the prewarm arm (D)")
+    assert s["unreachable_verdicts"] == [e1.D_VERDICT_UNREACHABLE]
+    assert f"Unreachable: {e1.D_VERDICT_UNREACHABLE}" in e1.format_summary(s)
 
 
 def test_rule_points_to_transport_when_only_the_codex_control_is_clean():

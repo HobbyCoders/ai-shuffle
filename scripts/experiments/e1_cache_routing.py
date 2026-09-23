@@ -25,7 +25,9 @@ Subcommands:
 Before any live run the runner checks, offline against a fake backend, that the
 client really implements each arm (identity headers, turn-state replay,
 prewarm). A live run refuses to start when an arm is missing, so quota is never
-spent measuring four copies of arm A.
+spent measuring four copies of arm A. The client does not implement arm D's
+prewarm (it logs and sends nothing), so ``run`` skips D with a one-line note
+and the summary marks the "TRANSPORT via D" verdict unreachable.
 """
 
 from __future__ import annotations
@@ -70,6 +72,16 @@ from scripts.experiments._stats import ols, proportion_ci  # noqa: E402
 
 ARM_ENV = "FLUID_RESPONSES_ROUTING_ARM"
 RUNNER_ARMS = ("A", "B", "C", "D")
+
+#: Whether fluid's client implements arm D's prewarm. It does not: over HTTP
+#: SSE there is no documented ``generate: false``, so the client logs the
+#: prewarm and sends nothing (``OpenAIResponsesClient._prewarm``). ``run``
+#: skips D, and the summary marks the "TRANSPORT via D" verdict unreachable.
+PREWARM_IMPLEMENTED = False
+PREWARM_SKIP_LINE = ("Arm D skipped: the client does not implement the prewarm "
+                     "(arm D is a logged no-op), so this run measures A, B and C.")
+D_VERDICT_UNREACHABLE = ("TRANSPORT via D is unreachable: the client does not "
+                         "implement the prewarm")
 CONTROL_ARM = "E"
 # The turn marker the client pops from request.extra (design-final #1). When
 # the contract check sees it leak into the request body, the runner stops
@@ -857,7 +869,7 @@ def summarize(rows: Iterable[dict[str, Any]], *, include_dry_run: bool = False) 
     elif winners:
         verdict = ("SHIP HEADERS: " + (f"arm {winners[0]} meets" if len(winners) == 1
                                        else "arms B and C meet") + " the rule")
-    elif _passes(pooled.get("D")):
+    elif PREWARM_IMPLEMENTED and _passes(pooled.get("D")):
         verdict = "TRANSPORT: only the prewarm arm (D) closes the gap; WebSocket moves into W1"
     else:
         verdict = "TRANSPORT: only the Codex CLI control closes the gap; WebSocket moves into W1"
@@ -879,6 +891,7 @@ def summarize(rows: Iterable[dict[str, Any]], *, include_dry_run: bool = False) 
         "days": per_day, "qualifying_days": qualifying, "pooled": pooled,
         "measured_calls_on_qualifying_days": counts, "enough_data": enough,
         "verdict": verdict, "latency": latency, "quota": quota_regression(rows),
+        "unreachable_verdicts": [] if PREWARM_IMPLEMENTED else [D_VERDICT_UNREACHABLE],
         "total_rows": len(rows), "measured_rows": len(measured),
     }
 
@@ -930,7 +943,9 @@ def format_summary(summary: dict[str, Any]) -> str:
     lines += ["", f"Pooled over qualifying days ({', '.join(summary['qualifying_days']) or 'none'}):"]
     for arm, s in summary["pooled"].items():
         lines.append(f"  {arm}: {fmt(s)}")
-    lines += ["", f"Verdict: {summary['verdict']}", ""]
+    lines += ["", f"Verdict: {summary['verdict']}"]
+    lines += [f"Unreachable: {text}" for text in summary.get("unreachable_verdicts") or []]
+    lines += [""]
     if summary["latency"]:
         lines.append("Latency (runner arms, all days):")
         for arm, lat in summary["latency"].items():
@@ -994,6 +1009,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     bad = [a for a in arms if a not in RUNNER_ARMS]
     if bad:
         raise SystemExit(f"unknown arm(s) {bad}; the runner drives {RUNNER_ARMS}")
+    if "D" in arms and not PREWARM_IMPLEMENTED:
+        arms = tuple(a for a in arms if a != "D")
+        print(PREWARM_SKIP_LINE)
+        if not arms:
+            raise SystemExit("no arm left to run")
     out = Path(args.out or f"e1-{'dry-' if args.dry_run else ''}{datetime.now():%Y%m%d-%H%M%S}.jsonl")
     cfg = RunConfig(
         out=out, model=args.model, effort=None if args.effort == "none-sent" else args.effort,
