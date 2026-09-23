@@ -81,6 +81,12 @@ class TurnStarted(Event):
     """One of :data:`TURN_SOURCES`. ``None`` means not recorded: a row written
     before this field existed, or an emitter that does not know. Optional so a
     reader that predates it drops the key and a row without it still loads."""
+    # The session's thinking setting as the host passed it (Anthropic shape),
+    # None when it sends none. Recorded on every turn because a session keeps
+    # the setting it started with: a resumed engine reads it back from here
+    # (NativeLoop._resolve_session_thinking). Optional and last so rows
+    # persisted before the field existed still load, as None.
+    thinking: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
