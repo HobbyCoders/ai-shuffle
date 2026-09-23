@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import Any
 
 from fluid.store.base import project_root_for, same_project
-from fluid.tools.builtins._util import repeat_search_pointer
+from fluid.tools.builtins._util import repeat_search_pointer, result_digest
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 _SNIPPET_RADIUS = 160
@@ -202,17 +202,25 @@ def _elsewhere_note(hidden: int) -> str:
     )
 
 
-def _is_repeat(terms: list[str], limit: int, scope: str, ctx: ToolCtx) -> bool:
-    """Whether this exact query already ran this session (and record it).
+def _is_repeat(
+    terms: list[str], limit: int, scope: str, text: str, ctx: ToolCtx
+) -> bool:
+    """Whether this exact query already returned this exact ``text`` (and record it).
 
     ``scope`` is part of the key: widening a scoped search to ``"all"`` is a
-    genuinely different question, not a repeat. State lives in ``ctx.extra`` —
-    the same per-session dict the backend callables arrive through.
+    genuinely different question, not a repeat. The key maps to a hash of the
+    last result, because the store keeps growing while the session runs: the
+    same query answered differently is new information, not a repeat. State
+    lives in ``ctx.extra`` — the same per-session dict the backend callables
+    arrive through.
     """
-    seen: set[tuple[Any, ...]] = ctx.extra.setdefault("session_search_seen", set())
+    seen = ctx.extra.get("session_search_seen")
+    if not isinstance(seen, dict):
+        seen = ctx.extra["session_search_seen"] = {}
     key = (tuple(terms), limit, scope)
-    repeat = key in seen
-    seen.add(key)
+    digest = result_digest(text)
+    repeat = seen.get(key) == digest
+    seen[key] = digest
     return repeat
 
 
@@ -284,19 +292,16 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # stable sort, so score order survives inside each bucket.
     hits = sorted(hits, key=lambda h: (-h.score, -h.last_ts))
     hits, hidden = _scoped(hits, project_root_for(ctx.cwd), scope)
-    repeat = _is_repeat(terms, limit, scope, ctx)
     if not hits:
         # A one-line "nothing matched" is already shorter than any pointer at
         # it, so the repeat case just says so and returns the same line.
-        return ToolOutcome(
-            text=f"no stored session matched {query!r} — try fewer or different terms."
+        text = (
+            f"no stored session matched {query!r} — try fewer or different terms."
             + _elsewhere_note(hidden)
-            + (
-                "\n[note: identical search already run this session]"
-                if repeat
-                else ""
-            )
         )
+        if _is_repeat(terms, limit, scope, text, ctx):
+            text += "\n[note: identical search already run this session]"
+        return ToolOutcome(text=text)
     shown = hits[:limit]
     # ``limit`` is a hint to the backend, which returns the whole ranked list —
     # so the count must say how many of the matches are actually on screen.
@@ -318,7 +323,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     text = "\n".join(lines)
     if len(text) > _OUTPUT_CAP:
         text = text[:_OUTPUT_CAP] + "\n[output capped — narrow the query]"
-    if repeat:
+    if _is_repeat(terms, limit, scope, text, ctx):
         # Identical query, identical listing: point at the copy already in the
         # conversation rather than paying for a second one.
         return ToolOutcome(text=repeat_search_pointer(text))

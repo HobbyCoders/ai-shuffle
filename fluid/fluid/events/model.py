@@ -61,10 +61,54 @@ class Event:
 # ─── Turn lifecycle ──────────────────────────────────────────────────────────
 
 
+#: What started a turn, as recorded on :class:`TurnStarted`.
+#:
+#: * ``user`` — a prompt submitted from outside the engine: the user, or a
+#:   host acting for them (an API call, a failover retry of a user's prompt).
+#: * ``agent_message`` — a peer's message woke an idle receiver.
+#: * ``wakeup`` — a timer fired: a scheduled wakeup or a host continuation.
+#: * ``unpark`` — background work came to rest and woke its parked parent.
+#: * ``promotion`` — peer messages held while the parent was parked were
+#:   promoted to a wake of their own.
+#: * ``automation`` — a host automation started the turn on a schedule or
+#:   trigger, with no person behind it.
+#: A host's retry of a turn (a failover to another account) records the
+#: source of the turn it retries.
+TURN_SOURCES = ("user", "agent_message", "wakeup", "unpark", "promotion", "automation")
+
+
 @dataclass(frozen=True, kw_only=True)
 class TurnStarted(Event):
     model: str
     provider: str
+    source: str | None = None
+    """One of :data:`TURN_SOURCES`. ``None`` means not recorded: a row written
+    before this field existed, or an emitter that does not know. Optional so a
+    reader that predates it drops the key and a row without it still loads."""
+    # The session's thinking setting as the host passed it (Anthropic shape),
+    # None when it sends none. Recorded on every turn because a session keeps
+    # the setting it started with: a resumed engine reads it back from here
+    # (NativeLoop._resolve_session_thinking). Optional and last so rows
+    # persisted before the field existed still load, as None.
+    thinking: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class ProfileResolved(Event):
+    """Which guidance family the session's model id resolved to.
+
+    Emitted once per engine when its first turn starts, and again if the
+    model changes. ``fallback`` is True when no rule recognised the id and
+    the generic pack was used, so "sessions with no model targeting" can be
+    counted from the event log. Every field is optional so a reader that
+    predates one drops it and a row without it still loads.
+    """
+
+    model: str | None = None
+    family: str | None = None
+    generation: str | None = None
+    matched_by: str | None = None
+    fallback: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -302,6 +346,11 @@ class ContextCompaction(Event):
     after_tokens: int = 0
     decision_reason: str = ""
     first_changed_message: int | None = None
+    # What the window decision was sized on: "measured" (the last billed
+    # prompt carried forward) or "estimate" (chars/4, only when no measured
+    # call is on the path). "" on provider-overflow rungs and older events.
+    token_basis: str = ""
+    measured_prompt_tokens: int = 0
 
 
 # ─── Accounting / signals ────────────────────────────────────────────────────
@@ -346,6 +395,12 @@ class CacheMissAlert(Event):
     ``cache_key`` is the affinity key the request carried (OpenAI Responses
     ``prompt_cache_key`` / OpenRouter ``session_id``), so a reader can tell a
     routing problem from a partitioning one.
+
+    ``miss_class`` is one of the six classes in
+    :mod:`fluid.context.cache_miss_classes`. The engine also raises this
+    alert, with ``reason="sticky_key_dropped"`` and class
+    ``provider_fallback``, when it drops OpenRouter's sticky routing key after
+    an empty completion. None on rows written before the field existed.
     """
 
     consecutive: int
@@ -356,6 +411,7 @@ class CacheMissAlert(Event):
     model: str = ""
     cache_key: str | None = None
     note: str = ""
+    miss_class: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -551,6 +607,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
     cls.__name__: cls
     for cls in (
         TurnStarted, TurnComplete, SessionParked, SessionWoken,
+        ProfileResolved,
         Interrupted, ErrorEvent,
         BlockStart, BlockStop, TextDelta, ThinkingDelta, ToolArgsDelta,
         ToolUse, ToolResult, SteerDelivered,

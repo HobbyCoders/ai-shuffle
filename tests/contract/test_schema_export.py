@@ -176,3 +176,13 @@ def test_unknown_type_raises():
                 "session_id": "s1",
             }
         )
+
+
+def test_turn_started_carries_the_turn_source():
+    """#6: the app's turn.started carries what started the turn, so wake
+    metrics can be read from the app event log as well as fluid's."""
+    event = TypeAdapter(SessionEvent).validate_python({
+        "type": "turn.started", "id": "e1", "session_id": "s1", "seq": 1,
+        "created_at": "2026-09-23T00:00:00Z", "source": "unpark",
+    })
+    assert event.source == "unpark"

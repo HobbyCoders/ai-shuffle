@@ -41,14 +41,12 @@ async def _run(registry, bridge, code, *, timeout=8):
         await kernel.stop()
 
 
-@pytest.mark.parametrize("tool_name,args", [
-    ("Read", {"file_path": "absent.txt"}),
-])
-async def test_missing_discovery_requires_explicit_recovery(tmp_path, tool_name, args):
-    # Round 9: Grep and Glob on a missing path return "(path missing …)" as
-    # a soft result and the cell continues (tests/unit/test_audit_r9_harness);
-    # only Read keeps raising MissingPathError, because a Read's text is
-    # consumed as content directly.
+async def test_missing_read_returns_a_falsy_sentinel_and_the_cell_keeps_running(tmp_path):
+    # A Read of a guessed path used to raise MissingPathError and abort the
+    # whole cell, dropping every call queued after it (39 of 96 aborted astra
+    # cells). It now returns a falsy MissingFile; only using it as content
+    # raises, so a missing file is never parsed as an empty one.
+    from fluid.codemode import SubprocessKernel
     from fluid.tools.builtins import read, grep, glob, edit
     from fluid.tools.registry import ToolCtx
 
@@ -59,25 +57,33 @@ async def test_missing_discovery_requires_explicit_recovery(tmp_path, tool_name,
     present.write_text("needle", encoding="utf-8")
     ctx = ToolCtx(cwd=str(tmp_path))
     bridge = HostBridge(registry, PermissionEngine("never_ask"), ctx=ctx)
-    call = f"{tool_name}(**{args!r})"
-    prefix = f"from tools import {tool_name}, Read, Edit\n"
-    result = await _run(registry, bridge, prefix + call + "\nprint('unreachable')")
-    assert "MissingPathError" in result.error
-    assert "unreachable" not in result.stdout
-    assert not ctx.read_files
 
-    code = prefix + (
-        "try:\n"
-        f"    missing = {call}\n"
-        "except MissingPathError:\n"
-        "    print('missing target')\n"
-        "else:\n"
-        "    raise AssertionError('failure became successful data')\n"
-        "print(Read(file_path='present.txt'))\n"
-    )
-    result = await _run(registry, bridge, code)
-    assert result.error is None, result.error
-    assert "missing target" in result.stdout and "needle" in result.stdout
+    kernel = SubprocessKernel()
+    await kernel.start()
+    try:
+        await kernel.set_vfs(Projection(registry.list_tools()).sources())
+        result = await kernel.exec(
+            "from tools import Read\n"
+            "r = Read(file_path='absent.txt')\n"
+            "print(Read(file_path='present.txt'))\n"
+            "print(bool(r), type(r).__name__, r.path)\n"
+            "print(r)\n",
+            timeout=8, on_host_call=bridge.on_host_call,
+        )
+        assert result.error is None, result.error
+        assert "needle" in result.stdout
+        assert "False MissingFile absent.txt" in result.stdout
+        assert "(missing file: file not found:" in result.stdout
+        assert "absent.txt" in result.stdout
+
+        consumed = await kernel.exec(
+            "r.splitlines()\nprint('unreachable')",
+            timeout=8, on_host_call=bridge.on_host_call,
+        )
+        assert "MissingPathError" in (consumed.error or "")
+        assert "unreachable" not in consumed.stdout
+    finally:
+        await kernel.stop()
     assert str(present) in ctx.read_files
     assert not any("absent" in path for path in ctx.read_files)
 

@@ -72,15 +72,18 @@ async def test_failure_metadata_and_retry_budget(kind, midstream, caplog):
         chunks = [c async for c in stream(kind, http, RetryPolicy(max_retries=1, base_delay=0))]
         assert not http.is_closed  # injected client still belongs to the host
     failure = chunks[-1].payload["transport_failure"]
+    # The Responses lane holds message_start until the first content item, so
+    # a drop right after response.created has delivered nothing and replays.
+    delivered = midstream and kind != "responses"
     assert chunks[-1].kind == "error"
     assert chunks[-1].payload["retriable"] is False
-    assert len(bodies) == (1 if midstream else 2)
+    assert len(bodies) == (1 if delivered else 2)
     assert all(b.closed for b in bodies)
     assert failure["host"] == "provider.test"
     assert failure["status"] == 200
     assert failure["http_version"] == "HTTP/1.1"
     assert failure["response_ids"] == {"x-request-id": "req-123", "cf-ray": "ray-456"}
-    assert failure["chunks_delivered"] is midstream
+    assert failure["chunks_delivered"] is delivered
     assert failure["bytes_received"] == (len(start(kind)) if midstream else 0)
     assert (failure["last_line_age_seconds"] is not None) is midstream
     assert failure["incomplete_chunked_read"]
@@ -146,7 +149,9 @@ async def test_real_incomplete_chunked_read():
         failure = chunks[-1].payload["transport_failure"]
         assert failure["incomplete_chunked_read"]
         assert failure["response_ids"]["x-request-id"] == "real-req"
-        assert failure["chunks_delivered"]
+        # Only response.created arrived: the held message_start was never
+        # delivered, so nothing reached the consumer before the failure.
+        assert not failure["chunks_delivered"]
         assert failure["exception_chain"][:2] == ["RemoteProtocolError", "RemoteProtocolError"]
         await asyncio.wait_for(done.wait(), 5)
     finally:

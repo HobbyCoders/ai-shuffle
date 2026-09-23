@@ -112,6 +112,11 @@ def test_background_completion_frames_are_stamped_for_fluid():
     assert opts.aih_background_task_completions == frames
 
 
+def test_turn_source_is_stamped_for_fluid():
+    assert _build_with({"turn_source": "unpark"}).aih_turn_source == "unpark"
+    assert _build_with({}).aih_turn_source is None
+
+
 def test_the_permission_allowlist_is_not_the_tool_surface():
     """``allowed_tools`` keeps its SDK PERMISSION meaning — it is full of MCP
     names and (under a tools preset) holds no builtins at all, so it must never

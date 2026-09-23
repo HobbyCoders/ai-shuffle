@@ -38,7 +38,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
@@ -50,6 +50,7 @@ from fluid.codemode.session import (
     CodeModeSession,
     register_code_mode_tools,
 )
+from fluid.context.cache_miss_classes import PROVIDER_FALLBACK, usage_miss_class
 from fluid.context.cache_plan import plan_cache
 from fluid.context.cache_probe import (
     CacheProbeConfig,
@@ -145,7 +146,12 @@ from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
 )
-from fluid.providers.base import ProviderClient, ProviderRequest
+from fluid.providers.base import (
+    TURN_MARKER_KEY,
+    ProviderClient,
+    ProviderRequest,
+    WireState,
+)
 from fluid.context.environment import environment_note
 from fluid.providers.pricing import PricingResolver
 from fluid.tools import read_window
@@ -545,6 +551,17 @@ def _upstream_suffix(native_stop_reason: str | None) -> str:
     return f" (upstream: {native_stop_reason})"
 
 
+def _stamp_miss_class(out: dict[str, Any]) -> None:
+    """Put the call's cache-miss class on its Usage fields, when it has one."""
+    try:
+        miss_class = usage_miss_class(out)
+    except Exception:  # noqa: BLE001 — instrumentation is never fatal
+        log.debug("cache-miss classification failed", exc_info=True)
+        return
+    if miss_class is not None:
+        out["cache_miss_class"] = miss_class
+
+
 def _is_empty_completion(result: _CallResult) -> bool:
     """Did this call come back with no content whatsoever?
 
@@ -782,6 +799,11 @@ def _parse_tool_args(raw_args: str) -> tuple[dict[str, Any], str | None]:
     return decoded, None
 
 
+
+def _held_peer_id(seq: int) -> str:
+    """The id of a peer message held while parked: its progress event's seq."""
+    return f"held-peer:{seq}"
+
 class NativeLoop(BackgroundLifecycleMixin):
     caps = EngineCaps(
         inproc_tools=True,
@@ -807,6 +829,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         context_window: int | None = None,
         max_tokens: int | None = None,
         effort: str | None = None,
+        thinking: dict[str, Any] | None = None,
         request_extra: dict[str, Any] | None = None,
         registry: ToolRegistry | None = None,
         permissions: PermissionEngine | None = None,
@@ -864,6 +887,16 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Reasoning-depth knob, provider-mapped by each serializer (Anthropic
         # output_config.effort; OpenAI-shaped reasoning.effort, clamped).
         self.effort = effort
+        # The host's explicit thinking setting, Anthropic-shaped
+        # (``{"type": "adaptive", "display": "summarized"}``; a dict with only
+        # ``display`` keeps the model's default mode). It applies to NEW
+        # sessions only: a session keeps the setting its turns were recorded
+        # with (``TurnStarted.thinking``), so a history that ran without
+        # thinking never has it switched on mid-way, which would rebuild the
+        # cached prefix and can 400 inside a tool loop. The serializer fits the
+        # value to each model (providers/anthropic/thinking.py).
+        self.thinking = dict(thinking) if thinking else None
+        self._session_thinking: dict[str, dict[str, Any] | None] = {}
         # Host-supplied passthrough merged into every ProviderRequest.extra,
         # which each serializer spreads onto the request body verbatim. For
         # wire-level knobs fluid has no first-class field for (an OpenAI
@@ -971,6 +1004,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         # instead of each waking the parent on its own.
         self._queued_peer_messages: list[AgentMessage] = []
         self._queued_peer_rehydrated = False
+        # The model the last ProfileResolved event was emitted for.
+        self._profile_resolved_for: str | None = None
+        # The last AgentMessage op submit() held rather than delivered, so a
+        # host can tell its sender "held" instead of "delivered".
+        self.last_held_message: AgentMessage | None = None
         # Runtime-facts block bookkeeping (see _environment_reminder): the
         # facts text last sent to the model, and whether this engine has
         # already harvested them into the memory store.
@@ -996,6 +1034,22 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Set once a sticky-routed call comes back empty: this loop instance
         # never sends the routing key again (see _agent_loop).
         self._sticky_poisoned = False
+        # Set when the key is dropped, cleared by the next fingerprinted call:
+        # that call's request changed because the key went, so its miss is a
+        # provider fallback, not a settings switch.
+        self._sticky_drop_unreported = False
+        # Request identity and in-turn routing state, one per (session, role);
+        # handed to the provider on each request (see WireState).
+        self._wire_states: dict[tuple[str, str], WireState] = {}
+        # The memory learner shares this loop's provider client. On the
+        # Responses lane it gets its own role: a "learner:<key>" cache key and
+        # the "learner" wire state, so its calls carry routing identity and
+        # never share a turn-state token or a cache key with the main loop.
+        if getattr(self.provider, "name", None) == "openai_responses":
+            recorder = self._friction_source()
+            bind = getattr(getattr(recorder, "_synthesizer", None), "bind_routing", None)
+            if callable(bind):
+                bind(self._learner_routing)
         # Set once a call 400s with invalid_encrypted_content: this loop
         # instance strips opaque reasoning from every later request instead of
         # paying a doomed call per turn (see _agent_loop; the strip itself is
@@ -1048,6 +1102,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # while that node is still on the loaded path — a fork or rewind past
         # it means the numbers describe a prompt this session no longer sends.
         self._last_call_usage: dict[str, tuple[str, dict[str, Any]]] = {}
+        # The model that billed each ``_last_call_usage`` entry; None when a
+        # rehydrated Usage event did not record one. Window protection ignores
+        # a measurement another model's tokenizer produced.
+        self._last_call_model: dict[str, str | None] = {}
         # Sessions whose ``_last_call_usage`` entry was already looked for in
         # the persisted Usage events (a resume recovers it from there once).
         self._usage_rehydrated: set[str] = set()
@@ -1404,6 +1462,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         assert self._session is not None, "no session yet — submit a turn first"
         return self._session.session_id
 
+    @property
+    def turn_running(self) -> bool:
+        """True while a turn task is live. A host that owns wake scheduling
+        reads this to route a peer message: into the running turn, or to its
+        own queue when the receiver is idle."""
+        return self._turn_task is not None and not self._turn_task.done()
+
     # ─── ExecutionEngine interface ───────────────────────────────────────
 
     async def submit(self, op: Op) -> None:
@@ -1456,16 +1521,23 @@ class NativeLoop(BackgroundLifecycleMixin):
                     raise RuntimeError("receiver is finishing its turn; retry the peer message")
                 self._pending_steers.append(replace(op, text=text))
             else:
+                # Parked comes first: a parent waiting on background work holds
+                # an ordinary message for its next wake whether or not the host
+                # owns wakes. Checking ``wake`` first sent every host-owned
+                # (wake=False) message to a parked parent back to the host,
+                # which woke the parent for it.
+                if not op.urgent and await self._queue_if_parked(replace(op, text=text)):
+                    self.last_held_message = op
+                    return
                 if not op.wake:
                     raise RuntimeError("no turn is running; peer message was not delivered")
-                if not op.urgent and await self._queue_if_parked(replace(op, text=text)):
-                    return
                 from fluid.context.peer import format_peer_message
 
                 self._interrupted.clear()
                 self._peer_delivery_sealed = False
                 self._turn_task = asyncio.create_task(self._run_turn(UserTurn(
                     content=format_peer_message(op.sender, text).strip(),
+                    source="agent_message",
                 )))
         elif isinstance(op, RespondPermission):
             fut = self._pending_permissions.get(op.request_id)
@@ -1740,6 +1812,24 @@ class NativeLoop(BackgroundLifecycleMixin):
         appended = [n.message for n in nodes[index:]]
         return _measured_prompt_tokens(usage) + estimate_tokens_of_messages(appended)
 
+    async def _measured_window_prompt(
+        self, sid: str, nodes: list[SessionNode]
+    ) -> int | None:
+        """``_measured_next_prompt`` for the compactor's window decision.
+
+        None after a model switch as well: the billed count came from the
+        previous model's tokenizer, so it says nothing about how the current
+        model will count the same prompt. The chars/4 estimate stands in until
+        the new model's first call is measured.
+        """
+        measured = await self._measured_next_prompt(sid, nodes)
+        if measured is None:
+            return None
+        model = self._last_call_model.get(sid)
+        if model is not None and model != self.model:
+            return None
+        return measured
+
     async def _rehydrate_last_call_usage(
         self, sid: str, nodes: list[SessionNode]
     ) -> tuple[str, dict[str, Any]] | None:
@@ -1771,6 +1861,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             }
             if _measured_prompt_tokens(usage) > 0:
                 self._last_call_usage[sid] = (event.node_id, usage)
+                model = (event.context_usage or {}).get("model")
+                self._last_call_model[sid] = model if isinstance(model, str) else None
                 return self._last_call_usage[sid]
         return None
 
@@ -1979,6 +2071,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._rehydrate_queued_peer_messages(sid)
         await self._rehydrate_compaction(sid)
         await self._rehydrate_prefix_fingerprint(sid)
+        await self._resolve_session_thinking(sid)
 
         if isinstance(op, Resume):
             # Nothing is appended: the head user node IS the prompt, so the
@@ -1992,6 +2085,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._emit(TurnStarted(
                     session_id=sid, node_id=head.node_id if head else "",
                     turn_id=turn_id, model=self.model, provider=self.provider.name,
+                    source=op.source,
+                    thinking=self._session_thinking.get(sid),
                 ))
                 await self._emit_terminal_with_park(ErrorEvent(
                     session_id=sid,
@@ -2008,8 +2103,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 return
             await self._emit(TurnStarted(
                 session_id=sid, node_id=head.node_id, turn_id=turn_id,
-                model=self.model, provider=self.provider.name,
+                model=self.model, provider=self.provider.name, source=op.source,
+                thinking=self._session_thinking.get(sid),
             ))
+            await self._emit_profile_resolved(sid, turn_id)
             blocked, _ = await self._turn_start_hook(
                 sid, turn_id, head.message.text(), with_context=False
             )
@@ -2044,8 +2141,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         node_id = new_id("node")
         await self._emit(TurnStarted(
             session_id=sid, node_id=node_id, turn_id=turn_id,
-            model=self.model, provider=self.provider.name,
+            model=self.model, provider=self.provider.name, source=op.source,
+            thinking=self._session_thinking.get(sid),
         ))
+        await self._emit_profile_resolved(sid, turn_id)
         blocked, hook_context = await self._turn_start_hook(sid, turn_id, prompt_text)
         if blocked:
             return
@@ -2313,6 +2412,23 @@ class NativeLoop(BackgroundLifecycleMixin):
         except Exception:  # noqa: BLE001 — never let bookkeeping touch a turn
             log.debug("runtime fact harvest failed", exc_info=True)
 
+    async def _emit_profile_resolved(self, sid: str, turn_id: str) -> None:
+        """Record which guidance family this engine's model resolved to.
+
+        Right after the turn's TurnStarted, once per engine and again after a
+        model change. Never fails a turn.
+        """
+        if self._profile_resolved_for == self.model:
+            return
+        try:
+            from fluid.cli.prompt import profile_resolved_event
+
+            await self._emit(profile_resolved_event(sid, self.model, turn_id=turn_id))
+        except Exception:  # noqa: BLE001 — bookkeeping never touches a turn
+            log.debug("profile resolution event failed", exc_info=True)
+            return
+        self._profile_resolved_for = self.model
+
     async def _queue_if_parked(self, op: AgentMessage) -> bool:
         """Hold an idle-time peer message when the session is parked.
 
@@ -2330,13 +2446,18 @@ class NativeLoop(BackgroundLifecycleMixin):
         if not parked:
             return False
         meta = await self._ensure_session()
-        self._queued_peer_messages.append(op)
-        await self._emit(SubagentEvent(
+        # Read the log first: once this message is in it, a later first read
+        # would find it there as well as in memory and deliver it twice.
+        await self._rehydrate_queued_peer_messages(meta.session_id)
+        event = await self._emit(SubagentEvent(
             session_id=meta.session_id, turn_id=None,
             task_id=f"peer:{op.sender}", kind="progress",
             description=op.sender, summary=op.text,
             wake=False, wake_disposition=WAKE_NOT_APPLICABLE,
         ))
+        # The event's seq is the message's id: the in-memory copy and the one
+        # a rebuilt engine reads back from the log share it.
+        self._queued_peer_messages.append(replace(op, id=_held_peer_id(event.seq)))
         return True
 
     async def _rehydrate_queued_peer_messages(self, sid: str) -> None:
@@ -2365,6 +2486,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             ):
                 queued.append(AgentMessage(
                     text=str(event.summary), sender=str(event.description or "peer"),
+                    id=_held_peer_id(event.seq),
                 ))
         if queued:
             self._queued_peer_messages = queued + self._queued_peer_messages
@@ -2372,6 +2494,17 @@ class NativeLoop(BackgroundLifecycleMixin):
     def _queued_peer_reminder(self) -> str | None:
         """Peer messages held while parked, rendered once for this turn."""
         queued, self._queued_peer_messages = self._queued_peer_messages, []
+        # Once and only once: the same message can reach the queue from memory
+        # and from the log.
+        seen: set[str] = set()
+        unique = []
+        for message in queued:
+            if message.id is not None and message.id in seen:
+                continue
+            if message.id is not None:
+                seen.add(message.id)
+            unique.append(message)
+        queued = unique
         if not queued:
             return None
         from fluid.context.peer import format_peer_message
@@ -2436,6 +2569,41 @@ class NativeLoop(BackgroundLifecycleMixin):
             if isinstance(e, ContextCompaction)
         )
 
+    async def _resolve_session_thinking(self, sid: str) -> None:
+        """Fix this session's thinking setting, once per session per engine.
+
+        A session with no recorded turn is new and takes the host's setting.
+        A session that already has turns keeps the setting its newest
+        ``TurnStarted`` recorded, whatever the host passes now; turns recorded
+        before the field existed ran without thinking, so they read as None.
+        That is what keeps a resumed history from having thinking switched on
+        (or off) under it.
+        """
+        if sid in self._session_thinking:
+            return
+        if self.thinking is None and not getattr(
+            self.provider.caps, "signed_thinking", False
+        ):
+            # No setting to apply, and a provider that sends none: skip the
+            # event scan.
+            self._session_thinking[sid] = None
+            return
+        try:
+            recorded = [event async for event in iter_events(self.store, sid, 0)
+                        if isinstance(event, TurnStarted)]
+        except Exception:  # noqa: BLE001 — unreadable history reads as resumed
+            log.warning(
+                "could not read session %s turns; not applying thinking", sid,
+                exc_info=True,
+            )
+            self._session_thinking[sid] = None
+            return
+        if recorded:
+            setting = recorded[-1].thinking
+            self._session_thinking[sid] = dict(setting) if setting else None
+        else:
+            self._session_thinking[sid] = dict(self.thinking) if self.thinking else None
+
     async def _rehydrate_prefix_fingerprint(self, sid: str) -> None:
         """Recover the previous request's prefix fingerprint from the events.
 
@@ -2489,6 +2657,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
             decision_reason=promo.decision_reason,
             first_changed_message=promo.first_changed_message,
+            token_basis=promo.token_basis,
+            measured_prompt_tokens=promo.measured_prompt_tokens,
         ))
 
     def _context_overhead_tokens(self) -> int:
@@ -2569,6 +2739,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # calls of one turn the provider is holding a prefix it built
                 # seconds ago; rewriting it there re-bills the whole prompt.
                 turn_boundary=num_calls == 0,
+                # Window protection sizes the prompt on what the provider
+                # billed last call, not on the chars/4 estimate alone.
+                measured_prompt_tokens=await self._measured_window_prompt(sid, nodes),
             )
             history = repair_dangling_tool_calls(rendered)
             if self._encrypted_reasoning_poisoned:
@@ -2583,9 +2756,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             for promo in promotions:
                 await self._emit_compaction(sid, turn_id, promo)
             projected_prompt = self._estimate_request_input_tokens(history)
-            call_was_sticky = not self._sticky_poisoned and empty_retries == 0
+            drops_sticky = self._drops_sticky_on_empty()
+            call_was_sticky = not self._sticky_poisoned and (
+                empty_retries == 0 or not drops_sticky
+            )
             num_calls += 1
             self._turn_model_calls = num_calls
+            call_model = self.model
             result = await self._stream_once(
                 sid, turn_id, history, sticky=call_was_sticky
             )
@@ -2606,8 +2783,32 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # while dead replicas failed fast, but a replica that HANGS
                 # makes every probe cost a full first-data watchdog timeout. A
                 # new session (or a new process) starts clean.
-                if call_was_sticky:
+                #
+                # That is OpenRouter's policy. The provider decides through
+                # classify_error: the Responses API never drops its
+                # prompt_cache_key, because the key is its cache affinity, and
+                # retrying without it re-bills the whole prefix.
+                if call_was_sticky and drops_sticky:
+                    dropped_key = self._affinity_key()
                     self._sticky_poisoned = True
+                    log.warning(
+                        "Empty completion from %s: dropping the sticky routing "
+                        "key for the rest of session %s (provider_fallback)",
+                        self.provider.name, sid,
+                    )
+                    await self._emit(CacheMissAlert(
+                        session_id=sid, turn_id=turn_id,
+                        consecutive=empty_retries + 1,
+                        reason="sticky_key_dropped",
+                        provider=self.provider.name,
+                        model=self.model,
+                        cache_key=dropped_key,
+                        note=(
+                            "empty completion: the sticky routing key is "
+                            "dropped for the rest of this session"
+                        ),
+                        miss_class=PROVIDER_FALLBACK,
+                    ))
                 empty_retries += 1
                 # The dud call may still have billed something.
                 self._fold_call_usage(total_usage, result.usage)
@@ -2615,6 +2816,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # next cache-miss diagnosis diffs against the request that
                 # was actually sent last, not the one before it.
                 self._cache_probe_fields(result.usage)
+                if call_was_sticky and drops_sticky:
+                    # Set after the dud call's own probe fields: the call
+                    # that follows is the first without the key.
+                    self._sticky_drop_unreported = True
                 delay = _empty_retry_delay(empty_retries)
                 await self._emit(ProviderRetry(
                     session_id=sid, turn_id=turn_id,
@@ -2855,6 +3060,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # A provider that reported nothing leaves the estimate in place
                 # rather than pinning the whole context at zero tokens.
                 self._last_call_usage[sid] = (node.node_id, dict(result.usage))
+                self._last_call_model[sid] = call_model
             snapshot: dict[str, Any] | None = None
             try:
                 snapshot = self._context_usage_snapshot(
@@ -3264,10 +3470,22 @@ class NativeLoop(BackgroundLifecycleMixin):
         return all(key in self.ctx.extra for key in required)
 
     def _build_request(
-        self, history: list[Message], *, sticky: bool = True
+        self, history: list[Message], *, sticky: bool = True,
+        turn_id: str | None = None,
     ) -> ProviderRequest:
         tools_api = self._tools_api()
         plan = plan_cache(self.provider.caps, has_tools=bool(tools_api))
+        sid = self._session.session_id if self._session is not None else None
+        routing: dict[str, Any] = {}
+        wire_state: WireState | None = None
+        if self.provider.name == "openai_responses":
+            # Routing identity for the Responses client: this loop's wire
+            # state for the main role, and the turn the call belongs to (a
+            # _fluid_ key, which the serializer keeps off the wire). The
+            # client decides per routing arm whether to use either.
+            wire_state = self._wire_state("main")
+            if turn_id is not None:
+                routing[TURN_MARKER_KEY] = turn_id
         return ProviderRequest(
             model=self.model,
             messages=history,
@@ -3275,11 +3493,41 @@ class NativeLoop(BackgroundLifecycleMixin):
             tools=tools_api,
             max_tokens=self.max_tokens,
             effort=self.effort,
+            thinking=self._session_thinking.get(sid) if sid else None,
             cache_breakpoints=plan.breakpoints,
             # Per-provider cache-affinity key first, host passthrough on top
             # so the host's keys win.
-            extra={**self._affinity_keys(sticky), **self.request_extra},
+            extra={**self._affinity_keys(sticky), **routing, **self.request_extra},
+            wire_state=wire_state,
         )
+
+    def _wire_state(self, role: str) -> WireState | None:
+        """The loop-owned wire state for ``role`` in the current session.
+
+        Kept per session and role so a turn-state token never crosses from
+        one to the other, even when the provider client is shared.
+        """
+        if self._session is None:
+            return None
+        key = (self._session.session_id, role)
+        state = self._wire_states.get(key)
+        if state is None:
+            state = self._wire_states[key] = WireState(
+                session_id=self._session.session_id, role=role,
+            )
+        return state
+
+    def _learner_routing(self) -> tuple[dict[str, Any], WireState | None]:
+        """Request extra and wire state for the memory learner's calls.
+
+        The key is ``"learner:<affinity key>"`` (design 2.4: one cache key
+        per role), and the wire state is this loop's ``learner`` state.
+        Empty before a session exists or once the sticky key was dropped.
+        """
+        key = self._affinity_key()
+        if key is None or self._sticky_poisoned:
+            return {}, None
+        return {"prompt_cache_key": f"learner:{key}"}, self._wire_state("learner")
 
     def _affinity_key(self) -> str | None:
         """The value the provider's cache-affinity key carries.
@@ -3314,6 +3562,21 @@ class NativeLoop(BackgroundLifecycleMixin):
             return {"prompt_cache_key": key}
         return {}
 
+    def _drops_sticky_on_empty(self) -> bool:
+        """Whether an empty completion should drop the affinity key for good.
+
+        The provider's ``classify_error`` decides (its ``drop_sticky``). A
+        provider without one keeps the original behaviour, which drops it.
+        """
+        classify = getattr(self.provider, "classify_error", None)
+        if not callable(classify):
+            return True
+        try:
+            return bool(classify({"kind": "empty_completion"}).drop_sticky)
+        except Exception:  # noqa: BLE001 — a policy lookup never ends a turn
+            log.debug("classify_error failed; keeping the default", exc_info=True)
+            return True
+
     def _fingerprint_request(self, request: ProviderRequest) -> None:
         """Record the prefix fingerprint of the request about to be sent.
 
@@ -3323,10 +3586,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         if not self._cache_probe.enabled:
             return
         try:
+            routing_headers = self._routing_headers(request)
             self._prefix_fingerprint = fingerprint_prefix(
                 system=request.system,
                 tools=request.tools,
                 messages=request.messages,
+                routing_headers=routing_headers,
                 request_identity={
                     "provider": self.provider.name, "model": request.model,
                     "max_tokens": request.max_tokens, "effort": request.effort,
@@ -3347,6 +3612,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     request, self._prefix_fingerprint,
                     previous_count=message_count(self._prev_prefix_fingerprint),
                     endpoint=getattr(self.provider, "_base_url", None),
+                    routing_headers=routing_headers,
                 )
             self._prefix_fingerprint["_requested_at"] = str(time.time())
             # The text behind the system hash, kept in-process so a change
@@ -3356,6 +3622,24 @@ class NativeLoop(BackgroundLifecycleMixin):
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             log.debug("prefix fingerprint failed", exc_info=True)
             self._prefix_fingerprint = None
+
+    def _routing_headers(self, request: ProviderRequest) -> dict[str, str]:
+        """The provider's routing headers for ``request``, for the probe.
+
+        Optional provider hook: ``routing_headers(request) -> dict``. Only the
+        non-credential headers that steer the request to a backend belong in
+        it (the cache is per route, so they are part of cache identity). A
+        provider without the hook, or one whose hook fails, contributes none.
+        """
+        hook = getattr(self.provider, "routing_headers", None)
+        if not callable(hook):
+            return {}
+        try:
+            headers = hook(request)
+        except Exception:  # noqa: BLE001 — instrumentation is never fatal
+            log.debug("routing headers for the cache probe failed", exc_info=True)
+            return {}
+        return dict(headers) if isinstance(headers, Mapping) else {}
 
     def _cache_probe_fields(self, usage: dict[str, Any]) -> dict[str, Any]:
         """``prefix_hashes`` (+ ``cache_miss`` on a miss) for a Usage payload.
@@ -3404,11 +3688,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
         except (TypeError, ValueError):
             pass  # Old or malformed diagnostic metadata is not a turn failure.
+        sticky_dropped, self._sticky_drop_unreported = self._sticky_drop_unreported, False
         try:
             diagnosis = diagnose_cache_miss(
                 previous=self._prev_prefix_fingerprint,
                 current=fingerprint,
-                input_tokens=int(usage.get("input_tokens", 0) or 0),
+                # Fresh prompt tokens: uncached input plus cache writes. On
+                # the Anthropic lane a rewritten prefix is billed as a cache
+                # write and input_tokens holds only the tail after the last
+                # breakpoint, so input_tokens alone kept every mutation under
+                # the probe's gate. Other providers report no writes.
+                input_tokens=int(usage.get("input_tokens", 0) or 0)
+                + int(usage.get("cache_creation_input_tokens", 0) or 0),
                 cache_read_tokens=int(
                     usage.get("cache_read_input_tokens", 0) or 0
                 ),
@@ -3423,8 +3714,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._prev_prefix_fingerprint = fingerprint
         if diagnosis is None:
             self._unexplained_misses = 0
+            _stamp_miss_class(out)
             return out
+        if sticky_dropped and diagnosis.get("reason") == "request_settings_changed":
+            diagnosis["sticky_key_dropped"] = True
         out["cache_miss"] = diagnosis
+        _stamp_miss_class(out)
         if not is_unexplained_miss(diagnosis):
             self._unexplained_misses = 0
             log.debug(
@@ -3490,6 +3785,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         }
         await self._emit(CacheMissAlert(
             session_id=sid, turn_id=turn_id,
+            miss_class=usage_raw.get("cache_miss_class"),
             consecutive=int(streak),
             reason=str(diagnosis.get("reason") or ""),
             input_tokens=int(diagnosis.get("input_tokens") or 0),
@@ -3539,7 +3835,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
     ) -> _CallResult:
         request = self._build_request(
-            history, sticky=sticky
+            history, sticky=sticky, turn_id=turn_id
         )
         self._fingerprint_request(request)
 

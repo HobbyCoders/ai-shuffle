@@ -517,7 +517,10 @@ class UserQuestionHandler:
         try:
             from app.core import wakeup_service
             from app.core.task_registry import task_registry
-            await asyncio.to_thread(wakeup_service.cancel_session_wakeups, session_id)
+            await asyncio.to_thread(
+                wakeup_service.cancel_session_wakeups, session_id,
+                exclude_source=wakeup_service.HELD_PEER_SOURCE,
+            )
             task_registry.clear_user_stop(session_id)
         except Exception:
             logger.warning("Question answer wake cleanup failed for %s", session_id, exc_info=True)

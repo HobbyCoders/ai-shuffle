@@ -345,3 +345,30 @@ def test_journal_diagnostics_rejects_links_and_special_files(tmp_path, monkeypat
         os.mkfifo(journal)
         result = fluid_memory.journal_diagnostics()
         assert result["journals_incomplete"] == 1 and result["bytes_scanned"] == 0
+
+
+def test_journal_diagnostics_counts_silent_learners_without_naming_them(tmp_path, monkeypatch):
+    import json
+    import time
+    from app.core import fluid_memory
+    from fluid.codemode.skills import SkillStore
+    monkeypatch.setattr(fluid_memory, "skills_root", lambda: tmp_path)
+    local = SkillStore(tmp_path)
+    user = SkillStore(tmp_path / ".users" / ("a" * 64))
+    idle = SkillStore(tmp_path / ".users" / ("b" * 64))
+    for store in (local, user, idle):
+        store.journal_append({"content": "fixture"})
+    # Passes for four days, none of them writing.
+    local.note_learner_pass(False, now=time.time() - 4 * 86400)
+    local.note_learner_pass(False, now=time.time() - 60)
+    user.note_learner_pass(False, now=time.time() - 3600)  # silent for an hour
+    # One silent pass four days ago and none since: the learner stopped
+    # running, which is not three days of passes without a write.
+    idle.note_learner_pass(False, now=time.time() - 4 * 86400)
+    result = fluid_memory.journal_diagnostics()
+    assert result["coverage_complete"]
+    assert result["learner_silent_stores"] == 1
+    assert result["learner_silence_alarm_seconds"] == 3 * 86400
+    local.note_learner_pass(True, now=time.time())
+    assert fluid_memory.journal_diagnostics()["learner_silent_stores"] == 0
+    assert str(tmp_path) not in json.dumps(result)

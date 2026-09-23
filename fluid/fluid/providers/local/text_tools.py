@@ -37,7 +37,14 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.messages import (
+    Image,
+    Message,
+    Text,
+    ToolResultBlock,
+    ToolUseBlock,
+    UnknownBlock,
+)
 from fluid.providers._chat_completions import system_message
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 
@@ -329,6 +336,8 @@ def tool_result_to_text(block: ToolResultBlock, name: str) -> str:
             parts.append(c.text)
         elif isinstance(c, Image):
             parts.append("[image omitted]")
+        elif isinstance(c, UnknownBlock):
+            continue  # a block kind from a newer release renders nothing
         else:
             parts.append(json.dumps(c.to_dict(), separators=(",", ":"), ensure_ascii=False))
     body = escape_markers("".join(parts))

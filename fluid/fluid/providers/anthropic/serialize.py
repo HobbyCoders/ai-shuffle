@@ -24,6 +24,7 @@ from fluid.messages import (
 )
 from fluid.providers.base import ProviderRequest, StreamChunk
 from fluid.providers.anthropic.limits import resolve_max_tokens
+from fluid.providers.anthropic.thinking import clamp_effort, resolve_thinking
 
 
 def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None:
@@ -111,12 +112,20 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
             tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
             breakpoints -= 1
         body["tools"] = tools
-    if request.thinking:
-        body["thinking"] = request.thinking
-    if request.effort:
-        # Anthropic effort is GA and lives inside output_config, not top-level.
-        # Values pass through verbatim (low/medium/high/xhigh/max).
-        body["output_config"] = {"effort": request.effort}
+    # Anthropic effort is GA and lives inside output_config, not top-level.
+    # Both it and ``thinking`` are fitted to what this model accepts (xhigh on
+    # a 4.6 model becomes high; a budget on 4.7+ becomes adaptive), since the
+    # API rejects the whole request otherwise. See providers/anthropic/thinking.
+    effort = clamp_effort(request.model, request.effort)
+    thinking = resolve_thinking(request.model, request.thinking, effort)
+    if thinking:
+        budget = thinking.get("budget_tokens")
+        if isinstance(budget, int) and budget >= body["max_tokens"]:
+            # The budget must stay below max_tokens.
+            thinking = {**thinking, "budget_tokens": max(1024, body["max_tokens"] - 1)}
+        body["thinking"] = thinking
+    if effort:
+        body["output_config"] = {"effort": effort}
     if breakpoints > 0 and messages:
         last = messages[-1]["content"]
         if last:
@@ -125,10 +134,30 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
     return body
 
 
+# Flat usage key carrying the 1-hour share of ``cache_creation_input_tokens``.
+# The API reports the per-TTL split nested under ``usage.cache_creation``, and
+# the engine's usage merge keeps only top-level integers, so the split would
+# never reach the cost estimate without this copy. See ``pricing.py``.
+CACHE_WRITE_1H_KEY = "cache_creation_1h_input_tokens"
+
+
+def _with_ttl_split(usage: Any) -> Any:
+    """``usage`` plus the flat 1-hour write count when the API reported one."""
+    if not isinstance(usage, dict):
+        return usage
+    breakdown = usage.get("cache_creation")
+    if not isinstance(breakdown, dict):
+        return usage
+    tokens_1h = breakdown.get("ephemeral_1h_input_tokens")
+    if isinstance(tokens_1h, bool) or not isinstance(tokens_1h, int) or tokens_1h <= 0:
+        return usage
+    return {**usage, CACHE_WRITE_1H_KEY: tokens_1h}
+
+
 def sse_to_chunk(event_name: str, data: dict[str, Any]) -> StreamChunk | None:
     t = data.get("type", event_name)
     if t == "message_start":
-        usage = data.get("message", {}).get("usage", {})
+        usage = _with_ttl_split(data.get("message", {}).get("usage", {}))
         return StreamChunk("message_start", {"usage": usage, "message": data.get("message", {})})
     if t == "content_block_start":
         block = data.get("content_block", {})
@@ -162,7 +191,7 @@ def sse_to_chunk(event_name: str, data: dict[str, Any]) -> StreamChunk | None:
     if t == "content_block_stop":
         return StreamChunk("block_stop", {"index": data.get("index", 0)})
     if t == "message_delta":
-        payload: dict[str, Any] = {"usage": data.get("usage", {})}
+        payload: dict[str, Any] = {"usage": _with_ttl_split(data.get("usage", {}))}
         payload["stop_reason"] = data.get("delta", {}).get("stop_reason")
         return StreamChunk("usage", payload)
     if t == "message_stop":

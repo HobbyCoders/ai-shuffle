@@ -21,6 +21,7 @@ __all__ = [
     "CacheProbeConfig",
     "fingerprint_prefix",
     "fingerprint_responses_request",
+    "normalize_routing_headers",
     "diagnose_cache_miss",
     "is_unexplained_miss",
     "checkpoint_positions",
@@ -35,6 +36,13 @@ _DIGEST_BYTES = 8  # 16 hex chars — collision-irrelevant for a diff signal
 
 SYSTEM_SEGMENT = "system"
 TOOLS_SEGMENT = "tools"
+# Hash of the routing headers alone, next to the ``request`` identity that also
+# covers them, so a diagnosis can say whether the headers were what changed.
+ROUTING_HEADERS_KEY = "_routing_headers"
+# Hash of the request identity without the routing headers, written whenever
+# headers are hashed, so a diagnosis can tell a header-only change from a
+# settings switch (model, endpoint) that also moved the headers.
+REQUEST_SETTINGS_KEY = "_request_settings"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -265,6 +273,11 @@ def cache_read_report(
     }
 
 
+def normalize_routing_headers(headers: Mapping[str, Any] | None) -> dict[str, str]:
+    """Header names lower-cased (HTTP names are case-insensitive), values as text."""
+    return {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+
+
 def _feed_block(h: Any, block: Any) -> None:
     # Field names and delimiters avoid ambiguous concatenations. Include full
     # image data, tool names and opaque reasoning, not length/head heuristics.
@@ -281,8 +294,16 @@ def fingerprint_prefix(
     messages: Sequence[Message],
     extra_checkpoints: Sequence[int] = (),
     request_identity: Mapping[str, Any] | None = None,
+    routing_headers: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     """Short stable hashes of the request prefix, in prefix order.
+
+    ``routing_headers`` are the non-credential HTTP headers the provider uses
+    to route the request (see ``routing_headers()`` on the Responses client).
+    They join the ``request`` identity, so a call that changes only a header
+    is diagnosed as ``request_settings_changed`` instead of an unchanged
+    prefix. None or empty leaves the identity as it was before headers were
+    hashed, so providers without routing headers keep their fingerprints.
 
     Keys: ``system``, ``tools``, then ``m1``/``m2``/``m4``… ``m<len>`` — each
     ``mK`` covering the first K messages cumulatively. Dict order IS prefix
@@ -299,7 +320,15 @@ def fingerprint_prefix(
         tools_text = "<unserializable>"
     out[TOOLS_SEGMENT] = _hash_text(tools_text)
 
-    out["request"] = _hash_text(_canonical(request_identity or {}))
+    identity = dict(request_identity or {})
+    headers = normalize_routing_headers(routing_headers)
+    settings_hash = _hash_text(_canonical(identity))
+    if headers:
+        out["request"] = _hash_text(_canonical({**identity, "headers": headers}))
+        out[REQUEST_SETTINGS_KEY] = settings_hash
+        out[ROUTING_HEADERS_KEY] = _hash_text(_canonical(headers))
+    else:
+        out["request"] = settings_hash
     out[SYSTEM_PARAGRAPHS_KEY] = system_paragraph_hashes(system_text_of(system))
     out["_version"] = "normalized-v2"
     static_tokens = (len(_canonical(system or "")) + len(tools_text)) // 4
@@ -320,12 +349,24 @@ def fingerprint_prefix(
 
 
 def fingerprint_responses_request(
-    request: Any, fingerprint: dict[str, str], *, previous_count: int, endpoint: Any = None
+    request: Any,
+    fingerprint: dict[str, str],
+    *,
+    previous_count: int,
+    endpoint: Any = None,
+    routing_headers: Mapping[str, Any] | None = None,
 ) -> None:
     """Replace normalized checkpoints with the Responses serializer's items.
 
     Serialization is O(n): absolute power-of-two checkpoints plus at most one
     prior-length checkpoint visit fewer than four full histories in total.
+
+    The ``request`` identity covers the body settings and ``routing_headers``.
+    The ChatGPT backend routes on headers as well as the body, so a header
+    that changes between two calls is an identity change even when every body
+    byte matched. v3 added the headers; a v2 fingerprint from before the
+    upgrade therefore reads as ``fingerprint_version_changed``, not as a
+    settings change.
     """
     from dataclasses import replace
     from fluid.providers.openai_responses.serialize import build_request_body
@@ -334,14 +375,18 @@ def fingerprint_responses_request(
         return _hash_text(_canonical(value))
 
     body = build_request_body(request)
-    fingerprint["_version"] = "responses-wire-v2"
+    headers = normalize_routing_headers(routing_headers)
+    fingerprint["_version"] = "responses-wire-v3"
     fingerprint["_wire_hash"] = digest(body)
     fingerprint["system"] = digest(body.get("instructions"))
     fingerprint["tools"] = digest(body.get("tools"))
-    fingerprint["request"] = digest({
+    settings = {
         "provider": "openai_responses", "endpoint": endpoint,
         **{k: v for k, v in body.items() if k not in {"input", "instructions", "tools"}},
-    })
+    }
+    fingerprint["request"] = digest({**settings, "headers": headers})
+    fingerprint[REQUEST_SETTINGS_KEY] = digest(settings)
+    fingerprint[ROUTING_HEADERS_KEY] = digest(headers)
     for count in checkpoint_positions(len(request.messages), (previous_count,)):
         prefix = build_request_body(replace(request, messages=request.messages[:count]))
         fingerprint[f"m{count}"] = digest(prefix.get("input"))
@@ -385,6 +430,15 @@ def _rewrite_phrase(rewrites: Sequence[Mapping[str, Any]]) -> str:
     joined = ", ".join(parts)
     subject = "compactions were" if len(parts) > 1 else "a compaction was"
     return f"{subject} applied ({joined})"
+
+
+def _settings_hash(fingerprint: Mapping[str, str]) -> str | None:
+    """The request identity without routing headers.
+
+    A fingerprint without headers has no separate key: its ``request`` hash
+    already leaves them out, and hashes the same identity the same way.
+    """
+    return fingerprint.get(REQUEST_SETTINGS_KEY, fingerprint.get("request"))
 
 
 def diagnose_cache_miss(
@@ -447,8 +501,26 @@ def diagnose_cache_miss(
     shared = [k for k in current if k in previous and not k.startswith("_")]
     # Request identity is an eligibility boundary, even if text stayed equal.
     if previous.get("request") != current.get("request"):
+        # Routing headers are part of the identity; say when they moved, and
+        # whether anything else did. Headers that moved on their own are a
+        # routing change the host did not announce; headers that moved with
+        # the model or endpoint are part of that switch.
+        headers_changed = (
+            previous.get(ROUTING_HEADERS_KEY) != current.get(ROUTING_HEADERS_KEY)
+        )
+        settings_changed = _settings_hash(previous) != _settings_hash(current)
+        if headers_changed and settings_changed:
+            note = ("a request setting (model, effort, extra, endpoint) and the "
+                    "routing headers changed")
+        elif headers_changed:
+            note = "the routing headers changed"
+        else:
+            note = "a request setting (model, effort, extra, endpoint) changed"
         return {"reason": "request_settings_changed", "input_tokens": input_tokens,
-                "cache_read_tokens": cache_read_tokens}
+                "cache_read_tokens": cache_read_tokens,
+                "routing_headers_changed": headers_changed,
+                "other_settings_changed": settings_changed,
+                "note": note}
     shared = [k for k in shared if k != "request"]
     changed: str | None = None
     stable_through: str | None = None

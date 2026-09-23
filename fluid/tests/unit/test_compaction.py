@@ -109,7 +109,7 @@ def test_growing_protected_turn_has_no_tiny_optional_rewrites() -> None:
     assert not c._digested  # No unsafe fallback to parsing tool text.
 
 
-def test_optional_rejection_rolls_back_and_overflow_bypasses_watermark() -> None:
+def test_optional_rejection_rolls_back_and_window_protection_keeps_the_floor() -> None:
     from fluid.context.trim import estimate_tokens_of_messages
 
     nodes = _growing_turn(50, metadata=False)
@@ -127,9 +127,14 @@ def test_optional_rejection_rolls_back_and_overflow_bypasses_watermark() -> None
         context_window=before + c.config.headroom_tokens + 4_000 - 1,
         output_reserve_tokens=4_000,
     )
-    assert promotions
-    assert 0 < before - estimate_tokens_of_messages(rendered) < before * 0.05
-    assert promotions[0].decision_reason == "window_protection"
+    # Window protection skips the retry watermark and builds a candidate, but
+    # a sub-5% reclaim is still a cache break for almost nothing: rejected.
+    assert not promotions and rendered == original
+    decision = c.last_decision
+    assert decision["reason"] == "insufficient_reclaim"
+    assert decision["window_protection"] is True
+    assert 0 < before - decision["candidate_after_tokens"] < before * 0.05
+    assert not c.trimmer._trimmed
 
 
 def test_rejected_optional_image_candidate_restores_consumed_state() -> None:
@@ -776,3 +781,368 @@ def test_engine_turns_the_recall_route_off_with_the_tools(tmp_path) -> None:
     )
     assert not off._compactor.config.recall_tools
     assert not off._trimmer.config.recall_tools
+
+
+# ─── Window protection: measured budget, guarded rungs, 5% floor ─────────────
+
+
+def _live_turn(calls: int, *, result_chars: int, steer: str | None = None) -> list[SessionNode]:
+    """An in-flight turn: the user's ask, then call/result pairs with typed
+    delivery metadata. ``steer`` rides on the newest result, the way the
+    engine delivers a mid-turn user message."""
+    from fluid.messages.content import SteerDelivery
+
+    nodes = [_node("live_u", "user", [Text("Fix the connector. " + "pad " * 50)])]
+    for i in range(calls):
+        steers = [SteerDelivery(text=steer, id="steer-live")] if steer and i == calls - 1 else []
+        nodes += [
+            _node(f"live_a{i}", "assistant", [
+                ToolUseBlock(id=f"live{i}", name="Bash", input={"cmd": f"probe {i}"}),
+            ]),
+            _node(f"live_r{i}", "user", [ToolResultBlock(
+                tool_use_id=f"live{i}",
+                content=[Text(f"live-result-{i} " + "y" * result_chars)],
+                delivered_steers=steers,
+                delivery_metadata_version=1,
+            )]),
+        ]
+    return nodes
+
+
+def test_window_protection_uses_measured_prompt() -> None:
+    # Character-based estimates can overstate the provider-billed prompt and trigger premature window
+    # protection. Use the measured prompt when it is available.
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    nodes = _history(6)
+    reserve = 4_000
+    estimate = estimate_tokens_of_messages(Compactor(config=_cfg()).view(nodes))
+    window = estimate + _cfg().headroom_tokens + reserve  # estimate sits at the limit
+    measured = int(estimate * 0.66)  # the like-for-like pair in the verify report
+
+    # Mid-turn, with an earlier optional pass rejected and waiting for more
+    # reclaimable growth. Only window protection may skip that wait.
+    calibrated = Compactor(config=_cfg())
+    calibrated._optional_retry = (1 << 62, 0)
+    original = calibrated.view(nodes)
+    rendered, promotions = calibrated.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve,
+        turn_boundary=False, measured_prompt_tokens=measured,
+    )
+    assert not promotions and rendered == original
+    assert calibrated.last_decision["reason"] != "window_protection"
+    assert calibrated.last_decision["reason"] == "awaiting_reclaimable_growth"
+    assert calibrated.last_decision["window_protection"] is False
+    assert calibrated.last_decision["token_basis"] == "measured"
+    assert calibrated.last_decision["measured_prompt_tokens"] == measured
+
+    # The same state with no measurement falls back to the estimate, which
+    # says the window is full: window protection runs and records its basis.
+    estimated = Compactor(config=_cfg())
+    estimated._optional_retry = (1 << 62, 0)
+    _, promotions = estimated.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve,
+        turn_boundary=False,
+    )
+    assert promotions
+    assert {p.decision_reason for p in promotions} == {"window_protection"}
+    assert {p.token_basis for p in promotions} == {"estimate"}
+    assert {p.measured_prompt_tokens for p in promotions} == {0}
+
+    # A measurement that really is at the limit still protects the window,
+    # and the event says the decision was sized on it.
+    at_limit = Compactor(config=_cfg())
+    at_limit._optional_retry = (1 << 62, 0)
+    _, promotions = at_limit.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve,
+        turn_boundary=False, measured_prompt_tokens=estimate,
+    )
+    assert promotions
+    assert {p.decision_reason for p in promotions} == {"window_protection"}
+    assert {p.token_basis for p in promotions} == {"measured"}
+    assert {p.measured_prompt_tokens for p in promotions} == {estimate}
+
+    # The factor never exceeds 1: a measurement above the estimate (stale,
+    # taken before a compaction) cannot make a roomy prompt look full.
+    roomy = Compactor(config=_cfg())
+    roomy.apply(
+        nodes, context_window=window * 2, output_reserve_tokens=reserve,
+        measured_prompt_tokens=window * 2,
+    )
+    assert roomy.last_decision["window_protection"] is False
+
+
+def test_window_protection_never_digests_inflight_tail() -> None:
+    # Window protection acts on a size check before anything is sent. When
+    # the guarded rungs cannot reach the target it must stop there: trimming
+    # or digesting the newest result is for a prompt the provider rejected.
+    # In the verified incident that result carried the user's steer and the
+    # model spent a call recovering it with HistoryExpand.
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    steer = "rensaio wont connect either"
+    cfg = _cfg(headroom_tokens=1_000, keep_recent_turns=1)
+    nodes = _history(6) + _live_turn(3, result_chars=24_000, steer=steer)
+    c = Compactor(config=cfg)
+    estimate = estimate_tokens_of_messages(c.view(nodes))
+    reserve = 1_000
+    # The protected tail alone is over the limit, so the guarded rungs run
+    # out before the target and the old code went on to trim(0)/digest(0).
+    window = estimate // 2 + cfg.headroom_tokens + reserve
+
+    rendered, promotions = c.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve,
+        turn_boundary=False,
+    )
+    assert promotions  # the guarded rungs still reclaimed the old turns
+    assert {p.decision_reason for p in promotions} == {"window_protection"}
+
+    live_ids = {n.node_id for n in nodes if n.node_id.startswith("live_")}
+    index = {n.node_id: i for i, n in enumerate(nodes)}
+    for promo in promotions:
+        for start, end, _kind in promo.spans:
+            covered = {n.node_id for n in nodes[index[start]:index[end] + 1]}
+            assert not covered & live_ids, (start, end)
+    newest = [("live_r1", "live1"), ("live_r2", "live2")]  # keep_recent_tool_results=2
+    trimmed = {pair for promo in promotions for pair in promo.trimmed}
+    assert not trimmed & set(newest)
+    texts = "\n".join(_texts(rendered))
+    assert "live-result-2 " + "y" * 24_000 in texts
+    assert "live-result-1 " + "y" * 24_000 in texts
+    assert steer in "\n".join(str(b) for m in rendered for b in m.content)
+    # Still over the escalation target: only the unguarded rungs could go on.
+    assert c._estimate(nodes, 0) > c._threshold(cfg.trigger_tokens, window, reserve)
+
+    # Provider-overflow recovery keeps the unguarded rungs.
+    overflow = c.escalate(
+        nodes, context_window=window, output_reserve_tokens=reserve,
+    )
+    assert any(set(p.trimmed) & set(newest) for p in overflow)
+
+
+_VERIFIED_FALSE_PASSES = [
+    # (billed prompt of the previous call, chars/4 estimate of the next one),
+    # the eight gpt-6-astra window_protection batches in verify/compaction-estimator.
+    (145_140, 216_979),
+    (140_502, 211_906),
+    (162_989, 210_162),
+    (156_768, 212_243),
+    (155_783, 211_465),
+    (150_032, 211_018),
+    (147_728, 211_654),
+    (148_006, 210_064),
+]
+
+
+def test_verified_false_window_protection_passes_no_longer_compact() -> None:
+    # Each batch fired window protection on the estimate while the billed
+    # prompt sat at 55-64% of a 256k window, and 4 of the 5 that stopped at the
+    # candidate reclaimed under 5% of the prompt, a cache-breaking rewrite for
+    # 3-5% of it. Replayed with the measurement: none of the eight compacts.
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    window, reserve = 256_000, 32_000  # limit 208k: every estimate above is over it
+    nodes = _history(4) + _live_turn(2, result_chars=4_000)
+    history_tokens = estimate_tokens_of_messages(Compactor().view(nodes))
+    for billed, estimate in _VERIFIED_FALSE_PASSES:
+        overhead = estimate - history_tokens
+        # Without the measurement the request is still judged over the limit;
+        # the floor now keeps even that pass from rewriting the prefix.
+        blind = Compactor()
+        _, promotions = blind.apply(
+            nodes, overhead_tokens=overhead, context_window=window,
+            output_reserve_tokens=reserve, turn_boundary=False,
+        )
+        assert promotions == [], (billed, estimate)
+        assert blind.last_decision["window_protection"] is True
+        assert blind.last_decision["token_basis"] == "estimate"
+
+        # Sized on the billed prompt it is not window protection at all.
+        c = Compactor()
+        rendered, promotions = c.apply(
+            nodes, overhead_tokens=overhead, context_window=window,
+            output_reserve_tokens=reserve, turn_boundary=False,
+            measured_prompt_tokens=billed,
+        )
+        assert promotions == [], (billed, estimate)
+        assert rendered == c.view(nodes)
+        assert c.last_decision["window_protection"] is False
+        assert c.last_decision["token_basis"] == "measured"
+        assert not c._digested and not c.trimmer._trimmed
+
+
+def test_measured_calibration_sizes_the_optional_trigger_and_the_stop_target() -> None:
+    # Calibration used to reach only the window-protection check. The
+    # optional meaningful_reclaim trigger and the ladder's stop target still
+    # read raw chars/4, so a real batch such as 63844 (211.9k estimated,
+    # 140.5k billed) could still compact mid-turn, as meaningful_reclaim.
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    # Trimming off, so only the digest rung reclaims, one turn at a time: its
+    # stop target decides how much history goes.
+    cfg = _cfg(trigger_tokens=1_000, trigger_window_ratio=0.6, target_ratio=0.7,
+               headroom_tokens=1_000,
+               trim=TrimConfig(trigger_tokens=1_000, keep_recent_tool_results=2,
+                               min_result_chars=10**6))
+    nodes = _history(20, result_chars=2_000)
+    estimate = estimate_tokens_of_messages(Compactor(config=cfg).view(nodes))
+    reserve = 1_000
+    # The estimate is over the 0.6 * window trigger with plenty to reclaim;
+    # the measured prompt (the 63844 ratio) is under it.
+    window = int(estimate / 0.7)
+    measured = int(estimate * 140_502 / 211_906)
+    trigger = int(window * 0.6)
+    assert measured < trigger < estimate
+
+    blind = Compactor(config=cfg)
+    _, promotions = blind.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve, turn_boundary=False,
+    )
+    assert promotions, "the history offers more than the 5% floor to reclaim"
+    assert blind.last_decision["reason"] == "meaningful_reclaim"
+
+    calibrated = Compactor(config=cfg)
+    rendered, promotions = calibrated.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve,
+        turn_boundary=False, measured_prompt_tokens=measured,
+    )
+    assert promotions == [] and rendered == calibrated.view(nodes)
+    assert calibrated.last_decision["reason"] != "meaningful_reclaim"
+    assert not calibrated._digested and not calibrated.trimmer._trimmed
+
+    # Over the trigger on the measurement too: it compacts, and stops at the
+    # target in measured tokens, which leaves more history than the blind
+    # pass that aimed at the same number in chars/4.
+    over = int(trigger * 1.05)
+    scale = over / estimate
+    sized = Compactor(config=cfg)
+    _, sized_promotions = sized.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve,
+        turn_boundary=False, measured_prompt_tokens=over,
+    )
+    assert sized_promotions
+    sized_after = sized.last_decision["after_tokens"]
+    blind_after = blind.last_decision["after_tokens"]
+    assert sized_after > blind_after
+    # The stop target, 0.7 of the trigger, is met in measured tokens.
+    assert sized_after * scale <= int(trigger * 0.7)
+
+
+async def test_engine_sizes_window_protection_on_the_billed_prompt(tmp_path) -> None:
+    # The engine hands the compactor the last call's billed prompt carried
+    # forward; with none on the path the decision says it used the estimate.
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    def script(billed: int) -> list[StreamChunk]:
+        return [
+            StreamChunk("message_start", {"usage": {"input_tokens": billed}}),
+            StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+            StreamChunk("text_delta", {"index": 0, "text": "noted"}),
+            StreamChunk("block_stop", {"index": 0}),
+            StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "end_turn"}),
+            StreamChunk("message_stop", {}),
+        ]
+
+    decisions = {}
+    for billed in (0, 10):
+        store = JsonlStore(tmp_path / str(billed))
+        loop = NativeLoop(provider=_ScriptedProvider([script(billed)]), store=store,
+                          model="m", max_tokens=1_000)
+        await loop.submit(UserTurn(content="context " + "words " * 4_000))
+        await asyncio.wait_for(loop.wait_turn(), timeout=5)
+        nodes = await store.load_path(loop.session_id)
+        estimate = loop._context_overhead_tokens() + estimate_tokens_of_messages(
+            loop._compactor.view(nodes)
+        )
+        # The next request's estimate is over the limit; the billed prompt is
+        # far under it.
+        loop.context_window = estimate + loop._compactor.config.headroom_tokens + 1_000
+        await loop.submit(UserTurn(content="next"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=5)
+        decisions[billed] = dict(loop._compactor.last_decision)
+        await loop.aclose()
+
+    assert decisions[0]["token_basis"] == "estimate"
+    assert decisions[0]["window_protection"] is True
+    assert decisions[10]["token_basis"] == "measured"
+    assert decisions[10]["measured_prompt_tokens"] > 10
+    assert decisions[10]["window_protection"] is False
+
+
+
+async def test_window_protection_ignores_a_measurement_from_another_model(tmp_path) -> None:
+    # A billed count is in the tokenizer of the model that billed it. After a
+    # switch, live or across an engine rebuild, the window decision falls back
+    # to the estimate until the new model's first call is measured.
+    from fluid.context.trim import estimate_tokens_of_messages
+    from fluid.events import SetModel
+
+    def script(billed: int) -> list[StreamChunk]:
+        return [
+            StreamChunk("message_start", {"usage": {"input_tokens": billed}}),
+            StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+            StreamChunk("text_delta", {"index": 0, "text": "noted"}),
+            StreamChunk("block_stop", {"index": 0}),
+            StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "end_turn"}),
+            StreamChunk("message_stop", {}),
+        ]
+
+    async def first_call(store: JsonlStore) -> str:
+        loop = NativeLoop(provider=_ScriptedProvider([script(10)]), store=store,
+                          model="m", max_tokens=1_000)
+        await loop.submit(UserTurn(content="context " + "words " * 4_000))
+        await asyncio.wait_for(loop.wait_turn(), timeout=5)
+        sid = loop.session_id
+        await loop.aclose()
+        return sid
+
+    async def next_decision(loop: NativeLoop, store: JsonlStore, sid: str) -> dict:
+        nodes = await store.load_path(sid)
+        estimate = loop._context_overhead_tokens() + estimate_tokens_of_messages(
+            loop._compactor.view(nodes)
+        )
+        # The estimate is over the limit; the billed prompt is far under it.
+        loop.context_window = estimate + loop._compactor.config.headroom_tokens + 1_000
+        await loop.submit(UserTurn(content="next"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=5)
+        return dict(loop._compactor.last_decision)
+
+    # Live switch on one engine.
+    store = JsonlStore(tmp_path / "live")
+    loop = NativeLoop(provider=_ScriptedProvider([script(10)]), store=store,
+                      model="m", max_tokens=1_000)
+    await loop.submit(UserTurn(content="context " + "words " * 4_000))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    await loop.submit(SetModel(model="m2"))
+    switched = await next_decision(loop, store, loop.session_id)
+    await loop.aclose()
+    assert switched["token_basis"] == "estimate"
+    assert switched["window_protection"] is True
+
+    # A rebuilt engine reads the model off the persisted Usage event.
+    decisions = {}
+    for model in ("m", "m2"):
+        store = JsonlStore(tmp_path / f"rebuilt-{model}")
+        sid = await first_call(store)
+        rebuilt = NativeLoop(provider=_ScriptedProvider([script(10)]), store=store,
+                             model=model, max_tokens=1_000, session_id=sid)
+        decisions[model] = await next_decision(rebuilt, store, sid)
+        await rebuilt.aclose()
+    assert decisions["m"]["token_basis"] == "measured"
+    assert decisions["m"]["window_protection"] is False
+    assert decisions["m2"]["token_basis"] == "estimate"
+    assert decisions["m2"]["window_protection"] is True
+
+
+def test_context_compaction_event_carries_token_basis() -> None:
+    e = ContextCompaction(
+        session_id="s", turn_id="t", tier=1, reason="trigger",
+        trimmed=[["n1", "t1"]], decision_reason="window_protection",
+        token_basis="measured", measured_prompt_tokens=150_032, seq=3,
+    )
+    assert event_from_dict(event_to_dict(e)) == e
+    legacy = event_to_dict(e)
+    legacy.pop("token_basis")
+    legacy.pop("measured_prompt_tokens")
+    revived = event_from_dict(legacy)
+    assert revived.token_basis == "" and revived.measured_prompt_tokens == 0

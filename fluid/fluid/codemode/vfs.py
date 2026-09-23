@@ -123,7 +123,56 @@ class ToolError(RuntimeError):
 
 
 class MissingPathError(ToolError):
-    """Missing Read/Grep/Glob target; catch only for independent discovery."""
+    """Raised when a :class:`MissingFile` is used as file content."""
+
+
+class MissingFile:
+    """What a Read of a path that does not exist returns inside a cell.
+
+    Falsy, so ``if not text:`` skips a guessed path without aborting the cell.
+    ``str()`` and ``print`` give a one-line note naming the path and the
+    reason. Using it as file content (a str method, slicing, iteration,
+    ``in``, ``len``, concatenation) raises :class:`MissingPathError`, so a
+    missing file is never parsed as if it were an empty one.
+    """
+
+    __slots__ = ("path", "reason")
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path = str(path)
+        self.reason = " ".join(str(reason).split())
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __str__(self) -> str:
+        return f"(missing file: {self.reason})"
+
+    def __format__(self, spec: str) -> str:
+        return format(str(self), spec)
+
+    def __repr__(self) -> str:
+        return f"MissingFile(path={self.path!r}, reason={self.reason!r})"
+
+    def __reduce__(self):
+        return (MissingFile, (self.path, self.reason))
+
+    def _consumed(self, *_args, **_kwargs):
+        raise MissingPathError(
+            f"{self.reason} (this Read returned a falsy MissingFile; check "
+            "`if not text:` before using it as content)"
+        )
+
+    __iter__ = __getitem__ = __contains__ = __len__ = _consumed
+    __add__ = __radd__ = __mul__ = __mod__ = _consumed
+
+    def __getattr__(self, name: str):
+        # Only str's own methods count as consumption; any other missing
+        # attribute (pickle's ``__setstate__`` probe among them) stays an
+        # AttributeError.
+        if not name.startswith("_") and hasattr(str, name):
+            return self._consumed
+        raise AttributeError(name)
 
 
 class HostCallDenied(PermissionError):
@@ -506,6 +555,7 @@ def make_namespace(
         "ResultRef": ResultRef,
         "ToolError": ToolError,
         "MissingPathError": MissingPathError,
+        "MissingFile": MissingFile,
         "HostCallDenied": HostCallDenied,
         "_refs": refs if refs is not None else RefRegistry(),
         "_": None,

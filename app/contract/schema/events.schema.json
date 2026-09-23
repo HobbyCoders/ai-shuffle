@@ -3118,6 +3118,18 @@
           "title": "Session Id",
           "type": "string"
         },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
         "turn_id": {
           "anyOf": [
             {

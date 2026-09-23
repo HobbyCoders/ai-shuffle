@@ -302,7 +302,7 @@ def test_complete_fingerprints_notice_tool_names_raw_reasoning_and_image_tail() 
         a = loop._prefix_fingerprint
         loop._fingerprint_request(second)
         b = loop._prefix_fingerprint
-        assert a["_version"] == "responses-wire-v2"
+        assert a["_version"] == "responses-wire-v3"
         assert a["_wire_hash"] != b["_wire_hash"]
         assert a["m1"] != b["m1"]
 
@@ -1036,3 +1036,215 @@ def test_the_cache_key_and_image_ratio_are_configurable() -> None:
     assert loaded.to_dict()["cache_key"] == "conv-42"
     # Blank is "unset", not an empty affinity key on every request.
     assert HarnessConfig.from_dict({"cache_key": ""}).cache_key is None
+
+
+# ─── Routing headers in the request identity ─────────────────────────────────
+
+
+class _HeaderMissProvider(_MissProvider):
+    """Full misses, and routing headers the test can change between calls."""
+
+    def __init__(self, tool_calls: int, *, switch_after: int) -> None:
+        super().__init__(tool_calls)
+        self.switch_after = switch_after
+
+    def routing_headers(self, request=None) -> dict[str, str]:
+        account = "acct-a" if self.calls < self.switch_after else "acct-b"
+        return {"chatgpt-account-id": account, "originator": "codex_cli_rs"}
+
+
+async def test_a_header_only_change_is_a_request_identity_change() -> None:
+    """The probe hashed the body only, so a call whose routing header moved
+    read as an unchanged prefix and was blamed on the provider. The header is
+    now part of the request identity and the diagnosis says it moved."""
+    loop = await _run_misses(3, provider=_HeaderMissProvider(3, switch_after=2))
+    usages = [e for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+    diagnoses = [u.raw["cache_miss"] for u in usages]
+
+    assert [d["reason"] for d in diagnoses] == [
+        "no_previous_request",
+        "prefix_grew_only",
+        # Call 3 is the first with the new account header; its body is the
+        # previous body plus one tool round, the same growth as on call 2.
+        "request_settings_changed",
+        "prefix_grew_only",
+    ]
+    assert diagnoses[2]["routing_headers_changed"] is True
+    assert diagnoses[2]["other_settings_changed"] is False
+    assert diagnoses[2]["note"] == "the routing headers changed"
+    assert not is_unexplained_miss(diagnoses[2])
+
+
+def test_the_normalized_fingerprint_hashes_routing_headers() -> None:
+    messages = _messages(4)
+    identity = {"provider": "p", "model": "m"}
+    before = fingerprint_prefix(system="s", tools=[], messages=messages,
+                                request_identity=identity,
+                                routing_headers={"session-id": "one"})
+    after = fingerprint_prefix(system="s", tools=[], messages=messages,
+                               request_identity=identity,
+                               routing_headers={"Session-Id": "two"})
+    same = fingerprint_prefix(system="s", tools=[], messages=messages,
+                              request_identity=identity,
+                              routing_headers={"SESSION-ID": "one"})
+    assert before["request"] != after["request"]
+    assert before["request"] == same["request"], "header names are case-insensitive"
+    diagnosis = diagnose_cache_miss(previous=before, current=after,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["reason"] == "request_settings_changed"
+    assert diagnosis["routing_headers_changed"] is True
+
+    # A settings change with the same headers is not a header change.
+    effort = fingerprint_prefix(system="s", tools=[], messages=messages,
+                                request_identity={**identity, "effort": "high"},
+                                routing_headers={"session-id": "one"})
+    diagnosis = diagnose_cache_miss(previous=before, current=effort,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["routing_headers_changed"] is False
+
+    # No headers leaves the identity as it was before headers were hashed, so
+    # fingerprints persisted by an older release still compare equal.
+    bare = fingerprint_prefix(system="s", tools=[], messages=messages,
+                              request_identity=identity)
+    empty = fingerprint_prefix(system="s", tools=[], messages=messages,
+                               request_identity=identity, routing_headers={})
+    assert bare == empty
+    assert "_routing_headers" not in bare
+
+
+def test_headers_that_move_with_a_settings_switch_are_reported_with_it() -> None:
+    """Switching a session from the Codex backend to the public API changes
+    the endpoint and drops the Codex headers in the same request. That is a
+    settings switch, and the diagnosis says the headers were not all that
+    moved, so the host does not file it as an unannounced routing change."""
+    from fluid.context.cache_probe import fingerprint_responses_request
+
+    request = ProviderRequest(model="m", messages=_messages(4))
+    codex = {"chatgpt-account-id": "acct-1", "originator": "codex_cli_rs"}
+
+    def responses(endpoint: str, headers: dict) -> dict:
+        fp = fingerprint_prefix(system=None, tools=[], messages=request.messages,
+                                routing_headers=headers)
+        fingerprint_responses_request(request, fp, previous_count=0,
+                                      endpoint=endpoint, routing_headers=headers)
+        return fp
+
+    before = responses("https://chatgpt.com/backend-api/codex/responses", codex)
+    switched = responses("https://api.openai.com/v1/responses", {})
+    moved = responses("https://chatgpt.com/backend-api/codex/responses",
+                      {**codex, "chatgpt-account-id": "acct-2"})
+
+    diagnosis = diagnose_cache_miss(previous=before, current=switched,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["reason"] == "request_settings_changed"
+    assert diagnosis["routing_headers_changed"] is True
+    assert diagnosis["other_settings_changed"] is True
+    assert "and the routing headers changed" in diagnosis["note"]
+
+    diagnosis = diagnose_cache_miss(previous=before, current=moved,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["routing_headers_changed"] is True
+    assert diagnosis["other_settings_changed"] is False
+
+    # The normalized fingerprint makes the same distinction, including when
+    # one side sent headers and the other sent none.
+    identity = {"provider": "p", "model": "m"}
+    with_headers = fingerprint_prefix(system="s", tools=[], messages=request.messages,
+                                      request_identity=identity, routing_headers=codex)
+    bare = fingerprint_prefix(system="s", tools=[], messages=request.messages,
+                              request_identity=identity)
+    other_model = fingerprint_prefix(system="s", tools=[], messages=request.messages,
+                                     request_identity={**identity, "model": "n"})
+    diagnosis = diagnose_cache_miss(previous=with_headers, current=bare,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["other_settings_changed"] is False
+    diagnosis = diagnose_cache_miss(previous=with_headers, current=other_model,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["routing_headers_changed"] is True
+    assert diagnosis["other_settings_changed"] is True
+
+
+async def test_the_responses_client_routing_headers_are_the_ones_it_sends() -> None:
+    from fluid.providers.openai_responses.client import (
+        CODEX_RESPONSES_URL,
+        OpenAIResponsesClient,
+    )
+
+    class _Auth:
+        account_id = "acct-1"
+
+        async def get_access_token(self) -> str:
+            return "secret-token"
+
+        async def on_401(self) -> None:
+            return None
+
+    client = OpenAIResponsesClient(auth=_Auth(), base_url=CODEX_RESPONSES_URL)
+    routing = client.routing_headers()
+    assert routing == {"chatgpt-account-id": "acct-1",
+                       "OpenAI-Beta": "responses=experimental",
+                       "originator": "codex_cli_rs"}
+    sent = await client._headers()
+    assert {k: sent[k] for k in routing} == routing
+    assert "Authorization" not in routing, "credentials never enter the probe"
+    # The public API sends no routing headers today.
+    assert OpenAIResponsesClient(api_key="k").routing_headers() == {}
+
+
+# ─── Miss classes on the event log ───────────────────────────────────────────
+
+
+async def test_the_alert_and_the_usage_rows_carry_the_miss_class() -> None:
+    # Design 5.1 reads CacheMissAlert.class from the event log. A streak of
+    # matching-prefix misses inside the cache lifetime is a provider fallback.
+    loop = await _run_misses(3)
+    events = loop.bus.log(loop.session_id)
+    (alert,) = [e for e in events if isinstance(e, CacheMissAlert)]
+    assert alert.miss_class == "provider_fallback"
+    classes = [e.raw.get("cache_miss_class") for e in events if isinstance(e, Usage)]
+    # Call 1 is the session's first request: a planned rebuild.
+    assert classes == ["planned_rebuild"] + ["provider_fallback"] * 3
+
+
+class _AnthropicWriteProvider(_MissProvider):
+    """Anthropic accounting: a rewritten prefix is billed as a cache write and
+    input_tokens holds only the few tokens after the last breakpoint."""
+
+    name = "anthropic"
+    caps = ProviderCaps(explicit_cache_breakpoints=True)
+
+    def __init__(self, tool_calls: int) -> None:
+        super().__init__(tool_calls)
+        self.loop: NativeLoop | None = None
+
+    async def stream(self, request: ProviderRequest):
+        if self.calls == 0 and self.loop is not None:
+            # The harness rewrites its own system prompt between two calls.
+            self.loop.system = "changed " * 50_000
+        async for chunk in super().stream(request):
+            if chunk.kind == "message_start":
+                chunk = StreamChunk("message_start", {"usage": {
+                    "input_tokens": 2_000,
+                    "cache_creation_input_tokens": 58_000,
+                    "cache_read_input_tokens": 0,
+                }})
+            yield chunk
+
+
+async def test_an_anthropic_prefix_mutation_is_classified_as_a_mutation() -> None:
+    # Before, the probe's 10k fresh-input gate read only input_tokens (2k
+    # here), so the rewrite never got a diagnosis and was filed as
+    # append_growth.
+    provider = _AnthropicWriteProvider(1)
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m", system="sys " * 50_000,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+    )
+    provider.loop = loop
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+    usages = [e for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+    second = usages[1].raw
+    assert second["cache_miss"]["reason"] == "prefix_changed"
+    assert second["cache_miss"]["changed"] == "system"
+    assert second["cache_miss_class"] == "harness_mutation"

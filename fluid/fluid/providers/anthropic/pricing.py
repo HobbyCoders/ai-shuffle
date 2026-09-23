@@ -3,9 +3,13 @@
 Prices are Anthropic's published per-MTok USD list prices for the Messages API.
 Derived rates follow the published multipliers:
 
-* cache **write** = 1.25x the input rate (5m ephemeral TTL — the only TTL this
-  harness plans to write),
-* cache **read** = 0.1x the input rate.
+* cache **write** = 1.25x the input rate for the 5-minute TTL and 2x for the
+  1-hour TTL. The API splits ``cache_creation_input_tokens`` by TTL in
+  ``usage.cache_creation`` (``ephemeral_5m_input_tokens`` /
+  ``ephemeral_1h_input_tokens``); the 1-hour part bills at 2x and the rest at
+  1.25x,
+* cache **read** = 0.1x the input rate, except the families listed in
+  ``_CACHE_READ_OVERRIDES``.
 
 Long context: models from the 4.6 generation on ship the 1M window at
 standard pricing, so a ``[1m]`` suffix changes nothing for them. The
@@ -37,20 +41,28 @@ _PRICES: list[tuple[str, float, float]] = [
     ("claude-3-opus", 15.0, 75.0),
     ("claude-fable-5", 10.0, 50.0),
     ("claude-mythos", 10.0, 50.0),
+    ("claude-opus-5-5", 4.0, 20.0),  # Opus 5.5 lists below Opus 5
     ("claude-opus", 5.0, 25.0),   # Opus 5 / 4.8 / 4.7 / 4.6 / 4.5
     ("claude-sonnet-5", 2.0, 10.0),  # the launch price became the list price
     ("claude-sonnet", 3.0, 15.0), # Sonnet 4.6 / 4.5 / 4.0
     ("claude-haiku", 1.0, 5.0),
 ]
 
+# Published as multipliers of the base input rate for every model, with no
+# per-model 1-hour rate listed (prompt-caching docs: "1.25x for 5-minute TTL,
+# 2x for 1-hour TTL"). So Opus 5.5's 1-hour write is $8/MTok by that rule;
+# the per-model table lists only input, output and cache-read overrides.
 _CACHE_WRITE_MULTIPLIER = 1.25  # 5m ephemeral
+_CACHE_WRITE_1H_MULTIPLIER = 2.0  # 1h ephemeral
 _CACHE_READ_MULTIPLIER = 0.1
 # Families whose published cache-read rate is not the 0.1x default, as a
 # fraction of their input rate. Fable 5.1 lists cache reads at $0.25/MTok
-# against a $10 input rate. Whether Mythos 5.1 shares that rate was open at
-# launch, so it keeps the default. Longest prefix first.
+# against a $10 input rate, and Opus 5.5 at $0.20/MTok against $4. Whether
+# Mythos 5.1 shares Fable 5.1's rate was open at launch, so it keeps the
+# default. Longest prefix first.
 _CACHE_READ_OVERRIDES: list[tuple[str, float]] = [
     ("claude-fable-5-1", 0.025),
+    ("claude-opus-5-5", 0.05),
 ]
 
 # Families whose native window is 200K and whose 1M window was the
@@ -104,13 +116,39 @@ def estimate_cost(model: str, usage: dict) -> float | None:
     if _long_context_tier(model, input_tokens + cache_write + cache_read):
         input_rate *= _LONG_CONTEXT_INPUT_MULTIPLIER
         output_rate *= _LONG_CONTEXT_OUTPUT_MULTIPLIER
+    write_5m, write_1h = _cache_write_split(usage, cache_write)
     total = (
         input_tokens * input_rate
-        + cache_write * _CACHE_WRITE_MULTIPLIER * input_rate
+        + write_5m * _CACHE_WRITE_MULTIPLIER * input_rate
+        + write_1h * _CACHE_WRITE_1H_MULTIPLIER * input_rate
         + cache_read * _cache_read_multiplier(model) * input_rate
         + output_tokens * output_rate
     )
     return total / 1_000_000
+
+
+def _cache_write_split(usage: dict, cache_write: int) -> tuple[int, int]:
+    """Split this call's cache-write tokens into (5-minute, 1-hour) parts.
+
+    The 1-hour count comes from the flat ``cache_creation_1h_input_tokens``
+    key the stream parser adds (``serialize.CACHE_WRITE_1H_KEY``), or else
+    from the API's nested ``usage["cache_creation"]`` breakdown. Without
+    either, every write token is a 5-minute write. The 1-hour part is capped
+    at the reported total, and whatever it leaves over bills at the 5-minute
+    rate, so an inconsistent breakdown never drops tokens and never bills more
+    than ``cache_write`` tokens in all.
+    """
+    raw_1h = usage.get("cache_creation_1h_input_tokens")
+    if raw_1h is None:
+        breakdown = usage.get("cache_creation")
+        if not isinstance(breakdown, dict):
+            return cache_write, 0
+        raw_1h = breakdown.get("ephemeral_1h_input_tokens", 0)
+    raw_1h = raw_1h or 0
+    if isinstance(raw_1h, bool) or not isinstance(raw_1h, (int, float)):
+        raw_1h = 0
+    write_1h = min(max(raw_1h, 0), cache_write)
+    return cache_write - write_1h, write_1h
 
 
 def _cache_read_multiplier(model: str) -> float:
