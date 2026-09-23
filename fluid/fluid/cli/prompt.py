@@ -877,7 +877,7 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
         ) if wanted
     ]
     recovery = (
-        f"{missing_read} Other errors "
+        f"{missing_read} {'Other' if missing_read else 'Tool'} errors "
         f"now return as results and do not abort the cell ({', '.join(soft_examples)}) "
         "— read each result before depending on it. Denials, cancellation "
         "and tool timeouts still abort the cell; do not catch broad "
