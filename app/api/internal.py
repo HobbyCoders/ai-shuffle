@@ -61,6 +61,11 @@ class DesktopUpdateState(BaseModel):
     percent: float | None = Field(default=None, ge=0, le=100)
     error: str | None = Field(default=None, max_length=4096)
     message: str | None = Field(default=None, max_length=4096)
+    # The signed manifest's version and release notes of the offered update, for
+    # the sidebar update button (the desktop checks both against the signed
+    # manifest; the limits match docker/application_updates.py).
+    release: str | None = Field(default=None, max_length=80)
+    notes: str | None = Field(default=None, max_length=4000)
     # No policy fields: the native heartbeat cannot overwrite account preferences.
 
 
