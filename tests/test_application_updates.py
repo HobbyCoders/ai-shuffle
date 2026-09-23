@@ -82,6 +82,43 @@ def test_signed_download_stages_then_explicit_restart_and_health_commit(feed):
     assert all("authorization" not in request.headers for request in requests)
 
 
+def test_lease_goes_to_hub_manifest_and_archive_requests_only(feed):
+    updater, publish, _, requests, _ = feed
+    publish()
+    calls = []
+    def lease():
+        calls.append(1)
+        return "eyJsZWFzZSI6MX0"
+    updater.lease = lease
+    updater.check(download=True)
+    assert [request.url.path for request in requests] == ["/v1/desktop/manifest", "/v1/desktop/sources/" + B]
+    for request in requests:
+        assert request.url.scheme == "https" and request.url.host == "hobbycoders.com"
+        assert request.headers["x-shuffle-lease"] == "eyJsZWFzZSI6MX0"
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("value", [None, "", "not a lease!", "x" * 4097, 42, RuntimeError("app not ready")])
+def test_missing_or_bad_lease_sends_no_header(feed, value):
+    updater, publish, _, requests, _ = feed
+    publish()
+    def lease():
+        if isinstance(value, Exception):
+            raise value
+        return value
+    updater.lease = lease
+    updater.check(download=True)
+    assert updater.state == {"pending": B}
+    assert requests and all("x-shuffle-lease" not in request.headers for request in requests)
+
+
+def test_no_lease_provider_sends_no_header(feed):
+    updater, publish, _, requests, _ = feed
+    publish()
+    updater.check()
+    assert requests and "x-shuffle-lease" not in requests[0].headers
+
+
 def test_disabled_before_download_and_after_staging_blocks_activation(feed):
     updater, publish, enabled, requests, _ = feed
     publish()
@@ -258,9 +295,9 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
         "from docker.application_updates import ContainerUpdates, UpdateError\n"
     )
     monkeypatch.setattr(supervisor, "__file__", str(packaging / "container_runtime.py"))
-    def factory(root, image, public_key, allowed, lifecycle, channel):
+    def factory(root, image, public_key, allowed, lifecycle, channel, lease):
         assert channel == "stable", "customers follow signed releases unless UPDATE_CHANNEL says otherwise"
-        updater.allowed, updater.lifecycle = allowed, lifecycle
+        updater.allowed, updater.lifecycle, updater.lease = allowed, lifecycle, lease
         return updater
     monkeypatch.setattr(update_module, "ContainerUpdates", factory)
     monkeypatch.setattr(startup, "is_shutting_down", False)
@@ -293,6 +330,9 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
             if action == "update-policy":
                 internal.require_desktop(local_request)
                 return httpx.Response(200, json={"allow_updates": enabled[0]})
+            if action == "source-lease":
+                internal.require_desktop(local_request)
+                return httpx.Response(200, json={"lease": "bGVhc2U"})
             if action == "active-sessions":
                 if failure == "preflight-timeout":
                     raise httpx.ReadTimeout("synthetic preflight timeout", request=request)
@@ -374,6 +414,9 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
         status = Mock(wraps=updater.publish)
         monkeypatch.setattr(updater, "publish", status)
         result = supervisor.run(Settings(_env_file=None), "run")
+        # The supervisor hands the updater the app's lease for the hub feed,
+        # read with the lifecycle token from /internal/desktop/source-lease.
+        assert updater.lease() == "bGVhc2U" and actions[-1] == "source-lease"
 
         assert result == (0 if safe or failure == "none" else 1)
         if safe:

@@ -38,6 +38,11 @@ VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.+-][A-Za-z0-9.+-]{1,60})?")
 # verification. edge: every main revision, for the owner's own workers. The
 # channel is inside the signed payload, so the hub cannot relabel an edge build.
 CHANNELS = ("stable", "edge")
+# D8: the hub's gated source feed (android/hub/src/license-gate.ts) reads this
+# worker's license lease from this header. The value is the signed envelope as
+# base64url (app/core/license.py lease_header), within the hub's 4 KiB limit.
+LEASE_HEADER = "X-Shuffle-Lease"
+LEASE_VALUE = re.compile(r"[A-Za-z0-9_-]{1,4096}")
 
 
 class UpdateError(Exception):
@@ -171,10 +176,14 @@ CHECK_INTERVAL_SECONDS = 24 * 3600
 
 
 class ContainerUpdates:
-    def __init__(self, root, image, public_key, allowed, lifecycle, channel="stable"):
+    def __init__(self, root, image, public_key, allowed, lifecycle, channel="stable", lease=None):
         if channel not in CHANNELS:
             raise UpdateError("Unknown update channel")
         self.channel = channel
+        # Returns the X-Shuffle-Lease value, or None (beta mode, no lease yet,
+        # app not answering). The supervisor reads it from the app's
+        # token-protected /api/v1/internal/desktop/source-lease.
+        self.lease = lease
         self.offer = {}
         self.root = Path(root)
         self.image = image
@@ -322,13 +331,26 @@ class ContainerUpdates:
         self.state["booting"] = self.running
         self.save()  # after old app stopped, before anything could migrate the DB
 
+    def current_lease(self):
+        """The lease header value, or None. Never raises: without a lease the
+        request goes out as it always did, and the hub decides."""
+        try:
+            value = self.lease() if self.lease else None
+        except Exception:
+            return None
+        return value if isinstance(value, str) and LEASE_VALUE.fullmatch(value) else None
+
     def fetch(self, endpoint, destination=None, manifest=None):
         if not re.fullmatch(r"manifest|manifest/edge|sources/[a-f0-9]{40}", endpoint):
             raise UpdateError("Invalid source endpoint")
         limit = manifest["size"] if manifest else 32768
         chunks, size, digest = [], 0, hashlib.sha256()
+        # Every request here goes to the hub's own update endpoints (ORIGIN is a
+        # constant and redirects are refused), so the lease reaches only the hub.
+        lease = self.current_lease()
+        headers = {LEASE_HEADER: lease} if lease else {}
         with httpx.Client(trust_env=False, follow_redirects=False, timeout=120) as client:
-            with client.stream("GET", ORIGIN + "/v1/desktop/" + endpoint) as response:
+            with client.stream("GET", ORIGIN + "/v1/desktop/" + endpoint, headers=headers) as response:
                 if response.status_code != 200:
                     raise UpdateError(f"Source request failed ({response.status_code})")
                 output = destination.open("xb") if destination else None

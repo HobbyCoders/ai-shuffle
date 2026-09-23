@@ -630,10 +630,16 @@ def run(settings, action, filename=None):
                 if channel not in ("stable", "edge"):
                     log(f"ignoring UPDATE_CHANNEL={channel!r}; following stable releases")
                     channel = "stable"
+                def lease():
+                    # D8: the app's license lease for the hub's gated feed. The
+                    # updater sends it to the hub's update endpoints only.
+                    value = lifecycle("source-lease").get("lease")
+                    return value if isinstance(value, str) and value else None
+
                 try:
                     updates = ContainerUpdates(root, image, Path(__file__).with_name("application-update-key.pem").read_bytes(),
                                                lambda: lifecycle("update-policy").get("allow_updates") is True, lifecycle,
-                                               channel=channel)
+                                               channel=channel, lease=lease)
                 except UpdateError as exc:
                     raise RuntimeFailure(str(exc)) from exc
         if os.environ.get("START_CHROME", "1") == "1":
