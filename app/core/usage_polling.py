@@ -32,6 +32,18 @@ def identity(url, headers):
     return hashlib.sha256(f"{url}\0{org}\0{credential}".encode()).hexdigest()
 
 
+def capability_fingerprint(source_id, headers, revision=""):
+    """Digest naming one credential revision's access to a usage capability.
+
+    Stored with a refusal so a known-denied capability is not re-probed. A
+    changed credential, organization or stored revision yields a new digest,
+    which invalidates the negative cache without any explicit cleanup.
+    """
+    credential = headers.get("Authorization", "")
+    org = headers.get("OpenAI-Organization", "")
+    return hashlib.sha256(f"{source_id}\0{org}\0{credential}\0{revision or ''}".encode()).hexdigest()
+
+
 def claim(key, now, interval=300):
     lease = secrets.token_hex(16)
     with get_db() as conn:

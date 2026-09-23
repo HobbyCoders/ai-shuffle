@@ -1,5 +1,8 @@
 """Passive inference usage capture and demand-driven account usage refreshes.
 
+Every source read here is defined in :mod:`app.core.usage_sources`; the
+poller takes its jobs from that registry and every upstream read goes through
+:func:`_registered_get`, which refuses endpoints the registry does not list.
 OpenAI account spend and completions usage use a separate local Admin API key.
 No dashboard endpoints, browser sign-ins or ChatGPT OAuth credentials are used
 for OpenAI Platform billing. Upstream reads share durable cooldowns; UI refresh
@@ -15,12 +18,12 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 
-from app.core import encryption
-from app.core.usage_polling import UsageDeferred, usage_get
+from app.core import encryption, usage_sources
+from app.core.usage_polling import UsageDeferred, capability_fingerprint, usage_get
 from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
@@ -371,13 +374,25 @@ async def _persist_openai_capture(provider_id: str, headers: Dict[str, str]) -> 
         u = normalize_openai_headers(headers)
         from app.db import database as db
 
+        # The OpenAI Responses leg also serves xAI, SuperGrok and custom
+        # OpenAI-compatible rows. Label the snapshot by the row's registry
+        # source so their per-minute headroom is never shown as OpenAI usage
+        # or written over a subscription allowance.
+        try:
+            row = await run_sync(db.get_model_provider, provider_id)
+        except Exception:  # noqa: BLE001 — classification falls back to OpenAI
+            row = None
+        snapshot_type = usage_sources.passive_snapshot_type(row, codex_backend=False)
+        if snapshot_type is None:
+            return
+
         # Poll recovered: forget the suppressed-failure state so the
         # next failure is reported at ERROR straight away.
         _clear_poll_failure(f"openai-capture:{provider_id}")
         await run_sync(
             db.upsert_provider_usage_snapshot,
             provider_id,
-            "openai",
+            snapshot_type,
             u.plan_type,
             u.windows,
             u.credits,
@@ -567,8 +582,8 @@ def _openrouter_windows_and_credits(
 # billing). Host is pinned; requests never follow redirects so the bearer token
 # cannot hop hosts.
 GROK_BILLING_HOST = "cli-chat-proxy.grok.com"
-GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
-GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
+GROK_BILLING_URL = usage_sources.GROK_BILLING_URL
+GROK_SETTINGS_URL = usage_sources.GROK_SETTINGS_URL
 GROK_TOKEN_AUTH = "xai-grok-cli"
 _GROK_SETTINGS_TIMEOUT_SECONDS = 5.0
 _GROK_PLAN_FALLBACK = "SuperGrok"
@@ -604,10 +619,7 @@ _GROK_PERIOD_FIELDS: Tuple[str, ...] = ("type", "start", "end")
 _GROK_PRODUCT_FIELDS: Tuple[str, ...] = ("product", "usagePercent")
 
 
-def _is_grok_subscription_row(row: Optional[Dict[str, Any]]) -> bool:
-    """True for SuperGrok OAuth rows. xAI API-key rows are ``provider_type='xai'``."""
-    r = row or {}
-    return r.get("provider_type") == "grok" or r.get("auth_mode") == "grok"
+_is_grok_subscription_row = usage_sources.is_grok_subscription_row
 
 
 def _unwrap_val(value: Any) -> Any:
@@ -790,7 +802,7 @@ async def _grok_get(
     """GET a pinned grok.com CLI-proxy URL. Never follows redirects."""
     if not _grok_url_is_pinned(url):
         raise ValueError("refusing non-pinned Grok billing host")
-    resp = await usage_get(url, headers=dict(headers), timeout=timeout)
+    resp = await _registered_get("grok_subscription", url, headers=dict(headers), timeout=timeout)
     body: Optional[Any] = None
     try:
         body = resp.json()
@@ -844,153 +856,60 @@ def _https_host_is(url: str, host: str) -> bool:
     return parsed.scheme == "https" and (parsed.hostname or "").lower() == host
 
 
-async def _pinned_get(
-    url: str,
-    headers: Mapping[str, str],
-    host: str,
-    timeout: float,
-) -> httpx.Response:
-    """GET ``url`` without following off-host redirects.
+async def _registered_get(source_id: str, url: str, *, headers: Mapping[str, str], **kwargs: Any) -> httpx.Response:
+    """Budgeted GET of an endpoint the registry lists for ``source_id``.
 
-    Same-host 3xx hops (trailing slash, etc.) are followed so a 301 cannot
-    look like a billing failure; any Location that leaves ``host`` stops the
-    chain and the 3xx is returned as-is.
+    Unlisted URLs (dashboard-internal or alpha billing endpoints, for example)
+    are refused before any credential is sent.
     """
-    if not _https_host_is(url, host):
-        raise ValueError("refusing non-pinned host")
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-        resp = await client.get(url, headers=dict(headers))
-        hops = 0
-        while resp.status_code in (301, 302, 303, 307, 308) and hops < 3:
-            loc = resp.headers.get("location")
-            if not loc:
-                break
-            next_url = urljoin(str(resp.url), loc)
-            if not _https_host_is(next_url, host):
-                break
-            url = next_url
-            resp = await client.get(url, headers=dict(headers))
-            hops += 1
-        return resp
+    endpoint = usage_sources.endpoint_for(source_id, url)
+    return await usage_get(url, headers=dict(headers), interval=endpoint.min_interval, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# OpenAI platform credit-grants poller
-# ---------------------------------------------------------------------------
-
-# Dashboard billing endpoint the platform console uses. Undocumented; 403s for
-# project keys without billing access. Host is pinned so the Bearer token never
-# leaves api.openai.com. Same-host redirects are followed via ``_pinned_get``.
-OPENAI_CREDIT_GRANTS_HOST = "api.openai.com"
-OPENAI_CREDIT_GRANTS_URL = (
-    "https://api.openai.com/v1/dashboard/billing/credit_grants"
-)
-OPENAI_CREDIT_GRANTS_URL_LEGACY = (
-    "https://api.openai.com/dashboard/billing/credit_grants"
-)
-
-# credits keys that may leave this module. Never tokens.
-_OPENAI_CREDITS_FIELDS: Tuple[str, ...] = (
-    "balance_remaining",
-    "total_available",
-    "total_granted",
-    "total_credits",
-    "total_used",
-    "total_usage",
-)
-_OPENAI_CREDITS_RAW_FIELDS: Tuple[str, ...] = (
-    "total_granted",
-    "total_used",
-    "total_available",
-)
+def _failure_kind(status: Optional[int]) -> str:
+    if status in usage_sources.DENIED_STATUSES:
+        return "billing_access_denied"
+    if status in usage_sources.UNSUPPORTED_STATUSES:
+        return "unsupported"
+    return "unavailable"
 
 
-def _openai_credit_grants_url_is_pinned(url: str) -> bool:
-    """HTTPS + host pin — the Bearer token must never leave api.openai.com."""
-    return _https_host_is(url, OPENAI_CREDIT_GRANTS_HOST)
+def _is_capability_refusal(status: Optional[int]) -> bool:
+    return status in usage_sources.DENIED_STATUSES or status in usage_sources.UNSUPPORTED_STATUSES
 
 
-def _is_openai_platform_row(row: Optional[Dict[str, Any]]) -> bool:
-    """True for official OpenAI API-key rows (not custom OpenAI-compatible hosts).
+async def _capability_denied(snapshot_id: str, fingerprint: str) -> bool:
+    """True when this exact credential revision was already refused.
 
-    An empty ``base_url`` is treated as official: the request still goes only
-    to the pinned ``api.openai.com`` credit-grants URL.
+    A known-denied capability is not re-probed: no budget claim, no peer
+    round trip and no upstream request. Any credential or revision change
+    produces a different fingerprint and probes again.
     """
-    r = row or {}
-    if r.get("provider_type") != "openai":
+    from app.db import database as db
+
+    try:
+        raw = await run_sync(db.get_provider_usage_raw, snapshot_id)
+    except Exception:  # noqa: BLE001 — an unreadable cache never blocks a poll
         return False
-    host = (urlsplit(r.get("base_url") or "").hostname or "").lower()
-    return host in ("", OPENAI_CREDIT_GRANTS_HOST)
+    return isinstance(raw, dict) and raw.get("denied_fingerprint") == fingerprint
 
+
+# Row classification lives in the source registry; these names stay importable.
+_is_openai_platform_row = usage_sources.is_openai_platform_row
+_is_chatgpt_subscription_row = usage_sources.is_chatgpt_subscription_row
 
 # Retained only to exclude persisted snapshots from the retired OAuth fallback.
 OPENAI_API_USAGE_PROVIDER_ID = "openai-api"
-
-
-def _is_chatgpt_subscription_row(row: Optional[Dict[str, Any]]) -> bool:
-    """True for ChatGPT/Codex OAuth rows. OpenAI API-key rows are ``openai``."""
-    r = row or {}
-    if r.get("provider_type") == "openai":
-        return False
-    return r.get("provider_type") == "chatgpt" or r.get("auth_mode") == "chatgpt"
-
-
-def _openai_credits_blob_is_displayable(credits: Any) -> bool:
-    if not isinstance(credits, dict):
-        return False
-    value = credits.get("balance_remaining")
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def normalize_openai_credit_grants(payload: Any) -> Optional[Dict[str, Any]]:
-    """Map ``credit_grants`` JSON to the credits blob the usage popover renders.
-
-    ``total_available`` is the remaining prepaid/grant balance (the figure the
-    platform home page shows). It is copied to ``balance_remaining`` so the
-    existing OpenRouter-style headline (``$X.XX left``) applies unchanged.
-    Pure and defensive: a non-dict payload or a missing available figure
-    returns ``None`` rather than raising. A top-level ``data`` wrapper is
-    unwrapped (some dashboard responses nest the totals).
-    """
-    if not isinstance(payload, dict):
-        return None
-    if isinstance(payload.get("data"), dict) and "total_available" not in payload:
-        payload = payload["data"]
-    total_granted = _as_float(payload.get("total_granted"))
-    total_used = _as_float(payload.get("total_used"))
-    total_available = _as_float(
-        payload.get("total_available")
-        if payload.get("total_available") is not None
-        else payload.get("available")
-    )
-    if total_available is None and total_granted is not None and total_used is not None:
-        total_available = total_granted - total_used
-    if total_available is None:
-        return None
-    credits: Dict[str, Any] = {
-        "balance_remaining": total_available,
-        "total_available": total_available,
-    }
-    if total_granted is not None:
-        credits["total_granted"] = total_granted
-        credits["total_credits"] = total_granted
-    if total_used is not None:
-        credits["total_used"] = total_used
-        credits["total_usage"] = total_used
-    return {k: v for k, v in credits.items() if k in _OPENAI_CREDITS_FIELDS}
 
 
 # ---------------------------------------------------------------------------
 # fal.ai account billing poller
 # ---------------------------------------------------------------------------
 
-# Official Platform API requires an *admin* key (ordinary FAL_KEY → 403).
-# Ordinary keys work on rest.alpha.fal.ai/billing/user_balance (raw number).
-# Both hosts are pinned; the Key credential never hops off them.
+# The documented Platform API requires a separate *admin* key. There is no
+# fallback to ordinary-key or alpha billing endpoints.
 FAL_BILLING_HOST = "api.fal.ai"
-FAL_BILLING_URL = "https://api.fal.ai/v1/account/billing?expand=credits"
-FAL_USER_BALANCE_HOST = "rest.alpha.fal.ai"
-FAL_USER_BALANCE_URL = "https://rest.alpha.fal.ai/billing/user_balance"
+FAL_BILLING_URL = usage_sources.FAL_BILLING_URL
 FAL_USAGE_PROVIDER_ID = "fal-ai"
 FAL_USAGE_PROVIDER_TYPE = "fal"
 FAL_USAGE_PROVIDER_NAME = "fal.ai"
@@ -1004,47 +923,12 @@ def _fal_billing_url_is_pinned(url: str) -> bool:
     return _https_host_is(url, FAL_BILLING_HOST)
 
 
-def _fal_user_balance_url_is_pinned(url: str) -> bool:
-    """HTTPS + host pin for the ordinary-key balance endpoint."""
-    return _https_host_is(url, FAL_USER_BALANCE_HOST)
-
-
 def _fal_auth_header(api_key: str) -> str:
     """Build fal's ``Authorization: Key …`` header. Never log the return value."""
     text = (api_key or "").strip()
     if text.lower().startswith("key "):
         return text
     return f"Key {text}"
-
-
-def normalize_fal_user_balance(payload: Any) -> Optional[Dict[str, Any]]:
-    """Map rest.alpha ``/billing/user_balance`` to a credits blob.
-
-    The endpoint often returns a bare number (or a quoted number). Dict
-    wrappers with ``balance`` / ``user_balance`` / ``current_balance`` are
-    also accepted. Pure and defensive.
-    """
-    if isinstance(payload, bool):
-        return None
-    if isinstance(payload, (int, float)):
-        return {"balance_remaining": float(payload)}
-    if isinstance(payload, str):
-        n = _as_float(payload.strip().strip('"').strip("'"))
-        return {"balance_remaining": n} if n is not None else None
-    if not isinstance(payload, dict):
-        return None
-    for key in ("balance", "user_balance", "current_balance"):
-        n = _as_float(payload.get(key))
-        if n is not None:
-            credits: Dict[str, Any] = {"balance_remaining": n}
-            currency = payload.get("currency")
-            if isinstance(currency, str) and currency.strip():
-                credits["currency"] = currency.strip()
-            return {k: v for k, v in credits.items() if k in _FAL_CREDITS_FIELDS}
-    nested = payload.get("credits")
-    if isinstance(nested, dict):
-        return normalize_fal_billing(payload)
-    return None
 
 
 def normalize_fal_billing(payload: Any) -> Optional[Dict[str, Any]]:
@@ -1157,19 +1041,19 @@ class ProviderUsageMonitor:
                     logger.warning("Provider usage job failed")
                     return False
 
-        from app.core.openrouter_usage import poll as poll_openrouter_account
-
-        jobs = [bounded(self._poll_fal)]
+        # The registry decides which sources apply to which rows; this loop
+        # only schedules them. Rows no source applies to (xAI API keys, custom
+        # hosts, Claude API keys) have no polled usage.
+        jobs = [bounded(getattr(self, source.poller)) for source in usage_sources.global_sources()]
         for row in rows or []:
-            r = row or {}
-            if r.get("provider_type") == "openrouter":
-                jobs.append(bounded(self._poll_provider, r))
-                jobs.append(bounded(poll_openrouter_account, r))
-            elif _is_grok_subscription_row(r):
-                jobs.append(bounded(self._poll_grok_provider, r))
-            elif _is_openai_platform_row(r):
-                jobs.append(bounded(self._poll_openai_provider, r))
+            for source in usage_sources.polled_sources(row or {}):
+                jobs.append(bounded(getattr(self, source.poller), row))
         await asyncio.gather(*jobs, return_exceptions=True)
+
+    async def _poll_openrouter_account(self, row: Dict[str, Any]) -> None:
+        from app.core.openrouter_usage import poll
+
+        await poll(row)
 
     async def _poll_provider(self, row: Dict[str, Any]) -> None:
         from app.db import database as db
@@ -1178,11 +1062,15 @@ class ProviderUsageMonitor:
         try:
             key = _decrypt_provider_auth_token(row)
             base_url = row.get("base_url") or ""
-            if not key or not base_url:
+            if not key or not base_url or not provider_id:
                 return
 
             url = _origin(base_url) + _KEY_PATH
-            resp = await usage_get(url, headers={"Authorization": f"Bearer {key}"})
+            headers = {"Authorization": f"Bearer {key}"}
+            fingerprint = capability_fingerprint("openrouter_key", headers)
+            if await _capability_denied(provider_id, fingerprint):
+                return
+            resp = await _registered_get("openrouter_key", url, headers=headers)
 
             if resp.status_code != 200:
                 _log_poll_failure(
@@ -1190,6 +1078,11 @@ class ProviderUsageMonitor:
                     "OpenRouter /key fetch for provider %s failed: HTTP %s",
                     provider_id,
                     resp.status_code,
+                )
+                await run_sync(
+                    db.record_provider_usage_failure, provider_id, "openrouter",
+                    _failure_kind(resp.status_code),
+                    denied_fingerprint=fingerprint if _is_capability_refusal(resp.status_code) else None,
                 )
                 return
 
@@ -1247,6 +1140,9 @@ class ProviderUsageMonitor:
                 return
 
             headers = _grok_request_headers(access)
+            fingerprint = capability_fingerprint("grok_subscription", headers)
+            if await _capability_denied(provider_id, fingerprint):
+                return
             body, status = await _grok_get(
                 GROK_BILLING_URL, headers, _REQUEST_TIMEOUT_SECONDS
             )
@@ -1254,6 +1150,8 @@ class ProviderUsageMonitor:
             if status == 401:
                 refreshed = await _maybe_refresh_grok_on_401(provider_id, access)
                 if not refreshed:
+                    await run_sync(db.record_provider_usage_failure, provider_id, "grok",
+                                   "billing_access_denied", denied_fingerprint=fingerprint)
                     return
                 stored = await run_sync(db.get_codex_tokens, provider_id)
                 access = _decrypt_grok_access_token(
@@ -1262,6 +1160,7 @@ class ProviderUsageMonitor:
                 if not access:
                     return
                 headers = _grok_request_headers(access)
+                fingerprint = capability_fingerprint("grok_subscription", headers)
                 body, status = await _grok_get(
                     GROK_BILLING_URL, headers, _REQUEST_TIMEOUT_SECONDS
                 )
@@ -1272,6 +1171,10 @@ class ProviderUsageMonitor:
                     "Grok billing fetch for provider %s failed: HTTP %s",
                     provider_id,
                     status,
+                )
+                await run_sync(
+                    db.record_provider_usage_failure, provider_id, "grok", _failure_kind(status),
+                    denied_fingerprint=fingerprint if _is_capability_refusal(status) else None,
                 )
                 return
 
@@ -1350,8 +1253,15 @@ class ProviderUsageMonitor:
         if not encrypted or not org or current.get("openai_billing_instance_id") != settings.effective_instance_id:
             return False
         binding = (org, settings.effective_instance_id)
+        fingerprint = None
         try:
             key = encryption.decrypt_value(encrypted)
+            # Re-saving the key re-encrypts it, so a deliberate re-save retries.
+            fingerprint = capability_fingerprint(
+                "openai_admin", {"Authorization": f"Bearer {key}", "OpenAI-Organization": org}, encrypted,
+            )
+            if await _capability_denied(provider_id, fingerprint):
+                return False
             results = await asyncio.gather(fetch(key, org, costs=True), fetch(key, org), return_exceptions=True)
             failures = [r for r in results if isinstance(r, BaseException) and not isinstance(r, UsageDeferred)]
             if failures:
@@ -1366,11 +1276,12 @@ class ProviderUsageMonitor:
             )
         except Exception as error:
             status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
-            kind = "billing_access_denied" if status in (401, 403) else "unavailable"
+            kind = _failure_kind(status)
             # Never log an exception with provider response text or credentials.
             _log_poll_failure(f"openai-admin:{provider_id}", "OpenAI Admin usage failed for %s (%s)", provider_id, kind)
             await run_sync(db.record_provider_usage_failure, provider_id, "openai", kind,
-                           expected_binding=binding, expected_admin_key=encrypted)
+                           expected_binding=binding, expected_admin_key=encrypted,
+                           denied_fingerprint=fingerprint if _is_capability_refusal(status) else None)
             return False
 
     async def _poll_fal(self) -> None:
@@ -1394,10 +1305,11 @@ class ProviderUsageMonitor:
             if not key:
                 return
 
-            async def failed(kind="unavailable"):
+            async def failed(kind="unavailable", denied=None):
                 await run_sync(db.record_provider_usage_failure, FAL_USAGE_PROVIDER_ID,
                                FAL_USAGE_PROVIDER_TYPE, kind,
-                               expected_credential_generation=generation)
+                               expected_credential_generation=generation,
+                               denied_fingerprint=denied)
 
             headers = {
                 "Authorization": _fal_auth_header(key),
@@ -1408,9 +1320,14 @@ class ProviderUsageMonitor:
 
             if not _fal_billing_url_is_pinned(FAL_BILLING_URL):
                 return
-            resp = await usage_get(FAL_BILLING_URL, headers=headers)
+            # Re-saving the Admin key bumps its revision and probes again.
+            fingerprint = capability_fingerprint("fal_billing", headers, generation)
+            if await _capability_denied(FAL_USAGE_PROVIDER_ID, fingerprint):
+                return
+            resp = await _registered_get("fal_billing", FAL_BILLING_URL, headers=headers)
             if resp.status_code != 200:
-                await failed("billing_access_denied" if resp.status_code in (401, 403) else "unavailable")
+                refused = _is_capability_refusal(resp.status_code)
+                await failed(_failure_kind(resp.status_code), fingerprint if refused else None)
                 return
             body = resp.json()
             credits = normalize_fal_billing(body)

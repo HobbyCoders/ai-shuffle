@@ -121,9 +121,15 @@ def record_provider_usage_failure(
     expected_binding: Optional[tuple[str, str]] = None,
     expected_credential_generation: Optional[str] = None,
     expected_admin_key: Optional[str] = None,
+    denied_fingerprint: str | None = None,
 ) -> None:
+    """Record a failed observation, keeping the last successful reading.
+
+    ``denied_fingerprint`` (a digest, never a credential) marks the capability
+    as refused for that credential revision so pollers skip re-probing it.
+    """
     if error_kind not in {
-        "billing_access_denied", "missing_credentials", "timeout", "unavailable",
+        "billing_access_denied", "missing_credentials", "timeout", "unavailable", "unsupported",
         "billing_browser_unavailable", "billing_sign_in_required", "billing_organization_mismatch",
         "billing_organization_required", "billing_invalid_response", "billing_timeout",
     }:
@@ -171,6 +177,7 @@ def record_provider_usage_failure(
             "usage_error": error_kind,
             "usage_attempted_at": int(now.timestamp() * 1000),
             "billing_fetched_at": billing_fetched_at,
+            **({"denied_fingerprint": denied_fingerprint} if denied_fingerprint else {}),
         })
         cursor.execute(
             """
@@ -203,6 +210,15 @@ def _lock_usage_generation(cursor, provider_id, provider_type, expected: Optiona
     cursor.execute("SELECT revision FROM system_settings WHERE key = %s FOR UPDATE", (setting,))
     row = cursor.fetchone()
     return bool(expected and row and row["revision"] == expected)
+
+
+def get_provider_usage_raw(provider_id: str) -> dict[str, Any] | None:
+    """The stored ``raw`` metadata for one snapshot (no credential fields)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT raw FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
+        rows = rows_to_list(cursor.fetchall())
+    return _parse_json_dict(rows[0].get("raw")) if rows else None
 
 
 def get_all_provider_usage_snapshots() -> List[Dict[str, Any]]:

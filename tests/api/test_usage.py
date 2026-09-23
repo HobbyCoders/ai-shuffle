@@ -130,8 +130,11 @@ class TestUsageLimitsEndpoint:
         assert body == {
             "windows": [], "fetched_at": None, "available": False, "generation": None,
             "snapshots": [], "self_instance_id": None, "providers": [],
-            "provider_refreshing": False,
+            "provider_refreshing": False, "attempted_at": None, "last_error_kind": None,
+            "claude_source": body["claude_source"],
         }
+        assert body["claude_source"]["support"] == "unofficial_subscription"
+        assert body["claude_source"]["dashboard_url"] == "https://claude.ai/settings/usage"
 
     def test_cluster_join_and_unknown_install_excluded(self):
         """The real get_cluster_snapshot joins the installs registry, includes
@@ -340,6 +343,36 @@ class TestUsageLimitsProviders:
         assert entry["fetched_at"] == (fetched if balance is not None else None)
         assert entry["credits"] == ({"spend_month": balance} if balance is not None else None)
         assert "raw" not in entry
+
+    def test_entries_carry_registry_source_and_separate_success_from_attempt(self):
+        from app.db import database as db
+        from app.db.provider_usage_snapshots import record_provider_usage_failure
+
+        db.create_model_provider(provider_id="prov-grok", name="grok", provider_type="grok",
+                                 base_url="https://example.test")
+        db.create_model_provider(provider_id="prov-or", name="router", provider_type="openrouter",
+                                 base_url="https://openrouter.ai/api/v1")
+        fetched = int(time.time() * 1000) - 60_000
+        db.upsert_provider_usage_snapshot("prov-grok", "grok", "SuperGrok",
+                                          [{"type": "seven_day", "utilization": 34.0}], None, {}, fetched)
+        record_provider_usage_failure("prov-grok", "grok", "unsupported", denied_fingerprint="f" * 64)
+        db.upsert_provider_usage_snapshot("prov-or", "openrouter", None, [], {"usage": 2.0}, {}, fetched)
+
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            body = _client().get("/api/v1/usage/limits").json()
+        grok, router = (next(p for p in body["providers"] if p["provider_id"] == pid)
+                        for pid in ("prov-grok", "prov-or"))
+        assert grok["status"] == "stale" and grok["last_error_kind"] == "unsupported"
+        assert grok["last_success_at"] == fetched < grok["last_attempt_at"]
+        assert grok["source_info"]["support_label"] == "Unofficial, subscription-specific endpoint"
+        assert grok["source_info"]["measure"] == "subscription_allowance"
+        assert grok["source_info"]["dashboard_url"].startswith("https://")
+        assert "denied_fingerprint" not in str(body)
+        assert router["last_success_at"] == router["last_attempt_at"] == fetched
+        assert router["source_info"]["measure"] == "reported_spend"
+        assert router["source_info"]["scope"] == "api_key"
+        assert body["claude_source"]["id"] == "claude_oauth_usage"
 
     def test_refresh_returns_cached_data_while_provider_work_is_pending(self, cached_provider_poll):
         cached_provider_poll.refreshing = True

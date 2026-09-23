@@ -213,8 +213,10 @@ class TestFetch:
 
         assert snap == {
             "windows": [], "fetched_at": None, "available": False,
+            "attempted_at": snap["attempted_at"], "last_error_kind": "missing_credentials",
             "generation": monitor.current_generation(),
         }
+        assert snap["attempted_at"]
         # Missing credential is an expected steady state — no warning spam.
         assert caplog.text == ""
 
@@ -383,11 +385,16 @@ class TestLiveEvents:
         assert monitor.apply_live_event("five_hour", "nan", "x") is None
 
     @pytest.mark.asyncio
-    async def test_get_snapshot_fetches_when_never_fetched(self, monitor):
+    async def test_get_snapshot_refreshes_in_background_when_never_fetched(self, monitor):
         with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
+             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)), \
+             patch.object(monitor, "_broadcast", new=AsyncMock()):
             oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
             oauth.get_access_token.return_value = "tok"
+            snap = await monitor.get_snapshot()
+            # The read returns the cached (empty) snapshot without waiting.
+            assert snap["available"] is False
+            await monitor._refresh_task
             snap = await monitor.get_snapshot()
         assert snap["available"] is True and snap["windows"]
 

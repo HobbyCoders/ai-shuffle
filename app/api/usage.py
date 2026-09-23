@@ -6,7 +6,6 @@ their utilization % and reset times) so the frontend can render the usage pill
 + popover on page load, before any live ``usage_snapshot`` WS event arrives.
 """
 
-import asyncio
 import logging
 import time
 from typing import List, Literal, Optional
@@ -15,6 +14,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, field_validator
 
 from app.api.auth import require_auth
+from app.core import usage_sources
 from app.core.usage_limits import usage_limits_monitor
 
 logger = logging.getLogger(__name__)
@@ -105,12 +105,38 @@ class ProviderUsageWindow(BaseModel):
         return _coerce_epoch_resets_at(v)
 
 
+ErrorKind = Literal["billing_access_denied", "missing_credentials", "timeout", "unavailable", "unsupported"]
+
+
+class UsageSourceInfo(BaseModel):
+    """Registry description of where a usage reading comes from."""
+    id: str
+    label: str
+    scope: str
+    scope_label: str
+    measure: str
+    measure_label: str
+    collection: str
+    support: str
+    support_label: str
+    dashboard_url: str
+    min_interval_seconds: int | None = None
+    unavailable: list[str] = []
+
+
+def _source_info(source: usage_sources.UsageSource | None) -> UsageSourceInfo | None:
+    if source is None:
+        return None
+    public = source.public()
+    return UsageSourceInfo(**{k: public[k] for k in UsageSourceInfo.model_fields})
+
+
 class ProviderUsageEntry(BaseModel):
     """One non-Claude provider's persisted usage snapshot.
 
     The debug-only ``raw`` blob stored alongside these fields is NEVER exposed
-    here — only the identity fields, ``windows``, ``credits``, ``plan_type`` and
-    ``fetched_at`` reach the client.
+    here — only the identity fields, ``windows``, ``credits``, ``plan_type``,
+    timestamps and the registry description of the source reach the client.
     """
     provider_id: str
     provider_name: Optional[str] = None
@@ -120,9 +146,15 @@ class ProviderUsageEntry(BaseModel):
     credits: Optional[dict] = None
     fetched_at: Optional[int] = None
     status: Literal["fresh", "stale", "unavailable", "never_fetched"] = "never_fetched"
-    last_error_kind: Optional[str] = None
+    last_error_kind: ErrorKind | None = None
+    # Short labels kept for older clients; ``source_info`` has the full entry.
     source: str | None = None
     scope: str | None = None
+    source_info: UsageSourceInfo | None = None
+    # Epoch ms. ``fetched_at`` is the last successful observation; an attempt
+    # that failed moves only ``last_attempt_at``.
+    last_success_at: int | None = None
+    last_attempt_at: int | None = None
 
 
 class UsageSnapshot(BaseModel):
@@ -146,6 +178,11 @@ class UsageSnapshot(BaseModel):
     # fal.ai credits, SuperGrok, ...). Additive.
     providers: List[ProviderUsageEntry] = []
     provider_refreshing: bool = False
+    # Local Claude subscription reading: last upstream attempt (epoch seconds,
+    # like ``fetched_at``), why it failed, and its registry source.
+    attempted_at: float | None = None
+    last_error_kind: ErrorKind | None = None
+    claude_source: UsageSourceInfo | None = None
 
 
 async def _load_provider_usage() -> List[ProviderUsageEntry]:
@@ -184,24 +221,23 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
             # Retired OAuth fallback snapshots are not Platform billing accounts.
             if row["provider_id"] == OPENAI_API_USAGE_PROVIDER_ID:
                 continue
-            # xAI API-key snapshots stay excluded: their only content is
-            # per-minute x-ratelimit headroom (~always 0%), and xAI exposes
-            # no credits endpoint a secret key may call. OpenAI rows are
-            # included once the credit-grants poller has a balance or an
-            # explicit failure status; their per-minute rate-limit windows are
-            # stripped so the popover headlines remaining credits instead
-            # of a ~0% requests bar. SuperGrok subscription rows
-            # (provider_type='grok') are included. Capture itself stays —
-            # it doubles as the 429 breaker seam.
+            # The registry decides visibility. Rate-limit-only sources (xAI and
+            # other OpenAI-compatible hosts, Anthropic headers) stay hidden:
+            # their only content is per-minute headroom (~always 0%). OpenAI
+            # rows are included once Admin usage has a figure or an explicit
+            # failure status; their per-minute windows are stripped so the
+            # popover headlines reported spend instead of a ~0% requests bar.
+            # Capture itself stays; it doubles as the 429 breaker seam.
             ptype = row.get("provider_type")
             credits = row.get("credits")
             windows = row.get("windows") or []
-            if ptype == "xai":
-                continue
             raw = row.get("raw") or {}
             error = raw.get("usage_error") if isinstance(raw, dict) else None
-            if error not in {"billing_access_denied", "missing_credentials", "timeout", "unavailable"}:
+            if error not in {"billing_access_denied", "missing_credentials", "timeout", "unavailable", "unsupported"}:
                 error = None
+            source_def = usage_sources.source_for_snapshot(ptype)
+            if source_def is not None and not source_def.shown:
+                continue
             fetched_at = row.get("fetched_at")
             if ptype == "openai":
                 if raw.get("source") != "openai_admin":
@@ -220,14 +256,10 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
                 # Old snapshots mixed /key limits with account-wide /credits.
                 credits = {k: v for k, v in credits.items()
                            if k not in {"total_credits", "total_usage", "balance_remaining"}}
-            source, scope = {
-                "openrouter": ("OpenRouter key API", "This model key's reported spend and limit (USD)"),
-                "openrouter_account": ("OpenRouter management API", "Account credit ledger (USD)"),
-                "openai": ("OpenAI organization Admin API", "Organization spend and completions usage this month (UTC)"),
-                "fal": ("fal account billing API", "Account credit balance"),
-                "chatgpt": ("Inference response metadata", "Subscription usage windows; not API credit"),
-                "grok": ("Subscription endpoint; support unverified", "Subscription allowance; not API credit"),
-            }.get(ptype, (None, None))
+            attempted = raw.get("usage_attempted_at") if error else None
+            attempted = attempted if isinstance(attempted, int) and not isinstance(attempted, bool) else None
+            last_attempt = max((t for t in (fetched_at, attempted) if t), default=None)
+            interval_ms = (source_def.min_interval if source_def and source_def.min_interval else 300) * 1000
             name = names.get(row["provider_id"])
             if not name and row["provider_id"] == FAL_USAGE_PROVIDER_ID:
                 name = FAL_USAGE_PROVIDER_NAME
@@ -242,13 +274,16 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
                     fetched_at=fetched_at,
                     status=(
                         "stale" if fetched_at and (
-                            error or time.time() * 1000 - fetched_at > (900_000 if ptype == "openai" else 300_000)
+                            error or time.time() * 1000 - fetched_at > interval_ms
                         ) else "fresh" if fetched_at else
                         "unavailable" if error else "never_fetched"
                     ),
                     last_error_kind=error,
-                    source=source,
-                    scope=scope,
+                    source=source_def.label if source_def else None,
+                    scope=source_def.scope_label if source_def else None,
+                    source_info=_source_info(source_def),
+                    last_success_at=fetched_at,
+                    last_attempt_at=last_attempt,
                 )
             )
         return entries
@@ -257,21 +292,14 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
         return []
 
 
-_claude_refresh_task: Optional[asyncio.Task] = None
-
-
 def _request_claude_refresh() -> None:
-    global _claude_refresh_task
-    if _claude_refresh_task is not None and not _claude_refresh_task.done():
-        return
+    # Shares the monitor's single-flight task; the durable budget still
+    # decides whether an upstream request is allowed.
+    usage_limits_monitor.request_refresh()
 
-    async def refresh() -> None:
-        try:
-            await usage_limits_monitor.refresh_and_broadcast()
-        except Exception:
-            logger.debug("Claude usage refresh failed")
 
-    _claude_refresh_task = asyncio.create_task(refresh())
+def _claude_fields(snapshot: dict) -> dict:
+    return {**snapshot, "claude_source": _source_info(usage_sources.SOURCES["claude_oauth_usage"])}
 
 
 @router.get("/limits", response_model=UsageSnapshot)
@@ -280,10 +308,11 @@ async def get_usage_limits(
 ) -> UsageSnapshot:
     """Return the latest Claude usage snapshot for every install in the cluster.
 
-    Serves cached snapshots while a coalesced provider poll refreshes stale data.
-    Pass ``refresh=true`` to start a forced provider and Claude refresh without
-    waiting for upstream billing. Read again while ``provider_refreshing`` is
-    true to receive progressive provider results. Returns ``available: false`` with empty
+    Serves cached snapshots while coalesced background refreshes update stale
+    data; no read waits on an upstream usage endpoint. Pass ``refresh=true`` to
+    start a provider and Claude refresh; it cannot bypass the request budget.
+    Read again while ``provider_refreshing`` is true to receive progressive
+    results (it also covers the local Claude refresh). Returns ``available: false`` with empty
     windows when there is no usable Claude OAuth credential (never errors). The
     legacy top-level fields describe the LOCAL install; ``snapshots`` adds every
     install's per-account data so offloaded sessions render the correct (owning
@@ -296,10 +325,10 @@ async def get_usage_limits(
     if refresh:
         _request_claude_refresh()
     snapshot = await usage_limits_monitor.get_cluster_snapshot()
-    refreshing = provider_usage_monitor.refreshing
+    refreshing = provider_usage_monitor.refreshing or usage_limits_monitor.refreshing is True
     providers = await _load_provider_usage()
     return UsageSnapshot(
-        **snapshot, providers=providers, provider_refreshing=refreshing
+        **_claude_fields(snapshot), providers=providers, provider_refreshing=refreshing
     )
 
 
@@ -315,7 +344,7 @@ async def get_cached_usage_snapshot() -> UsageSnapshot:
     snapshot = await usage_limits_monitor.get_cached_cluster_snapshot()
     providers = await _load_provider_usage()
     return UsageSnapshot(
-        **snapshot,
+        **_claude_fields(snapshot),
         providers=providers,
         provider_refreshing=provider_usage_monitor.refreshing,
     )

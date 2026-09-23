@@ -83,7 +83,7 @@ def cluster(monkeypatch):
                 return httpx.Response(result.status_code, content=result.content, headers=result.headers)
             finally:
                 device.reset(caller)
-        assert request.url.host == "provider.test"
+        assert request.url.host in ("provider.test", "api.anthropic.com")
         upstream.append(request)
         await asyncio.sleep(0)
         if mode["cancel"]:
@@ -239,3 +239,40 @@ async def test_explicit_resume_reaches_authority_without_bypassing_success_coold
     finally:
         cluster.device.reset(caller)
     assert len(cluster.upstream) == 2
+
+
+@pytest.mark.asyncio
+async def test_mirrored_claude_credentials_share_one_budget_across_workers(cluster, monkeypatch):
+    """Stale reads on every worker with the same Claude sign-in: one upstream request."""
+    from unittest.mock import AsyncMock
+
+    from app.core import usage_limits
+
+    oauth = SimpleNamespace(ensure_fresh_credentials=AsyncMock(return_value=False),
+                            get_access_token=lambda: "mirrored-subscription-token")
+    monkeypatch.setattr(usage_limits, "direct_oauth", oauth)
+    monitors = {}
+    for name in ("founder", "first", "second"):
+        monitor = usage_limits.UsageLimitsMonitor()
+        monkeypatch.setattr(monitor, "_persist_snapshot", lambda: None)
+        monkeypatch.setattr(monitor, "_broadcast", AsyncMock())
+        monkeypatch.setattr(monitor, "_cluster_snapshot", dict)
+        monitors[name] = monitor
+
+    async def read(name):
+        caller = cluster.device.set(name)
+        try:
+            await monitors[name].get_snapshot()
+            await monitors[name]._refresh_task
+        finally:
+            cluster.device.reset(caller)
+
+    await asyncio.gather(*(read(name) for name in ["first", "second", "founder"] * 3))
+    claude = [r for r in cluster.upstream if r.url.host == "api.anthropic.com"]
+    assert len(claude) == 1
+    assert sum(m._fetched_at > 0 for m in monitors.values()) == 1
+    # An explicit refresh on another worker inside the interval is deferred too.
+    for monitor in monitors.values():
+        monitor._attempted_at = 0
+    await asyncio.gather(*(read(name) for name in ("first", "second")))
+    assert len([r for r in cluster.upstream if r.url.host == "api.anthropic.com"]) == 1

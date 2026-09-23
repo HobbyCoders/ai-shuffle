@@ -79,11 +79,48 @@ export interface UsageBucket {
  * current set and we full-replace on each poll.
  */
 export type ProviderUsageStatus = 'fresh' | 'stale' | 'unavailable' | 'never_fetched';
-export type ProviderUsageErrorKind = 'billing_access_denied' | 'missing_credentials' | 'timeout' | 'unavailable';
+export type ProviderUsageErrorKind =
+	| 'billing_access_denied'
+	| 'missing_credentials'
+	| 'timeout'
+	| 'unavailable'
+	| 'unsupported';
+
+/** What a reading means; never present one kind as another. */
+export type UsageMeasure = 'rate_limit' | 'subscription_allowance' | 'reported_spend' | 'monetary_credit';
+export type UsageSupport = 'documented' | 'response_metadata' | 'unofficial_subscription';
+
+/** Backend registry entry describing where a usage reading comes from. */
+export interface UsageSourceInfo {
+	id: string;
+	label: string;
+	scope: string;
+	scope_label: string;
+	measure: UsageMeasure;
+	measure_label: string;
+	collection: 'passive' | 'polled';
+	support: UsageSupport;
+	support_label: string;
+	dashboard_url: string;
+	min_interval_seconds?: number | null;
+	/** Figures this source cannot report (shown as unavailable). */
+	unavailable?: string[];
+}
+
+/** The local Claude subscription reading's source and last attempt. */
+export interface ClaudeUsageSourceState {
+	source: UsageSourceInfo | null;
+	/** Epoch ms of the last upstream attempt (success or failure). */
+	attemptedAt: number | null;
+	lastErrorKind: ProviderUsageErrorKind | null;
+}
 
 export interface ProviderUsageBucket {
 	source?: string | null;
 	scope?: string | null;
+	sourceInfo?: UsageSourceInfo | null;
+	/** Epoch ms of the last attempt; later than `fetchedAt` after a failure. */
+	lastAttemptAt?: number | null;
 	status?: ProviderUsageStatus;
 	lastErrorKind?: ProviderUsageErrorKind | null;
 	providerId: string;
@@ -166,6 +203,9 @@ export interface SnapshotInstance {
 export interface ProviderUsageEntry {
 	source?: string | null;
 	scope?: string | null;
+	source_info?: UsageSourceInfo | null;
+	last_success_at?: number | null;
+	last_attempt_at?: number | null;
 	status?: ProviderUsageStatus;
 	last_error_kind?: ProviderUsageErrorKind | null;
 	provider_id: string;
@@ -179,6 +219,11 @@ export interface ProviderUsageEntry {
 
 export interface UsageSnapshot {
 	provider_refreshing?: boolean;
+	/** Local Claude reading: registry source, last attempt (epoch SECONDS,
+	 *  like the legacy `fetched_at`) and why it failed. */
+	claude_source?: UsageSourceInfo | null;
+	attempted_at?: number | null;
+	last_error_kind?: ProviderUsageErrorKind | null;
 	/** Legacy top-level fields — the LOCAL install's data. Always present for
 	 *  backwards compatibility; folded into the self bucket when `snapshots` is
 	 *  absent. */
@@ -469,6 +514,14 @@ function _save(state: RateLimitState) {
 	}
 }
 
+/** Runtime-only (not persisted): where the local Claude reading comes from. */
+const _claudeSource = createStore<ClaudeUsageSourceState>({
+	source: null,
+	attemptedAt: null,
+	lastErrorKind: null,
+});
+export const claudeUsageSource = { subscribe: _claudeSource.subscribe };
+
 const _loaded = _load();
 const _store = createStore<RateLimitState>({
 	buckets: _loaded.buckets,
@@ -570,6 +623,18 @@ export const rateLimit = {
 	applySnapshot(snapshot: UsageSnapshot): void {
 		const now = Date.now();
 
+		// REST payloads describe the local Claude reading's source; WS payloads
+		// carry only the attempt fields. Absent keys leave the last value.
+		if (snapshot.claude_source !== undefined || snapshot.attempted_at !== undefined) {
+			_claudeSource.update((prev) => ({
+				source: snapshot.claude_source !== undefined ? (snapshot.claude_source ?? null) : prev.source,
+				attemptedAt:
+					snapshot.attempted_at !== undefined ? _legacyFetchedMs(snapshot.attempted_at) : prev.attemptedAt,
+				lastErrorKind:
+					snapshot.attempted_at !== undefined ? (snapshot.last_error_kind ?? null) : prev.lastErrorKind,
+			}));
+		}
+
 		// ── Provider usage (non-Claude) — full replace when present ─────────────
 		// Providers are provider-scoped, not install-scoped, so none of the
 		// per-install generation/merge logic applies: the endpoint returns the
@@ -587,6 +652,8 @@ export const rateLimit = {
 						providerId: p.provider_id,
 						source: p.source ?? null,
 						scope: p.scope ?? null,
+						sourceInfo: p.source_info ?? null,
+						lastAttemptAt: p.last_attempt_at ?? p.fetched_at ?? null,
 						status: p.status,
 						lastErrorKind: p.last_error_kind ?? null,
 						providerName: p.provider_name ?? null,
@@ -755,6 +822,7 @@ export const rateLimit = {
 	__resetForTests(): void {
 		for (const k of Object.keys(_lastGenByInstance)) delete _lastGenByInstance[k];
 		_store.set({ buckets: {}, providerBuckets: {}, selfInstanceId: null, staleByInstance: {} });
+		_claudeSource.set({ source: null, attemptedAt: null, lastErrorKind: null });
 		_save(_store.current);
 	},
 };

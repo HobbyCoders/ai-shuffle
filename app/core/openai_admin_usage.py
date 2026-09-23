@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 import math
 
 from app.core.usage_polling import usage_get
+from app.core.usage_sources import interval_for
 
 BASE = "https://api.openai.com/v1/organization"
 
@@ -51,7 +52,7 @@ async def fetch(admin_key, organization_id, *, costs=False):
     response = await usage_get(
         url, headers={"Authorization": f"Bearer {admin_key}", "OpenAI-Organization": organization_id},
         params={"start_time": start, "end_time": end, "bucket_width": "1d", "limit": 31},
-        paginate=True, interval=900,
+        paginate=True, interval=interval_for("openai_admin", url),
     )
     response.raise_for_status()
     summary = summarize(response.json()["data"], costs=costs)

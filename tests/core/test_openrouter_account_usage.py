@@ -23,7 +23,7 @@ def snapshot():
 async def test_account_scope_and_fixed_destination(provider, monkeypatch):
     calls = []
 
-    async def fetch(url, *, headers):
+    async def fetch(url, *, headers, **_budget):
         calls.append((url, headers))
         return httpx.Response(200, json={"data": {"total_credits": 25, "total_usage": 4.25, "secret": "discard"}})
 

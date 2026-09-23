@@ -30,6 +30,8 @@ import {
 	reportedRemainingPct,
 	remainingFromUsedPct,
 	SELF_BUCKET_KEY,
+	claudeUsageSource,
+	type ClaudeUsageSourceState,
 	type UsageWindow,
 } from './rate-limit';
 
@@ -741,5 +743,39 @@ describe('displayWindows — drops degenerate and never-surfaced windows', () =>
 		};
 		const result = displayWindows(windows);
 		expect(result.map((w) => w.type)).toEqual(['seven_day', 'grok_api']);
+	});
+});
+
+describe('rateLimit.applySnapshot — usage source metadata', () => {
+	it('keeps provider source info and the last attempt separate from the last success', () => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'or', provider_type: 'openrouter', fetched_at: 10, last_attempt_at: 20,
+				source_info: { id: 'openrouter_key', label: 'OpenRouter key API', scope: 'api_key',
+					scope_label: 'Key spend', measure: 'reported_spend', measure_label: 'Provider-reported spend',
+					collection: 'polled', support: 'documented', support_label: 'Documented API',
+					dashboard_url: 'https://openrouter.ai/settings/keys' } },
+			{ provider_id: 'old', provider_type: 'openrouter', fetched_at: 30 },
+		] });
+		const buckets = rateLimit.current.providerBuckets;
+		expect(buckets.or.sourceInfo?.measure).toBe('reported_spend');
+		expect(buckets.or.fetchedAt).toBe(10);
+		expect(buckets.or.lastAttemptAt).toBe(20);
+		// Older backends: the last attempt defaults to the last success.
+		expect(buckets.old.lastAttemptAt).toBe(30);
+		expect(buckets.old.sourceInfo).toBeNull();
+	});
+
+	it('records the Claude source from REST payloads and keeps it across WS-only payloads', () => {
+		let state: ClaudeUsageSourceState | undefined;
+		const unsubscribe = claudeUsageSource.subscribe((value) => (state = value));
+		rateLimit.applySnapshot({ windows: [], available: true, attempted_at: 12.5, last_error_kind: 'timeout',
+			claude_source: { id: 'claude_oauth_usage', label: 'Claude', scope: 'subscription', scope_label: 's',
+				measure: 'subscription_allowance', measure_label: 'Subscription allowance', collection: 'polled',
+				support: 'unofficial_subscription', support_label: 'Unofficial', dashboard_url: 'https://claude.ai/' } });
+		expect(state?.attemptedAt).toBe(12_500);
+		expect(state?.lastErrorKind).toBe('timeout');
+		rateLimit.applySnapshot({ windows: [], available: true });
+		expect(state?.source).not.toBeNull();
+		unsubscribe();
 	});
 });

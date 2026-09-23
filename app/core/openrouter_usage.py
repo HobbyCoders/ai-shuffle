@@ -2,26 +2,19 @@
 
 import math
 import time
-from urllib.parse import urlsplit
 
 import httpx
 
-from app.core.usage_polling import UsageDeferred, usage_get
+from app.core import usage_sources
+from app.core.usage_polling import UsageDeferred, capability_fingerprint, usage_get
 from app.db.async_database import run_sync
 
-CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+CREDITS_URL = usage_sources.OPENROUTER_CREDITS_URL
 SETTING_PREFIX = "openrouter_billing_key:"
 SNAPSHOT_PREFIX = "openrouter-account:"
 
 
-def supported(row):
-    try:
-        url = urlsplit(row.get("base_url") or "")
-        return (row.get("provider_type") == "openrouter" and url.scheme == "https"
-                and url.hostname == "openrouter.ai" and url.port in (None, 443)
-                and not url.username and not url.password)
-    except ValueError:
-        return False
+supported = usage_sources.is_official_openrouter_row
 
 
 def normalize(body):
@@ -49,14 +42,27 @@ async def poll(row):
     generation = await run_sync(db.get_system_setting_revision, setting)
     if not generation:
         return
+    denied = None
     try:
         key = await run_sync(get_decrypted_api_key, setting)
         if await run_sync(db.get_system_setting_revision, setting) != generation:
             return
         error = "missing_credentials"
         if key:
-            response = await usage_get(CREDITS_URL, headers={"Authorization": f"Bearer {key}"})
-            error = "billing_access_denied" if response.status_code in (401, 403) else "unavailable"
+            headers = {"Authorization": f"Bearer {key}"}
+            # A refused management key is not re-probed until it is replaced
+            # or re-saved (either changes the setting revision).
+            fingerprint = capability_fingerprint("openrouter_credits", headers, generation)
+            raw = await run_sync(db.get_provider_usage_raw, snapshot)
+            if isinstance(raw, dict) and raw.get("denied_fingerprint") == fingerprint:
+                return
+            response = await usage_get(CREDITS_URL, headers=headers,
+                                       interval=usage_sources.interval_for("openrouter_credits", CREDITS_URL))
+            status = response.status_code
+            refused = status in usage_sources.DENIED_STATUSES or status in usage_sources.UNSUPPORTED_STATUSES
+            denied = fingerprint if refused else None
+            error = ("billing_access_denied" if status in usage_sources.DENIED_STATUSES
+                     else "unsupported" if refused else "unavailable")
             if response.status_code == 200:
                 credits = normalize(response.json())
                 if credits is not None:
@@ -72,4 +78,4 @@ async def poll(row):
         # HTTP exception messages can contain request headers. Persist only a category.
         error = "unavailable"
     await run_sync(db.record_provider_usage_failure, snapshot, "openrouter_account", error,
-                   expected_credential_generation=generation)
+                   expected_credential_generation=generation, denied_fingerprint=denied)

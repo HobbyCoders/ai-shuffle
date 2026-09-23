@@ -75,8 +75,11 @@
 		resolveBucket,
 		resolveBucketKey,
 		selfBucketKey,
+		claudeUsageSource,
 		type UsageBucket,
 		type ProviderUsageBucket,
+		type ProviderUsageErrorKind,
+		type UsageSourceInfo,
 		type UsageWindow,
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
@@ -391,7 +394,22 @@
 		if (pb.lastErrorKind === 'missing_credentials') {
 			return isOpenAI ? 'Configure an Admin API key in provider settings' : 'Sign in to view usage';
 		}
+		if (pb.lastErrorKind === 'unsupported') {
+			return 'Not supported for this credential; polling paused';
+		}
 		return null;
+	}
+
+	const ATTEMPT_OUTCOME: Record<ProviderUsageErrorKind, string> = {
+		billing_access_denied: 'access refused',
+		unsupported: 'not supported',
+		missing_credentials: 'no credential',
+		timeout: 'timed out',
+		unavailable: 'failed',
+	};
+
+	function formatObservedAt(ms: number): string {
+		return new Date(ms).toLocaleString();
 	}
 
 	function creditsSummary(
@@ -633,6 +651,47 @@
 	</button>
 {/snippet}
 
+<!-- Where a reading comes from (backend usage-source registry). A failed
+     attempt after the last success is shown separately so a stale figure is
+     never presented as current. -->
+{#snippet sourceDetails(
+	info: UsageSourceInfo | null | undefined,
+	fallbackSource: string | null | undefined,
+	fallbackScope: string | null | undefined,
+	successAt: number | null | undefined,
+	attemptAt: number | null | undefined,
+	errorKind: ProviderUsageErrorKind | null | undefined
+)}
+	{@const label = info?.label ?? fallbackSource}
+	{@const scopeLabel = info?.scope_label ?? fallbackScope}
+	{#if label}
+		<div class="usage-source">
+			<div class="row-reset">Source: {label}</div>
+			{#if info}
+				<div class="row-reset source-support" class:unofficial={info.support === 'unofficial_subscription'}>
+					{info.support_label}
+				</div>
+			{/if}
+			{#if scopeLabel}<div class="row-reset">{scopeLabel}</div>{/if}
+			{#if info}<div class="row-reset">Reports: {info.measure_label}</div>{/if}
+			{#if successAt}<div class="row-reset">Last successful update: {formatObservedAt(successAt)}</div>{/if}
+			{#if attemptAt && (!successAt || attemptAt > successAt)}
+				<div class="row-reset">
+					Last attempt: {formatObservedAt(attemptAt)}{errorKind ? ` (${ATTEMPT_OUTCOME[errorKind] ?? 'failed'})` : ''}
+				</div>
+			{/if}
+			{#if info?.unavailable?.length}
+				<div class="row-reset">Not reported by this source: {info.unavailable.join(', ')}</div>
+			{/if}
+			{#if info?.dashboard_url}
+				<a class="provider-dashboard-link" href={info.dashboard_url} target="_blank" rel="noopener noreferrer"
+					>Compare on the provider dashboard</a
+				>
+			{/if}
+		</div>
+	{/if}
+{/snippet}
+
 <div class="usage-context-wrapper" bind:this={wrapperRef}>
 	<button
 		type="button"
@@ -751,7 +810,8 @@
 				     its auth-kind subtext (plan / "API"), falling back to the resolved
 				     device name or "Other device". It is the collapse toggle for the window rows;
 				     collapsed shows the least quota remaining and hides the rows +
-				     "No usage data" line. No account naming, no "as of" staleness line. -->
+				     "No usage data" line. No account naming; the expanded rows end with the
+				     source details (source, scope, last successful update). -->
 				<div class="popover-section">
 					<div class="provider-header">
 						<button
@@ -811,6 +871,17 @@
 						{/each}
 					{:else}
 						<div class="row-reset no-data">No usage data yet</div>
+					{/if}
+					<!-- Last attempt/error describe only this install's own poller. -->
+					{#if $claudeUsageSource.source}
+						{@render sourceDetails(
+							$claudeUsageSource.source,
+							null,
+							null,
+							resolvedBucket?.fetchedAt,
+							isSelf ? $claudeUsageSource.attemptedAt : null,
+							isSelf ? $claudeUsageSource.lastErrorKind : null
+						)}
 					{/if}
 				{/if}
 			{/if}
@@ -882,9 +953,7 @@
 					{/if}
 				</div>
 				{#if pbOpen}
-					{#if pb.source}<div class="row-reset">Source: {pb.source}</div>{/if}
-					{#if pb.scope}<div class="row-reset">{pb.scope}</div>{/if}
-					{#if pb.source && pb.fetchedAt}<div class="row-reset">Last successful update: {new Date(pb.fetchedAt).toLocaleString()}</div>{/if}
+					{@render sourceDetails(pb.sourceInfo, pb.source, pb.scope, pb.fetchedAt, pb.lastAttemptAt, pb.lastErrorKind)}
 					{#each pbWindows as w (w.type)}
 						{@const display = providerWindowPercent(w, now, pbShowsRemaining)}
 						{@const countdown = formatCountdown(w.resets_at, now)}
@@ -1337,6 +1406,24 @@
 		max-width: 100%;
 		white-space: normal;
 		overflow-wrap: anywhere;
+	}
+	.usage-source {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+	.provider-dashboard-link {
+		align-self: flex-start;
+		font-size: 10.5px;
+		color: var(--muted-foreground);
+		text-decoration: underline;
+		text-underline-offset: 2px;
+	}
+	.provider-dashboard-link:focus-visible {
+		outline: 2px solid var(--ring, var(--primary));
+		outline-offset: 2px;
 	}
 	.provider-billing-link {
 		align-self: flex-start;

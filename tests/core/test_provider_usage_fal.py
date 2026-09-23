@@ -18,17 +18,13 @@ import pytest
 from app.core.provider_usage import (
     FAL_BILLING_HOST,
     FAL_BILLING_URL,
-    FAL_USER_BALANCE_HOST,
-    FAL_USER_BALANCE_URL,
     FAL_USAGE_PROVIDER_ID,
     FAL_USAGE_PROVIDER_NAME,
     FAL_USAGE_PROVIDER_TYPE,
     ProviderUsageMonitor,
     _fal_auth_header,
     _fal_billing_url_is_pinned,
-    _fal_user_balance_url_is_pinned,
     normalize_fal_billing,
-    normalize_fal_user_balance,
 )
 
 
@@ -38,6 +34,9 @@ _TOKEN_KEY_RE = re.compile(
 )
 
 _KEY = "fal-secret-must-never-log"
+# The retired ordinary-key endpoint. The handler still answers it so a
+# regression that falls back to it would be visible in ``seen``.
+FAL_USER_BALANCE_HOST = "rest.alpha.fal.ai"
 _BILLING = {
     "username": "my-team",
     "credits": {"current_balance": 24.5, "currency": "USD"},
@@ -70,25 +69,6 @@ class TestNormalizeFalBilling:
         assert normalize_fal_billing(payload) is None
 
 
-class TestNormalizeFalUserBalance:
-    def test_bare_number(self):
-        assert normalize_fal_user_balance(18.11) == {"balance_remaining": 18.11}
-
-    def test_quoted_number_string(self):
-        assert normalize_fal_user_balance('"18.11"')["balance_remaining"] == pytest.approx(18.11)
-
-    def test_dict_balance(self):
-        assert normalize_fal_user_balance({"balance": 9.5, "currency": "USD"}) == {
-            "balance_remaining": 9.5,
-            "currency": "USD",
-        }
-
-    def test_unusable_returns_none(self):
-        assert normalize_fal_user_balance(None) is None
-        assert normalize_fal_user_balance(True) is None
-        assert normalize_fal_user_balance("nope") is None
-
-
 class TestFalAuthAndPin:
     def test_auth_header_prefixes_key(self):
         assert _fal_auth_header("abc") == "Key abc"
@@ -100,10 +80,6 @@ class TestFalAuthAndPin:
         assert _fal_billing_url_is_pinned("http://api.fal.ai/v1/account/billing") is False
         assert _fal_billing_url_is_pinned(
             "https://evil.example/v1/account/billing?expand=credits"
-        ) is False
-        assert _fal_user_balance_url_is_pinned(FAL_USER_BALANCE_URL) is True
-        assert _fal_user_balance_url_is_pinned(
-            "https://evil.example/billing/user_balance"
         ) is False
 
 

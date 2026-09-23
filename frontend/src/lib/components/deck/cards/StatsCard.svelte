@@ -202,9 +202,9 @@
 				<div class="bento">
 					<!-- Metric cards -->
 					<div class="bcard">
-						<div class="blabel"><DollarSign size={14} strokeWidth={2} /> Total spend</div>
+						<div class="blabel" title="Estimated by this app from token counts and model prices. Provider-reported spend is in the usage popover."><DollarSign size={14} strokeWidth={2} /> Estimated spend</div>
 						<div class="bignum">{formatCost(summary?.total_cost ?? 0)}</div>
-						<div class="bsub">across {summary?.session_count ?? 0} sessions</div>
+						<div class="bsub">app estimate across {summary?.session_count ?? 0} sessions</div>
 					</div>
 
 					<div class="bcard">
@@ -222,12 +222,12 @@
 					<div class="bcard">
 						<div class="blabel"><Gauge size={14} strokeWidth={2} /> Avg / session</div>
 						<div class="bignum">{formatCost(summary?.average_cost_per_session ?? 0)}</div>
-						<div class="bsub">mean spend per session</div>
+						<div class="bsub">mean estimated spend per session</div>
 					</div>
 
 					<!-- Spend over time (tall, wide) -->
 					<div class="bcard c2 r2 bflex">
-						<div class="blabel">Spend over time</div>
+						<div class="blabel">Estimated spend over time</div>
 						{#if usageTrends.length === 0}
 							<div class="bempty">No usage in this range</div>
 						{:else}

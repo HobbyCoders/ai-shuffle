@@ -7,9 +7,16 @@ Claude OAuth credential, normalises every rate-limit window into a compact
 snapshot, caches it in memory, and lets callers broadcast it to connected
 clients as a ``usage_snapshot`` WebSocket event.
 
-Two data sources feed the frontend's per-window store:
-  1. This poller's snapshot (all windows at once, every ~5 min + on demand).
+Two data sources feed the frontend's per-window store (both are defined in
+``app.core.usage_sources``):
+  1. This poller's snapshot (all windows at once, at most every ~5 min). The
+     OAuth usage endpoint is an unofficial, subscription-specific endpoint.
   2. Live SDK ``rate_limit`` events, which refine a single window as it changes.
+
+Ordinary reads never wait on the upstream endpoint: a stale read returns the
+cached snapshot and starts one shared background refresh. Every refresh goes
+through the durable, cross-worker request budget in ``usage_polling``, and a
+refused credential is not re-probed until the token changes.
 
 Both key on the same window-type strings (``five_hour``, ``seven_day``,
 ``seven_day_opus``, ``seven_day_sonnet``, ``seven_day_overage_included``,
@@ -29,11 +36,12 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.oauth import direct_oauth
+from app.core.usage_sources import CLAUDE_OAUTH_USAGE_URL
 from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
-USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
+USAGE_ENDPOINT = CLAUDE_OAUTH_USAGE_URL
 # The CLI sends this beta header; the endpoint answers with or without it, but
 # we mirror the CLI to stay forward-compatible.
 _OAUTH_BETA_HEADER = "oauth-2025-04-20"
@@ -61,6 +69,12 @@ _TOP_LEVEL_TYPES = (
 
 # How long a cached snapshot is considered fresh for on-demand REST reads.
 _SNAPSHOT_TTL_SECONDS = 300
+
+# Minimum spacing between background refresh attempts started by ordinary
+# reads. The durable budget already bounds upstream requests; this bounds the
+# token-refresh check and the budget claim (a peer round trip on enrolled
+# workers) that every attempt costs.
+_ATTEMPT_SPACING_SECONDS = 60
 
 # Short TTL for the assembled cluster view (peer snapshot rows + installs map).
 # Hot GETs/broadcasts within this window reuse the cached DB reads; the cache is
@@ -192,6 +206,13 @@ class UsageLimitsMonitor:
         # Short-TTL cache of the assembled cluster view: (expires_at, snapshots).
         # Invalidated on our own persist so local changes are never masked.
         self._cluster_cache: Optional[tuple[float, List[Dict[str, Any]]]] = None
+        # Last upstream attempt (distinct from ``_fetched_at``, the last
+        # success) and why it failed, for the usage API.
+        self._attempted_at: float = 0.0
+        self._last_error: str | None = None
+        # Negative capability cache: digest of the token the endpoint refused.
+        self._denied_fingerprint: str | None = None
+        self._refresh_task: asyncio.Task | None = None
 
     def current_generation(self) -> int:
         return self._generation
@@ -213,9 +234,31 @@ class UsageLimitsMonitor:
         return {
             "windows": list(self._windows),
             "fetched_at": self._fetched_at or None,
+            "attempted_at": self._attempted_at or None,
+            "last_error_kind": self._last_error,
             "available": self._available,
             "generation": self._generation,
         }
+
+    @property
+    def refreshing(self) -> bool:
+        return self._refresh_task is not None and not self._refresh_task.done()
+
+    def request_refresh(self) -> asyncio.Task | None:
+        """Start (or join) the single background refresh + broadcast."""
+        if self.refreshing:
+            return self._refresh_task
+        try:
+            self._refresh_task = asyncio.create_task(self._refresh_quietly())
+        except RuntimeError:
+            return None
+        return self._refresh_task
+
+    async def _refresh_quietly(self) -> None:
+        try:
+            await self.refresh_and_broadcast()
+        except Exception:  # noqa: BLE001 — background refresh is best-effort
+            logger.debug("Claude usage refresh failed")
 
     def _resolve_account_meta(self) -> Dict[str, Optional[str]]:
         """Best-effort {account_id, account_email, account_name} for this install.
@@ -283,6 +326,7 @@ class UsageLimitsMonitor:
         # account switch bumps the generation; if it changes before we commit,
         # this poll's result is stale and must be discarded (see below).
         gen = self._generation
+        self._attempted_at = time.time()
 
         try:
             # Keep the on-disk token fresh (no-op in API-key mode / when valid).
@@ -296,6 +340,7 @@ class UsageLimitsMonitor:
             # empty gracefully; this is an expected steady state, so no logging.
             self._available = False
             self._windows = []
+            self._last_error = "missing_credentials"
             # Still persist so API-key-mode installs are represented in the
             # cluster snapshot (empty windows, available=False).
             await run_sync(self._persist_snapshot)
@@ -306,13 +351,35 @@ class UsageLimitsMonitor:
             "Content-Type": "application/json",
             "anthropic-beta": _OAUTH_BETA_HEADER,
         }
+        from app.core import usage_sources
+        from app.core.usage_polling import (
+            UsageDeferred,
+            capability_fingerprint,
+            usage_get,
+        )
+
+        fingerprint = capability_fingerprint("claude_oauth_usage", headers)
+        if fingerprint == self._denied_fingerprint:
+            # Refused for this exact token: no budget claim, no upstream probe.
+            return self._snapshot()
         try:
-            from app.core.usage_polling import UsageDeferred, usage_get
             try:
-                resp = await usage_get(USAGE_ENDPOINT, headers=headers)
+                resp = await usage_get(
+                    USAGE_ENDPOINT, headers=headers,
+                    interval=usage_sources.interval_for("claude_oauth_usage", USAGE_ENDPOINT),
+                )
             except UsageDeferred:
                 return self._snapshot()
             if resp.status_code != 200:
+                status = resp.status_code
+                if status in usage_sources.DENIED_STATUSES:
+                    self._last_error = "billing_access_denied"
+                elif status in usage_sources.UNSUPPORTED_STATUSES:
+                    self._last_error = "unsupported"
+                else:
+                    self._last_error = "unavailable"
+                if self._last_error != "unavailable":
+                    self._denied_fingerprint = fingerprint
                 if not self._warned:
                     logger.warning(
                         "Usage-limits fetch failed: HTTP %s (keeping last snapshot)",
@@ -336,6 +403,7 @@ class UsageLimitsMonitor:
             self._fetched_at = time.time()
             self._available = True
             self._warned = False
+            self._last_error = None
             # Persist this install's snapshot (stamped with the active account)
             # so peers can serve the correct per-account reset time for offloaded
             # sessions. Best-effort — never break the poll on a DB error.
@@ -360,15 +428,22 @@ class UsageLimitsMonitor:
             return self._snapshot()
 
         except Exception as e:  # noqa: BLE001 — keep last snapshot on any error
+            self._last_error = "unavailable"
             if not self._warned:
                 logger.warning("Usage-limits fetch error: %s (keeping last snapshot)", e)
                 self._warned = True
             return self._snapshot()
 
     async def get_snapshot(self, max_age: float = _SNAPSHOT_TTL_SECONDS) -> Dict[str, Any]:
-        """Return the cached snapshot, fetching first if stale or never-fetched."""
-        if not self._fetched_at or (time.time() - self._fetched_at) > max_age:
-            return await self.fetch()
+        """Return the cached snapshot; start a background refresh when stale.
+
+        Never waits on the upstream endpoint. Concurrent stale reads share one
+        refresh task, and attempts are spaced by ``_ATTEMPT_SPACING_SECONDS``.
+        """
+        now = time.time()
+        stale = not self._fetched_at or (now - self._fetched_at) > max_age
+        if stale and now - self._attempted_at >= _ATTEMPT_SPACING_SECONDS:
+            self.request_refresh()
         return self._snapshot()
 
     async def get_cluster_snapshot(
@@ -376,8 +451,8 @@ class UsageLimitsMonitor:
     ) -> Dict[str, Any]:
         """Return the LOCAL snapshot plus every install's persisted snapshot.
 
-        Refreshes this install's own reading first when stale (persisting it),
-        then reads all persisted snapshots and joins the installs registry for
+        Starts a background refresh of this install's own reading when stale
+        (see :meth:`get_snapshot`), then reads all persisted snapshots and joins the installs registry for
         ``device_name``/``online``. Keeps the legacy top-level fields
         (``windows``/``fetched_at``/``available``/``generation``) intact for old
         clients, and adds:
@@ -392,7 +467,7 @@ class UsageLimitsMonitor:
         UNLESS the row is self (so a brand-new install with no registry row yet
         still reports its own numbers).
         """
-        # Refresh + persist our own reading if it is stale or never fetched.
+        # Schedule (never await) a refresh of our own reading when stale.
         await self.get_snapshot(max_age)
         # Assembly reads the DB — offload it so it never blocks the event loop.
         return await run_sync(self._cluster_snapshot)
@@ -603,12 +678,11 @@ def schedule_usage_refresh() -> None:
     (discarded via a done-callback) so it is not GC'd mid-flight. Never raises.
     """
     try:
-        task = asyncio.create_task(usage_limits_monitor.refresh_and_broadcast())
-    except RuntimeError:
-        # No running event loop (e.g. sync test context) — skip silently.
-        return
+        task = usage_limits_monitor.request_refresh()
     except Exception as e:  # noqa: BLE001
         logger.debug(f"Could not schedule usage refresh: {e}")
         return
+    if task is None:
+        return  # no running event loop (e.g. sync test context)
     _pending_refresh_tasks.add(task)
     task.add_done_callback(_pending_refresh_tasks.discard)

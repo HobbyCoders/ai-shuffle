@@ -29,12 +29,20 @@ completion cannot reach the authority, the ten-minute reservation remains in
 place; its unknown response status cannot be applied until a later observation.
 No provider request is replayed after an uncertain claim response.
 
-Current application budgets (not provider-approved rate guarantees):
+Ordinary usage reads never wait on an upstream request. A stale Claude reading
+starts one shared background refresh (at most one attempt per minute per
+worker); explicit refreshes join the same task and still need a budget lease.
+A capability refused with 401, 403, 405, 410 or 501 is also recorded on the
+worker's snapshot for that credential revision, so later polls skip it without
+claiming a lease; see the [provider source matrix](../provider-usage-sources.md#failure-policy-and-negative-caching).
+
+Current application budgets (not provider-approved rate guarantees), taken
+from the source registry in `app/core/usage_sources.py`:
 
 | Source | Successful observation minimum interval |
 | --- | --- |
 | OpenRouter key and account credits, each endpoint | 300 seconds |
-| Grok subscription usage endpoint | 300 seconds |
+| Grok subscription billing and settings, each endpoint | 300 seconds |
 | Claude OAuth usage | 300 seconds |
 | OpenAI Admin usage or costs, each endpoint | 900 seconds |
 | fal.ai Admin billing | 300 seconds |
