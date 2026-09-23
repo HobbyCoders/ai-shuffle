@@ -34,6 +34,7 @@ FILES = {
     ".github/workflows/ci.yml": "internal",
     "requirements.txt": "fastapi",
     "requirements.lock": "fastapi==1 --hash=sha256:" + "0" * 64,
+    "requirements-native.lock": "mss==1 --hash=sha256:" + "1" * 64,
     "LICENSE": "Proprietary",
     "README.md": "internal",
 }
@@ -68,7 +69,8 @@ def test_archive_holds_only_runtime_paths_under_the_accepted_root(repo, tmp_path
         "app/main.py", "fluid/pyproject.toml", "fluid/README.md", "fluid/fluid/__init__.py",
         "frontend/package.json", "frontend/src/lib/a.ts", "tools/package.json",
         "browser-mcp/src/index.ts", "desktop/src/main/index.ts",
-        "docs/content/getting-started/overview.md", "requirements.txt", "requirements.lock", "LICENSE",
+        "docs/content/getting-started/overview.md", "requirements.txt", "requirements.lock",
+        "requirements-native.lock", "LICENSE",
     }
     data = output.read_bytes()
     assert result["sha256"] == hashlib.sha256(data).hexdigest() and result["size"] == len(data)
@@ -98,4 +100,11 @@ def test_real_allow_list_excludes_internal_material():
     spec = source_archive.pathspec()
     for internal in ("docs", "docs/reviews", "mockups", "videos", "scripts", "tests", "android", ".github"):
         assert internal not in spec
-    assert "docs/content" in spec and "requirements.lock" in spec
+    assert "docs/content" in spec and "requirements.lock" in spec and "requirements-native.lock" in spec
+
+
+def test_archive_refuses_a_revision_without_the_native_lock(repo, tmp_path):
+    git(repo, "rm", "-q", "requirements-native.lock")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "drop native lock")
+    with pytest.raises(ValueError, match="requirements-native.lock"):
+        source_archive.build(git(repo, "rev-parse", "HEAD"), tmp_path / "a.zip", repo)

@@ -57,8 +57,12 @@ rules: it accepts only a manifest signed for its channel (`stable` unless the
 owner writes `{"channel": "edge"}` to `update-channel.json` in the install's
 `updates` folder) that carries a tree digest, keeps the signature, size,
 checksum and sequence checks, and recomputes the tree digest over the
-extracted files before building. Its build still installs from
-`requirements.txt`; that belongs to `desktop/src/main/source-build.ts`.
+extracted files before building. Its build (`desktop/src/main/source-build.ts`)
+and the bundled runtime (`desktop/scripts/build-worker.mjs`) install Python
+packages only from `requirements.lock` and `requirements-native.lock`, both
+with `--require-hashes`, then fluid with `--no-deps --no-build-isolation`.
+`scripts/lock_requirements.sh` regenerates both locks; the native lock is
+constrained by `requirements.lock` so a shared package never pins differently.
 
 ## One-time steps for the owner
 

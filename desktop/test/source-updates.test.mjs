@@ -293,3 +293,19 @@ test('release fields are validated when present and older installed manifests wi
  await fs.writeFile(path.join(f.root,'versions',B,'release.json'),legacy.signed);
  u=f.create();await u.load();await u.select();await f.release(C);assert.equal((await u.check()).kind,'available');
 });
+test('Python dependencies install only from the hash-pinned locks, like the container updater',async t=>{
+ const {pythonInstallSteps,pythonDependencyKey,buildSource}=require('../dist/main/source-build.js');
+ const steps=pythonInstallSteps();
+ assert.deepEqual(steps.map(args=>args.slice(-3)),[['--require-hashes','-r','requirements.lock'],['--require-hashes','-r','requirements-native.lock'],['--no-deps','--no-build-isolation','./fluid']]);
+ for(const args of steps){assert.deepEqual(args.slice(0,3),['-m','pip','install']);assert(!args.includes('requirements.txt')&&!args.includes('requirements-native.txt'));}
+ // The bundled runtime is reused only when it was installed from the same locks.
+ const {pythonDependencies}=await import('../scripts/runtime-contract.mjs');
+ const repo=fileURLToPath(new URL('../..',import.meta.url));
+ assert.equal(await pythonDependencyKey(repo),await pythonDependencies(repo));
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-lock-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const source=path.join(root,'source');await fs.mkdir(path.join(source,'fluid'),{recursive:true});
+ for(const name of ['requirements.txt','requirements-native.txt','requirements.lock','fluid/pyproject.toml'])await fs.writeFile(path.join(source,name),'x');
+ const log=path.join(root,'build.log');const runtime={root,python:'python-not-run',node:'node-not-run',npm:'npm',pythonDependencies:''};
+ await assert.rejects(buildSource({source,server:path.join(root,'server'),cache:path.join(root,'cache'),runtime,revision:A,log,progress(){}}),/no hash-pinned requirements-native\.lock/);
+ await assert.rejects(fs.stat(log),{code:'ENOENT'},'nothing ran before the refusal');
+});

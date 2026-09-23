@@ -210,16 +210,12 @@ async function installPython() {
 
 	const env = { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: '1', PYTHONNOUSERSITE: '1' };
 	run(py, ['-m', 'pip', 'install', '--no-cache-dir', '--upgrade', 'pip==26.2.1'], { env });
-	run(
-		py,
-		[
-			'-m', 'pip', 'install', '--no-cache-dir',
-			'-r', path.join(repoDir, 'requirements.txt'),
-			'-r', path.join(repoDir, 'requirements-native.txt'),
-			path.join(repoDir, 'fluid')
-		],
-		{ env, cwd: repoDir }
-	);
+	// Hash-pinned, the same way the container image and updater install: every
+	// package, including fluid's build backend, must match a hash in the locks.
+	const pip = ['-m', 'pip', 'install', '--no-cache-dir', '--prefer-binary', '--timeout', '120', '--retries', '10'];
+	run(py, [...pip, '--require-hashes', '-r', path.join(repoDir, 'requirements.lock')], { env, cwd: repoDir });
+	run(py, [...pip, '--require-hashes', '-r', path.join(repoDir, 'requirements-native.lock')], { env, cwd: repoDir });
+	run(py, [...pip, '--no-deps', '--no-build-isolation', path.join(repoDir, 'fluid')], { env, cwd: repoDir });
 	run(py, ['-c', 'import fluid, claude_agent_sdk, psycopg2, pygit2, fastapi; print("python deps ok")'], { env });
 	return { version: PYTHON_VERSION, build: PYTHON_BUILD, triple };
 }

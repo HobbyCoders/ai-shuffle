@@ -46,6 +46,7 @@ RUNTIME_PATHS = (
     "requirements.lock",
     "requirements-build.txt",
     "requirements-native.txt",
+    "requirements-native.lock",
     ".env.example",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
@@ -115,7 +116,8 @@ def build(revision: str, output: Path, repo: Path = ROOT) -> dict:
                     "-o", str(output), revision, "--", *pathspec(present_paths(repo, revision))], cwd=repo, check=True)
     files = archive_files(output)
     present = {path.split("/", 1)[0] for path, _ in files}
-    missing = {"app", "fluid", "frontend", "requirements.lock"} - present
+    # The desktop updater installs both locks with --require-hashes.
+    missing = {"app", "fluid", "frontend", "requirements.lock", "requirements-native.lock"} - present
     if missing:
         raise ValueError(f"runtime archive is missing {', '.join(sorted(missing))}")
     data = output.read_bytes()

@@ -477,7 +477,8 @@ def test_published_tree_digest_matches_what_the_updater_extracts(tmp_path):
     from scripts import source_archive
     repo = tmp_path / "repo"
     for name, content in {"app/main.py": "print(1)", "fluid/fluid/__init__.py": "", "frontend/package.json": "{}",
-                          "requirements.lock": "x", "docs/reviews/secret.md": "internal"}.items():
+                          "requirements.lock": "x", "requirements-native.lock": "x",
+                          "docs/reviews/secret.md": "internal"}.items():
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
         (repo / name).write_text(content)
 
