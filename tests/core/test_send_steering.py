@@ -960,7 +960,7 @@ async def test_a_plain_run_does_log_its_message_user(mock_db):
         await session_runtime.SessionRuntime(turn).execute()
 
     env["recorder"].start.assert_awaited_once_with(
-        "sent while idle", profile_id=None, record_user=True,
+        "sent while idle", profile_id=None, record_user=True, source="user",
     )
 
 
@@ -977,7 +977,7 @@ async def test_a_requeued_steer_records_nothing_when_it_runs(mock_db):
         assert await session_runtime.SessionRuntime(turn).execute() == "completed"
 
     env["recorder"].start.assert_awaited_once_with(
-        "wait, also check the logs", profile_id=None, record_user=False,
+        "wait, also check the logs", profile_id=None, record_user=False, source="user",
     )
     assert _messages(mock_db, "s15") == []
     env["sync"].broadcast_message_added.assert_not_awaited()
@@ -1153,7 +1153,7 @@ async def test_the_flagged_re_run_tells_the_model_about_the_duplicate(mock_db):
     assert session_runtime._REDELIVERY_NOTE in seen["prompt"]
     assert seen["prompt"].endswith("also check the logs")
     env["recorder"].start.assert_awaited_once_with(
-        "also check the logs", profile_id=None, record_user=True,
+        "also check the logs", profile_id=None, record_user=True, source="user",
     )
 
 
