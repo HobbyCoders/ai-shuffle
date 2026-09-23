@@ -52,6 +52,15 @@ def _has_provider_credential_safe() -> bool:
         return False
 
 
+def _has_stored_anthropic_key_safe() -> bool:
+    try:
+        from app.core import claude_auth_mode
+        return claude_auth_mode.has_stored_api_key()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Stored-key probe failed (ignored): {e}")
+        return False
+
+
 def get_session_token(request: Request) -> Optional[str]:
     """Extract session token from cookie"""
     return request.cookies.get("session")
@@ -396,7 +405,12 @@ async def get_auth_status(request: Request, response: Response = None):
         # enabled model-provider row with a stored credential. The composer and
         # first-run setup gate on THIS, not on claude auth alone; Claude-CLI
         # auth remains required only for claude-subscription agents.
-        "has_any_credential": claude_authenticated or _has_provider_credential_safe(),
+        # The stored Anthropic API key counts as a credential too.
+        "has_any_credential": (
+            claude_authenticated
+            or await run_sync(_has_stored_anthropic_key_safe)
+            or _has_provider_credential_safe()
+        ),
         # Kept for older clients: the CLI reports one signed-in state.
         "claude_token_valid": claude_authenticated,
         "claude_cli": cli,

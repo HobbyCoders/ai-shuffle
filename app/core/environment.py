@@ -335,43 +335,51 @@ class ProviderConfigError(ValueError):
 def inject_claude_code_auth(
     env: Dict[str, str], provider_id: Optional[str] = None
 ) -> Dict[str, str]:
-    """Inject the Claude Code auth credential into a subprocess env (in place).
+    """Wire the Claude Code credential of the ACTIVE auth mode into a spawn env.
 
-    The stored `anthropic_api_key` is an authentication credential for Claude
-    Code — NOT a separate generation transport. This is the always-on hook
-    that wires it into EVERY Claude Code subprocess (chat sessions, agents,
-    one-shot generation), mirroring how `FAL_KEY` is injected but unconditional
-    on ai_tools.
+    The user chooses the mode (``app.core.claude_auth_mode``); the app never
+    switches it on its own, whatever credentials happen to exist:
 
-    Precedence (matches `claude.exe`'s native behavior, where `ANTHROPIC_API_KEY`
-    overrides any stored OAuth credentials):
+    - ``api_key``: the Anthropic API key stored in Settings goes in as
+      ``ANTHROPIC_API_KEY``. Other Anthropic credential variables from the host
+      or the profile env are kept away from the CLI, so it sees that key and
+      nothing else credential-like.
+    - ``subscription``: nothing is injected, and any ``ANTHROPIC_API_KEY`` /
+      ``ANTHROPIC_AUTH_TOKEN`` from the host or the profile env is kept away,
+      so the CLI runs on the sign-in the user completed with ``claude auth
+      login``. The CLI's own credential files are never read or touched here.
 
-    - **API key set** → inject `ANTHROPIC_API_KEY` (API-key auth wins). The
-      connected Claude account / OAuth credentials are ignored by the CLI for
-      that session, so billing flows through the API key.
-    - **API key absent** → inject nothing; leave the env untouched so the CLI
-      falls back to the existing OAuth account credentials.
+    Inherited host variables are removed through fluid's
+    ``FLUID_CHILD_ENV_UNSET`` marker, which the delegated loop honors and never
+    passes on.
 
     When ``provider_id`` is truthy the session targets a non-Anthropic model
-    provider: DO NOT inject the stored Anthropic key. ``apply_provider_env``
-    owns auth for those spawns (it sets ANTHROPIC_AUTH_TOKEN for the gateway and
-    an explicitly-empty ANTHROPIC_API_KEY). Injecting the Anthropic key here
-    would either leak it to the gateway or cause a native-Anthropic fallback.
-
-    We never delete or alter the OAuth login flow — this only ADDS the
-    key-injection path. Returns the same dict for convenience.
+    provider: ``apply_provider_env`` owns auth for those spawns (gateway token
+    plus an explicitly empty ``ANTHROPIC_API_KEY``), so nothing happens here.
+    Returns the same dict for convenience.
     """
     if provider_id:
-        # Provider session — leave Anthropic auth untouched (see apply_provider_env).
         return env
-    api_key = _get_decrypted_api_key("anthropic_api_key")
-    if api_key:
-        env["ANTHROPIC_API_KEY"] = api_key
-        logger.debug(
-            "Injected ANTHROPIC_API_KEY for Claude Code auth (API-key login "
-            "active; overrides connected account)"
-        )
-    # No key → inject nothing; OAuth account credentials remain in effect.
+    from app.core import claude_auth_mode
+    from fluid.tools.child_env import UNSET_ENV
+
+    mode = claude_auth_mode.current_mode()
+    if mode == claude_auth_mode.MODE_API_KEY:
+        unset = claude_auth_mode.API_KEY_UNSET
+        api_key = _get_decrypted_api_key(claude_auth_mode.API_KEY_SETTING)
+        if api_key:
+            env["ANTHROPIC_API_KEY"] = api_key
+        else:
+            # No stored key: the credential gate refuses the turn; never let a
+            # key from somewhere else stand in for the user's.
+            unset = unset + ("ANTHROPIC_API_KEY",)
+            env.pop("ANTHROPIC_API_KEY", None)
+    else:
+        unset = claude_auth_mode.SUBSCRIPTION_UNSET
+    for name in unset:
+        env.pop(name, None)
+    existing = [n for n in (env.get(UNSET_ENV) or "").split(",") if n.strip()]
+    env[UNSET_ENV] = ",".join(dict.fromkeys(existing + list(unset)))
     return env
 
 
@@ -794,12 +802,11 @@ def _build_env_with_ai_tools(
     if ENV_FILE_PATH:
         env.setdefault(ENV_FILE_REF_VAR, ENV_FILE_PATH)
 
-    # ALWAYS-ON: wire the stored anthropic_api_key in as the Claude Code auth
-    # credential for EVERY session, regardless of whether AI tools are enabled.
-    # Must happen BEFORE the ai_tools early-returns below — auth is not gated on
-    # ai_tools. (Key set → API-key auth wins; key absent → OAuth account auth.)
-    # For provider sessions (provider_id set) the Anthropic key is NOT injected;
-    # apply_provider_env owns auth for the gateway.
+    # ALWAYS-ON: apply the Claude Code auth mode the user chose (API key
+    # injected in api_key mode, every Anthropic key kept away in subscription
+    # mode) for EVERY session, regardless of whether AI tools are enabled. Must
+    # happen BEFORE the ai_tools early-returns below. For provider sessions
+    # (provider_id set) nothing is touched; apply_provider_env owns auth.
     inject_claude_code_auth(env, provider_id)
 
     # NOTE: The browser integration is now "Claude in Chrome" (the bundled CLI's

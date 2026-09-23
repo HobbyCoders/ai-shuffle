@@ -23,9 +23,10 @@
 	 * `ensureLoaded()`; that path is untouched.)
 	 */
 	import { onMount } from 'svelte';
-	import { Server, FileInput, Type, SquareTerminal } from 'lucide-svelte';
+	import { Server, FileInput, Type, SquareTerminal, KeyRound } from 'lucide-svelte';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import ClaudeCliPanel from '$lib/components/settings/ClaudeCliPanel.svelte';
+	import ClaudeAuthModePanel from '$lib/components/settings/ClaudeAuthModePanel.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import MediaToolsSection from './MediaToolsSection.svelte';
 	import ProviderList from './ProviderList.svelte';
@@ -121,6 +122,14 @@
 		}
 	});
 </script>
+
+<!-- Which credential Claude Code runs on: subscription or API key, chosen explicitly. -->
+<div class="set-group" id="claude-auth-mode-section">
+	<div class="set-grouphead">
+		<h3><KeyRound />Claude Code mode</h3>
+	</div>
+	<ClaudeAuthModePanel isAdmin={$isAdmin} />
+</div>
 
 <!-- The stock Claude Code CLI: its own sign-in, as `claude auth status` reports it. -->
 <div class="set-group" id="claude-cli-section">

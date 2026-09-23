@@ -232,6 +232,15 @@ def check_prerequisites() -> None:
     from app.core import claude_relogin_notice
     claude_relogin_notice.mark_if_needed()
 
+    # Record the Claude Code auth mode once for an install that has none, so a
+    # later change in credentials can never switch it silently.
+    from app.core import claude_auth_mode
+    try:
+        mode = claude_auth_mode.ensure_mode_recorded(cli.signed_in)
+        logger.info("Claude Code auth mode: %s", mode)
+    except Exception:
+        logger.warning("Could not record the Claude Code auth mode", exc_info=True)
+
     if auth_service.is_setup_required():
         logger.info("Local setup required - visit /setup on this computer or your LAN")
     else:

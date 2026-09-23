@@ -8,7 +8,7 @@
 	 *
 	 *   1. Claude              — the stock CLI's own login (no toggle); signing
 	 *                            in and out lives in the Claude Code CLI group
-	 *   2. Anthropic API key   — overrides the subscription while it is set
+	 *   2. Anthropic API key   — used only in API-key mode (Claude Code mode above)
 	 *   3. ChatGPT             — Codex subscription (auth_mode='chatgpt')
 	 *   4. OpenAI API key      — gateway row, provider_type='openai'
 	 *   5. Grok                — SuperGrok subscription
@@ -162,7 +162,7 @@
 		if (!$claudeAuthenticated) {
 			return { subtitle: 'Not signed in — sign in to the Claude Code CLI above.', tone: 'off' };
 		}
-		if (usingApiKeyAuth) return { subtitle: 'Overridden by Anthropic API key', tone: 'off' };
+		if (usingApiKeyAuth) return { subtitle: 'Not in use: Claude Code mode is API key', tone: 'off' };
 		const plan = claudePlanLabel(claudeCli?.plan);
 		const label = plan ? `Claude ${plan} subscription` : 'Claude subscription';
 		const email = claudeCli?.email;
@@ -182,7 +182,9 @@
 			};
 		}
 		const masked = s.anthropicKeyMasked;
-		return { subtitle: masked ? `Key set · ${masked}` : 'Key set', tone: 'ok' };
+		const set = masked ? `Key set · ${masked}` : 'Key set';
+		if (!usingApiKeyAuth) return { subtitle: `${set} · not in use: Claude Code mode is subscription`, tone: 'off' };
+		return { subtitle: set, tone: 'ok' };
 	});
 
 	/** Subscription rows (ChatGPT / Grok) authenticate via OAuth blobs, not a token. */
@@ -389,7 +391,7 @@
 		<ProviderPanel kind="subscription" nativeModels onPrimary={showClaudeCli} />
 	</ProviderRow>
 
-	<!-- 2. Anthropic API key — overrides the subscription while it is set. -->
+	<!-- 2. Anthropic API key — used only when Claude Code mode is API key. -->
 	<ProviderRow
 		title="Anthropic API key"
 		badge="API key"

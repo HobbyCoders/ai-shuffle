@@ -164,6 +164,14 @@ class TestAuthStatusAnyCredential:
         assert status["has_any_credential"] is True
 
     @pytest.mark.asyncio
+    async def test_true_via_stored_anthropic_key(self, mock_db):
+        from app.db import database as db
+        db.set_system_setting("anthropic_api_key", "sk-ant-api03-plaintext-for-test")
+        status = await _auth_status(claude_authenticated=False)
+        assert status["claude_authenticated"] is False
+        assert status["has_any_credential"] is True
+
+    @pytest.mark.asyncio
     async def test_probe_failure_degrades_to_false(self, mock_db):
         from app.db import database as db
         with patch.object(

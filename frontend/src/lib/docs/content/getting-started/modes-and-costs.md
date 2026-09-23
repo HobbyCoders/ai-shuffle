@@ -50,7 +50,7 @@ Use an API key for anything that runs when you are not watching:
 - **Connectors** that answer Telegram, Discord, Slack or other messages;
 - **Many agents at once**, for example a batch of parallel tasks.
 
-If you run much of this kind of work, API key mode is the safer choice. You can change the mode in Settings at any time.
+If you run much of this kind of work, API key mode is the safer choice. You can change the mode at any time in **Settings → Providers → Claude Code mode**, which also shows the account the CLI is signed in to and the last four characters of your key. If both a sign-in and a key are set up, the mode you picked decides; AI Shuffle never switches on its own.
 
 ## The loop guard
 
