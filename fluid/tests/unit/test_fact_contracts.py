@@ -57,6 +57,22 @@ async def test_correct_forget_and_restore_through_tools(tmp_path):
     assert store.memories()[0].id != current.id
 
 
+@pytest.mark.asyncio
+async def test_new_fact_saves_even_when_a_revision_is_supplied(tmp_path):
+    # GPT-6-Luna sends expected_revision=1 with an empty memory_id for a new
+    # fact; the guard used to refuse it as "Memory changed since it was read".
+    store = SkillStore(tmp_path)
+    c = ctx(store)
+    out = await remember.handler({"text": "Prefers short answers.", "key": "profile.response_style",
+                                   "scope": "global", "memory_id": "", "expected_revision": 1}, c)
+    assert not out.is_error and "Saved" in out.text
+    saved = store.memories()[0]
+    assert saved.key == "profile.response_style" and saved.revision == 1
+    stale = await remember.handler({"text": "Prefers long answers.", "key": "profile.response_style",
+                                     "memory_id": saved.id, "expected_revision": 7}, c)
+    assert stale.is_error and "changed since it was read" in stale.text
+
+
 def test_retry_is_idempotent_and_scope_is_part_of_identity(tmp_path):
     store = SkillStore(tmp_path)
     first = store.save_memory("A durable preference", protected=True)

@@ -214,7 +214,10 @@ class FactStore:
                             ((key and e.get("key") == key) or fingerprint(e["text"]) == fp)), None)
             if old and old.get("protected") and not protected:
                 raise ValueError("Background learning cannot rewrite an explicitly saved fact")
-            if expected_revision is not None and (not old or old.get("revision", 1) != expected_revision):
+            # A revision guards a rewrite. With nothing to rewrite (a new fact,
+            # no memory ID) it has nothing to compare against: models fill the
+            # optional field in anyway, and refusing made every such save fail.
+            if expected_revision is not None and old and old.get("revision", 1) != expected_revision:
                 raise ValueError("Memory changed since it was read; recall it before retrying")
             if old and not old.get("conflicted") and old["text"] == text and old.get("protected", False) == protected:
                 return self._entry(old)
