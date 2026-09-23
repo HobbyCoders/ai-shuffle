@@ -1,12 +1,12 @@
 <!--
 title: Quick Start
 description: Get up and running with AI Shuffle in minutes
-order: 3
+order: 8
 -->
 
 # Quick Start
 
-This guide walks you through the essential workflows after installation.
+This guide walks you through the essential workflows once [First run](/docs/getting-started/first-run) is done.
 
 ## Start a Chat
 
@@ -24,7 +24,7 @@ Profiles control how the agent behaves. To create one:
 3. Configure:
    - **Name** — A descriptive name
    - **System Prompt** — Instructions for the agent
-   - **Model** — sonnet, opus, fable, etc.
+   - **Model** — any model offered by the providers you set up
    - **Allowed Tools** — Which tools the agent can use
    - **Thinking Mode** — How deeply the model reasons
 4. Save the profile

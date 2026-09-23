@@ -1,0 +1,101 @@
+<!--
+title: Troubleshooting
+description: Fixes for install, access, sign-in, license, update and runtime problems
+order: 12
+-->
+
+# Troubleshooting
+
+Most problems show up in the container log. Read it first:
+
+- Docker Compose: `docker compose logs --tail 200 ai-shuffle` (add `-f` to follow it).
+- Unraid: click the container icon, then **Logs**.
+
+In the commands below, the container is called `ai-shuffle` with Docker Compose and `AI-Shuffle` on Unraid.
+
+## Installing and pulling the image
+
+**`Set AI_SHUFFLE_PULL_TOKEN in .env`**: the `.env` file is missing, is not next to `compose.yaml`, or has no pull token. Copy the settings from [Install with Docker Compose](/docs/getting-started/install-docker-compose) into `.env` and paste your token.
+
+**`denied: This pull token is not valid`**: the token is mistyped, was replaced by a newer one, or its license was revoked. Copy it again from your license email or your account page on hobbycoders.com. A token you rotated stops working within a minute.
+
+**`manifest unknown` for a version that exists**: after a license ends, the pull token still downloads exact versions (`0.9.1`), but not `latest` or short versions (`0.9`). Use an exact version. Development tags are never available.
+
+**A temporary error or `503` from `registry.hobbycoders.com`**: the license service could not be reached. Try again in a few minutes. Containers already running are not affected.
+
+**`exec format error` or `no matching manifest for linux/arm64`**: the host is ARM. AI Shuffle runs on 64-bit Intel or AMD (amd64) only for now.
+
+## The container does not become healthy
+
+- **First start:** installing the Claude Code CLI takes a few minutes. Wait for the log to settle.
+- **Check readiness from inside:** `docker exec ai-shuffle curl -fsS http://localhost:8000/health/ready`. An answer means the app is up and the problem is the address or network (next section).
+- **It restarts in a loop:** look for the first error in the log. `Killed`, `out of memory` or a sudden stop usually means the host ran out of memory; add swap, run fewer agents at once, or give the host more memory.
+- **`Permission denied` on `/workspace` or `/data`:** set `PUID` and `PGID` to the owner of those folders (Unraid: 99 and 100).
+
+## I cannot open it from another device
+
+- **Docker Compose:** by default AI Shuffle listens on `127.0.0.1` only. Set `BIND_HOST` in `.env` to the host's LAN or Tailscale address and run `docker compose up -d`.
+- **Unraid:** **WebUI address** must be the server's address with the port, for example `192.168.1.20:8000`.
+- Check the host firewall allows port 8000 from your network.
+- **The page opens but you cannot sign in or stay signed in:** set `COOKIE_SECURE=false` (Unraid: **Secure cookies** `false`) when you use plain `http://`.
+- Do not "fix" access by binding to `0.0.0.0` or forwarding the port from your router. See [Remote access](/docs/getting-started/remote-access).
+
+## Owner password
+
+<!-- verify against wizard v2 -->
+
+- **Forgotten password:** open AI Shuffle from a browser on the machine that runs it, which works without the password, and set a new one in Settings. On Unraid you can instead set **Owner password** in the template and **Apply**.
+- **A device keeps asking for the password:** its sign-in was revoked or expired. Sign in again, or check **Settings → Devices** for the device.
+
+## Agents do not start
+
+The message in the app says which of these it is.
+
+**No credential is set up.** AI Shuffle never falls back to another account. Follow [First run](/docs/getting-started/first-run) to sign in to the Claude Code CLI or add an API key.
+
+**The Claude Code CLI is not signed in** (subscription mode):
+
+<!-- verify against wizard v2 -->
+
+- Sign in again from the in-app terminal, or from the host: `docker exec -it -u appuser ai-shuffle claude auth login`.
+- Check whose account it uses: `docker exec -u appuser ai-shuffle claude auth status`.
+- The login is kept in the Claude Code folder (`/home/appuser/.claude`). If that volume or appdata folder was removed or not mapped, the login is lost on every update; check the mapping.
+
+**The Claude Code CLI is missing.** The installer runs on first start and needs `claude.ai` and Anthropic's download servers. Check the host can reach them, then restart the container. The CLI is kept in its own folder (`/home/appuser/.local`); make sure it is mapped.
+
+**Your plan's usage limit was reached** (subscription mode): agents pause until the limit resets. Wait, or switch to API key mode for heavy or unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
+
+<!-- verify against wizard v2 -->
+
+**An automation waits for confirmation** (subscription mode): the loop guard paused it because unattended turns reached their budget. Confirm it in the app, or switch to API key mode for unattended work.
+
+**The API key is refused:** the key was deleted or the Console account has no credit or reached its spend limit. Check the Anthropic Console, then paste a new key in Settings.
+
+**The license banner says new agent runs are paused:** see [License](/docs/getting-started/license). Your data is not affected.
+
+## Connectors
+
+**A chat connector refuses to start:** Telegram, Discord, WhatsApp and the other chat connectors need a **sender allowlist**, the accounts allowed to talk to your agent. Add your own account ID to the allowlist in the connector's settings, then start it again. Tool approvals for connector turns appear in the app, not in the chat.
+
+## The built-in browser crashes
+
+Pages crash or the browser closes when the container has too little shared memory. The template and compose file set `--shm-size=1g` / `shm_size: 1gb`; if you created the container another way, add it.
+
+## Updates
+
+**`This source update needs a newer container release`**: this release changes the container itself. Change the version in `.env` (Compose) or **Repository** (Unraid) and recreate the container. See [Updates](/docs/getting-started/updates).
+
+**No update is offered:** check **Settings → General → Allow updates**, and choose **Check for updates**. Unraid's "update ready" notice only covers the tag you already run; a new release always means changing the version.
+
+## Stopping and the database
+
+- **The container takes a while to stop:** agents stop first, then the database writes a clean checkpoint, which can take up to 90 seconds. Do not kill it. The compose file and Unraid template allow 90 seconds; if you run it another way, use `--stop-timeout 90`.
+- **The database does not start after a crash or a full disk:** stop the container, copy the whole data folder or volume somewhere safe before changing anything, and email support. Restore from your last backup only with the data folder and its encryption key together.
+
+## Sending logs to support
+
+```bash
+docker compose logs --tail 500 ai-shuffle > ai-shuffle.log
+```
+
+On Unraid, use `docker logs --tail 500 AI-Shuffle > /mnt/user/appdata/ai-shuffle/support.log` in the terminal. Read the file before sending it and remove anything private. Email it to support@hobbycoders.com with your AI Shuffle version (shown in Settings) and what you were doing. Never send passwords, API keys, license keys, pull tokens or sign-in codes.
