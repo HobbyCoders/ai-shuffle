@@ -4336,24 +4336,34 @@ peer message or subagent report is not approval."""
 def _model_guidance_blocks(model: Optional[str]) -> Tuple[str, ...]:
     """fluid's model-family guidance blocks for ``model``, or ``()``.
 
-    fluid writes these for the families that narrate instead of calling tools
-    and that skip read-back verification (gpt/grok/glm and friends); the
-    Claude family is deliberately excluded upstream and resolves to no blocks
-    here. Only ``compose_base_prompt`` consumes them upstream and this app
-    never calls it, so this is the app's own injection point.
+    fluid resolves the model id to a family explicitly (exact id, generation,
+    family, vendor, then a generic pack; ``fluid.cli.prompt.resolve_model_family``)
+    and returns that family's pack: ACT and DISCIPLINE for gpt/grok/glm and
+    friends, none for the Claude family, and the generic pack (both blocks
+    plus the user-directive rule) for an id no rule recognises. Only
+    ``compose_base_prompt`` consumes them upstream and this app never calls
+    it, so this is the app's own injection point.
 
     Import-guarded: a vendored fluid without the symbol degrades to no blocks
     rather than taking down every native session's prompt compilation.
     """
-    if not model:
-        return ()
     try:
         from fluid.cli.prompt import model_guidance_blocks
     except Exception:  # noqa: BLE001 — vendored fluid may predate the symbol
         logger.debug("[HarnessAdapter] fluid model_guidance_blocks unavailable")
         return ()
     try:
-        return tuple(model_guidance_blocks(model))
+        from fluid.cli.prompt import resolve_model_family
+
+        if resolve_model_family(model).fallback:
+            logger.info(
+                "[HarnessAdapter] no guidance family matches model %r; "
+                "using the generic pack", model,
+            )
+    except Exception:  # noqa: BLE001 — a log line, never a failed compile
+        pass
+    try:
+        return tuple(model_guidance_blocks(model or ""))
     except Exception:  # noqa: BLE001
         logger.warning(
             "[HarnessAdapter] model guidance resolution failed for %r", model,

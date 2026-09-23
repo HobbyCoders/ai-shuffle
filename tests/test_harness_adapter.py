@@ -6494,6 +6494,44 @@ def test_safety_block_keeps_the_prefix_stable_across_turns():
     assert first.text.index(ha.SAFETY_BLOCK) < first.text.index(ACT_GUIDANCE_BLOCK)
 
 
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("openai/gpt-oss-120b", ("act", "discipline")),
+        ("stealth/union-alpha", ("act", "discipline", "directive")),
+        ("some-unknown-model", ("act", "discipline", "directive")),
+        ("gpt-6-astra", ("act", "discipline")),
+        ("gpt-5.6-terra", ("act", "discipline")),
+        ("z-ai/glm-5.3", ("act", "discipline")),
+        ("claude-opus-5", ()),
+    ],
+)
+def test_app_guidance_uses_fluids_family_resolution(model, expected):
+    """The app's native prompt resolves the model's family the way fluid
+    does: an unknown or stealth id gets the generic pack instead of nothing,
+    gpt-oss keeps both blocks, and GPT, GLM and Claude ids are unchanged."""
+    import app.core.provider.harness_adapter as ha
+    from fluid.cli.prompt import (
+        ACT_GUIDANCE_BLOCK,
+        DISCIPLINE_GUIDANCE_BLOCK,
+        USER_DIRECTIVE_GUIDANCE_BLOCK,
+    )
+
+    names = {
+        ACT_GUIDANCE_BLOCK: "act",
+        DISCIPLINE_GUIDANCE_BLOCK: "discipline",
+        USER_DIRECTIVE_GUIDANCE_BLOCK: "directive",
+    }
+    assert tuple(names[b] for b in ha._model_guidance_blocks(model)) == expected
+
+    compiled = ha.HarnessAdapter._compile_prompt_sections(
+        "base", None, _native_opts(model=model)
+    )
+    texts = [section.text for section in compiled.sections]
+    for block, name in names.items():
+        assert (block in texts) is (name in expected)
+
+
 def test_guidance_bytes_are_stable_for_one_model():
     """Prompt-prefix caching: the same model must compile to identical text."""
     import app.core.provider.harness_adapter as ha
