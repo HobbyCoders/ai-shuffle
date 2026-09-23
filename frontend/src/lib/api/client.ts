@@ -303,10 +303,12 @@ export interface AuthStatus {
 	local_access?: boolean;
 	owner_linked?: boolean;
 	credential_storage?: { ready: boolean; state: string };
+	/** The Claude Code CLI reports a login (`claude auth status`). */
 	claude_authenticated: boolean;
-	/** True only when the Claude OAuth token is present AND not expired.
-	 *  May be undefined on older backends — treat undefined as "unknown". */
+	/** Same as claude_authenticated; kept for older clients. */
 	claude_token_valid?: boolean;
+	/** The CLI probe. Account fields only for a caller signed in to the worker. */
+	claude_cli?: Partial<import('./claude-cli').ClaudeCliStatus> & { installed: boolean; signed_in: boolean | null };
 	/** True when ANY usable credential exists: the Claude subscription login OR
 	 *  at least one enabled model provider with a stored credential (PA10).
 	 *  May be undefined on older backends — fall back to claude_authenticated. */

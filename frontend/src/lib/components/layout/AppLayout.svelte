@@ -23,6 +23,7 @@
 	import Sidebar from './Sidebar.svelte';
 	import CredentialStorageBanner from '../CredentialStorageBanner.svelte';
 	import LicenseBanner from '../LicenseBanner.svelte';
+	import ClaudeReloginBanner from '../ClaudeReloginBanner.svelte';
 
 	interface Props {
 		isAdmin?: boolean;
@@ -123,6 +124,7 @@
 <div class="app-shell" class:narrow>
 	<CredentialStorageBanner />
 	<LicenseBanner />
+	<ClaudeReloginBanner />
 
 	<div class="app-body">
 		{#if sidebarFloating}

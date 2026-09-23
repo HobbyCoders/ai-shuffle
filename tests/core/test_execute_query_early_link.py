@@ -73,8 +73,6 @@ def engine_mocks():
         qe, "reconcile_memory", _noop
     ), patch.object(
         qe, "push_memory", _noop
-    ), patch.object(
-        qe.direct_oauth, "ensure_fresh_credentials", _noop
     ):
         mock_db.get_session.return_value = session_row
         yield mock_db

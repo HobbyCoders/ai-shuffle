@@ -523,9 +523,6 @@ def _ack_chat_patches(stack, pool):
         return {"id": "row-1"}
 
     stack.enter_context(_patch.object(_qe, "run_sync", new=_AsyncMock(side_effect=_fake_run_sync)))
-    oauth = _MagicMock()
-    oauth.ensure_fresh_credentials = _AsyncMock()
-    stack.enter_context(_patch.object(_qe, "direct_oauth", new=oauth))
     options = _MagicMock()
     options.include_partial_messages = True
     options.cwd = None

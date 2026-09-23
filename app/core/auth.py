@@ -5,21 +5,17 @@ Authentication service for AI Hub
 import os
 import sys
 import shutil
-import secrets
 import logging
 import subprocess
-import json
 import time
 import asyncio
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
 
 import bcrypt
 
 from app.db import database
 from app.core.config import settings
-from app.core.oauth import direct_oauth
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +122,6 @@ class AuthService:
         self._gh_web_login_process: Optional[subprocess.Popen] = None
         self._gh_web_login_error: Optional[str] = None
 
-        # Note: OAuth state is now managed by direct_oauth module (app/core/oauth.py)
 
     # =========================================================================
     # Web UI Authentication
@@ -173,212 +168,53 @@ class AuthService:
     # =========================================================================
 
     def is_claude_authenticated(self) -> bool:
+        """Whether the stock CLI reports a login (``claude auth status``).
+
+        Never reads the CLI's credential files; the answer is the CLI's own,
+        briefly cached by ``claude_cli_status``.
         """
-        Check if Claude CLI is authenticated with valid (non-expired) credentials.
-
-        Uses the direct_oauth module to check token expiry, not just file existence.
-        """
-        # Use the oauth module's check which validates token expiry
-        if direct_oauth.has_valid_credentials():
-            logger.debug("Valid Claude credentials found")
-            # Ensure onboarding is marked complete when credentials exist
-            self._ensure_onboarding_complete()
-            return True
-
-        # Fall back to checking if credentials file exists at all
-        # (in case user authenticated via CLI directly)
-        creds_file = self.config_dir / '.credentials.json'
-
-        if not creds_file.exists():
-            logger.debug("Credentials file does not exist")
-            return False
-
-        # Check if file has content
-        if creds_file.stat().st_size == 0:
-            logger.debug("Credentials file is empty")
-            return False
-
-        # File exists but may have expired tokens - still return True
-        # so the UI knows credentials exist (even if expired)
-        # The UI can show a "reconnect" option
-        logger.debug("Credentials file exists (token may be expired)")
-        self._ensure_onboarding_complete()
-        return True
+        from app.core import claude_cli_status
+        return claude_cli_status.is_signed_in_cached()
 
     def validate_claude_credentials(self) -> Dict[str, Any]:
-        """
-        Validate Claude credentials by running a simple CLI command.
-        This checks if the OAuth token is still valid (not just if the file exists).
-
-        Returns:
-            Dict with 'valid' boolean and 'error' message if invalid.
-        """
-        creds_file = self.config_dir / '.credentials.json'
-
-        # First check if credentials file exists
-        if not creds_file.exists() or creds_file.stat().st_size == 0:
-            return {
-                "valid": False,
-                "authenticated": False,
-                "error": "No credentials file found"
-            }
-
-        try:
-            home_env = os.environ.get('HOME', str(Path.home()))
-
-            # Find claude executable
-            claude_cmd = find_claude_executable()
-            if not claude_cmd:
-                return {
-                    "valid": False,
-                    "authenticated": True,  # File exists but can't validate
-                    "error": "Claude CLI not found"
-                }
-
-            use_shell = sys.platform == 'win32' and claude_cmd.endswith('.cmd')
-
-            # Run 'claude --version' or a simple non-interactive command
-            # to check if credentials are valid
-            result = subprocess.run(
-                [claude_cmd, '--version'] if not use_shell else f'"{claude_cmd}" --version',
-                capture_output=True,
-                text=True,
-                timeout=10,
-                shell=use_shell,
-                env={**os.environ, 'HOME': home_env}
-            )
-
-            # If this works, credentials are likely valid
-            # Note: --version doesn't actually validate OAuth, but if the CLI
-            # is configured and works, that's a good sign
-            if result.returncode == 0:
-                return {
-                    "valid": True,
-                    "authenticated": True,
-                    "version": result.stdout.strip() if result.stdout else None
-                }
-            else:
-                # Check if error indicates auth issue
-                error_output = result.stderr.lower() if result.stderr else ''
-                if 'unauthorized' in error_output or 'auth' in error_output or 'expired' in error_output:
-                    return {
-                        "valid": False,
-                        "authenticated": True,  # File exists but token expired
-                        "error": "Credentials may be expired",
-                        "details": result.stderr
-                    }
-                return {
-                    "valid": True,  # Assume valid if not auth error
-                    "authenticated": True
-                }
-
-        except subprocess.TimeoutExpired:
-            return {
-                "valid": False,
-                "authenticated": True,
-                "error": "CLI command timed out"
-            }
-        except Exception as e:
-            logger.error(f"Error validating Claude credentials: {e}")
-            return {
-                "valid": False,
-                "authenticated": True,
-                "error": str(e)
-            }
-
-    def _ensure_onboarding_complete(self):
-        """
-        Ensure settings.json has hasCompletedOnboarding=true.
-        This prevents the CLI from showing the onboarding wizard when
-        spawning interactive terminals (like /rewind).
-        """
-        settings_file = self.config_dir / 'settings.json'
-
-        try:
-            # Read existing settings or start with empty dict
-            if settings_file.exists():
-                with open(settings_file, 'r') as f:
-                    settings_data = json.load(f)
-            else:
-                settings_data = {}
-
-            # Only update if not already set
-            if not settings_data.get('hasCompletedOnboarding'):
-                settings_data['hasCompletedOnboarding'] = True
-
-                # Set default theme if not present
-                if 'theme' not in settings_data:
-                    settings_data['theme'] = 'dark'
-
-                # Write back
-                with open(settings_file, 'w') as f:
-                    json.dump(settings_data, f, indent=2)
-
-                logger.info("Set hasCompletedOnboarding=true in settings.json")
-        except Exception as e:
-            logger.warning(f"Could not update settings.json: {e}")
+        """Ask the CLI again, bypassing the cache."""
+        from app.core import claude_cli_status
+        status = claude_cli_status.get_status(force=True)
+        result: Dict[str, Any] = {
+            "valid": bool(status.signed_in),
+            "authenticated": bool(status.signed_in),
+            "version": status.cli_version,
+        }
+        if status.error:
+            result["error"] = status.error
+        elif not status.signed_in:
+            result["error"] = "The Claude Code CLI is not signed in"
+        return result
 
     def get_claude_token_status(self) -> Dict[str, Any]:
+        """Token-shaped view of the CLI probe, for callers of the old fields.
+
+        The CLI owns and refreshes its token; AI Shuffle no longer reads it,
+        so expiry and refresh-token presence are unknown.
         """
-        Inspect the on-disk Claude OAuth credential and report token validity.
-
-        Unlike ``is_claude_authenticated()`` (which returns True whenever a
-        non-empty credentials file exists, even if the token is expired), this
-        reports whether the access token is actually usable:
-
-            - token_valid: True only if a non-expired access token is present
-              (delegates to direct_oauth.has_valid_credentials()).
-            - expired:     True when credentials exist but the token is past
-              (or within the 5-min buffer of) its expiry.
-            - expires_at:  Unix timestamp in milliseconds, if known.
-            - has_refresh_token: whether a refresh token is present to renew it.
-
-        A credential with an empty refresh token AND an expired access token is
-        unrecoverable without a fresh login (force_reauth) — this is exactly the
-        "401 Invalid authentication credentials" failure mode.
-        """
-        token_valid = direct_oauth.has_valid_credentials()
-        expires_at: Optional[int] = None
-        has_refresh_token = False
-        expired = False
-
-        creds_file = self.config_dir / '.credentials.json'
-        try:
-            if creds_file.exists() and creds_file.stat().st_size > 0:
-                data = json.loads(creds_file.read_text())
-                oauth_data = data.get("claudeAiOauth", {}) or {}
-                expires_at = oauth_data.get("expiresAt")
-                has_refresh_token = bool(oauth_data.get("refreshToken"))
-                if not token_valid and oauth_data.get("accessToken"):
-                    # Credentials present but not valid → treat as expired/invalid.
-                    expired = True
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"Could not read Claude credentials for token status: {e}")
-
+        signed_in = self.is_claude_authenticated()
         return {
-            "token_valid": token_valid,
-            "expired": expired,
-            "expires_at": expires_at,
-            "has_refresh_token": has_refresh_token,
+            "token_valid": signed_in,
+            "expired": False,
+            "expires_at": None,
+            "has_refresh_token": None,
         }
 
     def get_claude_auth_info(self) -> Dict[str, Any]:
-        """Get Claude CLI authentication info.
-
-        ``authenticated`` is kept as-is (file-exists semantics) for back-compat,
-        but the payload is enriched with honest token-validity fields so the UI
-        can distinguish "connected & valid" from "credentials present but
-        expired/invalid" and offer a re-authenticate path.
-        """
+        """Get Claude CLI authentication info, as the CLI reports it."""
         token_status = self.get_claude_token_status()
         return {
-            "authenticated": self.is_claude_authenticated(),
+            "authenticated": token_status["token_valid"],
             "token_valid": token_status["token_valid"],
-            "expired": token_status["expired"],
-            "expires_at": token_status["expires_at"],
-            "has_refresh_token": token_status["has_refresh_token"],
+            "expired": False,
+            "expires_at": None,
+            "has_refresh_token": None,
             "config_dir": str(self.config_dir),
-            "credentials_file": str(self.config_dir / '.credentials.json')
         }
 
     def get_login_instructions(self) -> Dict[str, Any]:
@@ -393,83 +229,61 @@ class AuthService:
             "status": "not_authenticated",
             "message": "Claude Code login required",
             "instructions": [
-                "1. Access the container: docker exec -it claude-sdk-agent /bin/bash",
-                "2. Run: claude login",
-                "3. Follow the OAuth prompts in your browser",
-                "4. Return here and refresh"
+                "1. Sign in from Settings > Providers > Claude Code CLI, or open a terminal where AI Shuffle runs",
+                "2. Run: claude auth login (Docker: docker exec -it -u appuser <container> claude auth login)",
+                "3. Open the link it prints and sign in on Anthropic's page",
+                "4. Return here and check again"
             ],
-            "command": "docker exec -it claude-sdk-agent claude login"
+            "command": "claude auth login"
         }
 
     def claude_logout(self) -> Dict[str, Any]:
-        """Logout from Claude CLI"""
-        creds_file = self.config_dir / '.credentials.json'
-        cli_success = False
-        cli_error = None
+        """Sign the CLI out with its own command, `claude auth logout`.
 
+        AI Shuffle never deletes or edits the CLI's credential files; if the
+        CLI cannot sign out, the error is reported and nothing else happens.
+        """
+        from app.core import claude_cli_status
         try:
-            home_env = os.environ.get('HOME', str(Path.home()))
-
-            # Find claude executable
-            claude_cmd = find_claude_executable()
-            if claude_cmd:
-                use_shell = sys.platform == 'win32' and claude_cmd.endswith('.cmd')
-
-                result = subprocess.run(
-                    [claude_cmd, 'logout'] if not use_shell else f'"{claude_cmd}" logout',
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    shell=use_shell,
-                    env={**os.environ, 'HOME': home_env}
-                )
-
-                if result.returncode == 0:
-                    cli_success = True
-                else:
-                    cli_error = result.stderr
-            else:
-                cli_error = "Claude CLI not found"
-
+            status = claude_cli_status.get_status()
+            claude_cmd = status.binary_path
+            if not claude_cmd:
+                return {"success": False, "message": "Logout failed",
+                        "error": status.error or "Claude CLI not found"}
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")}
+            result = subprocess.run(
+                [claude_cmd, 'auth', 'logout'],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                stdin=subprocess.DEVNULL,
+                env=env,
+            )
         except Exception as e:
             logger.error(f"Claude logout CLI error: {e}")
-            cli_error = str(e)
+            return {"success": False, "message": "Logout failed", "error": str(e)}
+        finally:
+            claude_cli_status.invalidate()
 
-        # Fallback: directly delete credentials file if it still exists
-        file_deleted = False
-        if creds_file.exists():
-            try:
-                creds_file.unlink()
-                file_deleted = True
-                logger.debug(f"Deleted credentials file: {creds_file}")
-            except Exception as e:
-                logger.error(f"Failed to delete credentials file: {e}")
-                if not cli_success:
-                    return {
-                        "success": False,
-                        "message": "Logout failed",
-                        "error": f"CLI error: {cli_error}. File deletion error: {e}"
-                    }
-
-        # Success if either CLI succeeded or file was deleted/doesn't exist
-        if cli_success or file_deleted or not creds_file.exists():
-            # Clear the per-install active-account pointer so status reflects the
-            # logout. Rows are intentionally KEPT — logout != forget accounts.
-            try:
-                from app.core import claude_accounts as _accounts
-                _accounts._set_active_account_id(None)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Could not clear active Claude account on logout: {e}")
-            return {
-                "success": True,
-                "message": "Logged out from Claude Code"
-            }
-        else:
+        if result.returncode != 0:
             return {
                 "success": False,
                 "message": "Logout failed",
-                "error": cli_error or "Unknown error"
+                "error": (result.stderr or result.stdout or "claude auth logout failed").strip(),
             }
+        # Signing out is the first half of the one-time re-login the upgrade
+        # notice asks for; the panel then offers Sign in.
+        try:
+            from app.core import claude_relogin_notice
+            if claude_relogin_notice.pending():
+                claude_relogin_notice.dismiss()
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not clear the Claude re-login notice", exc_info=True)
+        return {
+            "success": True,
+            "message": "Logged out from Claude Code"
+        }
 
     # =========================================================================
     # GitHub CLI Authentication
@@ -864,136 +678,6 @@ class AuthService:
         """Mark the onboarding flow as complete"""
         database.set_system_setting("onboarding_complete", "true")
         logger.info("Onboarding marked as complete")
-
-    # =========================================================================
-    # Claude Code OAuth Login (Direct OAuth - no PTY/CLI interaction needed)
-    # =========================================================================
-
-    def start_claude_oauth_login(self, force_reauth: bool = False) -> Dict[str, Any]:
-        """
-        Start Claude Code OAuth login using direct OAuth 2.0 + PKCE flow.
-
-        This directly implements the OAuth flow against Anthropic's endpoints,
-        bypassing the need for CLI/PTY interaction. Much more reliable and
-        works on all platforms.
-
-        The flow:
-        1. Generate PKCE code verifier and challenge
-        2. Return OAuth URL for user to visit
-        3. User authenticates and gets authorization code
-        4. User calls complete_claude_oauth_login with code + state
-        5. We exchange code for tokens and write credentials file
-
-        Args:
-            force_reauth: If True, delete existing credentials and force re-authentication.
-
-        Returns:
-            Dict with oauth_url and state on success, or error details on failure.
-        """
-        try:
-            # If force_reauth, delete existing credentials first
-            if force_reauth:
-                creds_file = self.config_dir / '.credentials.json'
-                if creds_file.exists():
-                    try:
-                        creds_file.unlink()
-                        logger.debug(f"Force reauth: deleted credentials file {creds_file}")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete credentials for force reauth: {e}")
-
-            # Check if already authenticated (skip if force_reauth)
-            if not force_reauth and self.is_claude_authenticated():
-                return {
-                    "success": True,
-                    "already_authenticated": True,
-                    "message": "Already authenticated with Claude Code"
-                }
-
-            # Start the direct OAuth flow
-            result = direct_oauth.start_oauth_flow()
-
-            logger.debug(f"Started direct OAuth flow, state: {result['state'][:8]}...")
-
-            return {
-                "success": True,
-                "oauth_url": result["oauth_url"],
-                "state": result["state"],
-                "message": "Open this URL in your browser to authenticate with Claude.",
-                "requires_code": True,
-            }
-
-        except Exception as e:
-            logger.error(f"Claude OAuth login error: {e}", exc_info=True)
-            return {
-                "success": False,
-                "message": "Login failed",
-                "error": str(e)
-            }
-
-    async def complete_claude_oauth_login(self, auth_code: str, state: str) -> Dict[str, Any]:
-        """
-        Complete the Claude OAuth login by exchanging the authorization code for tokens.
-
-        This is the second step of the direct OAuth flow. After the user visits
-        the OAuth URL and authenticates, they receive an authorization code which
-        is exchanged for access/refresh tokens.
-
-        Args:
-            auth_code: The authorization code from the OAuth callback
-            state: The state parameter from the original OAuth request (for PKCE validation)
-
-        Returns:
-            Dict with success status and message.
-        """
-        try:
-            # Complete the OAuth flow (exchanges code, writes credentials)
-            result = await direct_oauth.complete_oauth_flow(auth_code, state)
-
-            if result["success"]:
-                # Also ensure onboarding is marked complete
-                self._ensure_onboarding_complete()
-                logger.debug("Direct OAuth login completed successfully")
-                # Land this fresh single-account login in the DB. If an active
-                # account row already exists, the post-write hook has already
-                # synced it; otherwise this seeds a default account. Never fatal.
-                try:
-                    from app.core.claude_accounts import seed_from_credentials_file
-                    seed_from_credentials_file()
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"Claude account seed after login failed (ignored): {e}")
-
-            return result
-
-        except Exception as e:
-            logger.error(f"Error completing Claude OAuth login: {e}", exc_info=True)
-            return {
-                "success": False,
-                "message": "Failed to complete login",
-                "error": str(e)
-            }
-
-    async def poll_claude_auth_status(self, timeout_seconds: int = 300) -> Dict[str, Any]:
-        """
-        Poll for Claude authentication status after user completes OAuth flow.
-        Returns when authentication is detected or timeout is reached.
-        """
-        start_time = datetime.now()
-        poll_interval = 2  # seconds
-
-        while (datetime.now() - start_time).total_seconds() < timeout_seconds:
-            if self.is_claude_authenticated():
-                return {
-                    "success": True,
-                    "authenticated": True,
-                    "message": "Successfully authenticated with Claude Code"
-                }
-            await asyncio.sleep(poll_interval)
-
-        return {
-            "success": False,
-            "authenticated": False,
-            "message": "Authentication timed out. Please try again."
-        }
 
     # =========================================================================
     # Combined Status

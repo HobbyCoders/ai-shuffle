@@ -39,7 +39,8 @@
 	import GrokKeyFlow from './flows/GrokKeyFlow.svelte';
 	import GrokDeviceFlow from './flows/GrokDeviceFlow.svelte';
 	import ClaudeApiKeyFlow from './flows/ClaudeApiKeyFlow.svelte';
-	import ClaudeSubscriptionFlow from './flows/ClaudeSubscriptionFlow.svelte';
+	import ClaudeCliPanel from '$lib/components/settings/ClaudeCliPanel.svelte';
+	import { isAdmin } from '$lib/stores/auth.svelte';
 	import OpenRouterKeyFlow from './flows/OpenRouterKeyFlow.svelte';
 	import FalAiKeyFlow from './flows/FalAiKeyFlow.svelte';
 	import ProviderModelsFlow from './flows/ProviderModelsFlow.svelte';
@@ -85,7 +86,7 @@
 		'grok-key': 'Grok API key',
 		'grok-sub': 'Grok subscription',
 		'claude-key': 'Anthropic API key',
-		'claude-sub': 'Claude Code subscription',
+		'claude-sub': 'Claude Code CLI',
 		'openrouter-key': 'OpenRouter API key',
 		'fal-key': 'fal.ai API key'
 	};
@@ -96,7 +97,7 @@
 		{ step: 'grok-key', icon: Zap, name: 'Grok API key', subtitle: 'Paste a key and choose your models.' },
 		{ step: 'grok-sub', icon: Sparkles, name: 'Grok subscription', subtitle: 'Sign in with SuperGrok. No key needed.' },
 		{ step: 'claude-key', icon: KeyRound, name: 'Anthropic API key', subtitle: 'Paste an Anthropic key for Claude Code.' },
-		{ step: 'claude-sub', icon: Bot, name: 'Claude Code subscription', subtitle: 'Sign in with your Claude account.' },
+		{ step: 'claude-sub', icon: Bot, name: 'Claude Code subscription', subtitle: 'Sign in to the Claude Code CLI with your own account.' },
 		{ step: 'openrouter-key', icon: Network, name: 'OpenRouter API key', subtitle: 'One key, hundreds of models to choose from.' },
 		{ step: 'fal-key', icon: Sparkles, name: 'fal.ai API key', subtitle: 'Choose models for image, video, audio and 3D tools.' }
 	];
@@ -209,7 +210,11 @@
 			{:else if step === 'claude-key'}
 				<ClaudeApiKeyFlow {onDone} {onCancel} {onBusyChange} />
 			{:else if step === 'claude-sub'}
-				<ClaudeSubscriptionFlow {onDone} {onCancel} {onBusyChange} />
+				<!-- The CLI's own sign-in; nothing here handles a Claude credential. -->
+				<ClaudeCliPanel variant="setup" isAdmin={$isAdmin} onUseApiKey={() => (step = 'claude-key')} />
+				<div class="flex justify-end mt-4">
+					<button type="button" class="btn btn-primary" onclick={onDone}>Done</button>
+				</div>
 			{:else if step === 'openrouter-key'}
 				<OpenRouterKeyFlow {onDone} {onCancel} {onBusyChange} />
 			{:else if step === 'fal-key'}

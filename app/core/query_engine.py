@@ -57,7 +57,6 @@ from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
     requires_reconnect, reconnect_option_names, graceful_disconnect, mark_subprocess_oom_killable,
 )
-from app.core.oauth import direct_oauth
 from app.core.session_title import derive_session_title
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
@@ -889,11 +888,6 @@ async def execute_query(
             profile_id=profile_id
         )
 
-    # Keep the Claude OAuth token alive: refresh it now if it's at/near expiry so
-    # the subprocess we're about to spawn/resume authenticates with a valid token
-    # instead of 401-ing. No-op when the token is still valid or on API-key auth.
-    await direct_oauth.ensure_fresh_credentials()
-
     # Build options with user-scoped credential resolution.
     # A WorktreeUnavailableError propagates here (non-streaming path) just like
     # the ValueErrors above — the caller turns it into an error response rather
@@ -1358,11 +1352,6 @@ async def stream_query(
             entity_id=str(user_msg["id"]),
             data=user_msg
         )
-
-    # Keep the Claude OAuth token alive: refresh it now if it's at/near expiry so
-    # the subprocess we're about to spawn/resume authenticates with a valid token
-    # instead of 401-ing. No-op when the token is still valid or on API-key auth.
-    await direct_oauth.ensure_fresh_credentials()
 
     # Build options with user-scoped credential resolution.
     # WorktreeUnavailableError → refuse to run (never silently in main).
@@ -2120,11 +2109,6 @@ async def _stream_to_websocket_impl(
     # Create a queue for plugin stderr messages to be broadcast to frontend
     # Plugin hooks run in the SDK's async loop but need to send messages to our streaming loop
     stderr_queue: asyncio.Queue = asyncio.Queue()
-
-    # Keep the Claude OAuth token alive: refresh it now if it's at/near expiry so
-    # the subprocess we're about to spawn/resume authenticates with a valid token
-    # instead of 401-ing. No-op when the token is still valid or on API-key auth.
-    await direct_oauth.ensure_fresh_credentials()
 
     # Build options once (without callback — callback is set later if needed).
     # can_use_tool/hooks default to None inside build_options_from_profile, so

@@ -5,7 +5,9 @@
 	 * 1. Start — a clean install, sign in to a Shuffle account to sync settings
 	 *    from your other workers, or join another worker with its invite.
 	 * 2. Workspace — where project checkouts live on this machine.
-	 * 3. Providers & GitHub — model providers and the GitHub login used for
+	 * 3. Claude Code — the stock CLI's own sign-in (`claude auth login`), shown
+	 *    as the CLI reports it, with an API key as the alternative.
+	 * 4. Providers & GitHub — model providers and the GitHub login used for
 	 *    repository features. Both are optional and live in Settings later.
 	 *
 	 * Nothing here waits for an approval on another device: a clean install is
@@ -14,7 +16,7 @@
 	 */
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
-	import { auth, anyCredential, claudeAuthenticated } from '$lib/stores/auth.svelte';
+	import { auth, anyCredential, claudeAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import {
 		getWorkspaceConfig, setupInstallation, setWorkspaceConfig,
 		completeOnboarding
@@ -27,11 +29,13 @@
 	import AddProviderModal from '$lib/components/deck/cards/settings/providers/AddProviderModal.svelte';
 	import AccountPanel from '$lib/components/deck/cards/settings/AccountPanel.svelte';
 	import JoinNetworkPanel from '$lib/components/deck/cards/settings/JoinNetworkPanel.svelte';
+	import ClaudeCliPanel from '$lib/components/settings/ClaudeCliPanel.svelte';
+	import type { ClaudeCliStatus } from '$lib/api/claude-cli';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { Check, FolderOpen, Loader2, Plus, AlertTriangle, ChevronLeft } from 'lucide-svelte';
 
 	// ── Steps ────────────────────────────────────────────────────────────────
-	type SetupStep = 'start' | 'workspace' | 'providers';
+	type SetupStep = 'start' | 'workspace' | 'claude' | 'providers';
 	let currentStep = $state<SetupStep>('workspace');
 	let completedSteps = $state(new Set<SetupStep>());
 	let loadingConfig = $state(true);
@@ -41,6 +45,7 @@
 		const s: { id: SetupStep; label: string }[] = [];
 		if (startStepNeeded) s.push({ id: 'start', label: 'Start' });
 		s.push({ id: 'workspace', label: 'Workspace' });
+		s.push({ id: 'claude', label: 'Claude Code CLI' });
 		s.push({ id: 'providers', label: 'Providers & GitHub' });
 		return s;
 	});
@@ -119,17 +124,26 @@
 		} finally { savingWorkspace = false; }
 	}
 
+	// ── Claude Code CLI ─────────────────────────────────────────────────────
+	let claudeCli = $state<ClaudeCliStatus | null>(null);
+	let addProviderStep = $state<'claude-key' | undefined>(undefined);
+
+	function useApiKey() {
+		addProviderStep = 'claude-key';
+		addProviderOpen = true;
+	}
+
 	// ── Providers & GitHub ──────────────────────────────────────────────────
 	let addProviderOpen = $state(false);
-	// Native Claude credentials and media keys live outside model_providers.
-	const hasClaude = $derived($claudeAuthenticated || providers.current.claudeAccounts.length > 0);
+	// The Claude Code CLI's own login and media keys live outside model_providers.
+	const hasClaude = $derived($claudeAuthenticated);
 	const hasProviders = $derived(hasClaude || providers.current.anthropicKeySet || providers.current.falKeySet || providers.current.providers.length > 0);
 
 	function closeAddProvider() {
 		addProviderOpen = false;
+		addProviderStep = undefined;
 		auth.checkAuth().catch(() => {});
 		providers.refreshProviders().catch(() => {});
-		providers.loadClaudeAccounts(true).catch(() => {});
 		providers.loadIntegrations().catch(() => {});
 	}
 
@@ -212,6 +226,8 @@
 						Your worker is running. Start clean, or bring in the settings you already use.
 					{:else if currentStep === 'workspace'}
 						Choose where project checkouts will be created on this machine
+					{:else if currentStep === 'claude'}
+						Sign in to the Claude Code CLI with your own Claude account, or use an API key
 					{:else}
 						Optional — add model providers and connect GitHub. Everything here is also in Settings.
 					{/if}
@@ -322,7 +338,24 @@
 					</div>
 				</div>
 
-			<!-- ═══ Step 3: Providers & GitHub ═══ -->
+			<!-- ═══ Step 3: Claude Code CLI ═══ -->
+			{:else if currentStep === 'claude'}
+				<div class="space-y-4">
+					<p class="text-sm text-muted-foreground">
+						AI Shuffle runs the standard Claude Code CLI. You sign in to it yourself on Anthropic's own page; AI Shuffle never sees or stores your Claude sign-in.
+					</p>
+					<div class="bg-muted/30 border border-border rounded-lg py-2">
+						<ClaudeCliPanel variant="setup" isAdmin={$isAdmin} onStatus={(s) => (claudeCli = s)} onUseApiKey={useApiKey} />
+					</div>
+					<div class="flex gap-3">
+						<button type="button" onclick={goBack} class="btn btn-secondary flex-1 py-3">Back</button>
+						<button type="button" onclick={() => { completedSteps.add('claude'); advanceStep(); }} class="btn btn-primary flex-1 py-3">
+							{claudeCli?.signed_in || providers.current.anthropicKeySet ? 'Continue' : 'Skip for now'}
+						</button>
+					</div>
+				</div>
+
+			<!-- ═══ Step 4: Providers & GitHub ═══ -->
 			{:else if currentStep === 'providers'}
 				<div class="space-y-6">
 					<div class="space-y-3">
@@ -338,7 +371,7 @@
 								{#if hasClaude}
 									<div class="flex items-center justify-between gap-2 bg-muted/30 border border-border rounded-lg px-3 py-2">
 										<span class="text-sm text-foreground truncate">Claude Code</span>
-										<span class="text-xs text-muted-foreground shrink-0">Subscription added</span>
+										<span class="text-xs text-muted-foreground shrink-0">CLI signed in</span>
 									</div>
 								{/if}
 								{#if providers.current.anthropicKeySet}
@@ -383,7 +416,7 @@
 			{/if}
 
 			{#if addProviderOpen}
-				<AddProviderModal onClose={closeAddProvider} />
+				<AddProviderModal initialStep={addProviderStep} onClose={closeAddProvider} />
 			{/if}
 		{/if}
 	</div>

@@ -21,7 +21,6 @@ from app.core.auth import (
     reset_github_auth_cache,
     set_github_auth_cached,
 )
-from app.core.oauth import direct_oauth
 from app.core import audit_service
 from app.core import auth as _auth_module
 from app.db import database as db
@@ -38,15 +37,6 @@ _auth_module.set_server_instance_id(_SERVER_INSTANCE_ID)
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
 
-def _sync_back_active_account_safe() -> None:
-    """Fire the multi-account sync-back defensively (never breaks status)."""
-    try:
-        from app.core.claude_accounts import sync_back_active_account
-        sync_back_active_account()
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Claude account sync-back on status failed (ignored): {e}")
-
-
 def _has_provider_credential_safe() -> bool:
     """Whether any enabled model-provider row carries a stored credential.
 
@@ -60,15 +50,6 @@ def _has_provider_credential_safe() -> bool:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Provider-credential probe failed (ignored): {e}")
         return False
-
-
-def _seed_claude_account_safe() -> None:
-    """Seed the default Claude account after the encryption key becomes available."""
-    try:
-        from app.core.claude_accounts import seed_from_credentials_file
-        seed_from_credentials_file()
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Claude account seed failed (ignored): {e}")
 
 
 def get_session_token(request: Request) -> Optional[str]:
@@ -367,15 +348,10 @@ async def get_auth_status(request: Request, response: Response = None):
         if token and not owner_auth.local_session(token) and response is not None:
             # Retired cookies must not strand the local browser's WebSocket.
             response.delete_cookie('session')
-    # Self-heal an expiring OAuth token before reporting status, so the UI doesn't
-    # flip to "unauthorized" when a valid refresh token could silently renew it.
-    await direct_oauth.ensure_fresh_credentials()
-    # Observe the on-disk credentials file back into the active account row. This
-    # catches CLI subprocesses self-refreshing the shared file (which bypasses
-    # the post-write hook). The mtime gate makes it a stat() no-op normally.
-    _sync_back_active_account_safe()
-
-    claude_authenticated = auth_service.is_claude_authenticated()
+    # The stock CLI's own answer (`claude auth status`, briefly cached). The CLI
+    # owns and refreshes its token; nothing here reads or renews it.
+    cli = await claude_cli_summary()
+    claude_authenticated = bool(cli["signed_in"])
 
     # ``gh auth status`` is a subprocess with a 10s timeout and this endpoint is
     # polled — run it off the event loop, and only when the shared TTL cache has
@@ -397,6 +373,10 @@ async def get_auth_status(request: Request, response: Response = None):
     pref_identity = (await run_sync(principal_preference_identity, preference_principal)
                      if preference_principal else None)
 
+    # Account details only go to a caller who is signed in to this worker.
+    if not (is_admin_authenticated or is_paired_authenticated):
+        cli = {"installed": cli["installed"], "signed_in": cli["signed_in"]}
+
     return {
         "authenticated": is_admin_authenticated or is_paired_authenticated,
         "local_access": local,
@@ -417,11 +397,9 @@ async def get_auth_status(request: Request, response: Response = None):
         # first-run setup gate on THIS, not on claude auth alone; Claude-CLI
         # auth remains required only for claude-subscription agents.
         "has_any_credential": claude_authenticated or _has_provider_credential_safe(),
-        # Honest token-validity signal: True only when the on-disk Claude OAuth
-        # token is present AND not expired. Lets the UI surface a "token expired —
-        # reconnect" state even though `claude_authenticated` stays True (file
-        # exists) for back-compat.
-        "claude_token_valid": auth_service.get_claude_token_status()["token_valid"],
+        # Kept for older clients: the CLI reports one signed-in state.
+        "claude_token_valid": claude_authenticated,
+        "claude_cli": cli,
         "github_authenticated": github_authenticated,
         "onboarding_complete": auth_service.is_onboarding_complete(),
         "username": username,
@@ -496,39 +474,107 @@ async def logout(request: Request, response: Response):
     return {"status": "ok", "message": "Logged out"}
 
 
+def claude_cli_login_hint() -> dict:
+    """Where the user runs the CLI's own login on this worker."""
+    from app.core.claude_cli_login import terminal_supported
+    from app.core.platform import is_docker_mode
+
+    if os.environ.get("SHUFFLE_DESKTOP") == "1":
+        surface = "desktop"
+    elif is_docker_mode():
+        surface = "docker"
+    else:
+        surface = "local"
+    return {
+        "surface": surface,
+        "terminal": terminal_supported(),
+        "command": "claude auth login",
+        "logout_command": "claude auth logout",
+        "status_command": "claude auth status",
+        "docker_command": "docker exec -it -u appuser <container> claude auth login" if surface == "docker" else None,
+    }
+
+
+async def claude_cli_summary(force: bool = False) -> dict:
+    """The CLI probe plus the login hint, as the status endpoints return it."""
+    from app.core import claude_cli_status
+
+    from app.core import claude_relogin_notice
+
+    status = await claude_cli_status.get_status_async(force)
+    notice = await run_sync(claude_relogin_notice.payload)
+    return {**status.to_dict(), "login": claude_cli_login_hint(), "relogin_notice": notice}
+
+
+@router.get("/claude/cli")
+async def claude_cli_status_route(refresh: bool = False, token: str = Depends(require_auth)):
+    """What `claude auth status` reports: signed in, account, method, plan, version, path.
+
+    ``refresh=true`` runs the CLI again instead of using the brief cache.
+    """
+    return await claude_cli_summary(force=refresh)
+
+
 @router.get("/claude/status")
-async def claude_auth_status():
-    """Get Claude CLI authentication status"""
-    # Renew an expiring OAuth token (using the refresh token) before reporting,
-    # so a short-lived access token doesn't surface as "expired" unnecessarily.
-    await direct_oauth.ensure_fresh_credentials()
-    _sync_back_active_account_safe()
+async def claude_auth_status(refresh: bool = False, token: str = Depends(require_auth)):
+    """The CLI's own sign-in status (same body as /claude/cli plus ``authenticated``)."""
+    cli = await claude_cli_summary(force=refresh)
+    return {**cli, "authenticated": bool(cli["signed_in"])}
 
-    info = auth_service.get_claude_auth_info()
-    # Extend with multi-account fields (keeping every existing field intact).
+
+@router.post("/claude/relogin-notice/dismiss")
+async def dismiss_claude_relogin_notice(token: str = Depends(require_admin)):
+    """Hide the one-time "sign in to the CLI again" notice on this worker."""
+    from app.core import claude_relogin_notice
+    await run_sync(claude_relogin_notice.dismiss)
+    return {"success": True}
+
+
+def _login_terminal_call(fn, *args):
+    """Run a login-terminal action, mapping its refusals to HTTP errors."""
     try:
-        from app.core import claude_accounts as _accounts
-        info["active_account"] = _accounts.get_active_account_summary()
-        info["accounts_count"] = await run_sync(db.count_claude_accounts)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Could not attach Claude account info to status: {e}")
-        info.setdefault("active_account", None)
-        info.setdefault("accounts_count", 0)
-    return info
+        return fn(*args)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:  # includes ClaudeCliMissingError
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
-@router.get("/claude/validate")
-async def validate_claude_credentials(token: str = Depends(require_admin)):
-    """
-    Validate Claude credentials by testing the CLI.
-    Use this to check if OAuth token is still valid (not just if file exists).
+@router.post("/claude/cli-login/start")
+async def claude_cli_login_start(token: str = Depends(require_admin)):
+    """Run the stock CLI's `claude auth login` in the in-app terminal."""
+    from app.core.claude_cli_login import login_terminal
+    return await run_sync(_login_terminal_call, login_terminal.start)
 
-    Returns:
-        - valid: boolean - True if credentials work
-        - authenticated: boolean - True if credentials file exists
-        - error: string - Error message if validation failed
-    """
-    return auth_service.validate_claude_credentials()
+
+@router.get("/claude/cli-login")
+async def claude_cli_login_output(offset: int = 0, token: str = Depends(require_admin)):
+    """Terminal output after *offset*, and whether the login is still running."""
+    from app.core.claude_cli_login import login_terminal
+    return await run_sync(login_terminal.read, max(0, offset))
+
+
+@router.post("/claude/cli-login/input")
+async def claude_cli_login_input(request: Request, token: str = Depends(require_admin)):
+    """Type one line into the running login (the code Anthropic's page shows)."""
+    from app.core.claude_cli_login import login_terminal
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    text = body.get("text") if isinstance(body, dict) else None
+    offset = body.get("offset", 0) if isinstance(body, dict) else 0
+    if not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="text is required")
+    return await run_sync(_login_terminal_call, login_terminal.send, text,
+                          offset if isinstance(offset, int) and offset >= 0 else 0)
+
+
+@router.post("/claude/cli-login/cancel")
+async def claude_cli_login_cancel(token: str = Depends(require_admin)):
+    """Stop the running login."""
+    from app.core.claude_cli_login import login_terminal
+    return await run_sync(login_terminal.cancel)
 
 
 @router.get("/claude/login-instructions")
@@ -537,92 +583,10 @@ async def claude_login_instructions():
     return auth_service.get_login_instructions()
 
 
-@router.post("/claude/login")
-async def claude_login(request: Request, token: str = Depends(require_admin)):
-    """
-    Start Claude Code OAuth login process.
-    Returns an OAuth URL that the user should open in their browser.
-
-    Accepts optional JSON body with:
-    - force_reauth: boolean - If true, delete existing credentials and force re-authentication.
-                             Use when OAuth token has expired or user wants to reconnect.
-    """
-    force_reauth = False
-    try:
-        body = await request.json()
-        force_reauth = body.get("force_reauth", False)
-    except Exception:
-        pass  # No body or invalid JSON, use defaults
-
-    return auth_service.start_claude_oauth_login(force_reauth=force_reauth)
-
-
-@router.get("/claude/login/poll")
-async def claude_login_poll(token: str = Depends(require_admin)):
-    """
-    Poll for Claude authentication status after user completes OAuth flow.
-    Returns when authentication is detected or after a short timeout.
-    """
-    # Short poll - check once with a brief delay for UI responsiveness
-    import asyncio
-    await asyncio.sleep(1)
-    if auth_service.is_claude_authenticated():
-        return {
-            "success": True,
-            "authenticated": True,
-            "message": "Successfully authenticated with Claude Code"
-        }
-    return {
-        "success": False,
-        "authenticated": False,
-        "message": "Not yet authenticated. Continue polling or try again."
-    }
-
-
-@router.post("/claude/complete")
-async def claude_login_complete(request: Request, token: str = Depends(require_admin)):
-    """
-    Complete the Claude OAuth login by providing the authorization code and state.
-
-    After starting the login with /auth/claude/login and getting an OAuth URL,
-    the user visits the URL in their browser, authenticates, and receives a code.
-    They then call this endpoint with that code and the state to complete the login flow.
-
-    Expects JSON body with:
-    - 'code': The authorization code from the OAuth callback
-    - 'state': The state parameter from the original /auth/claude/login response
-    """
-    try:
-        body = await request.json()
-        auth_code = body.get("code")
-        state = body.get("state")
-
-        if not auth_code:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Authorization code is required"
-            )
-        if not state:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="State parameter is required"
-            )
-
-        return await auth_service.complete_claude_oauth_login(auth_code, state)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception("Claude complete login error")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to complete Claude login"
-        )
-
-
 @router.post("/claude/logout")
 async def claude_logout(token: str = Depends(require_admin)):
-    """Logout from Claude CLI"""
-    return auth_service.claude_logout()
+    """Sign the CLI out with `claude auth logout` (never touches its files)."""
+    return await run_sync(auth_service.claude_logout)
 
 
 # =========================================================================
@@ -763,11 +727,12 @@ async def auth_diagnostics(token: str = Depends(require_admin)):
     diagnostics["claude_dir"] = str(claude_dir)
     diagnostics["claude_dir_exists"] = claude_dir.exists()
 
-    if claude_dir.exists():
-        creds_file = claude_dir / '.credentials.json'
-        diagnostics["claude_credentials_exists"] = creds_file.exists()
-        if creds_file.exists():
-            diagnostics["credentials_file_size"] = creds_file.stat().st_size
+    # Sign-in state comes from the CLI itself, not from its files.
+    cli = await claude_cli_summary(force=True)
+    diagnostics["claude_cli_signed_in"] = cli["signed_in"]
+    diagnostics["claude_cli_version"] = cli["cli_version"]
+    if cli["error"]:
+        diagnostics["claude_cli_error"] = cli["error"]
 
     # Check process user
     try:

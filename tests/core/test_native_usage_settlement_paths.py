@@ -173,9 +173,6 @@ def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str) -> None:
     stack.enter_context(patch.object(
         qe, "get_profile", return_value={"id": "default", "config": {}}
     ))
-    oauth = MagicMock()
-    oauth.ensure_fresh_credentials = AsyncMock()
-    stack.enter_context(patch.object(qe, "direct_oauth", new=oauth))
     options = MagicMock()
     options.include_partial_messages = False
     options.cwd = cwd

@@ -352,15 +352,21 @@ def check_claude_cli():
 
 
 def check_claude_auth():
-    """Check if Claude is authenticated (credentials exist from in-app setup)"""
-    creds_file = Path.home() / ".claude" / ".credentials.json"
-    if creds_file.exists():
-        print_status("Claude credentials found", "success")
-        return True
-    else:
-        print_status("Claude not authenticated", "warning")
-        print_status("  You'll be guided through authentication on first launch", "info")
+    """Ask the Claude Code CLI whether it is signed in (`claude auth status`)."""
+    found = shutil.which("claude")
+    if not found:
         return False
+    try:
+        result = subprocess.run([found, "auth", "status"], capture_output=True, text=True,
+                                timeout=15, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is not None and result.returncode == 0:
+        print_status("Claude Code CLI is signed in", "success")
+        return True
+    print_status("Claude Code CLI is not signed in", "warning")
+    print_status("  Run `claude auth login` in a terminal, or use an Anthropic API key in Settings", "info")
+    return False
 
 
 def run_setup():

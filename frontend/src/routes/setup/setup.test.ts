@@ -9,8 +9,8 @@ const mocks = vi.hoisted(() => ({
 	githubStatus: vi.fn(), githubWeb: vi.fn(), githubToken: vi.fn(),
 	hasCredential: false, providers: [] as { id: string; name: string; provider_type: string }[],
 	claudeAuthenticated: false, claudeSubscribers: new Set<(v: boolean) => void>(),
-	claudeAccounts: [] as { id: string }[], anthropicKeySet: false, falKeySet: false,
-	refreshProviders: vi.fn(), loadClaudeAccounts: vi.fn(), loadIntegrations: vi.fn()
+	anthropicKeySet: false, falKeySet: false,
+	refreshProviders: vi.fn(), loadIntegrations: vi.fn()
 }));
 vi.mock('$app/navigation', () => ({ goto: mocks.goto }));
 vi.mock('$lib/api/network', () => ({ getNetworkStatus: mocks.getStatus, createNetwork: mocks.create,
@@ -24,13 +24,15 @@ vi.mock('$lib/stores/auth.svelte', () => ({
 	auth: { checkAuth: mocks.checkAuth, current: { status: { setup_required: true, auth_mode: 'local' } }, logout: vi.fn(),
 		subscribe(run: (v: unknown) => void) { run({ status: { auth_mode: 'local' } }); return () => {}; } },
 	anyCredential: { subscribe(run: (v: boolean) => void) { run(mocks.hasCredential); return () => {}; } },
+	isAdmin: { subscribe(run: (v: boolean) => void) { run(true); return () => {}; } },
 	claudeAuthenticated: { subscribe(run: (v: boolean) => void) { mocks.claudeSubscribers.add(run); run(mocks.claudeAuthenticated); return () => mocks.claudeSubscribers.delete(run); } }
 }));
 vi.mock('$lib/stores/providers.svelte', () => ({ providers: { current: {
-	get providers() { return mocks.providers; }, get claudeAccounts() { return mocks.claudeAccounts; },
+	get providers() { return mocks.providers; },
 	get anthropicKeySet() { return mocks.anthropicKeySet; }, get falKeySet() { return mocks.falKeySet; }
-}, ensureLoaded: vi.fn(), refreshProviders: mocks.refreshProviders, loadClaudeAccounts: mocks.loadClaudeAccounts, loadIntegrations: mocks.loadIntegrations } }));
+}, ensureLoaded: vi.fn(), refreshProviders: mocks.refreshProviders, loadIntegrations: mocks.loadIntegrations } }));
 vi.mock('$lib/components/DirectoryBrowser.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+vi.mock('$lib/components/settings/ClaudeCliPanel.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/deck/cards/settings/providers/AddProviderModal.svelte', () => import('$lib/test-stubs/CompleteProviderModal.svelte'));
 import Setup from './+page.svelte';
 
@@ -49,8 +51,8 @@ let connection: Record<string, unknown>;
 beforeEach(() => {
 	vi.resetAllMocks(); status = fresh(); connection = disconnected; mocks.hasCredential = false; mocks.providers = [];
 	vi.spyOn(window, 'open').mockReturnValue(null);
-	mocks.claudeAuthenticated = false; mocks.claudeAccounts = []; mocks.anthropicKeySet = false; mocks.falKeySet = false;
-	mocks.refreshProviders.mockResolvedValue(undefined); mocks.loadClaudeAccounts.mockResolvedValue(undefined); mocks.loadIntegrations.mockResolvedValue(undefined);
+	mocks.claudeAuthenticated = false; mocks.anthropicKeySet = false; mocks.falKeySet = false;
+	mocks.refreshProviders.mockResolvedValue(undefined); mocks.loadIntegrations.mockResolvedValue(undefined);
 	mocks.getStatus.mockImplementation(async () => status);
 	mocks.create.mockImplementation(async () => { status = enrolled(); return { network: status.network }; });
 	mocks.workspace.mockResolvedValue({ workspace_path: 'D:\\Work', default_path: 'D:\\Work', is_local_mode: true });
@@ -71,13 +73,15 @@ async function cleanInstall() {
 }
 async function continueToProviders() {
 	await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+	// The Claude Code step: sign-in happens in the CLI; skipping is allowed.
+	await screen.findByText(/AI Shuffle runs the standard Claude Code CLI/);
+	await fireEvent.click(screen.getByRole('button', { name: /Skip for now|Continue/ }));
 	await screen.findByRole('button', { name: 'Add provider' });
 }
 
 describe('first-run setup', () => {
-	it.each(['subscription', 'saved-account', 'api-key', 'fal'] as const)('shows a native %s provider without a gateway row', async (kind) => {
+	it.each(['subscription', 'api-key', 'fal'] as const)('shows a native %s provider without a gateway row', async (kind) => {
 		mocks.claudeAuthenticated = kind === 'subscription';
-		mocks.claudeAccounts = kind === 'saved-account' ? [{ id: 'claude' }] : [];
 		mocks.anthropicKeySet = kind === 'api-key'; mocks.falKeySet = kind === 'fal';
 		await cleanInstall(); await continueToProviders();
 		expect(screen.getByText(kind === 'fal' ? 'fal.ai' : kind === 'api-key' ? 'Anthropic' : 'Claude Code')).toBeTruthy();
@@ -96,12 +100,11 @@ describe('first-run setup', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Complete provider connection' }));
 		expect(await screen.findByText('Claude Code')).toBeTruthy();
 		expect(screen.getByText('OpenRouter')).toBeTruthy();
-		expect(screen.getByText('Subscription added')).toBeTruthy();
-		expect(mocks.loadClaudeAccounts).toHaveBeenCalledWith(true);
+		expect(screen.getByText('CLI signed in')).toBeTruthy();
 		expect(mocks.loadIntegrations).toHaveBeenCalledOnce();
 	});
 
-	it('shows sign-in immediately with local and invite alternatives and three steps', async () => {
+	it('shows sign-in immediately with local and invite alternatives and four steps', async () => {
 		render(Setup);
 		expect(await screen.findByRole('button', { name: /Continue without an account/ })).toBeTruthy();
 		expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
@@ -111,8 +114,8 @@ describe('first-run setup', () => {
 		const progress = screen.getByRole('navigation', { name: 'Setup progress' });
 		expect(progress.textContent).toContain('Start');
 		expect(progress.textContent).toContain('Workspace');
+		expect(progress.textContent).toContain('Claude Code CLI');
 		expect(progress.textContent).toContain('Providers & GitHub');
-		expect(screen.queryByText(/Claude Code/)).toBeNull();
 	});
 
 	it.each([false, true])('finishes a clean install with workspace, providers and GitHub only (existing credential: %s)', async (existingCredential) => {
@@ -123,7 +126,7 @@ describe('first-run setup', () => {
 		await continueToProviders();
 		expect(screen.getByText('GitHub', { exact: true })).toBeTruthy();
 		expect(await screen.findByRole('button', { name: 'Sign in with GitHub' })).toBeTruthy();
-		expect(screen.queryByText(/Claude Code/)).toBeNull();
+		expect(screen.queryByText('Claude Code')).toBeNull();
 		expect(screen.queryByText(/Connect Claude/)).toBeNull();
 		if (existingCredential) expect(screen.getByText('My OpenAI account')).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: existingCredential ? 'Finish Setup' : 'Finish without a provider' }));

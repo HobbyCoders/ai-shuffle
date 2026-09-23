@@ -15,16 +15,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ModelProvider } from '$lib/api/model-providers';
-import type { ClaudeAccount } from '$lib/api/auth';
 
 const mocks = vi.hoisted(() => ({
 	listModelProviders: vi.fn(),
 	toggleModelProvider: vi.fn(),
 	hydrateModelRegistry: vi.fn(),
-	listClaudeAccounts: vi.fn(),
-	deleteClaudeAccount: vi.fn(),
-	startAddClaudeAccount: vi.fn(),
-	completeAddClaudeAccount: vi.fn(),
 	getAuthStatus: vi.fn()
 }));
 
@@ -41,10 +36,6 @@ vi.mock('$lib/api/auth', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/api/auth')>();
 	return {
 		...actual,
-		listClaudeAccounts: mocks.listClaudeAccounts,
-		deleteClaudeAccount: mocks.deleteClaudeAccount,
-		startAddClaudeAccount: mocks.startAddClaudeAccount,
-		completeAddClaudeAccount: mocks.completeAddClaudeAccount,
 		getAuthStatus: mocks.getAuthStatus
 	};
 });
@@ -81,10 +72,6 @@ beforeEach(() => {
 	mocks.listModelProviders.mockReset();
 	mocks.toggleModelProvider.mockReset();
 	mocks.hydrateModelRegistry.mockReset();
-	mocks.listClaudeAccounts.mockReset();
-	mocks.deleteClaudeAccount.mockReset();
-	mocks.startAddClaudeAccount.mockReset();
-	mocks.completeAddClaudeAccount.mockReset();
 	mocks.getAuthStatus.mockReset();
 	mocks.hydrateModelRegistry.mockResolvedValue(undefined);
 	mocks.getAuthStatus.mockResolvedValue({ authenticated: true });
@@ -222,159 +209,35 @@ describe('providers store — Anthropic API key integration', () => {
 	});
 });
 
-describe('providers store — Claude single-account lifecycle', () => {
-	function acct(id: string, isActive: boolean): ClaudeAccount {
-		return {
-			id,
-			email: `${id}@example.com`,
-			is_active: isActive,
-			sync_pending: false,
-			expires_at: null,
-			has_refresh_token: true,
-			subscription_type: 'pro'
-		} as unknown as ClaudeAccount;
-	}
-
-	it('disconnectClaude deletes inactive accounts before the active one, then refreshes + re-checks auth', async () => {
-		// Seed three accounts: two inactive, one active.
-		mocks.listClaudeAccounts.mockResolvedValueOnce({
-			accounts: [acct('i1', false), acct('i2', false), acct('a1', true)],
-			active_account_id: 'a1',
-			encryption_ready: true
-		});
-		await providers.loadClaudeAccounts();
-		expect(providers.current.claudeAccounts.length).toBe(3);
-
-		mocks.deleteClaudeAccount.mockResolvedValue(undefined);
-		// After all deletes, the refresh sees an empty list (auth logged out).
-		mocks.listClaudeAccounts.mockResolvedValueOnce({
-			accounts: [],
-			active_account_id: null,
-			encryption_ready: true
-		});
-
-		await providers.disconnectClaude();
-
-		// Every account deleted, inactive first and the active one LAST.
-		expect(mocks.deleteClaudeAccount).toHaveBeenCalledTimes(3);
-		const deletedOrder = mocks.deleteClaudeAccount.mock.calls.map((c) => c[0]);
-		expect(deletedOrder).toEqual(['i1', 'i2', 'a1']);
-		expect(deletedOrder[deletedOrder.length - 1]).toBe('a1');
-
-		// Refresh (2nd list call) + auth re-check both ran.
-		expect(mocks.listClaudeAccounts).toHaveBeenCalledTimes(2);
-		expect(mocks.getAuthStatus).toHaveBeenCalledTimes(1);
-		expect(providers.current.claudeAccounts).toEqual([]);
-		expect(providers.current.accountsError).toBe('');
-	});
-
-	it('disconnectClaude surfaces a failure via accountsError', async () => {
-		mocks.listClaudeAccounts.mockResolvedValueOnce({
-			accounts: [acct('a1', true)],
-			active_account_id: 'a1',
-			encryption_ready: true
-		});
-		await providers.loadClaudeAccounts();
-
-		mocks.deleteClaudeAccount.mockRejectedValueOnce({ detail: 'switch first' });
-
-		await providers.disconnectClaude();
-
-		expect(providers.current.accountsError).toBe('switch first');
-		// No refresh/auth-recheck after the failed delete.
-		expect(mocks.getAuthStatus).not.toHaveBeenCalled();
-	});
-
-	it('completeAddAccount prunes inactive siblings after a successful add', async () => {
-		vi.stubGlobal('open', vi.fn());
-
-		// Open the add-account flow so addAccountState is populated.
-		mocks.startAddClaudeAccount.mockResolvedValueOnce({
-			success: true,
-			oauth_url: 'https://claude.ai/oauth',
-			state: 'st-1'
-		});
-		await providers.startAddAccount();
-		providers.setAddAccountCode('paste-code');
-
-		mocks.completeAddClaudeAccount.mockResolvedValueOnce(undefined);
-		// 1st list (post-complete): the newly-active account plus a stale sibling.
-		mocks.listClaudeAccounts.mockResolvedValueOnce({
-			accounts: [acct('old', false), acct('new', true)],
-			active_account_id: 'new',
-			encryption_ready: true
-		});
-		mocks.deleteClaudeAccount.mockResolvedValue(undefined);
-		// 2nd list (post-prune): only the active account remains.
-		mocks.listClaudeAccounts.mockResolvedValueOnce({
-			accounts: [acct('new', true)],
-			active_account_id: 'new',
-			encryption_ready: true
-		});
-
-		await providers.completeAddAccount();
-
-		// Only the inactive sibling was pruned; the active account was kept.
-		expect(mocks.deleteClaudeAccount).toHaveBeenCalledTimes(1);
-		expect(mocks.deleteClaudeAccount).toHaveBeenCalledWith('old');
-		// Refreshed once after complete, once after pruning.
-		expect(mocks.listClaudeAccounts).toHaveBeenCalledTimes(2);
-		expect(providers.current.claudeAccounts).toEqual([acct('new', true)]);
-
-		vi.unstubAllGlobals();
-	});
-});
-
 describe('providers store — refreshAll silent refetch', () => {
-	function account(id: string): ClaudeAccount {
-		return { id, name: id, email: null, is_active: false } as unknown as ClaudeAccount;
-	}
-
 	it('refetches without raising loading flags when data is already present', async () => {
-		// Seed both clusters so their data is non-empty.
 		mocks.listModelProviders.mockResolvedValue({ providers: [provider({ id: 'p1' })] });
-		mocks.listClaudeAccounts.mockResolvedValue({
-			accounts: [account('a1')],
-			active_account_id: 'a1',
-			encryption_ready: true
-		});
 		vi.stubGlobal(
 			'fetch',
 			vi.fn().mockResolvedValue({ ok: true, json: async () => ({ anthropic_api_key_set: false }) })
 		);
 
 		await providers.loadProviders();
-		await providers.loadClaudeAccounts();
 		expect(providers.current.providers.length).toBe(1);
-		expect(providers.current.claudeAccounts.length).toBe(1);
 
-		// Re-arm the list APIs with in-flight promises so we can inspect state mid-refresh.
+		// Re-arm the list API with an in-flight promise so we can inspect state mid-refresh.
 		let resolveList!: (v: unknown) => void;
-		let resolveAccts!: (v: unknown) => void;
 		mocks.listModelProviders.mockReturnValueOnce(
 			new Promise((r) => {
 				resolveList = r;
 			})
 		);
-		mocks.listClaudeAccounts.mockReturnValueOnce(
-			new Promise((r) => {
-				resolveAccts = r;
-			})
-		);
 
 		const done = providers.refreshAll();
 
-		// Data already present + silent → loading flags never rose.
+		// Data already present + silent → the loading flag never rose.
 		expect(providers.current.providersLoading).toBe(false);
-		expect(providers.current.accountsLoading).toBe(false);
 
 		resolveList({ providers: [provider({ id: 'p1' })] });
-		resolveAccts({ accounts: [account('a1')], active_account_id: 'a1', encryption_ready: true });
 		await done;
 
-		// The refetch still hit the network (list APIs called a second time).
+		// The refetch still hit the network (list API called a second time).
 		expect(mocks.listModelProviders).toHaveBeenCalledTimes(2);
-		expect(mocks.listClaudeAccounts).toHaveBeenCalledTimes(2);
 
 		vi.unstubAllGlobals();
 	});

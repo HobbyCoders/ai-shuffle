@@ -23,7 +23,7 @@ from app.core.cors import configured_origins
 from app.core import desktop_listener  # noqa: F401
 
 # Import API routers
-from app.api import auth, claude_accounts, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, permission_rules, import_export, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, teams, model_registry, computer_use, cluster, notifications, usage, voice
+from app.api import auth, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, permission_rules, import_export, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, teams, model_registry, computer_use, cluster, notifications, usage, voice
 from app.api import voice_context
 from app.api import tools as tools_api
 from app.api import events as events_api
@@ -512,7 +512,6 @@ app.include_router(system.router)
 app.include_router(auth.router)
 from app.api import owner_login
 app.include_router(owner_login.router)
-app.include_router(claude_accounts.router)
 app.include_router(model_providers.router)
 app.include_router(agents.router)
 app.include_router(projects.router)
