@@ -176,9 +176,7 @@ class TelegramConnector(BaseConnector):
         try:
             chat_id = str(message.chat.id)
 
-            # Filter by allowed chat IDs when configured
-            allowed = self.config.get("allowed_chat_ids")
-            if allowed and chat_id not in [str(cid) for cid in allowed]:
+            if not self._chat_allowed(chat_id):
                 logger.debug("Ignoring message from non-allowed chat %s", chat_id)
                 return
 
@@ -197,10 +195,32 @@ class TelegramConnector(BaseConnector):
         except Exception as exc:
             logger.exception("Error handling Telegram message: %s", exc)
 
+    def _chat_allowed(self, chat_id: Optional[str]) -> bool:
+        """True when ``chat_id`` passes the connector's allowlist (if any)."""
+        allowed = self.config.get("allowed_chat_ids")
+        if not allowed:
+            return True
+        return chat_id is not None and chat_id in [str(cid) for cid in allowed]
+
     async def _handle_callback_query(self, callback_query: Any) -> None:
         """Handle inline-keyboard button presses (permission responses)."""
         try:
             data = callback_query.data or ""
+
+            # A button press is a separate update from the message that carried
+            # it: re-check the allowlist, or anyone who can reach the button
+            # (a forwarded message, a group member) could approve tool calls.
+            if data.startswith(("actreq:", "perm:")):
+                message = getattr(callback_query, "message", None)
+                chat = getattr(message, "chat", None)
+                user = getattr(callback_query, "from_user", None)
+                chat_id = getattr(chat, "id", None)
+                if chat_id is None:
+                    chat_id = getattr(user, "id", None)
+                if not self._chat_allowed(str(chat_id) if chat_id is not None else None):
+                    logger.warning("Ignoring Telegram approval from non-allowed chat %s", chat_id)
+                    await callback_query.answer(text="Not allowed")
+                    return
 
             # Destructive-action approval buttons (action gateway)
             if data.startswith("actreq:"):

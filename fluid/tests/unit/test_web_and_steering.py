@@ -11,6 +11,8 @@ from fluid.context.steering import STEER_CLOSE, STEER_OPEN, format_steer
 from fluid.events.ops import Steer, UserTurn
 from fluid.providers.base import ProviderCaps, StreamChunk
 from fluid.tools.builtins.web import (
+    BlockedAddress,
+    PinnedTransport,
     check_url,
     fetch_handler,
     html_to_text,
@@ -37,6 +39,54 @@ def test_check_url_schemes_and_private_hosts() -> None:
     assert check_url("http://localhost:8080") is not None
     assert check_url("https://192.168.1.5/admin") is not None
     assert check_url("https://[::1]/") is not None
+
+
+@pytest.mark.parametrize("address", [
+    "100.64.0.1",        # carrier-grade NAT / Tailscale: not "private", not global
+    "10.0.0.1",
+    "169.254.169.254",   # cloud metadata
+    "[::ffff:10.0.0.1]",
+    "224.0.0.1",
+])
+def test_check_url_refuses_non_public_addresses(address: str) -> None:
+    assert check_url(f"https://{address}/") is not None
+
+
+def test_check_url_allows_public_address() -> None:
+    assert check_url("https://93.184.215.14/") is None
+
+
+async def test_pinned_transport_connects_to_the_vetted_address() -> None:
+    seen: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, text="ok")
+
+    transport = PinnedTransport(
+        inner=httpx.MockTransport(respond),
+        resolver=lambda host: ("93.184.215.14", None),
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        response = await client.get("https://example.com/page")
+    assert response.text == "ok"
+    (request,) = seen
+    assert request.url.host == "93.184.215.14"
+    assert request.headers["host"] == "example.com"
+    assert request.extensions["sni_hostname"] == "example.com"
+
+
+async def test_pinned_transport_refuses_rebound_private_answer() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("request must not be sent")
+
+    transport = PinnedTransport(
+        inner=httpx.MockTransport(respond),
+        resolver=lambda host: (None, "host resolves to a private address"),
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(BlockedAddress):
+            await client.get("https://rebind.example/")
 
 
 # ─── HTML extraction ─────────────────────────────────────────────────────────

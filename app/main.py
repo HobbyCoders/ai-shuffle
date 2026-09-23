@@ -253,7 +253,8 @@ async def lifespan(app: FastAPI):
         from app.core.resource_monitor import reconcile_orphans_once
         orphan_backfill_task = asyncio.create_task(reconcile_orphans_once())
 
-    logger.info(f"API docs: http://localhost:{settings.port}/docs")
+    if settings.api_docs_enabled:
+        logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
     from app.core.provider_usage import provider_usage_monitor
@@ -333,8 +334,11 @@ app = FastAPI(
     description="AI Shuffle web interface and OpenAI-compatible API",
     version=settings.version,
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc"
+    # Off unless API_DOCS_ENABLED=true: these routes are unauthenticated and
+    # map the whole API for anyone who can reach the port.
+    docs_url="/docs" if settings.api_docs_enabled else None,
+    redoc_url="/redoc" if settings.api_docs_enabled else None,
+    openapi_url="/openapi.json" if settings.api_docs_enabled else None,
 )
 
 # Global exception handler — surface actual error details instead of generic

@@ -19,6 +19,19 @@ from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
+# A connector turn runs as the connector's API user: its profile, project and
+# model. Without one there is no owner-chosen agent to run, so the message is
+# refused instead of falling back to whichever profile happens to be first.
+CONNECTOR_NEEDS_API_USER_MESSAGE = (
+    "This connector has no API user bound, so it cannot run the agent. "
+    "The owner needs to bind an API user in the connector settings."
+)
+CONNECTOR_NEEDS_PROFILE_MESSAGE = (
+    "This connector's API user has no agent profile, so it cannot run the agent. "
+    "The owner needs to give that API user a profile."
+)
+
+
 
 class ConnectorManager:
     """Central hub for connector lifecycle, event dispatch, and message routing."""
@@ -177,6 +190,26 @@ class ConnectorManager:
         connector_type = prepared["type"]
         config = prepared["config"]
         cls = prepared["cls"]
+
+        # A chat connector with no sender allowlist hands the agent to anyone
+        # who finds the bot, so it does not start (owner decision D14).
+        from app.core.connector_service import (
+            ALLOWLIST_REQUIRED_MESSAGE,
+            missing_sender_allowlist,
+        )
+
+        if missing_sender_allowlist(connector_type, config):
+            logger.error(
+                "Connector %s (%s) not started: %s",
+                connector_id, connector_type, ALLOWLIST_REQUIRED_MESSAGE,
+            )
+            await run_sync(
+                database.update_connector_status,
+                connector_id, "error",
+                status_message=ALLOWLIST_REQUIRED_MESSAGE,
+                error=ALLOWLIST_REQUIRED_MESSAGE,
+            )
+            return False
 
         # Create the connector instance
         instance = cls(
@@ -519,17 +552,29 @@ class ConnectorManager:
                 except Exception:
                     logger.debug("Mark-as-read failed", exc_info=True)
 
-            def _resolve_routing_blocking() -> Optional[Dict[str, Any]]:
-                """Session lookup/creation + connector row + API user + profile
-                fallback: FIVE contiguous round trips, ONE thread hop.
+            def _resolve_routing_blocking() -> Dict[str, Any]:
+                """Connector row + API user + session lookup/creation: contiguous
+                round trips, ONE thread hop.
 
                 Nothing between them awaits, and the "no session row yet →
                 create one" step is a read-decide-write that must not be split
                 across hops (two inbound messages racing on a fresh chat would
-                otherwise both decide to create the session). ``None`` means
-                "no profiles available" — the caller returns, exactly as the
-                inline code did after logging the same error here.
+                otherwise both decide to create the session). A result with
+                ``refused`` means the connector has no API user (or that user
+                has no agent profile): the turn is refused rather than run on
+                some other profile.
                 """
+                # Determine the API user for this connector
+                connector_row = database.get_connector(message.connector_id)
+                api_user_id = connector_row.get("api_user_id") if connector_row else None
+                api_user = database.get_api_user(api_user_id) if api_user_id else None
+                if not api_user:
+                    return {"refused": CONNECTOR_NEEDS_API_USER_MESSAGE}
+                profile_ids = api_user.get("profile_ids", []) or []
+                profile_id = profile_ids[0] if profile_ids else None
+                if not profile_id:
+                    return {"refused": CONNECTOR_NEEDS_PROFILE_MESSAGE}
+
                 # Look up or create connector session
                 session = database.get_connector_session(
                     message.connector_id, message.platform_chat_id
@@ -545,31 +590,10 @@ class ConnectorManager:
                         platform_user_name=message.platform_user_name,
                     )
 
-                # Determine the API user for this connector
-                connector_row = database.get_connector(message.connector_id)
-                api_user_id = connector_row.get("api_user_id") if connector_row else None
-
-                # Resolve profile / project / run config from the API user
-                api_user = database.get_api_user(api_user_id) if api_user_id else None
-                profile_id = None
-                project_id = None
-                api_user_model = None
-                api_user_effort = None
-                if api_user:
-                    profile_ids = api_user.get("profile_ids", [])
-                    profile_id = profile_ids[0] if profile_ids else None
-                    project_id = api_user.get("project_id")
-                    api_user_model = api_user.get("model")
-                    api_user_effort = api_user.get("effort")
-
-                # Fall back to the first available profile when none is configured
-                if not profile_id:
-                    profiles = database.get_all_profiles()
-                    if profiles:
-                        profile_id = profiles[0]["id"]
-                    else:
-                        logger.error("No profiles available for connector query")
-                        return None
+                # Project and run config come from the same API user.
+                project_id = api_user.get("project_id")
+                api_user_model = api_user.get("model")
+                api_user_effort = api_user.get("effort")
                 return {
                     "session": session,
                     "connector_row": connector_row,
@@ -581,7 +605,19 @@ class ConnectorManager:
                 }
 
             routing = await run_sync(_resolve_routing_blocking)
-            if routing is None:
+            if routing.get("refused"):
+                logger.error(
+                    "Connector %s refused a message from chat %s: %s",
+                    message.connector_id, message.platform_chat_id, routing["refused"],
+                )
+                if instance:
+                    try:
+                        await instance.send_message(OutgoingMessage(
+                            platform_chat_id=message.platform_chat_id,
+                            text=routing["refused"],
+                        ))
+                    except Exception:
+                        logger.debug("Refusal reply failed", exc_info=True)
                 return
             session = routing["session"]
             connector_row = routing["connector_row"]
@@ -824,37 +860,21 @@ class ConnectorManager:
     async def handle_permission_response(
         self, request_id: str, session_id: str, approved: bool
     ) -> None:
-        """Forward a permission approval/denial from a messaging platform.
+        """Ignore a tool approval answered from a messaging platform.
 
-        Connectors (Telegram, Discord, Slack, etc.) send interactive
-        Approve/Deny prompts and invoke this callback when the user presses a
-        button. We translate the boolean into the permission_handler decision
-        and resolve the pending request so the waiting tool call unblocks.
-
-        broadcast_func is None because a connector response has no associated
-        WebSocket UI session; permission_handler tolerates a None broadcaster
-        (all queue-update broadcasts are guarded).
+        Tool approvals for connector sessions are the owner's to answer, in the
+        app (web UI or phone), through the same pending-interaction path as any
+        other session. Chats no longer receive Approve/Deny buttons, but old
+        ones can still sit in chat history, and some connectors parse plain
+        text replies; every such answer ends here and is dropped, so nobody in
+        a chat can approve the agent's tool calls.
         """
-        logger.info(
-            f"Permission response: request={request_id} session={session_id} approved={approved}"
+        logger.warning(
+            "Ignoring a tool approval sent from a connector chat "
+            "(request=%s session=%s approved=%s): approvals are answered in the "
+            "owner's app",
+            request_id, session_id, approved,
         )
-
-        if not request_id or not session_id:
-            logger.warning(
-                "Ignoring connector permission response with missing "
-                f"request_id/session_id (request={request_id!r} session={session_id!r})"
-            )
-            return
-
-        from app.core.permission_handler import permission_handler
-
-        result = await permission_handler.respond(
-            request_id=request_id,
-            session_id=session_id,
-            decision="allow" if approved else "deny",
-            broadcast_func=None,
-        )
-        logger.debug(f"Connector permission response resolved: {result}")
 
     # ------------------------------------------------------------------
     # Public accessors (avoids external code reaching into _connectors)

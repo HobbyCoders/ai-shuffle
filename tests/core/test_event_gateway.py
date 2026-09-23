@@ -84,7 +84,7 @@ def _drive_listen_loop(monkeypatch, gateway, connect_effects, max_sleeps=10):
         connect_calls.append((args, kwargs))
         effect = effects.pop(0) if effects else "fail"
         if effect == "fail":
-            raise OSError('could not translate host name "Pwd@10.0.0.200"')
+            raise OSError('could not translate host name "Xyz@192.0.2.10"')
         conn = MagicMock()
         return conn
 
@@ -103,7 +103,7 @@ def _drive_listen_loop(monkeypatch, gateway, connect_effects, max_sleeps=10):
     record = MagicMock()
     monkeypatch.setattr(type(eg.settings), "get_database_connection", lambda self: {
         "host": "127.0.0.1", "hostaddr": "127.0.0.1", "port": 6543,
-        "user": "aihub", "password": "p@ssPwd", "dbname": "aihub",
+        "user": "aihub", "password": "p@ssXyz", "dbname": "aihub",
     })
     monkeypatch.setattr(eg.psycopg2, "connect", fake_connect)
     monkeypatch.setattr(eg.select, "select", fake_select)
@@ -124,7 +124,7 @@ def test_listen_loop_connects_with_parsed_dsn_kwargs(monkeypatch, gw):
     args, kwargs = calls[0]
     assert args == ()  # no raw-DSN positional argument
     assert kwargs["host"] == kwargs["hostaddr"] == "127.0.0.1"
-    assert kwargs["password"] == "p@ssPwd"
+    assert kwargs["password"] == "p@ssXyz"
     assert kwargs["dbname"] == "aihub"
 
 

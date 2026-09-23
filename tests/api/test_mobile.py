@@ -542,6 +542,27 @@ class TestRegisterPushToken:
 class TestRegisterUnifiedPushEndpoint:
     """Test UnifiedPush endpoint registration."""
 
+    @pytest.fixture(autouse=True)
+    def _public_dns(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.services.push_notification._resolve_public",
+            lambda host: (None, "private") if host[0].isdigit() else ("93.184.215.14", None),
+        )
+
+    @pytest.mark.parametrize("endpoint", ["http://ntfy.sh/up_abc", "https://10.0.0.5/up"])
+    def test_register_rejects_insecure_or_private_endpoint(self, endpoint, client, mock_database, mock_auth):
+        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
+
+        response = client.post(
+            "/api/v1/mobile/push/unifiedpush",
+            json={"device_id": "test-device", "endpoint": endpoint},
+            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
+        )
+
+        assert response.status_code == 400
+        mock_database.update_mobile_device_unifiedpush_endpoint.assert_not_called()
+
     def test_register_endpoint_success(self, client, mock_database, mock_auth):
         """UnifiedPush endpoint registration should succeed."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"

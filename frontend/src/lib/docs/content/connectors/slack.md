@@ -136,7 +136,7 @@ The Slack connector supports the following capabilities:
 | Rich text | Yes | Full Slack `mrkdwn` formatting: bold, italic, strikethrough, code, code blocks, blockquotes, lists, and links |
 | File upload | Yes | Upload files up to the workspace's file size limit (default 1 GB for paid plans) |
 | Threads | Yes | Can create threaded replies and follow conversation threads |
-| Buttons | Yes | Permission prompts are sent as Block Kit messages with Approve / Deny buttons |
+| Buttons | Yes | Used for destructive-action prompts. Tool approvals are answered by the owner in the app; the channel only sees a waiting notice |
 
 **Message Length Limit:** 4,000 characters per message. Messages exceeding this limit are automatically split. Slack has a hard limit of 40,000 characters but recommends keeping messages under 4,000 for readability.
 

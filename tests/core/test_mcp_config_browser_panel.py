@@ -16,10 +16,14 @@ def _set_local_mode(monkeypatch, value: bool) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _clean_ssrf_env(monkeypatch):
+def _clean_ssrf_env(monkeypatch, request):
     """Neither the process env nor the host's real deployment mode leaks in."""
     monkeypatch.delenv("BROWSER_SSRF_ALLOW", raising=False)
     monkeypatch.delenv("BROWSER_SSRF_BLOCK", raising=False)
+    monkeypatch.delenv("BROWSER_SSRF_DENY_PORTS", raising=False)
+    monkeypatch.delenv("BROWSER_LOOPBACK_HOST", raising=False)
+    if "own_address" not in request.node.name:
+        monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: None)
     monkeypatch.setattr(settings, "browser_ssrf_allow_loopback", None, raising=False)
     _set_local_mode(monkeypatch, False)
 
@@ -188,3 +192,44 @@ def test_own_address_is_routable_or_absent(monkeypatch, host, expected):
     monkeypatch.setattr('socket.socket', lambda *args, **kwargs: sock)
     assert mcp_config._own_routable_address() == expected
     sock.close.assert_called()
+
+
+# --- private ranges and the worker's own ports (SEC-12) ------------------------
+
+
+def test_loopback_stand_in_is_allowed_with_automatic_loopback(monkeypatch):
+    """browser-mcp now refuses private addresses by default, so the loopback
+    stand-in (this host's own address) rides on the automatic loopback allow."""
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK + ",172.17.0.5/32"
+
+
+def test_explicit_allow_is_not_widened_by_the_loopback_stand_in(monkeypatch):
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
+    env = mcp_config._build_browser_server_env(
+        {"BROWSER_SSRF_ALLOW": "127.0.0.1/32"}, session_id=None
+    )
+    assert env["BROWSER_SSRF_ALLOW"] == "127.0.0.1/32"
+
+
+def test_stand_in_is_not_allowed_when_loopback_is_off(monkeypatch):
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
+    monkeypatch.setattr(settings, "browser_ssrf_allow_loopback", False, raising=False)
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert "BROWSER_SSRF_ALLOW" not in env
+
+
+def test_worker_ports_are_always_denied(monkeypatch):
+    monkeypatch.setattr(settings, "port", 8000, raising=False)
+    monkeypatch.delenv("SHUFFLE_DESKTOP_PROTECTED_PORT", raising=False)
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_DENY_PORTS"] == "8000,8001"
+
+
+def test_operator_deny_ports_add_to_the_worker_ports(monkeypatch):
+    monkeypatch.setattr(settings, "port", 8000, raising=False)
+    monkeypatch.delenv("SHUFFLE_DESKTOP_PROTECTED_PORT", raising=False)
+    monkeypatch.setenv("BROWSER_SSRF_DENY_PORTS", "9000")
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_DENY_PORTS"] == "8000,8001,9000"

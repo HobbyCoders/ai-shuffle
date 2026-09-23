@@ -238,11 +238,16 @@ async def test_whatsapp_webhook_reads_every_connector_row_in_one_hop(loop_thread
     request = MagicMock()
     request.body = AsyncMock(return_value=b"{}")
     request.json = AsyncMock(return_value={"entry": [{}]})
-    request.headers = {}
+    # Webhooks must be signed with the connector's app secret.
+    import hashlib
+    import hmac
+    request.headers = {
+        "x-hub-signature-256": "sha256=" + hmac.new(b"s3cret", b"{}", hashlib.sha256).hexdigest()
+    }
 
     with patch.object(connectors_api, "database", db), \
          patch("app.core.connectors.manager.connector_manager", manager), \
-         patch("app.core.connector_service.decrypt_config", lambda c, t: {}), \
+         patch("app.core.connector_service.decrypt_config", lambda c, t: {"app_secret": "s3cret"}), \
          _HopCounter(connectors_api) as hops:
         result = await connectors_api.whatsapp_webhook_receive(request)
 

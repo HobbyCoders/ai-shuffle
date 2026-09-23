@@ -5,10 +5,15 @@ Provides structured access to all application documentation including
 connector setup guides, feature documentation, and API reference.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from app.api.auth import require_admin, require_auth
 from app.core.docs_content import docs_index
 
-router = APIRouter(prefix="/api/v1/documentation", tags=["Documentation"])
+router = APIRouter(
+    prefix="/api/v1/documentation",
+    tags=["Documentation"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 @router.get("")
@@ -37,7 +42,7 @@ async def search_documentation(
     return {"query": q, "results": results, "total": len(results)}
 
 
-@router.get("/reload")
+@router.get("/reload", dependencies=[Depends(require_admin)])
 async def reload_documentation():
     """
     Reload documentation from disk.

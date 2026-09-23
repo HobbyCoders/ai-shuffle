@@ -1,18 +1,18 @@
-"""Bridge permission requests from connector-linked sessions out to platforms.
+"""Tell a connector chat that its agent is waiting for the owner's approval.
 
-When a session that a CONNECTOR conversation owns raises a tool permission
-request, the pending-interaction row + WebSocket broadcast is not enough: the
-conversation lives on Discord/Telegram/..., not in the web UI. The connector
-protocol already defines the outbound half — ``send_permission_prompt`` posts
-an interactive Approve/Deny message and the user's button press routes back
-through ``ConnectorManager.handle_permission_response`` →
-``permission_handler.respond`` — but nothing called it.
+Tool approvals for connector-linked sessions belong to the OWNER, not to
+whoever is talking to the bot: the durable ``pending_interactions`` row, the
+WebSocket broadcast and the mobile push created by the permission handler are
+the only ways to answer, exactly as for a web session. The chat gets one line
+saying the agent is waiting, so the person there knows why nothing happens.
+The platform Approve/Deny buttons are no longer sent, and
+``ConnectorManager.handle_permission_response`` ignores any that remain in old
+chat history.
 
-This module is that request-side bridge. It is called best-effort from the
-permission request path: ANY failure (connector not running, platform send
-error, lookup miss) must never break the permission flow itself — the durable
-``pending_interactions`` row still resolves via the web UI, mobile push, or
-the 300-second TTL deny.
+Called best-effort from the permission request path: ANY failure (connector
+not running, platform send error, lookup miss) must never break the
+permission flow itself. An unanswered request still ends with the 300-second
+TTL deny.
 """
 
 import logging
@@ -28,16 +28,16 @@ async def deliver_permission_prompt(
     tool_input: Dict[str, Any],
     description: str,
 ) -> None:
-    """Fan a permission request out to every connector linked to ``session_id``.
+    """Post the "waiting for the owner" line to every chat linked to ``session_id``.
 
     Looks up the connector sessions bound to the AI session, resolves each
-    RUNNING connector instance, and asks it to render the interactive prompt
-    on the platform chat that owns the conversation. Fire-and-forget from the
-    caller's perspective: errors are logged, never raised.
+    RUNNING connector instance, and sends a plain one-line message to the
+    platform chat that owns the conversation. No buttons: approval happens in
+    the owner's app. Fire-and-forget from the caller's perspective: errors are
+    logged, never raised.
     """
     try:
-        from app.core.connectors.base import PermissionPrompt
-        from app.db import database
+        from app.core.connectors.base import OutgoingMessage
         from app.core.connectors.manager import connector_manager
     except Exception:  # noqa: BLE001 — imports must never break the flow
         logger.debug("connector_permissions: imports unavailable", exc_info=True)
@@ -55,13 +55,7 @@ async def deliver_permission_prompt(
     if not connector_sessions:
         return
 
-    prompt = PermissionPrompt(
-        request_id=request_id,
-        session_id=session_id,
-        tool_name=tool_name,
-        tool_input=tool_input,
-        description=description,
-    )
+    text = waiting_for_owner_text(tool_name)
 
     for cs in connector_sessions:
         connector_id = cs.get("connector_id")
@@ -76,13 +70,13 @@ async def deliver_permission_prompt(
                     "skipping prompt delivery", connector_id,
                 )
                 continue
-            sent = await instance.send_permission_prompt(
-                platform_chat_id, prompt
+            sent = await instance.send_message(
+                OutgoingMessage(platform_chat_id=platform_chat_id, text=text)
             )
             if not sent:
                 logger.warning(
-                    "connector_permissions: %s failed to deliver permission "
-                    "prompt %s to chat %s",
+                    "connector_permissions: %s failed to post the waiting "
+                    "notice for %s to chat %s",
                     connector_id, request_id, platform_chat_id,
                 )
         except Exception:  # noqa: BLE001 — one platform's failure must not
@@ -91,6 +85,11 @@ async def deliver_permission_prompt(
                 "connector_permissions: prompt delivery raised for connector "
                 "%s chat %s", connector_id, platform_chat_id, exc_info=True,
             )
+
+
+def waiting_for_owner_text(tool_name: str) -> str:
+    """The one line a chat sees while its agent waits for the owner."""
+    return f"Waiting for the owner to approve {tool_name}."
 
 
 def _lookup_connector_sessions(session_id):

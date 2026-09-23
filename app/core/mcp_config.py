@@ -144,6 +144,27 @@ def _browser_loopback_host(explicit: Optional[str]) -> Optional[str]:
         return None
 
 
+def _host_cidr(address: str) -> str:
+    """``address`` as a single-host CIDR (``/32`` or ``/128``)."""
+    return f"{address}/128" if ":" in address else f"{address}/32"
+
+
+def _worker_deny_ports(extra: Optional[str]) -> str:
+    """The worker's local and protected listener ports, plus any extras."""
+    ports = {str(settings.port)}
+    try:
+        from app.serve import configured_remote_port
+
+        ports.add(str(configured_remote_port(os.environ)))
+    except Exception:  # pragma: no cover - misconfigured protected port
+        ports.add("8001")
+    desktop_port = os.environ.get("SHUFFLE_DESKTOP_PROTECTED_PORT", "")
+    for token in f"{extra or ''} {desktop_port}".replace(",", " ").split():
+        if token.isdigit():
+            ports.add(token)
+    return ",".join(sorted(ports, key=int))
+
+
 def _build_browser_server_env(
     tool_env: Optional[Dict[str, str]],
     session_id: Optional[str] = None,
@@ -179,13 +200,24 @@ def _build_browser_server_env(
     )
 
     # Loopback egress: injected only when nothing explicit was configured above.
-    ssrf_allow = _browser_ssrf_allow(env.get("BROWSER_SSRF_ALLOW"))
-    if ssrf_allow:
-        env["BROWSER_SSRF_ALLOW"] = ssrf_allow
+    explicit_allow = env.get("BROWSER_SSRF_ALLOW")
+    ssrf_allow = _browser_ssrf_allow(explicit_allow)
 
     loopback_host = _browser_loopback_host(env.get("BROWSER_LOOPBACK_HOST"))
     if loopback_host:
         env["BROWSER_LOOPBACK_HOST"] = loopback_host
+        # browser-mcp refuses private addresses by default. The loopback
+        # stand-in is this host, so it rides on the automatic loopback allow;
+        # an operator's explicit allow-list is left exactly as written.
+        if ssrf_allow and not explicit_allow:
+            ssrf_allow = f"{ssrf_allow},{_host_cidr(loopback_host)}"
+    if ssrf_allow:
+        env["BROWSER_SSRF_ALLOW"] = ssrf_allow
+
+    # The worker's own listeners stay closed to the agent's browser on every
+    # internal address, whatever the allow-list says: a request from inside
+    # the container to them is treated as the owner.
+    env["BROWSER_SSRF_DENY_PORTS"] = _worker_deny_ports(os.environ.get("BROWSER_SSRF_DENY_PORTS"))
 
     if session_id:
         from app.core import browser_panel_registry

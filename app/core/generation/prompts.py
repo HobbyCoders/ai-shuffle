@@ -324,7 +324,7 @@ picks those for that chat.
 | Quick Questions | haiku | default | all |
 | Code Review | sonnet | default | Read, Grep, Glob only |
 | Development | sonnet | acceptEdits | all |
-| Automation | sonnet | bypassPermissions | all |
+| Automation | sonnet | default | all (approve risky tools, or use a narrow allow-list) |
 | Architecture | opus | default | Read, Grep, Glob |
 | Creative Work | sonnet | acceptEdits | all + AI tools |
 

@@ -9,10 +9,12 @@
  * proceed. It performs NO I/O — DNS resolution and request interception live in
  * the browser layer; here we only classify.
  *
- * DESIGN (Workstream A6 of the browser suite plan):
- *   - RFC1918 private ranges are ALLOWED by default. Self-hosted / homelab
- *     operators legitimately browse LAN services (10/8, 172.16/12, 192.168/16,
- *     and IPv6 unique-local fc00::/7).
+ * DESIGN (Workstream A6 of the browser suite plan, tightened for SEC-12):
+ *   - Private network ranges are BLOCKED by default: RFC1918 (10/8, 172.16/12,
+ *     192.168/16), carrier-grade NAT 100.64/10 (Tailscale) and IPv6
+ *     unique-local fc00::/7. A page the agent visits must not be able to reach
+ *     the user's router, NAS or this app's own LAN listener. Operators who
+ *     want the agent on specific LAN services list them in BROWSER_SSRF_ALLOW.
  *   - Cloud metadata (169.254.0.0/16, notably 169.254.169.254) is ALWAYS blocked
  *     and CANNOT be re-enabled through the allow-list — it is the credential
  *     theft vector and there is no legitimate reason for the browser agent to
@@ -32,8 +34,12 @@
  *   1. Always-block set (cloud metadata 169.254.0.0/16). Non-overridable.
  *   2. BROWSER_SSRF_BLOCK env entries. Win over the allow-list.
  *   3. BROWSER_SSRF_ALLOW env entries. Override the default-block set below.
- *   4. Default-block set (loopback, IPv6 link-local, 0.0.0.0/8).
- *   5. Default allow (RFC1918, fc00::/7, and all public addresses).
+ *   4. Default-block set (loopback, private ranges, IPv6 link-local, 0.0.0.0/8).
+ *   5. Default allow (public addresses).
+ *
+ * BROWSER_SSRF_DENY_PORTS names ports (the AI Shuffle worker's own listeners)
+ * that stay blocked on every non-public address, even one the allow-list opens.
+ * Loopback may be allowed for dev servers; the worker itself never is.
  */
 
 export interface ParsedIp {
@@ -69,6 +75,8 @@ export interface SsrfPolicy {
   allow: LabeledCidr[];
   /** Default blocks, overridable by `allow`. */
   defaultBlock: LabeledCidr[];
+  /** Ports refused on any non-public address (BROWSER_SSRF_DENY_PORTS). */
+  denyPorts: number[];
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +280,15 @@ const DEFAULT_BLOCK: LabeledCidr[] = [
   labeled("fe80::/10", "IPv6 link-local"),
 ];
 
+/** Private network ranges; blocked by default, allowed per entry by the operator. */
+const PRIVATE_BLOCK: LabeledCidr[] = [
+  labeled("10.0.0.0/8", "private network (RFC1918)"),
+  labeled("172.16.0.0/12", "private network (RFC1918)"),
+  labeled("192.168.0.0/16", "private network (RFC1918)"),
+  labeled("100.64.0.0/10", "carrier-grade NAT / Tailscale"),
+  labeled("fc00::/7", "IPv6 unique-local"),
+];
+
 /**
  * Remedy sentences appended to a block reason. A blocked host is a policy
  * decision an operator can change; saying so turns a dead end into one action.
@@ -282,6 +299,16 @@ const REMEDY_DEFAULT_BLOCK =
   "address with the same port. To allow this range permanently the operator sets " +
   "BROWSER_SSRF_ALLOW_LOOPBACK=true (or " +
   'BROWSER_SSRF_ALLOW="127.0.0.0/8,::1/128") and starts a new session';
+
+const REMEDY_PRIVATE_BLOCK =
+  "blocked by default: the agent's browser does not reach the local network " +
+  "unless the operator allows it. To allow a specific LAN service the operator " +
+  'sets BROWSER_SSRF_ALLOW (for example BROWSER_SSRF_ALLOW="192.168.1.20/32") ' +
+  "and starts a new session";
+
+const REMEDY_DENY_PORT =
+  "this is the AI Shuffle worker's own listener, which the agent's browser may " +
+  "never open; there is no configuration that permits it";
 
 const REMEDY_ALWAYS_BLOCK =
   "always blocked and NOT overridable — BROWSER_SSRF_ALLOW cannot re-enable it; " +
@@ -305,17 +332,28 @@ export function compilePolicy(env: NodeJS.ProcessEnv = process.env): SsrfPolicy 
     cidr,
     label: "BROWSER_SSRF_ALLOW",
   }));
-  return { alwaysBlock: ALWAYS_BLOCK, block, allow, defaultBlock: DEFAULT_BLOCK };
+  const denyPorts = (env.BROWSER_SSRF_DENY_PORTS ?? "")
+    .split(/[\s,]+/)
+    .map((t) => Number(t))
+    .filter((n) => Number.isInteger(n) && n > 0 && n <= 65535);
+  return {
+    alwaysBlock: ALWAYS_BLOCK,
+    block,
+    allow,
+    defaultBlock: [...DEFAULT_BLOCK, ...PRIVATE_BLOCK],
+    denyPorts,
+  };
 }
 
 /**
  * Classify a single resolved IP string against the policy. Fails CLOSED: an
  * address we cannot parse is blocked.
  */
-export function classifyIp(ip: string, policy: SsrfPolicy): Verdict {
+export function classifyIp(ip: string, policy: SsrfPolicy, port?: number): Verdict {
   const raw = parseIp(normalizeHost(ip));
   if (!raw) return { blocked: true, reason: `unparseable address "${ip}"` };
   const p = unmap(raw);
+  const internal = firstMatch(p, policy.defaultBlock);
 
   // 1. Always-block (metadata) — cannot be overridden.
   const meta = firstMatch(p, policy.alwaysBlock);
@@ -332,16 +370,22 @@ export function classifyIp(ip: string, policy: SsrfPolicy): Verdict {
     };
   }
 
+  // 2b. The worker's own ports on any internal address. The allow-list cannot
+  // open them: loopback or LAN access to the worker is owner access.
+  if (internal && port !== undefined && (policy.denyPorts ?? []).includes(port)) {
+    return { blocked: true, reason: `port ${port} on ${internal.label}: ${REMEDY_DENY_PORT}` };
+  }
+
   // 3. Operator allow list — overrides the default-block set.
   if (firstMatch(p, policy.allow)) return { blocked: false };
 
   // 4. Default-block set.
-  const def = firstMatch(p, policy.defaultBlock);
-  if (def) {
-    return { blocked: true, reason: `${def.label} ${def.cidr.text}: ${REMEDY_DEFAULT_BLOCK}` };
+  if (internal) {
+    const remedy = PRIVATE_BLOCK.includes(internal) ? REMEDY_PRIVATE_BLOCK : REMEDY_DEFAULT_BLOCK;
+    return { blocked: true, reason: `${internal.label} ${internal.cidr.text}: ${remedy}` };
   }
 
-  // 5. Default allow (RFC1918, fc00::/7, public).
+  // 5. Default allow (public addresses).
   return { blocked: false };
 }
 
@@ -353,6 +397,7 @@ export function describePolicy(policy: SsrfPolicy): string {
     `default-block=${list(policy.defaultBlock)}`,
     `env-block=${list(policy.block)}`,
     `env-allow=${list(policy.allow)}`,
-    "RFC1918/public=allow",
+    `deny-ports=${(policy.denyPorts ?? []).join(",") || "(none)"}`,
+    "public=allow",
   ].join(" ");
 }

@@ -92,9 +92,10 @@ def normalize_database_url(db_url: str) -> str:
     Python's ``urlsplit`` splits userinfo at the LAST ``@``, which is what
     :func:`_parse_legacy_database_url` relies on. A client that splits at the
     FIRST ``@`` can resolve the wrong host when given an unescaped DSN. The observed failure was a
-    worker container reporting ``could not translate host name "Pwd@10.0.0.200"``:
-    libpq had taken the tail of the password as part of the hostname, and the
-    fragment went into the event log with the error.
+    worker container reporting that it could not translate a host name made of
+    the tail of the password plus the real host: libpq had taken part of the
+    password as the hostname, and that fragment went into the event log with
+    the error.
 
     Explicit normalization makes the two readings agree. This pure helper is
     not used to load application database settings; managed descriptors carry
@@ -350,6 +351,9 @@ class Settings(BaseSettings):
 
     # Security - Cookie settings
     cookie_secure: bool = True  # Set to False only for local HTTP development
+    # Interactive API docs (/docs, /redoc, /openapi.json) are unauthenticated,
+    # so they stay off unless a developer sets API_DOCS_ENABLED=true.
+    api_docs_enabled: bool = False
 
     # Local transport access and optional account service share normal Settings
     # precedence: process environment overrides .env; neither is exported to os.environ.

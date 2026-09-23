@@ -33,7 +33,7 @@ class TestGetSensitiveFields:
         assert get_sensitive_fields("discord") == ["bot_token"]
 
     def test_whatsapp_sensitive_fields(self):
-        assert get_sensitive_fields("whatsapp") == ["access_token"]
+        assert get_sensitive_fields("whatsapp") == ["access_token", "app_secret"]
 
     def test_slack_sensitive_fields(self):
         assert get_sensitive_fields("slack") == ["bot_token", "app_token"]
