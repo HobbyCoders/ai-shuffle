@@ -31,10 +31,52 @@ ORIGIN = "https://hobbycoders.com"
 REVISION = re.compile(r"[a-f0-9]{40}")
 DIGEST = re.compile(r"[a-f0-9]{64}")
 MAX_ARCHIVE = 512 * 1024**2
+MAX_NOTES = 4000
+# "0.9.0" on a release, "0.9.0-dev.12+gabc1234" on an edge build.
+VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.+-][A-Za-z0-9.+-]{1,60})?")
+# stable: tagged releases, signed only after the release image passed container
+# verification. edge: every main revision, for the owner's own workers. The
+# channel is inside the signed payload, so the hub cannot relabel an edge build.
+CHANNELS = ("stable", "edge")
 
 
 class UpdateError(Exception):
     pass
+
+
+def tree_lines(files):
+    """Canonical listing signed as the manifest's tree (see scripts/source_archive.py)."""
+    return b"".join(f"{path}\0{digest}\n".encode() for path, digest in sorted(files))
+
+
+def file_digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def verify_tree(directory, manifest):
+    """Re-hash every signed source file before its code is built or run.
+
+    The listing is kept beside the build and must hash to the signed tree
+    digest, and every listed file must still match. Build outputs (venv,
+    node_modules, dist, app/static) are not in the listing; they are rebuilt
+    from these files and are not covered.
+    """
+    tree = manifest.get("tree")
+    if not tree:
+        raise UpdateError("This application build has no signed source tree; install a newer image")
+    try:
+        listing = (directory / "tree.txt").read_bytes()
+    except FileNotFoundError:
+        raise UpdateError("Application source listing is missing; download the update again") from None
+    if hashlib.sha256(listing).hexdigest() != tree:
+        raise UpdateError("Application source listing does not match the signed release")
+    source = directory / "source"
+    for line in listing.decode().splitlines():
+        relative, digest = line.split("\0")
+        path = source.joinpath(*PurePosixPath(relative).parts)
+        if path.is_symlink() or not path.is_file() or file_digest(path) != digest:
+            raise UpdateError("Application source files changed after download; download the update again")
 
 
 def verify_manifest(text, public_key):
@@ -53,6 +95,13 @@ def verify_manifest(text, public_key):
                 or type(result["size"]) is not int or not 0 < result["size"] <= MAX_ARCHIVE
                 or type(result["sequence"]) is not int or not 0 < result["sequence"] < 2**53):
             raise ValueError("invalid fields")
+        # Fields added after format 2 shipped. Older launchers ignore them; this
+        # one requires channel and tree on every download and launch.
+        if ("channel" in result and result["channel"] not in CHANNELS
+                or "tree" in result and not (isinstance(result["tree"], str) and DIGEST.fullmatch(result["tree"]))
+                or "version" in result and not (isinstance(result["version"], str) and VERSION.fullmatch(result["version"]))
+                or "notes" in result and not (isinstance(result["notes"], str) and len(result["notes"]) <= MAX_NOTES)):
+            raise ValueError("invalid release fields")
         container = result.get("container", {})
         if (type(container.get("sequence")) is not int or not 0 < container["sequence"] < 2**53
                 or not DIGEST.fullmatch(container.get("runtime", ""))):
@@ -88,6 +137,7 @@ def extract_source(archive, target, revision):
             raise UpdateError("Unexpected source archive root")
         root = roots.pop()
         target.mkdir()
+        files = []
         for item in entries:
             relative = PurePosixPath(item.filename).parts[1:]
             if not relative:
@@ -97,8 +147,13 @@ def extract_source(archive, target, revision):
                 destination.mkdir(parents=True, exist_ok=True)
             else:
                 destination.parent.mkdir(parents=True, exist_ok=True)
+                digest = hashlib.sha256()
                 with zipped.open(item) as source, destination.open("xb") as output:
-                    shutil.copyfileobj(source, output)
+                    while chunk := source.read(1024 * 1024):
+                        digest.update(chunk)
+                        output.write(chunk)
+                files.append(("/".join(relative), digest.hexdigest()))
+        return files
 
 
 def build_environment(home):
@@ -116,7 +171,11 @@ CHECK_INTERVAL_SECONDS = 24 * 3600
 
 
 class ContainerUpdates:
-    def __init__(self, root, image, public_key, allowed, lifecycle):
+    def __init__(self, root, image, public_key, allowed, lifecycle, channel="stable"):
+        if channel not in CHANNELS:
+            raise UpdateError("Unknown update channel")
+        self.channel = channel
+        self.offer = {}
         self.root = Path(root)
         self.image = image
         self.public_key = public_key
@@ -151,10 +210,14 @@ class ContainerUpdates:
             self.failed()
         pending = self.state.get("pending")
         if pending:
-            staged = self.manifest(pending)["container"]
-            if staged["sequence"] <= self.image["sequence"] or staged["runtime"] != self.image["runtime"]:
+            staged_manifest = self.manifest(pending)
+            staged = staged_manifest["container"]
+            if (staged["sequence"] <= self.image["sequence"] or staged["runtime"] != self.image["runtime"]
+                    or staged_manifest.get("channel") != self.channel):
                 self.state.pop("pending")
                 self.save()
+            else:
+                self.remember(staged_manifest)
         retained = [self.manifest(revision) for revision in
                     {*self.state.get("failed", []), self.state.get("active")} if revision]
         if retained and all(self.image["sequence"] > m["container"]["sequence"] for m in retained):
@@ -182,9 +245,15 @@ class ContainerUpdates:
     def save(self):
         atomic_json(self.state_path, self.state)
 
+    def remember(self, manifest):
+        """The release name and notes shown beside the update button."""
+        self.offer = {"release": manifest.get("version"), "notes": manifest.get("notes")}
+
     def publish(self, phase, message=None, error=None, version=None):
+        offered = self.offer if phase in ("available", "ready", "downloading") else {}
         atomic_json(self.root / "status.json", {"phase": phase, "message": message,
-                    "error": error, "version": (version or self.state.get("pending") or self.running or "")[:12] or None})
+                    "error": error, "version": (version or self.state.get("pending") or self.running or "")[:12] or None,
+                    "release": offered.get("release"), "notes": offered.get("notes"), "channel": self.channel})
 
     def failed(self):
         revision = self.state.pop("booting", None)
@@ -236,8 +305,11 @@ class ContainerUpdates:
         python = directory / "venv/bin/python"
         if not (directory / "complete").is_file() or not (source / "app/static/index.html").is_file() or not python.is_file():
             raise UpdateError("Application build is incomplete")
+        verify_tree(directory, manifest)
         env = dict(env, GIT_SHA=revision, PYTHONNOUSERSITE="1", TOOLS_DIR=str(source / "tools"),
                    BROWSER_MCP_ENTRY=str(source / "browser-mcp/dist/index.js"))
+        if manifest.get("version"):
+            env["APP_VERSION"] = manifest["version"]
         for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
             env.pop(key, None)
         env["PATH"] = str(python.parent) + os.pathsep + env.get("PATH", "")
@@ -251,7 +323,7 @@ class ContainerUpdates:
         self.save()  # after old app stopped, before anything could migrate the DB
 
     def fetch(self, endpoint, destination=None, manifest=None):
-        if not re.fullmatch(r"manifest|sources/[a-f0-9]{40}", endpoint):
+        if not re.fullmatch(r"manifest|manifest/edge|sources/[a-f0-9]{40}", endpoint):
             raise UpdateError("Invalid source endpoint")
         limit = manifest["size"] if manifest else 32768
         chunks, size, digest = [], 0, hashlib.sha256()
@@ -293,18 +365,25 @@ class ContainerUpdates:
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait()
 
-    def build(self, directory, revision):
+    def build(self, directory, revision, version=None):
         source = directory / "source"
         home = directory / "build-home"
         home.mkdir()
         env = build_environment(home)
         env["GITHUB_SHA"] = revision
+        if version:
+            env["APP_VERSION"] = version  # the frontend stamps it into the UI
         python = directory / "venv/bin/python"
+        if not (source / "requirements.lock").is_file():
+            raise UpdateError("This source update has no hash-pinned requirements.lock; install a newer image")
         self.run_build([sys.executable, "-m", "venv", str(directory / "venv")], source, env)
         # pip's 15-second read timeout dropped an 85 MB wheel mid-download on
         # the Unraid host and failed the whole update; allow slow mirrors.
-        self.run_build([str(python), "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10",
-                        "-r", "requirements.txt", "./fluid"], source, env)
+        # Every package, including fluid's build backend, must match a hash in
+        # the signed source's lock, so a hostile index release cannot slip in.
+        pip = [str(python), "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10"]
+        self.run_build(pip + ["--require-hashes", "-r", "requirements.lock"], source, env)
+        self.run_build(pip + ["--no-deps", "--no-build-isolation", "./fluid"], source, env)
         for package in ("frontend", "tools", "browser-mcp"):
             self.publish("downloading", f"Building {package}…", version=revision)
             self.run_build(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], source / package, env)
@@ -319,8 +398,12 @@ class ContainerUpdates:
             self.publish("ready", "Update ready. Choose Update and restart.")
             return
         self.publish("checking")
-        signed = self.fetch("manifest")
+        signed = self.fetch("manifest" if self.channel == "stable" else "manifest/edge")
         manifest = verify_manifest(signed, self.public_key)
+        if manifest.get("channel") != self.channel:
+            raise UpdateError(f"The update feed did not return a signed {self.channel} release")
+        if not manifest.get("tree"):
+            raise UpdateError("The update has no signed source tree; install a newer image")
         revision = manifest["revision"]
         active = self.manifest(self.state["active"])["container"] if self.state.get("active") else self.image
         if revision in (self.state.get("active"), self.image["revision"]) or manifest["container"]["sequence"] <= active["sequence"]:
@@ -329,6 +412,7 @@ class ContainerUpdates:
         if manifest["container"]["runtime"] != self.image["runtime"]:
             self.publish("image-required", "A new Docker image is required for this update.")
             return
+        self.remember(manifest)
         if not download:
             self.publish("available", "An application update is available.", version=revision)
             return
@@ -341,9 +425,13 @@ class ContainerUpdates:
         try:
             self.publish("downloading", "Downloading verified source…", version=revision)
             self.fetch("sources/" + revision, archive, manifest)
-            extract_source(archive, directory / "source", revision)
+            listing = tree_lines(extract_source(archive, directory / "source", revision))
             archive.unlink()
-            self.build(directory, revision)
+            if hashlib.sha256(listing).hexdigest() != manifest["tree"]:
+                raise UpdateError("Source files do not match the signed release")
+            (directory / "tree.txt").write_bytes(listing)
+            self.build(directory, revision, manifest.get("version"))
+            verify_tree(directory, manifest)
             (directory / "release.json").write_bytes(signed)
             if not self.allowed():
                 raise UpdateError("Updates were disabled while preparing; no update was activated")

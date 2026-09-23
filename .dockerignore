@@ -105,6 +105,9 @@ scripts/deploy.sh
 scripts/deploy.ps1
 scripts/hub_domain_preflight.py
 scripts/stage_release.py
+scripts/lock_requirements.sh
+scripts/source_archive.py
+requirements-build.txt
 scripts/verification_evidence.py
 scripts/verify_container_postgres.py
 scripts/verify_shared_pg.py
@@ -118,7 +121,6 @@ mobile/
 redeploy.ps1
 Start AI Shuffle.cmd
 run_local.*
-my-ai-shuffle.xml
 LOCAL_SETUP.md
 CONTRIBUTING.md
 Makefile

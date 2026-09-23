@@ -32,8 +32,11 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       release_tag: ${{ steps.version.outputs.tag }}
+      promote_latest: ${{ steps.promote.outputs.promote_latest }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Normalise release version
         id: version
         # Accept v0.8.5, V0.8.5 or 0.8.5 from the dispatch box; tags are already vX.Y.Z.
@@ -47,6 +50,17 @@ jobs:
           echo "RELEASE_VERSION=$raw" >> "$GITHUB_ENV"
           echo "tag=$normalised" >> "$GITHUB_OUTPUT"
           echo "Releasing $normalised"
+
+      # latest, X.Y and X follow the newest final release only: a patch cut
+      # for an older line, or a prerelease, never moves them.
+      - name: Decide whether this release becomes latest
+        id: promote
+        shell: bash
+        run: |
+          highest="$( { git tag -l 'v[0-9]*'; echo "$VERSION"; } | grep -v -- '-' | sort -V | tail -n 1)"
+          if [[ "$VERSION" != *-* && "$highest" == "$VERSION" ]]; then promote=true; else promote=false; fi
+          echo "promote_latest=$promote" >> "$GITHUB_OUTPUT"
+          echo "$VERSION promotes latest: $promote (newest final release: $highest)"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -66,11 +80,14 @@ jobs:
             |-------|----------|--------------------|
             | **Desktop** | Windows x64 (Intel / AMD) | [Windows installer (.exe)](https://hobbycoders.com/desktop) |
             | **Mobile** | Android 8.0+ | [Get it on Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle) |
-            | **Docker** | Linux amd64 | [Container image](https://github.com/${{ github.repository }}/pkgs/container/ai-shuffle) — `ghcr.io/hobbycoders/ai-shuffle:${{ env.RELEASE_VERSION }}`; see install instructions below |
+            | **Docker** | Linux amd64 | [Container image](https://github.com/orgs/HobbyCoders/packages/container/package/ai-shuffle-server) — `ghcr.io/hobbycoders/ai-shuffle-server:${{ env.RELEASE_VERSION }}` (private); buyers install from `docs/install` |
 
             Docker becomes available after its build and verification finish. Pull it
             from the container registry, not the release assets. Android installs and
             updates are delivered through Google Play, subject to track access and review.
+            In-app updates are offered to installs only after this release's image
+            passed verification and its signed source was published as the stable
+            release.
 
             ### Desktop install
 
@@ -79,8 +96,8 @@ jobs:
             No account is required for desktop downloads or updates. The app runs
             its own worker and persistent PostgreSQL database.
             After that, use Download update and Update and restart inside AI Shuffle.
-            The app fetches the latest code from main and prepares updates in the
-            background. No command prompt, new installer, or tagged release is needed.
+            The app fetches the newest stable release and prepares updates in the
+            background. No command prompt or new installer is needed.
             Desktop installers are opt-in for manually dispatched releases, not built
             for every version. Existing desktop users should update inside the app.
             Other workers are managed inside the app under Devices.
@@ -96,12 +113,17 @@ jobs:
 
             ### Docker install
 
+            The image is private. Customers pull it through their licensed registry
+            path and the files in `docs/install` (compose file and Unraid template).
+            For your own hosts, sign in once with `docker login ghcr.io` using a
+            token that can read the package.
+
             For a **new install**, use Docker Engine on a Linux amd64 host, or Docker
             Desktop with Linux containers on an x64 computer. Run these commands in
             a Bash-compatible terminal:
 
             ```bash
-            docker pull ghcr.io/hobbycoders/ai-shuffle:${{ env.RELEASE_VERSION }}
+            docker pull ghcr.io/hobbycoders/ai-shuffle-server:${{ env.RELEASE_VERSION }}
             docker run -d --name ai-shuffle --restart unless-stopped \
               --stop-timeout 90 --shm-size 1g \
               -p 127.0.0.1:8000:8000 \
@@ -111,7 +133,7 @@ jobs:
               -v ai-shuffle-claude:/home/appuser/.claude \
               -v ai-shuffle-gh:/home/appuser/.config/gh \
               -v ai-shuffle-browser:/home/appuser/chrome-profile \
-              ghcr.io/hobbycoders/ai-shuffle:${{ env.RELEASE_VERSION }}
+              ghcr.io/hobbycoders/ai-shuffle-server:${{ env.RELEASE_VERSION }}
             ```
 
             Open [http://localhost:8000](http://localhost:8000) on the Docker host
@@ -136,7 +158,86 @@ jobs:
     uses: ./.github/workflows/docker-publish.yml
     with:
       release_tag: ${{ needs.create-release.outputs.release_tag }}
+      promote_latest: ${{ needs.create-release.outputs.promote_latest == 'true' }}
     secrets: inherit
+
+  # The published image, pulled from the registry on a fresh GitHub-hosted
+  # runner (nothing from the build runner's cache) and installed with the
+  # buyer compose file. The stable in-app update waits for this.
+  buyer-install:
+    name: Buyer install on a clean runner
+    needs: [create-release, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE: ${{ needs.docker.outputs.image }}
+      RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.create-release.outputs.release_tag }}
+      - name: Pull the published release image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+          docker pull "$IMAGE:${RELEASE_TAG#v}"
+          docker logout ghcr.io
+      - name: Install from docs/install/compose
+        run: python3 scripts/ci/verify_buyer_compose.py --image "$IMAGE:${RELEASE_TAG#v}" --artifacts "$RUNNER_TEMP/buyer-install"
+      - name: Upload install evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 7
+          name: buyer-install-${{ needs.create-release.outputs.release_tag }}
+          path: ${{ runner.temp }}/buyer-install
+          if-no-files-found: ignore
+
+  # The only job that signs an update customers are offered. It runs in the
+  # release-signing environment (required reviewer, deployments only from
+  # v* tags; see docs/ci/release-channels.md), after the release image passed
+  # container verification in docker-publish.yml and the clean-runner buyer
+  # install above. Prereleases are never offered as stable updates.
+  source-stable:
+    name: Sign the stable in-app update
+    needs: [create-release, docker, buyer-install]
+    if: ${{ !contains(needs.create-release.outputs.release_tag, '-') }}
+    runs-on: ubuntu-latest
+    environment: release-signing
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Shares desktop-source.yml's group so D1 pointer writes never interleave.
+    concurrency:
+      group: desktop-source-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.create-release.outputs.release_tag }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: android/hub/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: android/hub
+      - name: Publish the signed stable source release
+        env:
+          SOURCE_CHANNEL: stable
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
+        run: node desktop/scripts/publish-source.mjs
 
   android:
     name: Android Play internal release

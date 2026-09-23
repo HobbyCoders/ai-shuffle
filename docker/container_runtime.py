@@ -624,9 +624,16 @@ def run(settings, action, filename=None):
                         response.raise_for_status()
                         return response.json()
 
+                # Customers follow signed releases. UPDATE_CHANNEL=edge follows
+                # every main revision and is meant for the owner's own workers.
+                channel = os.environ.get("UPDATE_CHANNEL", "stable").strip().lower() or "stable"
+                if channel not in ("stable", "edge"):
+                    log(f"ignoring UPDATE_CHANNEL={channel!r}; following stable releases")
+                    channel = "stable"
                 try:
                     updates = ContainerUpdates(root, image, Path(__file__).with_name("application-update-key.pem").read_bytes(),
-                                               lambda: lifecycle("update-policy").get("allow_updates") is True, lifecycle)
+                                               lambda: lifecycle("update-policy").get("allow_updates") is True, lifecycle,
+                                               channel=channel)
                 except UpdateError as exc:
                     raise RuntimeFailure(str(exc)) from exc
         if os.environ.get("START_CHROME", "1") == "1":

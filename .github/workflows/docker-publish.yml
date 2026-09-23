@@ -9,6 +9,11 @@ on:
         description: 'Rebuild an existing vX.Y.Z tag using the verification tools from this workflow ref'
         required: false
         type: string
+      promote_latest:
+        description: 'Also move latest, X.Y and X to this release (only for the newest final release)'
+        required: false
+        type: boolean
+        default: false
       no_cache:
         description: 'Build without Docker cache (forces full rebuild)'
         required: false
@@ -20,10 +25,19 @@ on:
         description: 'Immutable release tag to build and verify'
         required: true
         type: string
+      promote_latest:
+        description: 'Move latest, X.Y and X to this release after verification'
+        required: false
+        type: boolean
+        default: false
       no_cache:
         required: false
         type: boolean
         default: false
+    outputs:
+      image:
+        description: 'Private image repository the release was pushed to'
+        value: ${{ jobs.build.outputs.image }}
 
 # Serialize a release tag without cancelling a publish; manual branch rebuilds
 # can still supersede each other. Different release versions do not conflict.
@@ -33,7 +47,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: ${{ github.repository_owner }}/ai-shuffle-server
 
 jobs:
   build:
@@ -42,6 +56,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
 
     steps:
       - name: Checkout repository
@@ -94,7 +110,10 @@ jobs:
 
       # Docker requires lowercase image names but github.repository preserves casing
       - name: Lowercase image name
-        run: echo "IMAGE=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+        id: image
+        run: |
+          echo "IMAGE=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+          echo "image=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata (tags, labels)
         id: meta
@@ -103,16 +122,17 @@ jobs:
           images: ${{ env.IMAGE }}
           labels: |
             org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+          # A release always gets its exact version. latest, X.Y and X move
+          # only when the caller promotes a final release (release.yml does);
+          # rebuilding an old tag never drags them backwards. Prereleases
+          # never get X.Y or X (metadata-action skips them).
           tags: |
-            # Tag with 'latest' on main/master branch
-            type=raw,value=latest,enable={{is_default_branch}}
-            # Tag with version on tags (v1.2.3 -> 1.2.3)
-            type=semver,pattern={{version}},value=${{ inputs.release_tag || github.ref_name }}
-            # Tag with major.minor on tags (v1.2.3 -> 1.2)
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release_tag || github.ref_name }}
-            # Tag with major on tags (v1.2.3 -> 1)
-            type=semver,pattern={{major}},value=${{ inputs.release_tag || github.ref_name }}
-            # Tag with branch name (only for push events, not PRs)
+            type=semver,pattern={{version}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' && inputs.promote_latest }}
+            type=semver,pattern={{major}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' && inputs.promote_latest }}
+            type=raw,value=latest,enable=${{ inputs.release_tag != '' && inputs.promote_latest && !contains(inputs.release_tag, '-') }}
+            # Manual main builds are the edge channel.
+            type=raw,value=edge,enable=${{ inputs.release_tag == '' && github.ref == 'refs/heads/main' }}
             type=ref,event=branch,enable=${{ inputs.release_tag == '' }}
             # Tag with git short SHA (simple prefix, works for all events)
             type=raw,value=sha-${{ steps.source.outputs.short_sha }}

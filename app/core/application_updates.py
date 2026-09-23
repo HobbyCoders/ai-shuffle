@@ -82,7 +82,8 @@ def status():
     if root:
         try:
             saved = json.loads((root / "status.json").read_text())
-            result.update({key: saved.get(key) for key in ("phase", "version", "error", "message")})
+            result.update({key: saved.get(key) for key in ("phase", "version", "error", "message",
+                                                           "release", "notes", "channel")})
         except FileNotFoundError:
             result["message"] = "Starting application updater…"
         except (ValueError, TypeError, AttributeError, OSError):
