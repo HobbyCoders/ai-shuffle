@@ -1173,6 +1173,9 @@ class SessionRuntime:
             # Carry the claimed completions to HarnessAdapter so Fluid can clear
             # its durable pending-task state without starting a second wake turn.
             turn_overrides["background_task_completions"] = completion_frames
+        # Fluid records what started the turn on its TurnStarted event; the
+        # adapter maps this app source onto fluid's vocabulary.
+        turn_overrides["turn_source"] = self.source
         # A resumed turn re-runs the engine loop from the session head: no new
         # prompt is sent and no message.user is recorded, so the transcript
         # gains only the answer the failed turn never produced.

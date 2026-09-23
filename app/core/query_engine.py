@@ -1601,6 +1601,9 @@ async def stream_query(
             )
             if asyncio.iscoroutine(prepared):
                 await prepared
+        set_turn_source = getattr(state.adapter, "set_turn_source", None)
+        if callable(set_turn_source):
+            set_turn_source(getattr(options, "aih_turn_source", None))
         await state.adapter.send_query(prompt)
 
         async for message in state.adapter.receive_events():
@@ -2907,6 +2910,9 @@ async def _stream_to_websocket_impl(
             )
             if asyncio.iscoroutine(prepared):
                 await prepared
+        set_turn_source = getattr(state.adapter, "set_turn_source", None)
+        if callable(set_turn_source):
+            set_turn_source(getattr(options, "aih_turn_source", None))
         if resume:
             await state.adapter.send_resume()
         else:

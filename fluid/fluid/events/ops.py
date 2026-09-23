@@ -30,6 +30,10 @@ class UserTurn(Op):
     # Internal durable-delivery marker for an automatic background wake. Hosts
     # normally leave this empty and submit BackgroundTaskFinished instead.
     wake_task_ids: tuple[str, ...] = ()
+    # What started this turn, copied onto its TurnStarted event. One of
+    # fluid.events.model.TURN_SOURCES; hosts that schedule their own wakes set
+    # it so the event log can tell a user's prompt from a wake.
+    source: str = "user"
 
 
 @dataclass(kw_only=True)
@@ -38,6 +42,8 @@ class Resume(Op):
     user node. Valid only when the head is a user-role node the model has
     not answered yet (a text prompt or tool results); otherwise the engine
     ends the turn with an ErrorEvent saying there is nothing to resume."""
+
+    source: str = "user"  # copied onto TurnStarted, as on UserTurn
 
 
 @dataclass(kw_only=True)

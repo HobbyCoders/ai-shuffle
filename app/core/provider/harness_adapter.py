@@ -299,6 +299,25 @@ def _extra_opt(options: SessionOptions, key: str, default: Any = None) -> Any:
         val = options.extra.get(f"omni_{key}", default)
     return val
 
+# App turn source -> fluid ``TurnStarted.source`` (one of
+# ``fluid.events.model.TURN_SOURCES``). Everything not listed is a prompt
+# submitted from outside (the user, the queue, the API, an automation, a
+# failover retry of the user's prompt) and records as "user".
+_FLUID_TURN_SOURCES = {
+    "agent_message": "agent_message",
+    "unpark": "unpark",
+    "unpark_pump": "unpark",
+    "wakeup": "wakeup",
+    "auto_continue": "wakeup",
+    "promotion": "promotion",
+}
+
+
+def fluid_turn_source(app_source: Optional[str]) -> str:
+    """Map an app ``turns.source`` onto fluid's turn-source vocabulary."""
+    return _FLUID_TURN_SOURCES.get(str(app_source or ""), "user")
+
+
 # app permission_mode → fluid PermissionEngine approval policy
 _PERMISSION_POLICY = {
     "bypassPermissions": "never_ask",
@@ -317,6 +336,9 @@ class HarnessAdapter(ProviderAdapter):
         self._connected: bool = False
         self._options: Optional[SessionOptions] = None
         self._sdk_session_id: Optional[str] = None
+        # Fluid turn source for the next send_query/send_resume; see
+        # set_turn_source. Reset to "user" after each submit.
+        self._next_turn_source: str = "user"
         # receive_events replay cursor: fluid's EventBus replays from ``since_seq``,
         # so we advance this per delivered event to avoid re-yielding prior turns.
         self._event_cursor: int = 0
@@ -1366,7 +1388,22 @@ class HarnessAdapter(ProviderAdapter):
         # fluid annotates ``UserTurn.content`` as a list, but its own callers and
         # tests pass the prompt string straight through (the loops normalize it),
         # so the cast bridges the vendor annotation without touching the value.
-        await self._engine.submit(UserTurn(content=cast(Any, content)))
+        await self._engine.submit(UserTurn(
+            content=cast(Any, content), source=self._take_turn_source(),
+        ))
+
+    def set_turn_source(self, app_source: Optional[str]) -> None:
+        """Name what starts the next turn, as an app ``turns.source``.
+
+        Recorded on fluid's TurnStarted event so the event log can tell a
+        user's prompt from a wake. Applies to the next submit only; a caller
+        that never sets it gets "user".
+        """
+        self._next_turn_source = fluid_turn_source(app_source)
+
+    def _take_turn_source(self) -> str:
+        source, self._next_turn_source = self._next_turn_source, "user"
+        return source
 
     def _build_workspace_card(self, options: SessionOptions) -> Optional[str]:
         """The "# Workspace facts" card for this native session, or None.
@@ -1526,7 +1563,7 @@ class HarnessAdapter(ProviderAdapter):
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
         self._mark_turn_floor()
-        await self._engine.submit(Resume())
+        await self._engine.submit(Resume(source=self._take_turn_source()))
 
     def _mark_turn_floor(self) -> None:
         """Record the event head as it stands just before a turn is submitted.

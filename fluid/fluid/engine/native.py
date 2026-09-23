@@ -1466,6 +1466,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._peer_delivery_sealed = False
                 self._turn_task = asyncio.create_task(self._run_turn(UserTurn(
                     content=format_peer_message(op.sender, text).strip(),
+                    source="agent_message",
                 )))
         elif isinstance(op, RespondPermission):
             fut = self._pending_permissions.get(op.request_id)
@@ -1992,6 +1993,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._emit(TurnStarted(
                     session_id=sid, node_id=head.node_id if head else "",
                     turn_id=turn_id, model=self.model, provider=self.provider.name,
+                    source=op.source,
                 ))
                 await self._emit_terminal_with_park(ErrorEvent(
                     session_id=sid,
@@ -2008,7 +2010,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 return
             await self._emit(TurnStarted(
                 session_id=sid, node_id=head.node_id, turn_id=turn_id,
-                model=self.model, provider=self.provider.name,
+                model=self.model, provider=self.provider.name, source=op.source,
             ))
             blocked, _ = await self._turn_start_hook(
                 sid, turn_id, head.message.text(), with_context=False
@@ -2044,7 +2046,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         node_id = new_id("node")
         await self._emit(TurnStarted(
             session_id=sid, node_id=node_id, turn_id=turn_id,
-            model=self.model, provider=self.provider.name,
+            model=self.model, provider=self.provider.name, source=op.source,
         ))
         blocked, hook_context = await self._turn_start_hook(sid, turn_id, prompt_text)
         if blocked:
