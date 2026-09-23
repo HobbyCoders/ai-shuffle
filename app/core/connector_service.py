@@ -440,6 +440,56 @@ async def test_connector(connector_id: str) -> Dict:
 # Connector type metadata
 # ---------------------------------------------------------------------------
 
+# Chat connectors where anyone who finds the bot can message it. Each must have
+# at least one of these allowlist fields filled before it may start (owner
+# decision D14). Discord and Slack only filter by server/channel, so a channel
+# allowlist counts; LINE's group list does not cover direct messages, so only
+# its user list counts.
+SENDER_ALLOWLIST_KEYS: Dict[str, tuple] = {
+    "telegram": ("allowed_chat_ids",),
+    "discord": ("guild_ids", "allowed_channel_ids"),
+    "whatsapp": ("allowed_phone_numbers",),
+    "slack": ("allowed_channel_ids",),
+    "line": ("allowed_user_ids",),
+    "signal": ("allowed_numbers",),
+    "imessage": ("allowed_handles",),
+    "msteams": ("allowed_user_ids",),
+    "bluebubbles": ("allowed_handles",),
+}
+ALLOWLIST_REQUIRED_MESSAGE = "Add at least one allowed sender before enabling this connector"
+
+
+def missing_sender_allowlist(connector_type: str, config: Dict[str, Any]) -> bool:
+    """True when a chat connector has no sender allowlist and must not start."""
+    keys = SENDER_ALLOWLIST_KEYS.get(connector_type)
+    if not keys:
+        return False
+    for key in keys:
+        value = config.get(key)
+        if isinstance(value, str):
+            value = [v for v in value.replace(",", " ").split() if v]
+        if value:
+            return False
+    return True
+
+
+def _annotate_allowlist_fields(types: List[Dict]) -> List[Dict]:
+    """Tell the connector form which fields gate starting the connector."""
+    for entry in types:
+        keys = SENDER_ALLOWLIST_KEYS.get(entry["type"])
+        if not keys:
+            continue
+        either = " (or " + ", ".join(k for k in keys) + ")" if len(keys) > 1 else ""
+        for field in entry["config_fields"]:
+            if field["key"] in keys and not field.get("description"):
+                field["description"] = (
+                    "Required to enable this connector: only these senders can use "
+                    f"the bot{either}. An empty list would let anyone who finds it "
+                    "run the agent."
+                )
+    return types
+
+
 def get_connector_type_info() -> List[Dict]:
     """Return metadata about each supported connector type."""
     types = [
@@ -673,4 +723,4 @@ def get_connector_type_info() -> List[Dict]:
         except (ValueError, AttributeError) as e:
             logger.warning("Failed to enrich capabilities for connector type '%s': %s", type_info["type"], e)
 
-    return types
+    return _annotate_allowlist_fields(types)

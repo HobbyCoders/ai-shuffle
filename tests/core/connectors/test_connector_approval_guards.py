@@ -2,7 +2,7 @@
 
 Approve/Deny presses re-check the sender allowlist, WhatsApp webhooks must be
 signed with the connector's app secret, and a connector without an allowlist
-logs a warning when it starts.
+does not start.
 """
 
 import hashlib
@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.core.connectors.discord_connector import DiscordConnector
-from app.core.connectors.manager import warn_if_open_to_everyone
+from app.core.connector_service import ALLOWLIST_REQUIRED_MESSAGE, missing_sender_allowlist
 from app.core.connectors.telegram import TelegramConnector
 
 
@@ -155,25 +155,71 @@ def test_whatsapp_form_offers_app_secret_and_encrypts_it():
     assert "app_secret" in get_sensitive_fields("whatsapp")
 
 
-# --- empty allowlist warning ---------------------------------------------------
+# --- empty allowlist refusal (owner decision D14) --------------------------------
 
 
 @pytest.mark.parametrize("kind,config", [
     ("telegram", {}),
-    ("discord", {"guild_ids": []}),
+    ("discord", {"guild_ids": [], "allowed_channel_ids": []}),
     ("whatsapp", {"allowed_phone_numbers": []}),
+    ("slack", {"allowed_channel_ids": ""}),
+    ("line", {"allowed_group_ids": ["g1"]}),  # groups do not cover direct messages
+    ("signal", {}),
+    ("imessage", {}),
+    ("msteams", {}),
+    ("bluebubbles", {}),
 ])
-def test_start_without_allowlist_warns(kind, config, caplog):
-    with caplog.at_level(logging.WARNING, logger="app.core.connectors.manager"):
-        assert warn_if_open_to_everyone("c1", kind, config) is True
-    assert "no sender allowlist" in caplog.text
+def test_chat_connector_without_allowlist_is_blocked(kind, config):
+    assert missing_sender_allowlist(kind, config) is True
 
 
 @pytest.mark.parametrize("kind,config", [
     ("telegram", {"allowed_chat_ids": ["1"]}),
     ("discord", {"allowed_channel_ids": ["c1"]}),
+    ("discord", {"guild_ids": "g1"}),
     ("whatsapp", {"allowed_phone_numbers": ["15550001"]}),
+    ("line", {"allowed_user_ids": ["U1"]}),
     ("webhook", {}),
+    ("gmail", {}),
 ])
-def test_start_with_allowlist_or_non_messaging_is_quiet(kind, config):
-    assert warn_if_open_to_everyone("c1", kind, config) is False
+def test_allowlisted_or_non_chat_connector_may_start(kind, config):
+    assert missing_sender_allowlist(kind, config) is False
+
+
+async def test_start_refuses_chat_connector_without_allowlist(mock_db, mock_encryption, caplog):
+    from app.core.connectors.manager import ConnectorManager
+    from app.db import database
+
+    database.create_connector(
+        connector_id="tg-open", connector_type="telegram", name="Open bot",
+        config={"bot_token": "123:abc"}, events=[], api_user_id=None,
+    )
+    manager = ConnectorManager()
+    with caplog.at_level(logging.ERROR, logger="app.core.connectors.manager"):
+        assert await manager.start_connector("tg-open") is False
+    assert "tg-open" not in manager._connectors
+    row = database.get_connector("tg-open")
+    assert row["status"] == "error"
+    assert row["status_message"] == ALLOWLIST_REQUIRED_MESSAGE
+    assert ALLOWLIST_REQUIRED_MESSAGE in caplog.text
+
+
+def test_connector_form_marks_allowlist_fields():
+    from app.core.connector_service import get_connector_type_info
+
+    telegram = next(t for t in get_connector_type_info() if t["type"] == "telegram")
+    field = next(f for f in telegram["config_fields"] if f["key"] == "allowed_chat_ids")
+    assert "Required to enable" in field["description"]
+
+
+def test_activate_without_allowlist_returns_the_form_message(authenticated_client, mock_encryption):
+    from app.db import database
+
+    cid = "tg-api-open"
+    database.create_connector(
+        connector_id=cid, connector_type="telegram", name="Open bot",
+        config={"bot_token": "123:abc"}, events=[], api_user_id=None,
+    )
+    response = authenticated_client.post(f"/api/v1/connectors/{cid}/activate")
+    assert response.status_code == 400
+    assert response.json()["detail"] == ALLOWLIST_REQUIRED_MESSAGE

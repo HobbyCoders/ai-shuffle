@@ -298,6 +298,13 @@ async def activate_connector(connector_id: str, token: str = Depends(require_adm
     # this single second hop.
     updated = await run_sync(_read_masked)
     if not success:
+        from app.core.connector_service import ALLOWLIST_REQUIRED_MESSAGE
+
+        if updated.get("last_error") == ALLOWLIST_REQUIRED_MESSAGE:
+            # A configuration problem the owner fixes in the form, not a crash.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=ALLOWLIST_REQUIRED_MESSAGE,
+            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to start connector: {updated.get('last_error', 'unknown error')}",
