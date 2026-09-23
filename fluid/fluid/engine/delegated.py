@@ -338,6 +338,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # through the turn's own frame reader (see _read_until_result);
         # anything still outstanding when the turn ends is dropped.
         self._pending_usage_snapshots: dict[str, str] = {}
+        # The same requests' model_call_index, so the snapshot record carries
+        # the index of the call it describes (hosts dedupe by it).
+        self._snapshot_call_index: dict[str, int] = {}
         # Only one reader may consume the CLI's stdout at a time: a turn's
         # frame reader, or a between-turns control pump.
         self._stdout_lock = asyncio.Lock()
@@ -771,6 +774,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         finally:
             self._active_turn_id = None
             self._pending_usage_snapshots.clear()
+            self._snapshot_call_index.clear()
             if (
                 mapper is not None
                 and mapper.cli_session_id
@@ -832,9 +836,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 )
                 await self._drop_resume_handle(sid)
                 continue
-            await self._emit_terminal_with_park(
-                ErrorEvent(session_id=sid, turn_id=turn_id, message=failure)
-            )
+            await self._emit_terminal_with_park(ErrorEvent(
+                session_id=sid, turn_id=turn_id, message=failure,
+                # A failed result still billed the turn; say what it cost.
+                usage=dict(mapper.failed_usage),
+                cost_usd=mapper.failed_cost_usd,
+                num_model_calls=mapper.model_calls or None,
+            ))
             return mapper
         return mapper
 
@@ -1120,7 +1128,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     await self._emit(event)
                 self._journal_event(event, mapper)
                 if isinstance(event, Usage) and event.node_id:
-                    await self._ask_usage_snapshot(event.node_id)
+                    await self._ask_usage_snapshot(
+                        event.node_id, event.raw.get("model_call_index"),
+                    )
             if mapped.message is not None and mapped.node_id is not None:
                 node = SessionNode(
                     node_id=mapped.node_id, parent_id=parent.node_id, message=mapped.message,
@@ -1145,6 +1155,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # Snapshots the CLI never got round to answering die with the
                 # turn — their Usage event already reported context_usage=None.
                 self._pending_usage_snapshots.clear()
+                self._snapshot_call_index.clear()
                 if mapped.error is not None:
                     self._hook_stop_reason = None
                     return mapped.error
@@ -1862,7 +1873,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         return await self._request_control({"subtype": "get_context_usage"})
 
-    async def _ask_usage_snapshot(self, node_id: str) -> None:
+    async def _ask_usage_snapshot(
+        self, node_id: str, call_index: int | None = None,
+    ) -> None:
         """Ask the CLI what the context looked like for the call just reported.
 
         Sent, not awaited. The turn's frame reader is the only stdout consumer
@@ -1876,6 +1889,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return
         request_id = self._next_req_id()
         self._pending_usage_snapshots[request_id] = node_id
+        if call_index is not None:
+            self._snapshot_call_index[request_id] = call_index
         try:
             await self._write_frame({
                 "type": "control_request",
@@ -1884,6 +1899,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             })
         except Exception:
             self._pending_usage_snapshots.pop(request_id, None)
+            self._snapshot_call_index.pop(request_id, None)
             logger.debug("context-usage snapshot request failed", exc_info=True)
 
     async def _emit_usage_snapshot(
@@ -1896,12 +1912,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         accounting. Returns False when the reply belongs to somebody else.
         """
         node_id = self._pending_usage_snapshots.pop(reply.request_id, None)
+        call_index = self._snapshot_call_index.pop(reply.request_id, None)
         if node_id is None:
             return False
         if reply.ok and reply.payload is not None:
             await self._emit(Usage(
                 session_id=sid, node_id=node_id, turn_id=turn_id,
                 context_usage=reply.payload,
+                raw={"model_call_index": call_index} if call_index is not None else {},
             ))
         else:
             logger.debug("context-usage snapshot unavailable: %s", reply.error)

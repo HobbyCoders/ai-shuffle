@@ -21,7 +21,8 @@ Frame vocabulary handled (see ``claude_agent_sdk`` message_parser + query.py):
     same boundary the native leg reports (see ``_on_compact_boundary``).
   * ``{"type":"assistant","message":{"content":[...],"usage":{...},...}}`` — each
     content block becomes BlockStart + a whole-block delta + BlockStop (+ ToolUse
-    for ``tool_use``); ``usage`` becomes a per-model-call Usage event. The full
+    for ``tool_use``); ``usage`` becomes a per-model-call Usage event carrying
+    what the native loop puts on its own (``per_call_usage``). The full
     message is assembled into a ``SessionNode`` for persistence. NOTE: the CLI
     splits a multi-block model message into ONE assistant frame PER BLOCK, each
     repeating the same message ``id`` and ``usage`` — hence the message-level
@@ -184,6 +185,42 @@ def parse_hook_callback(frame: dict[str, Any]) -> HookCallbackRequest | None:
     )
 
 
+def per_call_usage(
+    usage: dict[str, Any], *, model: str | None, index: int,
+    cost_usd: float | None = None,
+) -> dict[str, Any]:
+    """``Usage.raw`` for one model call the CLI reported, in the native
+    loop's shape.
+
+    The CLI's own usage block (input, output, cache read and cache creation
+    tokens) plus what the native loop adds to every per-call record: a
+    ``model_call_index`` (hosts count and dedupe calls by it), the
+    provider-reported ``cache_read_report`` and a ``cost_usd``. The CLI
+    prices only the whole turn, so a call's cost is estimated from the
+    pricing table, flagged ``cost_estimated``, unless the caller has the
+    CLI's own figure. A model nobody can price leaves the cost out.
+    """
+    from fluid.context.cache_probe import cache_read_report
+    from fluid.providers.pricing import estimate_cost
+
+    raw = dict(usage)
+    raw["model_call_index"] = index
+    try:
+        # The CLI's input_tokens exclude cache reads and writes, like every
+        # usage block fluid normalizes.
+        raw["cache_read_report"] = cache_read_report(usage, input_includes_cached=False)
+    except Exception:  # noqa: BLE001 — instrumentation is never fatal
+        pass
+    if cost_usd is not None:
+        raw["cost_usd"] = cost_usd
+    elif "cost_usd" not in raw and model:
+        cost = estimate_cost(model, usage)
+        if cost is not None:
+            raw["cost_usd"] = cost
+            raw["cost_estimated"] = True
+    return raw
+
+
 def _int_or_zero(value: Any) -> int:
     """A reported token count, or 0 when the CLI omitted it (or sent junk)."""
     try:
@@ -292,6 +329,14 @@ class StreamJsonMapper:
         # the arguments that produced it.
         self.tool_inputs: dict[str, dict[str, Any]] = {}
         self._usage_emitted = False
+        # Model calls reported this turn; the last one's number is the
+        # ``model_call_index`` of its Usage.
+        self.model_calls = 0
+        # What a failed result reported for the whole turn (the CLI's usage
+        # block and total cost), for the loop's ErrorEvent. Empty/None until
+        # a failed result arrives.
+        self.failed_usage: dict[str, Any] = {}
+        self.failed_cost_usd: float | None = None
         self._last_node_id: str = user_node_id
         # Dedupe: block indices already streamed via stream_event for the CURRENT
         # model message (their whole-block re-emission is suppressed). Cleared on
@@ -364,10 +409,18 @@ class StreamJsonMapper:
             tool_use_id=tool_use_id, name=name, input=input,
         )
 
-    def _usage_event(self, node_id: str, usage: dict[str, Any]) -> Usage:
+    def _usage_event(
+        self, node_id: str, usage: dict[str, Any], *,
+        model: str | None = None, cost_usd: float | None = None,
+    ) -> Usage:
+        self.model_calls += 1
         return Usage(
             session_id=self.session_id, node_id=node_id, turn_id=self.turn_id,
-            raw=dict(usage), **usage_fields(usage),
+            raw=per_call_usage(
+                usage, model=model or self.model, index=self.model_calls,
+                cost_usd=cost_usd,
+            ),
+            **usage_fields(usage),
         )
 
     # ─── per-frame handlers ──────────────────────────────────────────────
@@ -481,7 +534,7 @@ class StreamJsonMapper:
         usage = msg.get("usage")
         msg_id = msg.get("id")
         if usage and (msg_id is None or msg_id != self._usage_msg_id):
-            events.append(self._usage_event(node_id, usage))
+            events.append(self._usage_event(node_id, usage, model=msg.get("model")))
             self._usage_emitted = True
             self._usage_msg_id = msg_id
 
@@ -597,11 +650,20 @@ class StreamJsonMapper:
         subtype = frame.get("subtype", "success")
         usage = frame.get("usage") or {}
         events: list[Event] = []
+        cost = frame.get("total_cost_usd")
         if not self._usage_emitted and usage:
-            events.append(self._usage_event(self._last_node_id, usage))
+            # No assistant frame carried usage: the turn's totals stand in for
+            # its one record, priced with the CLI's own figure.
+            events.append(self._usage_event(
+                self._last_node_id, usage,
+                cost_usd=cost if isinstance(cost, (int, float)) else None,
+            ))
         if frame.get("is_error") and subtype != "error_max_turns":
             # A failed turn: no TurnComplete. The loop turns this into an
             # ErrorEvent, or retries when a stale --resume handle caused it.
+            # The CLI still billed the turn, so its totals ride along.
+            self.failed_usage = dict(usage)
+            self.failed_cost_usd = cost if isinstance(cost, (int, float)) else None
             return Mapped(events=events, is_result=True, error=result_error_message(frame))
         num_turns = frame.get("num_turns") or 1
         events.append(TurnComplete(

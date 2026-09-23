@@ -228,3 +228,79 @@ async def test_delegated_pre_tool_use_reaches_the_bus_and_the_policy_blocks(
     assert [(r.is_error, r.output) for r in results] == [
         (True, "Tool 'Bash' is disabled in this profile"),
     ]
+
+
+# ─── Usage: the delegated leg fills the same per-call roll-up ───────────────
+
+
+def test_delegated_usage_stream_rolls_up_with_its_cache_hit_ratio():
+    """A synthetic CLI message stream with known usage, mapped by the
+    delegated leg and translated by the adapter, fills the per-call roll-up
+    the native leg fills: summed tokens, a cost for every call, one call per
+    model message, and a cache-hit ratio that matches the totals."""
+    from app.core.provider.events import AssistantMessage
+    from fluid.engine.delegated_proto import StreamJsonMapper
+    from fluid.events.model import Usage
+    from fluid.providers.pricing import estimate_cost
+
+    model = "claude-opus-4-6"
+    calls = [
+        {"input_tokens": 100, "output_tokens": 20,
+         "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 900},
+        {"input_tokens": 50, "output_tokens": 40,
+         "cache_read_input_tokens": 9900, "cache_creation_input_tokens": 50},
+    ]
+
+    def frame(msg_id, usage, block):
+        return {"type": "assistant", "session_id": "cli", "message": {
+            "id": msg_id, "model": model, "stop_reason": "end_turn",
+            "content": [block], "usage": usage,
+        }}
+
+    frames = [
+        # One model message split into two per-block frames, each repeating
+        # the message's usage: it is still one call.
+        frame("msg_1", calls[0], {"type": "thinking", "thinking": "plan", "signature": "s"}),
+        frame("msg_1", calls[0], {"type": "text", "text": "Looking."}),
+        frame("msg_2", calls[1], {"type": "text", "text": "Done."}),
+    ]
+    mapper = StreamJsonMapper(session_id="ses", turn_id="turn", model="fable", user_node_id="n0")
+    events = [e for f in frames for e in mapper.feed(f).events]
+    usages = [e for e in events if isinstance(e, Usage)]
+    # The context breakdown the loop asks for after each call arrives as its
+    # own record, tokens zero, carrying the index of the call it describes.
+    events.append(Usage(
+        session_id="ses", node_id=usages[-1].node_id, turn_id="turn",
+        context_usage={"totalTokens": 20000, "maxTokens": 200000},
+        raw={"model_call_index": 2},
+    ))
+
+    adapter = ha.HarnessAdapter()
+    adapter._options = SessionOptions(model="fable")
+    adapter._mark_turn_floor()
+    per_call = [
+        m.usage for e in events for m in adapter._translate(e)
+        if isinstance(m, AssistantMessage) and m.usage
+    ]
+
+    totals = adapter._turn_usage_snapshot()
+    assert adapter._turn_model_calls == 2
+    assert totals["input_tokens"] == 150
+    assert totals["output_tokens"] == 60
+    assert totals["cache_read_input_tokens"] == 18900
+    assert totals["cache_creation_input_tokens"] == 950
+    assert totals["cost_usd"] == pytest.approx(
+        estimate_cost(model, calls[0]) + estimate_cost(model, calls[1])
+    )
+    prompt = (
+        totals["input_tokens"] + totals["cache_read_input_tokens"]
+        + totals["cache_creation_input_tokens"]
+    )
+    assert totals["cache_read_input_tokens"] / prompt == pytest.approx(0.945)
+
+    # Each call's record carries the provider-reported cache verdict and its
+    # index, like a native record; the snapshot rides with the second call's.
+    assert [u["model_call_index"] for u in per_call] == [1, 2, 2]
+    assert per_call[0]["cache_read_report"]["cached_fraction"] == pytest.approx(0.9, abs=1e-3)
+    assert per_call[1]["cache_read_report"]["cached_fraction"] == pytest.approx(0.99, abs=1e-3)
+    assert per_call[2]["context_usage"]["totalTokens"] == 20000

@@ -2703,8 +2703,17 @@ class HarnessAdapter(ProviderAdapter):
     )
 
     def _accumulate_turn_usage(self, usage: Dict[str, Any]) -> None:
-        """Add one model call's usage to this turn's roll-up. Never raises."""
+        """Add one model call's usage to this turn's roll-up. Never raises.
+
+        A context-snapshot-only record is skipped: the delegated leg sends one
+        after each call to carry that call's context breakdown, with every
+        token field zero, and counting it would double the turn's calls.
+        """
         try:
+            if usage.get("context_usage") and not any(
+                usage.get(key) for key in self._ROLLUP_USAGE_KEYS
+            ):
+                return
             self._turn_model_calls += 1
             for key in self._ROLLUP_USAGE_KEYS:
                 value = usage.get(key)
