@@ -42,10 +42,24 @@ In the commands below, the container is called `ai-shuffle` with Docker Compose 
 
 ## Owner password
 
-<!-- verify against wizard v2 -->
+**Forgotten password:** set a new one from a terminal on the server. This needs access to the server itself, which is what keeps it safe:
 
-- **Forgotten password:** open AI Shuffle from a browser on the machine that runs it, which works without the password, and set a new one in Settings. On Unraid you can instead set **Owner password** in the template and **Apply**.
-- **A device keeps asking for the password:** its sign-in was revoked or expired. Sign in again, or check **Settings → Devices** for the device.
+```bash
+# Docker Compose
+docker exec -it -u appuser ai-shuffle python -m app.owner_password set
+
+# Unraid (>_ Terminal at the top of the Unraid web interface)
+docker exec -it -u appuser AI-Shuffle python -m app.owner_password set
+```
+
+It asks for the new password twice and signs every browser out. `python -m app.owner_password reset` removes the password instead, so the next browser that opens AI Shuffle creates a new one; do that only when you can open it yourself straight away. Paired phones and devices linked through your account keep working either way.
+
+Changing **Owner password** in the Unraid template (or `OWNER_PASSWORD` in `.env`) does **not** reset it: that setting is only read on the very first start.
+
+- **A browser keeps asking for the password:** its sign-in expired (after 30 days) or the password was changed, which signs every browser out. Sign in again.
+- **"Too many wrong passwords":** after five wrong passwords from one device, sign-in pauses for up to 15 minutes. Wait, then try again.
+- **A phone or linked device stopped working:** it does not use the owner password; check **Settings → Devices** for the device.
+- **Desktop app:** the desktop app never asks for a password. If a browser you opened some other way shows "Desktop listener token required", use **Open in Browser** from the app's menu instead.
 
 ## Agents do not start
 

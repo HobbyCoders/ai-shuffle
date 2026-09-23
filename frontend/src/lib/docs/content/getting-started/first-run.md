@@ -16,15 +16,16 @@ The first screen says what AI Shuffle is and what it is not: it runs agents with
 
 ## 2. Owner password
 
-<!-- verify against wizard v2 -->
+Before anything else, AI Shuffle asks you to create the password for the owner of this install. If you set **Owner password** in the Unraid template (or `OWNER_PASSWORD` in `.env` for Docker Compose) before the first start, the password already exists: the step is skipped and your browser asks you to sign in with it instead.
 
-Create the password for the owner of this install. If you set **Owner password** in the Unraid template, the wizard skips this step.
-
-- Browsers on the machine running AI Shuffle itself work without it.
-- Every other browser, on your LAN or your tailnet, signs in with it once and stays signed in on that device.
-- Choose a long password you use nowhere else, and keep it in a password manager. Anyone who has it controls your agents and everything they can reach.
+- Every browser signs in with it once and stays signed in on that device for 30 days. With Docker this includes a browser on the server itself: Docker hands AI Shuffle your browser's connection from its own network address, so it cannot tell the server's browser from any other.
+- The desktop app never asks for it. Its window signs itself in with a key that changes on every launch, and **Open in Browser** signs your default browser in the same way.
+- Choose a long password (at least 12 characters) you use nowhere else, and keep it in a password manager. Anyone who has it controls your agents and everything they can reach.
+- Until a password exists, any browser that can reach AI Shuffle can create it. Create it right after the first start, or set it in the template or `.env` beforehand.
 
 Phones and remote browsers linked through your HobbyCoders account (see [Remote access](/docs/getting-started/remote-access)) use their own device authorization instead.
+
+To change the password later, open **Settings → Account → Owner access**. The same place has **Trusted LAN, no login**, off by default: when on, every device on your network or tailnet is the owner without a password. Leave it off unless the network is yours alone.
 
 ## 3. License
 
