@@ -159,6 +159,29 @@ class OpenAIResponsesClient:
             or "chatgpt.com" in (self._base_url or "")
         )
 
+    def routing_headers(self, request: ProviderRequest | None = None) -> dict[str, str]:
+        """The headers that pick the backend route, without credentials.
+
+        The engine's cache probe hashes these into the request identity: a
+        cache lives on a route, so a header change can cost the cache even
+        when the body is byte-identical. ``_headers`` sends all of these.
+        Under arms B-D, ``request`` adds the session-stable identity headers
+        (``session-id``, ``thread-id``). Per-request and per-turn headers
+        (``x-client-request-id``, ``x-codex-turn-state``) stay out: they
+        change on every request or turn by design, so hashing them would
+        read every call as a routing change.
+        """
+        headers: dict[str, str] = {}
+        if self._auth is not None and self._is_codex_backend():
+            account_id = getattr(self._auth, "account_id", None)
+            if account_id:
+                headers["chatgpt-account-id"] = account_id
+            headers["OpenAI-Beta"] = "responses=experimental"
+            headers["originator"] = "codex_cli_rs"
+        if request is not None and self._routing_arm != "A" and self._is_codex_backend():
+            headers.update(self._session_headers(request.extra, request.wire_state))
+        return headers
+
     async def _headers(
         self,
         body: dict | None = None,
@@ -172,14 +195,10 @@ class OpenAIResponsesClient:
         if self._auth is not None:
             token = await self._auth.get_access_token()
             headers["Authorization"] = f"Bearer {token}"
-            if self._is_codex_backend():
-                account_id = getattr(self._auth, "account_id", None)
-                if account_id:
-                    headers["chatgpt-account-id"] = account_id
-                headers["OpenAI-Beta"] = "responses=experimental"
-                headers["originator"] = "codex_cli_rs"
         else:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        # After the token: an auth that loads its account id lazily has it now.
+        headers.update(self.routing_headers())
         if self._routing_arm != "A" and self._is_codex_backend():
             headers.update(self._identity_headers(body or {}, wire, request_id))
         return headers
@@ -192,6 +211,20 @@ class OpenAIResponsesClient:
         ``session-id`` carries the cache key, as Codex sends it: "ChatGPT
         derives cache affinity from the Responses session-id header".
         """
+        out = self._session_headers(body, wire)
+        out["x-client-request-id"] = request_id or uuid.uuid4().hex
+        if self._routing_arm == "C" and wire is not None and wire.turn_state:
+            out[TURN_STATE_HEADER] = wire.turn_state
+        return out
+
+    @staticmethod
+    def _session_headers(body: dict, wire: WireState | None) -> dict[str, str]:
+        """``session-id`` and ``thread-id``: the identity headers that stay
+        the same for a whole session and role.
+
+        ``body`` is the request body or the request's ``extra``; both carry
+        the same ``prompt_cache_key``.
+        """
         out: dict[str, str] = {}
         cache_key = body.get("prompt_cache_key")
         session = cache_key if isinstance(cache_key, str) and cache_key else None
@@ -200,9 +233,6 @@ class OpenAIResponsesClient:
         if session is not None:
             out["session-id"] = session
             out["thread-id"] = wire.thread_id if wire is not None else session
-        out["x-client-request-id"] = request_id or uuid.uuid4().hex
-        if self._routing_arm == "C" and wire is not None and wire.turn_state:
-            out[TURN_STATE_HEADER] = wire.turn_state
         return out
 
     def _capture_turn_state(self, resp: httpx.Response, wire: WireState | None) -> None:

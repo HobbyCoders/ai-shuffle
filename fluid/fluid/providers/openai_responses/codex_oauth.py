@@ -554,6 +554,12 @@ class CodexAuth:
 
     @property
     def account_id(self) -> str | None:
+        # Load the stored bundle on first read, not only on the first token
+        # fetch: the cache probe reads the routing headers before the first
+        # request, and a missing account id there and a present one on the
+        # next call would look like a routing change.
+        if self._bundle is None:
+            self._bundle = load_bundle(self.token_path)
         return self._bundle.account_id if self._bundle else None
 
     def _ensure_loaded(self) -> StoredBundle:
