@@ -5,6 +5,7 @@ Nothing here touches the network: every client talks to a MockTransport.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -68,7 +69,7 @@ class SpecClient(e1.OpenAIResponsesClient):
         arm = os.environ.get(e1.ARM_ENV, "A") if self.honour else "A"
         extra = dict(request.extra)
         turn = extra.pop(e1.TURN_MARKER_KEY, None)
-        body = build_request_body(type(request)(**{**request.__dict__, "extra": extra}))
+        body = build_request_body(dataclasses.replace(request, extra=extra))
         headers = await self._headers()
         key = body.get("prompt_cache_key")
         if arm in ("B", "C", "D") and key:
@@ -131,6 +132,108 @@ async def test_the_contract_check_restores_the_arm_variable(monkeypatch):
     monkeypatch.setenv(e1.ARM_ENV, "keep-me")
     await e1.check_contract(spec_factory())
     assert os.environ[e1.ARM_ENV] == "keep-me"
+
+
+class _Wire:
+    """Stand-in for fluid's ``WireState`` (p0/responses-wire): per-session
+    turn marker and turn-state token, owned by the caller."""
+
+    def __init__(self, session_id):
+        self.session_id = session_id
+        self.turn_marker = None
+        self.turn_state = None
+
+    def begin(self, marker):
+        if marker is None:
+            self.turn_marker = self.turn_state = None
+            return False
+        if marker == self.turn_marker:
+            return False
+        self.turn_marker, self.turn_state = marker, None
+        return True
+
+
+class WireStateClient(e1.OpenAIResponsesClient):
+    """Arms as p0/responses-wire implements them: the arm is read once at
+    construction, and arm C keeps its token in ``request.wire_state`` (I1),
+    never on the client. ``prewarm=False`` models its HTTP no-op arm D."""
+
+    def __init__(self, *args, prewarm: bool = True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.arm = os.environ.get(e1.ARM_ENV, "A")
+        self.prewarm = prewarm
+
+    async def stream(self, request):
+        extra = dict(request.extra)
+        marker = extra.pop(e1.TURN_MARKER_KEY, None)
+        body = build_request_body(dataclasses.replace(request, extra=extra))
+        headers = await self._headers()
+        wire = getattr(request, "wire_state", None)
+        if self.arm in ("B", "C", "D"):
+            for h in e1.IDENTITY_HEADERS:
+                headers[h] = body["prompt_cache_key"]
+        new_turn = wire.begin(marker) if wire is not None and self.arm in ("C", "D") else False
+        if self.arm == "D" and new_turn and self.prewarm:
+            await self._http.post(self._base_url, json={**body, "generate": False}, headers=headers)
+        if self.arm == "C" and wire is not None and wire.turn_state:
+            headers[e1.TURN_STATE_HEADER] = wire.turn_state
+        async with self._http.stream("POST", self._base_url, json=body, headers=headers) as resp:
+            if self.arm == "C" and wire is not None and wire.turn_marker and wire.turn_state is None:
+                wire.turn_state = resp.headers.get(e1.TURN_STATE_HEADER)
+            from fluid.providers._sse import sse_events
+            from fluid.providers.openai_responses.serialize import ResponsesStreamNormalizer
+
+            norm = ResponsesStreamNormalizer()
+            async for name, data in sse_events(resp.aiter_lines()):
+                for chunk in norm.consume(name, data):
+                    yield chunk
+
+
+def wire_factory(prewarm=True):
+    def make(http):
+        return WireStateClient(base_url=e1.CODEX_RESPONSES_URL, auth=e1.FakeAuth(), http_client=http,
+                               prewarm=prewarm)
+    return make
+
+
+@pytest.fixture
+def wire_state(monkeypatch):
+    monkeypatch.setattr(e1, "WireState", _Wire)
+
+
+async def test_contract_check_passes_turn_state_through_the_request_wire_state(wire_state):
+    contract = await e1.check_contract(wire_factory())
+    assert contract["ok"], e1.format_contract(contract)
+    assert contract["arms"]["C"]["observed"]["turn_state"] is True
+
+
+def test_each_session_hands_the_client_one_wire_state(wire_state):
+    conv = e1.build_conversation("C", "t", 0, start_tokens=500, static_tokens=400)
+    first = conv.request(model="m", effort=None, turn_id="t1")
+    conv.grow()
+    second = conv.request(model="m", effort=None, turn_id="t1")
+    assert first.wire_state is second.wire_state is conv.wire
+    assert conv.wire.session_id == conv.session_id
+    other = e1.build_conversation("C", "t", 1, start_tokens=500, static_tokens=400)
+    assert other.wire is not conv.wire
+
+
+async def test_a_run_without_d_is_not_refused_when_only_d_is_missing(tmp_path, wire_state):
+    contract = await e1.check_contract(wire_factory(prewarm=False), arms=("A", "B", "C"))
+    assert contract["ok"] and set(contract["arms"]) == {"A", "B", "C"}
+    backend = e1.FakeCodexBackend()
+    cfg = e1.RunConfig(out=tmp_path / "abc.jsonl", calls_per_arm=2, dry_run=False, arms=("A", "B", "C"),
+                       start_tokens=500, max_tokens=5_000, round_tokens=50, seed=1)
+
+    async def no_sleep(_):
+        return None
+    await e1.run_experiment(cfg, wire_factory(prewarm=False), transport=httpx.MockTransport(backend.handle),
+                            sleep=no_sleep, log=lambda _: None)
+    assert {r["arm"] for r in read_jsonl([cfg.out])} == {"A", "B", "C"}
+    with pytest.raises(e1.ContractError):
+        await e1.run_experiment(e1.RunConfig(out=tmp_path / "abcd.jsonl", calls_per_arm=2, dry_run=False),
+                                wire_factory(prewarm=False),
+                                transport=httpx.MockTransport(backend.handle), log=lambda _: None)
 
 
 # ─── the dry run ─────────────────────────────────────────────────────────────
@@ -272,6 +375,15 @@ def test_rule_points_to_transport_when_only_the_codex_control_is_clean():
     assert e1.summarize(rows)["verdict"].startswith("TRANSPORT: only the Codex CLI control")
 
 
+def test_rule_reaches_a_final_verdict_without_the_prewarm_arm():
+    rows = []
+    for day in ("2026-10-01", "2026-10-02", "2026-10-03"):
+        rows += [r for r in _day(day) if r["arm"] != "D"]
+    s = e1.summarize(rows)
+    assert s["enough_data"]
+    assert s["verdict"] == "SHIP HEADERS: arms B and C meet the rule"
+
+
 def test_rule_is_provisional_below_three_days_or_120_calls():
     s = e1.summarize(_day("2026-10-01"))
     assert s["verdict"].startswith("PROVISIONAL")
@@ -339,6 +451,23 @@ def test_ingest_reads_codex_rollouts_for_the_workspace_only(tmp_path):
     assert rows[0]["arm"] == "E" and rows[0]["model"] == "gpt-6-astra"
     assert rows[1]["quota"]["x-codex-primary-used-percent"] == "11.0"
     assert rows[0]["cluster"] == "s-a:t1"
+
+
+def test_ingest_counts_first_calls_per_thread_not_per_root_session(tmp_path):
+    work = tmp_path / "ws"
+    work.mkdir()
+    lines = [{"timestamp": "2026-10-01T15:00:00Z", "type": "session_meta", "payload": {"cwd": str(work)}}]
+    for i, thread in enumerate(("root", "root", "sub", "sub")):
+        lines.append({"timestamp": f"2026-10-01T15:00:{10 + i:02d}Z", "type": "token_usage_record",
+                      "payload": {"session_id": "root", "thread_id": thread, "turn_id": "t1",
+                                  "response_id": f"r{i}",
+                                  "usage": {"input_tokens": 30_000, "cached_input_tokens": 0 if i in (0, 2)
+                                            else 29_000, "output_tokens": 5}}})
+    path = tmp_path / "rollout-t.jsonl"
+    path.write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+    rows = e1.ingest_codex_rollouts([path], cwd=str(work))
+    # The subagent thread's first call is cold by construction, not a miss.
+    assert [r["call_index"] for r in rows] == [0, 1, 0, 1]
 
 
 def test_ingest_cli_writes_arm_e_rows_the_summary_reads(tmp_path, capsys):

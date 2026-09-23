@@ -60,6 +60,7 @@ ensure_import_paths()
 import httpx  # noqa: E402
 
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock  # noqa: E402
+from fluid.providers import base as _provider_base  # noqa: E402
 from fluid.providers.base import ProviderRequest  # noqa: E402
 from fluid.providers.openai_responses.client import (  # noqa: E402
     CODEX_RESPONSES_URL,
@@ -85,6 +86,17 @@ CONTROL_MAX_RATE = 0.02
 BASELINE_MIN_RATE = 0.15
 REQUIRED_CALLS_PER_ARM = 120
 REQUIRED_DAYS = 3
+
+# The per-loop routing state fix #1 hands the client on each request
+# (``ProviderRequest.wire_state``, invariant I1). Arm C keeps its turn-state
+# token there, not on the client, so the runner must pass one per session.
+# None on a fluid that predates it; the requests then carry no wire state.
+WireState = getattr(_provider_base, "WireState", None)
+
+
+def new_wire_state(session_id: str) -> Any:
+    return WireState(session_id=session_id) if WireState is not None else None
+
 
 HARNESS_INSTRUCTION = (
     "You are the model side of a prompt-cache measurement harness. The "
@@ -137,6 +149,7 @@ class Conversation:
     max_tokens: int
     calls: int = 0
     _chars: int = 0
+    wire: Any = None
 
     @property
     def estimated_tokens(self) -> int:
@@ -150,10 +163,15 @@ class Conversation:
         extra: dict[str, Any] = {"prompt_cache_key": self.session_id}
         if turn_id is not None:
             extra[TURN_MARKER_KEY] = turn_id
-        return ProviderRequest(
+        request = ProviderRequest(
             model=model, messages=list(self.messages), system=self.system,
             tools=self.tools, effort=effort, extra=extra,
         )
+        if self.wire is not None:
+            # One state object for the whole session, so the client can tell
+            # a new turn from the next call of the same one.
+            request.wire_state = self.wire
+        return request
 
     def grow(self) -> None:
         """Append one tool round: an assistant call and its result."""
@@ -203,7 +221,7 @@ def build_conversation(
     conv = Conversation(
         arm=arm, session_id=session_id, system=system, tools=tools,
         messages=[Message("user", [Text(task)])], rng=rng, vocab=vocab,
-        round_tokens=round_tokens, max_tokens=max_tokens,
+        round_tokens=round_tokens, max_tokens=max_tokens, wire=new_wire_state(session_id),
     )
     conv._chars = len(system) + len(json.dumps(tools)) + len(task)
     while conv.estimated_tokens < start_tokens:
@@ -425,14 +443,16 @@ EXPECTED = {
 }
 
 
-async def check_contract(factory: ClientFactory, *, model: str = "gpt-fake") -> dict[str, Any]:
-    """Run each arm three times against the fake backend (two calls in one
-    turn, one in the next) and compare what went over the wire with the arm's
-    definition. Costs nothing: no network."""
+async def check_contract(factory: ClientFactory, *, model: str = "gpt-fake",
+                         arms: Iterable[str] = RUNNER_ARMS) -> dict[str, Any]:
+    """Run each of ``arms`` three times against the fake backend (two calls
+    in one turn, one in the next) and compare what went over the wire with the
+    arm's definition. Costs nothing: no network. Only the arms a run will
+    measure are checked, so ``--arms A,B,C`` can run while D is missing."""
     env = _ArmEnv()
     result: dict[str, Any] = {"arms": {}, "marker_leak": False}
     try:
-        for arm in RUNNER_ARMS:
+        for arm in arms:
             env.set(arm)
             backend = FakeCodexBackend(seed=1)
             recorder = Recorder()
@@ -543,7 +563,7 @@ async def run_experiment(
     ``transport`` is the fake backend's transport in a dry run and None live.
     The contract check always runs against its own fake backend.
     """
-    contract = await check_contract(contract_factory or factory, model=cfg.model)
+    contract = await check_contract(contract_factory or factory, model=cfg.model, arms=cfg.arms)
     log(format_contract(contract))
     if not contract["ok"] and not cfg.dry_run and not cfg.skip_contract_check:
         raise ContractError(
@@ -708,7 +728,9 @@ def ingest_codex_rollouts(files: Iterable[Path], *, cwd: str | None = None,
             elif kind == "token_usage_record":
                 saw_records = True
                 usage = payload.get("usage") or {}
-                file_rows.append(_codex_row(path, rec, payload.get("session_id") or payload.get("thread_id"),
+                # thread_id is the cache-affinity unit: a subagent thread shares
+                # its root's session_id but starts its own cold cache.
+                file_rows.append(_codex_row(path, rec, payload.get("thread_id") or payload.get("session_id"),
                                             payload.get("turn_id"), usage, model,
                                             payload.get("response_id")))
             elif kind == "event_msg" and payload.get("type") == "token_count":
@@ -824,8 +846,11 @@ def summarize(rows: Iterable[dict[str, Any]], *, include_dry_run: bool = False) 
     pooled_rows = [r for r in measured if r.get("day") in qualifying]
     pooled = {arm: _rate([r for r in pooled_rows if r["arm"] == arm]) for arm in arms}
     counts = {arm: sum(1 for r in pooled_rows if r["arm"] == arm) for arm in arms}
+    # Every arm that was run needs the calls, and A and E always: a run
+    # without D (``--arms A,B,C``) can still reach a final verdict.
+    required = {"A", CONTROL_ARM} | set(arms)
     enough = (len(qualifying) >= REQUIRED_DAYS
-              and all(counts.get(a, 0) >= REQUIRED_CALLS_PER_ARM for a in RUNNER_ARMS + (CONTROL_ARM,)))
+              and all(counts.get(a, 0) >= REQUIRED_CALLS_PER_ARM for a in required))
     winners = [a for a in ("B", "C") if _passes(pooled.get(a))]
     if not qualifying:
         verdict = "NO DECISION: no qualifying day yet"

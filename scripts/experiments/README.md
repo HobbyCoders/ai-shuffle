@@ -46,8 +46,9 @@ is ≥15%. Days where E is also bad are flagged as backend drift and excluded. I
 only D or E closes the gap, WebSocket moves into W1.
 
 **Cost estimate (design-final 6.1):** about 600 calls, about $50-120 notional
-quota. At the defaults each runner call sends 40-60k input tokens (about 1.2M
-tokens per arm per day at 40 calls) with a one-word answer at low effort.
+quota. At the defaults each runner call sends 40-60k input tokens and gets a
+one-word answer at low effort, so 40 calls are about 2M input tokens per arm per
+day.
 
 ### What the runner does
 
@@ -72,7 +73,15 @@ goes in `request.extra["_fluid_turn_id"]`, as fix #1 describes.
 - **Contract check.** Before any live call, the runner sends three calls per arm
   to a fake backend and checks that each arm does what its definition says. A
   live run refuses to start if an arm does not, so quota is never spent on four
-  copies of arm A. `--skip-contract-check` overrides this.
+  copies of arm A. `--skip-contract-check` overrides this. Only the arms the
+  run will measure (`--arms`) are checked.
+- Arm D: the p0/responses-wire client implements it as a logged no-op, because
+  `generate:false` exists only on the Responses WebSocket. Until a transport
+  that can prewarm lands, run `--arms A,B,C`. The summary then asks for 120
+  calls only from the arms that were run, plus A and E.
+- Arm C keeps its turn-state token in the request's `wire_state` (invariant
+  I1), so the runner gives each session one `WireState` and passes it on every
+  call of that session.
 - A live run asks you to type `yes` before it starts. `--yes` skips the prompt.
 
 ### Commands
@@ -95,7 +104,7 @@ Each day, for at least 3 separate days. Start the runner in one terminal:
 
 ```powershell
 mkdir e1-logs -Force
-python scripts/experiments/e1_cache_routing.py run --calls-per-arm 40 --out e1-logs\e1-runner-$(Get-Date -Format yyyy-MM-dd).jsonl
+python scripts/experiments/e1_cache_routing.py run --arms A,B,C --calls-per-arm 40 --out e1-logs\e1-runner-$(Get-Date -Format yyyy-MM-dd).jsonl
 ```
 
 **Arm E (manual, the same day and at the same time as the runner).** In a second
@@ -106,9 +115,13 @@ on the same ChatGPT account (checked with codex-cli 0.153.4):
 python scripts/experiments/e1_cache_routing.py prepare-codex --dir $env:TEMP\e1-codex
 cd $env:TEMP\e1-codex
 codex exec -m gpt-6-astra -s read-only --skip-git-repo-check (Get-Content turn_01.txt -Raw)
-foreach ($t in 2..8) { codex exec resume --last (Get-Content ("turn_{0:D2}.txt" -f $t) -Raw) }
+foreach ($t in 2..8) { codex exec resume --last --skip-git-repo-check -m gpt-6-astra -c sandbox_mode=read-only (Get-Content ("turn_{0:D2}.txt" -f $t) -Raw) }
 cd -
 ```
+
+`codex exec resume` has no `-s` flag, so the sandbox is set with `-c`. It needs
+`--skip-git-repo-check` again because the workspace is not a repository, and
+`--last` picks the newest session started in the current directory.
 
 That gives about 40 model calls in one Codex thread. Codex writes its usage to
 rollout files under `~/.codex/sessions`. Read them back as arm-E rows:
