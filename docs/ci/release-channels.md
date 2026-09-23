@@ -64,6 +64,13 @@ with `--require-hashes`, then fluid with `--no-deps --no-build-isolation`.
 `scripts/lock_requirements.sh` regenerates both locks; the native lock is
 constrained by `requirements.lock` so a shared package never pins differently.
 
+Release notes: the desktop's update state carries the manifest's `version`
+(as `release`) and `notes`, and its "Update ready" notification names the
+release and summarizes the notes. The sidebar update button shows the full
+notes for any worker whose status carries them: container workers today, and
+desktop workers once `DesktopUpdateState` in `app/api/internal.py` accepts
+`release` and `notes` (it currently drops fields it does not declare).
+
 ## One-time steps for the owner
 
 1. **Protect `main`.** Settings → Rules → Rulesets → New branch ruleset for

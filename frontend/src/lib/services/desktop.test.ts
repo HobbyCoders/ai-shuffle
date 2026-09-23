@@ -129,4 +129,26 @@ describe('desktop update announcement', () => {
 
 		teardown();
 	});
+
+	it('names the release and summarizes its signed notes in the announcement', async () => {
+		const { bridge, emit } = makeBridge();
+		(window as Window & { shuffleDesktop?: ShuffleDesktopBridge }).shuffleDesktop = bridge;
+		const { initDesktop, notesSummary } = await import('./desktop');
+		const { notify, notificationHistory } = await import('$lib/stores/notifications');
+		notify.resetLocal();
+		const teardown = initDesktop();
+		await flush();
+
+		emit({ ...ready('bbbbbbbbbbbb'), release: '0.9.0', notes: '- Faster startup\n- Fixes the sidebar' });
+		await flush();
+
+		let history: AppNotification[] = [];
+		notificationHistory.subscribe((h) => (history = h))();
+		const [item] = history.filter((n) => n.category === 'desktop-update');
+		expect(item.message).toContain('AI Shuffle Desktop 0.9.0 has downloaded');
+		expect(item.message).toContain("What's new: - Faster startup - Fixes the sidebar");
+		expect(notesSummary('x'.repeat(4000))).toHaveLength(280);
+		expect(notesSummary(null)).toBe('');
+		teardown();
+	});
 });

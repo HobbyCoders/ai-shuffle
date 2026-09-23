@@ -8,6 +8,8 @@ export interface UpdateState {
   phase: UpdatePhase; version: string | null; percent: number | null;
   error: string | null; checkedAt: string | null; message?: string | null;
   running_version?: string | null;
+  /** Release name and notes from the signed manifest of the offered update. */
+  release?: string | null; notes?: string | null;
 }
 export class Updater {
   private state: UpdateState = { phase: 'unsupported', version: null, percent: null, error: null, checkedAt: null };
@@ -63,7 +65,11 @@ export class Updater {
     this.installedExecutable = installedExecutable;
     this.restartArgs = restartArgs;
     const pending = applications.pendingVersion !== applications.version ? applications.pendingVersion : null;
-    this.set({ phase: pending ? 'ready' : 'idle', version: pending?.slice(0, 12) ?? null, error: null, message: null, percent: null });
+    this.set({ phase: pending ? 'ready' : 'idle', version: pending?.slice(0, 12) ?? null, error: null, message: null, percent: null, release: null, notes: null });
+    // Older source managers have no releaseInfo; the prompt then shows no notes.
+    if (pending) void applications.releaseInfo?.(pending).then(info => {
+      if (this.state.phase === 'ready' && this.state.version === pending.slice(0, 12)) this.set({ release: info.release ?? null, notes: info.notes ?? null });
+    }).catch(() => {});
   }
   get current(): UpdateState { return { ...this.state, running_version: this.applications?.version ?? null }; }
   subscribe(fn: (state: UpdateState) => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
@@ -87,7 +93,7 @@ export class Updater {
     try {
       if (!await this.permitted()) { this.set({ phase: 'idle' }); return; }
       const result = await this.applications.check(undefined, interactive);
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, checkedAt: new Date().toISOString() });
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: result.notes ?? null });
     } catch (error) { this.set({ phase: 'error', error: String(error), message: null }); }
     finally { this.checking = false; }
   }
@@ -97,7 +103,7 @@ export class Updater {
     try {
       if (!await this.permitted()) { this.set({ phase: 'available' }); return; }
       const result = await this.applications.download((percent, message) => this.set({ percent, message }), true);
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null });
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: result.notes ?? null });
     } catch (error) { this.set({ phase: 'error', error: String(error), percent: null, message: null }); }
     finally { this.downloading = false; }
   }

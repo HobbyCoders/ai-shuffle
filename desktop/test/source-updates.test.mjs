@@ -94,10 +94,10 @@ test('checks verify metadata only; explicit download stages the signed release a
  const f=await fixture(t);await f.release(A);const u=f.create();await u.load();
  await u.download();await u.select();await u.healthy();const old=await f.release(B);
  f.requests.length=0;const builds=f.builds;const progress=[];
- assert.deepEqual(await u.check((...args)=>progress.push(args)),{kind:'available',version:B.slice(0,12)});
+ assert.deepEqual(await u.check((...args)=>progress.push(args)),{kind:'available',version:B.slice(0,12),release:old.manifest.version,notes:old.manifest.notes});
  assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest']);assert.equal(f.builds,builds);assert.deepEqual(progress,[]);
  assert.equal(u.pendingVersion,null);await assert.rejects(fs.stat(path.join(f.root,'staging')), {code:'ENOENT'});
- assert.deepEqual(await u.download(),{kind:'ready',version:B.slice(0,12)});
+ assert.deepEqual(await u.download(),{kind:'ready',version:B.slice(0,12),release:old.manifest.version,notes:old.manifest.notes});
  assert.equal(f.requests.filter(url=>url===old.url).length,1);assert.equal(f.builds,builds+1);
  assert.equal(await fs.readFile(path.join(f.root,'versions',B,'release.json'),'utf8'),old.signed);
  await f.release(C);f.requests.length=0;
@@ -308,4 +308,19 @@ test('Python dependencies install only from the hash-pinned locks, like the cont
  const log=path.join(root,'build.log');const runtime={root,python:'python-not-run',node:'node-not-run',npm:'npm',pythonDependencies:''};
  await assert.rejects(buildSource({source,server:path.join(root,'server'),cache:path.join(root,'cache'),runtime,revision:A,log,progress(){}}),/no hash-pinned requirements-native\.lock/);
  await assert.rejects(fs.stat(log),{code:'ENOENT'},'nothing ran before the refusal');
+});
+test('checks and downloads report the signed release name and notes; a staged update keeps them across restarts',async t=>{
+ const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
+ const notes='Faster startup.\nFixes the sidebar.';
+ await f.release(B,undefined,{version:'0.9.0',notes});
+ assert.deepEqual(await u.check(),{kind:'available',version:B.slice(0,12),release:'0.9.0',notes});
+ assert.deepEqual(await u.download(),{kind:'ready',version:B.slice(0,12),release:'0.9.0',notes});
+ u=f.create();await u.load();
+ assert.deepEqual(await u.check(),{kind:'ready',version:B.slice(0,12),release:'0.9.0',notes});
+ assert.deepEqual(await u.releaseInfo(B),{release:'0.9.0',notes});
+ assert.deepEqual(await u.releaseInfo(C),{});
+ // Notes are optional: a release without them offers none.
+ await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({active:B}));
+ await f.release(C,undefined,{notes:undefined,version:undefined});
+ const w=f.create();await w.load();assert.deepEqual(await w.check(),{kind:'available',version:C.slice(0,12)});
 });

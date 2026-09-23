@@ -211,3 +211,28 @@ test('D22: installed apps check once shortly after launch and then daily, with n
  delays.length = 0; preview.start();
  assert.deepEqual(delays, []);
 });
+
+test('the signed release name and notes travel with the offered update and clear when current', async () => {
+ const { updater } = fixture(); const seen = [];
+ updater.subscribe(state => seen.push(state));
+ let result = { ...available, release: '0.9.0', notes: 'Faster startup.\nFixes the sidebar.' };
+ updater.useApplications(source({ check: async () => result, download: async () => ({ ...result, kind: 'ready' }) }));
+ await updater.check();
+ assert.equal(updater.current.phase, 'available'); assert.equal(updater.current.release, '0.9.0'); assert.equal(updater.current.notes, 'Faster startup.\nFixes the sidebar.');
+ await updater.download();
+ assert.equal(updater.current.phase, 'ready'); assert.equal(updater.current.release, '0.9.0'); assert.match(seen.at(-1).notes, /Fixes the sidebar/);
+ const { updater: other } = fixture(); result = { kind: 'current' };
+ other.useApplications(source({ check: async () => result })); await other.check();
+ assert.equal(other.current.release, null); assert.equal(other.current.notes, null);
+});
+
+test('a download staged before a restart shows its notes from the stored manifest; older managers show none', async () => {
+ const pending = 'b'.repeat(40);
+ const { updater } = fixture();
+ updater.useApplications(source({ pendingVersion: pending, releaseInfo: async revision => { assert.equal(revision, pending); return { release: '0.9.1', notes: 'Stored notes' }; } }));
+ assert.equal(updater.current.phase, 'ready'); await new Promise(setImmediate);
+ assert.equal(updater.current.release, '0.9.1'); assert.equal(updater.current.notes, 'Stored notes');
+ const { updater: legacy } = fixture();
+ legacy.useApplications(source({ pendingVersion: pending })); await new Promise(setImmediate);
+ assert.equal(legacy.current.phase, 'ready'); assert.equal(legacy.current.notes, null);
+});

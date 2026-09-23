@@ -53,7 +53,12 @@ export interface SourceApplication {
 }
 interface SourceState { active?: string; previous?: string; pending?: string; staged?: string; booting?: string; blocked?: boolean; failed?: string[] }
 export type SourceProgress = (percent: number | null, message: string) => void;
-export type SourceCheck = { kind: 'current' | 'available' | 'ready'; version?: string };
+/** The signed release name and notes shown beside the update button. */
+export interface ReleaseInfo { release?: string; notes?: string }
+export type SourceCheck = { kind: 'current' | 'available' | 'ready'; version?: string } & ReleaseInfo;
+function releaseOf(manifest: SourceManifest): ReleaseInfo {
+  return { ...(manifest.version ? { release: manifest.version } : {}), ...(manifest.notes ? { notes: manifest.notes } : {}) };
+}
 
 export function verifySourceManifest(text: string, publicKey: string): SourceManifest {
   const envelope = JSON.parse(text);
@@ -220,6 +225,11 @@ export class SourceUpdates {
     const signed = Buffer.concat(chunks).toString('utf8');
     return { signed, manifest: requireRelease(verifySourceManifest(signed, this.options.publicKey), channel) };
   }
+  /** Release name and notes of a downloaded revision, from its stored signed manifest; empty when unreadable. */
+  async releaseInfo(revision: string): Promise<ReleaseInfo> {
+    try { return releaseOf(verifySourceManifest(await fs.readFile(path.join(this.directory(revision), 'release.json'), 'utf8'), this.options.publicKey)); }
+    catch { return {}; }
+  }
   async check(_progress: SourceProgress = () => {}, interactive = false): Promise<SourceCheck> {
     return this.update(false, () => {}, interactive);
   }
@@ -230,7 +240,7 @@ export class SourceUpdates {
     if (!await this.updatesAllowed()) throw new Error('Application updates are disabled in Account settings');
     if (this.checking) throw new Error('An application update is already running');
     if (this.state.booting) return { kind: 'current' };
-    if (this.pendingVersion) return { kind: 'ready', version: this.pendingVersion.slice(0, 12) };
+    if (this.pendingVersion) return { kind: 'ready', version: this.pendingVersion.slice(0, 12), ...await this.releaseInfo(this.pendingVersion) };
     this.checking = true;
     let unlock: (() => Promise<void>) | undefined;
     try {
@@ -245,9 +255,9 @@ export class SourceUpdates {
         if (manifest.sequence <= old.sequence) return { kind: 'current' };
       }
       if (this.state.failed?.includes(manifest.revision)) throw new Error('This revision failed to start. Check again after a newer update. Previous files and data have been retained.');
-      if (!download) return { kind: 'available', version: manifest.revision.slice(0, 12) };
+      if (!download) return { kind: 'available', version: manifest.revision.slice(0, 12), ...releaseOf(manifest) };
       await this.stage(manifest, signed, progress);
-      return { kind: 'ready', version: manifest.revision.slice(0, 12) };
+      return { kind: 'ready', version: manifest.revision.slice(0, 12), ...releaseOf(manifest) };
     } finally { try { if (unlock) await unlock(); } finally { this.checking = false; } }
   }
   private async stage(manifest: SourceManifest, signed: string, progress: SourceProgress): Promise<void> {

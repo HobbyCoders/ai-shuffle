@@ -139,3 +139,18 @@ it('cleans up animation timers on unmount', async()=>{
   view.unmount();expect(vi.getTimerCount()).toBe(0);
  } finally { cleanup();vi.useRealTimers(); }
 });
+
+it('shows the offered release name and its signed notes in the update tooltip', async()=>{
+ api.get.mockResolvedValue({...state,workers:[{...worker,release:'0.9.0',notes:'- Faster startup\n- Fixes the sidebar'}]});
+ render(DesktopUpdateButton);const button=await screen.findByRole('button',{name:'Download update'});
+ await fireEvent.mouseEnter(button);
+ const tip=await screen.findByRole('tooltip');
+ expect(tip.textContent).toContain("What's new in 0.9.0");
+ expect(tip.querySelector('.notes-text')?.textContent).toBe('- Faster startup\n- Fixes the sidebar');
+});
+
+it('shows no notes section when the offered update has none', async()=>{
+ render(DesktopUpdateButton);const button=await screen.findByRole('button',{name:'Download update'});
+ await fireEvent.mouseEnter(button);
+ expect((await screen.findByRole('tooltip')).querySelector('.release-notes')).toBeNull();
+});
