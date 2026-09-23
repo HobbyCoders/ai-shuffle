@@ -1228,6 +1228,50 @@ async def test_routing_arm_decides_which_identity_headers_are_sent(
     assert len(prewarms) == (2 if arm == "D" else 0), "one prewarm per turn start"
 
 
+@pytest.mark.parametrize("arm", ["A", "B", "C", "D"])
+async def test_probe_routing_headers_keep_session_identity_and_drop_per_turn_headers(
+    arm: str,
+) -> None:
+    # The cache probe hashes routing_headers(request) into the request
+    # identity. Under arms B-D that must cover session-id and thread-id,
+    # which are sent and stay fixed for the session, and leave out
+    # x-client-request-id and x-codex-turn-state, which change on every
+    # request or turn: hashing those would read every call as a routing change.
+    from fluid.context.cache_probe import fingerprint_prefix, fingerprint_responses_request
+
+    sid = "ses_x"
+    recorder = _Recorder()
+    client, http = _codex_client(recorder, arm)
+    wire = WireState(session_id=sid)
+    fingerprints = []
+    for turn in ("turn_1", "turn_1", "turn_2"):
+        request = _routed_request(sid, turn, wire)
+        routing = client.routing_headers(request)
+        fingerprint = fingerprint_prefix(
+            system=request.system, tools=request.tools, messages=request.messages,
+            routing_headers=routing,
+        )
+        fingerprint_responses_request(
+            request, fingerprint, previous_count=0,
+            endpoint=CODEX_RESPONSES_URL, routing_headers=routing,
+        )
+        fingerprints.append(fingerprint)
+        await _send(client, request)
+    await http.aclose()
+
+    stable = {"session-id", "thread-id"} if arm != "A" else set()
+    routing = client.routing_headers(_routed_request(sid, "turn_3", wire))
+    assert set(routing) == {"chatgpt-account-id", "OpenAI-Beta", "originator"} | stable
+    for name in stable:
+        assert routing[name] == sid
+    # Everything the probe hashes is also sent.
+    sent = recorder.headers(2)
+    assert all(sent[name.lower()] == value for name, value in routing.items())
+    # A new turn, a new request id and (arm C) a replayed turn-state token
+    # leave the probe's request identity unchanged.
+    assert len({f["request"] for f in fingerprints}) == 1
+
+
 async def test_routing_arm_a_requests_are_byte_identical_to_the_pre_experiment_shape() -> None:
     # Arm A with a wire state and a turn marker sends exactly the bytes a
     # request without either sent before the experiment existed.
