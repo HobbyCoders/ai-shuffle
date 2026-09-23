@@ -28,6 +28,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 from fluid.codemode.skills import (
@@ -43,7 +44,7 @@ from fluid.codemode.skills import (
 )
 from fluid.codemode.verify import verify_sources
 from fluid.messages.content import Message, Text
-from fluid.providers.base import ProviderRequest
+from fluid.providers.base import ProviderRequest, WireState
 
 _log = logging.getLogger(__name__)
 
@@ -484,6 +485,36 @@ class Synthesizer:
         self._kick_warned = False
         # This replica's store id, for log lines (see _store_label).
         self._store_id: str | None = None
+        # Request routing for this learner's calls, bound by the loop that
+        # owns the session (see bind_routing). None sends no routing at all.
+        self._routing: Callable[[], tuple[dict[str, Any], WireState | None]] | None = None
+
+    def bind_routing(
+        self, routing: Callable[[], tuple[dict[str, Any], WireState | None]],
+    ) -> bool:
+        """Route this learner's calls with ``routing``; True when bound.
+
+        ``routing`` returns the request ``extra`` (the cache-affinity key)
+        and the loop-owned ``WireState`` for the learner role. The first
+        binder wins: a worker loop that shares its parent's synthesizer must
+        not move the learner's key onto the worker's session.
+        """
+        if self._routing is not None:
+            return False
+        self._routing = routing
+        return True
+
+    def _request_routing(self) -> tuple[dict[str, Any], WireState | None]:
+        # The routing speaks the Responses client's dialect; a learner pinned
+        # to another client sends none of it.
+        if self._routing is None or getattr(self._provider, "name", None) != "openai_responses":
+            return {}, None
+        try:
+            extra, wire = self._routing()
+        except Exception:  # noqa: BLE001 — routing never fails a pass
+            _log.debug("learner routing lookup failed", exc_info=True)
+            return {}, None
+        return dict(extra or {}), wire
 
     # ─── triggering ──────────────────────────────────────────────────────
     def mark_urgent(self) -> None:
@@ -1231,6 +1262,7 @@ class Synthesizer:
                 len(prompt), PROMPT_CHAR_LIMIT, self._model, self._store_label(),
             )
             prompt = prompt[:PROMPT_CHAR_LIMIT]
+        extra, wire_state = self._request_routing()
         request = ProviderRequest(
             model=self._model,
             messages=[Message(role="user", content=[Text(text=prompt)])],
@@ -1238,6 +1270,8 @@ class Synthesizer:
             tools=[],
             max_tokens=self._max_tokens,
             effort=self._effort,
+            extra=extra,
+            wire_state=wire_state,
         )
         parts: list[str] = []
         raw: dict[str, Any] = {}

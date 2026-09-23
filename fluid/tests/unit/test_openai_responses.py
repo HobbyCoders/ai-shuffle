@@ -1421,3 +1421,56 @@ async def test_loop_hands_the_client_its_wire_state_and_turn_marker() -> None:
         assert TURN_MARKER_KEY not in request.extra
     finally:
         await other.aclose()
+
+
+async def test_memory_learner_calls_carry_their_own_role_routing(tmp_path: Path) -> None:
+    # Engine wiring, not a hand-built WireState: the loop binds the learner
+    # that shares its Responses client, so a learner pass is sent with the
+    # "learner:<sid>" cache key and the loop's "learner" wire state, and the
+    # main loop keeps its own state.
+    from fluid.codemode.continual import Synthesizer
+    from fluid.codemode.journal import ToolJournal
+    from fluid.codemode.skills import SkillStore
+
+    recorder = _Recorder()
+    client, http = _codex_client(recorder, "B")
+    store = SkillStore(tmp_path)
+    synth = Synthesizer(client, "gpt-6-astra", store)
+    loop, sid = await _loop_with_session(client, journal=ToolJournal(store, synth))
+    try:
+        await synth._complete("learn from this")
+        main = loop._build_request([], turn_id="turn_1")
+        await _send(client, main)
+    finally:
+        await loop.aclose()
+        await http.aclose()
+
+    learner_call, main_call = recorder.requests
+    assert _json.loads(learner_call.content)["prompt_cache_key"] == f"learner:{sid}"
+    assert learner_call.headers["session-id"] == f"learner:{sid}"
+    assert learner_call.headers["thread-id"] == f"learner:{sid}"
+    assert learner_call.headers["x-client-request-id"] == f"learner:{sid}"
+    assert main_call.headers["session-id"] == sid
+    assert main_call.headers["thread-id"] == sid
+    learner_state = loop._wire_states[(sid, "learner")]
+    assert learner_state.role == "learner"
+    assert learner_state is not loop._wire_states[(sid, "main")]
+
+
+async def test_a_worker_loop_does_not_rebind_the_parent_learner(tmp_path: Path) -> None:
+    from fluid.codemode.continual import Synthesizer
+    from fluid.codemode.journal import ToolJournal
+    from fluid.codemode.skills import SkillStore
+
+    store = SkillStore(tmp_path)
+    provider = _NamedProvider("openai_responses")
+    synth = Synthesizer(provider, "gpt-6-astra", store)
+    parent, parent_sid = await _loop_with_session(provider, journal=ToolJournal(store, synth))
+    child, _ = await _loop_with_session(provider, journal=ToolJournal(store, synth))
+    try:
+        extra, wire = synth._request_routing()
+        assert extra == {"prompt_cache_key": f"learner:{parent_sid}"}
+        assert wire is parent._wire_states[(parent_sid, "learner")]
+    finally:
+        await child.aclose()
+        await parent.aclose()

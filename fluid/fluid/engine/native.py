@@ -1018,6 +1018,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Request identity and in-turn routing state, one per (session, role);
         # handed to the provider on each request (see WireState).
         self._wire_states: dict[tuple[str, str], WireState] = {}
+        # The memory learner shares this loop's provider client. On the
+        # Responses lane it gets its own role: a "learner:<key>" cache key and
+        # the "learner" wire state, so its calls carry routing identity and
+        # never share a turn-state token or a cache key with the main loop.
+        if getattr(self.provider, "name", None) == "openai_responses":
+            recorder = self._friction_source()
+            bind = getattr(getattr(recorder, "_synthesizer", None), "bind_routing", None)
+            if callable(bind):
+                bind(self._learner_routing)
         # Set once a call 400s with invalid_encrypted_content: this loop
         # instance strips opaque reasoning from every later request instead of
         # paying a doomed call per turn (see _agent_loop; the strip itself is
@@ -3430,6 +3439,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                 session_id=self._session.session_id, role=role,
             )
         return state
+
+    def _learner_routing(self) -> tuple[dict[str, Any], WireState | None]:
+        """Request extra and wire state for the memory learner's calls.
+
+        The key is ``"learner:<affinity key>"`` (design 2.4: one cache key
+        per role), and the wire state is this loop's ``learner`` state.
+        Empty before a session exists or once the sticky key was dropped.
+        """
+        key = self._affinity_key()
+        if key is None or self._sticky_poisoned:
+            return {}, None
+        return {"prompt_cache_key": f"learner:{key}"}, self._wire_state("learner")
 
     def _affinity_key(self) -> str | None:
         """The value the provider's cache-affinity key carries.
