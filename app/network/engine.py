@@ -599,12 +599,15 @@ def record_after_commit(collection: str, record_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, owner_only: bool = False,
-                    record_ids: Optional[Iterable[str]] = None) -> int:
+                    record_ids: Optional[Iterable[str]] = None, retain: Iterable[str] = ()) -> int:
     """Publish every row that differs from the network's view; return the count.
 
     ``record_ids`` limits the pass to those records of a single-key
     collection: their rows are published and those that no longer match are
     retracted, as a whole-collection pass would for the same ids.
+
+    ``retain`` names records another publisher owns this pass (held
+    sessions): an owner-only scan skips them without retracting them.
     """
     ctx = ctx or context()
     if ctx is None or ctx.bootstrap_state != BOOTSTRAP_READY:
@@ -679,8 +682,9 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
         # missing id proves nothing this pass: publish no deletions.
         logger.debug("Scan of %s skipped %d unreadable rows; deletions deferred", collection, skipped)
     else:
+        retained = set(retain)
         for record_id, existing in known.items():
-            if record_id in seen or bool(existing["deleted"]):
+            if record_id in seen or record_id in retained or bool(existing["deleted"]):
                 continue
             if owner_only and existing.get("origin_device_id") != ctx.device_id:
                 continue

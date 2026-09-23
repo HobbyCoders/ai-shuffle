@@ -104,10 +104,14 @@ def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
             if len(owned) != len(ids):
                 ids = None
     published = 0
-    published += engine.scan_collection("sessions", ctx=ctx, owner_only=True, record_ids=ids)
-    if ids is None:
-        # Held sessions have a foreign owner, so a narrow set (all owned) has none.
-        published += _publish_held_sessions(ctx)
+    # Held sessions have a foreign owner, so a narrow set (all owned) has none.
+    held = _held_session_ids(ctx) if ids is None else []
+    # The owner-only scan would retract a held session this device published,
+    # and the held pass would publish it straight back: a delete and an upsert
+    # on every scan, forever, while the owner stays silent.
+    published += engine.scan_collection("sessions", ctx=ctx, owner_only=True, record_ids=ids, retain=held)
+    if held:
+        published += _publish_held_sessions(ctx, held)
     from app.network.session_runtime import publish_owned as publish_runtime
     published += publish_runtime(ctx, session_ids=ids)
     published += _publish_child_rows("session_tags", ctx, session_ids=ids)
@@ -118,21 +122,26 @@ def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
     return published
 
 
-def _publish_held_sessions(ctx: engine.NetworkContext) -> int:
+def _held_session_ids(ctx: engine.NetworkContext) -> List[str]:
+    """Sessions with a foreign owner that this worker still publishes for it."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        held = _owned_session_ids(cursor, ctx.device_id, recent_only=False, include_held=True)
+        if not held:
+            return []
+        cursor.execute("SELECT id FROM sessions WHERE owner_device_id IS NOT NULL AND owner_device_id <> %s",
+                       (ctx.device_id,))
+        foreign = {r["id"] for r in cursor.fetchall()}
+    return [sid for sid in held if sid in foreign]
+
+
+def _publish_held_sessions(ctx: engine.NetworkContext, held: List[str]) -> int:
     """Hand migrated sessions to their owner device (shared-database cluster migration)."""
     coll = policy.collection("sessions")
     count = 0
     with get_db() as conn:
         cursor = conn.cursor()
-        held = [sid for sid in _owned_session_ids(cursor, ctx.device_id, recent_only=False, include_held=True)]
-        if not held:
-            return 0
-        cursor.execute("SELECT id, owner_device_id FROM sessions WHERE owner_device_id IS NOT NULL AND owner_device_id <> %s",
-                       (ctx.device_id,))
-        foreign = {r["id"] for r in cursor.fetchall()}
         for session_id in held:
-            if session_id not in foreign:
-                continue
             row = engine._read_row(cursor, coll, session_id)
             if row is None:
                 continue
