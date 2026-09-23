@@ -288,6 +288,51 @@ async def test_execute_requires_run_claim(mock_db):
     assert session_runtime.get_live_runtime("s1") is None
 
 
+async def test_execute_behind_a_stranded_live_turn_does_not_claim_or_retry(mock_db):
+    """Round-9 follow-up (#1237): a live turn whose lease is dead leaves the
+    session claimable, and every claim pass used to claim a run, trip
+    idx_turns_one_live_per_session in start_turn and release the run again.
+    The kick must now leave the queued turn alone without touching runs or
+    start_turn, and the reap sweep must still free the slot."""
+    stranded = turns_db.enqueue_turn("s-strand", "unpark", prompt="wake")
+    run = runs_db.claim_run("s-strand", "me", 60)
+    assert turns_db.start_turn(stranded["id"], run["id"], "me") is not None
+    # The owner released its lease without settling the turn.
+    assert runs_db.release_run(run["id"], run["fence_token"])
+    queued = turns_db.enqueue_turn("s-strand", "user", prompt="next")
+
+    def _run_count():
+        from app.db.base import get_db
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) AS n FROM runs WHERE session_id = %s", ("s-strand",))
+            return cur.fetchone()["n"]
+
+    runs_before = _run_count()
+    real_start = turns_db.start_turn
+    start_calls = []
+
+    def _spy_start(*args, **kwargs):
+        start_calls.append(args)
+        return real_start(*args, **kwargs)
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+        with patch.object(turns_db, "start_turn", side_effect=_spy_start):
+            # Several claim passes in a row, as the NOTIFY-driven loop does.
+            for _ in range(5):
+                assert await session_runtime.SessionRuntime(queued).execute() is None
+            assert start_calls == []
+            assert _run_count() == runs_before
+            assert turns_db.get_turn(queued["id"])["state"] == "queued"
+
+            # The reap sweep frees the slot; the next kick runs the queued turn.
+            reaped = turns_db.reap_expired()
+            assert [t["id"] for t in reaped] == [stranded["id"]]
+            env["registry"].get_task.return_value = None
+            assert await session_runtime.SessionRuntime(queued).execute() == "completed"
+            assert len(start_calls) == 1
+
+
 # ---------------------------------------------------------------------------
 # 1b. Live-runtime registry — the command→runtime interrupt seam (D1)
 # ---------------------------------------------------------------------------

@@ -4011,13 +4011,6 @@ def _skill_store_tool_specs(codemode: Any) -> Dict[str, Any]:
     return skill_store_tool_specs()
 
 
-# The deferred one-liner omits the import guidance at the end of Skill's
-# description. Keep that guidance visible even when its full spec is deferred.
-_SKILL_CODE_MODE_NOTE = (
-    "In code mode reach it with `from tools.Skill import Skill` and "
-    "`Skill(name=\"<skill>\")` inside run_python."
-)
-
 
 def _code_mode_tool_sections(
     codemode: Any,
@@ -4079,7 +4072,7 @@ def _code_mode_tool_sections(
     # The skill-store pair is registered by NativeLoop (``register_code_mode_
     # tools``), which runs AFTER this compile — so at connect the projection
     # has no ``save_skill`` leaf and the catalog silently lacked it (round-9
-    # finding S1). Fetch the specs from a throwaway registration instead.
+    # finding S1). Take the specs from fluid's public accessor instead.
     late_specs = (
         _skill_store_tool_specs(codemode) if "save_skill" not in leaves else {}
     )
@@ -4099,10 +4092,7 @@ def _code_mode_tool_sections(
         if permit is not None and not permit(getattr(spec, "name", None) or leaf):
             continue
         if getattr(spec, "name", None) in deferred:
-            one_liner = _catalog_one_liner(spec, leaf)
-            if leaf == "Skill":
-                one_liner = f"{one_liner} {_SKILL_CODE_MODE_NOTE}"
-            collapsed.append(f"- {leaf}: {one_liner}")
+            collapsed.append(f"- {leaf}: {_catalog_one_liner(spec, leaf)}")
             continue
         schema = getattr(spec, "input_schema", None) or {}
         props: dict = schema.get("properties") or {}

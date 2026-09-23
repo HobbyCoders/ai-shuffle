@@ -150,6 +150,7 @@ class TestNewTurnRearms:
             placement.resolve_placement.return_value = None
             runs_mod.claim_run.return_value = {"id": "r1", "fence_token": 1}
             turns_mod.start_turn.return_value = {"id": "t2"}
+            turns_mod.get_live_turn.return_value = None
             # The re-arm runs between start_turn and _reset_started_this_turn.
             with patch.object(
                 SessionRuntime,

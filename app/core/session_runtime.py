@@ -769,6 +769,27 @@ class SessionRuntime:
             await asyncio.to_thread(turns_db.remove_queued_turn, tid)
             return None
 
+        # 0b. Another turn already holds the live slot: stay queued without
+        #     claiming. A slot held under a dead lease still makes the session
+        #     claimable (no active run), so without this read every claim pass
+        #     — up to one a second while any session streams — claimed a fresh
+        #     run, tripped idx_turns_one_live_per_session in start_turn and
+        #     released it again until the reap sweep freed the slot (353
+        #     duplicate-key errors in 90 minutes on a desktop install). The
+        #     holder's settlement or the reap sweep kicks this session again.
+        #     The unique index stays the race guard for the window after this.
+        try:
+            live = await asyncio.to_thread(turns_db.get_live_turn, sid)
+        except Exception:
+            logger.warning("SessionRuntime: live-turn read failed for %s", sid, exc_info=True)
+            live = None
+        if live is not None and live["id"] != tid:
+            logger.debug(
+                "SessionRuntime: %s already has live turn %s (%s) — turn %s stays queued",
+                sid, live["id"], live["state"], tid,
+            )
+            return None
+
         # 1. Claim the run lease — MANDATORY. No claim ⇒ another runner owns the
         #    session; leave the turn queued for a later kick/reap.
         try:

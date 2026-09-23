@@ -6917,6 +6917,8 @@ def test_skill_catalog_entry_says_how_it_is_reached_in_code_mode():
     deferred = ha._code_mode_tool_sections(codemode, deferred=frozenset({"Skill"}))
     one_liners = deferred[-1][0]
     assert "- Skill:" in one_liners and "from tools.Skill import Skill" in one_liners
+    # The guidance comes from fluid's own description, not an app-side splice.
+    assert one_liners.count("from tools.Skill import Skill") == 1
 
 
 def test_github_block_limits_prs_to_repository_changes():

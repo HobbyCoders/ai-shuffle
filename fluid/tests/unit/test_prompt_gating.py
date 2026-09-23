@@ -293,3 +293,14 @@ async def test_skill_miss_list_honours_setting_sources(tmp_path, monkeypatch) ->
     )
     assert "(none discovered)" in disabled.text
     assert "Searched roots: (none — disabled by setting_sources)" in disabled.text
+
+
+def test_skill_one_liner_names_the_code_mode_import() -> None:
+    """A deferred tool gets only the first line of its description. Skill's
+    code-mode import must survive that cut so hosts need not splice it on."""
+    from fluid.codemode.projection import _first_line
+    from fluid.tools.builtins.skill import SPEC
+
+    first = _first_line(SPEC.description)
+    assert "from tools.Skill import Skill" in first
+    assert 'Skill(name="<skill>")' in first
