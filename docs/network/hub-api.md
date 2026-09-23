@@ -169,6 +169,33 @@ Two-phase publish of content-addressed bytes: request an upload URL, upload,
 then commit the reference. Not needed for the current milestones; blobs are
 served worker to worker.
 
+## Limits
+
+The hub enforces these bounds so one account cannot fill the shared D1
+database (`android/hub/src/network.ts`):
+
+| Bound | Value | Error |
+|---|---|---|
+| Request body on any `.../network` route | 128 KiB | 413 `Body too large (limit 128 KiB)` |
+| `response` in `devices/{id}/approve` (stored as `approval_json`) | 64 KiB of JSON | 413 `response is too large (limit 64 KiB)` |
+| `recovery` in `POST .../network` or `POST .../network/recovery` | 16 KiB of JSON | 413 `recovery is too large (limit 16 KiB)` |
+| Devices per network | 50 | 409 `Network device limit reached (50 devices); remove a worker first` |
+| Pending or rejected device rows | Deleted 30 days after their last update | None; the hourly cron removes them |
+
+The device cap counts rows that are not `rejected` and whose linked server is
+not revoked, so removing a worker frees its slot. A device already on the list
+can always register again (renames, restarts). A join response grows by about
+1 KiB per member plus one certificate record per past admission, so a
+50-device network fits in 64 KiB but a network with a long admission history
+may not. A larger response fails admission with 413 rather than being
+truncated. A pending device that keeps polling refreshes
+its row on each registration, so only abandoned requests are purged; a purged
+worker that comes back simply registers again as `pending`.
+
+All `/v1/servers/{id}/...` routes also share the hub rate limit: 120 requests a
+minute per worker (server id and secret), plus a looser 1,200 a minute per
+client IP. Over the limit the hub answers 429 with `Retry-After`.
+
 ## Quotas
 
 Per network: 200,000 stored envelopes, 512 MiB stored ciphertext JSON, and
