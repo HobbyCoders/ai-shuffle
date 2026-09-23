@@ -3,7 +3,7 @@ import { createHash, verify } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { extractSource, type ExtractedFile } from './source-archive';
-import { isLeaseValue, LEASE_HEADER, publicSourceFetch, SOURCE_ORIGIN } from './source-auth';
+import { isLeaseValue, isLicenseKeyValue, LEASE_HEADER, LICENSE_KEY_HEADER, publicSourceFetch, SOURCE_ORIGIN } from './source-auth';
 import { buildSource, removeSourceDirectory, type BuiltSource } from './source-build';
 import { prepareNativeRuntime } from './source-runtime';
 
@@ -23,6 +23,22 @@ export const CHANNELS = ['stable', 'edge'] as const;
 export type UpdateChannel = typeof CHANNELS[number];
 /** Owner-only override in the update root: {"channel": "edge"}. Absent means stable. */
 export const CHANNEL_FILE = 'update-channel.json';
+/**
+ * First-install license key in the update root: {"key": "ASH-..."}. Written
+ * when the owner enters their key because the hub asked for a license before
+ * any worker (and so any lease) existed; sent as X-Shuffle-License-Key only
+ * while there is no lease, and removed once a lease has opened the feed.
+ */
+export const LICENSE_KEY_FILE = 'license-key.json';
+/** The hub's gate answered 402: this install needs a lease or a license key. */
+export class LicenseRequiredError extends Error {
+  readonly code = 'license_required';
+  constructor(readonly keySent: boolean) {
+    super(keySent
+      ? 'The hub did not accept this license key for updates. Check the key, or that the license is active, at hobbycoders.com.'
+      : 'Updates need an active AI Shuffle license. Enter your license key, or add it in Settings > License.');
+  }
+}
 const FEEDS: Record<UpdateChannel, string> = { stable: SOURCE_ORIGIN + '/v1/desktop/manifest', edge: SOURCE_ORIGIN + '/v1/desktop/manifest/edge' };
 export interface SourceManifest {
   format: 2; revision: string; sequence: number; sha256: string; size: number;
@@ -120,8 +136,9 @@ export class SourceUpdates {
   private lease: (() => Promise<string | null>) | null = null;
   constructor(readonly options: SourceOptions) {
     this.request = options.fetch ?? ((url, init) => {
-      const lease = (init?.headers as Record<string, string> | undefined)?.[LEASE_HEADER];
-      return lease ? publicSourceFetch(String(url), lease) : publicSourceFetch(String(url));
+      const headers = init?.headers as Record<string, string> | undefined;
+      const lease = headers?.[LEASE_HEADER], key = headers?.[LICENSE_KEY_HEADER];
+      return lease ? publicSourceFetch(String(url), lease) : key ? publicSourceFetch(String(url), undefined, key) : publicSourceFetch(String(url));
     });
   }
   /**
@@ -133,6 +150,26 @@ export class SourceUpdates {
   private async currentLease(): Promise<string | null> {
     try { const lease = await this.lease?.(); return isLeaseValue(lease) ? lease : null; }
     catch { return null; }
+  }
+  /** The first-install license key, or null when none was entered or the file is unreadable. */
+  async licenseKey(): Promise<string | null> {
+    try {
+      const key = JSON.parse(await fs.readFile(path.join(this.options.root, LICENSE_KEY_FILE), 'utf8'))?.key;
+      return isLicenseKeyValue(key) ? key : null;
+    } catch { return null; }
+  }
+  /** Keep the key the owner entered for the first download; owner-only file. */
+  async saveLicenseKey(key: string): Promise<void> {
+    const value = key.trim();
+    if (!isLicenseKeyValue(value)) throw new Error('That does not look like a license key. Keys look like ASH-XXXXX-XXXXX-XXXXX-XXXXX.');
+    await fs.mkdir(this.options.root, { recursive: true });
+    const file = path.join(this.options.root, LICENSE_KEY_FILE);
+    await fs.writeFile(file + '.tmp', JSON.stringify({ key: value }), { mode: 0o600 });
+    await fs.rename(file + '.tmp', file);
+  }
+  private async forgetLicenseKey(): Promise<void> {
+    try { await fs.unlink(path.join(this.options.root, LICENSE_KEY_FILE)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error('Could not remove the first-install license key', error); }
   }
   get version(): string | null { return this.running ?? this.state.active ?? this.options.baseline?.revision ?? null; }
   get pendingVersion(): string | null { return this.state.staged ?? this.state.pending ?? null; }
@@ -229,10 +266,15 @@ export class SourceUpdates {
   private async response(url: string): Promise<Response> {
     // Only hub update URLs reach here (FEEDS and the hub's /v1/desktop/sources/<revision>).
     if (!url.startsWith(SOURCE_ORIGIN + '/v1/desktop/')) throw new Error('Invalid source download endpoint');
+    // A lease from the worker wins; the first-install key is only for before one exists.
     const lease = await this.currentLease();
-    const headers: Record<string, string> = { 'User-Agent': 'AI-Shuffle-Source-Updater', ...(lease ? { [LEASE_HEADER]: lease } : {}) };
+    const key = lease ? null : await this.licenseKey();
+    const headers: Record<string, string> = { 'User-Agent': 'AI-Shuffle-Source-Updater', ...(lease ? { [LEASE_HEADER]: lease } : key ? { [LICENSE_KEY_HEADER]: key } : {}) };
     const response = await this.request(url, { signal: AbortSignal.timeout(120_000), headers });
+    if (response.status === 402) throw new LicenseRequiredError(!!key);
     if (!response.ok || !response.body) throw new Error(`Source update request failed (${response.status})`);
+    // The worker has a lease and the hub took it: the first-install key has done its job.
+    if (lease) await this.forgetLicenseKey();
     return response;
   }
   private async manifest(): Promise<{ signed: string; manifest: SourceManifest }> {

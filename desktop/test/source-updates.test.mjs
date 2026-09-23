@@ -248,6 +248,14 @@ test('public source requests omit credentials and reject off-origin URLs and red
  for(const url of ['https://evil.example/v1/desktop/manifest','https://hobbycoders.com/v1/account','http://hobbycoders.com/v1/desktop/manifest'])await assert.rejects(request(url,'lease_1-x'),/Invalid source/);
  for(const lease of ['','has space','a\r\nX-Other: 1','x'.repeat(4097)])await assert.rejects(request('https://hobbycoders.com/v1/desktop/manifest',lease),/Invalid license lease/);
  assert.equal(requests.length,3);
+ // First install: the license key rides the same checks, and a lease wins over it.
+ await request('https://hobbycoders.com/v1/desktop/manifest',undefined,'ASH-7K2QD-M4XRT-9PWZC-H3N8B');
+ assert.deepEqual({...requests[3][1].headers},{'X-Shuffle-License-Key':'ASH-7K2QD-M4XRT-9PWZC-H3N8B'});assert.equal(requests[3][1].redirect,'error');
+ await request('https://hobbycoders.com/v1/desktop/manifest','lease_1-x','ASH-7K2QD-M4XRT-9PWZC-H3N8B');
+ assert.deepEqual({...requests[4][1].headers},{'X-Shuffle-Lease':'lease_1-x'});
+ await assert.rejects(request('https://evil.example/v1/desktop/manifest',undefined,'ASH-7K2QD-M4XRT-9PWZC-H3N8B'),/Invalid source/);
+ for(const key of ['','short','ASH-7K2QD\r\nX-Other: 1-XXXXXXXXXXXX',' ASH-7K2QD-M4XRT-9PWZC-H3N8B','x'.repeat(65)])await assert.rejects(request('https://hobbycoders.com/v1/desktop/manifest',undefined,key),/Invalid license key/);
+ assert.equal(requests.length,5);
 });
 
 test('only signed stable releases are accepted by default; edge and unlabelled manifests are refused before any download',async t=>{
@@ -330,6 +338,30 @@ test('the license lease goes to the hub manifest and archive requests, and only 
   current=value;seen.length=0;assert.equal((await u.check()).kind,'available');assert.deepEqual(seen,[['https://hobbycoders.com/v1/desktop/manifest',undefined]],JSON.stringify(value));
  }
  u.useLease(async()=>{throw Error('worker restarting');});seen.length=0;assert.equal((await u.check()).kind,'available');assert.equal(seen[0][1],undefined,'a failing provider never blocks updates');
+});
+test('a first install sends the license key it was given until a lease exists, then forgets it',async t=>{
+ const f=await fixture(t);await f.release(A);const fetch=f.options.fetch;const seen=[];let gate=true;
+ // A stand-in for the hub with LICENSE_GATE=on: a lease or the right key opens the feed.
+ f.options.fetch=async(url,init)=>{const h=init?.headers??{};seen.push([url,h['X-Shuffle-Lease'],h['X-Shuffle-License-Key']]);
+  if(gate&&!h['X-Shuffle-Lease']&&h['X-Shuffle-License-Key']!=='ASH-7K2QD-M4XRT-9PWZC-H3N8B')return new Response('{"code":"license_required"}',{status:402});return fetch(url,init);};
+ const u=f.create();await u.load();
+ await assert.rejects(u.download(),error=>error.code==='license_required'&&error.keySent===false&&/license key/.test(error.message));
+ assert.deepEqual(seen,[['https://hobbycoders.com/v1/desktop/manifest',undefined,undefined]]);
+ await assert.rejects(u.saveLicenseKey('not a key'),/does not look like a license key/);
+ await u.saveLicenseKey('ASH-00000-00000-00000-00000');seen.length=0;
+ await assert.rejects(u.download(),error=>error.code==='license_required'&&error.keySent===true);
+ await u.saveLicenseKey(' ASH-7K2QD-M4XRT-9PWZC-H3N8B ');seen.length=0;
+ const stat=await fs.stat(path.join(f.root,'license-key.json'));if(process.platform!=='win32')assert.equal(stat.mode&0o777,0o600);
+ assert.equal((await u.download()).kind,'ready');
+ assert.deepEqual(seen,[['https://hobbycoders.com/v1/desktop/manifest',undefined,'ASH-7K2QD-M4XRT-9PWZC-H3N8B'],['https://hobbycoders.com/v1/desktop/sources/'+A,undefined,'ASH-7K2QD-M4XRT-9PWZC-H3N8B']]);
+ await u.select();await u.healthy();await f.release(B);
+ // Once the worker has a lease, the lease goes instead of the key, and the key file is removed.
+ u.useLease(async()=>'lease_1-x');seen.length=0;assert.equal((await u.check()).kind,'available');
+ assert.deepEqual(seen,[['https://hobbycoders.com/v1/desktop/manifest','lease_1-x',undefined]]);
+ assert.equal(await u.licenseKey(),null);await assert.rejects(fs.stat(path.join(f.root,'license-key.json')),{code:'ENOENT'});
+ // A key file that is not a key is ignored rather than sent.
+ await fs.writeFile(path.join(f.root,'license-key.json'),'{"key":"bad\\r\\nX: 1"}');u.useLease(async()=>null);seen.length=0;gate=false;
+ await u.check();assert.deepEqual(seen,[['https://hobbycoders.com/v1/desktop/manifest',undefined,undefined]]);
 });
 test('checks and downloads report the signed release name and notes; a staged update keeps them across restarts',async t=>{
  const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();

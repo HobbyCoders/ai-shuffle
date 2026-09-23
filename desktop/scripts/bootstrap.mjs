@@ -5,6 +5,7 @@ import { verify } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
+import { createInterface } from 'node:readline/promises';
 import path from 'node:path';
 const desktop = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const { readProfile, createProfile, localFeed } = createRequire(import.meta.url)('./source-profile.cjs');
@@ -26,6 +27,11 @@ if (options.isolated) {
 } else if (Object.keys(options).some(key => key !== '--root')) throw Error('Port, debug, and test-feed options require --isolated');
 await mkdir(root, { recursive: true });
 const publicKey = profile?.publicKey ?? await readFile(path.join(desktop, 'build/application-update-key.pem'), 'utf8');
+async function askLicenseKey() {
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try { return (await prompt.question('License key (ASH-XXXXX-XXXXX-XXXXX-XXXXX), or Enter to stop: ')).trim(); }
+  finally { prompt.close(); }
+}
 async function exists(file) { try { await access(file); return true; } catch { return false; } }
 async function run(exe, args, cwd, env = process.env, windowsHide = true) {
   await new Promise((resolve, reject) => {
@@ -72,7 +78,20 @@ if (!(await free(profile?.port ?? 8000)) || !(await free(profile?.protectedPort 
     console.log('Preparing the latest authenticated source from main. The first build can take several minutes.');
     let lastMessage;
     // Older installed source managers acquired updates through check().
-    await (updates.download ?? updates.check).call(updates, (percent, message) => { if (message !== lastMessage) { console.log(message); lastMessage = message; } }, true);
+    const download = () => (updates.download ?? updates.check).call(updates, (percent, message) => { if (message !== lastMessage) { console.log(message); lastMessage = message; } }, true);
+    // A first install has no worker and so no license lease. When the hub asks
+    // for a license (402), collect the owner's key here, keep it beside the
+    // update state, and retry: the hub checks it with the license server.
+    for (let attempt = 0; ; attempt++) {
+      try { await download(); break; }
+      catch (error) {
+        if (error?.code !== 'license_required' || !updates.saveLicenseKey || attempt >= 3 || !process.stdin.isTTY) throw error;
+        console.log(error.message);
+        const key = await askLicenseKey();
+        if (!key) throw error;
+        try { await updates.saveLicenseKey(key); } catch (invalid) { console.log(invalid.message); }
+      }
+    }
     await updates.prepareInstall?.();
     selected = await updates.select();
   }
