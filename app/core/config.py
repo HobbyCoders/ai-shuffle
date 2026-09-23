@@ -697,15 +697,16 @@ class Settings(BaseSettings):
     # working worker stays unbounded.
     #
     # How long an admitted worker may go without streaming its first frame
-    # before it is failed as "worker failed to start". 0 disables the watchdog.
+    # before it is stopped as "forwarded no output". 0 disables the watchdog.
     #
-    # TRADE-OFF, because there is no third signal: a worker whose provider
-    # connection is wedged and a reasoning model whose first token is merely
-    # late look identical from here — both have an empty event log. Raise this
-    # if slow-thinking models start being reported as "failed to start"; the
-    # automatic re-dispatch already gives the retry DOUBLE this deadline for
-    # exactly that reason, so a false positive costs one wasted start rather
-    # than the work.
+    # Provider progress the parent card never shows also counts: reasoning and
+    # tool-argument deltas and a finished call's usage in the worker's own log
+    # (#1418). One case stays invisible: a reasoning model whose reasoning is
+    # encrypted-only streams nothing the engine records until the reasoning
+    # item ends, so it looks the same as a wedged connection until then. Raise
+    # this if such models are stopped early. A watchdog stop is never
+    # re-dispatched automatically, because the provider may already have been
+    # working when the interrupt landed.
     # Override via TASK_WORKER_FIRST_FRAME_SECONDS.
     task_worker_first_frame_seconds: float = 90.0
     # Hard wall-clock cap on a SYNCHRONOUS Task worker, measured across every

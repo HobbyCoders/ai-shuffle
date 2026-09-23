@@ -130,6 +130,25 @@ _TEXT_TYPES = ("assistant.text_delta", "message.assistant")
 _TOOL_USE_TYPE = "tool.use"
 _TOOL_RESULT_TYPE = "tool.result"
 
+#: Worker rows that prove its provider request is streaming or has answered,
+#: though the tap does not mirror them: reasoning deltas, tool-argument deltas
+#: and a finished model call's usage. A reasoning model can spend minutes on
+#: these before its first text or tool call (#1418). ``turn.started`` is not
+#: one: the recorder writes it before any provider request is made.
+_PROVIDER_PROGRESS_TYPES = (
+    "assistant.thinking_delta", "tool.input_delta", "turn.usage",
+)
+
+
+def _is_provider_progress(row: Dict[str, Any]) -> bool:
+    etype = row.get("event_type")
+    if etype in _PROVIDER_PROGRESS_TYPES:
+        return True
+    # A completed non-text block (reasoning) recorded without deltas.
+    return etype == "message.assistant" and (
+        (row.get("payload") or {}).get("kind") not in (None, "text")
+    )
+
 
 def _clip(text: Optional[str], limit: int) -> str:
     """Clip ``text`` to ``limit`` characters, marking the cut."""
@@ -205,6 +224,7 @@ class WorkerFeed:
 
         self._cursor = 0
         self._frames = 0
+        self._provider_progress = 0
         self._text_chars = 0
         self._capped = False
         self._text_capped = False
@@ -217,6 +237,14 @@ class WorkerFeed:
     @property
     def frames_forwarded(self) -> int:
         return self._frames
+
+    @property
+    def provider_progress(self) -> int:
+        """Worker rows seen that prove provider activity but are not mirrored.
+
+        Liveness evidence for the first-frame watchdog, never parent output.
+        """
+        return self._provider_progress
 
     @property
     def capped(self) -> bool:
@@ -441,6 +469,7 @@ class WorkerFeed:
         ) or self._cursor
 
         self._capture_usage(rows)
+        self._provider_progress += sum(1 for r in rows if _is_provider_progress(r))
 
         emitted = 0
         pending_text: List[str] = []

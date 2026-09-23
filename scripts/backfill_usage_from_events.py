@@ -270,10 +270,11 @@ def main() -> int:
     parser.add_argument(
         "--dedupe-cancelled", action="store_true",
         help=(
-            "report historical duplicate usage rows, provable only by the "
-            "shared settlement identity on the usage_log rows (never by "
-            "equal token totals). Read-only: prints the duplicate groups "
-            "and writes nothing."
+            "report historical duplicate usage rows of cancelled workers, "
+            "proven from engine and turn identity (never by equal token "
+            "totals). Read-only: prints the duplicate groups and writes "
+            "nothing. To fix them, run python -m "
+            "scripts.dedupe_cancelled_usage --apply."
         ),
     )
     parser.add_argument(

@@ -318,6 +318,35 @@ async def test_background_records_regardless_of_v2_flag(mock_db):
     state.adapter.send_query.assert_awaited_once()
 
 
+async def test_background_lane_books_each_run_once(mock_db):
+    """The API lane bypasses the turn queue, so no live turn row exists. It
+    still needs a producer identity: without one ``_persist_turn_results``
+    refused to settle and every background run's usage was dropped."""
+    from app.core.query_persistence import _persist_turn_results
+    from app.db import database
+
+    sid = "bg-usage-booked"
+    sessions_db.create_session(sid, "default")
+    for _ in range(2):
+        pool = _StubPool(_fake_state(messages=[_result_message()]))
+        with ExitStack() as stack:
+            _bg_patches(stack, pool)
+            stack.enter_context(patch.object(
+                qb, "_persist_turn_results", new=_persist_turn_results,
+            ))
+            await _run(sid)
+
+    row = database.get_session(sid)
+    # Two runs with identical usage are two runs, not a duplicate.
+    assert row["total_tokens_in"] == 20
+    assert row["total_tokens_out"] == 10
+    assert row["total_model_calls"] == 2
+    keys = [r[0] for r in mock_db.execute(
+        "SELECT settlement_key FROM usage_log WHERE session_id=?", (sid,),
+    ).fetchall()]
+    assert len(keys) == 2 and len(set(keys)) == 2 and all(keys)
+
+
 # ─── subagent usage isolation ───────────────────────────────────────────────
 
 

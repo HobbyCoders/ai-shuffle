@@ -825,12 +825,14 @@ async def _await_worker_idle(
     the 2026-09-05 audit bound only the states where "running for hours" is not
     a description of anything:
 
-    * ``first_frame_deadline`` — an absolute ``loop.time()`` by which the feed
-      must have forwarded at least one frame. Zero frames means the parent saw
-      no progress; it does not prove that an admitted provider request never
-      began. The audit found ten of them reported ~900s late, one after fifteen
-      minutes of a parent parked on a corpse. Once ANY frame has been forwarded
-      the deadline stops applying, permanently.
+    * ``first_frame_deadline`` — an absolute ``loop.time()`` by which the
+      worker must have shown progress: a forwarded frame, or a worker row that
+      proves its provider is answering (reasoning or tool-argument deltas, a
+      finished call's usage). A reasoning model can stream only reasoning for
+      minutes, and those rows are liveness even though the parent card never
+      shows them (#1418). The audit found ten stalled workers reported ~900s
+      late, one after fifteen minutes of a parent parked on a corpse. Once
+      progress has been seen the deadline stops applying, permanently.
     * ``hard_deadline`` — an absolute ``loop.time()`` ceiling for a dispatch
       whose caller cannot survive an unbounded wait. Only the SYNCHRONOUS lane
       passes one: it blocks the parent's turn, so "no timeout" means "no
@@ -886,7 +888,7 @@ async def _await_worker_idle(
             if (
                 first_frame_deadline is not None
                 and now >= first_frame_deadline
-                and int(getattr(feed, "frames_forwarded", 0) or 0) == 0
+                and not await _worker_showed_progress(feed)
             ):
                 return WAIT_NO_FIRST_FRAME
             if hard_deadline is not None and now >= hard_deadline:
@@ -896,6 +898,33 @@ async def _await_worker_idle(
             waiter.cancel()
             with contextlib.suppress(BaseException):
                 await waiter
+
+
+def _feed_shows_progress(feed: Any) -> bool:
+    return bool(
+        int(getattr(feed, "frames_forwarded", 0) or 0)
+        or int(getattr(feed, "provider_progress", 0) or 0)
+    )
+
+
+async def _worker_showed_progress(feed: Any) -> bool:
+    """Whether the worker has done anything the first-frame watchdog must honour.
+
+    The feed polls on its own cadence, so a verdict taken from its counters
+    alone can miss rows written since its last tick. Before answering "no",
+    drain it once: rows already in the worker's log count, and any text or tool
+    rows among them are forwarded as they would be on the next tick.
+    """
+    if _feed_shows_progress(feed):
+        return True
+    drain = getattr(feed, "drain", None)
+    if drain is None:
+        return False
+    try:
+        await drain()
+    except Exception:  # noqa: BLE001 — a failed catch-up read keeps the verdict
+        logger.debug("ProviderAgent: watchdog catch-up drain failed", exc_info=True)
+    return _feed_shows_progress(feed)
 
 
 #: How long to wait between re-reads while a worker sits PARKED on background
@@ -2151,8 +2180,9 @@ async def dispatch_worker(
             status = "error"
             logger.warning(
                 "ProviderAgent: worker %s abandoned by the %s watchdog "
-                "(%d frame(s) forwarded)",
+                "(%d frame(s) forwarded, %d provider progress row(s))",
                 worker_session_id, wait_verdict, feed.frames_forwarded,
+                feed.provider_progress,
             )
             await _stop_wedged_worker(worker_session_id)
             return WorkerOutcome(

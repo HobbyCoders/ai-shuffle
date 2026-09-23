@@ -38,6 +38,7 @@ from app.core.query_persistence import (
     _wrap_stderr_capture,
     _extract_connection_error,
     _persist_turn_results,
+    capture_usage_identity,
     schedule_context_usage_capture,
     log_captured_cli_stderr,
 )
@@ -366,7 +367,10 @@ async def _run_background_query_impl(
         # Execute query
         response_text = []
         tool_messages = []  # Collect tool use/result messages for storage
-        metadata = {}
+        # This lane bypasses the turn queue, so there is no live turn row and
+        # the identity falls back to a fresh per-run key. Without one,
+        # _persist_turn_results refuses to book and the run's usage is lost.
+        metadata = {"usage_settlement_key": await capture_usage_identity(session_id)}
         sdk_session_id = resume_id
         interrupted = False
     except BaseException:

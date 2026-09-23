@@ -638,6 +638,46 @@ class TestProgressBounding:
 
         assert _types(_parent_rows()) == ["subagent.started", "task.updated"]
 
+    def test_provider_progress_counts_without_reaching_the_parent(self, db):
+        """#1418: reasoning, tool-argument and usage rows prove the provider is
+        answering. They count as liveness for the first-frame watchdog, but the
+        parent card still only mirrors text and tool activity."""
+        f = _feed()
+
+        async def run():
+            await f.started()
+            _seed_worker(
+                {"type": "turn.started", "payload": {}},
+                {"type": "assistant.thinking_delta", "payload": {"text": "hmm"}},
+                {"type": "tool.input_delta", "payload": {"partial_json": "{\"a"}},
+                {"type": "message.assistant",
+                 "payload": {"kind": "thinking", "content": "plan"}},
+                {"type": "turn.usage", "payload": {"usage": {"output_tokens": 9}}},
+            )
+            await f.drain()
+
+        asyncio.run(run())
+
+        assert f.provider_progress == 4
+        assert f.frames_forwarded == 0
+        assert _types(_parent_rows()) == ["subagent.started", "task.updated"]
+
+    def test_lifecycle_rows_alone_are_not_provider_progress(self, db):
+        """``turn.started`` is written before any provider request exists."""
+        f = _feed()
+
+        async def run():
+            await f.started()
+            _seed_worker(
+                {"type": "turn.started", "payload": {}},
+                {"type": "subagent.progress", "payload": {"task_id": "nested"}},
+            )
+            await f.drain()
+
+        asyncio.run(run())
+
+        assert f.provider_progress == 0
+
     def test_the_cursor_advances_so_rows_are_never_forwarded_twice(self, db):
         f = _feed()
 

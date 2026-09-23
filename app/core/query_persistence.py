@@ -589,20 +589,20 @@ async def _persist_turn_results(
     settlement_key = metadata.get("usage_settlement_key")
     if settlement_key:
         try:
-            await run_sync(
-                database.settle_turn_usage,
-                session_id=session_id, settlement_key=settlement_key,
-                profile_id=profile_id, model=metadata.get("model"),
-                tokens_in=metadata.get("tokens_in") or 0,
-                tokens_out=metadata.get("tokens_out") or 0,
-                cache_read_tokens=metadata.get("cache_read_tokens") or 0,
-                cache_creation_tokens=metadata.get("cache_creation_tokens") or 0,
-                cost_usd=metadata.get("total_cost_usd") or 0,
-                duration_ms=metadata.get("duration_ms") or 0,
-                model_calls=metadata.get("num_turns") or 0,
-                turn_increment=0 if interrupted or metadata.get("error")
-                or metadata.get("is_error") else 1,
+            booking = await _turn_end_booking(
+                session_id, settlement_key, metadata, interrupted,
             )
+            if booking is None:
+                logger.info(
+                    "%sNo usage evidence for %s at turn end; settlement claim "
+                    "left open", log_prefix, session_id,
+                )
+            else:
+                await run_sync(
+                    database.settle_turn_usage,
+                    session_id=session_id, settlement_key=settlement_key,
+                    profile_id=profile_id, **booking,
+                )
         except Exception:
             logger.exception("%sUsage settlement failed for %s", log_prefix, session_id)
     else:
@@ -610,6 +610,77 @@ async def _persist_turn_results(
                        log_prefix, session_id)
 
     return assistant_msg
+
+
+def settlement_turn_id(settlement_key: str) -> Optional[str]:
+    """The ``turns`` row a settlement key names, or ``None`` for a legacy key."""
+    try:
+        parts = json.loads(settlement_key)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(parts, list) and len(parts) == 4 and parts[1] != "legacy":
+        return parts[1]
+    return None
+
+
+async def _turn_end_booking(
+    session_id: str, settlement_key: str, metadata: dict, interrupted: bool,
+) -> Optional[dict]:
+    """What the turn-end finalizer books under ``settlement_key``.
+
+    A terminal result (``num_turns`` is set only from one) carries the turn's
+    own totals. Without one, the pump was cancelled or crashed before the
+    provider's terminal arrived, and the metadata holds no usage at all.
+    Booking those zeros would win the claim and lock out the kill path's
+    event-log recovery for the same attempt (#1407), so the finalizer recovers
+    from the same durable per-call ``turn.usage`` records instead, when they
+    are native per-call records. Otherwise nothing is booked and the claim
+    stays open for a later recovery path.
+    """
+    if "num_turns" in metadata:
+        return {
+            "model": metadata.get("model"),
+            "tokens_in": metadata.get("tokens_in") or 0,
+            "tokens_out": metadata.get("tokens_out") or 0,
+            "cache_read_tokens": metadata.get("cache_read_tokens") or 0,
+            "cache_creation_tokens": metadata.get("cache_creation_tokens") or 0,
+            "cost_usd": metadata.get("total_cost_usd") or 0,
+            "duration_ms": metadata.get("duration_ms") or 0,
+            "model_calls": metadata.get("num_turns") or 0,
+            "turn_increment": 0 if interrupted or metadata.get("error")
+            or metadata.get("is_error") else 1,
+        }
+    turn_id = settlement_turn_id(settlement_key)
+    if turn_id is None:
+        # A legacy key has no turn to scope the event log to; summing the
+        # whole session's history would book earlier turns again.
+        return None
+    totals = await run_sync(_partial_usage_from_events, session_id, turn_id)
+    if totals["unindexed_records"]:
+        # Delegated-leg records are coalesced gauges, several per call; summing
+        # them is the kill path's best-effort fallback, not a finalizer's
+        # booking. Leave the claim to it.
+        return None
+    if not _has_usage(totals):
+        return None
+    return {
+        "model": totals["model"] or metadata.get("model"),
+        "tokens_in": totals["tokens_in"],
+        "tokens_out": totals["tokens_out"],
+        "cache_read_tokens": totals["cache_read_tokens"],
+        "cache_creation_tokens": totals["cache_creation_tokens"],
+        "cost_usd": totals["cost_usd"],
+        "model_calls": totals["model_calls"],
+        "turn_increment": 0,
+    }
+
+
+def _has_usage(totals: Optional[dict]) -> bool:
+    return bool(totals) and bool(
+        totals["tokens_in"] or totals["tokens_out"]
+        or totals["cache_read_tokens"] or totals["cache_creation_tokens"]
+        or totals["cost_usd"] or totals["model_calls"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -693,6 +764,7 @@ def _partial_usage_from_events(session_id: str, turn_id: Optional[str]) -> dict:
             totals["model"] = usage["model"]
 
     totals["model_calls"] = len(seen_indices) or unindexed
+    totals["unindexed_records"] = unindexed
     return totals
 
 
@@ -755,11 +827,7 @@ async def settle_killed_session(
                 exc_info=True,
             )
             totals = None
-        if totals and (
-            totals["tokens_in"] or totals["tokens_out"]
-            or totals["cache_read_tokens"] or totals["cache_creation_tokens"]
-            or totals["cost_usd"] or totals["model_calls"]
-        ):
+        if _has_usage(totals):
             try:
                 key = usage_settlement_key(session_id, {
                     "id": turn_id, "run_id": run_id, "started_at": started_at,

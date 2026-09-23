@@ -214,6 +214,48 @@ class TestFirstFrameWatchdog:
         # The underlying idle wait still gets no ceiling of its own.
         assert seen["timeout"] == float("inf")
 
+    @pytest.mark.parametrize("row_type, expect_stop", [
+        # Reasoning, tool-argument and usage rows prove the provider is
+        # answering even though the parent card never mirrors them (#1418).
+        ("assistant.thinking_delta", False),
+        ("tool.input_delta", False),
+        ("turn.usage", False),
+        # turn.started is written before any provider request exists.
+        ("turn.started", True),
+    ])
+    def test_provider_progress_holds_off_the_watchdog(
+        self, worker_env, mock_db, row_type, expect_stop,
+    ):
+        from app.core import turn_manager as tm_mod
+        from app.db import session_events
+
+        async def _reasoning_worker(session_id, timeout=300.0):
+            # The row lands right before the deadline, between two feed polls:
+            # only the watchdog's own catch-up read can see it in time.
+            session_events.append_events(
+                session_id, [{"type": row_type, "payload": {"text": "hmm"}}],
+            )
+            await asyncio.sleep(0.4)
+            return True
+
+        with patch.object(tm_mod, "wait_session_idle", _reasoning_worker):
+            outcome = _run(pa.dispatch_worker(
+                parent_session_id="parent-1",
+                profile_id="p1",
+                prompt="go",
+                label="thinker",
+                first_frame_seconds=0.05,
+            ))
+
+        assert outcome.frames_forwarded == 0
+        if expect_stop:
+            assert outcome.ok is False
+            assert "forwarded no output" in outcome.error
+            assert worker_env.tm.interrupts == [(outcome.session_id, "stop")]
+        else:
+            assert outcome.ok is True
+            assert worker_env.tm.interrupts == []
+
     def test_the_deadline_can_be_disabled(self, worker_env, mock_db, monkeypatch):
         from app.core import config as cfg
 

@@ -117,3 +117,43 @@ def test_counter_failure_rolls_back_claim(mock_db, monkeypatch):
     monkeypatch.setattr(sessions, "update_session", original)
     assert database.settle_turn_usage(sid, "rollback-key", tokens_in=17)
     assert database.get_session(sid)["total_tokens_in"] == 17
+
+
+@pytest.mark.asyncio
+async def test_finalizer_without_terminal_leaves_coalesced_records_to_the_kill_path(mock_db):
+    """Delegated-leg ``turn.usage`` rows carry no call index and are coalesced
+    gauges, so a cancelled pump must not sum them. It books nothing and the
+    claim stays open for the kill path's own recovery."""
+    sid = "settlement-unindexed"
+    database.create_session(session_id=sid, profile_id="default")
+    turn = turns.enqueue_turn(sid, "user", prompt="go")
+    turns.start_turn(turn["id"], instance_id="test")
+    key = await qp.capture_usage_identity(sid)
+    session_events.append_events(sid, [{
+        "type": "turn.usage", "turn_id": turn["id"],
+        "payload": {"usage": {"input_tokens": 17, "output_tokens": 4}},
+    }])
+    await qp._persist_turn_results(
+        sid, "sdk", [], [], {"usage_settlement_key": key}, "default",
+        interrupted=True,
+    )
+    assert mock_db.execute(
+        "SELECT COUNT(*) FROM usage_log WHERE session_id=?", (sid,)
+    ).fetchone()[0] == 0
+    assert await qp.settle_killed_session(sid) is True
+    assert database.get_session(sid)["total_tokens_in"] == 17
+
+
+@pytest.mark.asyncio
+async def test_finalizer_without_terminal_or_turn_books_nothing(mock_db):
+    sid = "settlement-legacy-empty"
+    database.create_session(session_id=sid, profile_id="default")
+    key = await qp.capture_usage_identity(sid)
+    assert qp.settlement_turn_id(key) is None
+    await qp._persist_turn_results(
+        sid, "sdk", [], [], {"usage_settlement_key": key}, "default",
+        interrupted=True,
+    )
+    assert mock_db.execute(
+        "SELECT COUNT(*) FROM usage_log WHERE session_id=?", (sid,)
+    ).fetchone()[0] == 0
