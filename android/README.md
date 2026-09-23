@@ -39,4 +39,6 @@ CI helpers are in `ci/`; run them from this directory. Instrumentation tests res
 
 The Cloudflare account hub is in `hub/`. Its deployment workflow uses the `account-hub-production` environment in this repository.
 
+The image registry Worker for `registry.hobbycoders.com` is in `registry/`; its deployment workflow (`deploy-registry.yml`) uses the `registry-production` environment. Owner steps: `registry/README.md`.
+
 Report problems in the [shared issue tracker](https://github.com/HobbyCoders/ai-shuffle/issues).

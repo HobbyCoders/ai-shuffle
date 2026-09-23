@@ -51,6 +51,19 @@ in the sidebar. They are signed releases only, never unreleased code, and
 **Settings → General → Allow updates** turns them off. See
 [update checks](../README.md#update-checks) for what the check sends.
 
+## Your pull token
+
+The pull token only downloads the image; there is nothing to log in to, and
+it keeps working after a reboot. It appears in `docker ps` and in logs, so if
+you have shared it by accident (a screenshot, a forum post), get a new one
+from your account on hobbycoders.com, put it in `.env` and run
+`docker compose up -d`. The old token stops working within a minute; your
+running container is not affected.
+
+If your license ends, AI Shuffle keeps running and your data stays yours. The
+exact version in `.env` can still be downloaded again (for example on a new
+host), but new versions need an active license.
+
 ## Back up
 
 Stop the container (`docker compose stop`), then back up the Docker volumes
