@@ -187,6 +187,7 @@ jobs:
           echo "$GH_TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
           docker pull "$IMAGE:${RELEASE_TAG#v}"
           docker logout ghcr.io
+      # Also drives the first-session API checks; see the script's docstring.
       - name: Install from docs/install/compose
         run: python3 scripts/ci/verify_buyer_compose.py --image "$IMAGE:${RELEASE_TAG#v}" --artifacts "$RUNNER_TEMP/buyer-install"
       - name: Upload install evidence
