@@ -207,6 +207,8 @@ async function main(): Promise<void> {
 	};
 
 	updater.setPolicy(() => supervisor?.updatesAllowed() ?? Promise.resolve(false));
+	// The hub's gated feed wants this worker's license lease; older source managers lack useLease.
+	applications?.useLease?.(() => supervisor?.sourceLease() ?? Promise.resolve(null));
 	updater.setBridge(state => supervisor?.exchangeUpdateState(state) ?? Promise.resolve({}),
 		async () => !!supervisor && await supervisor.activeSessionCount() === 0);
 	registerIpc({ window, updater, worker });

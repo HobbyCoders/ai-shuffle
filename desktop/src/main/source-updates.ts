@@ -3,7 +3,7 @@ import { createHash, verify } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { extractSource, type ExtractedFile } from './source-archive';
-import { publicSourceFetch, SOURCE_ORIGIN } from './source-auth';
+import { isLeaseValue, LEASE_HEADER, publicSourceFetch, SOURCE_ORIGIN } from './source-auth';
 import { buildSource, removeSourceDirectory, type BuiltSource } from './source-build';
 import { prepareNativeRuntime } from './source-runtime';
 
@@ -117,7 +117,23 @@ export class SourceUpdates {
   }
   private writes: Promise<void> = Promise.resolve();
   private readonly request: typeof fetch;
-  constructor(readonly options: SourceOptions) { this.request = options.fetch ?? ((url) => publicSourceFetch(String(url))); }
+  private lease: (() => Promise<string | null>) | null = null;
+  constructor(readonly options: SourceOptions) {
+    this.request = options.fetch ?? ((url, init) => {
+      const lease = (init?.headers as Record<string, string> | undefined)?.[LEASE_HEADER];
+      return lease ? publicSourceFetch(String(url), lease) : publicSourceFetch(String(url));
+    });
+  }
+  /**
+   * Where to get the license lease sent as X-Shuffle-Lease with manifest and
+   * archive requests (the hub's gated feed, D8). Without it, or when it yields
+   * nothing, requests go out without the header exactly as before.
+   */
+  useLease(provider: () => Promise<string | null>): void { this.lease = provider; }
+  private async currentLease(): Promise<string | null> {
+    try { const lease = await this.lease?.(); return isLeaseValue(lease) ? lease : null; }
+    catch { return null; }
+  }
   get version(): string | null { return this.running ?? this.state.active ?? this.options.baseline?.revision ?? null; }
   get pendingVersion(): string | null { return this.state.staged ?? this.state.pending ?? null; }
   get hasSourceState(): boolean { return !!(this.state.active || this.state.pending || this.state.blocked); }
@@ -211,7 +227,11 @@ export class SourceUpdates {
     return () => fs.unlink(file);
   }
   private async response(url: string): Promise<Response> {
-    const response = await this.request(url, { signal: AbortSignal.timeout(120_000), headers: { 'User-Agent': 'AI-Shuffle-Source-Updater' } });
+    // Only hub update URLs reach here (FEEDS and the hub's /v1/desktop/sources/<revision>).
+    if (!url.startsWith(SOURCE_ORIGIN + '/v1/desktop/')) throw new Error('Invalid source download endpoint');
+    const lease = await this.currentLease();
+    const headers: Record<string, string> = { 'User-Agent': 'AI-Shuffle-Source-Updater', ...(lease ? { [LEASE_HEADER]: lease } : {}) };
+    const response = await this.request(url, { signal: AbortSignal.timeout(120_000), headers });
     if (!response.ok || !response.body) throw new Error(`Source update request failed (${response.status})`);
     return response;
   }

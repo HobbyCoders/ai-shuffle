@@ -130,12 +130,14 @@ test('automatic checks and downloads use the public source transport without acc
  const module={exports:{}};const localRequire=createRequire(new URL('../dist/main/source-updates.js',import.meta.url));
  vm.runInNewContext(await fs.readFile(new URL('../dist/main/source-updates.js',import.meta.url),'utf8'),{
   exports:module.exports,module,Buffer,AbortSignal,process,
-  require:id=>id==='./source-auth'?{SOURCE_ORIGIN:'https://hobbycoders.com',publicSourceFetch:async(...args)=>{requests.push(args);return f.options.fetch(args[0]);}}:localRequire(id)
+  require:id=>id==='./source-auth'?{...localRequire('./source-auth'),publicSourceFetch:async(...args)=>{requests.push(args);return f.options.fetch(args[0]);}}:localRequire(id)
  });
  const u=new module.exports.SourceUpdates({...f.options,fetch:undefined});await u.load();
  await u.check();assert.deepEqual(requests,[['https://hobbycoders.com/v1/desktop/manifest']]);
  await u.download();assert.equal(requests.length,3);assert(requests.every(args=>args.length===1));await u.select();await u.healthy();await f.release(B);
  await u.check();assert.equal(requests.length,4);assert.equal(f.builds,1);
+ // With a lease, the public transport receives it as its second argument.
+ u.useLease(async()=>'lease-value_1');await u.check();assert.deepEqual(requests.at(-1),['https://hobbycoders.com/v1/desktop/manifest','lease-value_1']);
 });
 
 test('installer baseline checks main without a source directory and transitions to a signed source update',async t=>{
@@ -240,6 +242,12 @@ test('public source requests omit credentials and reject off-origin URLs and red
  await request('https://hobbycoders.com/v1/desktop/manifest/edge');
  for(const url of ['https://evil.example/v1/desktop/manifest','https://user:secret@hobbycoders.com/v1/desktop/manifest','https://hobbycoders.com/v1/desktop/manifest?token=secret','https://hobbycoders.com/v1/desktop/manifest/beta'])await assert.rejects(request(url),/Invalid source/);
  assert.equal(requests.length,2);
+ // The lease header goes only to the hub's update endpoints, never with a redirect or credentials.
+ await request('https://hobbycoders.com/v1/desktop/sources/'+A,'lease_1-x');
+ assert.deepEqual({...requests[2][1].headers},{'X-Shuffle-Lease':'lease_1-x'});assert.equal(requests[2][1].redirect,'error');assert.equal(requests[2][1].credentials,'omit');
+ for(const url of ['https://evil.example/v1/desktop/manifest','https://hobbycoders.com/v1/account','http://hobbycoders.com/v1/desktop/manifest'])await assert.rejects(request(url,'lease_1-x'),/Invalid source/);
+ for(const lease of ['','has space','a\r\nX-Other: 1','x'.repeat(4097)])await assert.rejects(request('https://hobbycoders.com/v1/desktop/manifest',lease),/Invalid license lease/);
+ assert.equal(requests.length,3);
 });
 
 test('only signed stable releases are accepted by default; edge and unlabelled manifests are refused before any download',async t=>{
@@ -308,6 +316,20 @@ test('Python dependencies install only from the hash-pinned locks, like the cont
  const log=path.join(root,'build.log');const runtime={root,python:'python-not-run',node:'node-not-run',npm:'npm',pythonDependencies:''};
  await assert.rejects(buildSource({source,server:path.join(root,'server'),cache:path.join(root,'cache'),runtime,revision:A,log,progress(){}}),/no hash-pinned requirements-native\.lock/);
  await assert.rejects(fs.stat(log),{code:'ENOENT'},'nothing ran before the refusal');
+});
+test('the license lease goes to the hub manifest and archive requests, and only when one is available',async t=>{
+ const f=await fixture(t);await f.release(A);const fetch=f.options.fetch;const seen=[];
+ f.options.fetch=async(url,init)=>{seen.push([url,init?.headers?.['X-Shuffle-Lease']]);return fetch(url,init);};
+ const lease='eyJmb3JtYXQiOiJzaHVmZmxlLWxlYXNlLXYxIn0';let current=lease;
+ let u=f.create();await u.load();
+ await u.check();assert.deepEqual(seen,[['https://hobbycoders.com/v1/desktop/manifest',undefined]],'no provider: no header');
+ u.useLease(async()=>current);seen.length=0;await u.download();
+ assert.deepEqual(seen,[['https://hobbycoders.com/v1/desktop/manifest',lease],['https://hobbycoders.com/v1/desktop/sources/'+A,lease]]);
+ await u.select();await u.healthy();await f.release(B);
+ for(const value of [null,'',undefined,'has space','a\r\nX-Other: 1','x'.repeat(4097)]){
+  current=value;seen.length=0;assert.equal((await u.check()).kind,'available');assert.deepEqual(seen,[['https://hobbycoders.com/v1/desktop/manifest',undefined]],JSON.stringify(value));
+ }
+ u.useLease(async()=>{throw Error('worker restarting');});seen.length=0;assert.equal((await u.check()).kind,'available');assert.equal(seen[0][1],undefined,'a failing provider never blocks updates');
 });
 test('checks and downloads report the signed release name and notes; a staged update keeps them across restarts',async t=>{
  const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();

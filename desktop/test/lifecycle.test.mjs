@@ -45,6 +45,32 @@ test('attached workers are neither counted nor sent a shutdown request', async (
     await worker.stop();
 });
 
+test('the source lease comes from the owned worker only, and a worker without the endpoint means no lease', async t => {
+    const lease = 'e'.repeat(4096);
+    const port = await server(t, (req, res) => {
+        if (req.url === '/api/v1/internal/desktop/source-lease' && req.method === 'GET') res.end(JSON.stringify({lease}));
+        else { res.statusCode = 404; res.end('{}'); }
+    });
+    // A full-size lease fits the response limit that guards the other lifecycle calls.
+    assert.deepEqual(await requestLifecycle(port, 'test-secret', 'source-lease'), {lease});
+    const worker = supervisor();
+    worker._state = {...worker.state, phase: 'ready', port};
+    worker.lifecycleToken = 'test-secret';
+    assert.equal(await worker.sourceLease(), lease);
+    // An older worker answers 404: the feature is absent and the desktop sends no header.
+    worker.lifecycleRequest = () => requestLifecycle(port, 'test-secret', 'update-policy');
+    assert.equal(await worker.sourceLease(), null);
+    for (const reply of [{lease: null}, {lease: ''}, {lease: 7}, {}]) {
+        worker.lifecycleRequest = async () => reply;
+        assert.equal(await worker.sourceLease(), null, JSON.stringify(reply));
+    }
+    worker.lifecycleRequest = () => { throw Error('must not ask a worker that is not ours or not ready'); };
+    worker._state = {...worker.state, external: true};
+    assert.equal(await worker.sourceLease(), null);
+    worker._state = {...worker.state, external: false, phase: 'starting'};
+    assert.equal(await worker.sourceLease(), null);
+});
+
 test('missing stop acknowledgment preserves the owned child for retry', async () => {
     const worker = supervisor();
     worker._state = {...worker.state, phase: 'ready'};
