@@ -30,7 +30,7 @@
       "module": "webhook_connector",
       "class": "WebhookConnector",
       "files": {
-        "webhook_connector.py": "bece18fba9a3b4d5369b61c7299603b2c60b89361083a568c28dfb7b6ab982f3"
+        "webhook_connector.py": "bac9faf139773d525f1cfa7a2f2a6405858bfbeb94581d2ef207f84d40fb093b"
       }
     },
     "slack": {
