@@ -58,8 +58,10 @@ In Play Console, App content > **Data safety** > Data deletion:
 
 Before submitting, open the URL in a private browser window on a desktop and
 check that it loads, signs in, and shows the steps without the app installed.
-The page's support link still points at a personal Gmail address (report 03,
-SEC-20); switch it to the business address first.
+The page's support link is `support@hobbycoders.com` (report 03, SEC-20);
+check that address receives mail (Email Routing, `android/site/README.md`)
+before submitting. Tests in `android/hub` and `android/site` fail if a
+personal Gmail address reaches their files or responses.
 
 ## Data safety form (draft answers for the owner to confirm)
 
