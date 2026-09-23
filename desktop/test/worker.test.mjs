@@ -116,6 +116,25 @@ test('buildWorkerEnv preserves non-DB settings and drops ALL inherited DB settin
 	}
 });
 
+test('D5: the packaged (non-preview) worker runs on the user\'s own home and Claude Code config dir', async () => {
+	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-worker-'));
+	try {
+		for (const platform of ['win32', 'darwin', 'linux']) {
+			await fakeBundle(path.join(dir, platform, 'worker'), platform);
+			const runtime = resolveRuntime({ packaged: true, resourcesPath: path.join(dir, platform), repoDir: '/nowhere', platform });
+			// No profileDir: that is only ever set for preview and isolated builds.
+			const plain = buildWorkerEnv({ runtime, port: 8000, dataDir: '/d', envFile: '/d/.env', platform, baseEnv: { PATH: '/bin', HOME: '/home/me', USERPROFILE: 'C:\\Users\\me' } });
+			assert.equal(plain.HOME, '/home/me', platform);
+			assert.equal(plain.USERPROFILE, 'C:\\Users\\me', platform);
+			assert.equal(plain.CLAUDE_CONFIG_DIR, undefined, `${platform}: the CLI falls back to ~/.claude of the real home`);
+			const custom = buildWorkerEnv({ runtime, port: 8000, dataDir: '/d', envFile: '/d/.env', platform, baseEnv: { PATH: '/bin', HOME: '/home/me', CLAUDE_CONFIG_DIR: '/home/me/.config/claude' } });
+			assert.equal(custom.CLAUDE_CONFIG_DIR, '/home/me/.config/claude', platform);
+		}
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test('isPortFree tells a bound port from a free one', async () => {
 	const server = net.createServer();
 	await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));

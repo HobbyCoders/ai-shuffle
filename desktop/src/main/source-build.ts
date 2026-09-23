@@ -30,8 +30,10 @@ async function fingerprint(root: string, names: string[]): Promise<string> {
 }
 export function buildEnvironment(node: string, python: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
+  // Also the source-managed app's environment, and so its worker's: keep the
+  // user's own Claude Code config dir so `claude` finds the user's login (D5).
   for (const [key, value] of Object.entries(process.env)) {
-    if (/^(path|systemroot|windir|comspec|pathext|userprofile|home|appdata|localappdata|temp|tmp|programfiles|programfiles\(x86\)|programdata|processor_architecture|number_of_processors)$/i.test(key)) env[key] = value;
+    if (/^(path|systemroot|windir|comspec|pathext|userprofile|home|appdata|localappdata|temp|tmp|programfiles|programfiles\(x86\)|programdata|processor_architecture|number_of_processors|claude_config_dir)$/i.test(key)) env[key] = value;
   }
   const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') ?? 'PATH';
   env[pathKey] = [path.dirname(node), path.dirname(python), env[pathKey] ?? ''].join(path.delimiter);

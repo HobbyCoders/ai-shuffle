@@ -25,3 +25,13 @@ test('installed source versions preserve the original profile and EXE across res
  assert.equal(launch.options.env.SHUFFLE_SOURCE_ROOT,root);assert.equal(launch.options.env.SHUFFLE_SOURCE_REVISION,app.revision);
  assert(!launch.args.some(arg=>/bootstrap|\.cmd|powershell/.test(arg)));
 });
+
+test('D5: the source-managed relaunch keeps the user\'s home and Claude Code config dir',t=>{
+ const saved={...process.env};t.after(()=>{for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);});
+ Object.assign(process.env,{HOME:'/home/me',USERPROFILE:'C:\\Users\\me',CLAUDE_CONFIG_DIR:'D:\\claude-config',ANTHROPIC_API_KEY:'sk-not-forwarded'});
+ const app={electron:'/r/electron.exe',desktopDir:'/r/desktop',revision:'b'.repeat(40),node:'/r/node.exe',python:'/r/python.exe'};
+ const env=sourceLaunch(app,'/r',[]).options.env;
+ assert.equal(env.CLAUDE_CONFIG_DIR,'D:\\claude-config');
+ assert.equal(env.HOME,'/home/me');assert.equal(env.USERPROFILE,'C:\\Users\\me');
+ assert.equal(env.ANTHROPIC_API_KEY,undefined);
+});
