@@ -295,7 +295,10 @@ class ContainerUpdates:
         env["GITHUB_SHA"] = revision
         python = directory / "venv/bin/python"
         self.run_build([sys.executable, "-m", "venv", str(directory / "venv")], source, env)
-        self.run_build([str(python), "-m", "pip", "install", "--prefer-binary", "-r", "requirements.txt", "./fluid"], source, env)
+        # pip's 15-second read timeout dropped an 85 MB wheel mid-download on
+        # the Unraid host and failed the whole update; allow slow mirrors.
+        self.run_build([str(python), "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10",
+                        "-r", "requirements.txt", "./fluid"], source, env)
         for package in ("frontend", "tools", "browser-mcp"):
             self.publish("downloading", f"Building {package}…", version=revision)
             self.run_build(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], source / package, env)
