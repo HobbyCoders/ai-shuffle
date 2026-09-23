@@ -107,7 +107,16 @@ def test_fal_rotation_reconnects_even_when_sdk_server_identity_is_equivalent():
     assert requires_reconnect(state, new) is True
 
 
-def test_build_options_propagates_fal_credential_and_reconnects_pooled_worker(tmp_path):
+@pytest.mark.parametrize("profile_ai_tools", [
+    {"image_generation": True},
+    # The live case in #1398: ruling T5 attaches the tools from the picker, and
+    # an ordinary profile never sets the retired ``ai_tools`` switches.
+    None,
+    {},
+])
+def test_build_options_propagates_fal_credential_and_reconnects_pooled_worker(
+    tmp_path, profile_ai_tools,
+):
     """The real profile builder bridges the settings key to the MCP worker.
 
     The MCP factory is captured before it starts a subprocess; the resulting
@@ -122,7 +131,7 @@ def test_build_options_propagates_fal_credential_and_reconnects_pooled_worker(tm
             "model": "claude-sonnet-4-5",
             "cwd": str(tmp_path),
             "tools_preset": "claude_code",
-            "ai_tools": {"image_generation": True},
+            "ai_tools": profile_ai_tools,
         },
     }
     captured_envs = []
@@ -492,3 +501,39 @@ def test_disallowed_tools_change_forces_reconnect_order_insensitively():
     assert requires_reconnect(
         _tool_state(disallowed=["Bash"]), _tool_options(disallowed=[])
     ) is True
+
+def test_catch_all_fal_tools_alone_still_carry_the_key(tmp_path):
+    """``runFalModel`` alone runs on the fal key too, so it must carry it."""
+    import app.core.environment as environment
+    import app.core.query_options as query_options
+
+    profile = {
+        "id": "fal-generic-only",
+        "config": {
+            "model": "claude-sonnet-4-5",
+            "cwd": str(tmp_path),
+            "tools_preset": "claude_code",
+            "allowed_tools": ["mcp__ai-tools__runFalModel"],
+        },
+    }
+    captured_envs = []
+
+    def capture_mcp_servers(**kwargs):
+        captured_envs.append(kwargs["tool_env"])
+        return {}
+
+    with (
+        patch.object(query_options, "get_security_instructions", return_value=""),
+        patch.object(
+            query_options, "_build_mcp_servers_dict_with_ai_tools",
+            side_effect=capture_mcp_servers,
+        ),
+        patch.object(query_options, "_ai_tools_available", return_value=True),
+        patch.object(
+            environment, "_get_decrypted_api_key",
+            side_effect=lambda name: "fal-a" if name == "fal_api_key" else None,
+        ),
+    ):
+        query_options.build_options_from_profile(profile=profile)
+
+    assert captured_envs[0]["FAL_KEY"] == "fal-a"

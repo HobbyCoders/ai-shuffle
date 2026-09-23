@@ -37,6 +37,21 @@ def _tool_result(result: dict) -> dict:
     return {"content": [{"type": "text", "text": json.dumps(result, indent=2, default=_json_default)}]}
 
 
+def _model_arg(args: dict) -> dict:
+    """Pass the fal model ID as ``model``, the field the Node tools read.
+
+    These schemas used to advertise the model ID as ``provider``, which the Node
+    tools ignore (fal is the only provider), so a requested model silently fell
+    back to the default one. Calls made against the old schema still arrive with
+    ``provider``; carry that value over rather than dropping it.
+    """
+    args = dict(args)
+    legacy = args.pop("provider", None)
+    if legacy and legacy != "fal-ai" and not args.get("model"):
+        args["model"] = legacy
+    return args
+
+
 # Annotation for tools that may return large results (base64 previews, lengthy metadata).
 # Prevents the SDK from silently truncating results beyond the default 50K char limit.
 _LARGE_RESULT_ANNOTATIONS = ToolAnnotations(maxResultSizeChars=200_000)
@@ -56,12 +71,12 @@ def _create_image_tools(worker: NodeWorker) -> list:
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the image to generate"},
-            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/flux-pro/v1.1-ultra, fal-ai/flux/dev, fal-ai/flux/schnell, fal-ai/nano-banana-2, fal-ai/recraft-v4)"}
+            "model": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/flux-pro/v1.1-ultra, fal-ai/flux/dev, fal-ai/flux/schnell, fal-ai/nano-banana-2, fal-ai/recraft-v4)"}
         },
         "required": ["prompt"]
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def generate_image(args: dict) -> dict:
-        result = await worker.call("generateImage", args)
+        result = await worker.call("generateImage", _model_arg(args))
         return _tool_result(result)
 
     tools.append(generate_image)
@@ -71,12 +86,12 @@ def _create_image_tools(worker: NodeWorker) -> list:
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the edit to make"},
             "image_path": {"type": "string", "description": "Path to the image to edit"},
-            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/nano-banana-2, fal-ai/flux-pro/kontext, fal-ai/nano-banana-pro)"}
+            "model": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/nano-banana-2, fal-ai/flux-pro/kontext, fal-ai/nano-banana-pro)"}
         },
         "required": ["prompt", "image_path"]
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def edit_image(args: dict) -> dict:
-        result = await worker.call("editImage", args)
+        result = await worker.call("editImage", _model_arg(args))
         return _tool_result(result)
 
     tools.append(edit_image)
@@ -113,13 +128,12 @@ def _create_video_tools(worker: NodeWorker) -> list:
             "prompt": {"type": "string", "description": "Text description of the video to generate"},
             "duration": {"type": "integer", "description": "Duration in seconds (4, 6, or 8)"},
             "aspect_ratio": {"type": "string", "description": "Aspect ratio (e.g., 16:9, 9:16)"},
-            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/kling-video/v2.1/master, fal-ai/veo3, fal-ai/sora-v2)"},
-            "model": {"type": "string", "description": "Model variant to use"}
+            "model": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/kling-video/v2.1/master, fal-ai/veo3, fal-ai/sora-v2)"}
         },
         "required": ["prompt"]
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def generate_video(args: dict) -> dict:
-        result = await worker.call("generateVideo", args)
+        result = await worker.call("generateVideo", _model_arg(args))
         return _tool_result(result)
 
     tools.append(generate_video)
@@ -129,12 +143,12 @@ def _create_video_tools(worker: NodeWorker) -> list:
         "properties": {
             "image_path": {"type": "string", "description": "Path to the image to animate"},
             "prompt": {"type": "string", "description": "Text description of the desired animation"},
-            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/kling-video/v2.1/master, fal-ai/veo3, fal-ai/sora-v2)"}
+            "model": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/kling-video/v2.1/master, fal-ai/veo3, fal-ai/sora-v2)"}
         },
         "required": ["image_path", "prompt"]
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def image_to_video(args: dict) -> dict:
-        result = await worker.call("imageToVideo", args)
+        result = await worker.call("imageToVideo", _model_arg(args))
         return _tool_result(result)
 
     tools.append(image_to_video)

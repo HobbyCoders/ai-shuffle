@@ -69,6 +69,29 @@ def _ai_tools_credential_fingerprint(tool_env: Optional[Dict[str, str]]) -> Opti
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
+def _ai_tools_credential_config(
+    ai_tools_config: Optional[Dict[str, Any]], ai_tool_names: List[str]
+) -> Dict[str, Any]:
+    """The ``ai_tools`` toggle map the credential env is built from.
+
+    Ruling T5 attaches the ai-tools server from the permitted tool set, not the
+    profile's retired ``ai_tools`` switches. The env that carries ``FAL_KEY`` and
+    the per-category default models has to follow the same set: gating it on the
+    old switches alone attached the tools to a Node worker with no key (#1398).
+    Unlike ``ai_tools_config_from_names`` this keeps the catch-all tools, since
+    ``runFalModel`` and ``searchModels`` run on the same key.
+    """
+    from app.mcp.ai_tools_sdk import TOOL_CONFIG_MAP
+
+    config = dict(ai_tools_config or {})
+    for name in {n.split("__")[-1] for n in ai_tool_names}:
+        mapping = TOOL_CONFIG_MAP.get(name) or {}
+        for key in mapping.get("config_keys") or [mapping.get("config_key")]:
+            if key:
+                config[key] = True
+    return config
+
+
 # The CLI's interactive question tool, blocked for ProviderAgent worker
 # sessions (ruling A3, 2026-07-25 — workers cannot ask user questions).
 # Ruling A3: a worker must not be able to ask the human anything. Approvals
@@ -1441,7 +1464,10 @@ def build_options_from_profile(
     # 1. MCP server creation (so Node.js tool subprocesses get the keys)
     # 2. ClaudeAgentOptions env (so the Claude CLI subprocess also gets them)
     full_env = _build_env_with_ai_tools(
-        config.get("env"), ai_tools_config, api_user_id, provider_id
+        config.get("env"),
+        _ai_tools_credential_config(ai_tools_config, ai_tool_names),
+        api_user_id,
+        provider_id,
     )
 
     if provider_id:
@@ -1466,8 +1492,8 @@ def build_options_from_profile(
     # T5: the ai-tools server rides the PERMITTED set, not ``config.ai_tools``.
     # ``create_ai_tools_server`` still gates on the per-category booleans, so the
     # picker's selection is projected back onto that shape. (The credential ENV
-    # above is deliberately still built from the raw config: which API keys a
-    # session carries is a credentials question, not a tool-access one.)
+    # above follows the raw config plus this permitted set, so every attached
+    # tool can reach its key.)
     ai_tools_server_config = ai_tools_config_from_names(ai_tool_names)
     mcp_servers_dict = _build_mcp_servers_dict_with_ai_tools(
         project_dir=Path(working_dir) if working_dir else None,
