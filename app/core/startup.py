@@ -504,6 +504,11 @@ def start_background_tasks() -> List[asyncio.Task]:
     else:
         logger.info("Idle-at-edge watchdog disabled (IDLE_WATCHDOG_ENABLED=false)")
 
+    # License lease renewal (daily, jittered backoff). Idle in beta mode.
+    from app.core import license as licensing
+    tasks.append(asyncio.create_task(licensing.refresh_loop(), name="license-refresh"))
+    logger.info("License mode: %s", "beta" if licensing.beta_mode() else "licensed")
+
     return tasks
 
 
