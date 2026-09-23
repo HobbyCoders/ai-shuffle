@@ -304,3 +304,23 @@ def test_delegated_usage_stream_rolls_up_with_its_cache_hit_ratio():
     assert per_call[0]["cache_read_report"]["cached_fraction"] == pytest.approx(0.9, abs=1e-3)
     assert per_call[1]["cache_read_report"]["cached_fraction"] == pytest.approx(0.99, abs=1e-3)
     assert per_call[2]["context_usage"]["totalTokens"] == 20000
+
+
+def test_a_zero_usage_native_call_still_counts_as_a_call():
+    """Only the delegated leg's snapshot record (a call index already counted
+    this turn, every token field zero) is skipped. A native call whose
+    provider reported no usage also has zero tokens and a context breakdown,
+    but it is a real call with its own index, and the ErrorEvent backstop
+    must still count it."""
+    from fluid.events.model import Usage
+
+    adapter = ha.HarnessAdapter()
+    adapter._options = SessionOptions(model="local-model")
+    adapter._mark_turn_floor()
+    for index in (1, 2):
+        adapter._translate(Usage(
+            session_id="ses", node_id=f"n{index}", turn_id="turn",
+            raw={"model_call_index": index},
+            context_usage={"totalTokens": 1000 * index, "maxTokens": 32000},
+        ))
+    assert adapter._turn_model_calls == 2

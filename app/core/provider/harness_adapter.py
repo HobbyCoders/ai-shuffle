@@ -386,6 +386,10 @@ class HarnessAdapter(ProviderAdapter):
         # real spend missing across several errored turns in one session.
         self._turn_usage_totals: Dict[str, float] = {}
         self._turn_model_calls: int = 0
+        # The ``model_call_index`` values this turn's roll-up has counted, so a
+        # second record for a counted call (the delegated leg's context
+        # snapshot) is recognised by its index.
+        self._turn_call_indices: set = set()
         # The HookBus both legs emit into. One bus per adapter, so a callback
         # registered on it keeps observing across the reconnects that rebuild
         # the engine.
@@ -1587,6 +1591,7 @@ class HarnessAdapter(ProviderAdapter):
         # New turn → new usage roll-up (see _turn_usage_totals).
         self._turn_usage_totals = {}
         self._turn_model_calls = 0
+        self._turn_call_indices = set()
 
     async def steer(
         self, text: str, *, id: Optional[str] = None, origin: str = "user"
@@ -2707,13 +2712,21 @@ class HarnessAdapter(ProviderAdapter):
 
         A context-snapshot-only record is skipped: the delegated leg sends one
         after each call to carry that call's context breakdown, with every
-        token field zero, and counting it would double the turn's calls.
+        token field zero and the index of the call it describes, and counting
+        it would double the turn's calls. It is told apart by that index being
+        counted already: a native call whose provider reported no usage also
+        has zero tokens and a breakdown, but a new index, and still counts.
         """
         try:
-            if usage.get("context_usage") and not any(
-                usage.get(key) for key in self._ROLLUP_USAGE_KEYS
+            index = usage.get("model_call_index")
+            if (
+                index is not None
+                and index in self._turn_call_indices
+                and not any(usage.get(key) for key in self._ROLLUP_USAGE_KEYS)
             ):
                 return
+            if index is not None:
+                self._turn_call_indices.add(index)
             self._turn_model_calls += 1
             for key in self._ROLLUP_USAGE_KEYS:
                 value = usage.get(key)
