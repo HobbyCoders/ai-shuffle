@@ -2854,9 +2854,9 @@ async def test_set_model_canonicalizes_on_the_anthropic_leg(monkeypatch, tmp_pat
 
 @pytest.mark.asyncio
 async def test_delegated_append_mode_bypasses_compiler(monkeypatch, tmp_path):
-    """Flag off (opt-out; default is full replace since the 2026-08 prompt
-    overhaul): the delegated leg's system/append are NOT compiled — the CLI
-    gathers its own env and instruction files.
+    """A preset profile's delegated system/append are NOT compiled, whatever
+    PROMPT_FULL_REPLACE says — the CLI gathers its own env and instruction
+    files (decision D6).
 
     The one thing the app does add here is the agents index (the CLI cannot
     know about DB agents), so the assertion is "the app's text, then at most
@@ -2887,9 +2887,36 @@ async def test_delegated_append_mode_bypasses_compiler(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_delegated_full_replace_compiles(monkeypatch, tmp_path):
-    """PROMPT_FULL_REPLACE=true: the delegated leg gets the compiled prompt
-    via --system-prompt and no append."""
+async def test_delegated_preset_profile_keeps_claude_code_prompt(monkeypatch, tmp_path):
+    """Decision D6, under the shipped default settings: a preset profile keeps
+    Claude Code's own system prompt (no --system-prompt) and the app's text
+    rides --append-system-prompt, uncompiled. This replaced the full-replace
+    behaviour (ruling A3) that sent the compiled prompt instead."""
+    import app.core.provider.harness_adapter as ha
+    from fluid.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="fable",
+            system_prompt={"type": "preset", "preset": "claude_code", "append": "APPEND TEXT"},
+            cwd=str(tmp_path),
+            extra={"fluid_registry": ToolRegistry()},
+        )
+    )
+    assert _CapturingLoop.captured["system"] is None
+    append = _CapturingLoop.captured["append_system_prompt"]
+    assert append.startswith("APPEND TEXT")
+    # Claude Code gathers these itself; compiling them in would restate it.
+    assert "# Environment" not in append
+    assert "# Skills" not in append
+
+
+@pytest.mark.asyncio
+async def test_delegated_plain_prompt_full_replace_compiles(monkeypatch, tmp_path):
+    """A plain-string profile chose its own prompt, so it still replaces the
+    preset; PROMPT_FULL_REPLACE compiles it."""
     import app.core.provider.harness_adapter as ha
     from app.core.config import settings
     from fluid.tools.registry import ToolRegistry
@@ -2900,14 +2927,14 @@ async def test_delegated_full_replace_compiles(monkeypatch, tmp_path):
     await ha.HarnessAdapter().connect(
         SessionOptions(
             model="fable",
-            system_prompt={"type": "preset", "append": "APPEND TEXT"},
+            system_prompt="BASE PROMPT",
             cwd=str(tmp_path),
             extra={"fluid_registry": ToolRegistry()},
         )
     )
     system = _CapturingLoop.captured["system"]
     assert _CapturingLoop.captured["append_system_prompt"] is None
-    assert "APPEND TEXT" in system
+    assert system.startswith("BASE PROMPT")
     assert "# Environment" in system
 
 
@@ -5896,8 +5923,8 @@ async def test_delegated_plain_prompt_carries_the_index(monkeypatch, agent_works
 async def test_delegated_full_replace_does_not_double_the_index(
     monkeypatch, agent_workspace
 ):
-    """PROMPT_FULL_REPLACE already slots the index into the compiled prompt —
-    the append-mode injection must not add a second copy."""
+    """PROMPT_FULL_REPLACE no longer compiles a preset profile's prompt: the
+    index rides the appended text exactly once."""
     import app.core.provider.harness_adapter as ha
     from app.core.config import settings
 
@@ -5909,10 +5936,10 @@ async def test_delegated_full_replace_does_not_double_the_index(
             agent_workspace, declared=[{"name": "Helper", "description": "Helps out"}]
         )
     )
-    system = _CapturingLoop.captured["system"]
-    assert _CapturingLoop.captured["append_system_prompt"] is None
-    assert system.count("# Available agent types") == 1
-    assert "- Helper: Helps out" in system
+    append = _CapturingLoop.captured["append_system_prompt"]
+    assert _CapturingLoop.captured["system"] is None
+    assert append.count("# Available agent types") == 1
+    assert "- Helper: Helps out" in append
 
 
 def test_with_agents_index_is_idempotent():
