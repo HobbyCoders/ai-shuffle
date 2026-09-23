@@ -71,6 +71,10 @@ services:
       # Never mount an external provider home over /home/appuser/.fluid.
       # Persist GitHub CLI authentication
       - gh-auth:/home/appuser/.config/gh
+      # Persist the Claude Code CLI that entrypoint installs with Anthropic's
+      # installer (~/.local/bin/claude and ~/.local/share/claude), so it keeps
+      # its self-updates across container recreation.
+      - local-home:/home/appuser/.local
       # Persist the browser-automation Chrome profile (logged-in sessions the
       # browser-mcp server drives). Non-default dir on purpose — Chrome 136+
       # disables the DevTools debug port on the default ~/.config/google-chrome
@@ -173,6 +177,9 @@ volumes:
     driver: local
   # Named volume for GitHub CLI authentication persistence
   gh-auth:
+    driver: local
+  # Named volume for ~/.local (the user-installed Claude Code CLI and its updates)
+  local-home:
     driver: local
   # Named volume for the browser-automation Chrome profile (persisted logins)
   browser-profile:

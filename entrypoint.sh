@@ -18,29 +18,7 @@ case "$PUID:$PGID" in
     *[!0-9:]*|0:*|*:0|:*|*:) echo "PUID/PGID must be non-root numeric IDs" >&2; exit 1 ;;
 esac
 
-# Image pulls deliver updates. Startup is offline-capable by default; the
-# legacy GitHub CLI updater remains explicit opt-in, never a boot dependency.
-AUTO_UPDATE=${AUTO_UPDATE:-false}
-
 echo "Starting with PUID=${PUID} and PGID=${PGID}" >&2
-
-# Update GitHub CLI if enabled. Provider runtimes remain pinned to the image
-# and are never rewritten by startup scripts.
-if [ "$AUTO_UPDATE" = "true" ] && [ "${1:-run}" = "run" ]; then
-    echo "Checking for updates..."
-
-    # Update GitHub CLI
-    echo "Updating GitHub CLI..."
-    if ! timeout 60s bash -c 'apt-get update -qq && apt-get install -y --only-upgrade gh' 2>/dev/null; then
-        echo "GitHub CLI update check failed or timed out (continuing anyway)" >&2
-    fi
-
-    # Clean up apt cache
-    rm -rf /var/lib/apt/lists/* 2>/dev/null || true
-
-    echo "Update check complete"
-    gh --version
-fi
 
 # Get current UID/GID of appuser
 CURRENT_UID=$(id -u appuser)
