@@ -557,7 +557,9 @@ def _sensitive_file_rules():
     """
     from fluid.permissions.rules import Rule
     from fluid.tools.hardening import (
+        PROTECTED_WRITE_PREFIXES,
         SENSITIVE_BASENAME_GLOBS,
+        SENSITIVE_DIR_NAMES,
         SENSITIVE_EXCEPTIONS,
         SENSITIVE_PATH_SUFFIXES,
     )
@@ -568,6 +570,8 @@ def _sensitive_file_rules():
         pattern if pattern.startswith("*") else f"*{pattern}"
         for pattern in (*SENSITIVE_BASENAME_GLOBS, *SENSITIVE_PATH_SUFFIXES)
     ]
+    for name in SENSITIVE_DIR_NAMES:
+        globs.extend((f"{name}/*", f"*/{name}/*", f"*/{name}", name))
     field_by_tool = {
         "Read": "file_path", "Edit": "file_path", "Write": "file_path",
         "Grep": "path", "Glob": "path",
@@ -577,6 +581,11 @@ def _sensitive_file_rules():
         for tool, field in field_by_tool.items()
         for glob in globs
     ]
+    asks.extend(
+        Rule(tool=tool, decision="ask", input_globs={"file_path": f"{prefix}*"})
+        for tool in ("Edit", "Write")
+        for prefix in PROTECTED_WRITE_PREFIXES
+    )
     # Template files (.env.example and friends) hold no values and are meant
     # to be read. They match ``.env.*`` above, so an allow rule after the
     # asks lets them through; last match wins, and a user rule still comes

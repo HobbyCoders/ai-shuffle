@@ -111,6 +111,44 @@ def test_is_sensitive_path() -> None:
     assert not is_sensitive_path("environment.md")
 
 
+@pytest.mark.parametrize("path", [
+    "/data/.credential-keys/0123abcd.key",
+    "/data/.credential-keys",
+    "/data/managed-postgres.json",
+    "~/.claude/.credentials.json",
+    "/home/appuser/.config/gh/hosts.yml",
+    "/home/appuser/chrome-profile/Default/Cookies",
+])
+def test_app_secret_paths_are_sensitive(path: str) -> None:
+    assert is_sensitive_path(path)
+
+
+@pytest.mark.parametrize("command", [
+    "cat /data/.credential-keys/0123abcd.key",
+    "cat /data/.credential-keys/*",
+    "cat /data/managed-postgres.json",
+    "cat ~/.claude/.credentials.json",
+    "cat ~/.claude/.cred*",
+    "head ~/.config/gh/hosts.yml",
+    "ls ~/chrome-profile/Default",
+])
+def test_bash_read_of_app_secrets_prompts(command: str) -> None:
+    assert classify({"command": command}) == "write"
+
+
+def test_default_rules_gate_app_secrets_and_app_code_writes() -> None:
+    engine = _build_permissions(_config())
+    read_spec = ToolSpec(name="Read", description="", input_schema={}, risk="safe")
+    write_spec = ToolSpec(name="Write", description="", input_schema={}, risk="safe")
+    for path in (
+        "/data/.credential-keys/k.key", "/data/managed-postgres.json",
+        "/home/appuser/.claude/.credentials.json", "/home/appuser/.config/gh/hosts.yml",
+    ):
+        assert engine.decide(read_spec, {"file_path": path}).decision == "ask", path
+    assert engine.decide(write_spec, {"file_path": "/app/app/main.py"}).decision == "ask"
+    assert engine.decide(read_spec, {"file_path": "/app/app/main.py"}).decision == "allow"
+
+
 def test_bash_read_only_of_credentials_still_prompts() -> None:
     assert classify({"command": "cat README.md"}) == "safe"
     assert classify({"command": "cat .env"}) == "write"

@@ -473,7 +473,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self.cli_version = None
 
     def _child_env(self) -> dict[str, str]:
-        env = dict(os.environ)
+        # The CLI child runs the model's Bash and tools, so it inherits the
+        # host environment minus host secrets. ``self.env`` is what the caller
+        # hands over on purpose (provider keys, fal.ai key) and goes on top.
+        from fluid.tools.child_env import scrub_child_env
+
+        env = scrub_child_env(os.environ)
         if self.env:
             env.update(self.env)
         return env
