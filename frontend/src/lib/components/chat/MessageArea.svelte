@@ -2133,8 +2133,8 @@
 
 	@media (min-width: 640px) and (pointer: fine) {
 		.has-long-turn-nav .chat-column {
-			width: calc(100% - 140px);
-			margin-left: max(140px, calc((100% - 768px) / 2));
+			width: calc(100% - 64px);
+			margin-left: max(64px, calc((100% - 768px) / 2));
 		}
 	}
 	@media (max-width: 639px), (pointer: coarse) {

@@ -20,17 +20,55 @@ describe('TurnNavigator', () => {
 		const onSelect = vi.fn();
 		const many = Array.from({ length: 1000 }, (_, i) => ({ id: String(i), label: `Turn ${i}`, title: `Turn ${i}`, preview: '' }));
 		render(TurnNavigator, { props: { items: many, currentIndex: 500, onSelect } });
-		expect(screen.getAllByRole('option')).toHaveLength(1000);
-		expect(screen.getAllByRole('button')).toHaveLength(4);
+		expect(screen.queryByRole('combobox')).toBeNull();
+		expect(screen.getAllByRole('button')).toHaveLength(14);
 		await fireEvent.click(screen.getByRole('button', { name: 'First user turn' }));
 		expect(onSelect).toHaveBeenLastCalledWith(0);
 		await fireEvent.click(screen.getByRole('button', { name: 'Last user turn' }));
 		expect(onSelect).toHaveBeenLastCalledWith(999);
-		await fireEvent.change(screen.getByRole('combobox'), { target: { value: '123' } });
+		await fireEvent.click(screen.getByRole('button', { name: /Browse session timeline/ }));
+		const search = screen.getByRole('searchbox');
+		expect(document.activeElement).toBe(search);
+		await fireEvent.input(search, { target: { value: '124' } });
+		await fireEvent.click(screen.getByRole('button', { name: '124 Turn 123' }));
 		expect(onSelect).toHaveBeenLastCalledWith(123);
-		onSelect.mockClear();
-		await fireEvent.keyDown(screen.getByRole('combobox'), { key: 'ArrowDown' });
+		expect(screen.queryByRole('searchbox')).toBeNull();
+		expect(document.activeElement).toBe(screen.getByRole('button', { name: /Browse session timeline/ }));
+	});
+
+	it('searches previews, handles empty results, and dismisses without navigating', async () => {
+		const onSelect = vi.fn();
+		const many = Array.from({ length: 100 }, (_, i) => ({ id: String(i), label: `Prompt ${i}`, title: `Prompt ${i}`, preview: i === 75 ? 'A unique detail' : '' }));
+		render(TurnNavigator, { props: { items: many, currentIndex: 50, onSelect } });
+		const trigger = screen.getByRole('button', { name: /Browse session timeline/ });
+		await fireEvent.click(trigger);
+		await fireEvent.input(screen.getByRole('searchbox'), { target: { value: 'unique detail' } });
+		expect(screen.getByRole('button', { name: '76 Prompt 75 A unique detail' })).toBeTruthy();
+		await fireEvent.input(screen.getByRole('searchbox'), { target: { value: 'no such message' } });
+		expect(screen.getByText('No messages found.')).toBeTruthy();
+		await fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
+		expect(screen.queryByRole('searchbox')).toBeNull();
+		expect(document.activeElement).toBe(trigger);
+		await fireEvent.click(trigger);
+		await fireEvent.pointerDown(document.body);
+		expect(screen.queryByRole('searchbox')).toBeNull();
 		expect(onSelect).not.toHaveBeenCalled();
+	});
+
+	it('keeps nearby targets and endpoint controls in bounds as the reading position changes', async () => {
+		const onSelect = vi.fn();
+		const many = Array.from({ length: 45 }, (_, i) => ({ id: String(i), label: `Prompt ${i}`, title: `Prompt ${i}`, preview: '' }));
+		const view = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+		expect((screen.getByRole('button', { name: 'Previous user turn' }) as HTMLButtonElement).disabled).toBe(true);
+		expect(screen.getByRole('button', { name: 'User message 1 of 45: Prompt 0' }).getAttribute('aria-current')).toBe('true');
+		await view.rerender({ items: many, currentIndex: 44, onSelect });
+		expect((screen.getByRole('button', { name: 'Next user turn' }) as HTMLButtonElement).disabled).toBe(true);
+		expect(screen.getByRole('button', { name: 'User message 45 of 45: Prompt 44' }).getAttribute('aria-current')).toBe('true');
+		const trigger = screen.getByRole('button', { name: /Browse session timeline/ });
+		await fireEvent.keyDown(trigger, { key: 'Home' });
+		expect(onSelect).toHaveBeenLastCalledWith(0);
+		await fireEvent.keyDown(trigger, { key: 'ArrowUp' });
+		expect(onSelect).toHaveBeenLastCalledWith(43);
 	});
 	it('selects a turn from the timeline', async () => {
 		const onSelect = vi.fn();
