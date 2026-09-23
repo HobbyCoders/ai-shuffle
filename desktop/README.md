@@ -108,6 +108,14 @@ hosted public downloads or GitHub download permissions.
   worker and database that this app started. A worker that crashes after it was
   ready is restarted, at most twice in five minutes, before the status page
   reports it.
+- Says plainly that agents run as you. Before the first worker ever starts,
+  a dialog explains that agents run on this computer as the signed-in user,
+  with the user's own `claude` login and every file that user can reach
+  (`src/main/disclosure.ts`). Quit leaves nothing running and asks again next
+  launch; the acknowledgement lives in `<userData>/agent-access.json`, and
+  raising `AGENT_ACCESS_VERSION` asks again after an upgrade. The same text
+  stays under Help > Agent Access… and in the web UI's Settings > General.
+  Automated acceptance runs set `SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS=1`.
 - Needs no database setup. The first run creates a cluster in
   `<userData>/postgres/data` (`initdb`, user `ai_shuffle`, a generated
   password, `scram-sha-256`); every start picks a free loopback port and

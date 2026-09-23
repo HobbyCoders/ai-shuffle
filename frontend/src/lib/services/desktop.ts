@@ -63,10 +63,20 @@ export type DesktopCommand =
 	| 'find'
 	| 'open-docs';
 
+/** The desktop app's "agents run as you" disclosure, shown on first launch. */
+export interface DesktopAgentAccess {
+	title: string;
+	message: string;
+	points: string[];
+	footer: string;
+}
+
 export interface ShuffleDesktopBridge {
 	version: string;
 	platform: DesktopPlatform;
 	titleBarHeight: number;
+	/** Older shells lack it. */
+	agentAccess?: DesktopAgentAccess | null;
 	window: {
 		getState(): Promise<DesktopWindowState>;
 		onStateChange(listener: (state: DesktopWindowState) => void): () => void;

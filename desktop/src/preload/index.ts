@@ -26,6 +26,7 @@ const info = ipcRenderer.sendSync('desktop:info') as {
 	worker: { url: string; phase: string; external: boolean } | null;
 	windowState: { maximized: boolean; fullscreen: boolean; focused: boolean };
 	updateState: unknown;
+	agentAccess?: { title: string; message: string; points: string[]; footer: string };
 } | null;
 
 const bridge = {
@@ -33,6 +34,8 @@ const bridge = {
 	version: info?.version ?? '0.0.0',
 	platform: info?.platform ?? process.platform,
 	titleBarHeight: info?.titleBarHeight ?? 52,
+	/** "Agents run as you": the disclosure shown on first launch, for Settings to repeat. */
+	agentAccess: info?.agentAccess ?? null,
 
 	window: {
 		getState: () => ipcRenderer.invoke('desktop:window-state') as Promise<{ maximized: boolean; fullscreen: boolean; focused: boolean }>,

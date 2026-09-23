@@ -7,6 +7,8 @@ import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { installPreview } from './install-preview.mjs';
 assert(process.platform==='win32'&&process.env.CI==='true','Fresh Windows CI only');
+// No person is here to acknowledge the first-launch agent access disclosure.
+process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS='1';
 const [installerArg,evidenceArg]=process.argv.slice(2);
 const installer=path.resolve(installerArg),output=path.resolve(evidenceArg),temporary=path.resolve(process.env.RUNNER_TEMP);
 assert(output.startsWith(temporary+path.sep));

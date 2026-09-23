@@ -13,6 +13,7 @@ import { desktopSampler } from './diagnostics';
 import { MainWindow, TITLE_BAR_HEIGHT, type TitleBarTheme } from './window';
 import { type WorkerState, type WorkerSupervisor } from './worker';
 import { LISTENER_HEADER, type ListenerTarget } from './listener';
+import { AGENT_ACCESS } from './disclosure';
 
 /** The database behind the worker, as the status page shows it. */
 export interface PostgresStatus {
@@ -76,7 +77,8 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 			titleBarHeight: TITLE_BAR_HEIGHT,
 			worker: { url: state.url, phase: state.phase, external: state.external },
 			windowState: window.windowState(),
-			updateState: updater.current
+			updateState: updater.current,
+			agentAccess: AGENT_ACCESS
 		};
 	});
 

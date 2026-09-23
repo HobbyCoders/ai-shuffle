@@ -52,6 +52,8 @@ const childEnv = {
   DATABASE_MODE: 'external', DATABASE_URL: 'postgresql://never:never@127.0.0.1:9/never',
   POSTGRES_HOST: 'invalid.invalid', POSTGRES_PORT: '9', POSTGRES_USER: 'never',
   POSTGRES_PASSWORD: 'never', POSTGRES_DB: 'never',
+  // No person is here to acknowledge the first-launch agent access disclosure.
+  SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS: '1',
 };
 let application;
 let page;
