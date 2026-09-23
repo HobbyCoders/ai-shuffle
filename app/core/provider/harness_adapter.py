@@ -142,9 +142,12 @@ HONORED SINCE THE P1 COMPILER LANDED (2026-08-13):
   * ``add_dirs`` — projected onto SessionOptions and passed to the delegated
     leg as repeated ``--add-dir`` flags (native-leg fluid tools are not
     path-sandboxed, so no equivalent is needed there).
-  * system prompts on native legs (and the delegated leg under
-    PROMPT_FULL_REPLACE) run through ``fluid.context.compiler`` — instruction
-    files, skills index, and environment are fluid-gathered (ruling A1).
+  * system prompts on native legs (and, under PROMPT_FULL_REPLACE, a
+    plain-string profile prompt on the delegated leg) run through
+    ``fluid.context.compiler`` — instruction files, skills index, and
+    environment are fluid-gathered (ruling A1). A preset profile on the
+    delegated leg keeps Claude Code's own prompt and gets the app's text
+    appended (decision D6, see ``_delegated_append_text``).
 
 SUPPLIED BY FLUID ITSELF, WITH NO WIRING HERE (Claude-ecosystem compat, CE1):
   fluid's discovery is filesystem-native and defaults ON, so a native leg picks
@@ -177,8 +180,8 @@ SUPPLIED BY FLUID ITSELF, WITH NO WIRING HERE (Claude-ecosystem compat, CE1):
     ``enabled_agents``/``agent_invoke_mode`` decide what is DECLARED, never what
     may be dispatched) are merged with the discovered ones, name+description
     only. BOTH legs get the block: native legs through the compiled prompt, the
-    delegated leg through whichever prompt part the CLI reads (the compiled
-    prompt under PROMPT_FULL_REPLACE, the appended text otherwise — see
+    delegated leg through whichever prompt part the CLI reads (the appended
+    text for a preset profile, the plain-string prompt otherwise — see
     ``_with_agents_index``), so a Claude-subscription caller can name a
     cross-provider agent too. Dispatch stays ours: the Task dispatcher injected
     below resolves app agents first and falls back to that registry
@@ -429,15 +432,22 @@ class HarnessAdapter(ProviderAdapter):
 
         if self._is_delegated:
             cli_session_id = await self._resolve_cli_session_id(fluid_session_id, options)
-            # Staged flip (ruling A3): append mode (default) keeps the CLI's
-            # own preset + env/instruction gathering and passes our text
-            # through untouched; full-replace hands the CLI the fluid-compiled
-            # prompt instead. Compiling env/instructions in append mode would
-            # duplicate what the CLI gathers itself, so the compiler is only
-            # invoked under full-replace.
+            # Decision D6 (reverses ruling A3 for preset profiles): a preset
+            # profile keeps Claude Code's own system prompt and gets the app's
+            # text appended. The CLI gathers env, instruction files and its
+            # skill listing itself, so none of that is compiled here. Only a
+            # profile with its own plain-string prompt replaces the preset,
+            # and PROMPT_FULL_REPLACE decides whether that prompt is compiled.
             from app.core.config import settings
 
-            if settings.prompt_full_replace:
+            if system is None:
+                # discover_agents walks .claude/agents + plugin dirs (rglob)
+                # — disk IO, so it runs in a worker thread.
+                delegated_system = None
+                delegated_append = await asyncio.to_thread(
+                    _delegated_append_text, append_system, options, self._registry
+                )
+            elif settings.prompt_full_replace:
                 # The compiled prompt already carries the merged agents index
                 # (``_compile_prompt_sections`` slots it in), so nothing is
                 # added here — that is what keeps the block un-doubled.
@@ -446,14 +456,10 @@ class HarnessAdapter(ProviderAdapter):
                 )
                 delegated_append = None
             else:
-                # Append mode still owes the model the delegation catalog. The
-                # CLI builds its own prompt here, so without this a
-                # Claude-subscription caller would be the ONE leg that never
-                # learns which agents exist — it could not name a target for
-                # the Task tool at all. Same block as the native leg, attached
-                # to whichever part the CLI actually reads.
-                # discover_agents walks .claude/agents + plugin dirs (rglob)
-                # — disk IO, so it runs in a worker thread.
+                # The plain prompt goes out uncompiled, but it still owes the
+                # model the delegation catalog: the CLI cannot know about DB
+                # agents, so without this the caller could not name a Task
+                # target at all. Same block as the native leg.
                 agents_index, _ = await asyncio.to_thread(_agent_context, options)
                 delegated_system, delegated_append = _with_agents_index(
                     system, append_system, agents_index
@@ -2742,8 +2748,8 @@ class HarnessAdapter(ProviderAdapter):
 
         ``native`` says whether this compilation feeds a native leg. It gates
         the steering/guidance/recall extras: under ``prompt_full_replace``
-        this same compiler also builds the DELEGATED leg's prompt, and there
-        the claude CLI owns those concerns itself.
+        this same compiler also builds a plain-string profile's prompt on
+        the DELEGATED leg, which gets none of them.
 
         The ``# Memory`` snapshot is no longer compiled in at all — it is a
         per-turn block on the user message now (:meth:`_memory_snapshot` and
@@ -2968,9 +2974,10 @@ class HarnessAdapter(ProviderAdapter):
         environment. Never raises — a compiler failure falls back to the
         pre-compiler string so a session can always start.
 
-        This is the DELEGATED full-replace path (the native leg calls
-        ``_compile_prompt_sections`` directly for the labeled sections), hence
-        ``native=False``: memory there is the claude CLI's own.
+        This is the DELEGATED full-replace path for a plain-string profile
+        prompt (the native leg calls ``_compile_prompt_sections`` directly for
+        the labeled sections), hence ``native=False``. A preset profile never
+        comes here: it keeps Claude Code's prompt (``_delegated_append_text``).
         """
         compiled = HarnessAdapter._compile_prompt_sections(
             system, append_system, options, native=False
@@ -4182,7 +4189,7 @@ acting on it."""
 
 # Append fixed, cache-stable harness memory guidance wherever RECALL_BLOCK appears, including before the first
 # saved fact makes a Memory snapshot available.
-MEMORY_BLOCK = """# Durable memory
+_MEMORY_BLOCK_CORE = """# Durable memory
 Remember saves a durable fact for every later session on every worker of this \
 install. Save environment facts the moment you establish them: how the tests \
 are run and which interpreter has pytest, host and port conventions, a \
@@ -4191,7 +4198,11 @@ machine on, and any correction the user gives you. Recall is one cheap call; \
 make it BEFORE re-discovering an environment fact with probes, and whenever \
 the user refers to a convention you do not see in context. Saved facts arrive \
 as the "# Memory" reminder on the user turn, not in this system prompt; when \
-that reminder is absent the store is empty, not hidden. Note and Ledger are \
+that reminder is absent the store is empty, not hidden."""
+
+# The native leg's copy also covers fluid's Note and Ledger tools, which the
+# delegated leg does not have; that leg uses _MEMORY_BLOCK_CORE alone.
+MEMORY_BLOCK = _MEMORY_BLOCK_CORE + """ Note and Ledger are \
 per-session working state and never persist beyond this session — anything \
 worth keeping past it goes through Remember."""
 
@@ -4411,6 +4422,82 @@ def _with_agents_index(
     if system:
         return (system if header in system else f"{system}\n\n{index}"), append
     return system, index
+
+
+# Registry names of the app builtins the delegated leg reaches over fluid's
+# bundled bridge. The CLI sees each one as ``mcp__fluid_bundled__`` + this.
+_DELEGATED_MEMORY_TOOLS = ("Remember", "Recall", "Forget")
+_DELEGATED_RECALL_TOOLS = ("SessionSearch", "SessionView")
+
+
+def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[str]:
+    """App guidance for the delegated leg that Claude Code's prompt lacks.
+
+    Claude Code's own prompt covers tone, task management, tool policy, git
+    and its skill listing, so none of that is repeated. What it cannot know
+    is the app's memory store, its session recall and that ``gh`` is signed
+    in, so those blocks ride here, each gated the way the native leg gates
+    it: on the tools actually being on this session's surface (ruling T9).
+    The text depends only on connect-time inputs, so it is identical on
+    every turn of the session.
+    """
+    try:
+        names = (
+            {spec.name for spec in registry.list_tools(loaded_only=False)}
+            if registry is not None else set()
+        )
+    except Exception:  # noqa: BLE001 — a prompt block never fails a connect
+        logger.warning("[HarnessAdapter] could not enumerate delegated tools", exc_info=True)
+        names = set()
+    permit = _tool_predicate(options)
+
+    def offered(tool: str) -> bool:
+        name = f"mcp__builtins__{tool}"
+        return name in names and (permit is None or permit(name))
+
+    recall = all(offered(t) for t in _DELEGATED_RECALL_TOOLS)
+    memory = all(offered(t) for t in ("Remember", "Recall"))
+    blocks: List[str] = []
+    if recall or memory:
+        shown = [
+            t for t in (*_DELEGATED_MEMORY_TOOLS, *_DELEGATED_RECALL_TOOLS)
+            if offered(t)
+        ]
+        suffixes = ", ".join(f"__{t}" for t in shown)
+        blocks.append(
+            "# App tools on this session\n"
+            "The app's memory and recall tools reach you as MCP tools whose "
+            f"names end in {suffixes}. The sections below call them by those "
+            "short names."
+        )
+    if recall:
+        blocks.append(RECALL_BLOCK)
+    if memory:
+        blocks.append(_MEMORY_BLOCK_CORE)
+    if (options.extra or {}).get("github_connected") and (
+        permit is None or permit("Bash")
+    ):
+        blocks.append(GITHUB_BLOCK)
+    return blocks
+
+
+def _delegated_append_text(
+    append_system: Optional[str], options: SessionOptions, registry: Any
+) -> Optional[str]:
+    """``--append-system-prompt`` for a preset profile on the delegated leg.
+
+    Decision D6: Claude Code keeps its own preset prompt and this text is
+    appended to it. In order: the profile's append (security and media
+    rules, the profile's instructions, app-config text), the merged agents
+    index, then :func:`_delegated_guidance_blocks`. Every input is fixed at
+    connect, so the text is byte-identical across the session's turns and
+    the CLI's prompt cache keeps hitting.
+    """
+    agents_index, _ = _agent_context(options)
+    _, text = _with_agents_index(None, append_system or None, agents_index)
+    parts = [text] if text else []
+    parts.extend(_delegated_guidance_blocks(options, registry))
+    return "\n\n".join(parts) or None
 
 
 def _agent_context(
