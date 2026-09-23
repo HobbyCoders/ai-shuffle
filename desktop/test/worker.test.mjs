@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const { resolveRuntime, buildWorkerEnv, isPortFree, fetchHealth, attachTokenHash, readWorkerProcessRecord, WorkerSupervisor, ATTACH_ANY_ENV, DEFAULT_PORT, PROTECTED_PORT } = require('../dist/main/worker.js');
+const { resolveRuntime, buildWorkerEnv, isPortFree, fetchHealth, attachTokenHash, readWorkerProcessRecord, requestBrowserHandoff, WorkerSupervisor, ATTACH_ANY_ENV, DEFAULT_PORT, PROTECTED_PORT } = require('../dist/main/worker.js');
 const { writePrivateFile } = require('../dist/main/private-file.js');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -343,6 +343,16 @@ test('SEC-08: every spawn gets a fresh listener token that the app sends and rec
 	const second = (await f.spawns())[1].split(' ')[2];
 	assert.notEqual(second, listener);
 	assert.equal(f.supervisor.listenerToken, second);
+});
+
+test('SEC-08: Open in Browser asks the worker for a one-time session URL with the listener token', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t);
+	assert.equal(await f.supervisor.browserHandoffUrl(), null, 'nothing before the worker is ready');
+	assert.equal((await f.supervisor.start()).phase, 'ready');
+	// The fake worker refuses the handoff without the header, so a URL proves the app sent it.
+	assert.equal(await f.supervisor.browserHandoffUrl(), `http://127.0.0.1:${f.port}/api/v1/owner/handoff?token=one-time`);
+	assert.equal(await requestBrowserHandoff(f.port, null), null, 'no token, no handoff: the plain URL works');
+	await assert.rejects(requestBrowserHandoff(f.port, 'e'.repeat(64)), /403/);
 });
 
 test('SEC-08: an adopted worker of ours keeps its recorded listener token; a foreign one gets none', { skip: !posix }, async (t) => {

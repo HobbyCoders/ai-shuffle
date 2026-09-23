@@ -304,7 +304,13 @@ async function main(): Promise<void> {
 		},
 		openInBrowser: () => {
 			const state = worker.state();
-			if (state.phase === 'ready') window.openExternal(state.url);
+			if (state.phase !== 'ready') return;
+			// The worker refuses requests without the listener token, which only
+			// this app's window sends: hand the browser a one-time session URL.
+			void (supervisor ? supervisor.browserHandoffUrl() : Promise.resolve(null)).then(
+				(url) => window.openExternal(url ?? state.url),
+				(error) => dialog.showErrorBox('Open in Browser', error instanceof Error ? error.message : String(error))
+			);
 		},
 		checkForUpdates: () => void updater.check(true),
 		reload: () => window.browserWindow?.webContents.reload(),
