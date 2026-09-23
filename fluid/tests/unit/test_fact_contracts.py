@@ -108,6 +108,45 @@ def test_protected_fact_survives_inference_flood_and_prompt_has_budget(tmp_path)
         store.save_memory("A curator rewrite", memory_id=name.id)
 
 
+def test_inferred_and_harvested_facts_survive_protected_flood(tmp_path):
+    # The desktop store: ~28 KB of protected Remember facts filled the whole
+    # 8,000-char snapshot, so no learner fact or env.* harvest ever rendered.
+    store = SkillStore(tmp_path)
+    for i in range(60):
+        store.save_memory(f"Explicit project note {i} " + "x" * 280, protected=True, scope="project:x")
+    store.save_memory("Prefers short answers that lead with the outcome.", provenance="user")
+    store.save_memory("pytest is importable from /usr/local/bin/python.",
+                      provenance="tool", key="env.pytest", scope="project:x")
+    store.save_memory("The dashboard keeps its filter in localStorage key dash.filter.",
+                      provenance="session", scope="project:x")
+    out = store.render_memory_section("project:x")
+    assert "Prefers short answers" in out
+    assert "pytest is importable" in out
+    assert "dash.filter" in out
+    assert "Explicit project note 59" in out  # protected still fills the rest
+    assert "scoped to other projects" not in out  # budget drops are not scope drops
+    assert "omitted for space" in out
+    body = out.split("\n\n")[1]  # the fact lines, between header and footers
+    assert len(body) <= facts.MAX_PROMPT_CHARS
+
+
+def test_memory_footer_counts_scope_and_space_drops_separately(tmp_path):
+    store = SkillStore(tmp_path)
+    store.save_memory("A fact about another project.", protected=True, scope="project:other")
+    for i in range(60):
+        store.save_memory(f"Explicit project note {i} " + "x" * 280, protected=True, scope="project:x")
+    out = store.render_memory_section("project:x")
+    rendered = sum(1 for line in out.splitlines() if line.startswith("- ["))
+    dropped = 60 - rendered
+    assert 0 < dropped < 60
+    assert "(1 entry scoped to other projects not shown.)" in out
+    assert f"({dropped} saved facts omitted for space; Recall finds them by keyword.)" in out
+    # Without a project nothing is out of scope; the drops are all for space.
+    everything = store.render_memory_section()
+    assert "scoped to other projects" not in everything
+    assert "saved facts omitted for space" in everything
+
+
 def test_full_explicit_quota_does_not_evict_an_earlier_promise(tmp_path, monkeypatch):
     monkeypatch.setattr(facts, "MAX_EXPLICIT", 2)
     store = SkillStore(tmp_path)

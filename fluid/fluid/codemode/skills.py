@@ -1199,7 +1199,10 @@ class SkillStore:
         all, so the model never learned that Remember/Recall existed until a
         fact happened to exist. With a ``project`` key, only global entries
         and that project's entries render — other projects' facts stay out of
-        this session's prompt (a count line says they exist). Entries pass
+        this session's prompt (a count line says they exist). Unprotected
+        facts get a reserved share of the budget (``RESERVED_INFERRED_CHARS``)
+        and facts that do not fit are counted on their own "omitted for
+        space" line, separate from the other-projects count. Entries pass
         the injection screen; a finding replaces that entry with a note naming
         the file, never silently deleting it. Entries whose only evidence was
         tool output (``provenance == "tool"``) render with a one-line
@@ -1215,30 +1218,32 @@ class SkillStore:
             return EMPTY_MEMORY_SECTION
         from fluid.context.screening import screen_findings
 
-        shown: list[str] = []
-        hidden = 0
+        from fluid.codemode.facts import MAX_PROMPT_CHARS, RESERVED_INFERRED_CHARS
+
+        out_of_scope = 0
+        over_budget = 0
         held = 0
-        from fluid.codemode.facts import MAX_PROMPT_CHARS
         entries.sort(key=lambda e: (not bool(e.key and e.key.startswith("profile.")), not e.protected, -e.updated_at))
-        remaining = MAX_PROMPT_CHARS
+        # (entry, line, counts against the budget) for each renderable entry.
+        candidates: list[tuple[MemoryEntry, str, bool]] = []
         for entry in entries:
             if (
                 project is not None
                 and entry.scope != "global"
                 and entry.scope != project
             ):
-                hidden += 1
+                out_of_scope += 1
                 continue
             if entry.conflicted:
                 held += 1
                 continue
             findings = screen_findings(entry.text)
             if findings:
-                shown.append(
+                candidates.append((entry, (
                     f"- [an entry was withheld — suspected injection "
                     f"pattern(s): {', '.join(findings)}. It is still in "
                     f"{self.memories_path}.]"
-                )
+                ), False))
             else:
                 hint = (
                     " (harvested from tool output, unconfirmed — confirm "
@@ -1246,25 +1251,53 @@ class SkillStore:
                     if entry.provenance == "tool" else ""
                 )
                 line = f"- [{entry.id} r{entry.revision}; {entry.provenance}] {entry.text}{hint}"
-                if len(line) <= remaining:
-                    shown.append(line)
-                    remaining -= len(line) + 1
-                else:
-                    hidden += 1
+                candidates.append((entry, line, True))
+        # Protected (Remember) facts rank first, and they alone can fill the
+        # budget: on the desktop store 92 protected facts (about 28 KB) hid
+        # every learner fact and every env.* harvest. Unprotected facts
+        # therefore get the first claim on a bounded slice of the budget,
+        # user-sourced and env.* facts before the rest, newest first. What
+        # the slice leaves unused goes back to the protected tier, and the
+        # slice is small enough that an inference flood cannot push
+        # protected facts out.
+        reserve = min(RESERVED_INFERRED_CHARS, MAX_PROMPT_CHARS)
+        reserved: set[int] = set()
+        for i in sorted(
+            (i for i, (e, _, costs) in enumerate(candidates) if costs and not e.protected),
+            key=lambda i: (
+                not (candidates[i][0].provenance == "user"
+                     or (candidates[i][0].key or "").startswith("env.")),
+                -candidates[i][0].updated_at,
+            ),
+        ):
+            cost = len(candidates[i][1]) + 1
+            if cost <= reserve:
+                reserved.add(i)
+                reserve -= cost
+        remaining = MAX_PROMPT_CHARS - sum(len(candidates[i][1]) + 1 for i in reserved)
+        shown: list[str] = []
+        for i, (_, line, costs) in enumerate(candidates):
+            if not costs or i in reserved:
+                shown.append(line)
+            elif len(line) <= remaining:
+                shown.append(line)
+                remaining -= len(line) + 1
+            else:
+                over_budget += 1
+        footer = ""
+        if out_of_scope:
+            footer += (
+                f"\n\n({out_of_scope} entr{'y' if out_of_scope == 1 else 'ies'} scoped to "
+                "other projects not shown.)"
+            )
+        if over_budget:
+            footer += (
+                f"\n\n({over_budget} saved fact{'' if over_budget == 1 else 's'} "
+                f"omitted for space; Recall finds {'it' if over_budget == 1 else 'them'} "
+                "by keyword.)"
+            )
         if not shown:
-            if hidden:
-                return (
-                    EMPTY_MEMORY_SECTION
-                    + f"\n\n({hidden} entr{'y' if hidden == 1 else 'ies'} scoped to "
-                    "other projects not shown.)"
-                )
-            return EMPTY_MEMORY_SECTION
-        footer = (
-            f"\n\n({hidden} entr{'y' if hidden == 1 else 'ies'} scoped to "
-            "other projects not shown.)"
-            if hidden
-            else ""
-        )
+            return EMPTY_MEMORY_SECTION + footer
         if held:
             footer += (
                 f"\n\n({held} conflicted entr{'y' if held == 1 else 'ies'} "

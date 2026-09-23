@@ -22,6 +22,10 @@ MAX_TOMBSTONES = 256
 BLOOM_BYTES = 16 * 1024
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 MAX_PROMPT_CHARS = 8000
+# Part of MAX_PROMPT_CHARS that unprotected facts (learner output, env.*
+# harvests) claim before protected facts fill the rest. Without it a store of
+# protected Remember facts alone hides every learned and harvested fact.
+RESERVED_INFERRED_CHARS = 2000
 INFERRED_TTL = 90 * 86400
 MAX_INFERENCE_CALLS_PER_DAY = 48
 HISTORY_TTL = 30 * 86400
