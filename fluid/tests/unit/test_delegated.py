@@ -602,6 +602,39 @@ async def test_partial_streaming_dedupe() -> None:
         await loop.aclose()
 
 
+class _BatchingStore(MemoryStore):
+    """Records which store hook each event reached; batches nothing itself."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.streamed: list[int] = []
+        self.flushes = 0
+
+    async def append_stream_event(self, session_id, event) -> None:
+        self.streamed.append(event.seq)
+        await self.append_event(session_id, event)
+
+    async def flush_events(self, session_id) -> None:
+        self.flushes += 1
+
+
+async def test_deltas_reach_the_stores_stream_hook_and_turns_flush() -> None:
+    store = _BatchingStore()
+    loop = _make_loop("s", store=store, partial=True, extra_env={"FAKE_CLAUDE_DELTAS": "6,2"})
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await loop.wait_turn()
+        events = loop.bus.log(loop.session_id)
+    finally:
+        await loop.aclose()
+    # Only reconstructible deltas take the batchable path; every other event
+    # (block boundaries, tool calls, usage, terminals) is a direct write.
+    assert store.streamed == [e.seq for e in events if isinstance(e, TextDelta)]
+    assert len(store.streamed) == 8
+    assert [e.seq for e in await store.events_since(loop.session_id, 0)] == [e.seq for e in events]
+    assert store.flushes == 1  # The turn's exit commits whatever is still batched.
+
+
 # ─── Bundled MCP server ──────────────────────────────────────────────────────
 
 

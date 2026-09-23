@@ -91,7 +91,14 @@ from fluid.events.ops import (
     UserTurn,
 )
 from fluid.messages import Image, Message, Text
-from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
+from fluid.store.base import (
+    SessionMeta,
+    SessionNode,
+    SessionStore,
+    flush_events,
+    new_id,
+    persist_event,
+)
 from fluid.tools.mcp.bundled_server import STREAM_LINE_LIMIT
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
@@ -310,9 +317,46 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         return self._session.session_id
 
     async def _emit(self, event: Event) -> Event:
+        """Publish to the bus (assigns seq), then persist through the store.
+
+        Same durability contract as NativeLoop: a store that batches
+        (``append_stream_event``) may hold streamed Text/Thinking deltas
+        uncommitted until 32 events, ~64 KiB, the next delta after 50 ms, or
+        the next durable event. Every other event (block boundaries, tool
+        calls and results, usage, permission prompts, lifecycle, terminals)
+        is a barrier: it commits the held deltas and itself in one
+        transaction, in seq order, before this returns. Batching adds no holes
+        or reordering of its own: a delta commits with or ahead of the next
+        durable event, never after it.
+
+        Crash-loss window: an abrupt process exit loses at most the batched
+        tail of deltas since the last commit, never a durable event, and a
+        restarted producer continues numbering after the committed head, so
+        the lost deltas' seqs are issued again. Their text is not lost: the
+        assistant node the CLI's ``assistant`` frame stores carries it.
+
+        Unlike NativeLoop, a failed write is not downgraded for deltas: it
+        raises into the turn, which ends on an ErrorEvent. The rejected
+        deltas stay batched, so that terminal write retries them first.
+        """
         sequenced = await self.bus.publish(event)
-        await self.store.append_event(event.session_id, sequenced)
+        await persist_event(self.store, sequenced)
         return sequenced
+
+    async def _flush_events(self, sid: str) -> None:
+        """Commit any batched deltas when a turn ends without a durable
+        terminal write behind them (cancellation, or a terminal that failed).
+
+        Runs from ``finally``, so it can only log: the turn's own error, or
+        its cancellation, is what the caller sees.
+        """
+        try:
+            await flush_events(self.store, sid)
+        except Exception:  # noqa: BLE001 — reported, never masks the turn's outcome
+            logger.warning(
+                "could not commit batched delegated deltas for %s; they stay "
+                "queued for the session's next durable write", sid, exc_info=True,
+            )
 
     def events(self, *, since_seq: int = 0) -> AsyncIterator[Event]:
         assert self._session is not None, "no session yet — submit a turn first"
@@ -659,6 +703,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             ):
                 self.cli_session_id = mapper.cli_session_id
                 self._persist_cli_session_id(sid, mapper.cli_session_id)
+            # Last: a second cancel landing on this await must not cost the
+            # resume handle above.
+            await self._flush_events(sid)
 
     async def _drive_turn(
         self, sid: str, turn_id: str, user_node: SessionNode, content: list[Any],
@@ -796,9 +843,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         message and folds it into the turn, so ``SteerDelivered`` is receipted as
         soon as the write drains. The event is published straight from ``submit``
         rather than from the turn's frame reader; that is safe because ``_emit``
-        (bus ``publish`` + store ``append_event``) never suspends between
-        assigning a seq and recording the event, so it cannot interleave with the
-        reader task's own emits.
+        does not suspend between assigning a seq and queueing on the store's
+        event lock, and the lock admits writers in arrival order. The steer
+        receipt is a durable barrier, so it also commits any deltas the reader
+        had batched before it.
 
         Known narrow race: if the CLI's ``result`` for this turn was already in
         flight when the frame landed, the CLI holds the frame and processes it as

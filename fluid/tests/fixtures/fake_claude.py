@@ -43,6 +43,15 @@ sequence on stdout, selected by ``FAKE_CLAUDE_SCENARIO``:
                             ``is_error`` and an ``errors`` list.
   o  turn cap:              like (a) but the result is ``error_max_turns``
                             with ``is_error`` set.
+  s  long partial stream:   stream_event text deltas (count from
+                            FAKE_CLAUDE_DELTAS, "first,second", default 40,8),
+                            the full assistant frame, a CLI-owned tool round
+                            (tool_use + tool_result, no permission prompt),
+                            then a second streamed message and the result.
+                            FAKE_CLAUDE_STREAM_MODE=die exits abruptly after
+                            the first block's deltas; =interrupt parks there
+                            until an ``interrupt`` control_request, then closes
+                            the block and returns a success result.
 
 ``claude --version`` prints a version line and exits (the loop's version guard).
 Frames model the real vocabulary (``claude_agent_sdk`` message_parser + query.py).
@@ -306,6 +315,55 @@ def turn_partial(sid: str) -> None:
     emit(result_frame(sid))
 
 
+def _stream_text_block(sid: str, index: int, count: int, prefix: str) -> str:
+    emit(stream_event(sid, {"type": "content_block_start", "index": index,
+                            "content_block": {"type": "text"}}))
+    parts = []
+    for i in range(count):
+        text = f"{prefix}{i} "
+        parts.append(text)
+        emit(stream_event(sid, {"type": "content_block_delta", "index": index,
+                                "delta": {"type": "text_delta", "text": text}}))
+    return "".join(parts)
+
+
+def turn_long_stream(sid: str) -> None:
+    counts = [int(n) for n in os.environ.get("FAKE_CLAUDE_DELTAS", "40,8").split(",")]
+    first, second = counts[0], counts[1] if len(counts) > 1 else 0
+    mode = os.environ.get("FAKE_CLAUDE_STREAM_MODE", "")
+    emit(stream_event(sid, {"type": "message_start", "message": {"usage": {"input_tokens": 9}}}))
+    text = _stream_text_block(sid, 0, first, "a")
+    if mode == "die":
+        os._exit(3)  # no block stop, no result: the stream just ends
+    if mode == "interrupt":
+        while True:
+            msg = read_line()
+            if msg is None:
+                return
+            if (msg.get("type") == "control_request"
+                    and (msg.get("request") or {}).get("subtype") == "interrupt"):
+                break
+    emit(stream_event(sid, {"type": "content_block_stop", "index": 0}))
+    emit(assistant_frame(sid, [{"type": "text", "text": text}], "end_turn"))
+    if mode == "interrupt":
+        emit(result_frame(sid))
+        return
+    tid = "toolu_stream_1"
+    emit(assistant_frame(
+        sid, [{"type": "tool_use", "id": tid, "name": "Read", "input": {"file_path": "notes.txt"}}],
+        "tool_use",
+    ))
+    emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": tid,
+        "content": [{"type": "text", "text": "notes: ok"}], "is_error": False,
+    }]}})
+    emit(stream_event(sid, {"type": "message_start", "message": {"usage": {"input_tokens": 11}}}))
+    tail = _stream_text_block(sid, 0, second, "b")
+    emit(stream_event(sid, {"type": "content_block_stop", "index": 0}))
+    emit(assistant_frame(sid, [{"type": "text", "text": tail}], "end_turn"))
+    emit(result_frame(sid))
+
+
 def main() -> int:
     if "--version" in sys.argv:
         print("claude 2.0.0 (fake-fluid)")
@@ -366,6 +424,8 @@ def main() -> int:
             turn_tool(session_id)
         elif scenario == "d":
             turn_partial(session_id)
+        elif scenario == "s":
+            turn_long_stream(session_id)
         elif scenario == "e":
             turn_simple(session_id)
             if not wake_emitted:

@@ -17,10 +17,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Protocol
 
-from fluid.events.model import Event
+from fluid.events.model import Event, TextDelta, ThinkingDelta, ToolArgsDelta
 from fluid.messages import Message
 
 log = logging.getLogger(__name__)
+
+# Events whose loss costs a gap in the replay log and nothing else: streaming
+# progress whose full content the turn's stored node carries. Only these may
+# wait in a store's stream batch; every other event is a durable barrier.
+RECONSTRUCTIBLE_EVENTS = (TextDelta, ThinkingDelta, ToolArgsDelta)
 
 
 async def iter_events(store: SessionStore, session_id: str, seq: int) -> AsyncIterator[Event]:
@@ -32,6 +37,38 @@ async def iter_events(store: SessionStore, session_id: str, seq: int) -> AsyncIt
     else:
         for event in await store.events_since(session_id, seq):
             yield event
+
+
+def replay_source(store: SessionStore) -> Any:
+    """The EventBus replay source for ``store``: one bounded page per call.
+
+    The bus asks again from its new cursor until it reaches its ring, so a
+    subscriber far behind never pulls the whole history into one list. Stores
+    without ``events_page`` keep the unbounded ``events_since``.
+    """
+    page = getattr(store, "events_page", None)
+    return page if callable(page) else store.events_since
+
+
+async def persist_event(store: SessionStore, event: Event) -> None:
+    """Write one sequenced event, letting the store batch reconstructible deltas.
+
+    A store with ``append_stream_event`` may hold a delta in memory until its
+    batch fills or a durable event arrives; the durable event then commits the
+    held deltas and itself in one transaction, in seq order. Failures raise.
+    """
+    stream_append = getattr(store, "append_stream_event", None)
+    if isinstance(event, RECONSTRUCTIBLE_EVENTS) and callable(stream_append):
+        await stream_append(event.session_id, event)
+    else:
+        await store.append_event(event.session_id, event)
+
+
+async def flush_events(store: SessionStore, session_id: str) -> None:
+    """Commit any deltas ``persist_event`` left batched; a no-op for other stores."""
+    flush = getattr(store, "flush_events", None)
+    if callable(flush):
+        await flush(session_id)
 
 
 def new_id(prefix: str) -> str:

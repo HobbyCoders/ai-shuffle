@@ -50,7 +50,13 @@ from app.core.provider import legacy_events as _legacy_events  # noqa: F401
 
 from fluid.events.model import Event, event_from_dict, event_to_dict
 from fluid.messages import Message
-from fluid.store.base import SessionMeta, SessionNode, new_id, project_root_for
+from fluid.store.base import (
+    RECONSTRUCTIBLE_EVENTS,
+    SessionMeta,
+    SessionNode,
+    new_id,
+    project_root_for,
+)
 from fluid.store.base import (
     RecallMessage,
     SessionSearchHit,
@@ -128,6 +134,10 @@ def _events_page_sync(session_id: str, seq: int, through: int, limit: int) -> Li
         )
         rows = cur.fetchall()
     return [event_from_dict(_as_dict(r["event"])) for r in rows]
+
+
+# Upper bound for an open-ended page (``seq`` is a PostgreSQL bigint).
+_MAX_SEQ = 2**63 - 1
 
 
 def _last_event_seq_sync(session_id: str) -> int:
@@ -678,14 +688,14 @@ class PgFluidStore:
         self._pending_bytes.pop(session_id, None)
 
     async def append_stream_event(self, session_id: str, event: Event) -> None:
-        """Optional native-loop hook; only reconstructible deltas may be buffered.
+        """Optional engine hook (native and delegated, via ``persist_event``);
+        only reconstructible deltas may be buffered.
 
         Flush on the next delta after 50ms, at 32 events, or before a durable
         event/node/replay. No background task or timer survives a parked turn.
         A crash may lose this bounded tail, never a durable lifecycle event.
         """
-        from fluid.events.model import TextDelta, ThinkingDelta, ToolArgsDelta
-        if not isinstance(event, (TextDelta, ThinkingDelta, ToolArgsDelta)):
+        if not isinstance(event, RECONSTRUCTIBLE_EVENTS):
             await self.append_event(session_id, event)
             return
         async with self._event_lock:
@@ -806,6 +816,22 @@ class PgFluidStore:
             for event in page:
                 yield event
             seq = page[-1].seq
+
+    async def events_page(
+        self, session_id: str, seq: int, limit: int = EVENT_CACHE_LIMIT,
+    ) -> List[Event]:
+        """At most ``limit`` committed events after ``seq``, oldest first.
+
+        The EventBus replay source (``fluid.store.base.replay_source``): a
+        subscriber behind the bus ring catches up one page per call instead of
+        loading everything after its cursor at once. Batched deltas are
+        committed first, so a page never skips an event the bus published.
+        """
+        if not 1 <= limit <= 1024:
+            raise ValueError("limit must be between 1 and 1024")
+        async with self._event_lock:
+            await self._write_pending(session_id)
+        return await run_sync(_events_page_sync, session_id, seq, _MAX_SEQ, limit)
 
     async def events_since(self, session_id: str, seq: int) -> List[Event]:
         async with self._event_lock:

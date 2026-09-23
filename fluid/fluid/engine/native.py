@@ -150,7 +150,16 @@ from fluid.providers.pricing import PricingResolver
 from fluid.tools import read_window
 from fluid.providers.pricing import estimate_cost as estimate_cost_from_table
 from fluid.providers.windows import context_window_for
-from fluid.store.base import SessionMeta, SessionNode, SessionStore, iter_events, new_id
+from fluid.store.base import (
+    RECONSTRUCTIBLE_EVENTS,
+    SessionMeta,
+    SessionNode,
+    SessionStore,
+    iter_events,
+    new_id,
+    persist_event,
+    replay_source,
+)
 from fluid.tools.builtins._util import resolve as resolve_tool_path
 from fluid.tools.builtins.tool_search import (
     parse_deferred_catalog,
@@ -389,7 +398,7 @@ _OVERFLOW_STATUSES = frozenset({413})
 # NativeLoop._emit). Everything else — ToolUse, ToolResult, Usage, every
 # lifecycle event — is load-bearing, and a store that cannot take it must say
 # so loudly.
-_RECONSTRUCTIBLE_EVENTS = (TextDelta, ThinkingDelta, ToolArgsDelta)
+_RECONSTRUCTIBLE_EVENTS = RECONSTRUCTIBLE_EVENTS
 
 # Exception class-name suffixes that mean "the transport or the database was
 # briefly unavailable", matched anywhere in an exception's inheritance chain.
@@ -824,7 +833,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # gets them from the store. A bus shared between engines keeps the
         # source the first engine attached.
         if self.bus.replay_source is None:
-            self.bus.set_replay_source(self.store.events_since)
+            self.bus.set_replay_source(replay_source(self.store))
         self.model = model
         self.system = system
         # The compiled prompt's labeled sections, when the caller compiled one
@@ -1563,11 +1572,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_progress_at = time.monotonic()
         sequenced = await self.bus.publish(event)
         try:
-            stream_append = getattr(self.store, "append_stream_event", None)
-            if isinstance(event, _RECONSTRUCTIBLE_EVENTS) and callable(stream_append):
-                await stream_append(event.session_id, sequenced)
-            else:
-                await self.store.append_event(event.session_id, sequenced)
+            await persist_event(self.store, sequenced)
         except Exception as exc:
             if not isinstance(event, _RECONSTRUCTIBLE_EVENTS):
                 raise
