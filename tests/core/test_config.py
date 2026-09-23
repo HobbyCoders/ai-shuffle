@@ -762,7 +762,7 @@ class TestDatabaseUrlNormalization:
     Python's ``urlsplit`` splits userinfo at the LAST ``@``; libpq splits at
     the FIRST. An unencoded ``@`` in the password therefore makes the same
     string name two different hosts depending on who reads it — a worker
-    container reported ``could not translate host name "Pwd@10.0.0.200"`` and
+    container reported ``could not translate host name "Xyz@192.0.2.10"`` and
     put a password fragment in the event log. Normalizing at load makes both
     readings agree.
     """
@@ -771,8 +771,8 @@ class TestDatabaseUrlNormalization:
         from app.core.config import normalize_database_url
 
         assert normalize_database_url(
-            "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle"
-        ) == "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle"
+            "postgresql://REDACTED@192.0.2.10:5432/ai_shuffle"
+        ) == "postgresql://REDACTED@192.0.2.10:5432/ai_shuffle"
 
     def test_normalization_is_idempotent(self):
         from app.core.config import normalize_database_url
@@ -830,8 +830,8 @@ class TestDatabaseUrlNormalization:
         from app.core.config import normalize_database_url
 
         normalized = normalize_database_url(
-            "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle"
+            "postgresql://REDACTED@192.0.2.10:5432/ai_shuffle"
         )
         after_scheme = normalized.split("://", 1)[1]
         assert after_scheme.count("@") == 1
-        assert after_scheme.split("@", 1)[1] == "10.0.0.200:5432/ai_shuffle"
+        assert after_scheme.split("@", 1)[1] == "192.0.2.10:5432/ai_shuffle"

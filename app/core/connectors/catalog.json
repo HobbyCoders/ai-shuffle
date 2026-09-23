@@ -14,7 +14,7 @@
       "module": "discord_connector",
       "class": "DiscordConnector",
       "files": {
-        "discord_connector.py": "c50d78b20538938dc4e5e91c2a1eb76c78e58923ae71dc46aa6ceac0ec626e33",
+        "discord_connector.py": "a4767f37b1eebcf3d7be6e65a1e470280365f80753693ad764fdb624d40a4d4d",
         "discord_actions.py": "406c47ebec2c4516a6c409b0a324062227db94bff837a4775a2e7ad0cb3549ff"
       }
     },

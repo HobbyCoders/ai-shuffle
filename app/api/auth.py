@@ -117,6 +117,26 @@ def _set_paired_request_state(request: Request, token: str, client: dict) -> str
     return f"paired_client:{client['id']}"
 
 
+# Failed-auth warnings are rate-limited: anyone who can reach the port can
+# send unauthenticated requests, and one warning per request lets them flood
+# the log. Each kind logs at most once per window, with a count of the ones
+# it held back.
+_AUTH_FAIL_LOG_WINDOW_S = 60.0
+_auth_fail_log_state: dict = {}
+
+
+def _log_auth_failure(kind: str, message: str) -> None:
+    now = time.monotonic()
+    last, suppressed = _auth_fail_log_state.get(kind, (None, 0))
+    if last is not None and now - last < _AUTH_FAIL_LOG_WINDOW_S:
+        _auth_fail_log_state[kind] = (last, suppressed + 1)
+        return
+    if suppressed:
+        message += f" ({suppressed} similar failures in the last {_AUTH_FAIL_LOG_WINDOW_S:.0f}s not logged)"
+    _auth_fail_log_state[kind] = (now, 0)
+    logger.warning(f"[{_SERVER_INSTANCE_ID}] {message}")
+
+
 def require_auth(request: Request) -> str:
     """Dependency that requires authentication (cookie or API key)"""
     preview_access.enforce_limits(request)
@@ -136,12 +156,12 @@ def require_auth(request: Request) -> str:
             request.state.auth_token = token
             return token
 
-        # Diagnostic logging - session token exists but validation failed
-        last4 = token[-4:] if len(token) >= 4 else token
-        logger.warning(
-            f"[{_SERVER_INSTANCE_ID}] Auth failed: token exists "
-            f"(len={len(token)}, last4=...{last4}) "
-            f"but validation failed. Path: {request.url.path}"
+        # Diagnostic logging - session token exists but validation failed.
+        # No part of the token is logged.
+        _log_auth_failure(
+            "token",
+            f"Auth failed: session token present (len={len(token)}) "
+            f"but validation failed. Path: {request.url.path}",
         )
 
     # Then try API key auth (Bearer token)
@@ -187,9 +207,9 @@ def require_auth(request: Request) -> str:
     has_cookie = token is not None
     has_bearer = api_key is not None
     path = request.url.path
-    logger.warning(
-        f"[{_SERVER_INSTANCE_ID}] Auth failed completely: "
-        f"cookie={has_cookie}, bearer={has_bearer}, path={path}"
+    _log_auth_failure(
+        "unauthenticated",
+        f"Auth failed completely: cookie={has_cookie}, bearer={has_bearer}, path={path}",
     )
 
     raise HTTPException(

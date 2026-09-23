@@ -40,6 +40,25 @@ def _fake_httpx_client(response):
     return client
 
 
+def _offline_resolver(host):
+    """Hostnames resolve to a public address without real DNS; IP
+    literals go through the real check so private ones are still refused."""
+    import ipaddress
+
+    from fluid.tools.builtins.web import resolve_public
+
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return "93.184.215.14", None
+    return resolve_public(host.strip("[]"))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_dns(monkeypatch):
+    monkeypatch.setattr("app.services.push_notification._resolve_public", _offline_resolver)
+
+
 # =============================================================================
 # NotificationPriority Enum Tests
 # =============================================================================
@@ -398,3 +417,38 @@ class TestFireAndForgetNotify:
         """Called with no running loop, it must not raise."""
         # Executed in a plain sync test → no running event loop.
         fire_and_forget_notify("Title", "Body")
+
+
+
+class TestUnifiedPushEndpointPolicy:
+    """Endpoints come from paired devices: HTTPS to a public address only."""
+
+    @pytest.mark.parametrize("endpoint", [
+        "http://ntfy.sh/up_abc",
+        "https://10.0.0.1/up",
+        "https://192.168.1.5/up",
+        "https://100.64.0.1/up",
+        "https://127.0.0.1:8000/api",
+        "https://169.254.169.254/latest",
+        "ftp://ntfy.sh/x",
+    ])
+    def test_refuses_insecure_or_internal_endpoints(self, endpoint):
+        from app.services.push_notification import unifiedpush_endpoint_problem
+
+        assert unifiedpush_endpoint_problem(endpoint) is not None
+
+    def test_accepts_public_https_endpoint(self):
+        from app.services.push_notification import unifiedpush_endpoint_problem
+
+        assert unifiedpush_endpoint_problem("https://ntfy.sh/up_abc") is None
+
+    async def test_send_refuses_internal_endpoint_without_posting(self):
+        service = PushNotificationService()
+        client = _fake_httpx_client(_FakeResponse(200))
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await service.send_notification(
+                device_id="device-1", title="T", body="B",
+                unifiedpush_endpoint="https://10.0.0.1/up",
+            )
+        assert result.success is False
+        client.post.assert_not_awaited()

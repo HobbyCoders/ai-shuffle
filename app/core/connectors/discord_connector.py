@@ -234,10 +234,12 @@ class DiscordConnector(BaseConnector):
             guild_id = str(message.guild.id) if message.guild else None
             channel_id = str(message.channel.id)
 
+            # IDs only at INFO; message content is user data and stays at DEBUG.
             logger.info(
-                "Processing message from %s in guild=%s channel=%s: %r",
-                message.author, guild_id, channel_id, (message.content or "")[:80],
+                "Processing message from author=%s in guild=%s channel=%s",
+                getattr(message.author, "id", "?"), guild_id, channel_id,
             )
+            logger.debug("Discord message content: %r", (message.content or "")[:80])
 
             if not self._location_allowed(guild_id, channel_id):
                 return
@@ -247,7 +249,7 @@ class DiscordConnector(BaseConnector):
             # Filter by command prefix
             prefix = self.config.get("command_prefix")
             if prefix and not text.startswith(prefix):
-                logger.info("Filtered out: message %r does not start with prefix %r", text[:50], prefix)
+                logger.debug("Filtered out: message %r does not start with prefix %r", text[:50], prefix)
                 return
 
             logger.info("Message accepted — forwarding to query engine")

@@ -421,6 +421,12 @@ async def register_unifiedpush_endpoint(
             detail="Device ID mismatch"
         )
 
+    from app.services.push_notification import unifiedpush_endpoint_problem
+
+    problem = await run_sync(unifiedpush_endpoint_problem, up_request.endpoint)
+    if problem:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=problem)
+
     updated = await run_sync(
         db.update_mobile_device_unifiedpush_endpoint, device['device_id'], up_request.endpoint
     )

@@ -10,7 +10,8 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,32 @@ class NotificationResult:
     message_id: Optional[str] = None
     error: Optional[str] = None
     device_id: Optional[str] = None
+
+
+def _resolve_public(host: str) -> Tuple[Optional[str], Optional[str]]:
+    """``(address, None)`` when every address of ``host`` is public, else
+    ``(None, reason)``. Module-level so tests can stub DNS."""
+    from fluid.tools.builtins.web import resolve_public
+
+    return resolve_public(host)
+
+
+def unifiedpush_endpoint_problem(endpoint: str) -> Optional[str]:
+    """Why ``endpoint`` may not receive notifications, or None when it may.
+
+    A paired device supplies the endpoint and the worker POSTs to it, so it
+    must be HTTPS and resolve only to public addresses: otherwise a device
+    could point the worker at services on its own network.
+    """
+    parsed = urlparse(endpoint or "")
+    if parsed.scheme != "https":
+        return "UnifiedPush endpoint must be an https:// URL"
+    if not parsed.hostname:
+        return "UnifiedPush endpoint has no host"
+    _address, reason = _resolve_public(parsed.hostname)
+    if reason:
+        return f"UnifiedPush endpoint is not a public address ({reason})"
+    return None
 
 
 class PushNotificationService:
@@ -235,6 +262,20 @@ class PushNotificationService:
                 device_id=notification_data["device_id"],
             )
 
+    async def _send_unifiedpush_notification_checked(
+        self, notification_data: Dict[str, Any], endpoint: str
+    ) -> Optional[NotificationResult]:
+        """Refusal result when ``endpoint`` is not a public HTTPS URL, else None."""
+        import asyncio
+
+        problem = await asyncio.to_thread(unifiedpush_endpoint_problem, endpoint)
+        if problem is None:
+            return None
+        logger.warning(f"UnifiedPush endpoint refused: {problem}")
+        return NotificationResult(
+            success=False, error=problem, device_id=notification_data.get("device_id"),
+        )
+
     async def _send_unifiedpush_notification(
         self, notification_data: Dict[str, Any], endpoint: str
     ) -> NotificationResult:
@@ -242,8 +283,13 @@ class PushNotificationService:
 
         The body is a small JSON payload the Android app parses to raise a local
         notification (title/body/data + a type for deep-linking into a session).
-        This path is independent of FCM/mock mode.
+        This path is independent of FCM/mock mode. The endpoint comes from a
+        paired device, so it must be HTTPS to a public address, and the POST
+        connects to the address that passed that check.
         """
+        refused = await self._send_unifiedpush_notification_checked(notification_data, endpoint)
+        if refused is not None:
+            return refused
         payload = {
             "title": notification_data["title"],
             "body": notification_data["body"],
@@ -254,7 +300,13 @@ class PushNotificationService:
         try:
             import httpx
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            from fluid.tools.builtins.web import PinnedTransport
+
+            async with httpx.AsyncClient(
+                timeout=10.0,
+                follow_redirects=False,
+                transport=PinnedTransport(resolver=_resolve_public),
+            ) as client:
                 resp = await client.post(endpoint, json=payload)
 
             success = 200 <= resp.status_code < 300
