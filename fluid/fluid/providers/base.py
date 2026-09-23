@@ -44,6 +44,51 @@ class StreamChunk:
     payload: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class WireState:
+    """Request identity and in-turn routing state for one loop and one role.
+
+    Owned by the caller (a ``NativeLoop`` keeps one per session and role) and
+    handed to the client on each ``ProviderRequest``. A client may be shared
+    by several roles (the main loop and the memory learner use the same
+    Responses client), so the client never keeps this state itself: a
+    learner call would overwrite the main loop's routing token.
+
+    ``turn_marker`` is the turn the state belongs to. ``turn_state`` is an
+    opaque routing token the provider returned on the first response of that
+    turn; it is replayed on later requests of the same turn and cleared when
+    the marker changes.
+    """
+
+    session_id: str
+    role: str = "main"
+    turn_marker: str | None = None
+    turn_state: str | None = None
+
+    @property
+    def thread_id(self) -> str:
+        """The session id for the main role, ``"<role>:<session>"`` otherwise."""
+        if self.role == "main":
+            return self.session_id
+        return f"{self.role}:{self.session_id}"
+
+    def begin(self, marker: str | None) -> bool:
+        """Enter the turn ``marker`` names; True when it is a new turn.
+
+        A request with no marker cannot be placed in a turn, so it clears the
+        token and never counts as a turn start.
+        """
+        if marker is None:
+            self.turn_marker = None
+            self.turn_state = None
+            return False
+        if marker == self.turn_marker:
+            return False
+        self.turn_marker = marker
+        self.turn_state = None
+        return True
+
+
 @dataclass(frozen=True)
 class ErrorClass:
     """How a client classifies one provider error.
@@ -63,6 +108,13 @@ class ErrorClass:
     drop_sticky: bool = False
 
 
+# The key in ``ProviderRequest.extra`` that carries the turn a request belongs
+# to. Keys with the ``_fluid_`` prefix are engine-to-client signals, and a
+# serializer that merges ``extra`` into the body leaves them out.
+TURN_MARKER_KEY = "_fluid_turn_id"
+INTERNAL_EXTRA_PREFIX = "_fluid_"
+
+
 @dataclass
 class ProviderRequest:
     model: str
@@ -80,6 +132,9 @@ class ProviderRequest:
     # (OpenAI-shaped APIs). Literal "none" disables reasoning; None omits it.
     effort: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    # Per-loop, per-role routing state (see WireState). None for one-off
+    # callers; a client that uses it reads and updates it in place.
+    wire_state: WireState | None = field(default=None, compare=False, repr=False)
 
 
 class ProviderClient(Protocol):

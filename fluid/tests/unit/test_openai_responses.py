@@ -1107,3 +1107,226 @@ async def test_liveness_before_content_keeps_the_start_first_and_single(_sleeps:
     assert kinds[:2] == ["message_start", "provider_alive"]
     assert kinds.count("message_start") == 1
     assert "error" not in kinds
+
+
+# ─── routing identity (experiment E1 arms, FLUID_RESPONSES_ROUTING_ARM) ─────
+
+import logging
+
+from fluid.providers.base import TURN_MARKER_KEY, WireState
+from fluid.providers.openai_responses.client import (
+    API_URL,
+    CODEX_RESPONSES_URL,
+    ROUTING_ARM_ENV,
+    TURN_STATE_HEADER,
+)
+
+_IDENTITY_HEADERS = ("session-id", "thread-id", "x-client-request-id", TURN_STATE_HEADER)
+
+
+class _CodexAuth:
+    account_id = "acct_1"
+
+    async def get_access_token(self) -> str:
+        return "tok"
+
+    async def on_401(self) -> None:  # pragma: no cover - not hit here
+        pass
+
+
+class _Recorder:
+    """MockTransport handler: records each request, returns a turn-state token.
+
+    Every response carries ``x-codex-turn-state: tok-<n>`` for the n-th
+    request, the way the backend hands out a routing token.
+    """
+
+    def __init__(self, extra_headers: dict[str, str] | None = None) -> None:
+        self.requests: list[httpx.Request] = []
+        self.extra_headers = extra_headers or {}
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return _sse(
+            _CREATED + _TEXT + _COMPLETED,
+            {TURN_STATE_HEADER: f"tok-{len(self.requests)}", **self.extra_headers},
+        )
+
+    def headers(self, n: int) -> dict[str, str]:
+        return dict(self.requests[n].headers)
+
+
+def _codex_client(recorder: _Recorder, arm: str | None, *, base_url: str = CODEX_RESPONSES_URL):
+    http = httpx.AsyncClient(transport=httpx.MockTransport(recorder))
+    client = OpenAIResponsesClient(
+        auth=_CodexAuth(), base_url=base_url, http_client=http, routing_arm=arm,
+    )
+    return client, http
+
+
+def _routed_request(sid: str, turn: str | None, wire: WireState | None) -> ProviderRequest:
+    extra: dict[str, Any] = {"prompt_cache_key": sid}
+    if turn is not None:
+        extra[TURN_MARKER_KEY] = turn
+    return ProviderRequest(
+        model="gpt-6-astra", messages=[Message(role="user", content=[Text("hi")])],
+        extra=extra, wire_state=wire,
+    )
+
+
+async def _send(client: OpenAIResponsesClient, request: ProviderRequest) -> None:
+    async for _ in client.stream(request):
+        pass
+
+
+@pytest.mark.parametrize("arm", ["A", "B", "C", "D"])
+async def test_routing_arm_decides_which_identity_headers_are_sent(
+    arm: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    sid = "ses_x"
+    recorder = _Recorder()
+    client, http = _codex_client(recorder, arm)
+    wire = WireState(session_id=sid)
+    with caplog.at_level(logging.INFO, logger="fluid.providers.openai_responses.client"):
+        # Turn 1 makes two calls, turn 2 one.
+        for turn in ("turn_1", "turn_1", "turn_2"):
+            await _send(client, _routed_request(sid, turn, wire))
+    await http.aclose()
+
+    assert len(recorder.requests) == 3, "a prewarm must not send a request"
+    sent = [recorder.headers(i) for i in range(3)]
+    if arm == "A":
+        for headers in sent:
+            assert not any(h in headers for h in _IDENTITY_HEADERS)
+        return
+    for headers in sent:
+        assert headers["session-id"] == sid
+        assert headers["thread-id"] == sid
+    request_ids = [headers["x-client-request-id"] for headers in sent]
+    assert len(set(request_ids)) == 3, "x-client-request-id is fresh per request"
+    turn_states = [headers.get(TURN_STATE_HEADER) for headers in sent]
+    if arm == "C":
+        # The first response of turn 1 returned tok-1: replayed within the
+        # turn, dropped when the turn changes.
+        assert turn_states == [None, "tok-1", None]
+        assert wire.turn_marker == "turn_2" and wire.turn_state == "tok-3"
+    else:
+        assert turn_states == [None, None, None]
+    prewarms = [r for r in caplog.records if "prewarm skipped" in r.getMessage()]
+    assert len(prewarms) == (2 if arm == "D" else 0), "one prewarm per turn start"
+
+
+async def test_routing_arm_a_requests_are_byte_identical_to_the_pre_experiment_shape() -> None:
+    # Arm A with a wire state and a turn marker sends exactly the bytes a
+    # request without either sent before the experiment existed.
+    recorder = _Recorder()
+    client, http = _codex_client(recorder, "A")
+    await _send(client, _routed_request("ses_x", "turn_1", WireState(session_id="ses_x")))
+    legacy = ProviderRequest(
+        model="gpt-6-astra", messages=[Message(role="user", content=[Text("hi")])],
+        extra={"prompt_cache_key": "ses_x"},
+    )
+    await _send(client, legacy)
+    await http.aclose()
+
+    routed, plain = recorder.requests
+    assert routed.content == plain.content
+    assert routed.headers.raw == plain.headers.raw
+    assert TURN_MARKER_KEY.encode() not in routed.content
+    assert set(dict(routed.headers)) == {
+        "host", "accept", "accept-encoding", "connection", "user-agent",
+        "content-length", "content-type", "authorization",
+        "chatgpt-account-id", "openai-beta", "originator",
+    }
+
+
+def test_routing_arm_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ROUTING_ARM_ENV, raising=False)
+    assert OpenAIResponsesClient(api_key="k")._routing_arm == "A"
+    monkeypatch.setenv(ROUTING_ARM_ENV, "c")
+    assert OpenAIResponsesClient(api_key="k")._routing_arm == "C"
+    monkeypatch.setenv(ROUTING_ARM_ENV, "Z")
+    assert OpenAIResponsesClient(api_key="k")._routing_arm == "A"
+    assert OpenAIResponsesClient(api_key="k", routing_arm="B")._routing_arm == "B"
+
+
+async def test_identity_headers_never_reach_the_public_api() -> None:
+    recorder = _Recorder()
+    client, http = _codex_client(recorder, "C", base_url=API_URL)
+    wire = WireState(session_id="ses_x")
+    for turn in ("turn_1", "turn_1"):
+        await _send(client, _routed_request("ses_x", turn, wire))
+    await http.aclose()
+    for request in recorder.requests:
+        assert not any(h in request.headers for h in _IDENTITY_HEADERS)
+    assert wire.turn_state is None
+
+
+async def test_turn_state_is_tracked_per_role_on_one_client() -> None:
+    # The main loop and the memory learner share one Responses client. Each
+    # role replays only the token its own turn received.
+    sid = "ses_x"
+    recorder = _Recorder()
+    client, http = _codex_client(recorder, "C")
+    main = WireState(session_id=sid, role="main")
+    learner = WireState(session_id=sid, role="learner")
+
+    await _send(client, _routed_request(sid, "turn_1", main))          # tok-1 → main
+    await _send(client, _routed_request(sid, "learn_1", learner))      # tok-2 → learner
+    await _send(client, _routed_request(sid, "turn_1", main))          # replays tok-1
+    await _send(client, _routed_request(sid, "learn_1", learner))      # replays tok-2
+    await _send(client, _routed_request(sid, "turn_1", None))          # no wire state
+    await _send(client, _routed_request(sid, "turn_1", main))          # still tok-1
+    await http.aclose()
+
+    sent = [recorder.headers(i) for i in range(6)]
+    assert [h.get(TURN_STATE_HEADER) for h in sent] == [
+        None, None, "tok-1", "tok-2", None, "tok-1",
+    ]
+    assert [h.get("thread-id") for h in sent] == [
+        sid, f"learner:{sid}", sid, f"learner:{sid}", sid, sid,
+    ]
+    assert main.turn_state == "tok-1"
+    assert learner.turn_state == "tok-2"
+
+
+async def test_usage_limit_headers_are_logged_at_debug(caplog: pytest.LogCaptureFixture) -> None:
+    recorder = _Recorder({
+        "x-codex-primary-used-percent": "42",
+        "x-codex-secondary-reset-after-seconds": "3600",
+        "x-ratelimit-remaining-tokens": "9000",
+    })
+    client, http = _codex_client(recorder, "B")
+    with caplog.at_level(logging.DEBUG, logger="fluid.providers.openai_responses.client"):
+        await _send(client, _routed_request("ses_x", "turn_1", WireState(session_id="ses_x")))
+    await http.aclose()
+
+    (record,) = [r for r in caplog.records if "usage-limit headers" in r.getMessage()]
+    message = record.getMessage()
+    assert record.levelno == logging.DEBUG
+    assert "arm=B" in message
+    assert '"x-codex-primary-used-percent": "42"' in message
+    assert '"x-ratelimit-remaining-tokens": "9000"' in message
+    assert TURN_STATE_HEADER not in message
+
+
+async def test_loop_hands_the_client_its_wire_state_and_turn_marker() -> None:
+    loop, sid = await _loop_with_session(_NamedProvider("openai_responses"))
+    try:
+        first = loop._build_request([], turn_id="turn_1")
+        second = loop._build_request([], turn_id="turn_2")
+        assert first.extra[TURN_MARKER_KEY] == "turn_1"
+        assert first.wire_state is second.wire_state
+        assert first.wire_state.session_id == sid and first.wire_state.role == "main"
+        # The marker is a signal to the client, never part of the body.
+        assert TURN_MARKER_KEY not in build_request_body(first)
+        assert build_request_body(first) == build_request_body(loop._build_request([]))
+    finally:
+        await loop.aclose()
+    other, _ = await _loop_with_session(_NamedProvider("openrouter"))
+    try:
+        request = other._build_request([], turn_id="turn_1")
+        assert request.wire_state is None
+        assert TURN_MARKER_KEY not in request.extra
+    finally:
+        await other.aclose()

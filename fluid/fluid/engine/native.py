@@ -145,7 +145,12 @@ from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
 )
-from fluid.providers.base import ProviderClient, ProviderRequest
+from fluid.providers.base import (
+    TURN_MARKER_KEY,
+    ProviderClient,
+    ProviderRequest,
+    WireState,
+)
 from fluid.context.environment import environment_note
 from fluid.providers.pricing import PricingResolver
 from fluid.tools import read_window
@@ -996,6 +1001,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Set once a sticky-routed call comes back empty: this loop instance
         # never sends the routing key again (see _agent_loop).
         self._sticky_poisoned = False
+        # Request identity and in-turn routing state, one per (session, role);
+        # handed to the provider on each request (see WireState).
+        self._wire_states: dict[tuple[str, str], WireState] = {}
         # Set once a call 400s with invalid_encrypted_content: this loop
         # instance strips opaque reasoning from every later request instead of
         # paying a doomed call per turn (see _agent_loop; the strip itself is
@@ -3277,10 +3285,21 @@ class NativeLoop(BackgroundLifecycleMixin):
         return all(key in self.ctx.extra for key in required)
 
     def _build_request(
-        self, history: list[Message], *, sticky: bool = True
+        self, history: list[Message], *, sticky: bool = True,
+        turn_id: str | None = None,
     ) -> ProviderRequest:
         tools_api = self._tools_api()
         plan = plan_cache(self.provider.caps, has_tools=bool(tools_api))
+        routing: dict[str, Any] = {}
+        wire_state: WireState | None = None
+        if self.provider.name == "openai_responses":
+            # Routing identity for the Responses client: this loop's wire
+            # state for the main role, and the turn the call belongs to (a
+            # _fluid_ key, which the serializer keeps off the wire). The
+            # client decides per routing arm whether to use either.
+            wire_state = self._wire_state("main")
+            if turn_id is not None:
+                routing[TURN_MARKER_KEY] = turn_id
         return ProviderRequest(
             model=self.model,
             messages=history,
@@ -3291,8 +3310,25 @@ class NativeLoop(BackgroundLifecycleMixin):
             cache_breakpoints=plan.breakpoints,
             # Per-provider cache-affinity key first, host passthrough on top
             # so the host's keys win.
-            extra={**self._affinity_keys(sticky), **self.request_extra},
+            extra={**self._affinity_keys(sticky), **routing, **self.request_extra},
+            wire_state=wire_state,
         )
+
+    def _wire_state(self, role: str) -> WireState | None:
+        """The loop-owned wire state for ``role`` in the current session.
+
+        Kept per session and role so a turn-state token never crosses from
+        one to the other, even when the provider client is shared.
+        """
+        if self._session is None:
+            return None
+        key = (self._session.session_id, role)
+        state = self._wire_states.get(key)
+        if state is None:
+            state = self._wire_states[key] = WireState(
+                session_id=self._session.session_id, role=role,
+            )
+        return state
 
     def _affinity_key(self) -> str | None:
         """The value the provider's cache-affinity key carries.
@@ -3567,7 +3603,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
     ) -> _CallResult:
         request = self._build_request(
-            history, sticky=sticky
+            history, sticky=sticky, turn_id=turn_id
         )
         self._fingerprint_request(request)
 

@@ -10,13 +10,33 @@ httpx streaming POST, same shape as ``AnthropicClient``. Two auth modes:
     401 (``on_401`` refreshes the rotated token) and the ``chatgpt-account-id``
     header attached. Point ``base_url`` at the Codex backend
     (``https://chatgpt.com/backend-api/codex/responses``) for subscription auth.
+
+Routing identity on the Codex backend is an experiment (E1), chosen with
+``FLUID_RESPONSES_ROUTING_ARM`` or the ``routing_arm`` argument:
+
+  * ``A`` (default): the body's ``prompt_cache_key`` only; requests are exactly
+    what this client sent before the experiment existed.
+  * ``B``: A plus the Codex identity headers. ``session-id`` is the
+    ``prompt_cache_key`` (the fluid session id unless the host overrides it),
+    ``thread-id`` is the loop's session id for its role, and
+    ``x-client-request-id`` is fresh for each request (its retries reuse it).
+  * ``C``: B plus ``x-codex-turn-state``: the token the first response of a
+    turn returns is replayed on every later request of that turn, retries
+    included, and dropped when the turn changes. It lives in the request's
+    ``WireState`` (one per loop and role), never on this client.
+  * ``D``: B plus a prewarm at turn start. The documented prewarm,
+    ``response.create`` with ``generate: false``, exists only in the Responses
+    WebSocket mode; this client speaks HTTP SSE, so the hook logs and sends
+    nothing.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterator
 from typing import Protocol, runtime_checkable
 
@@ -35,7 +55,14 @@ from fluid.providers._transport import (
     is_usable_client,
     with_deadline,
 )
-from fluid.providers.base import ErrorClass, ProviderCaps, ProviderRequest, StreamChunk
+from fluid.providers.base import (
+    TURN_MARKER_KEY,
+    ErrorClass,
+    ProviderCaps,
+    ProviderRequest,
+    StreamChunk,
+    WireState,
+)
 from fluid.providers.openai_responses.pricing import estimate_cost as _estimate_cost
 from fluid.providers.openai_responses.serialize import (
     ResponsesStreamNormalizer,
@@ -46,7 +73,27 @@ from fluid.providers.openai_responses.serialize import (
 API_URL = "https://api.openai.com/v1/responses"
 CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 
+ROUTING_ARM_ENV = "FLUID_RESPONSES_ROUTING_ARM"
+ROUTING_ARMS = frozenset("ABCD")
+TURN_STATE_HEADER = "x-codex-turn-state"
+# Response headers that carry usage-limit and quota state: the Codex
+# backend's x-codex-* family (plan, primary/secondary window use and reset,
+# credits), which Codex parses into its rate-limit snapshot, and the public
+# API's x-ratelimit-* family. Logged at debug level for experiment E1.
+_QUOTA_HEADER_PREFIXES = ("x-codex-", "x-ratelimit-")
+
 log = logging.getLogger(__name__)
+
+
+def resolve_routing_arm(value: str | None) -> str:
+    """The routing arm named by ``value``; ``A`` when unset or unknown."""
+    arm = (value or "A").strip().upper()
+    if arm not in ROUTING_ARMS:
+        log.warning(
+            "%s=%r is not one of A, B, C, D; using A", ROUTING_ARM_ENV, value
+        )
+        return "A"
+    return arm
 
 
 @runtime_checkable
@@ -76,8 +123,13 @@ class OpenAIResponsesClient:
         stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
+        routing_arm: str | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        # Read once: one client sends one arm for its whole life.
+        self._routing_arm = resolve_routing_arm(
+            routing_arm if routing_arm is not None else os.environ.get(ROUTING_ARM_ENV)
+        )
         self._base_url = base_url
         self._auth = auth
         self._timeout = timeout
@@ -107,7 +159,12 @@ class OpenAIResponsesClient:
             or "chatgpt.com" in (self._base_url or "")
         )
 
-    async def _headers(self) -> dict[str, str]:
+    async def _headers(
+        self,
+        body: dict | None = None,
+        wire: WireState | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, str]:
         headers = {
             "content-type": "application/json",
             "accept": "text/event-stream",
@@ -123,7 +180,77 @@ class OpenAIResponsesClient:
                 headers["originator"] = "codex_cli_rs"
         else:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        if self._routing_arm != "A" and self._is_codex_backend():
+            headers.update(self._identity_headers(body or {}, wire, request_id))
         return headers
+
+    def _identity_headers(
+        self, body: dict, wire: WireState | None, request_id: str | None
+    ) -> dict[str, str]:
+        """Codex routing identity for arms B-D (Codex backend only).
+
+        ``session-id`` carries the cache key, as Codex sends it: "ChatGPT
+        derives cache affinity from the Responses session-id header".
+        """
+        out: dict[str, str] = {}
+        cache_key = body.get("prompt_cache_key")
+        session = cache_key if isinstance(cache_key, str) and cache_key else None
+        if session is None and wire is not None:
+            session = wire.session_id
+        if session is not None:
+            out["session-id"] = session
+            out["thread-id"] = wire.thread_id if wire is not None else session
+        out["x-client-request-id"] = request_id or uuid.uuid4().hex
+        if self._routing_arm == "C" and wire is not None and wire.turn_state:
+            out[TURN_STATE_HEADER] = wire.turn_state
+        return out
+
+    def _capture_turn_state(self, resp: httpx.Response, wire: WireState | None) -> None:
+        """Arm C: keep the first turn-state token a turn's responses return."""
+        if (
+            self._routing_arm != "C"
+            or wire is None
+            or wire.turn_marker is None
+            or wire.turn_state is not None
+            or resp.status_code != 200
+        ):
+            return
+        token = resp.headers.get(TURN_STATE_HEADER)
+        if token:
+            wire.turn_state = token
+
+    def _log_quota_headers(self, resp: httpx.Response, model: str) -> None:
+        """Debug-log the usage-limit headers of one response (experiment E1)."""
+        if not log.isEnabledFor(logging.DEBUG):
+            return
+        quota = {
+            key.lower(): value for key, value in resp.headers.items()
+            if key.lower().startswith(_QUOTA_HEADER_PREFIXES)
+            and key.lower() != TURN_STATE_HEADER
+        }
+        retry_after = resp.headers.get("retry-after")
+        if retry_after:
+            quota["retry-after"] = retry_after
+        if quota:
+            log.debug(
+                "openai_responses usage-limit headers (arm=%s status=%s model=%s): %s",
+                self._routing_arm, resp.status_code, model,
+                json.dumps(quota, sort_keys=True),
+            )
+
+    async def _prewarm(self, request: ProviderRequest, wire: WireState) -> None:
+        """Arm D's turn-start prewarm: a hook that logs and sends nothing.
+
+        The only documented prewarm is ``response.create`` with
+        ``generate: false`` in the Responses WebSocket mode, and it primes
+        that connection. This client speaks HTTP SSE, where no equivalent is
+        documented, and an unknown field could start a billed generation.
+        """
+        log.info(
+            "openai_responses routing arm D: turn-start prewarm skipped, no "
+            "HTTP equivalent of generate:false (session=%s role=%s turn=%s model=%s)",
+            wire.session_id, wire.role, wire.turn_marker, request.model,
+        )
 
     def _pick_client(
         self, owned: httpx.AsyncClient | None
@@ -165,6 +292,15 @@ class OpenAIResponsesClient:
         # generation after a transport failure or an ambiguous server error.
         native_image = any(t.get("type") == "image_generation" for t in (body.get("tools") or ()) if isinstance(t, dict))
         transport_retries = 0 if native_image else self._retry.transport_retries
+        # Routing identity (arms B-D; see the module docstring). The wire
+        # state belongs to the calling loop and role; one-off callers pass
+        # none and get no turn state.
+        wire = request.wire_state
+        request_id = uuid.uuid4().hex
+        if wire is not None and self._routing_arm in ("C", "D") and self._is_codex_backend():
+            new_turn = wire.begin(request.extra.get(TURN_MARKER_KEY))
+            if new_turn and self._routing_arm == "D":
+                await self._prewarm(request, wire)
         owned: httpx.AsyncClient | None = None
         attempt = 0
         refreshed_401 = False
@@ -177,12 +313,14 @@ class OpenAIResponsesClient:
                     self.name, self._base_url, request.model, attempt + 1
                 )
                 try:
-                    headers = await self._headers()
+                    headers = await self._headers(body, wire, request_id)
                     trace_request("openai_responses", body)
                     async with client.stream(
                         "POST", self._base_url, json=body, headers=headers
                     ) as resp:
                         diagnostics.received_headers(resp)
+                        self._log_quota_headers(resp, request.model)
+                        self._capture_turn_state(resp, wire)
                         if resp.status_code == 200:
                             normalizer = ResponsesStreamNormalizer()
                             # Heartbeats become provider_alive chunks: with

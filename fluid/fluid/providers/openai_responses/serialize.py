@@ -49,6 +49,7 @@ from fluid.messages import (
 from fluid.providers._retry import is_retriable_status
 from fluid.providers._sse import KEEPALIVE_EVENT
 from fluid.providers.base import (
+    INTERNAL_EXTRA_PREFIX,
     ErrorClass,
     ProviderRequest,
     StreamChunk,
@@ -270,7 +271,12 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
 
     # extra passthrough enables stateful mode (previous_response_id, store:true),
     # tool_choice, temperature, etc. — and can override any default above.
-    body.update(request.extra)
+    # ``_fluid_``-prefixed keys are engine-to-client signals (the turn
+    # marker) and never reach the wire or the cache probe's body hash.
+    body.update({
+        key: value for key, value in request.extra.items()
+        if not key.startswith(INTERNAL_EXTRA_PREFIX)
+    })
     return body
 
 
