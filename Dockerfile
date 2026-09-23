@@ -138,8 +138,11 @@ RUN groupadd -g 1000 appuser && \
     chown -R appuser:appuser /home/appuser /data /workspace
 
 # ── Python dependencies ──
-COPY requirements.txt .
-RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 && pip install --no-cache-dir -r requirements.txt
+# requirements.lock is the hash-pinned closure of requirements.txt, fluid's own
+# dependencies and its build backend (scripts/lock_requirements.sh). A changed
+# or substituted package on the index fails the build instead of shipping.
+COPY requirements.lock .
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 && pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # ── Dev / test dependencies ──
 # The runtime image is also the agent's workbench: it checks out this repo and
@@ -153,8 +156,10 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 # fluid is developed in this repo under fluid/ (its own pyproject; the package
 # is fluid/fluid). Installed from the tree so the image needs no registry or
 # cross-repo credentials. The build must fail if the harness cannot install.
+# Its dependencies and build backend already came from the locked install
+# above, so nothing unpinned is fetched here.
 COPY fluid/ /opt/fluid/
-RUN pip install --no-cache-dir /opt/fluid && python -c "import fluid"
+RUN pip install --no-cache-dir --no-deps --no-build-isolation /opt/fluid && python -c "import fluid"
 
 # ── Backend code ──
 COPY --chown=appuser:appuser app/ ./app/

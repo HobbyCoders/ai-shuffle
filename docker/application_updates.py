@@ -300,11 +300,16 @@ class ContainerUpdates:
         env = build_environment(home)
         env["GITHUB_SHA"] = revision
         python = directory / "venv/bin/python"
+        if not (source / "requirements.lock").is_file():
+            raise UpdateError("This source update has no hash-pinned requirements.lock; install a newer image")
         self.run_build([sys.executable, "-m", "venv", str(directory / "venv")], source, env)
         # pip's 15-second read timeout dropped an 85 MB wheel mid-download on
         # the Unraid host and failed the whole update; allow slow mirrors.
-        self.run_build([str(python), "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10",
-                        "-r", "requirements.txt", "./fluid"], source, env)
+        # Every package, including fluid's build backend, must match a hash in
+        # the signed source's lock, so a hostile index release cannot slip in.
+        pip = [str(python), "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10"]
+        self.run_build(pip + ["--require-hashes", "-r", "requirements.lock"], source, env)
+        self.run_build(pip + ["--no-deps", "--no-build-isolation", "./fluid"], source, env)
         for package in ("frontend", "tools", "browser-mcp"):
             self.publish("downloading", f"Building {package}…", version=revision)
             self.run_build(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], source / package, env)

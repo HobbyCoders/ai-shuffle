@@ -1,0 +1,4 @@
+# Build backend for the in-repo fluid package. Listed so the hash-pinned
+# requirements.lock covers it and `pip install --no-build-isolation ./fluid`
+# never fetches an unpinned backend at image build or update time.
+hatchling
