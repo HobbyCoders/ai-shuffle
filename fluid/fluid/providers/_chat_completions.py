@@ -30,6 +30,7 @@ from fluid.messages import (
     Thinking,
     ToolResultBlock,
     ToolUseBlock,
+    UnknownBlock,
 )
 from fluid.providers._retry import (
     RETRIABLE_STATUSES,
@@ -78,6 +79,8 @@ def tool_result_text(block: ToolResultBlock) -> str:
             # than useless. Images ride the content array (see
             # tool_result_content) when the leg carries them at all.
             parts.append("[image attached]")
+        elif isinstance(c, UnknownBlock):
+            continue  # a block kind from a newer release renders nothing
         else:
             parts.append(json.dumps(c.to_dict(), separators=(",", ":"), ensure_ascii=False))
     return "".join(parts)
@@ -101,6 +104,8 @@ def tool_result_content(block: ToolResultBlock) -> str:
             parts.append(c.text)
         elif isinstance(c, Image):
             parts.append("[image attached — see the user message that follows]")
+        elif isinstance(c, UnknownBlock):
+            continue  # a block kind from a newer release renders nothing
         else:
             parts.append(json.dumps(c.to_dict(), separators=(",", ":"), ensure_ascii=False))
     return "".join(parts)

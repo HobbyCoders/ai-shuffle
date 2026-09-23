@@ -10,7 +10,8 @@ next call targets a different provider. It is never synthesized or edited.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import copy
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 
@@ -98,6 +99,24 @@ class Reasoning(ContentBlock):
     model: str | None = None
 
 
+@dataclass
+class UnknownBlock(ContentBlock):
+    """A stored block whose ``kind`` this release does not know.
+
+    Workers update one at a time, so a session written by a newer release can
+    be resumed by an older one. The block keeps the stored dict in ``raw``
+    (``kind`` included) and serializes back to exactly that dict, so a load
+    and save loses nothing. Every provider serializer and renderer skips it:
+    it puts nothing in the model's view.
+    """
+
+    kind: str
+    raw: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return copy.deepcopy(self.raw)
+
+
 _KINDS = {
     "text": Text,
     "thinking": Thinking,
@@ -108,12 +127,30 @@ _KINDS = {
 }
 
 
+def _known_fields(cls: type, d: dict[str, Any]) -> dict[str, Any]:
+    """``d`` without the keys ``cls`` has no field for.
+
+    A newer release may add a field to a known block; this release drops it
+    on load rather than failing to construct the block.
+    """
+    names = {f.name for f in fields(cls)}
+    return {k: v for k, v in d.items() if k in names}
+
+
 def block_from_dict(d: dict[str, Any]) -> ContentBlock:
-    d = dict(d)
-    cls = _KINDS[d.pop("kind")]
+    kind = d.get("kind")
+    cls = _KINDS.get(kind) if isinstance(kind, str) else None
+    if cls is None:
+        return UnknownBlock(
+            kind=kind if isinstance(kind, str) else "", raw=copy.deepcopy(dict(d))
+        )
+    d = _known_fields(cls, d)
     if cls is ToolResultBlock:
         d["content"] = [block_from_dict(c) for c in d.get("content", [])]
-        d["delivered_steers"] = [SteerDelivery(**s) for s in d.get("delivered_steers", [])]
+        d["delivered_steers"] = [
+            SteerDelivery(**_known_fields(SteerDelivery, s))
+            for s in d.get("delivered_steers", [])
+        ]
     return cls(**d)
 
 

@@ -7,6 +7,7 @@ from fluid.messages.content import (
     Thinking,
     ToolResultBlock,
     ToolUseBlock,
+    UnknownBlock,
     block_from_dict,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "Thinking",
     "ToolResultBlock",
     "ToolUseBlock",
+    "UnknownBlock",
     "block_from_dict",
 ]

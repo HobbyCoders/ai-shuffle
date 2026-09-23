@@ -45,6 +45,7 @@ from fluid.messages import (
     Thinking,
     ToolResultBlock,
     ToolUseBlock,
+    UnknownBlock,
 )
 from fluid.providers._sse import KEEPALIVE_EVENT
 from fluid.providers.base import ProviderRequest, StreamChunk
@@ -99,6 +100,8 @@ def _tool_result_output(block: ToolResultBlock) -> str | list[dict[str, Any]]:
         for c in block.content:
             if isinstance(c, Text):
                 parts.append(c.text)
+            elif isinstance(c, UnknownBlock):
+                continue  # a block kind from a newer release renders nothing
             else:
                 parts.append(json.dumps(c.to_dict(), separators=(",", ":"), ensure_ascii=False))
         return "".join(parts)
