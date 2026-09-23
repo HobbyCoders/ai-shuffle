@@ -4851,6 +4851,60 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     return blocks
 
 
+DELEGATED_INSTRUCTIONS_HEADER = (
+    "# AGENTS.md instructions\n"
+    "Claude Code loads CLAUDE.md files itself. These are the AGENTS.md-family "
+    "files the workspace also carries (fluid's instruction stack); follow them "
+    "the same way."
+)
+DELEGATED_SKILLS_HEADER = (
+    "# More skills\n"
+    "These skills live outside .claude/skills, so the Skill tool cannot load "
+    "them. Read a skill's SKILL.md at the path shown before doing a task it "
+    "covers."
+)
+
+
+def _delegated_fluid_context(options: SessionOptions) -> List[str]:
+    """fluid's instruction files and skills, for the delegated leg.
+
+    Claude Code reads CLAUDE.md and .claude/skills, never fluid's
+    AGENTS.md family (``~/.fluid/AGENTS.md``, project ``AGENTS.md``,
+    ``.fluid/AGENTS.md``, ``.agents/AGENTS.md``) or the skills under
+    ``.fluid/skills``, ``.agents/skills`` and ``~/.fluid/skills``. Under
+    full replace the compiled prompt carried them; with Claude Code's preset
+    kept (D6) they ride the appended text instead, gated by the profile's
+    ``setting_sources`` the way the compiler gates them. Never raises.
+    """
+    sources = _fluid_setting_sources(options)
+    user_on = sources is None or "user" in sources
+    project_on = sources is None or "project" in sources
+    cwd = options.cwd or "."
+    blocks: List[str] = []
+    try:
+        from fluid.context.instructions import build_instruction_blocks, discover_skills
+
+        if user_on or project_on:
+            files = [
+                text for _, text in build_instruction_blocks(
+                    cwd, include_global=user_on, include_project=project_on,
+                )
+                if text.strip()
+            ]
+            if files:
+                blocks.append("\n\n".join([DELEGATED_INSTRUCTIONS_HEADER, *files]))
+            skills = discover_skills(cwd, include_global=user_on, include_project=project_on)
+            if skills:
+                lines = "\n".join(
+                    f"- {skill.name}: {skill.description} ({skill.path})"
+                    for skill in skills
+                )
+                blocks.append(f"{DELEGATED_SKILLS_HEADER}\n{lines}")
+    except Exception:  # noqa: BLE001 — a prompt block never fails a connect
+        logger.warning("[HarnessAdapter] fluid instructions for the delegated leg failed", exc_info=True)
+    return blocks
+
+
 def _delegated_append_text(
     append_system: Optional[str], options: SessionOptions, registry: Any
 ) -> Optional[str]:
@@ -4859,13 +4913,21 @@ def _delegated_append_text(
     Decision D6: Claude Code keeps its own preset prompt and this text is
     appended to it. In order: the profile's append (security and media
     rules, the profile's instructions, app-config text), the merged agents
-    index, then :func:`_delegated_guidance_blocks`. Every input is fixed at
-    connect, so the text is byte-identical across the session's turns and
-    the CLI's prompt cache keeps hitting.
+    index, fluid's AGENTS.md-family files and skills
+    (:func:`_delegated_fluid_context`), the model's learned guidance, then
+    :func:`_delegated_guidance_blocks`. Every input is fixed at connect, so
+    the text is byte-identical across the session's turns and the CLI's
+    prompt cache keeps hitting.
+
+    ``VERIFICATION_BLOCK`` stays native-only: it points at the native
+    leg's "# Workspace facts" card and browser tool names, neither of which
+    this leg has.
     """
     agents_index, _ = _agent_context(options)
     _, text = _with_agents_index(None, append_system or None, agents_index)
     parts = [text] if text else []
+    parts.extend(_delegated_fluid_context(options))
+    parts.extend(_learned_guidance_blocks(options.model))
     parts.extend(_delegated_guidance_blocks(options, registry))
     return "\n\n".join(parts) or None
 

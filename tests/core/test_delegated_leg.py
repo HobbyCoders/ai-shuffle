@@ -35,6 +35,23 @@ def _memory_registry() -> ToolRegistry:
     return registry
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(monkeypatch, tmp_path):
+    """The appended text reads ~/.fluid (AGENTS.md, skills) and the learned
+    guidance home: point both at an empty directory so the developer's own
+    files never reach these tests."""
+    home = tmp_path / "home"
+    home.mkdir()
+    # Bound the project walk: without a git root it climbs to the drive root
+    # and finds whatever AGENTS.md files the machine has above the temp dir.
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    from app.core import guidance_surface
+
+    monkeypatch.setenv(guidance_surface.GUIDANCE_HOME_ENV, str(home))
+    return home
+
+
 def _preset_options(cwd, *, registry=None, **extra) -> SessionOptions:
     return SessionOptions(
         model="fable",
@@ -336,3 +353,50 @@ def test_a_zero_usage_native_call_still_counts_as_a_call():
             context_usage={"totalTokens": 1000 * index, "maxTokens": 32000},
         ))
     assert adapter._turn_model_calls == 2
+
+
+def test_delegated_append_carries_fluid_instructions_skills_and_learned_guidance(
+    tmp_path, _isolated_home,
+):
+    """Claude Code reads CLAUDE.md and .claude/skills only. fluid's
+    AGENTS.md-family files and its skills, which the full-replace prompt
+    carried, ride the appended text now, and so does the model's learned
+    guidance."""
+    project = tmp_path / "proj"
+    (project / ".fluid" / "skills" / "deploy").mkdir(parents=True)
+    (project / ".agents").mkdir()
+    (project / "AGENTS.md").write_text("root agents rule", encoding="utf-8")
+    (project / ".fluid" / "AGENTS.md").write_text("fluid agents rule", encoding="utf-8")
+    (project / ".agents" / "AGENTS.md").write_text("dot-agents rule", encoding="utf-8")
+    (project / ".fluid" / "skills" / "deploy" / "SKILL.md").write_text(
+        "---\nname: deploy\ndescription: Ship a build\n---\nbody", encoding="utf-8",
+    )
+    (_isolated_home / ".fluid").mkdir()
+    (_isolated_home / ".fluid" / "AGENTS.md").write_text("global fluid rule", encoding="utf-8")
+    guidance = _isolated_home / ".fluid" / "guidance"
+    guidance.mkdir()
+    (guidance / "fable.md").write_text("learned: prefer small diffs", encoding="utf-8")
+
+    text = ha._delegated_append_text(
+        "APPEND TEXT", _preset_options(project), ToolRegistry(),
+    )
+    assert text.startswith("APPEND TEXT")
+    assert ha.DELEGATED_INSTRUCTIONS_HEADER in text
+    for rule in ("global fluid rule", "root agents rule", "fluid agents rule", "dot-agents rule"):
+        assert rule in text
+    assert ha.DELEGATED_SKILLS_HEADER in text
+    assert "- deploy: Ship a build (" in text
+    assert "learned: prefer small diffs" in text
+    # Native-only: it points at a workspace card this leg does not have.
+    assert ha.VERIFICATION_BLOCK not in text
+
+    # setting_sources gates them as the compiler does.
+    options = _preset_options(project)
+    options.setting_sources = ["project"]
+    project_only = ha._delegated_append_text("APPEND TEXT", options, ToolRegistry())
+    assert "global fluid rule" not in project_only
+    assert "root agents rule" in project_only
+    options.setting_sources = []
+    assert ha.DELEGATED_INSTRUCTIONS_HEADER not in ha._delegated_append_text(
+        "APPEND TEXT", options, ToolRegistry(),
+    )
