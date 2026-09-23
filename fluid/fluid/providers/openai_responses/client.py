@@ -19,7 +19,9 @@ Routing identity on the Codex backend is an experiment (E1), chosen with
   * ``B``: A plus the Codex identity headers. ``session-id`` is the
     ``prompt_cache_key`` (the fluid session id unless the host overrides it),
     ``thread-id`` is the loop's session id for its role, and
-    ``x-client-request-id`` is fresh for each request (its retries reuse it).
+    ``x-client-request-id`` repeats ``thread-id``, as Codex sends it (its
+    request id is the thread id). For the main role all three equal the
+    ``prompt_cache_key``.
   * ``C``: B plus ``x-codex-turn-state``: the token the first response of a
     turn returns is replayed on every later request of that turn, retries
     included, and dropped when the turn changes. It lives in the request's
@@ -166,10 +168,10 @@ class OpenAIResponsesClient:
         cache lives on a route, so a header change can cost the cache even
         when the body is byte-identical. ``_headers`` sends all of these.
         Under arms B-D, ``request`` adds the session-stable identity headers
-        (``session-id``, ``thread-id``). Per-request and per-turn headers
-        (``x-client-request-id``, ``x-codex-turn-state``) stay out: they
-        change on every request or turn by design, so hashing them would
-        read every call as a routing change.
+        (``session-id``, ``thread-id``). ``x-client-request-id`` repeats
+        ``thread-id``, so hashing it adds nothing, and ``x-codex-turn-state``
+        stays out because it changes on every turn by design: hashing it
+        would read every turn start as a routing change.
         """
         headers: dict[str, str] = {}
         if self._auth is not None and self._is_codex_backend():
@@ -212,7 +214,10 @@ class OpenAIResponsesClient:
         derives cache affinity from the Responses session-id header".
         """
         out = self._session_headers(body, wire)
-        out["x-client-request-id"] = request_id or uuid.uuid4().hex
+        # Codex sends the thread id here, not a per-request id
+        # (codex-api/src/endpoint/responses.rs). With no session identity at
+        # all there is no thread id, and a fresh id stands in.
+        out["x-client-request-id"] = out.get("thread-id") or request_id or uuid.uuid4().hex
         if self._routing_arm == "C" and wire is not None and wire.turn_state:
             out[TURN_STATE_HEADER] = wire.turn_state
         return out

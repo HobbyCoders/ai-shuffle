@@ -1211,11 +1211,12 @@ async def test_routing_arm_decides_which_identity_headers_are_sent(
     ]
     if arm == "A":
         return
+    # As Codex sends them: session-id, thread-id and x-client-request-id
+    # all equal the prompt_cache_key for the main role, on every request.
     for headers in sent:
         assert headers["session-id"] == sid
         assert headers["thread-id"] == sid
-    request_ids = [headers["x-client-request-id"] for headers in sent]
-    assert len(set(request_ids)) == 3, "x-client-request-id is fresh per request"
+        assert headers["x-client-request-id"] == sid
     turn_states = [headers.get(TURN_STATE_HEADER) for headers in sent]
     if arm == "C":
         # The first response of turn 1 returned tok-1: replayed within the
@@ -1235,8 +1236,9 @@ async def test_probe_routing_headers_keep_session_identity_and_drop_per_turn_hea
     # The cache probe hashes routing_headers(request) into the request
     # identity. Under arms B-D that must cover session-id and thread-id,
     # which are sent and stay fixed for the session, and leave out
-    # x-client-request-id and x-codex-turn-state, which change on every
-    # request or turn: hashing those would read every call as a routing change.
+    # x-client-request-id (a copy of thread-id) and x-codex-turn-state, which
+    # changes on every turn: hashing that would read every turn start as a
+    # routing change.
     from fluid.context.cache_probe import fingerprint_prefix, fingerprint_responses_request
 
     sid = "ses_x"
@@ -1267,8 +1269,8 @@ async def test_probe_routing_headers_keep_session_identity_and_drop_per_turn_hea
     # Everything the probe hashes is also sent.
     sent = recorder.headers(2)
     assert all(sent[name.lower()] == value for name, value in routing.items())
-    # A new turn, a new request id and (arm C) a replayed turn-state token
-    # leave the probe's request identity unchanged.
+    # A new turn and (arm C) a replayed turn-state token leave the probe's
+    # request identity unchanged.
     assert len({f["request"] for f in fingerprints}) == 1
 
 
@@ -1370,6 +1372,10 @@ async def test_turn_state_is_tracked_per_role_on_one_client() -> None:
     ]
     assert [h.get("thread-id") for h in sent] == [
         sid, f"learner:{sid}", sid, f"learner:{sid}", sid, sid,
+    ]
+    # x-client-request-id follows thread-id, as Codex sends it.
+    assert [h.get("x-client-request-id") for h in sent] == [
+        h.get("thread-id") for h in sent
     ]
     assert main.turn_state == "tok-1"
     assert learner.turn_state == "tok-2"
