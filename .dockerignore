@@ -106,6 +106,7 @@ scripts/deploy.ps1
 scripts/hub_domain_preflight.py
 scripts/stage_release.py
 scripts/lock_requirements.sh
+scripts/source_archive.py
 requirements-build.txt
 scripts/verification_evidence.py
 scripts/verify_container_postgres.py
