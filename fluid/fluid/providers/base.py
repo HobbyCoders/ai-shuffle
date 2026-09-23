@@ -95,7 +95,8 @@ class ErrorClass:
 
     ``max_retries`` caps retries for this class below the client's policy
     (None means the policy's own budget). ``backoff_floor`` is the minimum
-    wait in seconds before the retry. ``drop_sticky`` says whether the
+    wait in seconds before the retry; ``retry_after`` is the provider's own
+    hint, when it gave one. ``drop_sticky`` says whether the
     engine should stop sending the provider's cache-affinity key after this
     error: OpenRouter drops it (a dead replica stays dead), the Responses
     API never does (the key is what keeps its prompt cache warm).
@@ -106,6 +107,9 @@ class ErrorClass:
     backoff_floor: float = 0.0
     max_retries: int | None = None
     drop_sticky: bool = False
+    # Seconds the provider asked for before the retry ("try again in 1.9s"),
+    # when the error said so. The client caps it; None means use the backoff.
+    retry_after: float | None = None
 
 
 # The key in ``ProviderRequest.extra`` that carries the turn a request belongs

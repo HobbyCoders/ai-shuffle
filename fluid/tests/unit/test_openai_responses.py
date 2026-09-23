@@ -1109,6 +1109,120 @@ async def test_liveness_before_content_keeps_the_start_first_and_single(_sleeps:
     assert "error" not in kinds
 
 
+class _DropAfter(httpx.AsyncByteStream):
+    """A response body that sends ``body`` and then loses the connection."""
+
+    def __init__(self, body: str) -> None:
+        self._body = body.encode()
+
+    async def __aiter__(self):
+        yield self._body
+        raise httpx.ReadError("connection reset by peer")
+
+    async def aclose(self) -> None:
+        pass
+
+
+def _dropped(body: str) -> httpx.Response:
+    return httpx.Response(
+        200, stream=_DropAfter(body), headers={"content-type": "text/event-stream"},
+    )
+
+
+async def test_transport_drop_after_created_before_content_is_retried(
+    _sleeps: list[float],
+) -> None:
+    """The held message_start is not content: a drop right after
+    response.created is replayed, as the Anthropic lane does."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _dropped(_CREATED)
+        return _sse(_CREATED + _TEXT + _COMPLETED)
+
+    chunks = await _run_client(handler)
+    kinds = [c.kind for c in chunks]
+    assert calls == 2
+    assert kinds.count("message_start") == 1
+    assert kinds[0] == "message_start"
+    assert "error" not in kinds
+    assert kinds[-1] == "message_stop"
+
+
+async def test_transport_drop_after_the_first_content_item_is_surfaced(
+    _sleeps: list[float],
+) -> None:
+    calls = 0
+    first_delta = _event("response.output_text.delta", {"item_id": "msg_1", "delta": "hi"})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _dropped(_CREATED + first_delta)
+
+    chunks = await _run_client(handler)
+    assert calls == 1
+    kinds = [c.kind for c in chunks]
+    assert kinds[0] == "message_start"
+    assert "text_delta" in kinds
+    assert chunks[-1].kind == "error"
+    assert chunks[-1].payload["retriable"] is False
+    assert _sleeps == []
+
+
+def _rate_limited(message: str) -> str:
+    return _event("response.failed", {"response": {
+        "id": "resp_1", "status": "failed",
+        "error": {"code": "rate_limit_exceeded", "type": "rate_limit_error",
+                  "message": message},
+    }})
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("Rate limit reached for gpt-6 on tokens per min. Please try again in 1.898s.", 1.898),
+    ("Rate limit reached. Please try again in 250ms.", 0.25),
+    # A hint past the long floor is capped at it.
+    ("Rate limit reached. Please try again in 45s.", OVERLOAD_BACKOFF_FLOOR_S),
+])
+async def test_rate_limit_hint_drives_the_backoff(
+    _sleeps: list[float], message: str, expected: float,
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _sse(_CREATED + _rate_limited(message))
+        return _sse(_CREATED + _TEXT + _COMPLETED)
+
+    chunks = await _run_client(handler)
+    assert calls == 2
+    assert _sleeps == [pytest.approx(expected)]
+    assert chunks[-1].kind == "message_stop"
+
+
+async def test_rate_limit_without_a_hint_uses_the_default_backoff(
+    _sleeps: list[float],
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _sse(_CREATED + _rate_limited("Rate limit reached."))
+        return _sse(_CREATED + _TEXT + _COMPLETED)
+
+    await _run_client(handler)
+    assert calls == 2
+    # base_delay=0 and no jitter in _run_client's policy: the default is 0.
+    assert _sleeps == [0]
+
+
 # ─── routing identity (experiment E1 arms, FLUID_RESPONSES_ROUTING_ARM) ─────
 
 import logging

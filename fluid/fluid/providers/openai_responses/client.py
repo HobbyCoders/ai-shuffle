@@ -67,6 +67,7 @@ from fluid.providers.base import (
 )
 from fluid.providers.openai_responses.pricing import estimate_cost as _estimate_cost
 from fluid.providers.openai_responses.serialize import (
+    LONG_BACKOFF_FLOOR_S,
     ResponsesStreamNormalizer,
     build_request_body,
     classify_error as _classify_error,
@@ -378,10 +379,10 @@ class OpenAIResponsesClient:
                             async for event_name, data in events:
                                 for chunk in normalizer.consume(event_name, data):
                                     if chunk.kind == "message_start":
-                                        # Unchanged transport rule: a failure
-                                        # after the provider accepted the call
-                                        # is not replayed.
-                                        yielded = True
+                                        # Held, so not yet yielded: a
+                                        # transport failure before the first
+                                        # content item is replayed, as on the
+                                        # Anthropic lane.
                                         if not start_sent:
                                             pending_start = chunk
                                         continue
@@ -413,10 +414,18 @@ class OpenAIResponsesClient:
                                     "in-stream error before content (code=%s, "
                                     "attempt %d)", retry_class.code, attempt + 1,
                                 )
-                                await asyncio.sleep(max(
-                                    self._retry.delay(attempt),
-                                    retry_class.backoff_floor,
-                                ))
+                                if retry_class.retry_after is not None:
+                                    # The provider said when; never longer
+                                    # than the long floor.
+                                    wait = min(
+                                        retry_class.retry_after, LONG_BACKOFF_FLOOR_S,
+                                    )
+                                else:
+                                    wait = max(
+                                        self._retry.delay(attempt),
+                                        retry_class.backoff_floor,
+                                    )
+                                await asyncio.sleep(wait)
                                 attempt += 1
                                 continue
                             if pending_start is not None:

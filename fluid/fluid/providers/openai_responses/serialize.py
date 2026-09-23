@@ -34,6 +34,7 @@ chunk model is simpler, so this is a port of the *knowledge*, not the code:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -300,7 +301,35 @@ _RETRIABLE_ERROR_TYPES = frozenset(("server_error", "service_unavailable_error")
 # both numbers).
 OVERLOAD_CODE = "server_is_overloaded"
 OVERLOAD_MAX_RETRIES = 2
-OVERLOAD_BACKOFF_FLOOR_S = 10.0
+#: The Responses client's long backoff floor. Overload never retries sooner;
+#: a rate-limit "try again in Xs" hint is never waited on for longer.
+LONG_BACKOFF_FLOOR_S = 10.0
+OVERLOAD_BACKOFF_FLOOR_S = LONG_BACKOFF_FLOOR_S
+
+RATE_LIMIT_CODE = "rate_limit_exceeded"
+# "Rate limit reached ... Please try again in 1.898s." (Codex parses the same
+# phrase; the unit can also be ms.)
+_TRY_AGAIN_RE = re.compile(
+    r"try again in\s*([0-9]+(?:\.[0-9]+)?)\s*(ms|milliseconds?|s|secs?|seconds?)\b",
+    re.IGNORECASE,
+)
+
+
+def retry_after_hint(err: Any) -> float | None:
+    """Seconds from a "try again in Xs" phrase in an error, else None."""
+    if isinstance(err, dict):
+        text = " ".join(str(err.get(k) or "") for k in ("message", "detail"))
+        if not text.strip():
+            text = str(err)
+    else:
+        text = str(err or "")
+    match = _TRY_AGAIN_RE.search(text)
+    if match is None:
+        return None
+    value = float(match.group(1))
+    if match.group(2).lower().startswith("m"):
+        value /= 1000.0
+    return value
 
 
 def _error_fields(err: Any) -> tuple[str | None, str | None, Any]:
@@ -340,7 +369,8 @@ def classify_error(err: Any) -> ErrorClass:
         or etype in _RETRIABLE_ERROR_TYPES
         or is_retriable_status(status)
     )
-    return ErrorClass(retriable=retriable, code=code)
+    hint = retry_after_hint(err) if code == RATE_LIMIT_CODE else None
+    return ErrorClass(retriable=retriable, code=code, retry_after=hint)
 
 
 # ─── usage / stop-reason mapping ─────────────────────────────────────────────
