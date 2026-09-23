@@ -4114,7 +4114,10 @@ from tools.Grep import Grep
 from tools.Read import Read
 hits = Grep(pattern="usage", path="/repo/src").splitlines()
 for path in hits[:10]:
-    print(path, Read(file_path=path)[:400])
+    text = Read(file_path=path)
+    if not text:  # MissingFile: the path is gone, skip it
+        continue
+    print(path, text[:400])
 ```
 A Read of a path that does not exist returns a falsy MissingFile instead of \
 raising, so check `if not text:` before using it; other tool errors come back as results and do not abort \
@@ -4144,8 +4147,9 @@ context with text you did not choose. Bind every result to a name, check its \
 size, and print only the slice you need:
 ```python
 out = Read(file_path="/repo/app/server.py")
-print(len(out))
-print(out[:800])
+if out:  # a missing path gives a falsy MissingFile
+    print(len(out))
+    print(out[:800])
 ```
 The kernel keeps what you bound. A ref you dropped is still recoverable: \
 `_refs` maps every live ResultRef id to its value, and `_` is the previous \

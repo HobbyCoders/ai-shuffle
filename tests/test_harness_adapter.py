@@ -7403,3 +7403,21 @@ async def test_subagent_roster_is_recomputed_at_every_turn_start(monkeypatch, ag
     await adapter.send_query("reviewer disabled")
     assert "- Reviewer:" not in engine.system
     assert "No subagents are configured" in engine.system
+
+
+def test_code_mode_examples_never_slice_an_unchecked_read():
+    """#5: a Read of a missing path returns a falsy MissingFile, and slicing
+    it raises MissingPathError. The batch example used to slice
+    Read(...)[:400] straight after Grep, contradicting the rule right below
+    it. Every example must test a Read result before using it."""
+    import re
+
+    import app.core.provider.harness_adapter as ha
+
+    blocks = re.findall(r"```python\n(.*?)```", ha.CODE_MODE_SECTION, re.S)
+    assert blocks
+    for block in blocks:
+        assert not re.search(r"Read\([^)]*\)\s*\[", block), block
+        # Every bound Read result is tested for truth before it is used.
+        for name in re.findall(r"(\w+) = Read\(", block):
+            assert re.search(rf"if (not )?{name}\b", block), block
