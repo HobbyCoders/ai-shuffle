@@ -193,6 +193,48 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
 
 _recent_authorization = {}
 
+# The hub answers 503 with Retry-After when an operator kill switch is on
+# (android/hub/src/switches.ts). Until then every call is answered locally, so
+# no loop on this worker keeps asking a paused hub. Keyed by hub origin.
+_paused_until = {}
+_MAX_RETRY_AFTER = 6 * 3600.0
+
+
+class HubResponseError(HTTPException):
+    """A failed hub call.
+
+    ``status_code`` stays 503 so existing callers keep treating it as
+    "unavailable". ``hub_status`` is what the hub answered (None when it was
+    not reached) and ``retry_after`` its Retry-After in seconds, if any.
+    """
+
+    def __init__(self, detail, hub_status=None, retry_after=None):
+        super().__init__(status_code=503, detail=detail)
+        self.hub_status = hub_status
+        self.retry_after = retry_after
+
+
+def hub_status(exc):
+    return getattr(exc, 'hub_status', None)
+
+
+def retry_after(exc):
+    return getattr(exc, 'retry_after', None)
+
+
+def _parse_retry_after(value):
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None  # HTTP-date form is not used by the hub.
+    if seconds != seconds or seconds < 0:
+        return None
+    return min(seconds, _MAX_RETRY_AFTER)
+
+
+def reset_pause():
+    _paused_until.clear()
+
 
 def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384, timeout=None):
     """Bounded, nonredirecting request; never include hub bodies or secrets in errors.
@@ -202,9 +244,13 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
     """
     conn = None
     detail = 'Account hub authorization unavailable'
+    status = wait = None
     try:
         origin = trusted_origin(binding['hub_url'])
         server = identifier(binding['server_id'])
+        remaining = _paused_until.get(origin, 0) - time.monotonic()
+        if remaining > 0:
+            raise HubResponseError('Account hub is paused', 503, remaining)
         if timeout is None:
             timeout = 65 if suffix in ('activate', 'connector') else 4
         conn = _PinnedHTTPS(urlsplit(origin).hostname, timeout=timeout, context=ssl.create_default_context())
@@ -214,6 +260,11 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
                               'Content-Type': 'application/json', 'Accept': 'application/json'})
         response = conn.getresponse()
         if response.status != 200:
+            status = response.status
+            getheader = getattr(response, 'getheader', None)  # Test doubles may omit headers.
+            wait = _parse_retry_after(getheader('Retry-After') if getheader else None)
+            if status == 503 and wait:
+                _paused_until[origin] = time.monotonic() + wait
             if response.status in (401, 403):
                 _recent_authorization.pop(_authorization_key(binding), None)
             if suffix.startswith('browser-logins') and response.status in (401, 403):
@@ -242,7 +293,6 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
         if not isinstance(result, dict):
             raise ValueError('Invalid hub response')
         if suffix == 'network/pending' or (suffix == 'status' and result.get('active') is True):
-            import time
             # One worker binding, bounded cache, no identity/provider secrets.
             if len(_recent_authorization) >= 16:
                 _recent_authorization.clear()
@@ -255,7 +305,9 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
         # JSON, or the status line above); hub bodies and credentials never
         # appear in it.
         logger.warning('Account hub %s %s failed: %s: %s', method, suffix, type(exc).__name__, exc)
-        raise HTTPException(status_code=503, detail=detail) from None
+        if status == 503 and wait:
+            detail = 'Account hub is paused'
+        raise HubResponseError(detail, status, wait) from None
     finally:
         if conn:
             conn.close()
