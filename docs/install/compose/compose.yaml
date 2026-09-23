@@ -5,7 +5,7 @@
 # 3. Run: docker compose up -d
 # 4. Open http://localhost:8000 on this computer.
 #
-# Full guide: docs/install/compose/README.md. Needs Docker Engine 24 or later
+# Full guide: "Install with Docker Compose" in the AI Shuffle docs. Needs Docker Engine 24 or later
 # with Compose 2.24 or later, on a 64-bit Intel or AMD (amd64) host.
 #
 # Everything you keep (database, settings, sign-ins, projects) lives in the
