@@ -38,7 +38,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from app.core.config import settings
 from app.core.permission_handler import permission_handler
@@ -110,6 +110,18 @@ def get_live_runtime(session_id: str) -> Optional["SessionRuntime"]:
     or ``None`` when no runtime in THIS process owns the session (already
     settled, never started here, or owned by another install)."""
     return _live_runtimes.get(session_id)
+
+
+def live_turn_ids() -> Set[str]:
+    """Turn ids this process is executing right now.
+
+    The reap sweep reads only the DB, and a lease can lapse under a turn that
+    is still running here (a stalled loop, a DB outage longer than the TTL).
+    Requeueing such a turn let the next claim pass start it a second time
+    while the first run was still going (#1444), so the sweep skips these.
+    Other processes still reap it, and fencing stops this runner's writes the
+    moment one of them claims the session."""
+    return {runtime.turn_id for runtime in _live_runtimes.values()}
 
 
 # Queue sources a steer may pull from — the two that render as the user's own
@@ -655,6 +667,10 @@ class SessionRuntime:
         self._drain_after_cancel = False
         # stop_reason override for an escalation-forced abort.
         self._abort_reason: Optional[str] = None
+        # The run this turn was started under, and whether this runner stopped
+        # owning it mid-turn (lease lost or fence superseded, ``_stop_unowned``).
+        self._run_id: Optional[str] = None
+        self._unowned = False
         self._recorder_closing = False
         # Queued turn ids already handed to the engine as steers THIS turn.
         # ``try_steer_pending`` fires once per send, so without this a message
@@ -807,6 +823,7 @@ class SessionRuntime:
             return None
         run_id = run["id"]
         fence_token = run["fence_token"]
+        self._run_id = run_id
         # An online handoff may have committed after the placement read but
         # before this claim. Never execute a stale-owner turn after its lease
         # was released. A read error here is fail-closed, unlike the UI hint.
@@ -1027,6 +1044,9 @@ class SessionRuntime:
                         )
                     pump = asyncio.create_task(self._run_pump(recorder))
                     self._pump_task = pump
+                    if self._unowned:
+                        # Lost before the pump existed: never reach the provider.
+                        pump.cancel()
                     self._start_progress_watchdog()
                     try:
                         await pump
@@ -1103,7 +1123,14 @@ class SessionRuntime:
                 # Invalidate workers that outlived cancellation before re-arming.
                 from app.mcp.computer_use import abort as cu_abort
                 cu_abort.request_stop(sid, reason="completed")
-            # Release the run lease + stop the heartbeat — always.
+            # Stop the heartbeat, then release the run lease — always. In that
+            # order: a beat landing after the release would read the released
+            # run as a lost lease and interrupt a turn that already ended.
+            renew_task.cancel()
+            try:
+                await renew_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
             try:
                 await asyncio.to_thread(runs_db.release_run, run_id, fence_token)
             except Exception:
@@ -1114,11 +1141,6 @@ class SessionRuntime:
             # Lease left active — re-check + broadcast the OFF diff now rather
             # than waiting for the sweep loop (mirrors TurnRecorder.close).
             _notify_run_change(sid)
-            renew_task.cancel()
-            try:
-                await renew_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
 
         # 8. Settlement callback (the scheduler seam) — after the lease is free,
         #    and ONLY when finalize actually performed the DB transition. A racer
@@ -2196,9 +2218,14 @@ class SessionRuntime:
             start_idle_reader(sid)
             return "parked", parked is not None
 
+        # A runner that lost its lease settles the row only while it is still
+        # bound to that run. Once another install's sweep requeued it (or a
+        # new owner started it), the row is theirs and this settle is a no-op.
+        owned_run = self._run_id if self._unowned else None
         if (self._abort_reason == "recording_failed"
                 or self._terminal in ("interrupted", "error") or self._terminal is None):
-            stop_reason = ("recording_failed" if self._abort_reason == "recording_failed"
+            stop_reason = (self._abort_reason
+                           if self._abort_reason in ("recording_failed", "lease_lost")
                            else self._terminal or self._abort_reason or "crash")
             settled = None
             try:
@@ -2208,7 +2235,7 @@ class SessionRuntime:
                 # undiagnosable from the turns table alone.
                 settled = await asyncio.to_thread(
                     turns_db.settle_turn, tid, "aborted", stop_reason,
-                    self._terminal_error,
+                    self._terminal_error, run_id=owned_run,
                 )
             except Exception:
                 logger.warning("SessionRuntime: settle_turn(aborted) failed for %s", tid, exc_info=True)
@@ -2234,7 +2261,9 @@ class SessionRuntime:
 
         settled = None
         try:
-            settled = await asyncio.to_thread(turns_db.settle_turn, tid, "completed")
+            settled = await asyncio.to_thread(
+                turns_db.settle_turn, tid, "completed", run_id=owned_run,
+            )
         except Exception:
             logger.warning("SessionRuntime: settle_turn(completed) failed for %s", tid, exc_info=True)
         await self._snapshot_working_set(sid)
@@ -2525,19 +2554,39 @@ class SessionRuntime:
         """The run lease moved to another runner mid-turn (fence violation).
 
         Runs once, synchronously on the loop, from the recorder's first
-        rejected append. Stops the pump through the escalation cancel path
-        (finalize then settles ``aborted`` with a distinct stop reason) and
-        asks the SDK to interrupt the turn so the pooled client stops
-        generating for a run nobody is recording.
+        rejected append.
         """
-        sid = self.session_id
         logger.warning(
             "SessionRuntime: run superseded for %s turn %s (fence violation) — "
             "stopping pump",
-            sid, self.turn_id,
+            self.session_id, self.turn_id,
         )
+        self._stop_unowned("fence_superseded")
+
+    def _on_lease_lost(self) -> None:
+        """The heartbeat could not keep this turn's run lease (#1444).
+
+        Nothing holds the reap sweep off an unleased turn, and another runner
+        may claim the session at any moment, so the turn stops rather than
+        run on without an owner. The pump's own cancel path books usage once
+        as an interrupted turn, and finalize settles the row ``aborted`` with
+        ``stop_reason='lease_lost'``.
+        """
+        logger.warning(
+            "SessionRuntime: lease lost for %s turn %s run %s — stopping the turn",
+            self.session_id, self.turn_id, self._run_id,
+        )
+        self._stop_unowned("lease_lost")
+
+    def _stop_unowned(self, reason: str) -> None:
+        """Stop a turn this runner no longer owns: cancel the pump through the
+        escalation cancel path (finalize then settles ``aborted`` with
+        ``reason``) and ask the SDK to interrupt the turn so the pooled client
+        stops generating for a run nobody owns."""
+        sid = self.session_id
+        self._unowned = True
         if self._abort_reason is None:
-            self._abort_reason = "fence_superseded"
+            self._abort_reason = reason
         self._cancel_pump()
         try:
             from app.core.query_session_lifecycle import interrupt_session
@@ -2549,7 +2598,8 @@ class SessionRuntime:
             )
         except Exception:  # noqa: BLE001 — best-effort
             logger.debug(
-                "SessionRuntime: interrupt after supersede failed for %s", sid, exc_info=True
+                "SessionRuntime: interrupt after %s failed for %s", reason, sid,
+                exc_info=True,
             )
 
     def _cancel_pump(self) -> None:
@@ -2759,28 +2809,42 @@ class SessionRuntime:
 
     async def _renew_loop(self, run_id: str, runner_id: str, fence_token: int) -> None:
         """Heartbeat the run lease every ``RUN_LEASE_RENEW_SECONDS`` until
-        cancelled (or the lease is lost)."""
-        try:
-            while True:
-                await asyncio.sleep(RUN_LEASE_RENEW_SECONDS)
-                try:
-                    ok = await asyncio.to_thread(
-                        runs_db.renew_run, run_id, runner_id, fence_token,
-                        RUN_LEASE_TTL_SECONDS,
-                    )
-                except Exception:
+        cancelled or the lease is lost.
+
+        The lease is lost when a renewal misses its guard (expired, or the run
+        was reaped or taken over) or when renewals kept failing for a whole
+        TTL, which is when the DB lets the lease lapse. Either way the turn
+        stops itself (``_on_lease_lost``) instead of running on unowned."""
+        loop = asyncio.get_running_loop()
+        renewed_at = loop.time()
+        while True:
+            await asyncio.sleep(RUN_LEASE_RENEW_SECONDS)
+            attempt_at = loop.time()
+            try:
+                ok = await asyncio.to_thread(
+                    runs_db.renew_run, run_id, runner_id, fence_token,
+                    RUN_LEASE_TTL_SECONDS,
+                )
+            except Exception:
+                if loop.time() - renewed_at < RUN_LEASE_TTL_SECONDS:
                     logger.warning(
                         "SessionRuntime: renew_run raised for run %s", run_id, exc_info=True,
                     )
                     continue
-                if not ok:
-                    logger.warning(
-                        "SessionRuntime: lease renewal lost for run %s — stopping heartbeat",
-                        run_id,
-                    )
-                    return
-        except asyncio.CancelledError:
-            raise
+                logger.warning(
+                    "SessionRuntime: renew_run kept failing for run %s past the "
+                    "%ss lease TTL", run_id, RUN_LEASE_TTL_SECONDS, exc_info=True,
+                )
+                ok = False
+            if ok:
+                renewed_at = attempt_at
+                continue
+            logger.warning(
+                "SessionRuntime: lease renewal lost for run %s — stopping heartbeat",
+                run_id,
+            )
+            self._on_lease_lost()
+            return
 
 
 # Include turns still acquiring their lease, not just registered live runtimes.

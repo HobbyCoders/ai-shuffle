@@ -548,10 +548,15 @@ async def _reap_and_kick_turns() -> int:
 
     Returns the number of turns reaped (0 on error)."""
     try:
-        from app.core import turn_scheduler
+        from app.core import session_runtime, turn_scheduler
         from app.db import turns as turns_db
 
-        reaped = await asyncio.to_thread(turns_db.reap_expired)
+        # A turn still executing in this process is not abandoned even when
+        # its lease is dead: it stops itself once its heartbeat notices, and
+        # requeueing it would start it a second time (#1444).
+        reaped = await asyncio.to_thread(
+            turns_db.reap_expired, session_runtime.live_turn_ids(),
+        )
         if not reaped:
             return 0
         for session_id in {r["session_id"] for r in reaped}:

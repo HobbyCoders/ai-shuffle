@@ -1608,3 +1608,183 @@ async def test_watchdog_is_off_when_the_timeout_is_zero(mock_db):
 
     assert outcome == "completed"
     assert rt._progress_watchdog is None
+
+
+# ---------------------------------------------------------------------------
+# Lost run lease — the turn stops itself and the sweep never starts it twice
+# (#1444)
+# ---------------------------------------------------------------------------
+
+def _break_lease(conn, run_id: str, failure: str) -> None:
+    """Kill the run lease underneath a live turn, the way production loses it.
+
+    ``fence``: another claim reaped the lapsed lease (the row left ``active``),
+    so the next ``renew_run`` misses its guard. ``db_error``: the database was
+    unreachable for longer than the TTL, so the lease lapsed in the DB while
+    every renewal raised."""
+    if failure == "fence":
+        conn.execute(
+            "UPDATE runs SET state='expired', "
+            "lease_expires_at=datetime('now', '-120 seconds') WHERE id=?",
+            (run_id,),
+        )
+    else:
+        conn.execute(
+            "UPDATE runs SET lease_expires_at=datetime('now', '-120 seconds') WHERE id=?",
+            (run_id,),
+        )
+    conn.commit()
+
+
+@contextmanager
+def _count_starts():
+    """Spy on ``turns_db.start_turn``: the ids of every turn it actually moved
+    into the live slot. The session reader lock serializes pumps inside one
+    process, so a second start is the first observable sign of a double run."""
+    real_start = turns_db.start_turn
+    started = []
+
+    def _spy(turn_id, *args, **kwargs):
+        row = real_start(turn_id, *args, **kwargs)
+        if row is not None:
+            started.append(turn_id)
+        return row
+
+    with patch.object(turns_db, "start_turn", side_effect=_spy):
+        yield started
+
+
+async def _sweep_and_drain_kicks(timeout: float = 1.0) -> list:
+    """Run the real sweep's reap+kick once, then give every kick it fired (the
+    claim pass into ``execute``) time to start its turn. Returns those kicks so
+    the caller can cancel any that are still running."""
+    from app.core import streaming_status, turn_scheduler
+
+    await streaming_status._reap_and_kick_turns()
+    pending = list(turn_scheduler._kick_tasks)
+    if pending:
+        await asyncio.wait(pending, timeout=timeout)
+    return pending
+
+
+@pytest.mark.parametrize("failure", ["fence", "db_error"])
+async def test_lost_lease_stops_the_turn_and_the_sweep_never_starts_it_twice(
+    mock_db, monkeypatch, failure,
+):
+    sid = f"lease-loss-{failure}"
+    turn = turns_db.enqueue_turn(sid, "user", prompt="hello")
+    pump_calls = []
+    pump_entered = asyncio.Event()
+
+    async def _generating_pump(**kwargs):
+        # A provider turn that keeps generating until something stops it.
+        pump_calls.append(kwargs)
+        pump_entered.set()
+        await asyncio.Event().wait()
+        yield {"type": "done", "metadata": {}}
+
+    monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.02)
+    if failure == "db_error":
+        # Shrink the TTL so "renewals failed for a whole TTL" fits in test
+        # time. The lease row is backdated below either way.
+        monkeypatch.setattr(session_runtime, "RUN_LEASE_TTL_SECONDS", 0.3)
+    broken = asyncio.Event()
+    renew_attempts = []
+    real_renew = runs_db.renew_run
+
+    def _renew(*args, **kwargs):
+        renew_attempts.append(args)
+        if failure == "db_error" and broken.is_set():
+            raise RuntimeError("database unreachable")
+        return real_renew(*args, **kwargs)
+
+    tasks = []
+    with _runtime_env(pump=_generating_pump) as env, patch.object(
+        runs_db, "renew_run", side_effect=_renew,
+    ), patch(
+        "app.core.query_session_lifecycle.interrupt_session", new=AsyncMock(),
+    ) as interrupt, _count_starts() as started:
+        try:
+            first = asyncio.create_task(session_runtime.execute(turn))
+            tasks.append(first)
+            await asyncio.wait_for(pump_entered.wait(), 2.0)
+            run_id = turns_db.get_turn(turn["id"])["run_id"]
+            assert run_id is not None
+
+            _break_lease(mock_db, run_id, failure)
+            broken.set()
+            seen = len(renew_attempts)
+            await asyncio.sleep(0.6 if failure == "db_error" else 0.2)
+            assert len(renew_attempts) > seen, "the heartbeat never tried to renew"
+
+            tasks.extend(await _sweep_and_drain_kicks())
+
+            # The turn was started, and the provider called, exactly once.
+            assert started == [turn["id"]]
+            assert len(pump_calls) == 1
+
+            outcome = await asyncio.wait_for(first, 2.0)
+            assert outcome == "aborted"
+            row = turns_db.get_turn(turn["id"])
+            assert row["state"] == "aborted"
+            assert row["stop_reason"] == "lease_lost"
+            interrupt.assert_awaited_with(sid)
+            env["scheduler"].assert_called_once()
+            assert runs_db.get_active_run(sid) is None
+
+            # Nothing is left for a later sweep either.
+            tasks.extend(await _sweep_and_drain_kicks())
+            assert started == [turn["id"]]
+            assert len(pump_calls) == 1
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_sweep_skips_a_lapsed_lease_turn_still_running_in_this_process(mock_db):
+    """The lease can lapse before the heartbeat's next beat notices (a stalled
+    loop, a DB blip). The sweep reads only the DB, so it has to skip a turn
+    this process is still executing instead of requeueing it for a second
+    start."""
+    sid = "lease-lapsed-alive"
+    turn = turns_db.enqueue_turn(sid, "user", prompt="hello")
+    pump_calls = []
+    pump_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _pump(**kwargs):
+        pump_calls.append(kwargs)
+        pump_entered.set()
+        await release.wait()
+        yield {"type": "done", "metadata": {}}
+
+    tasks = []
+    with _runtime_env(pump=_pump), _count_starts() as started:
+        try:
+            first = asyncio.create_task(session_runtime.execute(turn))
+            tasks.append(first)
+            await asyncio.wait_for(pump_entered.wait(), 2.0)
+            run_id = turns_db.get_turn(turn["id"])["run_id"]
+            _break_lease(mock_db, run_id, "db_error")
+
+            tasks.extend(await _sweep_and_drain_kicks())
+
+            assert started == [turn["id"]]
+            assert len(pump_calls) == 1
+            row = turns_db.get_turn(turn["id"])
+            assert row["state"] == "running"
+            assert row["run_id"] == run_id
+
+            release.set()
+            assert await asyncio.wait_for(first, 2.0) == "completed"
+            # A requeued copy would take the reader lock now and call the
+            # provider again.
+            await asyncio.sleep(0.2)
+            assert started == [turn["id"]]
+            assert len(pump_calls) == 1
+        finally:
+            release.set()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)

@@ -37,7 +37,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Collection, Dict, List, Optional
 
 import psycopg2
 
@@ -403,23 +403,31 @@ def settle_turn(
     outcome: str,
     stop_reason: Optional[str] = None,
     error: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Settle a turn to a terminal ``outcome`` (``'completed'`` or
     ``'aborted'``). Idempotent: a turn already in a terminal state
     (completed/aborted/parked) is left untouched and ``None`` is returned.
 
+    ``run_id`` narrows the settle to a turn still bound to that run: a runner
+    that lost its lease must not settle a row the reap sweep requeued or a new
+    owner started.
+
     Returns the settled turn row on the transition that actually settles it.
     """
     if outcome not in ("completed", "aborted"):
         raise ValueError(f"settle_turn outcome must be completed|aborted, got {outcome!r}")
+    sql = (
+        "UPDATE turns SET state=%s, stop_reason=%s, error=%s, ended_at=NOW() "
+        "WHERE id=%s AND state NOT IN ('completed','aborted','parked') "
+    )
+    params: tuple = (outcome, stop_reason, error, turn_id)
+    if run_id is not None:
+        sql += "AND run_id=%s "
+        params += (run_id,)
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE turns SET state=%s, stop_reason=%s, error=%s, ended_at=NOW() "
-            "WHERE id=%s AND state NOT IN ('completed','aborted','parked') "
-            "RETURNING *",
-            (outcome, stop_reason, error, turn_id),
-        )
+        cursor.execute(sql + "RETURNING *", params)
         row = cursor.fetchone()
     return _row(row)
 
@@ -776,9 +784,14 @@ def list_interrupting_for_runner(runner_id: str) -> List[Dict[str, Any]]:
 # Reaping dead-lease live turns
 # ---------------------------------------------------------------------------
 
-def reap_expired() -> List[Dict[str, Any]]:
+def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
     """Resolve every live turn whose run lease is dead (run missing, not active,
     or lapsed) — the crash/kill recovery sweep.
+
+    ``skip_turn_ids`` are turns the calling process is still executing. Their
+    lease can be dead while the task runs on (it stops itself once the
+    heartbeat notices), and requeueing one would let the next claim start it a
+    second time (#1444). They are left live and not returned.
 
     A dead-lease live turn is resolved by its ``source`` and ``state``:
 
@@ -801,7 +814,8 @@ def reap_expired() -> List[Dict[str, Any]]:
             "WHERE t.state IN ('running','interrupting','draining') "
             "AND (r.id IS NULL OR r.state <> 'active' OR r.lease_expires_at < NOW())",
         )
-        dead = _rows(cursor.fetchall())
+        skip = set(skip_turn_ids)
+        dead = [t for t in _rows(cursor.fetchall()) if t["id"] not in skip]
         for turn in dead:
             if turn["state"] == "running" and turn["source"] in (
                 "user", "queue", "agent_message",

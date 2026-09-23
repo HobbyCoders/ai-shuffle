@@ -504,6 +504,42 @@ def test_reap_leaves_live_turn_with_valid_lease_alone(mock_db):
     assert turns.get_live_turn("sLive")["id"] == t["id"]
 
 
+def test_reap_skips_dead_lease_turns_the_caller_is_still_executing(mock_db):
+    """#1444: the sweeping process passes the turns it is still running; a dead
+    lease under one of those must not requeue it for a second start."""
+    alive = turns.enqueue_turn("sAlive", "user")
+    run_alive = runs.claim_run("sAlive", "runner", -1)
+    turns.start_turn(alive["id"], run_id=run_alive["id"])
+    gone = turns.enqueue_turn("sGone", "user")
+    run_gone = runs.claim_run("sGone", "runner", -1)
+    turns.start_turn(gone["id"], run_id=run_gone["id"])
+
+    reaped = turns.reap_expired(skip_turn_ids={alive["id"]})
+
+    assert [r["id"] for r in reaped] == [gone["id"]]
+    assert turns.get_turn(alive["id"])["state"] == "running"
+    assert turns.get_turn(alive["id"])["run_id"] == run_alive["id"]
+    assert turns.get_turn(gone["id"])["state"] == "queued"
+
+
+def test_settle_turn_run_guard_leaves_a_rebound_turn_alone(mock_db):
+    """A runner that lost its lease settles only while the row is still bound
+    to its run, never a row the sweep requeued or a new owner started."""
+    t = turns.enqueue_turn("sRebound", "user")
+    old = runs.claim_run("sRebound", "old", -1)
+    turns.start_turn(t["id"], run_id=old["id"])
+    turns.reap_expired()  # requeued by another install's sweep
+    assert turns.settle_turn(t["id"], "aborted", "lease_lost", run_id=old["id"]) is None
+    assert turns.get_turn(t["id"])["state"] == "queued"
+
+    new = runs.claim_run("sRebound", "new", 60)
+    turns.start_turn(t["id"], run_id=new["id"])
+    assert turns.settle_turn(t["id"], "aborted", "lease_lost", run_id=old["id"]) is None
+    assert turns.get_turn(t["id"])["state"] == "running"
+    settled = turns.settle_turn(t["id"], "completed", run_id=new["id"])
+    assert settled is not None and settled["state"] == "completed"
+
+
 # ---------------------------------------------------------------------------
 # v59 migration: queued_messages -> turns
 # ---------------------------------------------------------------------------
