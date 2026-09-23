@@ -406,7 +406,7 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
 def test_only_a_signed_release_for_the_configured_channel_is_offered(feed):
     updater, publish, _, requests, responses = feed
     # A hub serving an edge build at the stable address cannot relabel it.
-    responses["/v1/desktop/manifest"] = publish(channel="edge")
+    responses["/v1/desktop/manifest"] = publish(channel="edge", version="0.8.18-dev.43+g3667297")
     with pytest.raises(UpdateError, match="signed stable release"):
         updater.check(download=True)
     assert updater.state == {} and [r.url.path for r in requests] == ["/v1/desktop/manifest"]

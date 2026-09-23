@@ -32,7 +32,8 @@ REVISION = re.compile(r"[a-f0-9]{40}")
 DIGEST = re.compile(r"[a-f0-9]{64}")
 MAX_ARCHIVE = 512 * 1024**2
 MAX_NOTES = 4000
-VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.-][A-Za-z0-9.-]{1,40})?")
+# "0.9.0" on a release, "0.9.0-dev.12+gabc1234" on an edge build.
+VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.+-][A-Za-z0-9.+-]{1,60})?")
 # stable: tagged releases, signed only after the release image passed container
 # verification. edge: every main revision, for the owner's own workers. The
 # channel is inside the signed payload, so the hub cannot relabel an edge build.
