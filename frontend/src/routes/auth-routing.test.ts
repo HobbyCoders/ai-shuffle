@@ -41,7 +41,7 @@ vi.mock('$lib/components/SpotlightSearch.svelte', () => import('$lib/test-stubs/
 vi.mock('$lib/components/Banner.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('lucide-svelte', async () => {
 	const { default: icon } = await import('$lib/test-stubs/EmptyRouteDependency.svelte');
-	return { Link2: icon, ShieldCheck: icon, Smartphone: icon };
+	return { Link2: icon, ShieldCheck: icon, Smartphone: icon, KeyRound: icon, Loader2: icon };
 });
 
 let Harness: Component;
@@ -54,8 +54,10 @@ let router: typeof import('$lib/test-stubs/app-stores');
 let statusRequests: Mock<() => Promise<Response>>;
 const signedIn = { authenticated: true, setup_required: false, onboarding_complete: true };
 const anonymous = { authenticated: false, setup_required: false, onboarding_complete: true };
-// There is no login page: a browser the worker does not trust sees this notice in place.
-const DENIED = 'AI Shuffle only accepts direct connections from its local network.';
+// A browser that cannot sign in from where it is (no owner status) sees this notice in place.
+const DENIED = 'This browser cannot sign in to AI Shuffle at this address.';
+const ownerStatus = { password_set: true, setup_allowed: false, required: false, trusted_lan: false,
+	login_available: true, desktop_handoff: false, min_length: 12 };
 function deferred() {
 	let resolve!: (value: Response) => void;
 	const promise = new Promise<Response>((done) => { resolve = done; });
@@ -199,4 +201,32 @@ it('does not repeat bootstrap metadata requests when their 401 confirms valid wo
 	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
 	expect(mocks.history).toHaveBeenCalledOnce(); expect(mocks.hydrate).toHaveBeenCalledOnce();
 	expect(statusRequests).toHaveBeenCalledTimes(2); expect(mocks.goto).not.toHaveBeenCalled();
+});
+
+it('shows the owner-password sign-in to a LAN browser and enters the app after it', async () => {
+	let signedInNow = false;
+	const login = vi.fn(() => { signedInNow = true; return Promise.resolve(Response.json({ status: 'ok' })); });
+	vi.stubGlobal('fetch', vi.fn((url: string) => url === '/api/v1/auth/status'
+		? Promise.resolve(Response.json(signedInNow ? signedIn : anonymous))
+		: url === '/api/v1/owner/status' ? Promise.resolve(Response.json(ownerStatus))
+		: url === '/api/v1/owner/login' ? login()
+		: Promise.resolve(Response.json([]))));
+	const view = render(Harness);
+	await waitFor(() => expect(view.getByRole('heading', { name: 'Sign in to AI Shuffle' })).toBeTruthy());
+	await fireEvent.input(view.getByLabelText('Owner password'), { target: { value: 'correct horse battery' } });
+	await fireEvent.click(view.getByRole('button', { name: 'Sign in' }));
+	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+	expect(login).toHaveBeenCalledOnce();
+	expect(view.queryByRole('heading', { name: 'Sign in to AI Shuffle' })).toBeNull();
+});
+
+it('blocks an owner without a password on the set-password step', async () => {
+	vi.stubGlobal('fetch', vi.fn((url: string) => url === '/api/v1/auth/status'
+		? Promise.resolve(Response.json({ ...signedIn, is_admin: true }))
+		: url === '/api/v1/owner/status'
+			? Promise.resolve(Response.json({ ...ownerStatus, password_set: false, required: true, login_available: false }))
+			: Promise.resolve(Response.json([]))));
+	const view = render(Harness);
+	await waitFor(() => expect(view.getByRole('heading', { name: 'Set an owner password' })).toBeTruthy());
+	expect(view.getByLabelText('Repeat it')).toBeTruthy();
 });

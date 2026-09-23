@@ -32,6 +32,7 @@
 	import GeneralSection from './settings/GeneralSection.svelte';
 	import ProvidersSection from './settings/providers/ProvidersSection.svelte';
 	import DevicesSection from './settings/DevicesSection.svelte';
+	import OwnerAccessSection from './settings/OwnerAccessSection.svelte';
 	import ChatBehaviorSection from './settings/ChatBehaviorSection.svelte';
 	import HotkeysSection from './settings/HotkeysSection.svelte';
 	import VoiceSection from './settings/VoiceSection.svelte';
@@ -296,6 +297,7 @@
 							onValidateWorkspace={handleValidateWorkspace}
 							onSaveWorkspace={handleSaveWorkspace}
 						/>
+						{#if $isAdmin}<OwnerAccessSection />{/if}
 					</div>
 				{/if}
 
