@@ -375,6 +375,11 @@ class HarnessAdapter(ProviderAdapter):
         # real spend missing across several errored turns in one session.
         self._turn_usage_totals: Dict[str, float] = {}
         self._turn_model_calls: int = 0
+        # Prompt-cache misses on this adapter's engine, counted by class (see
+        # app.core.provider.cache_miss_classes). get_context_usage() reports
+        # them; the last class labels the CacheMissAlert that follows a Usage.
+        self._cache_miss_counts: Dict[str, int] = {}
+        self._last_cache_miss_class: Optional[str] = None
 
     # ─── Transition helper ────────────────────────────────────────────
 
@@ -2043,10 +2048,46 @@ class HarnessAdapter(ProviderAdapter):
         if get_usage is None:
             return None
         try:
-            return await get_usage()
+            result = await get_usage()
         except Exception as exc:  # pragma: no cover — defensive, mirrors the SDK adapter
             logger.warning(f"[HarnessAdapter] get_context_usage() failed: {exc}")
             return None
+        if isinstance(result, dict) and self._cache_miss_counts:
+            result = {**result, "cacheMisses": self._cache_miss_report()}
+        return result
+
+    def _cache_miss_report(self) -> Dict[str, Any]:
+        """Prompt-cache misses so far, by class, with the unexpected count."""
+        from app.core.provider.cache_miss_classes import UNEXPECTED_CLASSES
+
+        counts = dict(self._cache_miss_counts)
+        return {
+            "byClass": counts,
+            "total": sum(counts.values()),
+            "unexpected": sum(
+                n for cls, n in counts.items() if cls in UNEXPECTED_CLASSES
+            ),
+        }
+
+    def _record_cache_miss(self, usage: Dict[str, Any]) -> None:
+        """Classify one call's cache miss and label its usage record. Never raises.
+
+        The class goes on the usage dict as ``cache_miss_class`` and into the
+        session counts; the fluid event's own ``raw`` dict is left untouched.
+        """
+        try:
+            from app.core.provider.cache_miss_classes import usage_miss_class
+
+            miss_class = usage_miss_class(usage)
+            self._last_cache_miss_class = miss_class
+            if miss_class is None:
+                return
+            usage["cache_miss_class"] = miss_class
+            self._cache_miss_counts[miss_class] = (
+                self._cache_miss_counts.get(miss_class, 0) + 1
+            )
+        except Exception:  # noqa: BLE001 — accounting never breaks a turn.
+            logger.debug("[HarnessAdapter] cache miss classification failed", exc_info=True)
 
     # ─── Session Identity ─────────────────────────────────────────────
 
@@ -2392,6 +2433,7 @@ class HarnessAdapter(ProviderAdapter):
             context_usage = getattr(event, "context_usage", None)
             if context_usage:
                 usage["context_usage"] = context_usage
+            self._record_cache_miss(usage)
             # Roll this call into the turn total so an ErrorEvent terminal (which
             # fluid emits with no usage and no cost at all) can still bill what
             # the turn actually spent. Cheap: one dict walk per model call.
@@ -2404,6 +2446,25 @@ class HarnessAdapter(ProviderAdapter):
                 session_id=getattr(event, "session_id", None),
                 uuid=self._uuid(event),
             )]
+
+        if cls == "CacheMissAlert":
+            # fluid emits this right after the Usage whose diagnosis made a
+            # streak of misses it cannot explain. That Usage was classified
+            # already; the alert only makes the streak visible in the log.
+            logger.warning(
+                "[HarnessAdapter] Prompt cache miss streak engine_session=%s "
+                "turn=%s class=%s consecutive=%s reason=%s provider=%s model=%s "
+                "fresh=%s cache_read=%s: %s",
+                event.session_id, event.turn_id,
+                self._last_cache_miss_class or "unclassified",
+                getattr(event, "consecutive", None), getattr(event, "reason", ""),
+                getattr(event, "provider", ""), getattr(event, "model", ""),
+                getattr(event, "input_tokens", None),
+                getattr(event, "cache_read_tokens", None),
+                getattr(event, "note", ""),
+                extra={"session_id": self._resolve_app_session_id()},
+            )
+            return []
 
         if cls == "DelegatedSurface":
             # fluid >= 5248b2e: the claude CLI announced its own tool surface in
