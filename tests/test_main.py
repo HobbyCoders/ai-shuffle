@@ -37,15 +37,15 @@ class TestMainModuleImports:
         from app.main import app
         assert app.title == "AI Hub"
 
-    def test_app_has_docs_url(self):
-        """App should have docs URL configured."""
+    def test_api_docs_are_off_by_default(self):
+        """Interactive docs and the OpenAPI schema are unauthenticated, so they
+        stay off unless API_DOCS_ENABLED is set."""
+        from app.core.config import settings
         from app.main import app
-        assert app.docs_url == "/docs"
-
-    def test_app_has_redoc_url(self):
-        """App should have redoc URL configured."""
-        from app.main import app
-        assert app.redoc_url == "/redoc"
+        assert settings.api_docs_enabled is False
+        assert app.docs_url is None
+        assert app.redoc_url is None
+        assert app.openapi_url is None
 
     def test_logger_exists(self):
         """Logger should be configured."""

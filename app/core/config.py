@@ -342,6 +342,9 @@ class Settings(BaseSettings):
 
     # Security - Cookie settings
     cookie_secure: bool = True  # Set to False only for local HTTP development
+    # Interactive API docs (/docs, /redoc, /openapi.json) are unauthenticated,
+    # so they stay off unless a developer sets API_DOCS_ENABLED=true.
+    api_docs_enabled: bool = False
 
     # Local transport access and optional account service share normal Settings
     # precedence: process environment overrides .env; neither is exported to os.environ.

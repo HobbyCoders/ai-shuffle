@@ -619,7 +619,7 @@ def _invalidate_github_auth_caches(value: Optional[bool] = None) -> None:
 
 
 @router.get("/github/status")
-async def github_auth_status():
+async def github_auth_status(token: str = Depends(require_auth)):
     """Get GitHub CLI authentication status"""
     # Runs `gh auth status` + `gh api user` — never on the event loop.
     info = await run_sync(auth_service.get_github_auth_info)
