@@ -27,6 +27,7 @@
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { User, MessageSquare, KeyRound, SlidersHorizontal, ScrollText, Code2, AudioLines, BadgeCheck } from 'lucide-svelte';
+	import { OPEN_SETTINGS_TAB_EVENT } from '$lib/api/account';
 
 	// Sub-components
 	import GeneralSection from './settings/GeneralSection.svelte';
@@ -121,7 +122,14 @@
 			currentTimezone = tz;
 		});
 
-		return () => { unsubscribe(); unsubTz(); };
+		// Other panels (the remote-access refusal) link to a tab here.
+		const openTab = (event: Event) => {
+			const tab = (event as CustomEvent<{ tab?: string }>).detail?.tab;
+			if (settingsTabs.some((item) => item.id === tab && !item.heading)) activeTab = tab as Tab;
+		};
+		window.addEventListener(OPEN_SETTINGS_TAB_EVENT, openTab);
+
+		return () => { unsubscribe(); unsubTz(); window.removeEventListener(OPEN_SETTINGS_TAB_EVENT, openTab); };
 	});
 
 	async function loadChatPreferences() {

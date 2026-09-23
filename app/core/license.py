@@ -327,9 +327,13 @@ LEASE_HEADER = "X-Shuffle-Lease"
 
 
 def lease_header() -> str | None:
-    """The current lease for the hub's gated source feed (D8), as the value of
-    the ``X-Shuffle-Lease`` header: the signed envelope as JSON, base64url.
-    None in beta mode or without a lease. See android/hub/src/license-gate.ts."""
+    """The current lease as the value of the ``X-Shuffle-Lease`` header: the
+    signed envelope as JSON, base64url. None in beta mode or without a lease.
+
+    Sent only to the account hub: on the gated source feed (D8,
+    android/hub/src/license-gate.ts) and on the worker's activate and
+    connector calls, where it lifts the account's tunnel cap
+    (android/hub/src/tunnel-capacity.ts, app/core/account_hub.py)."""
     if beta_mode():
         return None
     lease = _load_state(cached=True).get("lease")
@@ -445,7 +449,17 @@ async def activate(key: str) -> dict:
         }
         await asyncio.to_thread(_save_state, state)
     logger.info("License activated on this worker (plan %s)", payload.get("plan"))
+    _nudge_remote_access()
     return await asyncio.to_thread(status)
+
+
+def _nudge_remote_access() -> None:
+    """A new lease may lift the hub's tunnel cap for this account: ask it again now."""
+    try:
+        from app.core import managed_connection
+        managed_connection.retry_soon()
+    except Exception:  # noqa: BLE001 - remote access is optional
+        logger.debug("Could not nudge the remote-access connection", exc_info=True)
 
 
 async def deactivate() -> dict:

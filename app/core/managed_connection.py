@@ -29,6 +29,11 @@ _error = None
 _url = None
 _offer_lock = threading.RLock()
 _generation = 0
+# The hub's last tunnel_limit refusal ({limit, used, licensed}), shown in the
+# remote-access UI until a connector starts or the worker signs out.
+_refusal = None
+# Bumped by retry_soon() (a license was just activated): cuts the hub backoff short.
+_wake = 0
 
 # Hub failures back off exponentially with jitter, from 15 s up to 10 minutes,
 # and never retry sooner than the hub's Retry-After (a kill switch sends an
@@ -52,7 +57,20 @@ def _hub_failure(exc):
     return isinstance(exc, HTTPException) and account_hub.hub_status(exc) not in REVOKED_STATUSES
 
 
+def _tunnel_limit_message(refused):
+    if refused.licensed:
+        return (f'Remote access is off: this account already uses all {refused.limit} remote connections '
+                'its license covers. Turn off remote access on another worker to free one.')
+    one = 'its one remote connection' if refused.limit == 1 else f'its {refused.limit} remote connections'
+    return (f'Remote access is off: this account already uses {one}. Remote access for more workers '
+            'needs an AI Shuffle license (Settings > License), or turn off remote access on another worker. '
+            'Local use is not affected.')
+
+
 def _hub_error_message(exc):
+    refused = account_hub.tunnel_limit(exc)
+    if refused:
+        return _tunnel_limit_message(refused)
     if account_hub.hub_status(exc) == 503 and account_hub.retry_after(exc):
         return 'The account service is paused. Remote access keeps working; Shuffle will retry later.'
     if account_hub.hub_status(exc) == 429:
@@ -79,24 +97,46 @@ def status():
               'server_id': binding['server_id'] if binding else None}
     if not encryption.is_encryption_ready():
         return {**common, 'status': 'locked', 'error': encryption.credential_storage_error(),
-                'url': None, 'code': None, 'expires_at': None}
+                'url': None, 'code': None, 'expires_at': None, 'refusal': None}
     if not cloudflared.find_executable():
         return {**common, 'status': 'unavailable', 'error': _missing_connector_message(),
-                'url': None, 'code': None, 'expires_at': None}
+                'url': None, 'code': None, 'expires_at': None, 'refusal': None}
     try:
         pending = _pending()
     except (RuntimeError, ValueError):
         return {**common, 'status': 'locked', 'error': 'Restore the server credential key to unlock this connection.',
-                'url': None, 'code': None, 'expires_at': None}
+                'url': None, 'code': None, 'expires_at': None, 'refusal': None}
     valid = pending and pending['expires'] > time.time()
     state = _state if binding or valid else 'disconnected'
     if binding and (state == 'disconnected' or not binding['active']):
         state = 'connecting'
     if valid and not binding:
         state = 'waiting'
+    refusal = _refusal if binding else None
+    if refusal and state != 'connected':
+        state = 'limited'
     return {**common, 'status': state, 'error': _error, 'url': _url,
             'code': pending['code'] if valid and _state != 'connected' else None,
-            'expires_at': pending['expires'] if valid else None}
+            'expires_at': pending['expires'] if valid else None,
+            'refusal': dict(refusal) if refusal else None}
+
+
+def _set_refusal(exc):
+    global _refusal
+    refused = account_hub.tunnel_limit(exc) if exc is not None else None
+    _refusal = ({'code': 'tunnel_limit', 'limit': refused.limit, 'used': refused.used,
+                 'licensed': refused.licensed, 'message': _tunnel_limit_message(refused)}
+                if refused else None)
+
+
+def retry_soon():
+    """Ask the hub again within seconds instead of after the backoff.
+
+    Called when a license was activated: an account the hub refused a tunnel
+    (tunnel_limit) may now be allowed more.
+    """
+    global _wake
+    _wake += 1
 
 
 def begin(name):
@@ -218,6 +258,7 @@ def _disconnect_local():
         mobile_hub.disconnect()
         _generation += 1
         _state, _error, _url = 'disconnected', None, None
+        _set_refusal(None)
         return binding, credential, _generation
 
 
@@ -290,12 +331,14 @@ def _linked_binding():
 
 
 async def _sleep(delay, generation):
-    """Sleep, waking early when the worker signs out so a relink is not delayed."""
+    """Sleep, waking early when the worker signs out (so a relink is not
+    delayed) or a license is activated (retry_soon)."""
     if delay <= 30:
         await asyncio.sleep(delay)
         return
     end = time.monotonic() + delay
-    while generation == _generation:
+    wake = _wake
+    while generation == _generation and wake == _wake:
         remaining = end - time.monotonic()
         if remaining <= 0:
             return
@@ -309,6 +352,7 @@ async def supervise():
     hub_retry_at = 0.0
     hub_error = None
     backoff_generation = _generation
+    seen_wake = _wake
     try:
         while True:
             delay = 3
@@ -316,6 +360,10 @@ async def supervise():
             if generation != backoff_generation:
                 # Signed out or relinked: the old binding's backoff is moot.
                 failures, hub_retry_at, hub_error, backoff_generation = 0, 0.0, None, generation
+            if _wake != seen_wake:
+                # A license was just activated: a refused tunnel may be allowed now.
+                seen_wake = _wake
+                failures, hub_retry_at = 0, 0.0
             try:
                 if _process and _process.returncode is None:
                     if time.monotonic() >= hub_retry_at:
@@ -369,6 +417,7 @@ async def supervise():
                         unreachable_since = time.monotonic()
                         failures, hub_retry_at, hub_error = 0, 0.0, None
                         _state, _error = 'connecting', None
+                        _set_refusal(None)
                         delay = 3
             except asyncio.CancelledError:
                 raise
@@ -383,6 +432,9 @@ async def supervise():
                     delay = _backoff(failures, account_hub.retry_after(exc))
                     hub_retry_at = time.monotonic() + delay
                     _error = _hub_error_message(exc)
+                    # The hub refused a tunnel (account at its cap): the
+                    # worker keeps running locally; the UI says why.
+                    _set_refusal(exc)
                 else:
                     failures = 0
             await _sleep(delay, generation)
