@@ -9,7 +9,7 @@
 import { app, dialog, nativeTheme, safeStorage, session, shell } from 'electron';
 import { QuitGuard } from './quit';
 import { showCloseDialog } from './close-dialog';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { managedContext } from './managed-context';
 import { installedContext } from './installed-entry';
 import { installedLaunchArgs } from './installed-host';
@@ -24,6 +24,7 @@ import { plainCipher, SettingsStore, type Cipher } from './settings';
 import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
+import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
 import { resolveRuntime, WorkerSupervisor, type WorkerState } from './worker';
 
@@ -211,6 +212,28 @@ async function main(): Promise<void> {
 	applications?.useLease?.(() => supervisor?.sourceLease() ?? Promise.resolve(null));
 	updater.setBridge(state => supervisor?.exchangeUpdateState(state) ?? Promise.resolve({}),
 		async () => !!supervisor && await supervisor.activeSessionCount() === 0);
+	// macOS and Linux: new releases come as signed installers (D22: checked on
+	// launch and daily without asking). Windows keeps its source-update path.
+	const platform = installerPlatform();
+	if (!applications && platform && app.isPackaged && !isolation) {
+		try {
+			const publicKey = readFileSync(path.join(app.getAppPath(), 'build/application-update-key.pem'), 'utf8');
+			updater.useInstallers(new InstallerUpdates({ platform, arch: process.arch, currentVersion: app.getVersion(), publicKey, directory: app.getPath('downloads') }),
+				file => shell.showItemInFolder(file));
+			let offered: string | null = null;
+			updater.subscribe((state) => {
+				// Offer each new release once per launch; the sidebar button keeps offering it.
+				if (state.phase !== 'available' || !state.version || state.version === offered) return;
+				offered = state.version;
+				void dialog.showMessageBox({ type: 'info', title: 'AI Shuffle', message: `AI Shuffle ${state.version} is available`,
+					detail: 'Download the installer now? It is checked against the signed release before it is saved to your Downloads folder.',
+					buttons: ['Download', 'Later'], defaultId: 0, cancelId: 1 })
+					.then(({ response }) => { if (response === 0) void updater.download(); });
+			});
+		} catch (error) {
+			console.error('Installer update checks are unavailable', error);
+		}
+	}
 	registerIpc({ window, updater, worker });
 	updater.subscribe((state) => window.send('desktop:update-state', state));
 	nativeTheme.on('updated', () => window.send('desktop:native-theme', { dark: nativeTheme.shouldUseDarkColors }));

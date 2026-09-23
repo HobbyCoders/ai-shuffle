@@ -236,3 +236,46 @@ test('a download staged before a restart shows its notes from the stored manifes
  legacy.useApplications(source({ pendingVersion: pending })); await new Promise(setImmediate);
  assert.equal(legacy.current.phase, 'ready'); assert.equal(legacy.current.notes, null);
 });
+test('macOS and Linux: installer checks run on launch and daily, offer the release, and download without installing', async () => {
+ const { updater, calls, timers } = fixture(); const saved = []; let checks = 0; let downloads = 0; let enabled = true;
+ const installers = {
+  check: async () => { checks++; return { kind: 'available', version: '0.9.0', release: '0.9.0', installer: {} }; },
+  download: async progress => { downloads++; progress(50, 'Downloading AI Shuffle 0.9.0…'); return { file: '/Users/me/Downloads/AI-Shuffle-0.9.0.dmg', version: '0.9.0' }; }
+ };
+ updater.setPolicy(async () => enabled);
+ updater.useInstallers(installers, file => saved.push(file));
+ assert.equal(updater.current.phase, 'idle');
+ updater.start();
+ // One timer for the launch check, one for the daily check; no consent prompt in between.
+ assert.equal(timers.length, 2);
+ timers[0](); await new Promise(setImmediate);
+ assert.equal(checks, 1);
+ assert.equal(updater.current.phase, 'available');
+ assert.equal(updater.current.version, '0.9.0');
+ assert.equal(updater.current.release, '0.9.0');
+ await updater.check();
+ assert.equal(checks, 2);
+ enabled = false; await updater.download(); assert.equal(downloads, 0);
+ enabled = true; await updater.download();
+ assert.equal(downloads, 1);
+ assert.deepEqual(saved, ['/Users/me/Downloads/AI-Shuffle-0.9.0.dmg']);
+ assert.equal(updater.current.phase, 'idle');
+ assert.match(updater.current.message, /0\.9\.0 was downloaded and verified/);
+ // There is nothing to install in place: no relaunch, ever.
+ await updater.install(); assert.deepEqual(calls, []);
+ installers.check = async () => ({ kind: 'current' }); await updater.check();
+ assert.equal(updater.current.phase, 'idle'); assert.equal(updater.current.version, null);
+ installers.check = async () => { throw Error('offline'); }; await updater.check();
+ assert.equal(updater.current.phase, 'error');
+ updater.stop();
+});
+test('installer checks never replace Windows source updates and respect the no-updates switch', () => {
+ const windows = fixture();
+ windows.updater.useApplications(source());
+ windows.updater.useInstallers({ check: async () => { throw Error('must not run'); }, download: async () => { throw Error('must not run'); } }, () => {});
+ assert.equal(windows.updater.installers, null);
+ const off = fixture({ SHUFFLE_DESKTOP_NO_UPDATES: '1' });
+ off.updater.useInstallers({ check: async () => ({ kind: 'current' }), download: async () => ({}) }, () => {});
+ assert.equal(off.updater.current.phase, 'unsupported');
+ off.updater.start(); assert.equal(off.timers.length, 0);
+});

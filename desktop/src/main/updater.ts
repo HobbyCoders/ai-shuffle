@@ -2,6 +2,7 @@
 import { app } from 'electron';
 import path from 'node:path';
 import type { SourceUpdates } from './source-updates';
+import type { InstallerUpdates } from './installer-updates';
 
 export type UpdatePhase = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error' | 'unsupported';
 export interface UpdateState {
@@ -17,6 +18,9 @@ export class Updater {
   private timer: ReturnType<typeof setInterval> | null = null;
   private initialCheck: ReturnType<typeof setTimeout> | null = null;
   private applications: SourceUpdates | null = null;
+  /** macOS and Linux: new releases arrive as installers (installer-updates.ts); no in-place install. */
+  private installers: Pick<InstallerUpdates, 'check' | 'download'> | null = null;
+  private saved: (file: string) => void = () => {};
   private installedExecutable: string | undefined;
   private restartArgs: string[] = [];
   private checking = false;
@@ -71,6 +75,17 @@ export class Updater {
       if (this.state.phase === 'ready' && this.state.version === pending.slice(0, 12)) this.set({ release: info.release ?? null, notes: info.notes ?? null });
     }).catch(() => {});
   }
+  /**
+   * macOS and Linux: check the signed installer list on launch and daily (D22,
+   * no consent prompt) and offer newer installers. Download saves and verifies
+   * the installer and hands its path to saved(); the owner runs it. Windows
+   * uses useApplications instead, and a source-managed app never uses both.
+   */
+  useInstallers(installers: Pick<InstallerUpdates, 'check' | 'download'>, saved: (file: string) => void): void {
+    if (!this.releaseUpdates || process.env.SHUFFLE_DESKTOP_NO_UPDATES === '1' || this.applications) return;
+    this.installers = installers; this.saved = saved;
+    this.set({ phase: 'idle', version: null, error: null, message: null, percent: null, release: null, notes: null });
+  }
   get current(): UpdateState { return { ...this.state, running_version: this.applications?.version ?? null }; }
   subscribe(fn: (state: UpdateState) => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   private set(patch: Partial<UpdateState>): void { this.state = { ...this.state, ...patch }; for (const fn of this.listeners) fn(this.current); }
@@ -81,27 +96,40 @@ export class Updater {
       this.bridgeTimer = setInterval(() => void this.exchange(), 2000);
       void this.exchange();
     }
-    if (!this.applications || this.timer) return;
+    if ((!this.applications && !this.installers) || this.timer) return;
     this.initialCheck = setTimeout(() => { this.initialCheck = null; void this.check(); }, 15_000);
     // Once on launch (above), then daily; users can still check from the app.
     this.timer = setInterval(() => void this.check(), 24 * 60 * 60 * 1000);
   }
   stop(): void { if (this.bridgeTimer) clearInterval(this.bridgeTimer); this.bridgeTimer = null; if (this.initialCheck) clearTimeout(this.initialCheck); this.initialCheck = null; if (this.timer) clearInterval(this.timer); this.timer = null; }
   async check(interactive = false): Promise<void> {
-    if (!this.applications || this.checking || this.downloading || this.installing || this.state.phase === 'ready') return;
+    if ((!this.applications && !this.installers) || this.checking || this.downloading || this.installing || this.state.phase === 'ready') return;
     this.checking = true; this.set({ phase: 'checking', error: null, percent: null, message: 'Checking for updates…' });
     try {
       if (!await this.permitted()) { this.set({ phase: 'idle' }); return; }
+      if (!this.applications) {
+        const found = await this.installers!.check();
+        this.set(found.kind === 'available'
+          ? { phase: 'available', version: found.version, percent: null, message: `AI Shuffle ${found.version} is available. Download the installer to update.`, checkedAt: new Date().toISOString(), release: found.release, notes: null }
+          : { phase: 'idle', version: null, percent: null, message: null, checkedAt: new Date().toISOString(), release: null, notes: null });
+        return;
+      }
       const result = await this.applications.check(undefined, interactive);
       this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: result.notes ?? null });
     } catch (error) { this.set({ phase: 'error', error: String(error), message: null }); }
     finally { this.checking = false; }
   }
   async download(): Promise<void> {
-    if (!this.applications || this.checking || this.downloading || this.installing || !['available', 'error'].includes(this.state.phase)) return;
+    if ((!this.applications && !this.installers) || this.checking || this.downloading || this.installing || !['available', 'error'].includes(this.state.phase)) return;
     this.downloading = true; this.set({ phase: 'downloading', error: null, percent: null, message: 'Preparing update…' });
     try {
       if (!await this.permitted()) { this.set({ phase: 'available' }); return; }
+      if (!this.applications) {
+        const { file, version } = await this.installers!.download((percent, message) => this.set({ percent, message }));
+        this.set({ phase: 'idle', version: null, percent: null, error: null, release: null, notes: null, message: `AI Shuffle ${version} was downloaded and verified. Open ${file} to install it.` });
+        this.saved(file);
+        return;
+      }
       const result = await this.applications.download((percent, message) => this.set({ percent, message }), true);
       this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: result.notes ?? null });
     } catch (error) { this.set({ phase: 'error', error: String(error), percent: null, message: null }); }
