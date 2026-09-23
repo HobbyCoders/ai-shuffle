@@ -32,6 +32,7 @@ const server = http.createServer((req, res) => {
 		return res.end('{"detail":"Desktop listener token required"}');
 	}
 	if (req.url === '/api/v1/network/startup-sync' && req.method === 'POST') return res.end('{"status":"synced","peers":0}');
+	if (req.url === '/api/v1/owner/handoff' && req.method === 'POST') return res.end('{"path":"/api/v1/owner/handoff?token=one-time","expires_in":60}');
 	if (req.url === '/api/v1/internal/desktop/stop-sessions') return res.end('{"stopped":true}');
 	if (req.url === '/api/v1/internal/desktop/active-sessions') return res.end('{"active_sessions":0}');
 	res.statusCode = 404;

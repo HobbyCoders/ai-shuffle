@@ -30,7 +30,7 @@ export interface ApiError {
  * the very page that needs to render the 401. Other endpoints can also report
  * provider authentication failures, so confirm worker auth first.
  */
-const AUTH_PATH_PREFIXES = ['/auth/', '/workspace/', '/pairing/exchange'];
+const AUTH_PATH_PREFIXES = ['/auth/', '/owner/', '/workspace/', '/pairing/exchange'];
 
 function isAuthPath(path: string): boolean {
 	// `path` is the API-relative path (e.g. '/auth/status', '/sessions'). Strip a

@@ -48,8 +48,11 @@ def test_compose_carries_the_runtime_settings_the_image_needs():
 
 def test_env_example_lists_only_what_a_buyer_sets():
     assert set(env_example()) == {"AI_SHUFFLE_PULL_TOKEN", "AI_SHUFFLE_VERSION", "BIND_HOST", "PORT",
-                                  "COOKIE_SECURE", "WORKSPACE_DIR", "PUID", "PGID"}
+                                  "COOKIE_SECURE", "OWNER_PASSWORD", "WORKSPACE_DIR", "PUID", "PGID"}
     assert env_example()["AI_SHUFFLE_PULL_TOKEN"] == ""
+    # The owner password is optional and seeds the first start only.
+    assert env_example()["OWNER_PASSWORD"] == ""
+    assert service()["environment"]["OWNER_PASSWORD"] == "${OWNER_PASSWORD:-}"
     assert env_example()["BIND_HOST"] == "127.0.0.1"
     compose = (COMPOSE / "compose.yaml").read_text()
     for key in env_example():
@@ -103,8 +106,12 @@ def test_unraid_template_runtime_flags_paths_and_interface():
     port = configs["8000"]
     assert port.get("Type") == "Port" and port.get("Default") == "" and port.get("Required") == "true"
     assert "LAN address" in port.get("Description") and "every interface" in port.get("Description")
-    owner = configs["OWNER_PASSWORD"]
-    assert owner.get("Mask") == "true" and owner.get("Required") == "false"
+    # The variable the worker reads (app.core.owner_auth.PASSWORD_ENV), masked,
+    # optional, and documented as a first-start seed.
+    from app.core.owner_auth import PASSWORD_ENV
+    owner = configs[PASSWORD_ENV]
+    assert owner.get("Mask") == "true" and owner.get("Required") == "false" and owner.get("Default") == ""
+    assert "first start only" in owner.get("Description")
     assert "CORS_ORIGINS" not in configs
 
 

@@ -41,6 +41,10 @@ _EXEMPT_PATHS = frozenset({
     # Pair exchange authenticates with a one-time, high-entropy grant in the
     # request body and is called before the new device owns a session cookie.
     "/api/v1/pairing/exchange",
+    # Owner password sign-in. The route itself requires a same-origin Origin
+    # before it sets a cookie; in Bearer mode it only returns the token in the
+    # body, which a cross-origin page cannot read.
+    "/api/v1/owner/login",
     # A worker joining a network posts its keys with a one-time join code
     # from another host: no cookie, no Origin header, nothing a browser can
     # forge without the code. The poll that follows is a safe GET.

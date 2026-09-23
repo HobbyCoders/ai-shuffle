@@ -59,6 +59,8 @@ services:
       PGID: ${PGID:-1000}
       # Plain http:// on a LAN address needs this off; keep it on behind HTTPS.
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Seeds the owner password on the first start only (see env.example).
+      OWNER_PASSWORD: ${OWNER_PASSWORD:-}
 
     # Loopback only by default: the web UI is reachable from this computer.
     # To use it from another device, set BIND_HOST in .env to one address of
@@ -140,6 +142,15 @@ PORT=8000
 # Plain http:// on a LAN address needs false. Set true when you reach AI
 # Shuffle only through HTTPS (a reverse proxy or Tailscale Serve).
 COOKIE_SECURE=false
+
+# --- Owner password -----------------------------------------------------------
+
+# Optional. The password every browser signs in with. It is read on the FIRST
+# start only; after that AI Shuffle keeps its own hashed copy and ignores this
+# line, so change the password in Settings > Account > Owner access (and clear
+# this line if you like). Leave it empty to create the password in your
+# browser on first visit instead. At least 12 characters.
+OWNER_PASSWORD=
 
 # --- Files and permissions ---------------------------------------------------
 

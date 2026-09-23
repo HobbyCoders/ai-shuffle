@@ -120,8 +120,8 @@ class TestAuthenticateWebSocket:
 
         # authenticate_websocket lives in app.api.ws_auth and reads `database`
         # from that module's namespace, so patch it there (not app.api.websocket).
-        with patch("app.api.ws_auth.database") as mock_db:
-            mock_db.get_auth_session.return_value = {"id": "session-1", "token": "test-token"}
+        with patch("app.api.ws_auth.database") as mock_db, \
+                patch("app.core.owner_auth.owner_session", return_value=True):
             mock_db.get_api_key_session.return_value = None
 
             is_auth, api_user = await authenticate_websocket(mock_websocket, "test-token")

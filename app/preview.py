@@ -78,7 +78,9 @@ def _require_preview_owner(request: Request) -> None:
     # direct-listener ownership boundary as the normal app, plus the agent
     # browser's session-scoped preview cookie (app.core.preview_access), which
     # is held to the same listener and peer rules and is read-only here.
-    if not local_access(request) and preview_access.grant(request) is None:
+    from app.core.owner_auth import owner_session
+    if (not local_access(request) and preview_access.grant(request) is None
+            and not owner_session(request, request.cookies.get("session"))):
         raise HTTPException(403, "Branch preview requires direct local-owner access")
 
 

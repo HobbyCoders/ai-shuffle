@@ -41,11 +41,11 @@ If you use Tailscale on the server and want to reach AI Shuffle only over your t
 
 ## 4. Set the owner password (optional here)
 
-<!-- verify against wizard v2 -->
+The **Owner password** field sets the password for the owner of this AI Shuffle install. Every browser signs in with it once per device.
 
-The **Owner password** field sets the password for the owner of this AI Shuffle install. Every browser that is not on the server itself signs in with it.
+It is used on the **first start only**. After that, AI Shuffle keeps its own copy (hashed, in its database) and ignores the field: change the password in **Settings → Account → Owner access**, not here. You can clear the field once AI Shuffle has started.
 
-You can leave it empty and create the password in the setup wizard on first visit instead. Either way, choose a long password you do not use anywhere else. The field is masked, but anyone with access to the Unraid web interface can read container settings, so creating it in the wizard keeps it out of the template.
+You can also leave it empty and create the password on your first visit instead; until you do, any browser that can reach AI Shuffle can create it, so do it right after the first start. Either way, choose a long password (at least 12 characters) you do not use anywhere else. The field is masked, but anyone with access to the Unraid web interface can read container settings, so creating it on first visit keeps it out of the template.
 
 ## 5. Check the paths
 

@@ -10,8 +10,10 @@ from app.core import mobile_tool_identity as identity
 
 async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> tuple[bool, Optional[dict]]:
     from app.core import owner_auth
-    # Only the actual local listener can establish a passwordless LAN owner.
-    # Browsers must send a matching Origin, preventing cross-site WebSocket use.
+    # Only the actual local listener can establish a passwordless owner:
+    # loopback (with the desktop listener token when there is one), or the
+    # LAN when the owner turned on trusted LAN. Browsers must send a matching
+    # Origin, preventing cross-site WebSocket use.
     if not token and not websocket.cookies.get('session') and owner_auth.local_access(websocket):
         try:
             owner_auth.same_origin(websocket)
@@ -61,8 +63,8 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
                 # prove that the saved credential was revoked or expired.
                 raise WebSocketException(code=1013, reason='Account authorization unavailable; retry later') from exc
             continue
-        session = await run_sync(database.get_auth_session, candidate)
-        if session and owner_auth.loopback_request(websocket):
+        # An owner password session (cookie, or the token as a query credential).
+        if await run_sync(owner_auth.owner_session, websocket, candidate):
             websocket.state.mobile_tool_principal = identity.principal('admin', 'install', candidate)
             return True, None
         key_session = await run_sync(database.get_api_key_session, candidate)

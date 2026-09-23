@@ -18,6 +18,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
 from app.core.cors import configured_origins
+# Takes the desktop listener token out of the environment before anything can
+# spawn a child process that would inherit it.
+from app.core import desktop_listener  # noqa: F401
 
 # Import API routers
 from app.api import auth, claude_accounts, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, permission_rules, import_export, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, teams, model_registry, computer_use, cluster, notifications, usage, voice
@@ -163,6 +166,14 @@ async def lifespan(app: FastAPI):
 
     # Startup phases
     init_core()
+    # OWNER_PASSWORD seeds the owner password on first boot only; it is taken
+    # out of the environment either way so agents never inherit it.
+    from app.core import owner_auth
+    try:
+        if owner_auth.seed_password_from_env() == 'seeded':
+            logger.info("Owner password set from OWNER_PASSWORD (first boot)")
+    except Exception:
+        logger.exception("Could not apply OWNER_PASSWORD (non-fatal)")
     # A network database and its device keys belong together. Do not start
     # schedulers/connector workers against another device's private database.
     from app.network import startup as network_startup
@@ -491,9 +502,16 @@ else:
         allow_headers=["*"],
     )
 
+# Desktop listener token (outermost): when the desktop app launched this
+# worker with one, local requests without it are refused.
+from app.middleware.desktop_listener import DesktopListenerGate
+app.add_middleware(DesktopListenerGate)
+
 # Include API routers
 app.include_router(system.router)
 app.include_router(auth.router)
+from app.api import owner_login
+app.include_router(owner_login.router)
 app.include_router(claude_accounts.router)
 app.include_router(model_providers.router)
 app.include_router(agents.router)

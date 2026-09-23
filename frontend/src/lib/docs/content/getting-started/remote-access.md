@@ -18,9 +18,7 @@ AI Shuffle runs at home, on your server. There are three ways to reach it from s
 
 Set the web interface to your server's LAN address: `BIND_HOST` in `.env` for Docker Compose, **WebUI address** in the Unraid template. Any device on your network can then open `http://<server address>:8000`.
 
-<!-- verify against wizard v2 -->
-
-Browsers other than the server itself sign in with your owner password once per device (see [First run](/docs/getting-started/first-run)).
+Every browser signs in with your owner password once per device (see [First run](/docs/getting-started/first-run)). **Settings → Account → Owner access → Trusted LAN, no login** skips the password for every device on your network; it is off by default, and turning it on makes anyone on your Wi-Fi or tailnet the owner.
 
 ## With Tailscale
 

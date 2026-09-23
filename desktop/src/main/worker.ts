@@ -379,6 +379,45 @@ function listenerHeaders(listener: string | null): Record<string, string> {
 	return isListenerToken(listener) ? { [LISTENER_HEADER]: listener } : {};
 }
 
+export const HANDOFF_PATH = '/api/v1/owner/handoff';
+
+/**
+ * "Open in Browser": the default browser has no listener token, so the
+ * worker hands it a session through a one-time URL instead. Only this app can
+ * ask for one (the request carries the listener token); the URL works once,
+ * for a minute, from this computer only. Resolves null when the worker has no
+ * handoff (started without a listener token), where the plain URL still works.
+ */
+export function requestBrowserHandoff(port: number, listener: string | null): Promise<string | null> {
+	if (!isListenerToken(listener)) return Promise.resolve(null);
+	return new Promise((resolve, reject) => {
+		const req = http.request({
+			host: '127.0.0.1', port, path: HANDOFF_PATH, method: 'POST',
+			timeout: 10_000, headers: { accept: 'application/json', 'content-length': '0', ...listenerHeaders(listener) }
+		}, (res) => {
+			let body = '';
+			res.setEncoding('utf8');
+			res.on('error', reject);
+			res.on('data', (chunk) => {
+				body += chunk;
+				if (body.length > 4096) req.destroy(new Error('Browser handoff response too large'));
+			});
+			res.on('end', () => {
+				if (res.statusCode === 404) return resolve(null);
+				if (res.statusCode !== 200) return reject(new Error(`The worker did not open a browser session (${res.statusCode}).`));
+				try {
+					const reply = JSON.parse(body);
+					if (typeof reply.path !== 'string' || !reply.path.startsWith(HANDOFF_PATH + '?token=')) throw new Error('Invalid browser handoff response');
+					resolve(`http://127.0.0.1:${port}${reply.path}`);
+				} catch (error) { reject(error); }
+			});
+		});
+		req.on('timeout', () => req.destroy(new Error('The worker did not answer in time.')));
+		req.on('error', reject);
+		req.end();
+	});
+}
+
 /** Authenticated, loopback-only control of the child we launched. Never a renderer API. */
 export type LifecycleAction = 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge' | 'source-lease';
 export function requestLifecycle(port: number, token: string, action: LifecycleAction, state?: object, listener: string | null = null): Promise<Record<string, unknown>> {
@@ -704,6 +743,12 @@ export class WorkerSupervisor extends EventEmitter {
 			if (this.stopping || this._state.phase !== 'starting') return;
 			this.set({ phase: 'failed', startupStep: undefined, error: error instanceof Error ? error.message : String(error) });
 		}
+	}
+
+	/** A one-time URL that signs the default browser in, or null when the plain URL works. */
+	browserHandoffUrl(): Promise<string | null> {
+		if (this._state.phase !== 'ready') return Promise.resolve(null);
+		return requestBrowserHandoff(this._state.port, this.listener);
 	}
 
 	private lifecycleRequest(action: LifecycleAction, state?: object): Promise<Record<string, unknown>> {

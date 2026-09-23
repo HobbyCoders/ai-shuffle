@@ -147,8 +147,8 @@ def require_auth(request: Request) -> str:
         if paired_client:
             return _set_paired_request_state(request, token, paired_client)
 
-        # Check admin session
-        if owner_auth.loopback_request(request) and auth_service.validate_session(token):
+        # Owner password session (browser cookie)
+        if owner_auth.owner_session(request, token):
             if request.method not in ('GET', 'HEAD', 'OPTIONS'):
                 owner_auth.same_origin(request)
             request.state.is_admin = True
@@ -170,6 +170,13 @@ def require_auth(request: Request) -> str:
         paired_client = get_paired_client_from_token(api_key)
         if paired_client:
             return _set_paired_request_state(request, api_key, paired_client)
+
+        # Owner password session sent as a Bearer: not ambient, so no Origin check.
+        if owner_auth.owner_session(request, api_key):
+            request.state.is_admin = True
+            request.state.api_user = None
+            request.state.auth_token = api_key
+            return api_key
 
         key_hash = hash_api_key(api_key)
         api_user = db.get_api_user_by_key_hash(key_hash)
@@ -233,8 +240,8 @@ def require_admin(request: Request) -> str:
             if client.get('account_owner_admin') is True:
                 return _set_paired_request_state(request, candidate, client)
             raise HTTPException(403, 'Owner access required')
-        elif token and owner_auth.loopback_request(request) and auth_service.validate_session(token):
-            if getattr(request, 'method', 'GET') not in ('GET', 'HEAD', 'OPTIONS'):
+        elif owner_auth.owner_session(request, candidate):
+            if candidate == token and getattr(request, 'method', 'GET') not in ('GET', 'HEAD', 'OPTIONS'):
                 owner_auth.same_origin(request)
             request.state.is_admin = True
             request.state.api_user = None
@@ -319,7 +326,7 @@ async def get_auth_status(request: Request, response: Response = None):
             is_paired_authenticated = True
             is_admin_authenticated = paired_client.get('account_owner_admin') is True
             username = paired_client.get("device_name") or "Paired device"
-        elif owner_auth.loopback_request(request) and auth_service.validate_session(token):
+        elif owner_auth.owner_session(request, token):
             is_admin_authenticated = True
             username = auth_service.get_admin_username()
 
@@ -334,6 +341,9 @@ async def get_auth_status(request: Request, response: Response = None):
             is_paired_authenticated = True
             is_admin_authenticated = paired_client.get('account_owner_admin') is True
             username = paired_client.get("device_name") or "Paired device"
+        elif await run_sync(owner_auth.owner_session, request, api_key):
+            is_admin_authenticated = True
+            username = auth_service.get_admin_username()
 
     local = owner_auth.local_access(request) and not is_paired_authenticated
     preview_grant = preview_access.grant(request)
