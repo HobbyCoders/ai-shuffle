@@ -245,7 +245,8 @@ def is_encrypted(value: str) -> bool:
 #   2. ``automations.triggers`` / ``trigger_config`` (JSONB) — webhook secrets.
 #   3. ``connectors.config`` (JSONB)       — bot tokens / access tokens.
 #   4. ``api_user_credentials.encrypted_value``.
-#   5. ``claude_accounts.credentials``     — full claudeAiOauth JSON per account.
+#   5. (retired) ``claude_accounts.credentials`` — no longer re-keyed; the
+#      table is dropped by its schema cleanup.
 #   6. ``model_providers.auth_token``      — gateway key per model provider.
 #   7. ``model_providers.codex_access_token``  — Codex/ChatGPT OAuth access token.
 #   8. ``model_providers.codex_refresh_token`` — Codex/ChatGPT OAuth refresh token.
@@ -339,8 +340,6 @@ def build_reencryption_plan(old_key: bytes, new_key: bytes, db_module):
       * ``get_all_connectors()``       -> recursive walk of ``config``.
       * ``get_all_api_users()`` x ``get_all_user_credentials()`` -> every
         credential whose ``encrypted_value`` ``is_encrypted``.
-      * ``get_all_claude_accounts(include_credentials=True)`` -> every account
-        whose ``credentials`` blob ``is_encrypted``.
       * ``get_all_model_providers(include_token=True)`` -> every provider whose
         ``auth_token`` / ``codex_access_token`` / ``codex_refresh_token`` blob
         ``is_encrypted`` (one plan entry per encrypted column).
@@ -438,29 +437,6 @@ def build_reencryption_plan(old_key: bytes, new_key: bytes, db_module):
                 new_value=f"enc:{base64.b64encode(reenc).decode()}",
             ))
 
-    # (5) claude_accounts — the encrypted full claudeAiOauth JSON per account.
-    try:
-        accounts = db_module.get_all_claude_accounts(include_credentials=True) or []
-    except Exception as e:  # noqa: BLE001
-        logger.error("Failed to enumerate claude_accounts for re-encryption: %s", e)
-        accounts = []
-    for acct in accounts:
-        aid = acct.get("id")
-        value = acct.get("credentials")
-        if not (isinstance(value, str) and is_encrypted(value)):
-            continue
-        label = f"claude_accounts:{aid}"
-        try:
-            plaintext = old_fernet.decrypt(base64.b64decode(value[4:])).decode()
-        except Exception as e:  # noqa: BLE001
-            failures.append((label, f"decrypt failed: {type(e).__name__}"))
-            continue
-        reenc = new_fernet.encrypt(plaintext.encode())
-        plan.append(ReencryptPlanItem(
-            "claude_account", aid, label,
-            new_value=f"enc:{base64.b64encode(reenc).decode()}",
-        ))
-
     # (6/7/8) model_providers — the encrypted gateway key (auth_token) plus the
     # phase-2 Codex OAuth bundle (codex_access_token / codex_refresh_token), each
     # its own re-key entry so a password change never bricks a stored Codex token.
@@ -521,10 +497,6 @@ def apply_reencryption_plan(plan, db_module) -> None:
         elif item.kind == "credential":
             uid, ctype = item.ref
             db_module.set_user_credential(uid, ctype, item.new_value)
-        elif item.kind == "claude_account":
-            # Credentials-only update: the plaintext is unchanged, so leave the
-            # fingerprint / expires_at / has_refresh_token columns untouched.
-            db_module.update_claude_account_credentials_only(item.ref, item.new_value)
         elif item.kind == "model_provider":
             # Token-only update: the plaintext is unchanged, so no other column
             # is touched (update_model_provider only writes auth_token here).

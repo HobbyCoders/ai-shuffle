@@ -489,8 +489,11 @@ async def claude_cli_summary(force: bool = False) -> dict:
     """The CLI probe plus the login hint, as the status endpoints return it."""
     from app.core import claude_cli_status
 
+    from app.core import claude_relogin_notice
+
     status = await claude_cli_status.get_status_async(force)
-    return {**status.to_dict(), "login": claude_cli_login_hint()}
+    notice = await run_sync(claude_relogin_notice.payload)
+    return {**status.to_dict(), "login": claude_cli_login_hint(), "relogin_notice": notice}
 
 
 @router.get("/claude/cli")
@@ -504,26 +507,17 @@ async def claude_cli_status_route(refresh: bool = False, token: str = Depends(re
 
 @router.get("/claude/status")
 async def claude_auth_status(refresh: bool = False, token: str = Depends(require_auth)):
-    """Get Claude CLI authentication status"""
+    """The CLI's own sign-in status (same body as /claude/cli plus ``authenticated``)."""
     cli = await claude_cli_summary(force=refresh)
-    info = {
-        "authenticated": bool(cli["signed_in"]),
-        "token_valid": bool(cli["signed_in"]),
-        "expired": False,
-        "expires_at": None,
-        "has_refresh_token": None,
-    }
-    # Extend with multi-account fields (keeping every existing field intact).
-    try:
-        from app.core import claude_accounts as _accounts
-        info["active_account"] = _accounts.get_active_account_summary()
-        info["accounts_count"] = await run_sync(db.count_claude_accounts)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Could not attach Claude account info to status: {e}")
-        info.setdefault("active_account", None)
-        info.setdefault("accounts_count", 0)
-    info["cli"] = cli
-    return info
+    return {**cli, "authenticated": bool(cli["signed_in"])}
+
+
+@router.post("/claude/relogin-notice/dismiss")
+async def dismiss_claude_relogin_notice(token: str = Depends(require_admin)):
+    """Hide the one-time "sign in to the CLI again" notice on this worker."""
+    from app.core import claude_relogin_notice
+    await run_sync(claude_relogin_notice.dismiss)
+    return {"success": True}
 
 
 def _login_terminal_call(fn, *args):
@@ -573,106 +567,10 @@ async def claude_cli_login_cancel(token: str = Depends(require_admin)):
     return await run_sync(login_terminal.cancel)
 
 
-@router.get("/claude/validate")
-async def validate_claude_credentials(token: str = Depends(require_admin)):
-    """
-    Validate Claude credentials by testing the CLI.
-    Use this to check if OAuth token is still valid (not just if file exists).
-
-    Returns:
-        - valid: boolean - True if credentials work
-        - authenticated: boolean - True if credentials file exists
-        - error: string - Error message if validation failed
-    """
-    return auth_service.validate_claude_credentials()
-
-
 @router.get("/claude/login-instructions")
 async def claude_login_instructions():
     """Get Claude CLI login instructions"""
     return auth_service.get_login_instructions()
-
-
-@router.post("/claude/login")
-async def claude_login(request: Request, token: str = Depends(require_admin)):
-    """
-    Start Claude Code OAuth login process.
-    Returns an OAuth URL that the user should open in their browser.
-
-    Accepts optional JSON body with:
-    - force_reauth: boolean - If true, delete existing credentials and force re-authentication.
-                             Use when OAuth token has expired or user wants to reconnect.
-    """
-    force_reauth = False
-    try:
-        body = await request.json()
-        force_reauth = body.get("force_reauth", False)
-    except Exception:
-        pass  # No body or invalid JSON, use defaults
-
-    return auth_service.start_claude_oauth_login(force_reauth=force_reauth)
-
-
-@router.get("/claude/login/poll")
-async def claude_login_poll(token: str = Depends(require_admin)):
-    """
-    Poll for Claude authentication status after user completes OAuth flow.
-    Returns when authentication is detected or after a short timeout.
-    """
-    # Short poll - check once with a brief delay for UI responsiveness
-    import asyncio
-    await asyncio.sleep(1)
-    if auth_service.is_claude_authenticated():
-        return {
-            "success": True,
-            "authenticated": True,
-            "message": "Successfully authenticated with Claude Code"
-        }
-    return {
-        "success": False,
-        "authenticated": False,
-        "message": "Not yet authenticated. Continue polling or try again."
-    }
-
-
-@router.post("/claude/complete")
-async def claude_login_complete(request: Request, token: str = Depends(require_admin)):
-    """
-    Complete the Claude OAuth login by providing the authorization code and state.
-
-    After starting the login with /auth/claude/login and getting an OAuth URL,
-    the user visits the URL in their browser, authenticates, and receives a code.
-    They then call this endpoint with that code and the state to complete the login flow.
-
-    Expects JSON body with:
-    - 'code': The authorization code from the OAuth callback
-    - 'state': The state parameter from the original /auth/claude/login response
-    """
-    try:
-        body = await request.json()
-        auth_code = body.get("code")
-        state = body.get("state")
-
-        if not auth_code:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Authorization code is required"
-            )
-        if not state:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="State parameter is required"
-            )
-
-        return await auth_service.complete_claude_oauth_login(auth_code, state)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception("Claude complete login error")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to complete Claude login"
-        )
 
 
 @router.post("/claude/logout")

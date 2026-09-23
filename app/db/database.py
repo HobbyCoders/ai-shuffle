@@ -3045,20 +3045,6 @@ from app.db.connectors import (  # noqa: F401
     update_connector_session_ai_session,
 )
 
-from app.db.claude_accounts import (  # noqa: F401
-    create_claude_account,
-    get_claude_account,
-    get_all_claude_accounts,
-    update_claude_account_credentials,
-    update_claude_account_credentials_only,
-    rename_claude_account,
-    delete_claude_account,
-    clear_claude_active_pointers,
-    mark_claude_account_sync_pending,
-    touch_claude_account_last_used,
-    set_claude_account_subscription_type,
-    count_claude_accounts,
-)
 
 from app.db.model_providers import (  # noqa: F401
     create_model_provider,

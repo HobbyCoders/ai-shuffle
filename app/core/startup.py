@@ -229,6 +229,8 @@ def check_prerequisites() -> None:
         logger.warning("Claude Code CLI: not signed in. Sign in from Settings or run `claude auth login` on this worker")
     else:
         logger.warning("Claude Code CLI: %s", cli.error or "not installed")
+    from app.core import claude_relogin_notice
+    claude_relogin_notice.mark_if_needed()
 
     if auth_service.is_setup_required():
         logger.info("Local setup required - visit /setup on this computer or your LAN")

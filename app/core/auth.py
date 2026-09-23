@@ -5,21 +5,17 @@ Authentication service for AI Hub
 import os
 import sys
 import shutil
-import secrets
 import logging
 import subprocess
-import json
 import time
 import asyncio
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
 
 import bcrypt
 
 from app.db import database
 from app.core.config import settings
-from app.core.oauth import direct_oauth
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +122,6 @@ class AuthService:
         self._gh_web_login_process: Optional[subprocess.Popen] = None
         self._gh_web_login_error: Optional[str] = None
 
-        # Note: OAuth state is now managed by direct_oauth module (app/core/oauth.py)
 
     # =========================================================================
     # Web UI Authentication
@@ -195,38 +190,6 @@ class AuthService:
         elif not status.signed_in:
             result["error"] = "The Claude Code CLI is not signed in"
         return result
-
-    def _ensure_onboarding_complete(self):
-        """
-        Ensure settings.json has hasCompletedOnboarding=true.
-        This prevents the CLI from showing the onboarding wizard when
-        spawning interactive terminals (like /rewind).
-        """
-        settings_file = self.config_dir / 'settings.json'
-
-        try:
-            # Read existing settings or start with empty dict
-            if settings_file.exists():
-                with open(settings_file, 'r') as f:
-                    settings_data = json.load(f)
-            else:
-                settings_data = {}
-
-            # Only update if not already set
-            if not settings_data.get('hasCompletedOnboarding'):
-                settings_data['hasCompletedOnboarding'] = True
-
-                # Set default theme if not present
-                if 'theme' not in settings_data:
-                    settings_data['theme'] = 'dark'
-
-                # Write back
-                with open(settings_file, 'w') as f:
-                    json.dump(settings_data, f, indent=2)
-
-                logger.info("Set hasCompletedOnboarding=true in settings.json")
-        except Exception as e:
-            logger.warning(f"Could not update settings.json: {e}")
 
     def get_claude_token_status(self) -> Dict[str, Any]:
         """Token-shaped view of the CLI probe, for callers of the old fields.
@@ -309,13 +272,14 @@ class AuthService:
                 "message": "Logout failed",
                 "error": (result.stderr or result.stdout or "claude auth logout failed").strip(),
             }
-        # Clear the per-install active-account pointer so status reflects the
-        # logout. Rows are intentionally KEPT — logout != forget accounts.
+        # Signing out is the first half of the one-time re-login the upgrade
+        # notice asks for; the panel then offers Sign in.
         try:
-            from app.core import claude_accounts as _accounts
-            _accounts._set_active_account_id(None)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Could not clear active Claude account on logout: {e}")
+            from app.core import claude_relogin_notice
+            if claude_relogin_notice.pending():
+                claude_relogin_notice.dismiss()
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not clear the Claude re-login notice", exc_info=True)
         return {
             "success": True,
             "message": "Logged out from Claude Code"
@@ -714,136 +678,6 @@ class AuthService:
         """Mark the onboarding flow as complete"""
         database.set_system_setting("onboarding_complete", "true")
         logger.info("Onboarding marked as complete")
-
-    # =========================================================================
-    # Claude Code OAuth Login (Direct OAuth - no PTY/CLI interaction needed)
-    # =========================================================================
-
-    def start_claude_oauth_login(self, force_reauth: bool = False) -> Dict[str, Any]:
-        """
-        Start Claude Code OAuth login using direct OAuth 2.0 + PKCE flow.
-
-        This directly implements the OAuth flow against Anthropic's endpoints,
-        bypassing the need for CLI/PTY interaction. Much more reliable and
-        works on all platforms.
-
-        The flow:
-        1. Generate PKCE code verifier and challenge
-        2. Return OAuth URL for user to visit
-        3. User authenticates and gets authorization code
-        4. User calls complete_claude_oauth_login with code + state
-        5. We exchange code for tokens and write credentials file
-
-        Args:
-            force_reauth: If True, delete existing credentials and force re-authentication.
-
-        Returns:
-            Dict with oauth_url and state on success, or error details on failure.
-        """
-        try:
-            # If force_reauth, delete existing credentials first
-            if force_reauth:
-                creds_file = self.config_dir / '.credentials.json'
-                if creds_file.exists():
-                    try:
-                        creds_file.unlink()
-                        logger.debug(f"Force reauth: deleted credentials file {creds_file}")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete credentials for force reauth: {e}")
-
-            # Check if already authenticated (skip if force_reauth)
-            if not force_reauth and self.is_claude_authenticated():
-                return {
-                    "success": True,
-                    "already_authenticated": True,
-                    "message": "Already authenticated with Claude Code"
-                }
-
-            # Start the direct OAuth flow
-            result = direct_oauth.start_oauth_flow()
-
-            logger.debug(f"Started direct OAuth flow, state: {result['state'][:8]}...")
-
-            return {
-                "success": True,
-                "oauth_url": result["oauth_url"],
-                "state": result["state"],
-                "message": "Open this URL in your browser to authenticate with Claude.",
-                "requires_code": True,
-            }
-
-        except Exception as e:
-            logger.error(f"Claude OAuth login error: {e}", exc_info=True)
-            return {
-                "success": False,
-                "message": "Login failed",
-                "error": str(e)
-            }
-
-    async def complete_claude_oauth_login(self, auth_code: str, state: str) -> Dict[str, Any]:
-        """
-        Complete the Claude OAuth login by exchanging the authorization code for tokens.
-
-        This is the second step of the direct OAuth flow. After the user visits
-        the OAuth URL and authenticates, they receive an authorization code which
-        is exchanged for access/refresh tokens.
-
-        Args:
-            auth_code: The authorization code from the OAuth callback
-            state: The state parameter from the original OAuth request (for PKCE validation)
-
-        Returns:
-            Dict with success status and message.
-        """
-        try:
-            # Complete the OAuth flow (exchanges code, writes credentials)
-            result = await direct_oauth.complete_oauth_flow(auth_code, state)
-
-            if result["success"]:
-                # Also ensure onboarding is marked complete
-                self._ensure_onboarding_complete()
-                logger.debug("Direct OAuth login completed successfully")
-                # Land this fresh single-account login in the DB. If an active
-                # account row already exists, the post-write hook has already
-                # synced it; otherwise this seeds a default account. Never fatal.
-                try:
-                    from app.core.claude_accounts import seed_from_credentials_file
-                    seed_from_credentials_file()
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"Claude account seed after login failed (ignored): {e}")
-
-            return result
-
-        except Exception as e:
-            logger.error(f"Error completing Claude OAuth login: {e}", exc_info=True)
-            return {
-                "success": False,
-                "message": "Failed to complete login",
-                "error": str(e)
-            }
-
-    async def poll_claude_auth_status(self, timeout_seconds: int = 300) -> Dict[str, Any]:
-        """
-        Poll for Claude authentication status after user completes OAuth flow.
-        Returns when authentication is detected or timeout is reached.
-        """
-        start_time = datetime.now()
-        poll_interval = 2  # seconds
-
-        while (datetime.now() - start_time).total_seconds() < timeout_seconds:
-            if self.is_claude_authenticated():
-                return {
-                    "success": True,
-                    "authenticated": True,
-                    "message": "Successfully authenticated with Claude Code"
-                }
-            await asyncio.sleep(poll_interval)
-
-        return {
-            "success": False,
-            "authenticated": False,
-            "message": "Authentication timed out. Please try again."
-        }
 
     # =========================================================================
     # Combined Status

@@ -64,48 +64,61 @@ curl http://localhost:8000/api/v1/auth/status
 
 `POST /api/v1/auth/login`, `/change-password`, `/account/start`, `/account/poll`, and `/recovery` no longer exist and return 404. Worker passwords, browser account sign-in, and console recovery codes are gone: a browser is the owner on the trusted local listener or it is not authenticated at all. Stored credentials use persistent server-managed keys; restoring unavailable keys is a separate operator procedure.
 
-## Claude CLI Integration
+## Claude Code CLI
 
-### GET /api/v1/auth/claude/status
+AI Shuffle never signs in to Claude itself and never reads the CLI's credentials. The stock Claude Code CLI owns its login; these endpoints report what `claude auth status` says and run the CLI's own `claude auth login` and `claude auth logout`.
 
-Get Claude CLI authentication status.
+### GET /api/v1/auth/claude/cli
 
-**Auth:** Admin only
+What the CLI reports about its own login. Add `?refresh=true` to ask the CLI again instead of using the answer cached for up to a minute.
+
+**Auth:** Any signed-in caller
 
 ```bash
-curl http://localhost:8000/api/v1/auth/claude/status \
+curl http://localhost:8000/api/v1/auth/claude/cli?refresh=true \
   -b cookies.txt
 ```
 
 **Response:**
 ```json
 {
-  "authenticated": true,
-  "account": "user@example.com"
+  "installed": true,
+  "signed_in": true,
+  "auth_method": "claude.ai",
+  "auth_method_label": "Claude account",
+  "email": "user@example.com",
+  "org_name": null,
+  "plan": "max",
+  "cli_version": "2.1.280",
+  "binary_path": "/home/appuser/.local/bin/claude",
+  "error": null,
+  "login": {
+    "surface": "docker",
+    "terminal": true,
+    "command": "claude auth login",
+    "docker_command": "docker exec -it -u appuser <container> claude auth login"
+  },
+  "relogin_notice": null
 }
 ```
 
-### POST /api/v1/auth/claude/login
+`signed_in` is `null` when the CLI's answer could not be read; `error` then says why. `GET /api/v1/auth/claude/status` returns the same body plus `authenticated`.
 
-Start OAuth login flow for Claude.
+### POST /api/v1/auth/claude/cli-login/start
 
-**Auth:** Admin only
-
-### GET /api/v1/auth/claude/login/poll
-
-Poll for OAuth completion.
-
-**Auth:** Admin only
-
-### POST /api/v1/auth/claude/complete
-
-Complete OAuth with authorization code.
+Run `claude auth login` in the in-app terminal (Docker and local runs; not the desktop app or Windows). Poll `GET /api/v1/auth/claude/cli-login?offset=N` for its output and the sign-in link, send the code Anthropic's page shows with `POST /api/v1/auth/claude/cli-login/input` (`{"text": "..."}`), and stop it with `POST /api/v1/auth/claude/cli-login/cancel`.
 
 **Auth:** Admin only
 
 ### POST /api/v1/auth/claude/logout
 
-Logout from Claude CLI.
+Run `claude auth logout`. The CLI's files are never edited or deleted by AI Shuffle.
+
+**Auth:** Admin only
+
+### POST /api/v1/auth/claude/relogin-notice/dismiss
+
+Hide the one-time notice, shown after upgrading from a version that ran its own Claude sign-in, asking to run `claude auth logout` and then `claude auth login`.
 
 **Auth:** Admin only
 

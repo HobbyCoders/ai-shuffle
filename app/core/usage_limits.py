@@ -29,13 +29,11 @@ logged, printed, or included in the snapshot.
 import asyncio
 import logging
 import math
-import os
 import time
 from typing import Any, Dict, List, Optional
 
 import httpx
 
-from app.core.oauth import direct_oauth
 from app.core.usage_sources import CLAUDE_OAUTH_USAGE_URL
 from app.db.async_database import run_sync
 
@@ -275,15 +273,7 @@ class UsageLimitsMonitor:
         meta: Dict[str, Optional[str]] = {
             "account_id": None, "account_email": None, "account_name": None,
         }
-        try:
-            from app.core import claude_accounts
-            row = claude_accounts.resolve_active_account_row()
-            if row:
-                meta["account_id"] = row.get("id")
-                meta["account_email"] = row.get("email")
-                meta["account_name"] = row.get("name")
-        except Exception:  # noqa: BLE001 — metadata is best-effort
-            pass
+        # The account table is retired; snapshots carry no account identity.
         return meta
 
     def _persist_snapshot(self) -> None:
@@ -316,117 +306,19 @@ class UsageLimitsMonitor:
             logger.debug("Usage-snapshot persist skipped: %s", e)
 
     async def fetch(self) -> Dict[str, Any]:
-        """Fetch and cache the latest snapshot. Never raises.
+        """Record a refresh and return the snapshot. Never raises.
 
-        On no/expired credential returns an empty (``available: false``)
-        snapshot without spamming logs. On endpoint failure keeps the last good
-        snapshot and logs once at WARNING.
+        AI Shuffle does not read the Claude CLI's OAuth token, so it no longer
+        calls the OAuth usage endpoint. The Claude windows come only from the
+        rate-limit events the CLI reports in its own stream
+        (``apply_live_event``); a refresh keeps them as they are.
         """
-        # Tag this poll with the generation it started under. A concurrent
-        # account switch bumps the generation; if it changes before we commit,
-        # this poll's result is stale and must be discarded (see below).
-        gen = self._generation
         self._attempted_at = time.time()
-
-        token = direct_oauth.get_access_token()
-        if not token:
-            # No OAuth credential (e.g. API-key mode or logged out). Report
-            # empty gracefully; this is an expected steady state, so no logging.
+        if not self._windows:
             self._available = False
-            self._windows = []
             self._last_error = "missing_credentials"
-            # Still persist so API-key-mode installs are represented in the
-            # cluster snapshot (empty windows, available=False).
-            await run_sync(self._persist_snapshot)
-            return self._snapshot()
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "anthropic-beta": _OAUTH_BETA_HEADER,
-        }
-        from app.core import usage_sources
-        from app.core.usage_polling import (
-            UsageDeferred,
-            capability_fingerprint,
-            usage_get,
-        )
-
-        fingerprint = capability_fingerprint("claude_oauth_usage", headers)
-        if fingerprint == self._denied_fingerprint:
-            # Refused for this exact token: no budget claim, no upstream probe.
-            return self._snapshot()
-        try:
-            try:
-                resp = await usage_get(
-                    USAGE_ENDPOINT, headers=headers,
-                    interval=usage_sources.interval_for("claude_oauth_usage", USAGE_ENDPOINT),
-                )
-            except UsageDeferred:
-                return self._snapshot()
-            if resp.status_code != 200:
-                status = resp.status_code
-                if status in usage_sources.DENIED_STATUSES:
-                    self._last_error = "billing_access_denied"
-                elif status in usage_sources.UNSUPPORTED_STATUSES:
-                    self._last_error = "unsupported"
-                else:
-                    self._last_error = "unavailable"
-                if self._last_error != "unavailable":
-                    self._denied_fingerprint = fingerprint
-                if not self._warned:
-                    logger.warning(
-                        "Usage-limits fetch failed: HTTP %s (keeping last snapshot)",
-                        resp.status_code,
-                    )
-                    self._warned = True
-                return self._snapshot()
-
-            if gen != self._generation:
-                # The active account switched while this poll was in flight.
-                # Discard the (old account's) result rather than overwriting the
-                # new account's data; the post-switch poll owns the snapshot.
-                logger.debug(
-                    "Usage-limits fetch discarded: generation changed %s -> %s",
-                    gen, self._generation,
-                )
-                return self._snapshot()
-
-            data = resp.json()
-            self._windows = parse_usage_response(data)
-            self._fetched_at = time.time()
-            self._available = True
-            self._warned = False
-            self._last_error = None
-            # Persist this install's snapshot (stamped with the active account)
-            # so peers can serve the correct per-account reset time for offloaded
-            # sessions. Best-effort — never break the poll on a DB error.
-            await run_sync(self._persist_snapshot)
-            # Ride along on the poll to keep the active account's subscription
-            # tier current: at most ONE profile GET per hour (self-throttled),
-            # which heals rows whose subscription_type is still NULL and tracks
-            # a plan change. Best-effort — never affects the usage snapshot.
-            #
-            # Suppressed under TESTING (conftest sets TESTING=1, mirroring
-            # app.core.startup_reconcile): this reads the REAL on-disk
-            # credential — which the test host has — so an unpatched
-            # monitor.fetch() test would issue a live authenticated request.
-            # ensure_subscription_type() itself is unit-tested directly.
-            if os.environ.get("TESTING") != "1":
-                try:
-                    from app.core import claude_accounts
-                    await claude_accounts.ensure_subscription_type()
-                except Exception as e:  # noqa: BLE001 — advisory metadata only
-                    logger.debug("Subscription-type refresh skipped: %s", e)
-            logger.debug("Usage-limits snapshot updated: %d window(s)", len(self._windows))
-            return self._snapshot()
-
-        except Exception as e:  # noqa: BLE001 — keep last snapshot on any error
-            self._last_error = "unavailable"
-            if not self._warned:
-                logger.warning("Usage-limits fetch error: %s (keeping last snapshot)", e)
-                self._warned = True
-            return self._snapshot()
+        await run_sync(self._persist_snapshot)
+        return self._snapshot()
 
     async def get_snapshot(self, max_age: float = _SNAPSHOT_TTL_SECONDS) -> Dict[str, Any]:
         """Return the cached snapshot; start a background refresh when stale.
@@ -498,18 +390,7 @@ class UsageLimitsMonitor:
             logger.debug("Usage cluster snapshot read skipped: %s", e)
             return None
 
-        # Subscription tier per Claude account, so each install's row can carry
-        # the plan its OWN account is on (the local model registry only speaks
-        # for the self install). Degrades to {} — a missing plan renders as no
-        # subtext, which must never cost us the whole cluster read.
         plans: Dict[Any, Optional[str]] = {}
-        try:
-            for account in db.get_all_claude_accounts():
-                account_id = account.get("id")
-                if account_id:
-                    plans[account_id] = account.get("subscription_type")
-        except Exception as e:  # noqa: BLE001 — plan join is advisory
-            logger.debug("Usage cluster plan join skipped: %s", e)
 
         snapshots: List[Dict[str, Any]] = []
         for row in rows:

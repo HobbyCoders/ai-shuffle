@@ -441,14 +441,14 @@ def _claude_payload() -> Dict[str, object]:
     Mirrors ``_providers_payload``'s ``auth_kind``/``plan_type`` pair for the
     Anthropic side, which has no ``model_providers`` row to carry them:
 
-      * a stored ``anthropic_api_key`` wins over any connected account (see
+      * a stored ``anthropic_api_key`` wins (see
         ``environment.inject_claude_code_auth``) → ``auth_kind = "api"``, no plan;
-      * otherwise the connected OAuth account is used → ``auth_kind =
-        "subscription"`` with the account's ``subscription_type`` ("max"/"pro")
-        when known, else null.
+      * otherwise, when the Claude Code CLI reports a login
+        (``claude auth status``), ``auth_kind = "subscription"`` with the plan
+        the CLI printed, if any.
 
-    Lazily imported and fully degrading: ANY failure yields nulls rather than
-    500-ing ``GET /api/models`` app-wide (same contract as ``_providers_payload``).
+    Reads the last probe result only (never runs the CLI on this request path)
+    and degrades to nulls on any failure.
     """
     try:
         from app.api.settings_crypto import get_decrypted_api_key
@@ -456,14 +456,12 @@ def _claude_payload() -> Dict[str, object]:
         if get_decrypted_api_key("anthropic_api_key"):
             return {"auth_kind": "api", "plan_type": None}
 
-        from app.core import claude_accounts
-        from app.db import database
+        from app.core import claude_cli_status
 
-        account_id = claude_accounts.get_active_account_id()
-        row = database.get_claude_account(account_id, include_credentials=True) if account_id else None
-        if not row or not row.get("credentials"):
+        status = claude_cli_status.peek()
+        if status is None or not status.signed_in:
             return {"auth_kind": None, "plan_type": None}
-        return {"auth_kind": "subscription", "plan_type": row.get("subscription_type")}
+        return {"auth_kind": "subscription", "plan_type": status.plan}
     except Exception as e:  # noqa: BLE001 — display metadata is never fatal
         logger.warning("Could not resolve Claude auth metadata for registry: %s", e)
         return {"auth_kind": None, "plan_type": None}

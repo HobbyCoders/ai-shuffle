@@ -119,7 +119,21 @@ def test_status_route_does_not_open_credentials(authenticated_client, monkeypatc
     status = authenticated_client.get("/api/v1/auth/status").json()
     assert status["claude_authenticated"] is True
     body = authenticated_client.get("/api/v1/auth/claude/status").json()
-    assert body["authenticated"] is True and body["cli"]["signed_in"] is True
+    assert body["authenticated"] is True and body["signed_in"] is True
     diag = authenticated_client.get("/api/v1/auth/diagnostics").json()
     assert "claude_credentials_exists" not in diag and "credentials_file_size" not in diag
     assert diag["claude_cli_signed_in"] is True
+
+
+def test_logout_clears_the_relogin_notice(monkeypatch, cli_home, mock_db):
+    from app.core import claude_relogin_notice as notice
+    from app.core.auth import AuthService
+    from app.db import database as db
+    db.set_system_setting("claude_active_account:old", "acct")
+    assert notice.mark_if_needed() is True
+    monkeypatch.setattr(cs, "probe", lambda resolver=None: _status(True))
+    monkeypatch.setattr("app.core.auth.subprocess.run",
+                        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""))
+    assert AuthService().claude_logout()["success"] is True
+    assert notice.pending() is False
+    assert cli_home.exists()

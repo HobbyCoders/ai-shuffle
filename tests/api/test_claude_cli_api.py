@@ -38,10 +38,45 @@ def test_cli_status_route(authenticated_client, signed_in, monkeypatch):
     assert len(signed_in) == 2
 
 
-def test_claude_status_includes_cli(authenticated_client, signed_in):
+def test_claude_status_is_the_cli_answer(authenticated_client, signed_in):
     body = authenticated_client.get("/api/v1/auth/claude/status").json()
-    assert body["cli"]["signed_in"] is True
-    assert body["cli"]["email"] == "me@example.com"
+    assert body["authenticated"] is True
+    assert body["signed_in"] is True
+    assert body["email"] == "me@example.com"
+    for retired in ("expires_at", "has_refresh_token", "credentials_file", "active_account", "accounts_count"):
+        assert retired not in body
+
+
+@pytest.mark.parametrize("method,path", [
+    ("post", "/api/v1/auth/claude/login"),
+    ("get", "/api/v1/auth/claude/login/poll"),
+    ("post", "/api/v1/auth/claude/complete"),
+    ("get", "/api/v1/auth/claude/validate"),
+    ("get", "/api/v1/auth/claude/accounts"),
+    ("post", "/api/v1/auth/claude/accounts/start"),
+    ("post", "/api/v1/auth/claude/accounts/complete"),
+])
+def test_in_app_claude_login_routes_are_gone(authenticated_client, method, path):
+    assert getattr(authenticated_client, method)(path).status_code in (404, 405)
+
+
+def test_relogin_notice_is_shown_once_and_dismissed(authenticated_client, signed_in, mock_db):
+    from app.core import claude_relogin_notice as notice
+    from app.db.base import get_db
+    from app.db import database as db
+
+    assert notice.mark_if_needed() is False  # fresh install: no notice
+    assert authenticated_client.get("/api/v1/auth/claude/cli").json()["relogin_notice"] is None
+    db.set_system_setting("claude_active_account:other-install", "acct-1")
+    with get_db() as conn:
+        conn.cursor().execute("DELETE FROM system_settings WHERE key LIKE 'claude_cli_relogin_notice:%'")
+    assert notice.mark_if_needed() is True
+    body = authenticated_client.get("/api/v1/auth/claude/cli").json()["relogin_notice"]
+    assert body["logout_command"] == "claude auth logout"
+    assert body["login_command"] == "claude auth login"
+    assert authenticated_client.post("/api/v1/auth/claude/relogin-notice/dismiss").json() == {"success": True}
+    assert authenticated_client.get("/api/v1/auth/claude/cli").json()["relogin_notice"] is None
+    assert notice.mark_if_needed() is False  # never comes back
 
 
 def test_missing_cli_is_reported_not_raised(authenticated_client):

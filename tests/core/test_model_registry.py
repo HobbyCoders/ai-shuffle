@@ -556,61 +556,42 @@ class TestRegistryPayloadClaude:
         assert set(payload["claude"]) == {"auth_kind", "plan_type"}
 
     def test_api_key_install_reports_api_auth_and_no_plan(self, mock_db, monkeypatch):
-        """A stored Anthropic key overrides any connected account (see
+        """A stored Anthropic key wins over the CLI's login (see
         ``environment.inject_claude_code_auth``) → API auth, no plan."""
-        iid = settings.effective_instance_id
-        db.create_claude_account(
-            account_id="acct-1", name="Primary", credentials="enc:x",
-            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
-            subscription_type="max",
-        )
-        db.set_system_setting(f"claude_active_account:{iid}", "acct-1")
+        from app.core import claude_cli_status as cs
+        monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
         monkeypatch.setattr(
             settings_crypto, "get_decrypted_api_key",
             lambda name: "sk-ant-key" if name == "anthropic_api_key" else None,
         )
+        assert m.registry_payload()["claude"] == {"auth_kind": "api", "plan_type": None}
 
-        claude = m.registry_payload()["claude"]
-        # The account's plan is deliberately NOT surfaced — the key is what
-        # authenticates, so the subtext must read "API".
-        assert claude == {"auth_kind": "api", "plan_type": None}
-
-    def test_account_install_reports_subscription_and_its_plan(self, mock_db, monkeypatch):
-        iid = settings.effective_instance_id
-        db.create_claude_account(
-            account_id="acct-1", name="Primary", credentials="enc:x",
-            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
-            subscription_type="max",
-        )
-        db.set_system_setting(f"claude_active_account:{iid}", "acct-1")
+    def test_cli_login_reports_subscription_and_the_plan_it_prints(self, mock_db, monkeypatch):
+        from app.core import claude_cli_status as cs
+        monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
         monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
+        assert m.registry_payload()["claude"] == {"auth_kind": "subscription", "plan_type": "max"}
 
-        claude = m.registry_payload()["claude"]
-        assert claude == {"auth_kind": "subscription", "plan_type": "max"}
-
-    def test_account_without_a_known_plan_reports_null(self, mock_db, monkeypatch):
-        """A row created before the plan lookup existed carries NULL until the
-        usage poller heals it — subscription auth, unknown tier."""
-        iid = settings.effective_instance_id
-        db.create_claude_account(
-            account_id="acct-1", name="Primary", credentials="enc:x",
-            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
-        )
-        db.set_system_setting(f"claude_active_account:{iid}", "acct-1")
+    def test_cli_login_without_a_plan_reports_null(self, mock_db, monkeypatch):
+        from app.core import claude_cli_status as cs
+        monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True))
         monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
+        assert m.registry_payload()["claude"] == {"auth_kind": "subscription", "plan_type": None}
 
-        claude = m.registry_payload()["claude"]
-        assert claude == {"auth_kind": "subscription", "plan_type": None}
-
-    def test_no_active_account_does_not_advertise_a_subscription(self, mock_db, monkeypatch):
+    def test_signed_out_cli_does_not_advertise_a_subscription(self, mock_db, monkeypatch):
+        from app.core import claude_cli_status as cs
+        monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=False))
         monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
-        claude = m.registry_payload()["claude"]
-        assert claude == {"auth_kind": None, "plan_type": None}
+        assert m.registry_payload()["claude"] == {"auth_kind": None, "plan_type": None}
 
-    def test_stale_active_pointer_does_not_advertise_a_subscription(self, mock_db, monkeypatch):
+    def test_registry_never_runs_the_cli(self, mock_db, monkeypatch):
+        from app.core import claude_cli_status as cs
+
+        def _no_probe(*a, **k):
+            raise AssertionError("GET /api/models must not spawn the CLI")
+        monkeypatch.setattr(cs, "probe", _no_probe)
         monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
-        db.set_system_setting(f"claude_active_account:{settings.effective_instance_id}", "deleted-account")
-        assert m.registry_payload()["claude"]["auth_kind"] is None
+        assert m.registry_payload()["claude"] == {"auth_kind": None, "plan_type": None}
 
     def test_db_failure_degrades_to_nulls(self, monkeypatch):
         """Same contract as ``_providers_payload``: never 500 GET /api/models."""

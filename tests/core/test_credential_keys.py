@@ -52,8 +52,12 @@ def seed():
         config={'bot_token': enc('connector-secret')}, events=[])
     db.create_api_user(user_id='u', name='u', api_key_hash='hash')
     db.set_user_credential('u', 'github_token', enc('integration-secret'))
-    db.create_claude_account(account_id='claude', name='Claude', credentials=enc('claude-secret'),
-        credential_fingerprint='unchanged', expires_at=123, has_refresh_token=True)
+    # The retired claude_accounts table stays until its schema cleanup.
+    with db.get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO claude_accounts (id, name, credentials, credential_fingerprint, expires_at,"
+            " has_refresh_token, sync_pending) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            ('claude', 'Claude', enc('claude-secret'), 'unchanged', 123, True, False))
     db.create_model_provider(provider_id='p', name='p', provider_type='custom',
         base_url='https://example.com', auth_token=enc('provider-secret'))
     db.set_codex_token_bundle('p', access_token=enc('oauth-access'), refresh_token=enc('oauth-refresh'),

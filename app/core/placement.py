@@ -194,11 +194,10 @@ def capable_runners(
           project is materialized there. Skipped when ``project_v2_id`` is
           falsy (a projectless session imposes no checkout requirement).
       (b) the capability ``constraints`` against ``installs.capabilities``.
-      (c) account availability — INTENTIONALLY OMITTED. Claude accounts are
-          shared-DB (any install can read/use any account; see
-          ``app/db/claude_accounts.py`` and the A8 finding), so there is no
-          install-scoped account constraint to apply. Were accounts ever made
-          install-local, this is where the per-account filter would go.
+      (c) a Claude sign-in — not implied. Each runner signs in to its own
+          Claude Code CLI and advertises ``claude_cli_signed_in``; a caller
+          that needs one passes ``{"claude_cli_signed_in": True}`` in
+          ``constraints``.
 
     ``installs_map`` (optional) is a PRELOADED install registry snapshot: pass
     the map you already read and this makes NO registry read of its own — the

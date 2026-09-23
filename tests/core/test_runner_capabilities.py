@@ -18,12 +18,12 @@ from app.core import runner_capabilities as rc
 
 def test_shape_has_all_keys_and_types():
     caps = rc.detect_capabilities()
-    assert set(caps.keys()) == {"os", "has_display", "has_chrome", "docker", "account_ids"}
+    assert set(caps.keys()) == {"os", "has_display", "has_chrome", "docker", "claude_cli_signed_in"}
     assert caps["os"] in ("windows", "linux", "darwin")
     assert isinstance(caps["has_display"], bool)
     assert isinstance(caps["has_chrome"], bool)
     assert isinstance(caps["docker"], bool)
-    assert isinstance(caps["account_ids"], list)
+    assert isinstance(caps["claude_cli_signed_in"], bool)
 
 
 def test_os_matches_platform():
@@ -59,18 +59,17 @@ def test_has_display_defaults_false_when_env_read_raises():
         assert rc._detect_has_display() is False
 
 
-def test_account_ids_default_empty_when_lookup_raises():
-    with patch(
-        "app.db.claude_accounts.get_all_claude_accounts",
-        side_effect=RuntimeError("db down"),
-    ):
-        assert rc._detect_account_ids() == []
+def test_claude_cli_signed_in_comes_from_the_cached_probe(monkeypatch):
+    from app.core import claude_cli_status as cs
 
-
-def test_account_ids_are_ids_only():
-    fake = [{"id": "acc-1", "name": "A", "email": "a@x"}, {"id": "acc-2"}, {"name": "no-id"}]
-    with patch("app.db.claude_accounts.get_all_claude_accounts", return_value=fake):
-        assert rc._detect_account_ids() == ["acc-1", "acc-2"]
+    def _no_probe(*a, **k):
+        raise AssertionError("capability detection must not run the CLI")
+    monkeypatch.setattr(cs, "probe", _no_probe)
+    assert rc._detect_claude_cli_signed_in() is False  # nothing probed yet
+    monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True))
+    assert rc._detect_claude_cli_signed_in() is True
+    monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=False))
+    assert rc._detect_claude_cli_signed_in() is False
 
 
 def test_detect_capabilities_never_raises_on_total_failure():
@@ -79,11 +78,11 @@ def test_detect_capabilities_never_raises_on_total_failure():
 
     with patch.object(rc.shutil, "which", side_effect=_boom), \
             patch.object(rc.os.path, "exists", side_effect=_boom), \
-            patch("app.db.claude_accounts.get_all_claude_accounts", side_effect=_boom):
+            patch("app.core.claude_cli_status.peek", side_effect=_boom):
         caps = rc.detect_capabilities()  # must not raise
         assert caps["has_chrome"] is False
         assert caps["docker"] is False
-        assert caps["account_ids"] == []
+        assert caps["claude_cli_signed_in"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +94,7 @@ _SENTINEL_CAPS = {
     "has_display": False,
     "has_chrome": True,
     "docker": True,
-    "account_ids": ["acc-1"],
+    "claude_cli_signed_in": True,
 }
 
 
@@ -104,7 +103,7 @@ def test_build_capabilities_merges_source_and_detected():
         caps = cluster._build_capabilities("config")
     assert caps["advertise_url_source"] == "config"
     assert caps["has_chrome"] is True and caps["docker"] is True
-    assert caps["account_ids"] == ["acc-1"]
+    assert caps["claude_cli_signed_in"] is True
 
 
 def test_build_capabilities_degrades_to_base_on_detection_error():
@@ -129,7 +128,7 @@ def test_register_self_writes_detected_capabilities():
     caps = captured["capabilities"]
     assert caps["advertise_url_source"] == "config"
     assert caps["has_chrome"] is True
-    assert caps["account_ids"] == ["acc-1"]
+    assert caps["claude_cli_signed_in"] is True
 
 
 def test_heartbeat_self_refreshes_capabilities():
@@ -148,4 +147,4 @@ def test_heartbeat_self_refreshes_capabilities():
     caps = captured["capabilities"]
     assert caps["advertise_url_source"] == "config"
     assert caps["has_chrome"] is True and caps["docker"] is True
-    assert caps["account_ids"] == ["acc-1"]
+    assert caps["claude_cli_signed_in"] is True

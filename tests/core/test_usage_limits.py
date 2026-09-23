@@ -131,6 +131,25 @@ class TestParse:
 # UsageLimitsMonitor.fetch
 # ---------------------------------------------------------------------------
 
+class TestFetchWithoutToken:
+    """The Claude CLI's OAuth token is never read, so no usage request is made."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_makes_no_request_and_keeps_live_windows(self, monitor):
+        with patch("app.core.usage_limits.httpx.AsyncClient") as client:
+            monitor.apply_live_event("five_hour", 0.25, None)
+            snap = await monitor.fetch()
+        client.assert_not_called()
+        assert snap["available"] is True
+        assert snap["windows"][0]["type"] == "five_hour"
+
+    @pytest.mark.asyncio
+    async def test_refresh_without_live_windows_is_unavailable(self, monitor):
+        with patch("app.core.usage_limits.httpx.AsyncClient") as client:
+            snap = await monitor.fetch()
+        client.assert_not_called()
+        assert snap["available"] is False and snap["windows"] == []
+
 def _fake_httpx(status_code=200, json_body=None, raise_exc=None):
     """Build a patch target for httpx.AsyncClient used as an async ctx manager."""
     resp = MagicMock()
@@ -153,113 +172,6 @@ def _fake_httpx(status_code=200, json_body=None, raise_exc=None):
 def monitor():
     return UsageLimitsMonitor()
 
-
-class TestFetch:
-    @pytest.mark.asyncio
-    async def test_happy_path_parses_and_caches(self, monitor):
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "secret-token"
-
-            snap = await monitor.fetch()
-
-        assert snap["available"] is True
-        assert snap["fetched_at"] is not None
-        types = {w["type"] for w in snap["windows"]}
-        assert "five_hour" in types and "seven_day_overage_included" in types
-
-    @pytest.mark.asyncio
-    async def test_sends_bearer_and_beta_header_but_never_logs_token(self, monitor, caplog):
-        captured = {}
-
-        def _client_factory(*args, **kwargs):
-            captured["headers"] = kwargs.get("headers", {})
-            return _fake_httpx(200, REAL_RESPONSE)()
-
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", side_effect=None) as ac:
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "secret-token"
-
-            # The get() call carries the headers, not the constructor — inspect it.
-            resp = MagicMock(); resp.status_code = 200; resp.json.return_value = REAL_RESPONSE
-            client = MagicMock()
-            client.get = AsyncMock(return_value=resp)
-            ctx = MagicMock()
-            ctx.__aenter__ = AsyncMock(return_value=client)
-            ctx.__aexit__ = AsyncMock(return_value=False)
-            ac.return_value = ctx
-
-            with caplog.at_level(logging.DEBUG):
-                await monitor.fetch()
-
-            _, kwargs = client.get.call_args
-            headers = kwargs["headers"]
-
-        assert headers["Authorization"] == "Bearer secret-token"
-        assert headers["anthropic-beta"] == "oauth-2025-04-20"
-        # The token must never appear in any log record.
-        assert "secret-token" not in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_no_credential_returns_empty_gracefully(self, monitor, caplog):
-        with patch("app.core.usage_limits.direct_oauth") as oauth:
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = None
-
-            with caplog.at_level(logging.WARNING):
-                snap = await monitor.fetch()
-
-        assert snap == {
-            "windows": [], "fetched_at": None, "available": False,
-            "attempted_at": snap["attempted_at"], "last_error_kind": "missing_credentials",
-            "generation": monitor.current_generation(),
-        }
-        assert snap["attempted_at"]
-        # Missing credential is an expected steady state — no warning spam.
-        assert caplog.text == ""
-
-    @pytest.mark.asyncio
-    async def test_http_error_keeps_last_snapshot_and_warns_once(self, monitor, caplog):
-        with patch("app.core.usage_limits.direct_oauth") as oauth:
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tok"
-
-            # First: a good fetch to populate a last-known snapshot.
-            with patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-                await monitor.fetch()
-
-            # Expire the previous success budget, then two failures coalesce.
-            from app.db import database as db
-            with db.get_db() as conn:
-                conn.cursor().execute("UPDATE usage_poll_state SET next_attempt = 0")
-            with patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(500, {})), \
-                 caplog.at_level(logging.WARNING):
-                snap1 = await monitor.fetch()
-                snap2 = await monitor.fetch()
-
-        assert snap1["available"] is True  # kept last good snapshot
-        assert snap1["windows"] == snap2["windows"]
-        assert caplog.text.count("Usage-limits fetch failed") == 1
-
-    @pytest.mark.asyncio
-    async def test_network_error_keeps_last_snapshot(self, monitor):
-        with patch("app.core.usage_limits.direct_oauth") as oauth:
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tok"
-
-            with patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-                await monitor.fetch()
-
-            with patch(
-                "app.core.usage_limits.httpx.AsyncClient",
-                _fake_httpx(raise_exc=RuntimeError("boom")),
-            ):
-                snap = await monitor.fetch()
-
-        assert snap["available"] is True
-        assert snap["windows"]  # unchanged
 
 
 # ---------------------------------------------------------------------------
@@ -292,62 +204,6 @@ class TestGenerationGuard:
         g2 = monitor.bump_generation()
         assert g2 > g1
         assert g2 >= int(time.time()) - 5
-
-    @pytest.mark.asyncio
-    async def test_stale_fetch_discarded_when_generation_bumped_midflight(self, monitor):
-        """A poll that STARTED before an account switch must not overwrite the
-        new account's data if it completes afterwards.
-
-        Simulated by bumping the generation from inside the network read (as a
-        concurrent ``switch_account`` would) and returning DIFFERENT data. The
-        stale result is discarded and the primed windows survive.
-        """
-        # Prime the monitor with account A's windows.
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tokA"
-            await monitor.fetch()
-        primed = monitor._snapshot()["windows"]
-        assert primed  # sanity: account A produced windows
-
-        async def _get_then_switch(*args, **kwargs):
-            # A switch lands while this fetch is awaiting the network.
-            monitor.bump_generation()
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.json.return_value = {"five_hour": {"utilization": 99.0, "resets_at": None}}
-            return resp
-
-        client = MagicMock()
-        client.get = AsyncMock(side_effect=_get_then_switch)
-        ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(return_value=client)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        factory = MagicMock(return_value=ctx)
-
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", factory):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tokA"
-            snap = await monitor.fetch()
-
-        # Discarded: primed windows unchanged, the 99%-used straggler (= 1%
-        # remaining once converted) never applied.
-        assert snap["windows"] == primed
-        assert all(w["utilization"] != 1.0 for w in snap["windows"])
-
-    @pytest.mark.asyncio
-    async def test_fresh_fetch_applies_when_generation_stable(self, monitor):
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch(
-                 "app.core.usage_limits.httpx.AsyncClient",
-                 _fake_httpx(200, {"five_hour": {"utilization": 55.0, "resets_at": None}}),
-             ):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tok"
-            snap = await monitor.fetch()
-        assert any(w["utilization"] == 45.0 for w in snap["windows"])  # 55% used
 
 
 # ---------------------------------------------------------------------------
@@ -385,30 +241,13 @@ class TestLiveEvents:
         assert monitor.apply_live_event("five_hour", "nan", "x") is None
 
     @pytest.mark.asyncio
-    async def test_get_snapshot_refreshes_in_background_when_never_fetched(self, monitor):
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)), \
-             patch.object(monitor, "_broadcast", new=AsyncMock()):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tok"
-            snap = await monitor.get_snapshot()
-            # The read returns the cached (empty) snapshot without waiting.
-            assert snap["available"] is False
-            await monitor._refresh_task
-            snap = await monitor.get_snapshot()
-        assert snap["available"] is True and snap["windows"]
-
-    @pytest.mark.asyncio
     async def test_get_snapshot_uses_cache_when_fresh(self, monitor):
         import time as _t
         monitor._windows = [{"type": "five_hour", "utilization": 1.0, "resets_at": None}]
         monitor._fetched_at = _t.time()
         monitor._available = True
-        # If it tried to fetch, the missing httpx patch would still be fine, but
-        # patch direct_oauth to assert get_access_token is NOT called.
-        with patch("app.core.usage_limits.direct_oauth") as oauth:
-            snap = await monitor.get_snapshot(max_age=300)
-            oauth.get_access_token.assert_not_called()
+        snap = await monitor.get_snapshot(max_age=300)
+        assert not monitor.refreshing
         assert snap["windows"][0]["utilization"] == 1.0
 
 
@@ -418,41 +257,9 @@ class TestLiveEvents:
 
 class TestPersistence:
     @pytest.mark.asyncio
-    async def test_fetch_persists_row_with_instance_and_account_meta(self, monitor, mock_db):
-        from app.db import database as db
-        iid = settings.effective_instance_id
-
-        # Seed an active Claude account for this install so metadata resolves.
-        db.create_claude_account(
-            account_id="acct-1", name="Primary", credentials="enc:x",
-            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
-            email="primary@example.com",
-        )
-        db.set_system_setting(f"claude_active_account:{iid}", "acct-1")
-
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tok"
-            await monitor.fetch()
-
-        rows = db.get_all_usage_snapshots()
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["instance_id"] == iid
-        assert row["available"] is True
-        assert row["account_id"] == "acct-1"
-        assert row["account_email"] == "primary@example.com"
-        assert row["account_name"] == "Primary"
-        assert row["windows"]  # normalized windows persisted
-
-    @pytest.mark.asyncio
     async def test_no_credential_persists_unavailable_row(self, monitor, mock_db):
         from app.db import database as db
-        with patch("app.core.usage_limits.direct_oauth") as oauth:
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = None
-            await monitor.fetch()
+        await monitor.fetch()
 
         rows = db.get_all_usage_snapshots()
         assert len(rows) == 1
@@ -532,64 +339,6 @@ class TestPersistence:
         after = monitor._cluster_snapshot()
         assert any(s["instance_id"] == "peer-x" for s in after["snapshots"])
 
-    def test_cluster_rows_carry_each_installs_account_plan(self, monitor, mock_db):
-        """Each install's entry carries ITS OWN account's subscription tier, so
-        the popover can name a remote worker's plan (the local model registry
-        only speaks for the self install)."""
-        from app.db import database as db
-        self_id = settings.effective_instance_id
-
-        db.create_claude_account(
-            account_id="acct-max", name="Primary", credentials="enc:x",
-            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
-            subscription_type="max",
-        )
-        db.create_claude_account(
-            account_id="acct-none", name="Secondary", credentials="enc:y",
-            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
-        )
-        db.register_install("peer-x", "Peer", "http://p:1", "docker", "1", {})
-        db.register_install("peer-y", "Peer Y", "http://p:2", "docker", "1", {})
-        db.upsert_usage_snapshot(
-            self_id, windows=[], available=True, generation=1, fetched_at=1,
-            account_id="acct-max",
-        )
-        db.upsert_usage_snapshot(
-            "peer-x", windows=[], available=True, generation=1, fetched_at=1,
-            account_id="acct-none",
-        )
-        # No account stamped at all (legacy single-account / API-key install).
-        db.upsert_usage_snapshot(
-            "peer-y", windows=[], available=True, generation=1, fetched_at=1,
-        )
-
-        by_id = {s["instance_id"]: s for s in monitor._read_cluster_rows(self_id)}
-        assert by_id[self_id]["plan_type"] == "max"
-        # Account row exists but its plan isn't known yet → null, not missing.
-        assert by_id["peer-x"]["plan_type"] is None
-        # No account_id on the row → null (never a KeyError / stray join hit).
-        assert by_id["peer-y"]["plan_type"] is None
-
-    def test_cluster_rows_survive_a_failing_plan_join(self, monitor, mock_db, monkeypatch):
-        """The plan is advisory: an accounts-table read failure must degrade to
-        null plans, NOT drop the whole cluster read (which would blank the
-        frontend's per-install buckets)."""
-        from app.db import database as db
-        self_id = settings.effective_instance_id
-        db.upsert_usage_snapshot(
-            self_id, windows=[], available=True, generation=1, fetched_at=1,
-            account_id="acct-max",
-        )
-
-        def _raise(*_args, **_kwargs):
-            raise Exception('relation "claude_accounts" does not exist')
-
-        monkeypatch.setattr(db, "get_all_claude_accounts", _raise)
-        rows = monitor._read_cluster_rows(self_id)
-
-        assert rows is not None
-        assert [r["instance_id"] for r in rows] == [self_id]
-        assert rows[0]["plan_type"] is None
 
     def test_cluster_snapshot_omits_keys_on_db_read_failure(self, monitor):
         # Fix 1: a DB read failure must NOT emit `snapshots: []` alongside valid
@@ -609,41 +358,3 @@ class TestPersistence:
         assert "snapshots" not in snap
         assert "self_instance_id" not in snap
 
-    @pytest.mark.asyncio
-    async def test_midflight_generation_bump_does_not_persist_stale(self, monitor, mock_db):
-        from app.db import database as db
-
-        # Prime the persisted row with account A's windows.
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tokA"
-            await monitor.fetch()
-        primed = db.get_all_usage_snapshots()[0]["windows"]
-        assert primed
-
-        async def _get_then_switch(*args, **kwargs):
-            monitor.bump_generation()  # a switch lands mid-flight
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.json.return_value = {"five_hour": {"utilization": 99.0, "resets_at": None}}
-            return resp
-
-        client = MagicMock()
-        client.get = AsyncMock(side_effect=_get_then_switch)
-        ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(return_value=client)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        factory = MagicMock(return_value=ctx)
-
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", factory):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tokA"
-            await monitor.fetch()
-
-        # The discarded straggler (99% used = 1% remaining) never overwrote the
-        # persisted row.
-        row = db.get_all_usage_snapshots()[0]
-        assert row["windows"] == primed
-        assert all(w["utilization"] != 1.0 for w in row["windows"])
