@@ -302,7 +302,7 @@ def test_complete_fingerprints_notice_tool_names_raw_reasoning_and_image_tail() 
         a = loop._prefix_fingerprint
         loop._fingerprint_request(second)
         b = loop._prefix_fingerprint
-        assert a["_version"] == "responses-wire-v2"
+        assert a["_version"] == "responses-wire-v3"
         assert a["_wire_hash"] != b["_wire_hash"]
         assert a["m1"] != b["m1"]
 
@@ -1036,3 +1036,103 @@ def test_the_cache_key_and_image_ratio_are_configurable() -> None:
     assert loaded.to_dict()["cache_key"] == "conv-42"
     # Blank is "unset", not an empty affinity key on every request.
     assert HarnessConfig.from_dict({"cache_key": ""}).cache_key is None
+
+
+# ─── Routing headers in the request identity ─────────────────────────────────
+
+
+class _HeaderMissProvider(_MissProvider):
+    """Full misses, and routing headers the test can change between calls."""
+
+    def __init__(self, tool_calls: int, *, switch_after: int) -> None:
+        super().__init__(tool_calls)
+        self.switch_after = switch_after
+
+    def routing_headers(self, request=None) -> dict[str, str]:
+        account = "acct-a" if self.calls < self.switch_after else "acct-b"
+        return {"chatgpt-account-id": account, "originator": "codex_cli_rs"}
+
+
+async def test_a_header_only_change_is_a_request_identity_change() -> None:
+    """The probe hashed the body only, so a call whose routing header moved
+    read as an unchanged prefix and was blamed on the provider. The header is
+    now part of the request identity and the diagnosis says it moved."""
+    loop = await _run_misses(3, provider=_HeaderMissProvider(3, switch_after=2))
+    usages = [e for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+    diagnoses = [u.raw["cache_miss"] for u in usages]
+
+    assert [d["reason"] for d in diagnoses] == [
+        "no_previous_request",
+        "prefix_grew_only",
+        # Call 3 is the first with the new account header; its body is the
+        # previous body plus one tool round, the same growth as on call 2.
+        "request_settings_changed",
+        "prefix_grew_only",
+    ]
+    assert diagnoses[2]["routing_headers_changed"] is True
+    assert "routing headers" in diagnoses[2]["note"]
+    assert not is_unexplained_miss(diagnoses[2])
+
+
+def test_the_normalized_fingerprint_hashes_routing_headers() -> None:
+    messages = _messages(4)
+    identity = {"provider": "p", "model": "m"}
+    before = fingerprint_prefix(system="s", tools=[], messages=messages,
+                                request_identity=identity,
+                                routing_headers={"session-id": "one"})
+    after = fingerprint_prefix(system="s", tools=[], messages=messages,
+                               request_identity=identity,
+                               routing_headers={"Session-Id": "two"})
+    same = fingerprint_prefix(system="s", tools=[], messages=messages,
+                              request_identity=identity,
+                              routing_headers={"SESSION-ID": "one"})
+    assert before["request"] != after["request"]
+    assert before["request"] == same["request"], "header names are case-insensitive"
+    diagnosis = diagnose_cache_miss(previous=before, current=after,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["reason"] == "request_settings_changed"
+    assert diagnosis["routing_headers_changed"] is True
+
+    # A settings change with the same headers is not a header change.
+    effort = fingerprint_prefix(system="s", tools=[], messages=messages,
+                                request_identity={**identity, "effort": "high"},
+                                routing_headers={"session-id": "one"})
+    diagnosis = diagnose_cache_miss(previous=before, current=effort,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["routing_headers_changed"] is False
+
+    # No headers leaves the identity as it was before headers were hashed, so
+    # fingerprints persisted by an older release still compare equal.
+    bare = fingerprint_prefix(system="s", tools=[], messages=messages,
+                              request_identity=identity)
+    empty = fingerprint_prefix(system="s", tools=[], messages=messages,
+                               request_identity=identity, routing_headers={})
+    assert bare == empty
+    assert "_routing_headers" not in bare
+
+
+async def test_the_responses_client_routing_headers_are_the_ones_it_sends() -> None:
+    from fluid.providers.openai_responses.client import (
+        CODEX_RESPONSES_URL,
+        OpenAIResponsesClient,
+    )
+
+    class _Auth:
+        account_id = "acct-1"
+
+        async def get_access_token(self) -> str:
+            return "secret-token"
+
+        async def on_401(self) -> None:
+            return None
+
+    client = OpenAIResponsesClient(auth=_Auth(), base_url=CODEX_RESPONSES_URL)
+    routing = client.routing_headers()
+    assert routing == {"chatgpt-account-id": "acct-1",
+                       "OpenAI-Beta": "responses=experimental",
+                       "originator": "codex_cli_rs"}
+    sent = await client._headers()
+    assert {k: sent[k] for k in routing} == routing
+    assert "Authorization" not in routing, "credentials never enter the probe"
+    # The public API sends no routing headers today.
+    assert OpenAIResponsesClient(api_key="k").routing_headers() == {}

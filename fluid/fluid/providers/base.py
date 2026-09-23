@@ -71,6 +71,11 @@ class ProviderClient(Protocol):
     # Return ``None`` for models with no known price (never guess) — the engine
     # then falls through to ``fluid.providers.pricing``, which consults the
     # host's pricing resolver and fluid's own cross-provider table.
+    #
+    # Optional routing hook (also opt-in): ``routing_headers(request) ->
+    # dict[str, str]`` returns the non-credential headers that steer a request
+    # to a backend. The engine's cache probe hashes them into the request
+    # identity, so a header-only change is reported as one.
     name: str
     caps: ProviderCaps
 

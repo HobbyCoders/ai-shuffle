@@ -38,7 +38,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
@@ -3323,10 +3323,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         if not self._cache_probe.enabled:
             return
         try:
+            routing_headers = self._routing_headers(request)
             self._prefix_fingerprint = fingerprint_prefix(
                 system=request.system,
                 tools=request.tools,
                 messages=request.messages,
+                routing_headers=routing_headers,
                 request_identity={
                     "provider": self.provider.name, "model": request.model,
                     "max_tokens": request.max_tokens, "effort": request.effort,
@@ -3347,6 +3349,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     request, self._prefix_fingerprint,
                     previous_count=message_count(self._prev_prefix_fingerprint),
                     endpoint=getattr(self.provider, "_base_url", None),
+                    routing_headers=routing_headers,
                 )
             self._prefix_fingerprint["_requested_at"] = str(time.time())
             # The text behind the system hash, kept in-process so a change
@@ -3356,6 +3359,24 @@ class NativeLoop(BackgroundLifecycleMixin):
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             log.debug("prefix fingerprint failed", exc_info=True)
             self._prefix_fingerprint = None
+
+    def _routing_headers(self, request: ProviderRequest) -> dict[str, str]:
+        """The provider's routing headers for ``request``, for the probe.
+
+        Optional provider hook: ``routing_headers(request) -> dict``. Only the
+        non-credential headers that steer the request to a backend belong in
+        it (the cache is per route, so they are part of cache identity). A
+        provider without the hook, or one whose hook fails, contributes none.
+        """
+        hook = getattr(self.provider, "routing_headers", None)
+        if not callable(hook):
+            return {}
+        try:
+            headers = hook(request)
+        except Exception:  # noqa: BLE001 — instrumentation is never fatal
+            log.debug("routing headers for the cache probe failed", exc_info=True)
+            return {}
+        return dict(headers) if isinstance(headers, Mapping) else {}
 
     def _cache_probe_fields(self, usage: dict[str, Any]) -> dict[str, Any]:
         """``prefix_hashes`` (+ ``cache_miss`` on a miss) for a Usage payload.

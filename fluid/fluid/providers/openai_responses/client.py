@@ -102,6 +102,22 @@ class OpenAIResponsesClient:
             or "chatgpt.com" in (self._base_url or "")
         )
 
+    def routing_headers(self, request: ProviderRequest | None = None) -> dict[str, str]:
+        """The headers that pick the backend route, without credentials.
+
+        The engine's cache probe hashes these into the request identity: a
+        cache lives on a route, so a header change can cost the cache even
+        when the body is byte-identical. ``_headers`` sends exactly these.
+        """
+        headers: dict[str, str] = {}
+        if self._auth is not None and self._is_codex_backend():
+            account_id = getattr(self._auth, "account_id", None)
+            if account_id:
+                headers["chatgpt-account-id"] = account_id
+            headers["OpenAI-Beta"] = "responses=experimental"
+            headers["originator"] = "codex_cli_rs"
+        return headers
+
     async def _headers(self) -> dict[str, str]:
         headers = {
             "content-type": "application/json",
@@ -110,14 +126,10 @@ class OpenAIResponsesClient:
         if self._auth is not None:
             token = await self._auth.get_access_token()
             headers["Authorization"] = f"Bearer {token}"
-            if self._is_codex_backend():
-                account_id = getattr(self._auth, "account_id", None)
-                if account_id:
-                    headers["chatgpt-account-id"] = account_id
-                headers["OpenAI-Beta"] = "responses=experimental"
-                headers["originator"] = "codex_cli_rs"
         else:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        # After the token: an auth that loads its account id lazily has it now.
+        headers.update(self.routing_headers())
         return headers
 
     def _pick_client(
