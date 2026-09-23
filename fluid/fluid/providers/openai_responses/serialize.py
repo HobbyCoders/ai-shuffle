@@ -47,8 +47,14 @@ from fluid.messages import (
     ToolUseBlock,
     UnknownBlock,
 )
+from fluid.providers._retry import is_retriable_status
 from fluid.providers._sse import KEEPALIVE_EVENT
-from fluid.providers.base import ProviderRequest, StreamChunk
+from fluid.providers.base import (
+    INTERNAL_EXTRA_PREFIX,
+    ErrorClass,
+    ProviderRequest,
+    StreamChunk,
+)
 
 # Fields echoed on output items that MUST be removed before a stateless
 # (``store: false``) resend — the backend rejects resent items carrying them.
@@ -268,8 +274,73 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
 
     # extra passthrough enables stateful mode (previous_response_id, store:true),
     # tool_choice, temperature, etc. — and can override any default above.
-    body.update(request.extra)
+    # ``_fluid_``-prefixed keys are engine-to-client signals (the turn
+    # marker) and never reach the wire or the cache probe's body hash.
+    body.update({
+        key: value for key, value in request.extra.items()
+        if not key.startswith(INTERNAL_EXTRA_PREFIX)
+    })
     return body
+
+
+# ─── in-stream error classification ──────────────────────────────────────────
+
+# Codes and types the backend sends for a failure that says nothing about the
+# request itself. Codex retries ``server_error``, ``rate_limit_exceeded`` and
+# ``slow_down``; policy, invalid-request and context-length failures stay
+# terminal because the same request fails the same way.
+_RETRIABLE_ERROR_CODES = frozenset((
+    "server_error", "rate_limit_exceeded", "slow_down", "server_is_overloaded",
+))
+_RETRIABLE_ERROR_TYPES = frozenset(("server_error", "service_unavailable_error"))
+
+# Overload is the backend shedding load, and Codex ends the turn on it. Fluid
+# retries it, but at most twice and never sooner than this many seconds, so
+# the retry does not add to the load it is waiting out (experiment E11 tunes
+# both numbers).
+OVERLOAD_CODE = "server_is_overloaded"
+OVERLOAD_MAX_RETRIES = 2
+OVERLOAD_BACKOFF_FLOOR_S = 10.0
+
+
+def _error_fields(err: Any) -> tuple[str | None, str | None, Any]:
+    """``(code, type, status)`` of a provider error object or error payload.
+
+    The ``error`` SSE event can carry its fields at the top level next to
+    ``"type": "error"``, which names the event, not the failure.
+    """
+    if not isinstance(err, dict):
+        return None, None, None
+    code = err.get("code")
+    etype = err.get("type")
+    return (
+        code if isinstance(code, str) else None,
+        etype if isinstance(etype, str) and etype != "error" else None,
+        err.get("status"),
+    )
+
+
+def classify_error(err: Any) -> ErrorClass:
+    """Classify a Responses in-stream error (``response.failed`` / ``error``).
+
+    ``err`` is the provider's error object, or an ``error`` chunk payload
+    built from one; both carry ``code``, ``type`` and ``status``. The
+    Responses lane never drops its affinity key on an error, so
+    ``drop_sticky`` is always False.
+    """
+    code, etype, status = _error_fields(err)
+    if code == OVERLOAD_CODE:
+        return ErrorClass(
+            retriable=True, code=code,
+            backoff_floor=OVERLOAD_BACKOFF_FLOOR_S,
+            max_retries=OVERLOAD_MAX_RETRIES,
+        )
+    retriable = (
+        code in _RETRIABLE_ERROR_CODES
+        or etype in _RETRIABLE_ERROR_TYPES
+        or is_retriable_status(status)
+    )
+    return ErrorClass(retriable=retriable, code=code)
 
 
 # ─── usage / stop-reason mapping ─────────────────────────────────────────────
@@ -654,7 +725,15 @@ class ResponsesStreamNormalizer:
                 or data.get("error")
                 or data
             )
-            out.append(StreamChunk("error", {"message": str(err), "retriable": False}))
+            payload: dict[str, Any] = {
+                "message": str(err), "retriable": classify_error(err).retriable,
+            }
+            code, etype, _status = _error_fields(err)
+            if code is not None:
+                payload["code"] = code
+            if etype is not None:
+                payload["type"] = etype
+            out.append(StreamChunk("error", payload))
             return out
 
         # content_part.added/done, reasoning_summary_part.*, in-progress skeletons

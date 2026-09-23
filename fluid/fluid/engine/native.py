@@ -145,7 +145,12 @@ from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
 )
-from fluid.providers.base import ProviderClient, ProviderRequest
+from fluid.providers.base import (
+    TURN_MARKER_KEY,
+    ProviderClient,
+    ProviderRequest,
+    WireState,
+)
 from fluid.context.environment import environment_note
 from fluid.providers.pricing import PricingResolver
 from fluid.tools import read_window
@@ -996,6 +1001,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Set once a sticky-routed call comes back empty: this loop instance
         # never sends the routing key again (see _agent_loop).
         self._sticky_poisoned = False
+        # Request identity and in-turn routing state, one per (session, role);
+        # handed to the provider on each request (see WireState).
+        self._wire_states: dict[tuple[str, str], WireState] = {}
         # Set once a call 400s with invalid_encrypted_content: this loop
         # instance strips opaque reasoning from every later request instead of
         # paying a doomed call per turn (see _agent_loop; the strip itself is
@@ -2583,7 +2591,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             for promo in promotions:
                 await self._emit_compaction(sid, turn_id, promo)
             projected_prompt = self._estimate_request_input_tokens(history)
-            call_was_sticky = not self._sticky_poisoned and empty_retries == 0
+            drops_sticky = self._drops_sticky_on_empty()
+            call_was_sticky = not self._sticky_poisoned and (
+                empty_retries == 0 or not drops_sticky
+            )
             num_calls += 1
             self._turn_model_calls = num_calls
             result = await self._stream_once(
@@ -2606,8 +2617,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # while dead replicas failed fast, but a replica that HANGS
                 # makes every probe cost a full first-data watchdog timeout. A
                 # new session (or a new process) starts clean.
-                if call_was_sticky:
+                #
+                # That is OpenRouter's policy. The provider decides through
+                # classify_error: the Responses API never drops its
+                # prompt_cache_key, because the key is its cache affinity, and
+                # retrying without it re-bills the whole prefix.
+                if call_was_sticky and drops_sticky:
                     self._sticky_poisoned = True
+                    log.warning(
+                        "Empty completion from %s: dropping the sticky routing "
+                        "key for the rest of session %s (provider_fallback)",
+                        self.provider.name, sid,
+                    )
                 empty_retries += 1
                 # The dud call may still have billed something.
                 self._fold_call_usage(total_usage, result.usage)
@@ -3264,10 +3285,21 @@ class NativeLoop(BackgroundLifecycleMixin):
         return all(key in self.ctx.extra for key in required)
 
     def _build_request(
-        self, history: list[Message], *, sticky: bool = True
+        self, history: list[Message], *, sticky: bool = True,
+        turn_id: str | None = None,
     ) -> ProviderRequest:
         tools_api = self._tools_api()
         plan = plan_cache(self.provider.caps, has_tools=bool(tools_api))
+        routing: dict[str, Any] = {}
+        wire_state: WireState | None = None
+        if self.provider.name == "openai_responses":
+            # Routing identity for the Responses client: this loop's wire
+            # state for the main role, and the turn the call belongs to (a
+            # _fluid_ key, which the serializer keeps off the wire). The
+            # client decides per routing arm whether to use either.
+            wire_state = self._wire_state("main")
+            if turn_id is not None:
+                routing[TURN_MARKER_KEY] = turn_id
         return ProviderRequest(
             model=self.model,
             messages=history,
@@ -3278,8 +3310,25 @@ class NativeLoop(BackgroundLifecycleMixin):
             cache_breakpoints=plan.breakpoints,
             # Per-provider cache-affinity key first, host passthrough on top
             # so the host's keys win.
-            extra={**self._affinity_keys(sticky), **self.request_extra},
+            extra={**self._affinity_keys(sticky), **routing, **self.request_extra},
+            wire_state=wire_state,
         )
+
+    def _wire_state(self, role: str) -> WireState | None:
+        """The loop-owned wire state for ``role`` in the current session.
+
+        Kept per session and role so a turn-state token never crosses from
+        one to the other, even when the provider client is shared.
+        """
+        if self._session is None:
+            return None
+        key = (self._session.session_id, role)
+        state = self._wire_states.get(key)
+        if state is None:
+            state = self._wire_states[key] = WireState(
+                session_id=self._session.session_id, role=role,
+            )
+        return state
 
     def _affinity_key(self) -> str | None:
         """The value the provider's cache-affinity key carries.
@@ -3313,6 +3362,21 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self.provider.name == "openai_responses":
             return {"prompt_cache_key": key}
         return {}
+
+    def _drops_sticky_on_empty(self) -> bool:
+        """Whether an empty completion should drop the affinity key for good.
+
+        The provider's ``classify_error`` decides (its ``drop_sticky``). A
+        provider without one keeps the original behaviour, which drops it.
+        """
+        classify = getattr(self.provider, "classify_error", None)
+        if not callable(classify):
+            return True
+        try:
+            return bool(classify({"kind": "empty_completion"}).drop_sticky)
+        except Exception:  # noqa: BLE001 — a policy lookup never ends a turn
+            log.debug("classify_error failed; keeping the default", exc_info=True)
+            return True
 
     def _fingerprint_request(self, request: ProviderRequest) -> None:
         """Record the prefix fingerprint of the request about to be sent.
@@ -3539,7 +3603,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
     ) -> _CallResult:
         request = self._build_request(
-            history, sticky=sticky
+            history, sticky=sticky, turn_id=turn_id
         )
         self._fingerprint_request(request)
 
