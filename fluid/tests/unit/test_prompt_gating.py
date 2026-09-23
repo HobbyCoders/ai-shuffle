@@ -199,6 +199,31 @@ def test_known_families_keep_their_blocks(model, expected) -> None:
     assert tuple(names[b] for b in model_guidance_blocks(model)) == expected
 
 
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        # The family name follows a vendor or product prefix. The substring
+        # tables matched these; resolution must not drop them to generic.
+        ("zai-glm-4.6", ("act", "discipline")),
+        ("cerebras/zai-glm-4.6", ("act", "discipline")),
+        ("open-mistral-nemo", ("discipline",)),
+        ("Meta-Llama-3.1-8B-Instruct", ("discipline",)),
+        ("lmstudio-community/Meta-Llama-3-8B", ("discipline",)),
+        ("hermes-3-llama-3.1-405b", ("discipline",)),
+    ],
+)
+def test_a_family_name_after_a_prefix_keeps_its_blocks(model, expected) -> None:
+    names = {ACT_GUIDANCE_BLOCK: "act", DISCIPLINE_GUIDANCE_BLOCK: "discipline"}
+    assert resolve_model_family(model).fallback is False
+    assert tuple(names[b] for b in model_guidance_blocks(model)) == expected
+
+
+@pytest.mark.parametrize("model", ["AIDC-AI/Marco-o1", "llama-3-sonnet-distill"])
+def test_a_later_token_never_matches_o_series_or_claude_tier_names(model) -> None:
+    resolved = resolve_model_family(model)
+    assert resolved.family not in ("gpt", "claude")
+
+
 def test_guidance_knob_shapes() -> None:
     assert model_guidance_blocks("claude-sonnet-5", True) == (
         ACT_GUIDANCE_BLOCK, DISCIPLINE_GUIDANCE_BLOCK,

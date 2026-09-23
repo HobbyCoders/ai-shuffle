@@ -283,6 +283,16 @@ _FAMILY_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("llama", _names("llama", "codellama")),
 )
 
+# The same rules for a family name that starts a later token of the model
+# segment. The o-series pattern and the bare Claude tier names are left out:
+# ``marco-o1`` is not OpenAI's and ``llama-3-sonnet-distill`` is not Claude.
+_TOKEN_START = re.compile(r"[-_.]")
+_TOKEN_FAMILY_RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (family, _names("gpt") if family == "gpt"
+     else _names("claude") if family == "claude" else pattern)
+    for family, pattern in _FAMILY_RULES
+)
+
 # Vendor namespaces (``vendor/model`` slugs, Bedrock ``vendor.model`` ids),
 # consulted when the model segment itself names no family.
 _VENDOR_FAMILIES: dict[str, str] = {
@@ -329,7 +339,8 @@ def resolve_model_family(model: str | None) -> ModelFamily:
     """Resolve ``model`` to its guidance family. Total: never returns nothing.
 
     Order: exact id, then a generation pattern, then a family rule over the
-    model segment, then the vendor namespace, then the generic pack.
+    model segment (at its start, then at a later token), then the vendor
+    namespace, then the generic pack.
     """
     vendor, name = _split_model_id(model or "")
     if name in _EXACT_FAMILIES:
@@ -342,6 +353,13 @@ def resolve_model_family(model: str | None) -> ModelFamily:
     for family, pattern in _FAMILY_RULES:
         if pattern.match(name):
             return ModelFamily(family, None, "family")
+    # A family name after a vendor or product prefix inside the model segment:
+    # ``open-mistral-nemo``, ``Meta-Llama-3.1-8B-Instruct``, ``zai-glm-4.6``.
+    for token in _TOKEN_START.finditer(name):
+        rest = name[token.end():]
+        for family, pattern in _TOKEN_FAMILY_RULES:
+            if pattern.match(rest):
+                return ModelFamily(family, None, "family")
     if vendor in _VENDOR_FAMILIES:
         return ModelFamily(_VENDOR_FAMILIES[vendor], None, "vendor")
     return ModelFamily(GENERIC_FAMILY, None, "generic")
