@@ -124,6 +124,18 @@ async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_
     # The second spawn resumed the same CLI conversation.
     assert _flag(_ArgvLoop.argvs[1], "--resume") is not None
 
+    # A reconnect (pool eviction, worker restart) builds the text again from
+    # the same connect-time inputs; it must come out the same bytes too.
+    again = ha.HarnessAdapter()
+    await again.connect(
+        _preset_options(tmp_path, registry=_memory_registry(), github_connected=True)
+    )
+    try:
+        rebuilt = again.engine.append_system_prompt
+    finally:
+        await again.disconnect()
+    assert rebuilt.encode("utf-8") == appends[0].encode("utf-8")
+
 
 # ─── Hooks: the delegated leg feeds the same HookBus the native leg does ────
 

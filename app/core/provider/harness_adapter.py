@@ -407,10 +407,12 @@ class HarnessAdapter(ProviderAdapter):
         """fluid's HookBus for this session, on whichever leg it runs.
 
         Register with ``hooks.on(event, callback)``. The native loop emits
-        PreToolUse, PostToolUse, TurnStart, TurnEnd, SessionStart, PreCompact
-        and SubagentStop into it directly; the delegated loop forwards the
-        claude CLI's matching hooks into the same events with the same payload
-        shape.
+        PreToolUse, PostToolUse, TurnStart, TurnEnd, SessionStart and
+        PreCompact into it directly; the delegated loop forwards the claude
+        CLI's matching hooks into the same events with the same payload shape.
+        SubagentStop arrives only from the delegated leg (the CLI's own
+        subagents): nothing on the app's native leg emits it, since fluid's
+        emitter for it lives in its CLI host, which the app does not run.
         """
         return self._hooks
 
