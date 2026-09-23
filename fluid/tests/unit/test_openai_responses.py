@@ -1122,6 +1122,12 @@ from fluid.providers.openai_responses.client import (
 )
 
 _IDENTITY_HEADERS = ("session-id", "thread-id", "x-client-request-id", TURN_STATE_HEADER)
+# What a Codex-backend request carried before the routing experiment existed.
+_CODEX_BASE_HEADERS = {
+    "host", "accept", "accept-encoding", "connection", "user-agent",
+    "content-length", "content-type", "authorization",
+    "chatgpt-account-id", "openai-beta", "originator",
+}
 
 
 class _CodexAuth:
@@ -1195,9 +1201,15 @@ async def test_routing_arm_decides_which_identity_headers_are_sent(
 
     assert len(recorder.requests) == 3, "a prewarm must not send a request"
     sent = [recorder.headers(i) for i in range(3)]
+    # The exact header names per request: arm A sends today's set, B and D
+    # add the three identity headers, C adds turn-state where it replays one.
+    identity = set() if arm == "A" else {"session-id", "thread-id", "x-client-request-id"}
+    replay = {1} if arm == "C" else set()
+    assert [set(headers) for headers in sent] == [
+        _CODEX_BASE_HEADERS | identity | ({TURN_STATE_HEADER} if i in replay else set())
+        for i in range(3)
+    ]
     if arm == "A":
-        for headers in sent:
-            assert not any(h in headers for h in _IDENTITY_HEADERS)
         return
     for headers in sent:
         assert headers["session-id"] == sid
@@ -1233,11 +1245,40 @@ async def test_routing_arm_a_requests_are_byte_identical_to_the_pre_experiment_s
     assert routed.content == plain.content
     assert routed.headers.raw == plain.headers.raw
     assert TURN_MARKER_KEY.encode() not in routed.content
-    assert set(dict(routed.headers)) == {
-        "host", "accept", "accept-encoding", "connection", "user-agent",
-        "content-length", "content-type", "authorization",
-        "chatgpt-account-id", "openai-beta", "originator",
-    }
+    assert set(dict(routed.headers)) == _CODEX_BASE_HEADERS
+
+
+async def test_client_retries_reuse_the_request_id_and_replay_the_turn_state(
+    _sleeps: list[float],
+) -> None:
+    # Arm C. The first response of the turn hands out a token and then fails
+    # before content; the client's own retry is the same request, so it keeps
+    # its x-client-request-id and replays that token.
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        body = _CREATED + (
+            _failed("server_error", "server_error") if len(requests) == 1
+            else _TEXT + _COMPLETED
+        )
+        return _sse(body, {TURN_STATE_HEADER: f"tok-{len(requests)}"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAIResponsesClient(
+        auth=_CodexAuth(), base_url=CODEX_RESPONSES_URL, http_client=http,
+        routing_arm="C", retry=RetryPolicy(max_retries=3, base_delay=0, jitter=0),
+    )
+    wire = WireState(session_id="ses_x")
+    chunks = [c async for c in client.stream(_routed_request("ses_x", "turn_1", wire))]
+    await http.aclose()
+
+    assert chunks[-1].kind == "message_stop"
+    first, retry = requests
+    assert first.headers["x-client-request-id"] == retry.headers["x-client-request-id"]
+    assert TURN_STATE_HEADER not in first.headers
+    assert retry.headers[TURN_STATE_HEADER] == "tok-1"
+    assert wire.turn_state == "tok-1"
 
 
 def test_routing_arm_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
