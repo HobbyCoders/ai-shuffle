@@ -80,6 +80,7 @@ _LOCAL_SETTING_PATTERNS = [
         r"^claude_active_account(:|$)",
         r"^encryption_salt$",
         r"^owner_preference_identity$",
+        r"^owner_auth_",
         r"^schema_migrations_fingerprint$",
         r"^migration:",
         r"^installation_configured$",

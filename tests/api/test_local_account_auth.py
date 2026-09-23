@@ -37,6 +37,9 @@ def app(monkeypatch):
     monkeypatch.setattr(settings, 'instance_id', 'local-auth-test')
     monkeypatch.setattr(settings, 'cookie_secure', False)
     monkeypatch.setattr(owner_auth.settings, 'shuffle_local_access', True)
+    # These tests cover the LAN owner, which now needs "trusted LAN, no login";
+    # tests/api/test_owner_login.py covers the default (off) and passwords.
+    monkeypatch.setattr(owner_auth, 'trusted_lan', lambda: True)
     monkeypatch.setattr(account_hub.settings, 'mobile_account_hub_url', 'https://hub.example.com')
     monkeypatch.setattr(encryption, '_encryption_key', encryption.Fernet.generate_key())
     monkeypatch.setattr(auth.direct_oauth, 'ensure_fresh_credentials', AsyncMock())
@@ -288,7 +291,7 @@ def test_passwords_legacy_sessions_and_login_endpoints_are_gone(app):
     c = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
     c.cookies.set('session', 'legacy-token')
     assert c.get('/owner').status_code == 403
-    # Shuffle never asks its owner to sign in: no password, account or recovery login route exists.
+    # The retired /api/v1/auth/ login routes stay gone; the owner password lives under /api/v1/owner.
     for path in ('login', 'change-password', 'account/start', 'account/poll', 'recovery'):
         assert c.post('/api/v1/auth/' + path, json={}).status_code == 404
     assert database.get_auth_session('legacy-token') is None

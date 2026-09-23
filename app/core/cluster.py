@@ -276,7 +276,9 @@ def observe_local_advertise_url(request: Request) -> bool:
     from urllib.parse import urlsplit
     from app.core import owner_auth
 
-    if settings.is_local_mode() or not owner_auth.local_access(request):
+    # The caller has already established the owner (LAN trust, or a password
+    # session); here only the direct-listener transport rules matter.
+    if settings.is_local_mode() or not owner_auth.direct_local(request):
         return False
     if (settings.cluster_advertise_url or "").strip() or _get_advertise_override():
         return False

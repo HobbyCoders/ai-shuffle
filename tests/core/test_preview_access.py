@@ -29,6 +29,9 @@ def _isolated_key(tmp_path, monkeypatch):
     # No managed DB in unit tests → the signature alone decides.
     monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
     monkeypatch.setattr(settings, "shuffle_local_access", True)
+    # The direct-LAN owner here needs "trusted LAN, no login" (off by default).
+    from app.core import owner_auth
+    monkeypatch.setattr(owner_auth, "trusted_lan", lambda: True)
 
 
 def _request(path="/", method="GET", *, peer="10.0.0.200", port=8000, ingress="local",
