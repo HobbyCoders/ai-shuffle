@@ -36,6 +36,7 @@ on:
       - Desktop CI
       - Desktop source update checks
       - Instance identity contracts
+      - License server CI
     types: [completed]
   workflow_dispatch:
     inputs:

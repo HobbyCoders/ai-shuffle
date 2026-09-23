@@ -556,6 +556,8 @@ app.include_router(voice.router)
 app.include_router(voice_context.router)
 app.include_router(events_api.router)
 app.include_router(artifacts_api.router)
+from app.api import license as license_api
+app.include_router(license_api.router)
 
 # Preview is opt-in and authenticates branch-specific assets on this listener.
 from app.preview import install_preview

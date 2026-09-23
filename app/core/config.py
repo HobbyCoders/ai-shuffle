@@ -368,6 +368,13 @@ class Settings(BaseSettings):
     mobile_account_hub_verify_ttl_seconds: float = 90.0
     mobile_account_hub_grace_seconds: float = 1800.0
 
+    # Licensing (app/core/license.py). With no license server URL, or with
+    # LICENSE_BETA=true (a release image sets it at build time while the beta
+    # runs), every install gets an always-valid beta lease and nothing is
+    # checked. A release build sets LICENSE_SERVER_URL=https://hobbycoders.com.
+    license_server_url: str = ""
+    license_beta: bool = False
+
     # Security - Request limits
     max_request_body_mb: int = 50  # Maximum request body size in MB
 
