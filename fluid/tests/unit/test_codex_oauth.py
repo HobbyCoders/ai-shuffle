@@ -167,6 +167,20 @@ async def test_get_access_token_refreshes_and_persists_rotation(tmp_path) -> Non
     assert auth.account_id == "acct_new"
 
 
+def test_account_id_is_read_from_the_stored_bundle_before_any_token_fetch(tmp_path) -> None:
+    """The cache probe reads the routing headers, account id included, before
+    the first request fetches a token. An account id that appeared only after
+    that fetch made the first two calls look like a routing change."""
+    path = tmp_path / "codex_auth.json"
+    save_bundle(
+        StoredBundle(access_token="at", refresh_token="rt", account_id="acct_1",
+                     last_refresh=_now_iso()),
+        path,
+    )
+    assert CodexAuth(token_path=path).account_id == "acct_1"
+    assert CodexAuth(token_path=tmp_path / "absent.json").account_id is None
+
+
 async def test_get_access_token_raises_without_stored_bundle(tmp_path) -> None:
     auth = CodexAuth(token_path=tmp_path / "absent.json")
     with pytest.raises(ox.CodexAuthError):

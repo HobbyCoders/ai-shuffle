@@ -145,6 +145,18 @@ def test_a_routing_header_change_is_a_mutation_but_a_settings_switch_is_planned(
     assert cmc.classify_cache_miss(settings) == cmc.PLANNED_REBUILD
 
 
+def test_headers_that_moved_with_a_provider_switch_are_a_planned_rebuild():
+    # Codex backend to the public API: the endpoint changed and the Codex
+    # headers went away in the same request. The user switched; nothing
+    # changed behind their back.
+    switch = {"reason": "request_settings_changed",
+              "routing_headers_changed": True, "other_settings_changed": True}
+    assert cmc.classify_cache_miss(switch) == cmc.PLANNED_REBUILD
+    alone = {"reason": "request_settings_changed",
+             "routing_headers_changed": True, "other_settings_changed": False}
+    assert cmc.classify_cache_miss(alone) == cmc.HARNESS_MUTATION
+
+
 def test_a_system_change_is_a_mutation_even_after_a_compaction():
     diagnosis = {"reason": "prefix_changed", "changed": "tools",
                  "history_rewritten": [{"tier": 1}]}

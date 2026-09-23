@@ -39,6 +39,10 @@ TOOLS_SEGMENT = "tools"
 # Hash of the routing headers alone, next to the ``request`` identity that also
 # covers them, so a diagnosis can say whether the headers were what changed.
 ROUTING_HEADERS_KEY = "_routing_headers"
+# Hash of the request identity without the routing headers, written whenever
+# headers are hashed, so a diagnosis can tell a header-only change from a
+# settings switch (model, endpoint) that also moved the headers.
+REQUEST_SETTINGS_KEY = "_request_settings"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -318,11 +322,13 @@ def fingerprint_prefix(
 
     identity = dict(request_identity or {})
     headers = normalize_routing_headers(routing_headers)
+    settings_hash = _hash_text(_canonical(identity))
     if headers:
-        identity["headers"] = headers
-    out["request"] = _hash_text(_canonical(identity))
-    if headers:
+        out["request"] = _hash_text(_canonical({**identity, "headers": headers}))
+        out[REQUEST_SETTINGS_KEY] = settings_hash
         out[ROUTING_HEADERS_KEY] = _hash_text(_canonical(headers))
+    else:
+        out["request"] = settings_hash
     out[SYSTEM_PARAGRAPHS_KEY] = system_paragraph_hashes(system_text_of(system))
     out["_version"] = "normalized-v2"
     static_tokens = (len(_canonical(system or "")) + len(tools_text)) // 4
@@ -374,10 +380,12 @@ def fingerprint_responses_request(
     fingerprint["_wire_hash"] = digest(body)
     fingerprint["system"] = digest(body.get("instructions"))
     fingerprint["tools"] = digest(body.get("tools"))
-    fingerprint["request"] = digest({
-        "provider": "openai_responses", "endpoint": endpoint, "headers": headers,
+    settings = {
+        "provider": "openai_responses", "endpoint": endpoint,
         **{k: v for k, v in body.items() if k not in {"input", "instructions", "tools"}},
-    })
+    }
+    fingerprint["request"] = digest({**settings, "headers": headers})
+    fingerprint[REQUEST_SETTINGS_KEY] = digest(settings)
     fingerprint[ROUTING_HEADERS_KEY] = digest(headers)
     for count in checkpoint_positions(len(request.messages), (previous_count,)):
         prefix = build_request_body(replace(request, messages=request.messages[:count]))
@@ -422,6 +430,15 @@ def _rewrite_phrase(rewrites: Sequence[Mapping[str, Any]]) -> str:
     joined = ", ".join(parts)
     subject = "compactions were" if len(parts) > 1 else "a compaction was"
     return f"{subject} applied ({joined})"
+
+
+def _settings_hash(fingerprint: Mapping[str, str]) -> str | None:
+    """The request identity without routing headers.
+
+    A fingerprint without headers has no separate key: its ``request`` hash
+    already leaves them out, and hashes the same identity the same way.
+    """
+    return fingerprint.get(REQUEST_SETTINGS_KEY, fingerprint.get("request"))
 
 
 def diagnose_cache_miss(
@@ -484,16 +501,26 @@ def diagnose_cache_miss(
     shared = [k for k in current if k in previous and not k.startswith("_")]
     # Request identity is an eligibility boundary, even if text stayed equal.
     if previous.get("request") != current.get("request"):
-        # Routing headers are part of the identity; say when they moved, since
-        # a header change is a routing change the host did not announce.
+        # Routing headers are part of the identity; say when they moved, and
+        # whether anything else did. Headers that moved on their own are a
+        # routing change the host did not announce; headers that moved with
+        # the model or endpoint are part of that switch.
         headers_changed = (
             previous.get(ROUTING_HEADERS_KEY) != current.get(ROUTING_HEADERS_KEY)
         )
+        settings_changed = _settings_hash(previous) != _settings_hash(current)
+        if headers_changed and settings_changed:
+            note = ("a request setting (model, effort, extra, endpoint) and the "
+                    "routing headers changed")
+        elif headers_changed:
+            note = "the routing headers changed"
+        else:
+            note = "a request setting (model, effort, extra, endpoint) changed"
         return {"reason": "request_settings_changed", "input_tokens": input_tokens,
                 "cache_read_tokens": cache_read_tokens,
                 "routing_headers_changed": headers_changed,
-                "note": ("the routing headers changed" if headers_changed
-                         else "a request setting (model, effort, extra, endpoint) changed")}
+                "other_settings_changed": settings_changed,
+                "note": note}
     shared = [k for k in shared if k != "request"]
     changed: str | None = None
     stable_through: str | None = None

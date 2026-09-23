@@ -1070,7 +1070,8 @@ async def test_a_header_only_change_is_a_request_identity_change() -> None:
         "prefix_grew_only",
     ]
     assert diagnoses[2]["routing_headers_changed"] is True
-    assert "routing headers" in diagnoses[2]["note"]
+    assert diagnoses[2]["other_settings_changed"] is False
+    assert diagnoses[2]["note"] == "the routing headers changed"
     assert not is_unexplained_miss(diagnoses[2])
 
 
@@ -1109,6 +1110,58 @@ def test_the_normalized_fingerprint_hashes_routing_headers() -> None:
                                request_identity=identity, routing_headers={})
     assert bare == empty
     assert "_routing_headers" not in bare
+
+
+def test_headers_that_move_with_a_settings_switch_are_reported_with_it() -> None:
+    """Switching a session from the Codex backend to the public API changes
+    the endpoint and drops the Codex headers in the same request. That is a
+    settings switch, and the diagnosis says the headers were not all that
+    moved, so the host does not file it as an unannounced routing change."""
+    from fluid.context.cache_probe import fingerprint_responses_request
+
+    request = ProviderRequest(model="m", messages=_messages(4))
+    codex = {"chatgpt-account-id": "acct-1", "originator": "codex_cli_rs"}
+
+    def responses(endpoint: str, headers: dict) -> dict:
+        fp = fingerprint_prefix(system=None, tools=[], messages=request.messages,
+                                routing_headers=headers)
+        fingerprint_responses_request(request, fp, previous_count=0,
+                                      endpoint=endpoint, routing_headers=headers)
+        return fp
+
+    before = responses("https://chatgpt.com/backend-api/codex/responses", codex)
+    switched = responses("https://api.openai.com/v1/responses", {})
+    moved = responses("https://chatgpt.com/backend-api/codex/responses",
+                      {**codex, "chatgpt-account-id": "acct-2"})
+
+    diagnosis = diagnose_cache_miss(previous=before, current=switched,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["reason"] == "request_settings_changed"
+    assert diagnosis["routing_headers_changed"] is True
+    assert diagnosis["other_settings_changed"] is True
+    assert "and the routing headers changed" in diagnosis["note"]
+
+    diagnosis = diagnose_cache_miss(previous=before, current=moved,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["routing_headers_changed"] is True
+    assert diagnosis["other_settings_changed"] is False
+
+    # The normalized fingerprint makes the same distinction, including when
+    # one side sent headers and the other sent none.
+    identity = {"provider": "p", "model": "m"}
+    with_headers = fingerprint_prefix(system="s", tools=[], messages=request.messages,
+                                      request_identity=identity, routing_headers=codex)
+    bare = fingerprint_prefix(system="s", tools=[], messages=request.messages,
+                              request_identity=identity)
+    other_model = fingerprint_prefix(system="s", tools=[], messages=request.messages,
+                                     request_identity={**identity, "model": "n"})
+    diagnosis = diagnose_cache_miss(previous=with_headers, current=bare,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["other_settings_changed"] is False
+    diagnosis = diagnose_cache_miss(previous=with_headers, current=other_model,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["routing_headers_changed"] is True
+    assert diagnosis["other_settings_changed"] is True
 
 
 async def test_the_responses_client_routing_headers_are_the_ones_it_sends() -> None:

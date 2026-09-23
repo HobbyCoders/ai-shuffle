@@ -12,7 +12,7 @@ watched as an SLO (fluid v2 design, sections 2.4 and 2.12):
 ``planned_rebuild``
     A rebuild the harness or user announced: the session's first request, a
     compaction that rewrote sent history, or a settings switch (model,
-    effort, endpoint).
+    effort, endpoint), including one that also changed the routing headers.
 ``harness_upgrade``
     The probe's fingerprint format changed between the two calls, which only
     a deploy does.
@@ -24,9 +24,9 @@ watched as an SLO (fluid v2 design, sections 2.4 and 2.12):
     The same shortfall after a gap longer than the cache lifetime.
 ``harness_mutation``
     Something the harness sent changed without an announcement: the system
-    prompt, the tool list, already-sent history, or the routing headers. This
-    class, together with any probe reason this module does not know, is the
-    unexpected-miss count.
+    prompt, the tool list, already-sent history, or the routing headers
+    alone. This class, together with any probe reason this module does not
+    know, is the unexpected-miss count.
 
 The functions here are pure: probe data in, class out.
 """
@@ -86,7 +86,12 @@ def classify_cache_miss(
     if reason == "fingerprint_version_changed":
         return HARNESS_UPGRADE
     if reason == "request_settings_changed":
-        if diagnosis.get("routing_headers_changed"):
+        # Headers that moved on their own are an unannounced routing change.
+        # Headers that moved with the model or endpoint (a provider switch)
+        # are part of that switch.
+        if diagnosis.get("routing_headers_changed") and not diagnosis.get(
+            "other_settings_changed"
+        ):
             return HARNESS_MUTATION
         return PLANNED_REBUILD
     if reason == "history_rewritten":
