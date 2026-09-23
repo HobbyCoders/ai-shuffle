@@ -25,7 +25,7 @@ def get_sensitive_fields(connector_type: str) -> List[str]:
     mapping = {
         "telegram": ["bot_token"],
         "discord": ["bot_token"],
-        "whatsapp": ["access_token"],
+        "whatsapp": ["access_token", "app_secret"],
         "webhook": ["secret", "inbound_token"],
         "slack": ["bot_token", "app_token"],
         "line": ["channel_access_token", "channel_secret"],
@@ -480,6 +480,8 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "phone_number_id", "label": "Phone Number ID", "type": "text", "required": True},
                 {"key": "access_token", "label": "Access Token", "type": "password", "required": True},
                 {"key": "verify_token", "label": "Verify Token", "type": "text", "required": True},
+                {"key": "app_secret", "label": "App Secret", "type": "password", "required": True,
+                 "description": "Meta app secret (App settings > Basic). Every webhook must carry a valid X-Hub-Signature-256 made with it; unsigned webhooks are rejected."},
                 {"key": "allowed_phone_numbers", "label": "Allowed Phone Numbers", "type": "list", "required": False},
                 {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
                  "description": "Restrict AI actions to these categories (empty = all): messages, reactions, templates, media, account"},

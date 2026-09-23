@@ -624,22 +624,33 @@ async def whatsapp_webhook_receive(request: Request):
         matched connectors are kept, so this is no larger than the running set.
         """
         recipients = []
+        rejected = 0
         for connector_id, connector in connector_manager.get_running_connectors("whatsapp"):
             conn_row = database.get_connector(connector_id)
             config = conn_row.get("config", {}) if conn_row else {}
             decrypted = decrypt_config(config, "whatsapp")
 
-            # Verify signature using the connector's app_secret if configured
+            # Every payload must carry a valid Meta signature. Without the app
+            # secret there is no way to tell Meta from anyone who found the URL,
+            # so a connector with no app_secret accepts nothing.
             app_secret = decrypted.get("app_secret")
-            if app_secret and signature:
-                expected = "sha256=" + _hmac.new(
-                    app_secret.encode(), body, _hashlib.sha256
-                ).hexdigest()
-                if not _hmac.compare_digest(expected, signature):
-                    logger.warning(f"WhatsApp webhook signature mismatch for connector {connector_id}")
-                    continue
-            elif app_secret and not signature:
+            if not app_secret:
+                logger.warning(
+                    "WhatsApp webhook rejected for connector %s: no app_secret configured",
+                    connector_id,
+                )
+                rejected += 1
+                continue
+            if not signature:
                 logger.warning(f"WhatsApp webhook missing signature for connector {connector_id}")
+                rejected += 1
+                continue
+            expected = "sha256=" + _hmac.new(
+                app_secret.encode(), body, _hashlib.sha256
+            ).hexdigest()
+            if not _hmac.compare_digest(expected, signature):
+                logger.warning(f"WhatsApp webhook signature mismatch for connector {connector_id}")
+                rejected += 1
                 continue
 
             # Match by phone_number_id if available
@@ -648,9 +659,13 @@ async def whatsapp_webhook_receive(request: Request):
                 continue
 
             recipients.append((connector_id, connector))
-        return recipients
+        return recipients, rejected
 
-    for connector_id, connector in await run_sync(_select_recipients):
+    recipients, rejected = await run_sync(_select_recipients)
+    if rejected and not recipients:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
+
+    for connector_id, connector in recipients:
         any_handled = True
         try:
             await connector.handle_webhook_payload(payload)

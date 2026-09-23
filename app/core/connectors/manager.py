@@ -19,6 +19,32 @@ from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
+# Sender allowlists per messaging connector. An empty allowlist means anyone
+# who finds the bot can start an agent turn and answer its approval prompts.
+_SENDER_ALLOWLIST_KEYS: Dict[str, tuple] = {
+    "telegram": ("allowed_chat_ids",),
+    "discord": ("guild_ids", "allowed_channel_ids"),
+    "whatsapp": ("allowed_phone_numbers",),
+}
+
+
+def warn_if_open_to_everyone(connector_id: str, connector_type: str, config: Dict[str, Any]) -> bool:
+    """Log a warning when a messaging connector starts with no sender allowlist.
+
+    Returns True when it warned. Refusing to start is an owner decision still
+    pending; until then the warning makes the exposure visible in the log.
+    """
+    keys = _SENDER_ALLOWLIST_KEYS.get(connector_type)
+    if not keys or any(config.get(key) for key in keys):
+        return False
+    logger.warning(
+        "Connector %s (%s) has no sender allowlist (%s): anyone who can message "
+        "the bot can run the agent and approve its tool calls. Add allowed IDs "
+        "in the connector settings.",
+        connector_id, connector_type, " or ".join(keys),
+    )
+    return True
+
 
 class ConnectorManager:
     """Central hub for connector lifecycle, event dispatch, and message routing."""
@@ -177,6 +203,7 @@ class ConnectorManager:
         connector_type = prepared["type"]
         config = prepared["config"]
         cls = prepared["cls"]
+        warn_if_open_to_everyone(connector_id, connector_type, config)
 
         # Create the connector instance
         instance = cls(

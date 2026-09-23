@@ -239,25 +239,8 @@ class DiscordConnector(BaseConnector):
                 message.author, guild_id, channel_id, (message.content or "")[:80],
             )
 
-            # Filter by guild IDs
-            allowed_guilds = self.config.get("guild_ids")
-            if allowed_guilds:
-                # Normalize: config may store a bare string instead of a list
-                if isinstance(allowed_guilds, str):
-                    allowed_guilds = [allowed_guilds]
-                if guild_id not in [str(g) for g in allowed_guilds]:
-                    logger.info("Filtered out: guild %s not in allowed_guilds %s", guild_id, allowed_guilds)
-                    return
-
-            # Filter by channel IDs
-            allowed_channels = self.config.get("allowed_channel_ids")
-            if allowed_channels:
-                # Normalize: config may store a bare string instead of a list
-                if isinstance(allowed_channels, str):
-                    allowed_channels = [allowed_channels]
-                if channel_id not in [str(c) for c in allowed_channels]:
-                    logger.info("Filtered out: channel %s not in allowed_channel_ids %s", channel_id, allowed_channels)
-                    return
+            if not self._location_allowed(guild_id, channel_id):
+                return
 
             text = message.content or ""
 
@@ -285,6 +268,26 @@ class DiscordConnector(BaseConnector):
         except Exception as exc:
             logger.exception("Error handling Discord message: %s", exc)
 
+    def _location_allowed(self, guild_id: Optional[str], channel_id: Optional[str]) -> bool:
+        """True when the guild and channel pass the connector's allowlists."""
+        allowed_guilds = self.config.get("guild_ids")
+        if allowed_guilds:
+            # Normalize: config may store a bare string instead of a list
+            if isinstance(allowed_guilds, str):
+                allowed_guilds = [allowed_guilds]
+            if guild_id not in [str(g) for g in allowed_guilds]:
+                logger.info("Filtered out: guild %s not in allowed_guilds %s", guild_id, allowed_guilds)
+                return False
+
+        allowed_channels = self.config.get("allowed_channel_ids")
+        if allowed_channels:
+            if isinstance(allowed_channels, str):
+                allowed_channels = [allowed_channels]
+            if channel_id not in [str(c) for c in allowed_channels]:
+                logger.info("Filtered out: channel %s not in allowed_channel_ids %s", channel_id, allowed_channels)
+                return False
+        return True
+
     async def _on_interaction_handler(self, interaction: Any) -> None:
         """Handle button interactions for permission responses."""
         try:
@@ -292,6 +295,20 @@ class DiscordConnector(BaseConnector):
                 return
 
             custom_id = interaction.data.get("custom_id", "")
+
+            # Approve/Deny buttons are clickable by anyone who can see the
+            # message, so the same allowlists as for messages apply here.
+            if custom_id.startswith(("actreq:", "perm:")):
+                guild_id = getattr(interaction, "guild_id", None)
+                channel_id = getattr(interaction, "channel_id", None)
+                if not self._location_allowed(
+                    str(guild_id) if guild_id is not None else None,
+                    str(channel_id) if channel_id is not None else None,
+                ):
+                    logger.warning(
+                        "Ignoring Discord approval click from a non-allowed guild/channel"
+                    )
+                    return
 
             # Destructive-action approval buttons (action gateway)
             if custom_id.startswith("actreq:"):

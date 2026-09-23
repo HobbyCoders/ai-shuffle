@@ -6,7 +6,7 @@
       "module": "telegram",
       "class": "TelegramConnector",
       "files": {
-        "telegram.py": "3c4229bb9a82a48433710abf0803d5da7ac0cc0bf65343e33737bf29c75dacb0",
+        "telegram.py": "7c425b29734c5bed2dc58fb6cc967f173d684c64e50d24f1ba7c3468d8ce74ad",
         "telegram_actions.py": "6a14a672d0ae8a797b4d8874a7fe4fd0dbfbd2928088624a4dccf1758927ae72"
       }
     },
@@ -14,7 +14,7 @@
       "module": "discord_connector",
       "class": "DiscordConnector",
       "files": {
-        "discord_connector.py": "25d63b387a127c76c49391b0146b6f77aa6ad2bf734b270e63f12e09eada8e30",
+        "discord_connector.py": "c50d78b20538938dc4e5e91c2a1eb76c78e58923ae71dc46aa6ceac0ec626e33",
         "discord_actions.py": "406c47ebec2c4516a6c409b0a324062227db94bff837a4775a2e7ad0cb3549ff"
       }
     },
