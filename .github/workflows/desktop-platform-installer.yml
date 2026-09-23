@@ -1,0 +1,100 @@
+name: Publish macOS or Linux installer
+
+# Publishes a macOS or Linux desktop build for the update check at
+# /v1/desktop/installers. Order:
+#   1. Run "Build macOS desktop artifact" or "Build Linux desktop artifact"
+#      with "Use workflow from" set to the release tag (vX.Y.Z) and the same
+#      version, so the artifact name carries the tag's commit.
+#   2. Within a day (the artifact expires after one), run this workflow, also
+#      from the tag, with the platform and that build's run ID.
+# It uploads the packages to the tag's GitHub release, then
+# desktop/scripts/publish-platform-installer.mjs checks and signs the installer
+# and points the hub at it. The Windows installer path is unchanged.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to publish
+        required: true
+        type: choice
+        options: [mac, linux]
+      build_run_id:
+        description: Run ID of the desktop-macos-artifact.yml or desktop-linux-artifact.yml build of this tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: desktop-platform-installer-${{ inputs.platform }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Holds DESKTOP_APPLICATION_SIGNING_KEY, CLOUDFLARE_API_TOKEN,
+    # CLOUDFLARE_ACCOUNT_ID and ACCOUNT_HUB_DATABASE_ID, and only runs for v* tags.
+    environment: release-signing
+    timeout-minutes: 20
+    env:
+      PLATFORM: ${{ inputs.platform }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Require a stable release tag
+        if: github.ref_type != 'tag'
+        run: |
+          echo '::error::Run this workflow from a vX.Y.Z tag'
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Name the build artifact of this tag
+        id: artifact
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '::error::Stable vX.Y.Z tag required'; exit 1; }
+          [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]] || { echo '::error::Invalid build run ID'; exit 1; }
+          prefix=$([ "$PLATFORM" = mac ] && echo macos || echo linux)
+          revision=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          echo "name=$prefix-desktop-${RELEASE_TAG#v}-$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: artifact
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.build_run_id }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: android/hub/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: android/hub
+      - name: Upload packages to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd artifact && sha256sum --check SHA256SUMS)
+          suffix=$([ "$PLATFORM" = mac ] && echo macos || echo linux)
+          # Windows already publishes SHA256SUMS on the same release.
+          cp artifact/SHA256SUMS "artifact/SHA256SUMS-$suffix"
+          existing=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+          shopt -s nullglob
+          for file in artifact/*.dmg artifact/*.zip artifact/*.AppImage artifact/*.deb artifact/*-build-provenance.json "artifact/SHA256SUMS-$suffix"; do
+            if grep -Fxq "$(basename "$file")" <<< "$existing"; then
+              echo "$(basename "$file") is already on the release; the publisher checks its bytes."
+            else
+              gh release upload "$RELEASE_TAG" "$file"
+            fi
+          done
+      - name: Sign and point the hub at the installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
+        run: node desktop/scripts/publish-platform-installer.mjs "$PLATFORM" artifact "$RELEASE_TAG"

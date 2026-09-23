@@ -159,10 +159,14 @@ download folder.
   "Allow updates" setting still stops checks and installs. The signing key is
   the `DESKTOP_APPLICATION_SIGNING_KEY` secret used by `desktop-source.yml`.
 - **Preview builds** never check for updates.
-- **macOS and Linux** have no in-app update feed yet: the hub serves only the
-  Windows installer and the Windows source feed. Users download a new DMG,
-  AppImage or deb. A signed installer manifest per platform on the hub is the
-  missing piece.
+- **macOS and Linux**: the hub now lists a signed installer per platform at
+  `https://hobbycoders.com/v1/desktop/installers` (see
+  `android/hub/README.md`, "Installers per platform") and serves the bytes at
+  `/v1/desktop/installer/mac` and `/v1/desktop/installer/linux`. The app does
+  not read it yet: the desktop updater still has to check it on launch and
+  every 24 hours (D22), verify `signature` over `payload` with
+  `build/application-update-key.pem`, compare the signed version, and point
+  the user at the download, checking its size and SHA-256.
 
 ## Release steps
 
@@ -173,8 +177,15 @@ download folder.
    `developer-id+notary-api-key` or `developer-id+notary-apple-id` and that the
    Gatekeeper step passed.
 3. Run `desktop-linux-artifact.yml` with the same version.
-4. Download both artifacts and attach the DMG, ZIP, AppImage, deb and each
-   `SHA256SUMS` (renamed per platform) to the GitHub release.
+   Run both builds with **Use workflow from** set to the tag, so the artifact
+   name carries the tag's commit.
+4. Within a day (the artifacts expire), run `desktop-platform-installer.yml`
+   from the tag once per platform (`mac`, `linux`) with that build's run ID. It
+   attaches the DMG, ZIP, AppImage, deb, provenance and `SHA256SUMS-macos` /
+   `SHA256SUMS-linux` to the release, then signs the DMG or AppImage entry and
+   points `/v1/desktop/installers` at it. It refuses a Mac build that is not
+   notarized, an artifact built from another commit or version, and a
+   version older than the one already published.
 5. Install each on a clean machine. Windows: the installer's Properties >
    Digital Signatures tab shows the publisher. macOS: it opens without
    `xattr` or right-click > Open.
