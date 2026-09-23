@@ -159,6 +159,7 @@ def normalize_model_id(model: str | None) -> str:
 _XAI = "docs.x.ai/docs/models, 2026-09-04; short-context tier (<200k prompt)"
 _ZAI = "docs.z.ai/guides/overview/pricing, 2026-09-04"
 _OPENAI_6 = "developers.openai.com/api/docs/pricing, 2026-09-04; short-context tier"
+# The gpt-6 rows (astra, sol, luna) as the pricing page read on this date.
 _OPENAI_6_LUNA = "developers.openai.com/api/docs/pricing, 2026-09-23; short-context tier"
 
 PRICES: list[tuple[str, ModelPrice]] = [
@@ -194,7 +195,22 @@ PRICES: list[tuple[str, ModelPrice]] = [
     ("glm-4.5", ModelPrice(input=0.60, cached_input=0.11, output=2.20, source=_ZAI)),
     ("glm", ModelPrice(source="Z.AI — rate not sourced; host must supply")),
     # ── OpenAI ids newer than the openai_responses table ─────────────────
-    ("gpt-6-astra", ModelPrice(input=10.00, cached_input=1.00, output=50.00, source=_OPENAI_6)),
+    # astra's row had no cache_write, so its writes billed at the $10 input
+    # rate instead of the listed $12.50.
+    (
+        "gpt-6-astra",
+        ModelPrice(
+            input=10.00, cached_input=1.00, cache_write=12.50, output=50.00,
+            source=_OPENAI_6_LUNA,
+        ),
+    ),
+    (
+        "gpt-6-sol",
+        ModelPrice(
+            input=2.00, cached_input=0.20, cache_write=2.50, output=10.00,
+            source=_OPENAI_6_LUNA,
+        ),
+    ),
     # Before this row luna fell through to the unpriced "gpt-6" row below,
     # so every luna call recorded no cost and the host stored $0.
     (

@@ -48,6 +48,10 @@ _PRICES: list[tuple[str, float, float]] = [
     ("claude-haiku", 1.0, 5.0),
 ]
 
+# Published as multipliers of the base input rate for every model, with no
+# per-model 1-hour rate listed (prompt-caching docs: "1.25x for 5-minute TTL,
+# 2x for 1-hour TTL"). So Opus 5.5's 1-hour write is $8/MTok by that rule;
+# the per-model table lists only input, output and cache-read overrides.
 _CACHE_WRITE_MULTIPLIER = 1.25  # 5m ephemeral
 _CACHE_WRITE_1H_MULTIPLIER = 2.0  # 1h ephemeral
 _CACHE_READ_MULTIPLIER = 0.1

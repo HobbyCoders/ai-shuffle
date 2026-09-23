@@ -43,7 +43,26 @@ def test_gpt_6_luna_prices_through_an_aggregator_prefix() -> None:
 def test_the_luna_row_does_not_disturb_its_neighbours() -> None:
     assert estimate_cost("gpt-6-astra", _only("output_tokens")) == pytest.approx(50.00)
     # An unsourced gpt-6 id still reports no cost rather than luna's rate.
-    assert estimate_cost("gpt-6-sol", _only("output_tokens")) is None
+    assert estimate_cost("gpt-6-nova", _only("output_tokens")) is None
+
+
+# ─── gpt-6-astra cache writes and gpt-6-sol ─────────────────────────────────
+
+
+def test_gpt_6_astra_cache_writes_bill_at_the_listed_write_rate() -> None:
+    # The row had no cache_write, so writes billed at the $10 input rate.
+    assert estimate_cost("gpt-6-astra", _only("cache_creation_input_tokens")) == pytest.approx(12.50)
+    assert estimate_cost("gpt-6-astra", _only("cache_read_input_tokens")) == pytest.approx(1.00)
+    assert estimate_cost("gpt-6-astra", _only("input_tokens")) == pytest.approx(10.00)
+
+
+def test_gpt_6_sol_row_is_priced() -> None:
+    price = resolve_price("gpt-6-sol")
+    assert price is not None and price.priced
+    assert (price.input, price.cached_input, price.cache_write, price.output) == (
+        2.00, 0.20, 2.50, 10.00,
+    )
+    assert estimate_cost("openai/gpt-6-sol", _only("output_tokens")) == pytest.approx(10.00)
 
 
 # ─── Claude Opus 5.5 ─────────────────────────────────────────────────────────
