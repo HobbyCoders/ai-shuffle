@@ -99,9 +99,6 @@ def _engine_patches(
     stack.enter_context(patch.object(
         qe, "get_profile", return_value={"id": "default", "config": profile_config}
     ))
-    oauth = MagicMock()
-    oauth.ensure_fresh_credentials = AsyncMock()
-    stack.enter_context(patch.object(qe, "direct_oauth", new=oauth))
     options = MagicMock()
     options.include_partial_messages = False
     options.cwd = cwd

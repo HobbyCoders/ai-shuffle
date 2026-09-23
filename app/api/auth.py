@@ -21,7 +21,6 @@ from app.core.auth import (
     reset_github_auth_cache,
     set_github_auth_cached,
 )
-from app.core.oauth import direct_oauth
 from app.core import audit_service
 from app.core import auth as _auth_module
 from app.db import database as db
@@ -38,15 +37,6 @@ _auth_module.set_server_instance_id(_SERVER_INSTANCE_ID)
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
 
-def _sync_back_active_account_safe() -> None:
-    """Fire the multi-account sync-back defensively (never breaks status)."""
-    try:
-        from app.core.claude_accounts import sync_back_active_account
-        sync_back_active_account()
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Claude account sync-back on status failed (ignored): {e}")
-
-
 def _has_provider_credential_safe() -> bool:
     """Whether any enabled model-provider row carries a stored credential.
 
@@ -60,15 +50,6 @@ def _has_provider_credential_safe() -> bool:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Provider-credential probe failed (ignored): {e}")
         return False
-
-
-def _seed_claude_account_safe() -> None:
-    """Seed the default Claude account after the encryption key becomes available."""
-    try:
-        from app.core.claude_accounts import seed_from_credentials_file
-        seed_from_credentials_file()
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Claude account seed failed (ignored): {e}")
 
 
 def get_session_token(request: Request) -> Optional[str]:
@@ -357,15 +338,10 @@ async def get_auth_status(request: Request, response: Response = None):
         if token and not owner_auth.local_session(token) and response is not None:
             # Retired cookies must not strand the local browser's WebSocket.
             response.delete_cookie('session')
-    # Self-heal an expiring OAuth token before reporting status, so the UI doesn't
-    # flip to "unauthorized" when a valid refresh token could silently renew it.
-    await direct_oauth.ensure_fresh_credentials()
-    # Observe the on-disk credentials file back into the active account row. This
-    # catches CLI subprocesses self-refreshing the shared file (which bypasses
-    # the post-write hook). The mtime gate makes it a stat() no-op normally.
-    _sync_back_active_account_safe()
-
-    claude_authenticated = auth_service.is_claude_authenticated()
+    # The stock CLI's own answer (`claude auth status`, briefly cached). The CLI
+    # owns and refreshes its token; nothing here reads or renews it.
+    cli = await claude_cli_summary()
+    claude_authenticated = bool(cli["signed_in"])
 
     # ``gh auth status`` is a subprocess with a 10s timeout and this endpoint is
     # polled — run it off the event loop, and only when the shared TTL cache has
@@ -387,9 +363,7 @@ async def get_auth_status(request: Request, response: Response = None):
     pref_identity = (await run_sync(principal_preference_identity, preference_principal)
                      if preference_principal else None)
 
-    # What the stock CLI reports about its own login. Account details only go
-    # to a caller who is signed in to this worker.
-    cli = await claude_cli_summary()
+    # Account details only go to a caller who is signed in to this worker.
     if not (is_admin_authenticated or is_paired_authenticated):
         cli = {"installed": cli["installed"], "signed_in": cli["signed_in"]}
 
@@ -413,11 +387,8 @@ async def get_auth_status(request: Request, response: Response = None):
         # first-run setup gate on THIS, not on claude auth alone; Claude-CLI
         # auth remains required only for claude-subscription agents.
         "has_any_credential": claude_authenticated or _has_provider_credential_safe(),
-        # Honest token-validity signal: True only when the on-disk Claude OAuth
-        # token is present AND not expired. Lets the UI surface a "token expired —
-        # reconnect" state even though `claude_authenticated` stays True (file
-        # exists) for back-compat.
-        "claude_token_valid": auth_service.get_claude_token_status()["token_valid"],
+        # Kept for older clients: the CLI reports one signed-in state.
+        "claude_token_valid": claude_authenticated,
         "claude_cli": cli,
         "github_authenticated": github_authenticated,
         "onboarding_complete": auth_service.is_onboarding_complete(),
@@ -534,12 +505,14 @@ async def claude_cli_status_route(refresh: bool = False, token: str = Depends(re
 @router.get("/claude/status")
 async def claude_auth_status(refresh: bool = False, token: str = Depends(require_auth)):
     """Get Claude CLI authentication status"""
-    # Renew an expiring OAuth token (using the refresh token) before reporting,
-    # so a short-lived access token doesn't surface as "expired" unnecessarily.
-    await direct_oauth.ensure_fresh_credentials()
-    _sync_back_active_account_safe()
-
-    info = auth_service.get_claude_auth_info()
+    cli = await claude_cli_summary(force=refresh)
+    info = {
+        "authenticated": bool(cli["signed_in"]),
+        "token_valid": bool(cli["signed_in"]),
+        "expired": False,
+        "expires_at": None,
+        "has_refresh_token": None,
+    }
     # Extend with multi-account fields (keeping every existing field intact).
     try:
         from app.core import claude_accounts as _accounts
@@ -549,7 +522,7 @@ async def claude_auth_status(refresh: bool = False, token: str = Depends(require
         logger.warning(f"Could not attach Claude account info to status: {e}")
         info.setdefault("active_account", None)
         info.setdefault("accounts_count", 0)
-    info["cli"] = await claude_cli_summary(force=refresh)
+    info["cli"] = cli
     return info
 
 
@@ -704,8 +677,8 @@ async def claude_login_complete(request: Request, token: str = Depends(require_a
 
 @router.post("/claude/logout")
 async def claude_logout(token: str = Depends(require_admin)):
-    """Logout from Claude CLI"""
-    return auth_service.claude_logout()
+    """Sign the CLI out with `claude auth logout` (never touches its files)."""
+    return await run_sync(auth_service.claude_logout)
 
 
 # =========================================================================
@@ -846,11 +819,12 @@ async def auth_diagnostics(token: str = Depends(require_admin)):
     diagnostics["claude_dir"] = str(claude_dir)
     diagnostics["claude_dir_exists"] = claude_dir.exists()
 
-    if claude_dir.exists():
-        creds_file = claude_dir / '.credentials.json'
-        diagnostics["claude_credentials_exists"] = creds_file.exists()
-        if creds_file.exists():
-            diagnostics["credentials_file_size"] = creds_file.stat().st_size
+    # Sign-in state comes from the CLI itself, not from its files.
+    cli = await claude_cli_summary(force=True)
+    diagnostics["claude_cli_signed_in"] = cli["signed_in"]
+    diagnostics["claude_cli_version"] = cli["cli_version"]
+    if cli["error"]:
+        diagnostics["claude_cli_error"] = cli["error"]
 
     # Check process user
     try:

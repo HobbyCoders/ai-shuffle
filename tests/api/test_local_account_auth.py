@@ -39,8 +39,6 @@ def app(monkeypatch):
     monkeypatch.setattr(owner_auth.settings, 'shuffle_local_access', True)
     monkeypatch.setattr(account_hub.settings, 'mobile_account_hub_url', 'https://hub.example.com')
     monkeypatch.setattr(encryption, '_encryption_key', encryption.Fernet.generate_key())
-    monkeypatch.setattr(auth.direct_oauth, 'ensure_fresh_credentials', AsyncMock())
-    monkeypatch.setattr(auth, '_sync_back_active_account_safe', lambda: None)
     monkeypatch.setattr(auth, 'is_github_authenticated_cached', lambda *args: False)
     monkeypatch.setattr(auth.auth_service, 'is_claude_authenticated', lambda: False)
     monkeypatch.setattr(auth.auth_service, 'get_claude_token_status', lambda: {'token_valid': False})

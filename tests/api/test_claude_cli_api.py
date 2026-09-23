@@ -18,6 +18,7 @@ def signed_in(monkeypatch):
         calls.append(1)
         return status
     monkeypatch.setattr(cs, "probe", fake_probe)
+    cs.invalidate()  # the app's startup probe may have run first
     return calls
 
 

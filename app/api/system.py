@@ -44,6 +44,12 @@ def desktop_attach_hash() -> Optional[str]:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _claude_cli_signed_in_cached() -> bool:
+    from app.core import claude_cli_status
+    status = claude_cli_status.peek()
+    return bool(status and status.signed_in)
+
+
 @router.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
 async def health_check():
     """Health check endpoint (no auth required)"""
@@ -53,7 +59,9 @@ async def health_check():
         "version": settings.version,
         "authenticated": False,  # Not checking session for health
         "setup_required": auth_service.is_setup_required(),
-        "claude_authenticated": auth_service.is_claude_authenticated()
+        # The last `claude auth status` answer, without running the CLI on a
+        # polled endpoint (startup runs the first probe).
+        "claude_authenticated": _claude_cli_signed_in_cached(),
     }
     attach = desktop_attach_hash()
     if attach is not None:

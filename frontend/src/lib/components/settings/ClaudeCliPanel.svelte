@@ -21,6 +21,7 @@
 		cancelClaudeCliLogin,
 		claudePlanLabel,
 		getClaudeCliStatus,
+		logoutClaudeCli,
 		readClaudeCliLogin,
 		sendClaudeCliLogin,
 		startClaudeCliLogin,
@@ -146,6 +147,22 @@
 		}
 	}
 
+	let signingOut = $state(false);
+	async function signOut() {
+		if (signingOut) return;
+		signingOut = true;
+		loginError = '';
+		try {
+			const result = await logoutClaudeCli();
+			if (!result.success) loginError = result.error || 'The CLI could not sign out.';
+		} catch (e) {
+			loginError = getErrorMessage(e, 'The CLI could not sign out.');
+		} finally {
+			signingOut = false;
+			await load(true);
+		}
+	}
+
 	async function closeTerminal() {
 		clearTimeout(pollTimer);
 		if (running) {
@@ -218,7 +235,7 @@
 			<p class="hint pad" role="status">{status.error}</p>
 		{/if}
 		{#if status.signed_in}
-			<p class="hint pad">Agents in subscription mode run on this account's plan. To sign out or switch accounts, run <code>{status.login.logout_command}</code> on the worker, then sign in again.</p>
+			<p class="hint pad">Agents in subscription mode run on this account's plan. To switch accounts, sign out (the CLI's <code>{status.login.logout_command}</code>), then sign in again.</p>
 		{/if}
 
 		<div class="actions">
@@ -226,6 +243,9 @@
 				<button type="button" class={btnPrimary} onclick={startLogin}>
 					<SquareTerminal size={14} /> Sign in
 				</button>
+			{/if}
+			{#if status.signed_in && isAdmin}
+				<button type="button" class={btn} onclick={signOut} disabled={signingOut}>Sign out</button>
 			{/if}
 			<button type="button" class={btn} onclick={() => load(true)} disabled={checking}>
 				{#if checking}<Loader2 size={14} class="spin" />{:else}<RefreshCw size={14} />{/if} Check again
@@ -267,6 +287,8 @@
 				{#if loginError}<p class="msg err" role="alert">{loginError}</p>{/if}
 			</div>
 		{/if}
+
+		{#if loginError && !terminalOpen}<p class="msg err pad" role="alert">{loginError}</p>{/if}
 
 		{#if !status.signed_in && !terminalOpen}
 			<div class="howto" data-testid="claude-cli-instructions">

@@ -98,9 +98,6 @@ def _chat_patches(stack: ExitStack, pool: _StubPool):
         return {"id": "row-1"}
 
     stack.enter_context(patch.object(qe, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
-    oauth = MagicMock()
-    oauth.ensure_fresh_credentials = AsyncMock()
-    stack.enter_context(patch.object(qe, "direct_oauth", new=oauth))
     options = MagicMock()
     options.include_partial_messages = True  # exercise the StreamEvent path
     options.cwd = None

@@ -90,6 +90,15 @@ it('tells desktop users to run the command in their own terminal', async () => {
 	expect(screen.queryByRole('button', { name: /Sign in/ })).toBeNull();
 });
 
+it('Sign out runs the CLI logout and asks again', async () => {
+	mocks.get.mockResolvedValueOnce(status({ signed_in: true, email: 'me@example.com' })).mockResolvedValue(status());
+	mocks.post.mockResolvedValue({ success: true });
+	render(ClaudeCliPanel, { isAdmin: true });
+	await fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+	expect(mocks.post).toHaveBeenCalledWith('/auth/claude/logout', {});
+	await waitFor(() => expect(screen.getByTestId('claude-cli-state').textContent?.trim()).toBe('Not signed in'));
+});
+
 it('reports a missing CLI and offers the API key', async () => {
 	const onUseApiKey = vi.fn();
 	mocks.get.mockResolvedValue(status({ installed: false, signed_in: null, cli_version: null, binary_path: null, error: 'Claude Code CLI not found.' }));

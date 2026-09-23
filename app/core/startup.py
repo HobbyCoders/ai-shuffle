@@ -202,25 +202,8 @@ def init_core() -> None:
 
 def init_encryption_and_sessions() -> None:
     """Phase 2: Initialize encryption key and manage sessions."""
-    # Register the multi-account sync-back hook so a rotated credentials file
-    # (login/refresh/switch) is persisted back into the active account row. The
-    # hook is defensive and can never fail a credential write.
-    try:
-        from app.core.oauth import set_post_write_hook
-        from app.core.claude_accounts import sync_back_active_account
-        set_post_write_hook(sync_back_active_account)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Could not register Claude account post-write hook: {e}")
-
     if encryption.initialize_server_key(database):
         logger.info("Credential storage initialized from private server key custody")
-        # Encryption is available — seed the default account from any existing
-        # credentials file (idempotent, no-op if accounts already exist).
-        try:
-            from app.core.claude_accounts import seed_from_credentials_file
-            seed_from_credentials_file()
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Claude account seed on startup failed (ignored): {e}")
     else:
         # Keep the local UI available for an honest recovery status. Auth and
         # secret writers must fail closed; sign-in cannot unlock server custody.
@@ -236,10 +219,16 @@ def init_workspace() -> None:
 
 def check_prerequisites() -> None:
     """Phase 4: Verify external dependencies are available."""
-    if auth_service.is_claude_authenticated():
-        logger.info("Claude CLI: Authenticated")
+    # Ask the CLI itself (`claude auth status`); this also warms the probe
+    # cache that /health and the runner capabilities read.
+    from app.core import claude_cli_status
+    cli = claude_cli_status.get_status(force=True)
+    if cli.signed_in:
+        logger.info("Claude Code CLI %s: signed in", cli.cli_version or "")
+    elif cli.installed:
+        logger.warning("Claude Code CLI: not signed in. Sign in from Settings or run `claude auth login` on this worker")
     else:
-        logger.warning("Claude CLI: Not authenticated - run 'claude login' in container")
+        logger.warning("Claude Code CLI: %s", cli.error or "not installed")
 
     if auth_service.is_setup_required():
         logger.info("Local setup required - visit /setup on this computer or your LAN")

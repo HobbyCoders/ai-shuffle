@@ -78,6 +78,11 @@ export function cancelClaudeCliLogin(): Promise<ClaudeCliLoginState> {
 	return api.post('/auth/claude/cli-login/cancel', {});
 }
 
+/** Sign the CLI out with its own `claude auth logout`. */
+export function logoutClaudeCli(): Promise<{ success: boolean; message?: string; error?: string }> {
+	return api.post('/auth/claude/logout', {});
+}
+
 /** Human name for the plan code the CLI prints, when it prints one. */
 export function claudePlanLabel(plan: string | null | undefined): string | null {
 	const value = (plan ?? '').trim().toLowerCase();

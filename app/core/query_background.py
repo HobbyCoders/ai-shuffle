@@ -28,7 +28,6 @@ from app.core.session_pool import (
     requires_reconnect,
     reconnect_option_names,
 )
-from app.core.oauth import direct_oauth
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.permission_handler import permission_handler
@@ -161,11 +160,6 @@ async def _run_background_query_impl(
         entity_id=str(user_msg["id"]),
         data=user_msg
     )
-
-    # Keep the Claude OAuth token alive: refresh it now if it's at/near expiry so
-    # the subprocess we're about to spawn/resume authenticates with a valid token
-    # instead of 401-ing. No-op when the token is still valid or on API-key auth.
-    await direct_oauth.ensure_fresh_credentials()
 
     # Build options + wire plugin/DB hooks (incl. blocking PreToolUse guards)
     # through the shared sdk_options seam — previously only the WebSocket path

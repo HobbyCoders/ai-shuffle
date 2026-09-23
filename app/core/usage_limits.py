@@ -328,12 +328,6 @@ class UsageLimitsMonitor:
         gen = self._generation
         self._attempted_at = time.time()
 
-        try:
-            # Keep the on-disk token fresh (no-op in API-key mode / when valid).
-            await direct_oauth.ensure_fresh_credentials()
-        except Exception:  # noqa: BLE001 — never let refresh break the poll
-            pass
-
         token = direct_oauth.get_access_token()
         if not token:
             # No OAuth credential (e.g. API-key mode or logged out). Report

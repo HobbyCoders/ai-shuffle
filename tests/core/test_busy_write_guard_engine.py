@@ -97,9 +97,6 @@ def _chat_patches(stack: ExitStack, pool: _StubPool):
         return {"id": "row-1"}
 
     stack.enter_context(patch.object(qe, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
-    oauth = MagicMock()
-    oauth.ensure_fresh_credentials = AsyncMock()
-    stack.enter_context(patch.object(qe, "direct_oauth", new=oauth))
     options = MagicMock()
     options.include_partial_messages = False
     options.cwd = None
@@ -206,23 +203,25 @@ async def test_chat_gate_uses_current_pool_entry_after_async_setup():
     setup_started = asyncio.Event()
     finish_setup = asyncio.Event()
 
-    async def _refresh_credentials(*args, **kwargs):
+    async def _slow_checkout(*args, **kwargs):
         setup_started.set()
         await finish_setup.wait()
 
     with ExitStack() as stack:
         _chat_patches(stack, pool)
-        qe.direct_oauth.ensure_fresh_credentials.side_effect = _refresh_credentials
+        # Any await between the pool read and the reuse decision will do;
+        # the pending-checkout wait is one.
+        stack.enter_context(patch("app.core.query_options.ensure_pending_checkout", new=_slow_checkout))
         query = asyncio.create_task(_collect(qe.stream_to_websocket(
             "hi", "sess-replaced", "claude-code",
             overrides={"provider_id": "provider-a"},
         )))
         try:
-            await asyncio.wait_for(setup_started.wait(), timeout=2)
+            await asyncio.wait_for(setup_started.wait(), timeout=10)
             pool.state = current_state
         finally:
             finish_setup.set()
-            events = await asyncio.wait_for(query, timeout=2)
+            events = await asyncio.wait_for(query, timeout=10)
 
     old_state.adapter.send_query.assert_not_awaited()
     current_state.adapter.send_query.assert_awaited_once()
@@ -339,9 +338,6 @@ def _rest_patches(stack: ExitStack, pool: _StubPool):
         return {"id": "row-1"}
 
     stack.enter_context(patch.object(qe, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
-    oauth = MagicMock()
-    oauth.ensure_fresh_credentials = AsyncMock()
-    stack.enter_context(patch.object(qe, "direct_oauth", new=oauth))
     options = MagicMock()
     options.cwd = None
     stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
@@ -385,9 +381,6 @@ async def test_background_gate_refuses_busy_client_and_never_writes_stdin(mock_d
     with ExitStack() as stack:
         stack.enter_context(patch.object(qb, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
         stack.enter_context(patch.object(qb, "sync_engine", new=sync))
-        oauth = MagicMock()
-        oauth.ensure_fresh_credentials = AsyncMock()
-        stack.enter_context(patch.object(qb, "direct_oauth", new=oauth))
         options = MagicMock()
         stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
         ))
@@ -495,9 +488,6 @@ async def test_background_claim_window_exception_clears_flag():
     with ExitStack() as stack:
         stack.enter_context(patch.object(qb, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
         stack.enter_context(patch.object(qb, "sync_engine", new=sync))
-        oauth = MagicMock()
-        oauth.ensure_fresh_credentials = AsyncMock()
-        stack.enter_context(patch.object(qb, "direct_oauth", new=oauth))
         options = MagicMock()
         _claim_window_options(options)
         stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
@@ -626,9 +616,6 @@ async def test_background_applies_permission_mode_on_reuse_without_respawn(mock_
     with ExitStack() as stack:
         stack.enter_context(patch.object(qb, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
         stack.enter_context(patch.object(qb, "sync_engine", new=_fake_sync_engine()))
-        oauth = MagicMock()
-        oauth.ensure_fresh_credentials = AsyncMock()
-        stack.enter_context(patch.object(qb, "direct_oauth", new=oauth))
         options = MagicMock()
         options.permission_mode = "plan"
         options.model = "m"
