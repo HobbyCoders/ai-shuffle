@@ -4,7 +4,6 @@
   "private": true,
   "description": "AI Shuffle desktop app: a native window around the web UI of any AI Shuffle worker",
   "author": "HobbyCoders",
-  "license": "MIT",
   "homepage": "https://github.com/HobbyCoders/ai-shuffle",
   "repository": {
     "type": "git",

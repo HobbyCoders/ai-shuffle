@@ -2,7 +2,6 @@
 
 > A self-hosted workspace for AI agents, powered by the Fluid harness.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [Releases](https://github.com/HobbyCoders/ai-shuffle/releases) · [Desktop](desktop/README.md) · [Android](android/README.md) · [Fluid](fluid/README.md)
 
 AI Shuffle brings your agents, projects, conversations, and tools into one workspace. Use it to build software, research a problem, automate recurring work, browse the web, or generate media. Run a worker on your computer or server, then work through the browser, desktop app, or Android app.
@@ -224,4 +223,4 @@ Documentation is also available inside the app.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Proprietary. See [LICENSE](LICENSE).

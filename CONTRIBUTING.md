@@ -1,6 +1,11 @@
+> **Internal: HobbyCoders team only.** AI Shuffle is proprietary software. This
+> guide is for HobbyCoders team members with access to the private repository;
+> it does not invite outside contributions.
+
 # Contributing to AI Shuffle
 
-Thank you for your interest in contributing to AI Shuffle! This guide will help you get started.
+This guide covers setup, conventions and the review process for the AI Shuffle
+repository.
 
 ## Table of Contents
 
@@ -30,18 +35,15 @@ Please be respectful and constructive in all interactions. We're building this t
 - **Git**
 - **GitHub CLI** — [Download](https://cli.github.com/)
 
-### Fork and Clone
+### Clone
 
-1. Fork the repository on GitHub
-2. Clone your fork:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/ai-shuffle.git
-   cd ai-shuffle
-   ```
-3. Add upstream remote:
-   ```bash
-   git remote add upstream https://github.com/HobbyCoders/ai-shuffle.git
-   ```
+Clone the repository directly; team members push branches to it rather than
+to a fork:
+
+```bash
+git clone https://github.com/HobbyCoders/ai-shuffle.git
+cd ai-shuffle
+```
 
 ---
 
@@ -106,7 +108,7 @@ Create a branch from `main` with a descriptive name:
 
 ```bash
 git checkout main
-git pull upstream main
+git pull origin main
 git checkout -b type/description
 ```
 
