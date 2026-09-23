@@ -161,6 +161,43 @@ jobs:
       promote_latest: ${{ needs.create-release.outputs.promote_latest == 'true' }}
     secrets: inherit
 
+  # The published image, pulled from the registry on a fresh GitHub-hosted
+  # runner (nothing from the build runner's cache) and installed with the
+  # buyer compose file. The stable in-app update waits for this.
+  buyer-install:
+    name: Buyer install on a clean runner
+    needs: [create-release, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE: ${{ needs.docker.outputs.image }}
+      RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.create-release.outputs.release_tag }}
+      - name: Pull the published release image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+          docker pull "$IMAGE:${RELEASE_TAG#v}"
+          docker logout ghcr.io
+      - name: Install from docs/install/compose
+        run: python3 scripts/ci/verify_buyer_compose.py --image "$IMAGE:${RELEASE_TAG#v}" --artifacts "$RUNNER_TEMP/buyer-install"
+      - name: Upload install evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 7
+          name: buyer-install-${{ needs.create-release.outputs.release_tag }}
+          path: ${{ runner.temp }}/buyer-install
+          if-no-files-found: ignore
+
   android:
     name: Android Play internal release
     needs: [create-release, docker]
