@@ -3843,8 +3843,8 @@ hits = Grep(pattern="usage", path="/repo/src").splitlines()
 for path in hits[:10]:
     print(path, Read(file_path=path)[:400])
 ```
-Catch only MissingPathError, and only around discovery (a Read or Grep of \
-a path you guessed); other tool errors come back as results and do not abort \
+A Read of a path that does not exist returns a falsy MissingFile instead of \
+raising, so check `if not text:` before using it; other tool errors come back as results and do not abort \
 the cell, so do not wrap them. The kernel is persistent: variables, imports and ResultRefs survive \
 across cells, so build on earlier results instead of re-fetching. Independent \
 tool calls that you would otherwise issue one per turn belong in the same cell.

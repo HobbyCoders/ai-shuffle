@@ -861,6 +861,12 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
     shell = " Bash covers shell and process work." if has("Bash") else ""
     exit_owner = "Bash returns" if has("Bash") else "it returns"
     discovery_tools = "/".join(name for name in ("Read", "Grep", "Glob") if has(name))
+    missing_read = (
+        " A Read of a path that does not exist returns a falsy `MissingFile` "
+        "instead of raising: check `if not text:` and move to the next "
+        "candidate; using it as text raises `MissingPathError`."
+        if has("Read") else ""
+    )
     soft_examples = [
         example for example, wanted in (
             ("a Grep/Glob on a missing path", has("Grep") and has("Glob")),
@@ -871,10 +877,7 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
         ) if wanted
     ]
     recovery = (
-        " Catch only the prebound `MissingPathError` around discovery (a "
-        f"{discovery_tools} call whose path may not exist) and continue to "
-        "the next candidate; it is an exception, not successful text, so keep "
-        "dependent parsing or edits in the successful branch. Other errors "
+        f"{missing_read} {'Other' if missing_read else 'Tool'} errors "
         f"now return as results and do not abort the cell ({', '.join(soft_examples)}) "
         "— read each result before depending on it. Denials, cancellation "
         "and tool timeouts still abort the cell; do not catch broad "
