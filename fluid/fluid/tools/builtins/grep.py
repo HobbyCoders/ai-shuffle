@@ -31,6 +31,7 @@ from fluid.tools.builtins._util import (
     is_binary,
     missing_path_note,
     repeat_search_pointer,
+    result_digest,
     truncate,
     walk_files,
 )
@@ -161,13 +162,19 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         outcome = await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit)
 
     # One choke point for repeat-search handling, so neither engine has to know
-    # about it. The search still ran; what it returns on a repeat is a pointer
-    # at the identical result already in the conversation, not a second copy of
-    # it — the rows are byte-identical, so paying for them twice buys nothing.
+    # about it. The search still ran; when its result has the same lines as the
+    # last result for the same input, what it returns is a pointer at the copy
+    # already in the conversation rather than a second one. The comparison is
+    # on the result, not the input: after an Edit, a new file or any other
+    # change on disk the same search answers differently, and that answer is
+    # delivered in full and becomes the one later repeats are compared with.
     if outcome.is_error:
         return outcome
     key = (pattern, str(root), glob, no_ignore, limit)
-    if key in ctx.grep_seen:
+    # Line order is ignored: ripgrep searches files in parallel, so the same
+    # matches can come back in a different file order on an unchanged tree.
+    digest = result_digest(outcome.text, unordered=True)
+    if ctx.grep_seen.get(key) == digest:
         # The header line names engine and root, so the earlier result is easy
         # to find; identity claims are dropped with the payload they described.
         return replace(
@@ -176,7 +183,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             content_id=None,
             window_of=None,
         )
-    ctx.grep_seen.add(key)
+    ctx.grep_seen[key] = digest
     return outcome
 
 
