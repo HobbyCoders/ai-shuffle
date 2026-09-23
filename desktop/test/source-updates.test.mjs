@@ -9,9 +9,12 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 const require = createRequire(import.meta.url);
-const { SourceUpdates, verifySourceManifest } = require('../dist/main/source-updates.js');
+const { SourceUpdates, verifySourceManifest, treeDigest } = require('../dist/main/source-updates.js');
 const { buildEnvironment, removeSourceDirectory } = require('../dist/main/source-build.js');
 const extractor = fileURLToPath(new URL('./helpers/source-archive.py', import.meta.url));
+const repoScripts = fileURLToPath(new URL('../../scripts', import.meta.url));
+// The publisher's own digest (scripts/source_archive.py), so the desktop check is tested against it, not against itself.
+const publishedTree = archive => execFileSync(process.env.PYTHON||'python',['-c','import sys; sys.path.insert(0, sys.argv[1]); import source_archive as s; print(s.tree_digest(s.archive_files(sys.argv[2])))',repoScripts,archive],{encoding:'utf8'}).trim();
 const A='a'.repeat(40), B='b'.repeat(40), C='c'.repeat(40), KEY='d'.repeat(64);
 test('browser download verification and launcher share one public trust key',async()=>{
  const pem=await fs.readFile(new URL('../build/application-update-key.pem',import.meta.url),'utf8');
@@ -23,18 +26,20 @@ async function fixture(t) {
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-source-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
  const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});
  const bodies=new Map();const requests=[];let signed;let sequence=100;let builds=0;let fail=false;
- const options={root,publicKey,bootstrapNode:process.execPath,fetch:async url=>{requests.push(url);return new Response(url.endsWith('/manifest')?signed:bodies.get(url)||'missing',{status:url.endsWith('/manifest')||bodies.has(url)?200:404});},build:async(source,stage,revision)=>{
+ const options={root,publicKey,bootstrapNode:process.execPath,fetch:async url=>{requests.push(url);const feed=url.endsWith('/manifest')||url.endsWith('/manifest/edge');return new Response(feed?signed:bodies.get(url)||'missing',{status:feed||bodies.has(url)?200:404});},build:async(source,stage,revision)=>{
   builds++;if(fail)throw Error('Local build failed');
   for(const name of ['server/app/main.py','server/app/static/index.html','source/desktop/dist/main/managed-entry.js']){await fs.mkdir(path.dirname(path.join(stage,name)),{recursive:true});await fs.writeFile(path.join(stage,name),revision);}
   const electron=path.join(root,'dependencies',KEY,'electron.exe');
   for(const name of [electron,path.join(root,'runtimes',KEY,'worker/python/python.exe')]){await fs.mkdir(path.dirname(name),{recursive:true});await fs.writeFile(name,'runtime');}
   return {revision,pythonKey:null,electron,runtimeKey:KEY};
  }};
- async function release(revision,hostile) {
-  const source=path.join(root,'input',revision,`ai-shuffle-${revision}`);await fs.mkdir(source,{recursive:true});await fs.writeFile(path.join(source,'source.txt'),'real archive content');
-  const archive=path.join(root,revision+'.zip');execFileSync(process.env.PYTHON||'python',[extractor,'pack',path.dirname(source),archive]);
+ async function release(revision,hostile,fields={}) {
+  const source=path.join(root,'input',revision,`ai-shuffle-${revision}`);await fs.mkdir(path.join(source,'app'),{recursive:true});await fs.writeFile(path.join(source,'source.txt'),'real archive content');await fs.writeFile(path.join(source,'app','main.py'),'print("ok")');
+  const archive=path.join(root,revision+'.zip');await fs.rm(archive,{force:true});execFileSync(process.env.PYTHON||'python',[extractor,'pack',path.dirname(source),archive]);
+  const tree=publishedTree(archive);
   if(hostile)execFileSync(process.env.PYTHON||'python',['-c','import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],"a"); i=zipfile.ZipInfo("placeholder"); i.filename=sys.argv[2]; z.writestr(i,"unsafe"); z.close()',archive,hostile]);
-  const bytes=await fs.readFile(archive);const manifest={format:2,revision,sequence:sequence++,sha256:createHash('sha256').update(bytes).digest('hex'),size:bytes.length};
+  const bytes=await fs.readFile(archive);const manifest={format:2,revision,sequence:sequence++,sha256:createHash('sha256').update(bytes).digest('hex'),size:bytes.length,channel:'stable',version:'0.9.'+(sequence-100),notes:'Notes for '+revision.slice(0,4),tree,...fields};
+  for(const [key,value] of Object.entries(manifest))if(value===undefined)delete manifest[key];
   const payload=Buffer.from(JSON.stringify(manifest));signed=JSON.stringify({payload:payload.toString('base64'),signature:sign(null,payload,privateKey).toString('base64')});
   const url='https://hobbycoders.com/v1/desktop/sources/'+revision;bodies.set(url,bytes);return {manifest,signed,url};
  }
@@ -89,10 +94,10 @@ test('checks verify metadata only; explicit download stages the signed release a
  const f=await fixture(t);await f.release(A);const u=f.create();await u.load();
  await u.download();await u.select();await u.healthy();const old=await f.release(B);
  f.requests.length=0;const builds=f.builds;const progress=[];
- assert.deepEqual(await u.check((...args)=>progress.push(args)),{kind:'available',version:B.slice(0,12)});
+ assert.deepEqual(await u.check((...args)=>progress.push(args)),{kind:'available',version:B.slice(0,12),release:old.manifest.version,notes:old.manifest.notes});
  assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest']);assert.equal(f.builds,builds);assert.deepEqual(progress,[]);
  assert.equal(u.pendingVersion,null);await assert.rejects(fs.stat(path.join(f.root,'staging')), {code:'ENOENT'});
- assert.deepEqual(await u.download(),{kind:'ready',version:B.slice(0,12)});
+ assert.deepEqual(await u.download(),{kind:'ready',version:B.slice(0,12),release:old.manifest.version,notes:old.manifest.notes});
  assert.equal(f.requests.filter(url=>url===old.url).length,1);assert.equal(f.builds,builds+1);
  assert.equal(await fs.readFile(path.join(f.root,'versions',B,'release.json'),'utf8'),old.signed);
  await f.release(C);f.requests.length=0;
@@ -125,12 +130,14 @@ test('automatic checks and downloads use the public source transport without acc
  const module={exports:{}};const localRequire=createRequire(new URL('../dist/main/source-updates.js',import.meta.url));
  vm.runInNewContext(await fs.readFile(new URL('../dist/main/source-updates.js',import.meta.url),'utf8'),{
   exports:module.exports,module,Buffer,AbortSignal,process,
-  require:id=>id==='./source-auth'?{SOURCE_ORIGIN:'https://hobbycoders.com',publicSourceFetch:async(...args)=>{requests.push(args);return f.options.fetch(args[0]);}}:localRequire(id)
+  require:id=>id==='./source-auth'?{...localRequire('./source-auth'),publicSourceFetch:async(...args)=>{requests.push(args);return f.options.fetch(args[0]);}}:localRequire(id)
  });
  const u=new module.exports.SourceUpdates({...f.options,fetch:undefined});await u.load();
  await u.check();assert.deepEqual(requests,[['https://hobbycoders.com/v1/desktop/manifest']]);
  await u.download();assert.equal(requests.length,3);assert(requests.every(args=>args.length===1));await u.select();await u.healthy();await f.release(B);
  await u.check();assert.equal(requests.length,4);assert.equal(f.builds,1);
+ // With a lease, the public transport receives it as its second argument.
+ u.useLease(async()=>'lease-value_1');await u.check();assert.deepEqual(requests.at(-1),['https://hobbycoders.com/v1/desktop/manifest','lease-value_1']);
 });
 
 test('installer baseline checks main without a source directory and transitions to a signed source update',async t=>{
@@ -232,6 +239,110 @@ test('public source requests omit credentials and reject off-origin URLs and red
  const request=module.exports.publicSourceFetch;
  await request('https://hobbycoders.com/v1/desktop/manifest');
  assert.equal(requests[0][1].credentials,'omit');assert.equal(requests[0][1].redirect,'error');assert.equal(requests[0][1].headers,undefined);
- for(const url of ['https://evil.example/v1/desktop/manifest','https://user:secret@hobbycoders.com/v1/desktop/manifest','https://hobbycoders.com/v1/desktop/manifest?token=secret'])await assert.rejects(request(url),/Invalid source/);
- assert.equal(requests.length,1);
+ await request('https://hobbycoders.com/v1/desktop/manifest/edge');
+ for(const url of ['https://evil.example/v1/desktop/manifest','https://user:secret@hobbycoders.com/v1/desktop/manifest','https://hobbycoders.com/v1/desktop/manifest?token=secret','https://hobbycoders.com/v1/desktop/manifest/beta'])await assert.rejects(request(url),/Invalid source/);
+ assert.equal(requests.length,2);
+ // The lease header goes only to the hub's update endpoints, never with a redirect or credentials.
+ await request('https://hobbycoders.com/v1/desktop/sources/'+A,'lease_1-x');
+ assert.deepEqual({...requests[2][1].headers},{'X-Shuffle-Lease':'lease_1-x'});assert.equal(requests[2][1].redirect,'error');assert.equal(requests[2][1].credentials,'omit');
+ for(const url of ['https://evil.example/v1/desktop/manifest','https://hobbycoders.com/v1/account','http://hobbycoders.com/v1/desktop/manifest'])await assert.rejects(request(url,'lease_1-x'),/Invalid source/);
+ for(const lease of ['','has space','a\r\nX-Other: 1','x'.repeat(4097)])await assert.rejects(request('https://hobbycoders.com/v1/desktop/manifest',lease),/Invalid license lease/);
+ assert.equal(requests.length,3);
+});
+
+test('only signed stable releases are accepted by default; edge and unlabelled manifests are refused before any download',async t=>{
+ const f=await fixture(t);const u=f.create();await u.load();
+ for(const [fields,message] of [[{channel:'edge'},/did not return a signed stable release/],[{channel:undefined},/did not return a signed stable release/],[{tree:undefined},/no signed source tree/]]){
+  f.requests.length=0;await f.release(A,undefined,fields);
+  await assert.rejects(u.check(),message);await assert.rejects(u.download(),message);
+  assert.deepEqual(f.requests,Array(2).fill('https://hobbycoders.com/v1/desktop/manifest'));assert.equal(f.builds,0);assert.equal(u.pendingVersion,null);
+ }
+ await f.release(A);assert.equal((await u.download()).kind,'ready');
+});
+test('the owner can opt one install into edge; the edge feed must be signed edge',async t=>{
+ const f=await fixture(t);const u=f.create();await u.load();
+ await fs.writeFile(path.join(f.root,'update-channel.json'),JSON.stringify({channel:'edge'}));
+ assert.equal(await u.channel(),'edge');
+ await f.release(A);await assert.rejects(u.check(),/did not return a signed edge release/);
+ assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest/edge']);
+ await f.release(A,undefined,{channel:'edge',version:'0.9.1-dev.3+gabc1234'});assert.equal((await u.download()).kind,'ready');
+ for(const text of ['{"channel":"beta"}','not json','{}']){
+  await fs.writeFile(path.join(f.root,'update-channel.json'),text);await assert.rejects(u.channel(),/update-channel.json must contain/);
+ }
+ await fs.rm(path.join(f.root,'update-channel.json'));assert.equal(await u.channel(),'stable');
+ assert.equal(await new SourceUpdates({...f.options,channel:'edge'}).channel(),'edge');
+});
+test('a tree digest that does not match the extracted files stops the update before the build',async t=>{
+ const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
+ await f.release(B,undefined,{tree:'f'.repeat(64)});const builds=f.builds;
+ await assert.rejects(u.download(),/Source files do not match the signed release\. The update was not built/);
+ assert.equal(f.builds,builds);assert.equal(u.version,A);assert.equal(u.pendingVersion,null);
+ await assert.rejects(fs.stat(path.join(f.root,'staging')),{code:'ENOENT'});await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ // A correctly signed tree for the same revision then installs.
+ await f.release(B);assert.equal((await u.download()).kind,'ready');
+});
+test('the desktop tree digest matches the publisher for ordering and non-ASCII paths',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-tree-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const top=path.join(root,'pack','ai-shuffle-'+A);const names=['z.txt','a-b/x','a.b','a/b','A/B','é/ü.md','日本/語.txt','a/b c','requirements.lock'];
+ const files=[];
+ for(const name of names){await fs.mkdir(path.dirname(path.join(top,name)),{recursive:true});await fs.writeFile(path.join(top,name),'content of '+name);files.push([name,createHash('sha256').update('content of '+name).digest('hex')]);}
+ const archive=path.join(root,'tree.zip');execFileSync(process.env.PYTHON||'python',[extractor,'pack',path.join(root,'pack'),archive]);
+ assert.equal(treeDigest(files),publishedTree(archive));assert.equal(treeDigest([...files].reverse()),treeDigest(files));
+});
+test('release fields are validated when present and older installed manifests without them stay readable',async t=>{
+ const f=await fixture(t);const {privateKey,publicKey}=generateKeyPairSync('ed25519');
+ const signed=fields=>{const payload=Buffer.from(JSON.stringify({format:2,revision:A,sequence:5,sha256:KEY,size:10,...fields}));return JSON.stringify({payload:payload.toString('base64'),signature:sign(null,payload,privateKey).toString('base64')});};
+ assert.equal(verifySourceManifest(signed({}),publicKey).channel,undefined);
+ assert.equal(verifySourceManifest(signed({channel:'edge',version:'1.2.3',notes:'x'.repeat(4000),tree:KEY}),publicKey).notes.length,4000);
+ for(const fields of [{channel:'beta'},{tree:'abc'},{version:'latest'},{version:7},{notes:'x'.repeat(4001)},{notes:null}])assert.throws(()=>verifySourceManifest(signed(fields),publicKey),/release fields/,JSON.stringify(fields));
+ // An install whose release.json predates channel and tree still orders against new releases.
+ await f.release(B);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
+ const legacy=await f.release(B,undefined,{channel:undefined,tree:undefined,version:undefined,notes:undefined});
+ await fs.writeFile(path.join(f.root,'versions',B,'release.json'),legacy.signed);
+ u=f.create();await u.load();await u.select();await f.release(C);assert.equal((await u.check()).kind,'available');
+});
+test('Python dependencies install only from the hash-pinned locks, like the container updater',async t=>{
+ const {pythonInstallSteps,pythonDependencyKey,buildSource}=require('../dist/main/source-build.js');
+ const steps=pythonInstallSteps();
+ assert.deepEqual(steps.map(args=>args.slice(-3)),[['--require-hashes','-r','requirements.lock'],['--require-hashes','-r','requirements-native.lock'],['--no-deps','--no-build-isolation','./fluid']]);
+ for(const args of steps){assert.deepEqual(args.slice(0,3),['-m','pip','install']);assert(!args.includes('requirements.txt')&&!args.includes('requirements-native.txt'));}
+ // The bundled runtime is reused only when it was installed from the same locks.
+ const {pythonDependencies}=await import('../scripts/runtime-contract.mjs');
+ const repo=fileURLToPath(new URL('../..',import.meta.url));
+ assert.equal(await pythonDependencyKey(repo),await pythonDependencies(repo));
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-lock-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const source=path.join(root,'source');await fs.mkdir(path.join(source,'fluid'),{recursive:true});
+ for(const name of ['requirements.txt','requirements-native.txt','requirements.lock','fluid/pyproject.toml'])await fs.writeFile(path.join(source,name),'x');
+ const log=path.join(root,'build.log');const runtime={root,python:'python-not-run',node:'node-not-run',npm:'npm',pythonDependencies:''};
+ await assert.rejects(buildSource({source,server:path.join(root,'server'),cache:path.join(root,'cache'),runtime,revision:A,log,progress(){}}),/no hash-pinned requirements-native\.lock/);
+ await assert.rejects(fs.stat(log),{code:'ENOENT'},'nothing ran before the refusal');
+});
+test('the license lease goes to the hub manifest and archive requests, and only when one is available',async t=>{
+ const f=await fixture(t);await f.release(A);const fetch=f.options.fetch;const seen=[];
+ f.options.fetch=async(url,init)=>{seen.push([url,init?.headers?.['X-Shuffle-Lease']]);return fetch(url,init);};
+ const lease='eyJmb3JtYXQiOiJzaHVmZmxlLWxlYXNlLXYxIn0';let current=lease;
+ let u=f.create();await u.load();
+ await u.check();assert.deepEqual(seen,[['https://hobbycoders.com/v1/desktop/manifest',undefined]],'no provider: no header');
+ u.useLease(async()=>current);seen.length=0;await u.download();
+ assert.deepEqual(seen,[['https://hobbycoders.com/v1/desktop/manifest',lease],['https://hobbycoders.com/v1/desktop/sources/'+A,lease]]);
+ await u.select();await u.healthy();await f.release(B);
+ for(const value of [null,'',undefined,'has space','a\r\nX-Other: 1','x'.repeat(4097)]){
+  current=value;seen.length=0;assert.equal((await u.check()).kind,'available');assert.deepEqual(seen,[['https://hobbycoders.com/v1/desktop/manifest',undefined]],JSON.stringify(value));
+ }
+ u.useLease(async()=>{throw Error('worker restarting');});seen.length=0;assert.equal((await u.check()).kind,'available');assert.equal(seen[0][1],undefined,'a failing provider never blocks updates');
+});
+test('checks and downloads report the signed release name and notes; a staged update keeps them across restarts',async t=>{
+ const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
+ const notes='Faster startup.\nFixes the sidebar.';
+ await f.release(B,undefined,{version:'0.9.0',notes});
+ assert.deepEqual(await u.check(),{kind:'available',version:B.slice(0,12),release:'0.9.0',notes});
+ assert.deepEqual(await u.download(),{kind:'ready',version:B.slice(0,12),release:'0.9.0',notes});
+ u=f.create();await u.load();
+ assert.deepEqual(await u.check(),{kind:'ready',version:B.slice(0,12),release:'0.9.0',notes});
+ assert.deepEqual(await u.releaseInfo(B),{release:'0.9.0',notes});
+ assert.deepEqual(await u.releaseInfo(C),{});
+ // Notes are optional: a release without them offers none.
+ await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({active:B}));
+ await f.release(C,undefined,{notes:undefined,version:undefined});
+ const w=f.create();await w.load();assert.deepEqual(await w.check(),{kind:'available',version:C.slice(0,12)});
 });

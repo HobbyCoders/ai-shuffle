@@ -54,8 +54,33 @@ async function run(executable: string, args: string[], cwd: string, opts: BuildO
   } finally { await log.close(); }
 }
 
+/** The files that decide the Python environment; desktop/scripts/runtime-contract.mjs hashes the same list. */
+export const PYTHON_INPUTS = ['requirements.lock', 'requirements-native.lock', 'fluid/pyproject.toml'];
+
+/**
+ * pip arguments for the Python environment, the same way the container
+ * updater installs it (docker/application_updates.py): every package, including
+ * fluid's build backend, must match a hash in the signed source's lock files,
+ * so a hostile or compromised index release cannot slip in.
+ */
+export function pythonInstallSteps(): string[][] {
+  // pip's 15-second read timeout can drop a large wheel on a slow link.
+  const pip = ['-m', 'pip', 'install', '--prefer-binary', '--timeout', '120', '--retries', '10'];
+  return [
+    [...pip, '--require-hashes', '-r', 'requirements.lock'],
+    [...pip, '--require-hashes', '-r', 'requirements-native.lock'],
+    [...pip, '--no-deps', '--no-build-isolation', './fluid'],
+  ];
+}
+
+/** Matches the bundled runtime's manifest.pythonDependencies when the same locks built it. */
+export function pythonDependencyKey(source: string): Promise<string> { return fingerprint(source, PYTHON_INPUTS); }
+
 async function pythonRuntime(opts: BuildOptions): Promise<string | null> {
-  const key = await fingerprint(opts.source, ['requirements.txt', 'requirements-native.txt', 'fluid/pyproject.toml']);
+  for (const lock of ['requirements.lock', 'requirements-native.lock']) {
+    if (!(await exists(path.join(opts.source, lock)))) throw new Error(`This update has no hash-pinned ${lock}; it cannot be built safely. The running version is unchanged.`);
+  }
+  const key = await pythonDependencyKey(opts.source);
   if (key === opts.runtime.pythonDependencies) return null;
   const target = path.join(opts.cache, 'python', key.slice(0, 24));
   if (await exists(path.join(target, '.complete'))) return key;
@@ -65,7 +90,7 @@ async function pythonRuntime(opts: BuildOptions): Promise<string | null> {
   try {
     await run(opts.runtime.python, ['-m', 'venv', temporary], opts.source, opts);
     const python = path.join(temporary, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
-    await run(python, ['-m', 'pip', 'install', '--prefer-binary', '-r', 'requirements.txt', '-r', 'requirements-native.txt', './fluid'], opts.source, opts, python);
+    for (const args of pythonInstallSteps()) await run(python, args, opts.source, opts, python);
     await fs.writeFile(path.join(temporary, '.complete'), key);
     await fs.rename(temporary, target);
     return key;

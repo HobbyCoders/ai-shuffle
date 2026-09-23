@@ -380,7 +380,10 @@ function listenerHeaders(listener: string | null): Record<string, string> {
 }
 
 /** Authenticated, loopback-only control of the child we launched. Never a renderer API. */
-export function requestLifecycle(port: number, token: string, action: 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge', state?: object, listener: string | null = null): Promise<Record<string, unknown>> {
+export type LifecycleAction = 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge' | 'source-lease';
+export function requestLifecycle(port: number, token: string, action: LifecycleAction, state?: object, listener: string | null = null): Promise<Record<string, unknown>> {
+	// A lease envelope is up to 4 KiB on its own (the hub's header limit).
+	const limit = action === 'source-lease' ? 16_384 : 4096;
 	return new Promise((resolve, reject) => {
 		const req = http.request({
 			host: '127.0.0.1', port, path: `/api/v1/internal/desktop/${action}`,
@@ -393,7 +396,7 @@ export function requestLifecycle(port: number, token: string, action: 'active-se
 			res.on('error', reject);
 			res.on('data', (chunk) => {
 				body += chunk;
-				if (body.length > 4096) req.destroy(new Error('Worker response too large'));
+				if (body.length > limit) req.destroy(new Error('Worker response too large'));
 			});
 			res.on('end', () => {
 				if (res.statusCode !== 200) return reject(new Error(`Worker lifecycle request failed (${res.statusCode})`));
@@ -666,6 +669,21 @@ export class WorkerSupervisor extends EventEmitter {
 		return reply.allow_updates === true;
 	}
 
+	/**
+	 * The worker's license lease for the hub's gated source feed, as the
+	 * X-Shuffle-Lease header value, or null: not our worker, not ready, no
+	 * lease, beta mode, or a worker too old to have the endpoint (feature check).
+	 */
+	async sourceLease(): Promise<string | null> {
+		if (this._state.external || this._state.phase !== 'ready') return null;
+		try {
+			const reply = await this.lifecycleRequest('source-lease');
+			return typeof reply.lease === 'string' && reply.lease ? reply.lease : null;
+		} catch {
+			return null;
+		}
+	}
+
 	async activeSessionCount(): Promise<number> {
 		if (this._state.external || this._state.phase !== 'ready') return 0;
 		const reply = await this.lifecycleRequest('active-sessions');
@@ -688,7 +706,7 @@ export class WorkerSupervisor extends EventEmitter {
 		}
 	}
 
-	private lifecycleRequest(action: 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge', state?: object): Promise<Record<string, unknown>> {
+	private lifecycleRequest(action: LifecycleAction, state?: object): Promise<Record<string, unknown>> {
 		return requestLifecycle(this._state.port, this.lifecycleToken, action, state, this.listener);
 	}
 

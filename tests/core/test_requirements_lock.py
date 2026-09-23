@@ -22,8 +22,8 @@ def direct_requirements():
     return [Requirement(line) for line in lines]
 
 
-def locked():
-    text = (ROOT / "requirements.lock").read_text()
+def locked(name="requirements.lock"):
+    text = (ROOT / name).read_text()
     entries = {}
     for block in re.split(r"\n(?=[A-Za-z0-9])", text):
         head = block.split("\\", 1)[0].strip()
@@ -62,3 +62,45 @@ def test_image_and_updater_install_only_from_the_lock():
     assert '"--require-hashes", "-r", "requirements.lock"' in updater
     assert '"--no-deps", "--no-build-isolation", "./fluid"' in updater
     assert '"requirements.txt"' not in updater
+
+
+def native_requirements():
+    lines = [line.split("#", 1)[0].strip() for line in (ROOT / "requirements-native.txt").read_text().splitlines()]
+    return [Requirement(line) for line in lines if line]
+
+
+def test_native_lock_is_hash_pinned_and_covers_requirements_native():
+    entries = locked("requirements-native.lock")
+    assert entries
+    for name, versions in entries.items():
+        for _version, hashes in versions:
+            assert hashes, f"{name} has no --hash in requirements-native.lock"
+    for requirement in native_requirements():
+        name = canonicalize_name(requirement.name)
+        assert name in entries, f"{name} is missing from requirements-native.lock; run scripts/lock_requirements.sh"
+        assert any(requirement.specifier.contains(version, prereleases=True) for version, _ in entries[name]), (
+            f"requirements-native.lock pins {name} outside {requirement.specifier}; run scripts/lock_requirements.sh")
+
+
+def test_packages_in_both_locks_are_pinned_identically():
+    # The native lock is compiled with -c requirements.lock; the desktop
+    # installs them one after the other and they must never disagree.
+    main, native = locked(), locked("requirements-native.lock")
+    for name in main.keys() & native.keys():
+        assert sorted(main[name]) == sorted(native[name]), f"{name} differs between the two locks"
+
+
+def test_desktop_installs_only_from_the_locks():
+    build = (ROOT / "desktop/src/main/source-build.ts").read_text()
+    assert "'--require-hashes', '-r', 'requirements.lock'" in build
+    assert "'--require-hashes', '-r', 'requirements-native.lock'" in build
+    assert "'--no-deps', '--no-build-isolation', './fluid'" in build
+    assert "'requirements.txt'" not in build and "'requirements-native.txt'" not in build
+    runtime = (ROOT / "desktop/scripts/build-worker.mjs").read_text()
+    assert "'--require-hashes', '-r', path.join(repoDir, 'requirements.lock')" in runtime
+    assert "'--require-hashes', '-r', path.join(repoDir, 'requirements-native.lock')" in runtime
+    assert "'--no-deps', '--no-build-isolation', path.join(repoDir, 'fluid')" in runtime
+    # The bundled runtime's fingerprint and the source build's must hash the same inputs.
+    contract = (ROOT / "desktop/scripts/runtime-contract.mjs").read_text()
+    assert "['requirements.lock', 'requirements-native.lock', 'fluid/pyproject.toml']" in contract
+    assert "['requirements.lock', 'requirements-native.lock', 'fluid/pyproject.toml']" in build

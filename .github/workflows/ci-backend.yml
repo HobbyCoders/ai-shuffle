@@ -19,6 +19,7 @@ on:
       - 'requirements.txt'
       - 'requirements-dev.txt'
       - 'requirements-native.txt'
+      - 'requirements*.lock'
       - 'run_local.*'
       - 'scripts/**'
       - 'docker/**'

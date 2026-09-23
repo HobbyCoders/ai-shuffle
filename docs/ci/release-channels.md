@@ -52,9 +52,31 @@ produced on the worker and are not in the signed listing. A separate uid for
 agent tools (SEC-04) is the fix for those. Node packages are pinned by their
 lockfiles' integrity hashes through `npm ci`.
 
-Desktop reads the same stable feed but does not yet check `channel` or `tree`,
-and its build still installs from `requirements.txt`. That work belongs to the
-desktop updater (`desktop/src/main/source-updates.ts`, `source-build.ts`).
+The desktop updater (`desktop/src/main/source-updates.ts`) follows the same
+rules: it accepts only a manifest signed for its channel (`stable` unless the
+owner writes `{"channel": "edge"}` to `update-channel.json` in the install's
+`updates` folder) that carries a tree digest, keeps the signature, size,
+checksum and sequence checks, and recomputes the tree digest over the
+extracted files before building. Its build (`desktop/src/main/source-build.ts`)
+and the bundled runtime (`desktop/scripts/build-worker.mjs`) install Python
+packages only from `requirements.lock` and `requirements-native.lock`, both
+with `--require-hashes`, then fluid with `--no-deps --no-build-isolation`.
+`scripts/lock_requirements.sh` regenerates both locks; the native lock is
+constrained by `requirements.lock` so a shared package never pins differently.
+
+License lease (D8): when its own worker has a lease, the desktop adds it as
+`X-Shuffle-Lease` to the manifest and archive requests, read from the worker's
+token-protected `GET /api/v1/internal/desktop/source-lease`. The header is
+attached only after the URL is checked to be a hub update endpoint, and
+redirects are refused. Without a lease (beta mode, an attached or older
+worker, first launch before any worker runs) requests go out as before.
+
+Release notes: the desktop's update state carries the manifest's `version`
+(as `release`) and `notes`, and its "Update ready" notification names the
+release and summarizes the notes. The sidebar update button shows the full
+notes for any worker whose status carries them: container workers today, and
+desktop workers once `DesktopUpdateState` in `app/api/internal.py` accepts
+`release` and `notes` (it currently drops fields it does not declare).
 
 ## One-time steps for the owner
 

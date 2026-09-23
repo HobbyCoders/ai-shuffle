@@ -40,6 +40,15 @@ export interface DesktopUpdateState {
 	error: string | null;
 	checkedAt: string | null;
 	message?: string | null;
+	/** Release name and notes from the update's signed manifest; absent on older desktop builds. */
+	release?: string | null;
+	notes?: string | null;
+}
+
+/** Release notes flattened to one short line for a notification. */
+export function notesSummary(notes: string | null | undefined, limit = 280): string {
+	const text = (notes ?? '').replace(/\s+/g, ' ').trim();
+	return text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}…` : text;
 }
 
 export interface DesktopWorkerState {
@@ -211,7 +220,8 @@ async function announceUpdate(state: DesktopUpdateState): Promise<void> {
 	announcedUpdateVersion = version;
 	const { notify } = await import('$lib/stores/notifications');
 	const shell = desktop;
-	notify.info(`AI Shuffle Desktop ${version} has downloaded. Restart to finish installing it.`, {
+	const summary = notesSummary(state.notes);
+	notify.info(`AI Shuffle Desktop ${state.release || version} has downloaded. Restart to finish installing it.${summary ? ` What's new: ${summary}` : ''}`, {
 		title: 'Update ready',
 		category: 'desktop-update',
 		persist: false,
