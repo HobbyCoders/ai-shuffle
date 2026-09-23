@@ -98,6 +98,40 @@ def test_existing_managed_owner_gets_all_admin_settings_and_keeps_device_identit
     assert change_voice(fresh, headers={'Authorization': 'Bearer ' + token}).status_code == 200
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('port,proto,expected', [(8001, 'https', 200), (8001, 'http', 403), (8000, 'https', 403)])
+async def test_android_private_access_through_https_proxy(owner_app, monkeypatch, port, proto, expected):
+    from httpx import ASGITransport, AsyncClient
+    from app.api import chat_access
+    from app.serve import IngressApplication
+
+    hub = bind_and_enroll(monkeypatch)
+    _, token = web_session(owner_app)
+    owner_app.include_router(chat_access.router)
+    monkeypatch.setattr(chat_access, 'require_session', AsyncMock())
+    snapshot = AsyncMock(return_value={'requests': [], 'actions': [], 'grants': [], 'saved_connections': []})
+    fulfill = AsyncMock(return_value={'granted': True})
+    monkeypatch.setattr(chat_access.broker, 'snapshot', snapshot)
+    monkeypatch.setattr(chat_access.broker, 'fulfill', fulfill)
+    transport = ASGITransport(app=IngressApplication(owner_app, 8000), client=('127.0.0.1', 1234))
+    async with AsyncClient(transport=transport, base_url=f'http://127.0.0.1:{port}', headers={
+        'Host': 'worker.example.com', 'X-Forwarded-Proto': proto,
+        'Authorization': 'Bearer ' + token,
+        'Origin': 'https://appassets.androidplatform.net',
+    }) as client:
+        response = await client.get('/api/v1/chat-access/chat')
+        assert response.status_code == expected, response.text
+        response = await client.post('/api/v1/chat-access/chat/requests/request', json={'saved_id': 'a' * 32})
+        assert response.status_code == expected, response.text
+        assert snapshot.await_count == fulfill.await_count == (1 if expected == 200 else 0)
+        # Transport evidence never replaces device authentication or live owner
+        # authorization, for either reads or credential-bearing writes.
+        hub.return_value = {'active': False}
+        assert (await client.get('/api/v1/chat-access/chat')).status_code == 403
+        assert (await client.post('/api/v1/chat-access/chat/requests/request', json={'saved_id': 'a' * 32})).status_code == 403
+        assert snapshot.await_count == fulfill.await_count == (1 if expected == 200 else 0)
+
+
 @pytest.mark.parametrize('transport', ['cookie', 'bearer'])
 def test_managed_account_session_reads_account_wide_inventory(owner_app, monkeypatch, transport):
     hub = bind_and_enroll(monkeypatch)

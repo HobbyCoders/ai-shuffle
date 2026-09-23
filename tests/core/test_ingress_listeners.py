@@ -23,7 +23,8 @@ def test_two_sockets_preserve_tcp_identity_and_share_one_lifespan():
                 await send({'type': event['type'] + '.complete'})
                 if event['type'] == 'lifespan.shutdown':
                     return
-        payload = json.dumps({'ingress': scope['shuffle.ingress'], 'peer': scope['client'][0]})
+        payload = json.dumps({'ingress': scope['shuffle.ingress'], 'peer': scope['client'][0],
+                              'forwarded_https': scope['shuffle.forwarded_https']})
         if scope['type'] == 'websocket':
             await receive()
             await send({'type': 'websocket.accept'})
@@ -49,10 +50,11 @@ def test_two_sockets_preserve_tcp_identity_and_share_one_lifespan():
                     result = client.get(f'http://127.0.0.1:{port}/', headers={
                         'X-Forwarded-For': '192.168.1.1',
                         'X-Forwarded-Host': f'127.0.0.1:{ports[0]}',
+                        'X-Forwarded-Proto': 'https',
                         'X-Shuffle-Ingress': 'local',
                     }).json()
-                    assert result == {'ingress': ingress, 'peer': '127.0.0.1'}
-                    with connect(f'ws://127.0.0.1:{port}/') as ws:
+                    assert result == {'ingress': ingress, 'peer': '127.0.0.1', 'forwarded_https': ingress == 'remote'}
+                    with connect(f'ws://127.0.0.1:{port}/', additional_headers={'X-Forwarded-Proto': 'https'}) as ws:
                         assert json.loads(ws.recv()) == result
         finally:
             server.should_exit = True
@@ -71,6 +73,36 @@ def test_unrecognized_socket_cannot_inherit_local_marker():
     for server in [None, ('127.0.0.1', 8001), ('127.0.0.1', 9999)]:
         asyncio.run(wrapper({'type': 'http', 'server': server, 'shuffle.ingress': 'local'}, None, None))
     assert received == ['remote', 'remote', 'remote']
+
+
+@pytest.mark.parametrize('server,peer,headers,secure', [
+    (('127.0.0.1', 18001), ('127.0.0.1', 1234), [(b'x-forwarded-proto', b'https')], True),
+    (('::1', 18001), ('::1', 1234), [(b'x-forwarded-proto', b'https')], True),
+    (('127.0.0.1', 8000), ('127.0.0.1', 1234), [(b'x-forwarded-proto', b'https')], False),
+    (('127.0.0.1', 9999), ('127.0.0.1', 1234), [(b'x-forwarded-proto', b'https')], False),
+    (None, ('127.0.0.1', 1234), [(b'x-forwarded-proto', b'https')], False),
+    (('127.0.0.1', 18001), ('10.0.0.2', 1234), [(b'x-forwarded-proto', b'https')], False),
+    (('10.0.0.1', 18001), ('127.0.0.1', 1234), [(b'x-forwarded-proto', b'https')], False),
+    (('127.0.0.1', 18001), None, [(b'x-forwarded-proto', b'https')], False),
+    (('127.0.0.1', 18001), ('127.0.0.1', 1234), [], False),
+    (('127.0.0.1', 18001), ('127.0.0.1', 1234), [(b'x-forwarded-proto', b'http')], False),
+    (('127.0.0.1', 18001), ('127.0.0.1', 1234), [(b'x-forwarded-proto', b'https, http')], False),
+    (('127.0.0.1', 18001), ('127.0.0.1', 1234), [(b'x-forwarded-proto', b'https')] * 2, False),
+])
+def test_https_attestation_only_from_protected_loopback_proxy(server, peer, headers, secure):
+    received = []
+
+    async def app(scope, receive, send):
+        received.append(scope)
+
+    wrapper = IngressApplication(app, 8000, 18001)
+    asyncio.run(wrapper({'type': 'http', 'scheme': 'http', 'server': server,
+                        'client': peer, 'headers': headers,
+                        'shuffle.forwarded_https': True}, None, None))
+    assert received[0]['shuffle.forwarded_https'] is secure
+    assert received[0]['scheme'] == 'http'
+    assert received[0]['client'] == peer
+    assert received[0]['shuffle.ingress'] == ('local' if server and server[1] == 8000 else 'remote')
 
 
 def test_isolated_remote_port_is_explicit_and_cannot_claim_normal_ports():

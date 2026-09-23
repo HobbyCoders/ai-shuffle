@@ -6,6 +6,7 @@ listening socket address, and proxy-header rewriting is disabled.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import socket
 import sys
@@ -28,6 +29,13 @@ def configured_remote_port(env):
 REMOTE_PORT = configured_remote_port(os.environ)
 
 
+def _loopback_endpoint(endpoint):
+    try:
+        return bool(endpoint) and ipaddress.ip_address(endpoint[0]).is_loopback
+    except (ValueError, TypeError, IndexError):
+        return False
+
+
 class IngressApplication:
     def __init__(self, app, local_port: int, remote_port: int = REMOTE_PORT):
         if local_port == remote_port:
@@ -43,6 +51,17 @@ class IngressApplication:
             port = server[1] if server else None
             # Unknown sockets are deliberately treated as remote.
             scope["shuffle.ingress"] = "local" if port == self.local_port else "remote"
+            # TLS terminates at the managed tunnel (or the owner's HTTPS
+            # proxy). Only its dedicated loopback listener may attest HTTPS.
+            # Keep the real scheme/peer and owner authority unchanged; headers
+            # on the LAN listener or unknown sockets cannot confer this flag.
+            scope["shuffle.forwarded_https"] = (
+                port == self.remote_port
+                and _loopback_endpoint(server)
+                and _loopback_endpoint(scope.get("client"))
+                and [value for name, value in scope.get("headers", [])
+                     if name.lower() == b"x-forwarded-proto"] == [b"https"]
+            )
         await self.app(scope, receive, send)
 
 

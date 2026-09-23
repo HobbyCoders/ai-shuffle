@@ -16,8 +16,10 @@ logger = logging.getLogger(__name__)
 
 async def checked(request: Request, session_id: str):
     from app.core.owner_auth import loopback_request
-    if request.url.scheme != "https" and not loopback_request(request):
-        raise HTTPException(403, "Private access requires the desktop loopback connection or HTTPS directly to this worker.")
+    if (request.url.scheme != "https"
+            and request.scope.get("shuffle.forwarded_https") is not True
+            and not loopback_request(request)):
+        raise HTTPException(403, "Private access requires the desktop loopback connection or HTTPS to this worker, directly or through its protected remote connection.")
     if getattr(request.state, "preview_grant", None) is not None:
         raise HTTPException(403, "Preview access cannot manage private connections.")
     await require_session(request, session_id)
