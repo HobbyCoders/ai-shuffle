@@ -158,7 +158,6 @@ def normalize_model_id(model: str | None) -> str:
 # ``source`` note says so on each row.
 _XAI = "docs.x.ai/docs/models, 2026-09-04; short-context tier (<200k prompt)"
 _ZAI = "docs.z.ai/guides/overview/pricing, 2026-09-04"
-_OPENAI_6 = "developers.openai.com/api/docs/pricing, 2026-09-04; short-context tier"
 # The gpt-6 rows (astra, sol, luna) as the pricing page read on this date.
 _OPENAI_6_LUNA = "developers.openai.com/api/docs/pricing, 2026-09-23; short-context tier"
 
