@@ -2,7 +2,8 @@
 
 The owner's checklist for moving AI Shuffle for Android from Play internal
 testing to a public listing. Build and signing mechanics are in
-[README.md](README.md); this file covers what Play Console asks for.
+[README.md](README.md); this file covers what Play Console asks for, and
+how the release APK and the Play link reach the website's downloads page.
 
 ## Builds and secrets (unchanged)
 
@@ -19,6 +20,57 @@ variables; nothing new is needed for this checklist.
 Promote a tested internal build to closed, open or production testing from
 Play Console (Test and release > the track > Promote release). The workflows
 never publish to production.
+
+## APK on the website
+
+The downloads page (`hobbycoders.com/ai-shuffle/downloads`) links a sideload
+APK once the account hub lists one: the `android` entry of
+`GET /v1/desktop/installers`, served at `/v1/desktop/installer/android`
+(`android/hub/README.md`, "Installers per platform"). It is published per
+release tag, after `release.yml` has created the tag's GitHub release:
+
+1. Deploy the hub with migration 0024 (`deploy-hub.yml`) if it is not live yet.
+2. In Actions, run **Publish a platform installer** (`platform-installer.yml`)
+   with **Use workflow from** set to the tag (`vX.Y.Z`), platform `android`,
+   and the build run ID left empty.
+3. The workflow calls Android CI (`android.yml`) with the tag as
+   `release_tag`. That builds the release APK with `versionName` set to the
+   tag, checks it is signed with the release key, runs the unit, lint, hub
+   and emulator checks, and attaches `AI-Shuffle-Android.apk`, its `.sha256`
+   file and `android-build.json` to the release. It needs the same keystore
+   secrets as the Play build (`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`,
+   `KEY_ALIAS`, `KEY_PASSWORD`).
+4. The publish job then runs `desktop/scripts/publish-platform-installer.mjs
+   android`. It checks the APK against its `.sha256` file and
+   `android-build.json`, and refuses the APK if its `versionName` is not the
+   tag, if it was built from another commit, if the release asset's bytes
+   differ, or if a newer APK is already listed. Then it signs the entry with
+   the application update key and writes the hub row. It runs in the
+   `release-signing` environment (`DESKTOP_APPLICATION_SIGNING_KEY`,
+   `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `ACCOUNT_HUB_DATABASE_ID`).
+
+If an Android CI run with that `release_tag` finished in the last day, pass
+its run ID instead to publish its `android-download` artifact without
+building again. A plain Android CI run from main is not accepted: its
+`versionName` is the Gradle default, not the tag.
+
+Check the result at `https://hobbycoders.com/v1/desktop/installers`
+(`platforms.android`). The link on the downloads page appears only while the
+hub's `PUBLIC_APP_DOWNLOADS` is `enabled`; until then the page says the APK
+download is paused. The page caches the hub's answer for a minute.
+
+The rolling `android-latest` release (Android CI dispatched on main with
+`publish_download`) is separate and never reaches the hub.
+
+### Google Play link on the downloads page
+
+Once the Play listing is public, set the repository variable
+`SITE_PLAY_LISTING_URL` (Settings > Secrets and variables > Actions >
+Variables) to `https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle`
+and run **Deploy website** (`deploy-site.yml`). The site accepts only a
+`https://play.google.com/store/apps/details?id=` address; anything else is
+ignored and the page keeps saying the listing opens with the public release.
+Leaving the variable unset keeps whatever the site Worker already has.
 
 ## Account deletion (required before a public listing)
 
