@@ -445,3 +445,93 @@ def test_unsynthesized_backlog_below_the_overflow_line_is_kept(tmp_path, monkeyp
     # Only consumed lines may go below the overflow line.
     assert store.journal_count() >= 10 - n
     assert store.synth_cursor() == 0 or store.journal_count() == 10
+
+
+# ─── a learner delete is not a user Forget ──────────────────────────────────
+
+
+def _cells(store: SkillStore, n: int, start: int = 0) -> None:
+    for i in range(start, start + n):
+        store.journal_append({"kind": "cell", "code": f"x = {i}", "host_calls": 0})
+
+
+async def test_learner_delete_keeps_journal_and_cursor(tmp_path) -> None:
+    """A learner <delete-memory> used to run as a user Forget: it purged every
+    journal line older than now (the unsynthesized backlog included) and the
+    pass then wrote its pre-purge cursor back, 40 lines past the empty
+    journal, so the next 40 entries were never read."""
+    store = SkillStore(tmp_path)
+    fact = store.save_memory("The staging box is called Atlas.", scope="global")
+    store.journal_context(session_id="ses_1", project=PROJECT)
+    _cells(store, 45)
+    provider = FakeInference(reply_text(f'<delete-memory id="{fact.id}"/>'))
+    synth = Synthesizer(provider, "gpt-test", store, project=PROJECT, min_new_entries=10)
+    assert await synth.run() == [f"-memory:{fact.id}"]
+
+    assert fact.id not in [m.id for m in store.memories()]
+    assert not store._facts.snapshot().get("forgotten_before")
+    consumed = log_rows(store)[-1]["consumed"]
+    assert 0 < consumed < 45
+    assert store.journal_count() == 45
+    assert store.synth_cursor() == consumed
+    # The maintenance sweep must not finish the wipe either.
+    store.reap()
+    store.purge_forgotten_evidence()
+    assert store.journal_count() == 45 and store.synth_cursor() == consumed
+
+    _cells(store, 10, start=45)
+    assert store.journal_count() - store.synth_cursor() == 55 - consumed
+    assert synth.due()
+    indexed, _ = store.journal_slice_indexed(store.synth_cursor(), 40)
+    assert indexed[0][1]["code"] == f"x = {consumed}"
+
+
+async def test_user_forget_still_purges_evidence_and_rebases_cursor(tmp_path) -> None:
+    store = SkillStore(tmp_path)
+    fact = store.save_memory("The staging box is called Atlas.", scope="global", protected=True)
+    _cells(store, 10)
+    store.set_synth_cursor(6)
+    assert store.delete_memory(fact.id, explicit=True)
+    assert store._facts.snapshot().get("forgotten_before")
+    assert store.journal_count() == 0
+    assert store.synth_cursor() == 0
+    time.sleep(0.02)  # later entries carry a later timestamp than the cutoff
+    _cells(store, 3, start=10)
+    store.purge_forgotten_evidence()  # the maintenance sweep repeats it
+    assert store.journal_count() == 3 and store.synth_cursor() == 0
+    assert [e["code"] for e in store.journal_entries()] == ["x = 10", "x = 11", "x = 12"]
+
+
+async def test_cursor_past_the_journal_end_is_clamped(tmp_path) -> None:
+    # The state older builds left behind after a learner delete: the cursor
+    # points past the end, pending is negative and the learner is never due.
+    store = SkillStore(tmp_path)
+    _cells(store, 10)
+    store.set_synth_cursor(40)
+    synth = Synthesizer(FakeInference(), "gpt-test", store, min_new_entries=1)
+    assert not synth.due()
+    store.reap()  # the five-minute maintenance sweep
+    assert store.synth_cursor() == store.journal_count() == 10
+    _cells(store, 1, start=10)
+    assert synth.due()
+
+
+async def test_user_forget_during_a_pass_does_not_strand_the_cursor(tmp_path) -> None:
+    store = SkillStore(tmp_path)
+    fact = store.save_memory("The staging box is called Atlas.", scope="global", protected=True)
+    store.journal_context(session_id="ses_1", project=PROJECT)
+    _cells(store, 30)
+
+    synth = Synthesizer(FakeInference(reply_text("NO_CHANGES")), "gpt-test", store,
+                        project=PROJECT, min_new_entries=1)
+    apply = synth._apply
+
+    async def apply_while_the_user_forgets(text, group):
+        # Another session's Forget lands while this pass applies its output.
+        store.delete_memory(fact.id, explicit=True)
+        return await apply(text, group)
+
+    synth._apply = apply_while_the_user_forgets
+    await synth.run()
+    assert store.journal_count() == 0
+    assert 0 <= store.synth_cursor() <= store.journal_count()

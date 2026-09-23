@@ -726,7 +726,14 @@ class Synthesizer:
                 changed.extend(await self._apply(text, group))
         finally:
             self._project = original_project
-        self._store.set_synth_cursor(reached)
+        if self._store._facts.snapshot().get("forgotten_before", 0) > forgotten_before:
+            # A user Forget landed while the pass ran. Its purge already
+            # rebased the cursor over a rewritten journal, so ``reached``
+            # no longer indexes the same lines.
+            return changed
+        # Clamped: a cursor past the end would make pending negative and
+        # stop the learner until the journal caught up.
+        self._store.set_synth_cursor(min(reached, self._store.journal_count()))
         try:
             self._store.clear_learner_backoff(self._model)
         except Exception:

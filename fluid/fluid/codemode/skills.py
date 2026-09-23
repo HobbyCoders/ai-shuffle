@@ -915,6 +915,17 @@ class SkillStore:
                 return 0
             cursor = max(0, self.synth_cursor())
             total = self.journal_count()
+            if cursor > total:
+                # A cursor past the end makes pending negative, so the
+                # learner is never due again until the journal catches up.
+                # Older builds left one after a learner delete wiped the
+                # journal; this sweep repairs such stores.
+                _log.warning(
+                    "Memory journal cursor %d was past the journal's %d lines "
+                    "in %s; clamped", cursor, total, self._journal_path,
+                )
+                self.set_synth_cursor(total)
+                cursor = total
             consumed = min(cursor, total)
             drop = max(0, min(consumed, total - JOURNAL_KEEP_ENTRIES))
             target = int(JOURNAL_MAX_BYTES * JOURNAL_REAP_FRACTION)
@@ -1158,8 +1169,14 @@ class SkillStore:
 
     def delete_memory(self, memory_id: str, *, explicit: bool = False,
                       expected_revision: int | None = None) -> bool:
+        """Delete one fact. ``explicit`` means the user asked (the Forget
+        tool); only that purges the journal evidence written before it. A
+        learner or consolidation delete retires the fact and leaves the
+        journal and the synthesis cursor alone: it used to wipe every
+        unsynthesized entry on the store and leave the cursor past the end.
+        """
         deleted = self._facts.forget(memory_id, explicit=explicit, expected_revision=expected_revision)
-        if deleted:
+        if deleted and explicit:
             self.purge_forgotten_evidence()
         return deleted
 
@@ -1172,16 +1189,24 @@ class SkillStore:
                 raise OSError("Fact deletion committed; inference cleanup is pending because the journal is busy")
             if self._journal_path.exists():
                 lines = self._journal_path.read_text(encoding="utf-8").splitlines()
+                cursor = max(0, self.synth_cursor())
                 kept = []
-                for line in lines:
+                behind = 0  # dropped lines the cursor had already passed
+                for index, line in enumerate(lines):
                     try:
                         if json.loads(line).get("ts", 0) > cutoff:
                             kept.append(line)
+                            continue
                     except (ValueError, AttributeError):
-                        continue
+                        pass
+                    behind += index < cursor
                 if len(kept) != len(lines):
                     atomic_write_text(self._journal_path, "".join(line + "\n" for line in kept))
-                    self.set_synth_cursor(0)
+                # Rebase like reap_journal does, then clamp: entries kept
+                # past the cursor stay unsynthesized.
+                rebased = min(cursor - behind, len(kept))
+                if rebased != cursor:
+                    self.set_synth_cursor(rebased)
             # Older versions logged model-output previews. These are diagnostic
             # derivatives, not facts; removing them prevents a forgotten value
             # from surviving in an old preview. Current rows carry counts and

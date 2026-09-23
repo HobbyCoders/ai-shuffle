@@ -300,7 +300,12 @@ class FactStore:
             doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
             for bucket in ("entries", "archived"):
                 doc[bucket] = [e for e in doc[bucket] if e["id"] != memory_id]
-            doc["forgotten_before"] = time.time()
+            if explicit:
+                # Journal evidence older than this is purged and never shown
+                # to the learner again. Only a user Forget earns that; a
+                # learner delete setting it would let the next maintenance
+                # sweep wipe the journal anyway.
+                doc["forgotten_before"] = time.time()
             self._write(doc)
             return True
 
