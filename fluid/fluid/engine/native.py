@@ -50,6 +50,7 @@ from fluid.codemode.session import (
     CodeModeSession,
     register_code_mode_tools,
 )
+from fluid.context.cache_miss_classes import PROVIDER_FALLBACK, usage_miss_class
 from fluid.context.cache_plan import plan_cache
 from fluid.context.cache_probe import (
     CacheProbeConfig,
@@ -550,6 +551,17 @@ def _upstream_suffix(native_stop_reason: str | None) -> str:
     return f" (upstream: {native_stop_reason})"
 
 
+def _stamp_miss_class(out: dict[str, Any]) -> None:
+    """Put the call's cache-miss class on its Usage fields, when it has one."""
+    try:
+        miss_class = usage_miss_class(out)
+    except Exception:  # noqa: BLE001 — instrumentation is never fatal
+        log.debug("cache-miss classification failed", exc_info=True)
+        return
+    if miss_class is not None:
+        out["cache_miss_class"] = miss_class
+
+
 def _is_empty_completion(result: _CallResult) -> bool:
     """Did this call come back with no content whatsoever?
 
@@ -1015,6 +1027,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Set once a sticky-routed call comes back empty: this loop instance
         # never sends the routing key again (see _agent_loop).
         self._sticky_poisoned = False
+        # Set when the key is dropped, cleared by the next fingerprinted call:
+        # that call's request changed because the key went, so its miss is a
+        # provider fallback, not a settings switch.
+        self._sticky_drop_unreported = False
         # Request identity and in-turn routing state, one per (session, role);
         # handed to the provider on each request (see WireState).
         self._wire_states: dict[tuple[str, str], WireState] = {}
@@ -2730,12 +2746,26 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # prompt_cache_key, because the key is its cache affinity, and
                 # retrying without it re-bills the whole prefix.
                 if call_was_sticky and drops_sticky:
+                    dropped_key = self._affinity_key()
                     self._sticky_poisoned = True
                     log.warning(
                         "Empty completion from %s: dropping the sticky routing "
                         "key for the rest of session %s (provider_fallback)",
                         self.provider.name, sid,
                     )
+                    await self._emit(CacheMissAlert(
+                        session_id=sid, turn_id=turn_id,
+                        consecutive=empty_retries + 1,
+                        reason="sticky_key_dropped",
+                        provider=self.provider.name,
+                        model=self.model,
+                        cache_key=dropped_key,
+                        note=(
+                            "empty completion: the sticky routing key is "
+                            "dropped for the rest of this session"
+                        ),
+                        miss_class=PROVIDER_FALLBACK,
+                    ))
                 empty_retries += 1
                 # The dud call may still have billed something.
                 self._fold_call_usage(total_usage, result.usage)
@@ -2743,6 +2773,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # next cache-miss diagnosis diffs against the request that
                 # was actually sent last, not the one before it.
                 self._cache_probe_fields(result.usage)
+                if call_was_sticky and drops_sticky:
+                    # Set after the dud call's own probe fields: the call
+                    # that follows is the first without the key.
+                    self._sticky_drop_unreported = True
                 delay = _empty_retry_delay(empty_retries)
                 await self._emit(ProviderRetry(
                     session_id=sid, turn_id=turn_id,
@@ -3611,11 +3645,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
         except (TypeError, ValueError):
             pass  # Old or malformed diagnostic metadata is not a turn failure.
+        sticky_dropped, self._sticky_drop_unreported = self._sticky_drop_unreported, False
         try:
             diagnosis = diagnose_cache_miss(
                 previous=self._prev_prefix_fingerprint,
                 current=fingerprint,
-                input_tokens=int(usage.get("input_tokens", 0) or 0),
+                # Fresh prompt tokens: uncached input plus cache writes. On
+                # the Anthropic lane a rewritten prefix is billed as a cache
+                # write and input_tokens holds only the tail after the last
+                # breakpoint, so input_tokens alone kept every mutation under
+                # the probe's gate. Other providers report no writes.
+                input_tokens=int(usage.get("input_tokens", 0) or 0)
+                + int(usage.get("cache_creation_input_tokens", 0) or 0),
                 cache_read_tokens=int(
                     usage.get("cache_read_input_tokens", 0) or 0
                 ),
@@ -3630,8 +3671,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._prev_prefix_fingerprint = fingerprint
         if diagnosis is None:
             self._unexplained_misses = 0
+            _stamp_miss_class(out)
             return out
+        if sticky_dropped and diagnosis.get("reason") == "request_settings_changed":
+            diagnosis["sticky_key_dropped"] = True
         out["cache_miss"] = diagnosis
+        _stamp_miss_class(out)
         if not is_unexplained_miss(diagnosis):
             self._unexplained_misses = 0
             log.debug(
@@ -3697,6 +3742,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         }
         await self._emit(CacheMissAlert(
             session_id=sid, turn_id=turn_id,
+            miss_class=usage_raw.get("cache_miss_class"),
             consecutive=int(streak),
             reason=str(diagnosis.get("reason") or ""),
             input_tokens=int(diagnosis.get("input_tokens") or 0),

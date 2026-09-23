@@ -190,3 +190,60 @@ def test_calls_that_are_not_misses_have_no_class():
     # The probe did not fingerprint this call (probe off, delegated leg).
     assert cmc.usage_miss_class(_report("no_cache_read")) is None
     assert cmc.usage_miss_class({}) is None
+
+
+def test_a_dropped_sticky_key_is_a_provider_fallback():
+    # OpenRouter's permanent key drop changes the request; the probe marks
+    # the diagnosis so the miss is not filed as a planned settings switch.
+    dropped = {"reason": "request_settings_changed", "routing_headers_changed": False,
+               "other_settings_changed": True, "sticky_key_dropped": True}
+    assert cmc.classify_cache_miss(dropped) == cmc.PROVIDER_FALLBACK
+
+
+def test_the_alert_is_logged_with_the_class_the_engine_stamped(caplog):
+    adapter = HarnessAdapter()
+    adapter._translate(_usage(SYNTHETIC_MISSES[cmc.HARNESS_MUTATION]))
+    alert = CacheMissAlert(
+        session_id="engine-s", turn_id="t1", consecutive=1,
+        reason="sticky_key_dropped", provider="openrouter", model="glm",
+        miss_class=cmc.PROVIDER_FALLBACK,
+    )
+    with caplog.at_level(logging.WARNING, logger="app.core.provider.harness_adapter"):
+        adapter._translate(alert)
+    assert "class=provider_fallback" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cache_miss_counts_survive_an_adapter_reconnect(monkeypatch):
+    # A reconnect builds a new adapter with empty counts. Its first capture
+    # used to overwrite the persisted counts with the lower ones.
+    from app.db import database
+
+    persisted = {"captured_at": "x", "data": {"cacheMisses": {
+        "byClass": {cmc.PROVIDER_FALLBACK: 4, cmc.HARNESS_MUTATION: 1},
+        "total": 5, "unexpected": 1,
+    }}}
+    reads: list[str] = []
+
+    def _snapshot(session_id):
+        reads.append(session_id)
+        return persisted
+
+    monkeypatch.setattr(database, "get_session_context_usage_snapshot", _snapshot)
+
+    class _Engine:
+        async def get_context_usage(self):
+            return {"totalTokens": 1_000, "categories": []}
+
+    adapter = HarnessAdapter()
+    adapter._engine = _Engine()
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "app-s")
+    adapter._translate(_usage(SYNTHETIC_MISSES[cmc.HARNESS_MUTATION]))
+
+    report = (await adapter.get_context_usage())["cacheMisses"]
+    assert report["byClass"] == {cmc.PROVIDER_FALLBACK: 4, cmc.HARNESS_MUTATION: 2}
+    assert report["total"] == 6
+    assert report["unexpected"] == 2
+    # Read once per adapter, not on every capture.
+    await adapter.get_context_usage()
+    assert reads == ["app-s"]

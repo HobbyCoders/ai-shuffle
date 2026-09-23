@@ -373,6 +373,12 @@ class CacheMissAlert(Event):
     ``cache_key`` is the affinity key the request carried (OpenAI Responses
     ``prompt_cache_key`` / OpenRouter ``session_id``), so a reader can tell a
     routing problem from a partitioning one.
+
+    ``miss_class`` is one of the six classes in
+    :mod:`fluid.context.cache_miss_classes`. The engine also raises this
+    alert, with ``reason="sticky_key_dropped"`` and class
+    ``provider_fallback``, when it drops OpenRouter's sticky routing key after
+    an empty completion. None on rows written before the field existed.
     """
 
     consecutive: int
@@ -383,6 +389,7 @@ class CacheMissAlert(Event):
     model: str = ""
     cache_key: str | None = None
     note: str = ""
+    miss_class: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

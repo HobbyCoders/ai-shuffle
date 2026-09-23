@@ -415,6 +415,11 @@ class HarnessAdapter(ProviderAdapter):
         # them; the last class labels the CacheMissAlert that follows a Usage.
         self._cache_miss_counts: Dict[str, int] = {}
         self._last_cache_miss_class: Optional[str] = None
+        # Counts an earlier adapter for this session persisted in
+        # ``sessions.context_usage_json``, read once at the first report. A
+        # reconnect builds a new adapter with empty counts; without this base
+        # its first capture overwrote the persisted counts with lower ones.
+        self._cache_miss_base: Optional[Dict[str, int]] = None
         # The ``model_call_index`` values this turn's roll-up has counted, so a
         # second record for a counted call (the delegated leg's context
         # snapshot) is recognised by its index.
@@ -2153,15 +2158,45 @@ class HarnessAdapter(ProviderAdapter):
         except Exception as exc:  # pragma: no cover — defensive, mirrors the SDK adapter
             logger.warning(f"[HarnessAdapter] get_context_usage() failed: {exc}")
             return None
-        if isinstance(result, dict) and self._cache_miss_counts:
-            result = {**result, "cacheMisses": self._cache_miss_report()}
+        if isinstance(result, dict):
+            if self._cache_miss_base is None:
+                self._cache_miss_base = await self._persisted_cache_miss_counts()
+            if self._cache_miss_counts or self._cache_miss_base:
+                result = {**result, "cacheMisses": self._cache_miss_report()}
         return result
 
+    async def _persisted_cache_miss_counts(self) -> Dict[str, int]:
+        """The per-class counts in this session's persisted context-usage
+        snapshot, or ``{}``. Never raises."""
+        try:
+            app_session_id = self._resolve_app_session_id()
+            if not app_session_id:
+                return {}
+            from app.db import database
+            from app.db.async_database import run_sync
+
+            snapshot = await run_sync(
+                database.get_session_context_usage_snapshot, app_session_id
+            )
+            by_class = (
+                ((snapshot or {}).get("data") or {}).get("cacheMisses") or {}
+            ).get("byClass") or {}
+            return {
+                str(cls): int(n) for cls, n in by_class.items()
+                if isinstance(n, int) and not isinstance(n, bool) and n > 0
+            }
+        except Exception:  # noqa: BLE001 — accounting never breaks a report.
+            logger.debug("[HarnessAdapter] persisted cache-miss counts unreadable", exc_info=True)
+            return {}
+
     def _cache_miss_report(self) -> Dict[str, Any]:
-        """Prompt-cache misses so far, by class, with the unexpected count."""
+        """Prompt-cache misses so far in this session, by class, with the
+        unexpected count: the persisted base plus this adapter's own."""
         from app.core.provider.cache_miss_classes import UNEXPECTED_CLASSES
 
-        counts = dict(self._cache_miss_counts)
+        counts = dict(self._cache_miss_base or {})
+        for cls, n in self._cache_miss_counts.items():
+            counts[cls] = counts.get(cls, 0) + n
         return {
             "byClass": counts,
             "total": sum(counts.values()),
@@ -2175,11 +2210,13 @@ class HarnessAdapter(ProviderAdapter):
 
         The class goes on the usage dict as ``cache_miss_class`` and into the
         session counts; the fluid event's own ``raw`` dict is left untouched.
+        An engine that stamps the class itself (``Usage.raw``) is trusted.
         """
         try:
-            from app.core.provider.cache_miss_classes import usage_miss_class
+            from app.core.provider.cache_miss_classes import MISS_CLASSES, usage_miss_class
 
-            miss_class = usage_miss_class(usage)
+            stamped = usage.get("cache_miss_class")
+            miss_class = stamped if stamped in MISS_CLASSES else usage_miss_class(usage)
             self._last_cache_miss_class = miss_class
             if miss_class is None:
                 return
@@ -2550,14 +2587,18 @@ class HarnessAdapter(ProviderAdapter):
 
         if cls == "CacheMissAlert":
             # fluid emits this right after the Usage whose diagnosis made a
-            # streak of misses it cannot explain. That Usage was classified
-            # already; the alert only makes the streak visible in the log.
+            # streak of misses it cannot explain, and when it drops
+            # OpenRouter's sticky key. The event carries its class
+            # (``miss_class``); older engines leave it None and the last
+            # Usage's class stands in. The alert only makes it visible in
+            # the log; the Usage was counted already.
             logger.warning(
                 "[HarnessAdapter] Prompt cache miss streak engine_session=%s "
                 "turn=%s class=%s consecutive=%s reason=%s provider=%s model=%s "
                 "fresh=%s cache_read=%s: %s",
                 event.session_id, event.turn_id,
-                self._last_cache_miss_class or "unclassified",
+                getattr(event, "miss_class", None)
+                or self._last_cache_miss_class or "unclassified",
                 getattr(event, "consecutive", None), getattr(event, "reason", ""),
                 getattr(event, "provider", ""), getattr(event, "model", ""),
                 getattr(event, "input_tokens", None),

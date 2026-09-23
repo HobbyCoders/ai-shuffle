@@ -105,3 +105,36 @@ async def test_sticky_policy_per_adapter(
         # The retry and the next turn keep the affinity key.
         assert sent == [sid, sid, sid]
         assert dropped_logs == []
+
+
+def _big_text(text: str) -> list[StreamChunk]:
+    chunks = _text(text)
+    chunks[0] = StreamChunk("message_start", {"usage": {"input_tokens": 60_000}})
+    return chunks
+
+
+async def test_openrouter_key_drop_is_logged_as_a_provider_fallback() -> None:
+    # Design 2.3: OpenRouter keeps its permanent drop, and the drop is logged
+    # as CacheMissAlert{class: provider_fallback}. The call after the drop
+    # changed its request only because the key went, so its miss is a
+    # provider fallback too, not a planned settings switch.
+    from fluid.events import CacheMissAlert, Usage
+
+    provider = ScriptedOpenRouter([_empty(), _big_text("done")])
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(provider=provider, store=store, model="m", session_id=sid,
+                      system="sys " * 50_000)
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+    await loop.aclose()
+
+    events = loop.bus.log(sid)
+    (alert,) = [e for e in events if isinstance(e, CacheMissAlert)]
+    assert alert.reason == "sticky_key_dropped"
+    assert alert.miss_class == "provider_fallback"
+    assert alert.cache_key == sid
+    after = [e for e in events if isinstance(e, Usage)][-1].raw
+    assert after["cache_miss"]["reason"] == "request_settings_changed"
+    assert after["cache_miss"]["sticky_key_dropped"] is True
+    assert after["cache_miss_class"] == "provider_fallback"

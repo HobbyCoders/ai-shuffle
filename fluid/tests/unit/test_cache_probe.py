@@ -1189,3 +1189,62 @@ async def test_the_responses_client_routing_headers_are_the_ones_it_sends() -> N
     assert "Authorization" not in routing, "credentials never enter the probe"
     # The public API sends no routing headers today.
     assert OpenAIResponsesClient(api_key="k").routing_headers() == {}
+
+
+# ─── Miss classes on the event log ───────────────────────────────────────────
+
+
+async def test_the_alert_and_the_usage_rows_carry_the_miss_class() -> None:
+    # Design 5.1 reads CacheMissAlert.class from the event log. A streak of
+    # matching-prefix misses inside the cache lifetime is a provider fallback.
+    loop = await _run_misses(3)
+    events = loop.bus.log(loop.session_id)
+    (alert,) = [e for e in events if isinstance(e, CacheMissAlert)]
+    assert alert.miss_class == "provider_fallback"
+    classes = [e.raw.get("cache_miss_class") for e in events if isinstance(e, Usage)]
+    # Call 1 is the session's first request: a planned rebuild.
+    assert classes == ["planned_rebuild"] + ["provider_fallback"] * 3
+
+
+class _AnthropicWriteProvider(_MissProvider):
+    """Anthropic accounting: a rewritten prefix is billed as a cache write and
+    input_tokens holds only the few tokens after the last breakpoint."""
+
+    name = "anthropic"
+    caps = ProviderCaps(explicit_cache_breakpoints=True)
+
+    def __init__(self, tool_calls: int) -> None:
+        super().__init__(tool_calls)
+        self.loop: NativeLoop | None = None
+
+    async def stream(self, request: ProviderRequest):
+        if self.calls == 0 and self.loop is not None:
+            # The harness rewrites its own system prompt between two calls.
+            self.loop.system = "changed " * 50_000
+        async for chunk in super().stream(request):
+            if chunk.kind == "message_start":
+                chunk = StreamChunk("message_start", {"usage": {
+                    "input_tokens": 2_000,
+                    "cache_creation_input_tokens": 58_000,
+                    "cache_read_input_tokens": 0,
+                }})
+            yield chunk
+
+
+async def test_an_anthropic_prefix_mutation_is_classified_as_a_mutation() -> None:
+    # Before, the probe's 10k fresh-input gate read only input_tokens (2k
+    # here), so the rewrite never got a diagnosis and was filed as
+    # append_growth.
+    provider = _AnthropicWriteProvider(1)
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m", system="sys " * 50_000,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+    )
+    provider.loop = loop
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+    usages = [e for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+    second = usages[1].raw
+    assert second["cache_miss"]["reason"] == "prefix_changed"
+    assert second["cache_miss"]["changed"] == "system"
+    assert second["cache_miss_class"] == "harness_mutation"
