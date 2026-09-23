@@ -535,6 +535,10 @@ async def test_user_forget_during_a_pass_does_not_strand_the_cursor(tmp_path) ->
     await synth.run()
     assert store.journal_count() == 0
     assert 0 <= store.synth_cursor() <= store.journal_count()
+    # The pass still ran and answered: it is logged and counted like any other.
+    row = log_rows(store)[-1]
+    assert row["kind"] == "synthesis" and row["consumed"] == 30 and "error" not in row
+    assert store.learner_yield()["silent_passes"] == 1
 
 
 # ─── yield: a silent learner is reported, and a writing one is visible ──────
@@ -623,6 +627,19 @@ async def test_a_long_gap_without_passes_is_not_silence(tmp_path, caplog) -> Non
         await synth.run()
     assert not [r for r in caplog.records if "yield alarm" in r.message]
     assert store.learner_yield()["silent_passes"] == 1
+
+
+def test_silence_ends_at_the_last_pass(tmp_path) -> None:
+    # A learner that ran one silent pass four days ago and has not run since
+    # is idle, not silent: diagnostics must not report it every day after.
+    from fluid.codemode.skills import learner_silence_seconds
+
+    store = SkillStore(tmp_path)
+    now = time.time()
+    store.note_learner_pass(False, now=now - 4 * 86400)
+    assert learner_silence_seconds(store.learner_yield(), now) == 0
+    store.note_learner_pass(False, now=now)
+    assert learner_silence_seconds(store.learner_yield(), now) == pytest.approx(4 * 86400)
 
 
 def test_a_skipped_pass_does_not_count_toward_yield(tmp_path) -> None:

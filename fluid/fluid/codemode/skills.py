@@ -1528,9 +1528,10 @@ class SkillStore:
     # ─── learner yield (see Synthesizer._track_yield) ─────────────────────
     #
     # ``meta.json["learner_yield"]``: ``last_write_at``, ``silent_passes``
-    # (passes since the last write) and ``silent_since`` (the first of them),
-    # plus ``alarm_at`` for the last silence warning. Shared by every session
-    # over the store; the app's diagnostics read it without a SkillStore.
+    # (passes since the last write), ``silent_since`` (the first of them) and
+    # ``last_pass_at``, plus ``alarm_at`` for the last silence warning. Shared
+    # by every session over the store; the app's diagnostics read it without
+    # a SkillStore.
 
     def learner_yield(self) -> dict:
         record = self._load_meta().get("learner_yield")
@@ -1542,13 +1543,14 @@ class SkillStore:
         record = meta.get("learner_yield")
         record = dict(record) if isinstance(record, dict) else {}
         if wrote:
-            record = {"last_write_at": now, "silent_passes": 0}
+            record = {"last_write_at": now, "last_pass_at": now, "silent_passes": 0}
         else:
             try:
                 record["silent_passes"] = int(record.get("silent_passes", 0)) + 1
             except (TypeError, ValueError):
                 record["silent_passes"] = 1
             record.setdefault("silent_since", now)
+            record["last_pass_at"] = now
         meta["learner_yield"] = record
         self._save_meta(meta)
         return record
@@ -1580,18 +1582,21 @@ LEARNER_SILENCE_ALARM_SECONDS = 3 * 86400.0
 
 
 def learner_silence_seconds(record: object, now: float) -> float:
-    """How long a ``learner_yield`` record has run passes without a write;
+    """How long a ``learner_yield`` record has run passes without a write:
+    from the first silent pass to the latest pass, not to ``now``, so a
+    store whose learner simply stopped running is not reported as silent.
     0 when the last pass wrote or no pass has run."""
     if not isinstance(record, dict):
         return 0.0
     try:
         passes = int(record.get("silent_passes", 0) or 0)
         since = float(record.get("silent_since", 0) or 0)
+        last = float(record.get("last_pass_at", now) or now)
     except (TypeError, ValueError):
         return 0.0
     if passes <= 0 or since <= 0:
         return 0.0
-    return max(0.0, now - since)
+    return max(0.0, min(now, last) - since)
 
 
 # Referenced-skill extraction: ``skills.foo`` attribute use, the

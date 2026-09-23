@@ -355,10 +355,16 @@ def test_journal_diagnostics_counts_silent_learners_without_naming_them(tmp_path
     monkeypatch.setattr(fluid_memory, "skills_root", lambda: tmp_path)
     local = SkillStore(tmp_path)
     user = SkillStore(tmp_path / ".users" / ("a" * 64))
-    for store in (local, user):
+    idle = SkillStore(tmp_path / ".users" / ("b" * 64))
+    for store in (local, user, idle):
         store.journal_append({"content": "fixture"})
-    local.note_learner_pass(False, now=time.time() - 4 * 86400)  # silent for four days
+    # Passes for four days, none of them writing.
+    local.note_learner_pass(False, now=time.time() - 4 * 86400)
+    local.note_learner_pass(False, now=time.time() - 60)
     user.note_learner_pass(False, now=time.time() - 3600)  # silent for an hour
+    # One silent pass four days ago and none since: the learner stopped
+    # running, which is not three days of passes without a write.
+    idle.note_learner_pass(False, now=time.time() - 4 * 86400)
     result = fluid_memory.journal_diagnostics()
     assert result["coverage_complete"]
     assert result["learner_silent_stores"] == 1
