@@ -24,6 +24,7 @@ from fluid.messages import (
 )
 from fluid.providers.base import ProviderRequest, StreamChunk
 from fluid.providers.anthropic.limits import resolve_max_tokens
+from fluid.providers.anthropic.thinking import clamp_effort, resolve_thinking
 
 
 def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None:
@@ -111,12 +112,20 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
             tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
             breakpoints -= 1
         body["tools"] = tools
-    if request.thinking:
-        body["thinking"] = request.thinking
-    if request.effort:
-        # Anthropic effort is GA and lives inside output_config, not top-level.
-        # Values pass through verbatim (low/medium/high/xhigh/max).
-        body["output_config"] = {"effort": request.effort}
+    # Anthropic effort is GA and lives inside output_config, not top-level.
+    # Both it and ``thinking`` are fitted to what this model accepts (xhigh on
+    # a 4.6 model becomes high; a budget on 4.7+ becomes adaptive), since the
+    # API rejects the whole request otherwise. See providers/anthropic/thinking.
+    effort = clamp_effort(request.model, request.effort)
+    thinking = resolve_thinking(request.model, request.thinking, effort)
+    if thinking:
+        budget = thinking.get("budget_tokens")
+        if isinstance(budget, int) and budget >= body["max_tokens"]:
+            # The budget must stay below max_tokens.
+            thinking = {**thinking, "budget_tokens": max(1024, body["max_tokens"] - 1)}
+        body["thinking"] = thinking
+    if effort:
+        body["output_config"] = {"effort": effort}
     if breakpoints > 0 and messages:
         last = messages[-1]["content"]
         if last:

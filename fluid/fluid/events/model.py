@@ -65,6 +65,12 @@ class Event:
 class TurnStarted(Event):
     model: str
     provider: str
+    # The session's thinking setting as the host passed it (Anthropic shape),
+    # None when it sends none. Recorded on every turn because a session keeps
+    # the setting it started with: a resumed engine reads it back from here
+    # (NativeLoop._resolve_session_thinking). Optional and last so rows
+    # persisted before the field existed still load, as None.
+    thinking: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

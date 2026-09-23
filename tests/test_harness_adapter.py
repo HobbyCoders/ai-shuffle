@@ -5172,6 +5172,74 @@ async def test_connect_with_sdk_options_threads_aih_tool_allowlist(recording_ada
     assert adapter._options.allowed_tools is None
 
 
+@pytest.mark.asyncio
+async def test_native_anthropic_leg_gets_the_explicit_thinking_setting(recording_adapter):
+    """thinking_mode and thinking_display reached only the delegated CLI; the
+    native anthropic lane dropped both. They now reach NativeLoop, which
+    applies them to new sessions only."""
+    from types import SimpleNamespace
+
+    adapter, made = recording_adapter
+    sdk_options = SimpleNamespace(
+        model="claude-opus-4-8",
+        system_prompt=None,
+        cwd=None,
+        resume=None,
+        permission_mode=None,
+        mcp_servers=None,
+        env=None,
+        include_partial_messages=False,
+        add_dirs=None,
+        disallowed_tools=None,
+        max_turns=None,
+        effort=None,
+        thinking={"type": "adaptive"},
+        extra_args={"thinking-display": "summarized"},
+        aih_provider_id=None,
+    )
+    adapter_connect = adapter.connect
+
+    async def _connect_native(opts):
+        opts.extra.setdefault("fluid_engine", "native")
+        opts.extra.setdefault("fluid_provider", "anthropic")
+        await adapter_connect(opts)
+
+    adapter.connect = _connect_native
+    await adapter.connect_with_sdk_options(sdk_options)
+    assert made["native"]["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+
+@pytest.mark.parametrize(
+    ("kind", "thinking", "display", "expected"),
+    [
+        # No explicit setting: nothing is sent (default-on waits on E5).
+        ("anthropic", None, None, None),
+        # A display alone is passed as display only; fluid never turns
+        # thinking on for it.
+        ("anthropic", None, "summarized", {"display": "summarized"}),
+        ("anthropic", {"type": "enabled", "budget_tokens": 8000}, None,
+         {"type": "enabled", "budget_tokens": 8000}),
+        ("anthropic", {"type": "disabled"}, "summarized", {"type": "disabled"}),
+        # Other lanes read ``thinking`` differently and get nothing.
+        ("openai_responses", {"type": "adaptive"}, "summarized", None),
+        ("openrouter", {"type": "adaptive"}, None, None),
+    ],
+)
+def test_native_thinking_shapes(kind, thinking, display, expected):
+    import app.core.provider.harness_adapter as ha
+
+    extra = {"thinking_display": display} if display else {}
+    options = SessionOptions(model="claude-opus-4-8", thinking=thinking, extra=extra)
+    assert ha._native_thinking(kind, options) == expected
+
+
+@pytest.mark.asyncio
+async def test_native_leg_without_a_thinking_setting_passes_none(recording_adapter):
+    adapter, made = recording_adapter
+    await adapter.connect(_native_opts(model="claude-opus-4-8"))
+    assert "thinking" not in made["native"]
+
+
 def test_requires_reconnect_on_a_changed_tool_surface():
     """The restriction is frozen at construction (CE12), so a change can only be
     honored by a rebuild — never a model hot-swap."""

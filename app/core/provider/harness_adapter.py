@@ -126,7 +126,9 @@ HONORED:
     lane, since fluid exempts code mode's own tools from the CE12 allowlist.
 
 DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
-  * ``thinking`` — fluid manages thinking via provider caps, not passed through.
+  * ``thinking`` — forwarded (with ``thinking_display``) on the native
+    anthropic lane only, and only to new sessions; fluid fits it to the model
+    (``_native_thinking``). The openai_responses and openrouter lanes ignore it.
   * ``hooks`` / ``include_hook_events`` — fluid has its own HookBus; app SDK hooks not wired.
   * ``extra_args`` — SDK/CLI-specific, ignored. (``setting_sources`` is now
     HONORED on native legs: it maps onto fluid's own scope filter — see
@@ -802,6 +804,10 @@ class HarnessAdapter(ProviderAdapter):
                 # Reasoning depth: fluid's serializers map this per provider
                 # (Anthropic output_config.effort; OpenAI-shaped reasoning.effort).
                 effort=_valid_effort(getattr(options, "effort", None)),
+                # The user's explicit thinking_mode / thinking_display, native
+                # anthropic lane only. fluid applies it to new sessions only
+                # and fits it to the model; None (the default) sends nothing.
+                **_native_thinking_kwargs(kind, options),
                 # The model's INPUT window (distinct from native_caps'
                 # max_tokens, which caps OUTPUT). Drives the maxTokens /
                 # percentage / "Free space" fields of the leg's
@@ -1022,6 +1028,10 @@ class HarnessAdapter(ProviderAdapter):
             # query_options). Delegated leg → --effort; native legs → the
             # provider's effort/reasoning param via fluid's serializers.
             effort=getattr(sdk_options, "effort", None),
+            # The profile's or chat's explicit thinking_mode, already shaped
+            # by query_options._build_thinking_config (None for "default").
+            # Only the native anthropic lane reads it (_native_thinking).
+            thinking=getattr(sdk_options, "thinking", None),
             # Per-session fast mode (v81), stamped by query_options as
             # ``aih_fast`` (override for this turn, else the session row).
             fast=getattr(sdk_options, "aih_fast", None),
@@ -1054,6 +1064,15 @@ class HarnessAdapter(ProviderAdapter):
         context_window = getattr(sdk_options, "aih_context_window", None)
         if context_window:
             opts.extra["context_window"] = int(context_window)
+        # thinking_display rides to the CLI as a raw flag (query_options
+        # _resolve_thinking_display); the native anthropic lane reads the same
+        # value from here.
+        extra_args = getattr(sdk_options, "extra_args", None)
+        thinking_display = (
+            extra_args.get("thinking-display") if isinstance(extra_args, dict) else None
+        )
+        if thinking_display:
+            opts.extra["thinking_display"] = thinking_display
         # The app's own session id (``sessions.id``) rides alongside it as
         # ``aih_session_id``. Native legs need it for Task dispatch: the fluid
         # session id is a ``ses_...`` handle, not an app session row, and on a
@@ -3345,6 +3364,49 @@ def _registry_bound_kwargs(registry_cls: Any = None) -> Dict[str, Any]:
         return {}
     seconds = float(getattr(settings, "fluid_external_call_timeout_seconds", 330) or 330)
     return {"external_call_timeout": seconds}
+
+
+_THINKING_TYPES = frozenset({"adaptive", "enabled", "disabled"})
+_THINKING_DISPLAYS = frozenset({"summarized", "omitted"})
+
+
+def _native_thinking(kind: Optional[str], options: SessionOptions) -> Optional[Dict[str, Any]]:
+    """The user's explicit thinking setting for a native anthropic leg, or None.
+
+    ``options.thinking`` is ``query_options._build_thinking_config``'s dict
+    (``{"type": "adaptive"}``, ``{"type": "enabled", "budget_tokens": N}`` or
+    ``{"type": "disabled"}``; absent for thinking_mode "default"), and
+    ``thinking_display`` is "summarized" or "omitted". A display with no mode
+    becomes ``{"display": ...}``, which fluid reads as "the model's default
+    mode, shown this way", so it never turns thinking on by itself. Other lanes
+    get None: their serializers read ``thinking`` differently.
+    """
+    if kind != "anthropic":
+        return None
+    raw = getattr(options, "thinking", None)
+    thinking: Dict[str, Any] = {}
+    if isinstance(raw, dict) and raw.get("type") in _THINKING_TYPES:
+        thinking = {
+            key: value for key, value in raw.items()
+            if key in ("type", "budget_tokens")
+        }
+    display = (options.extra or {}).get("thinking_display")
+    if display in _THINKING_DISPLAYS and thinking.get("type") != "disabled":
+        thinking["display"] = display
+    return thinking or None
+
+
+def _native_thinking_kwargs(
+    kind: Optional[str], options: SessionOptions, loop_cls: Any = None
+) -> Dict[str, Any]:
+    """``thinking`` for :class:`NativeLoop`, when there is one and it takes it."""
+    thinking = _native_thinking(kind, options)
+    if thinking is None:
+        return {}
+    cls = loop_cls if loop_cls is not None else NativeLoop
+    if not _accepts_kwarg(cls, "thinking"):
+        return {}
+    return {"thinking": thinking}
 
 
 def _loop_bound_kwargs(loop_cls: Any = None) -> Dict[str, Any]:

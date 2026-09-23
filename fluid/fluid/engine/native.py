@@ -807,6 +807,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         context_window: int | None = None,
         max_tokens: int | None = None,
         effort: str | None = None,
+        thinking: dict[str, Any] | None = None,
         request_extra: dict[str, Any] | None = None,
         registry: ToolRegistry | None = None,
         permissions: PermissionEngine | None = None,
@@ -864,6 +865,16 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Reasoning-depth knob, provider-mapped by each serializer (Anthropic
         # output_config.effort; OpenAI-shaped reasoning.effort, clamped).
         self.effort = effort
+        # The host's explicit thinking setting, Anthropic-shaped
+        # (``{"type": "adaptive", "display": "summarized"}``; a dict with only
+        # ``display`` keeps the model's default mode). It applies to NEW
+        # sessions only: a session keeps the setting its turns were recorded
+        # with (``TurnStarted.thinking``), so a history that ran without
+        # thinking never has it switched on mid-way, which would rebuild the
+        # cached prefix and can 400 inside a tool loop. The serializer fits the
+        # value to each model (providers/anthropic/thinking.py).
+        self.thinking = dict(thinking) if thinking else None
+        self._session_thinking: dict[str, dict[str, Any] | None] = {}
         # Host-supplied passthrough merged into every ProviderRequest.extra,
         # which each serializer spreads onto the request body verbatim. For
         # wire-level knobs fluid has no first-class field for (an OpenAI
@@ -1979,6 +1990,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._rehydrate_queued_peer_messages(sid)
         await self._rehydrate_compaction(sid)
         await self._rehydrate_prefix_fingerprint(sid)
+        await self._resolve_session_thinking(sid)
 
         if isinstance(op, Resume):
             # Nothing is appended: the head user node IS the prompt, so the
@@ -1992,6 +2004,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._emit(TurnStarted(
                     session_id=sid, node_id=head.node_id if head else "",
                     turn_id=turn_id, model=self.model, provider=self.provider.name,
+                    thinking=self._session_thinking.get(sid),
                 ))
                 await self._emit_terminal_with_park(ErrorEvent(
                     session_id=sid,
@@ -2009,6 +2022,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             await self._emit(TurnStarted(
                 session_id=sid, node_id=head.node_id, turn_id=turn_id,
                 model=self.model, provider=self.provider.name,
+                thinking=self._session_thinking.get(sid),
             ))
             blocked, _ = await self._turn_start_hook(
                 sid, turn_id, head.message.text(), with_context=False
@@ -2045,6 +2059,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._emit(TurnStarted(
             session_id=sid, node_id=node_id, turn_id=turn_id,
             model=self.model, provider=self.provider.name,
+                thinking=self._session_thinking.get(sid),
         ))
         blocked, hook_context = await self._turn_start_hook(sid, turn_id, prompt_text)
         if blocked:
@@ -2435,6 +2450,42 @@ class NativeLoop(BackgroundLifecycleMixin):
             for e in events
             if isinstance(e, ContextCompaction)
         )
+
+    async def _resolve_session_thinking(self, sid: str) -> None:
+        """Fix this session's thinking setting, once per session per engine.
+
+        A session with no recorded turn is new and takes the host's setting.
+        A session that already has turns keeps the setting its newest
+        ``TurnStarted`` recorded, whatever the host passes now; turns recorded
+        before the field existed ran without thinking, so they read as None.
+        That is what keeps a resumed history from having thinking switched on
+        (or off) under it.
+        """
+        if sid in self._session_thinking:
+            return
+        if self.thinking is None and not getattr(
+            self.provider.caps, "signed_thinking", False
+        ):
+            # No setting to apply, and a provider that sends none: skip the
+            # event scan.
+            self._session_thinking[sid] = None
+            return
+        recorded: list[TurnStarted] = []
+        try:
+            recorded = [event async for event in iter_events(self.store, sid, 0)
+                        if isinstance(event, TurnStarted)]
+        except Exception:  # noqa: BLE001 — unreadable history reads as resumed
+            log.warning(
+                "could not read session %s turns; not applying thinking", sid,
+                exc_info=True,
+            )
+            self._session_thinking[sid] = None
+            return
+        if recorded:
+            setting = recorded[-1].thinking
+            self._session_thinking[sid] = dict(setting) if setting else None
+        else:
+            self._session_thinking[sid] = dict(self.thinking) if self.thinking else None
 
     async def _rehydrate_prefix_fingerprint(self, sid: str) -> None:
         """Recover the previous request's prefix fingerprint from the events.
@@ -3268,6 +3319,7 @@ class NativeLoop(BackgroundLifecycleMixin):
     ) -> ProviderRequest:
         tools_api = self._tools_api()
         plan = plan_cache(self.provider.caps, has_tools=bool(tools_api))
+        sid = self._session.session_id if self._session is not None else None
         return ProviderRequest(
             model=self.model,
             messages=history,
@@ -3275,6 +3327,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             tools=tools_api,
             max_tokens=self.max_tokens,
             effort=self.effort,
+            thinking=self._session_thinking.get(sid) if sid else None,
             cache_breakpoints=plan.breakpoints,
             # Per-provider cache-affinity key first, host passthrough on top
             # so the host's keys win.
