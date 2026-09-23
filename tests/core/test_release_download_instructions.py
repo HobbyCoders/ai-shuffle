@@ -200,3 +200,22 @@ def test_docker_release_rebuild_keeps_container_verification_gate():
     assert steps["Verify actual container lifecycle and UI"]["if"] == gate
     assert steps["Upload container evidence"]["if"] == f"always() && ({gate})"
     assert steps["Checkout release source"]["with"]["ref"] == "refs/tags/${{ inputs.release_tag }}"
+
+
+def test_stable_update_is_signed_only_after_verification_in_a_protected_environment():
+    release = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+    job = release["jobs"]["source-stable"]
+    assert set(job["needs"]) == {"create-release", "docker", "buyer-install"}
+    assert job["environment"] == "release-signing"
+    assert job["if"] == "${{ !contains(needs.create-release.outputs.release_tag, '-') }}"
+    checkout = job["steps"][0]
+    assert checkout["with"]["ref"] == "refs/tags/${{ needs.create-release.outputs.release_tag }}"
+    assert checkout["with"]["fetch-depth"] == 0
+    publish = job["steps"][-1]
+    assert publish["run"] == "node desktop/scripts/publish-source.mjs"
+    assert publish["env"]["SOURCE_CHANNEL"] == "stable"
+    assert publish["env"]["RELEASE_TAG"] == "${{ needs.create-release.outputs.release_tag }}"
+    assert job["concurrency"]["group"] == "desktop-source-publish"
+    # The per-push publisher stays on the edge channel.
+    edge = yaml.safe_load((ROOT / ".github/workflows/desktop-source.yml").read_text())
+    assert "SOURCE_CHANNEL" not in str(edge)

@@ -198,6 +198,47 @@ jobs:
           path: ${{ runner.temp }}/buyer-install
           if-no-files-found: ignore
 
+  # The only job that signs an update customers are offered. It runs in the
+  # release-signing environment (required reviewer, deployments only from
+  # v* tags; see docs/ci/release-channels.md), after the release image passed
+  # container verification in docker-publish.yml and the clean-runner buyer
+  # install above. Prereleases are never offered as stable updates.
+  source-stable:
+    name: Sign the stable in-app update
+    needs: [create-release, docker, buyer-install]
+    if: ${{ !contains(needs.create-release.outputs.release_tag, '-') }}
+    runs-on: ubuntu-latest
+    environment: release-signing
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Shares desktop-source.yml's group so D1 pointer writes never interleave.
+    concurrency:
+      group: desktop-source-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.create-release.outputs.release_tag }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: android/hub/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: android/hub
+      - name: Publish the signed stable source release
+        env:
+          SOURCE_CHANNEL: stable
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
+        run: node desktop/scripts/publish-source.mjs
+
   android:
     name: Android Play internal release
     needs: [create-release, docker]
