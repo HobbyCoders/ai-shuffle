@@ -323,6 +323,22 @@ def status(now: float | None = None, *, cached: bool = False) -> dict:
     return result | {"state": "trialing" if payload.get("status") == "trialing" else "active", "allowed": True, "reason": None}
 
 
+LEASE_HEADER = "X-Shuffle-Lease"
+
+
+def lease_header() -> str | None:
+    """The current lease for the hub's gated source feed (D8), as the value of
+    the ``X-Shuffle-Lease`` header: the signed envelope as JSON, base64url.
+    None in beta mode or without a lease. See android/hub/src/license-gate.ts."""
+    if beta_mode():
+        return None
+    lease = _load_state(cached=True).get("lease")
+    if not isinstance(lease, dict):
+        return None
+    raw = json.dumps(lease, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
 def license_allows_agent_runs() -> tuple[bool, str | None]:
     """Whether this worker may start a new agent run, and why not.
 

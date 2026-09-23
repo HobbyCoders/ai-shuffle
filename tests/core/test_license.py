@@ -173,6 +173,17 @@ def test_leases_that_do_not_verify_block_runs(store, keys, tamper):
     assert licensing.status()["state"] == "invalid"
 
 
+def test_lease_header_carries_the_signed_envelope_for_the_hub(store, keys, monkeypatch):
+    assert licensing.lease_header() is None
+    lease = keys.lease("inst-1")
+    save(store, install_id="inst-1", lease=lease)
+    header = licensing.lease_header()
+    assert "=" not in header and "+" not in header and "/" not in header
+    assert json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4))) == lease
+    monkeypatch.setattr(licensing.settings, "license_beta", True)
+    assert licensing.lease_header() is None
+
+
 def test_gate_fails_open_when_state_cannot_be_read(store, monkeypatch):
     def broken(key, ttl=5.0):
         raise RuntimeError("database unavailable")
