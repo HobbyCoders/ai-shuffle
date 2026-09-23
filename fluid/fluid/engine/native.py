@@ -2583,7 +2583,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             for promo in promotions:
                 await self._emit_compaction(sid, turn_id, promo)
             projected_prompt = self._estimate_request_input_tokens(history)
-            call_was_sticky = not self._sticky_poisoned and empty_retries == 0
+            drops_sticky = self._drops_sticky_on_empty()
+            call_was_sticky = not self._sticky_poisoned and (
+                empty_retries == 0 or not drops_sticky
+            )
             num_calls += 1
             self._turn_model_calls = num_calls
             result = await self._stream_once(
@@ -2606,8 +2609,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # while dead replicas failed fast, but a replica that HANGS
                 # makes every probe cost a full first-data watchdog timeout. A
                 # new session (or a new process) starts clean.
-                if call_was_sticky:
+                #
+                # That is OpenRouter's policy. The provider decides through
+                # classify_error: the Responses API never drops its
+                # prompt_cache_key, because the key is its cache affinity, and
+                # retrying without it re-bills the whole prefix.
+                if call_was_sticky and drops_sticky:
                     self._sticky_poisoned = True
+                    log.warning(
+                        "Empty completion from %s: dropping the sticky routing "
+                        "key for the rest of session %s (provider_fallback)",
+                        self.provider.name, sid,
+                    )
                 empty_retries += 1
                 # The dud call may still have billed something.
                 self._fold_call_usage(total_usage, result.usage)
@@ -3313,6 +3326,21 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self.provider.name == "openai_responses":
             return {"prompt_cache_key": key}
         return {}
+
+    def _drops_sticky_on_empty(self) -> bool:
+        """Whether an empty completion should drop the affinity key for good.
+
+        The provider's ``classify_error`` decides (its ``drop_sticky``). A
+        provider without one keeps the original behaviour, which drops it.
+        """
+        classify = getattr(self.provider, "classify_error", None)
+        if not callable(classify):
+            return True
+        try:
+            return bool(classify({"kind": "empty_completion"}).drop_sticky)
+        except Exception:  # noqa: BLE001 — a policy lookup never ends a turn
+            log.debug("classify_error failed; keeping the default", exc_info=True)
+            return True
 
     def _fingerprint_request(self, request: ProviderRequest) -> None:
         """Record the prefix fingerprint of the request about to be sent.

@@ -463,7 +463,8 @@ async def test_responses_requests_carry_the_session_as_prompt_cache_key() -> Non
         request = loop._build_request([])
         assert request.extra == {"prompt_cache_key": sid}
         assert build_request_body(request)["prompt_cache_key"] == sid
-        # The non-sticky retry drops the key, as it does for OpenRouter.
+        # sticky=False still omits the key. The engine never asks for that on
+        # this lane: its sticky policy keeps the key (test_sticky_policy.py).
         assert "prompt_cache_key" not in loop._build_request([], sticky=False).extra
     finally:
         await loop.aclose()
