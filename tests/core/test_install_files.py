@@ -69,6 +69,46 @@ def test_buyer_compose_is_verified_in_ci():
     assert any("verify_buyer_compose.py" in step.get("run", "") for step in job["steps"])
 
 
+def unraid():
+    import xml.etree.ElementTree as ET
+    return ET.parse(ROOT / "docs/install/unraid/ai-shuffle.xml").getroot()
+
+
+def test_unraid_template_pins_the_release_under_the_buyer_registry_path():
+    template = unraid()
+    assert template.findtext("Repository") == f"registry.hobbycoders.com/YOUR-PULL-TOKEN/ai-shuffle:{__version__}"
+    public = "https://raw.githubusercontent.com/HobbyCoders/ai-shuffle-unraid/main/"
+    assert template.findtext("TemplateURL") == public + "ai-shuffle.xml"
+    assert template.findtext("Icon") == public + "images/ai-shuffle.png"
+    assert template.findtext("Support") == "https://github.com/HobbyCoders/ai-shuffle-unraid/issues"
+    text = (ROOT / "docs/install/unraid/ai-shuffle.xml").read_text()
+    assert "claude-sdk" not in text and "claude-icon" not in text and ":latest" not in text
+
+
+def test_unraid_template_runtime_flags_paths_and_interface():
+    template = unraid()
+    flags = template.findtext("ExtraParams").split()
+    assert {"--shm-size=1g", "--stop-timeout=90", "--init", "--pids-limit=8192"} <= set(flags)
+    configs = {config.get("Target"): config for config in template.iter("Config")}
+    paths = {target: config for target, config in configs.items() if config.get("Type") == "Path"}
+    assert set(paths) == PERSISTENT
+    for target, config in paths.items():
+        assert config.get("Default").startswith("/mnt/user/appdata/ai-shuffle/"), target
+        assert config.text == config.get("Default"), target
+    assert paths["/workspace"].get("Display") == "always"
+    assert paths["/home/appuser/chrome-profile"].get("Display") == "always"
+    port = configs["8000"]
+    assert port.get("Type") == "Port" and port.get("Default") == "" and port.get("Required") == "true"
+    assert "LAN address" in port.get("Description") and "every interface" in port.get("Description")
+    owner = configs["OWNER_PASSWORD"]
+    assert owner.get("Mask") == "true" and owner.get("Required") == "false"
+    assert "CORS_ORIGINS" not in configs
+
+
+def test_the_old_root_template_is_gone():
+    assert not (ROOT / "my-ai-shuffle.xml").exists()
+
+
 def test_install_docs_never_name_the_frozen_public_package():
     for path in (ROOT / "docs/install").rglob("*"):
         # registry.md explains why that package is frozen.

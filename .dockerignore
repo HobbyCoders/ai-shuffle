@@ -121,7 +121,6 @@ mobile/
 redeploy.ps1
 Start AI Shuffle.cmd
 run_local.*
-my-ai-shuffle.xml
 LOCAL_SETUP.md
 CONTRIBUTING.md
 Makefile
