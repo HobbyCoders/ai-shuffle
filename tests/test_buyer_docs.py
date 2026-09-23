@@ -55,6 +55,16 @@ def test_frontend_bundles_the_same_buyer_pages():
         assert ours[name] == bundled[name], f"{name} differs between docs/content and the frontend copy"
 
 
+def test_frontend_bundles_the_same_docs_everywhere():
+    """Every docs section, not only the buyer pages: connector guides drifted once."""
+    content, frontend = ROOT / "docs/content", ROOT / "frontend/src/lib/docs/content"
+    ours = {p.relative_to(content): p.read_bytes() for p in content.rglob("*.md")}
+    bundled = {p.relative_to(frontend): p.read_bytes() for p in frontend.rglob("*.md")}
+    assert set(ours) == set(bundled), f"pages only on one side: {sorted(map(str, set(ours) ^ set(bundled)))}"
+    drifted = sorted(str(name) for name in ours if ours[name] != bundled[name])
+    assert not drifted, f"differ between docs/content and the frontend copy: {drifted}"
+
+
 def test_index_links_every_page_and_every_link_resolves():
     found = pages()
     linked = set(DOC_LINK.findall(found["_index"]))

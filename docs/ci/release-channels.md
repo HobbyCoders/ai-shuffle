@@ -16,7 +16,11 @@ and D22 are the background.
    `X` and `latest` when promoted.
 3. **buyer-install** pulls that image on a fresh GitHub-hosted runner and
    installs it with `docs/install/compose` exactly as a buyer would
-   (`scripts/ci/verify_buyer_compose.py`).
+   (`scripts/ci/verify_buyer_compose.py`), then checks the first session
+   through the API: `/health`, signed-out requests refused until an owner
+   password exists, the password set and used, the beta license, no CLI login
+   on a fresh container, and an agent turn refused without a credential. The
+   manual half of the clean-box test is `docs/internal/acceptance-clean-box.md`.
 4. **source-stable** runs in the protected `release-signing` environment,
    checks that the tag's commit is on `main`, builds the runtime-only source
    archive (`scripts/source_archive.py`), signs a manifest with

@@ -17,6 +17,12 @@ on:
       - 'docker-compose*.yml'
       - 'docs/install/compose/**'
       - 'scripts/ci/verify_buyer_compose.py'
+      # The buyer install check also drives the owner password, license and
+      # CLI status APIs of the running container.
+      - 'app/api/owner_login.py'
+      - 'app/core/owner_auth.py'
+      - 'app/api/license.py'
+      - 'app/core/license.py'
       - 'scripts/backup.sh'
       - 'scripts/verify_container_postgres.py'
       - 'tests/integration/container_ui_smoke.mjs'
@@ -95,7 +101,9 @@ jobs:
       - name: Verify actual container lifecycle and UI
         run: python scripts/verify_container_postgres.py --image ai-shuffle:postgres-candidate --artifacts "$RUNNER_TEMP/container-postgres"
       # The buyer's install path: docs/install/compose, unmodified, with only
-      # the .env values a buyer fills in.
+      # the .env values a buyer fills in; then the first-session API checks
+      # (owner password gate, beta license, no CLI login, agent turn refused
+      # without a credential). The human half is docs/internal/acceptance-clean-box.md.
       - name: Install from the buyer compose file
         run: python scripts/ci/verify_buyer_compose.py --image ai-shuffle:postgres-candidate --artifacts "$RUNNER_TEMP/container-postgres"
       # Diagnostics only; release evidence is uploaded by docker-publish.yml.
