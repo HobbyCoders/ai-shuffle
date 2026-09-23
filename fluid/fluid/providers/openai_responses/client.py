@@ -171,12 +171,21 @@ class OpenAIResponsesClient:
                         diagnostics.received_headers(resp)
                         if resp.status_code == 200:
                             normalizer = ResponsesStreamNormalizer()
+                            # Heartbeats become provider_alive chunks: with
+                            # encrypted-only reasoning they can be the only
+                            # frames for minutes. The stream deadline still
+                            # caps the whole call.
                             events = with_deadline(
-                                sse_events(diagnostics.lines()), self._stream_deadline
+                                sse_events(diagnostics.lines(), keepalives=True),
+                                self._stream_deadline,
                             )
                             async for event_name, data in events:
                                 for chunk in normalizer.consume(event_name, data):
-                                    yielded = True
+                                    # A liveness signal is not delivered
+                                    # content, so it leaves a pre-content
+                                    # transport failure retriable.
+                                    if chunk.kind != "provider_alive":
+                                        yielded = True
                                     yield chunk
                             return
                         text = (await resp.aread()).decode(errors="replace")

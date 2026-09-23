@@ -646,6 +646,44 @@ async def test_turn_usage_maps_to_turn_usage(mock_db):
     await rec.close()
 
 
+async def test_provider_alive_maps_to_turn_provider_alive(mock_db):
+    # #1418: fluid's ProviderAlive, recorded as worker liveness evidence.
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "provider_alive", "signal": "reasoning"})
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.provider_alive"
+    assert row["payload"]["signal"] == "reasoning"
+    await rec.close()
+
+
+async def test_provider_alive_is_recorded_once_while_the_log_is_busy(mock_db):
+    # fluid sends one per model call. A turn whose log keeps moving records
+    # the first only; the rows around it already prove the stream is alive.
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "provider_alive", "signal": "accepted"})
+    await rec.on_event({"type": "tool_use", "id": "t1", "name": "Read", "input": {}})
+    await rec.on_event({"type": "provider_alive", "signal": "accepted"})
+    await rec.on_event({"type": "provider_alive", "signal": "keepalive"})
+    assert _types().count("turn.provider_alive") == 1
+    await rec.close()
+
+
+async def test_provider_alive_is_recorded_again_after_a_silent_gap(mock_db, monkeypatch):
+    # A reasoning stream that stays silent past the gap gets another row, so
+    # the log can show it is still open.
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "provider_alive", "signal": "accepted"})
+    monkeypatch.setattr(tr, "PROVIDER_ALIVE_MIN_GAP_SECONDS", 0.0)
+    await rec.on_event({"type": "provider_alive", "signal": "keepalive"})
+    signals = [r["payload"]["signal"] for r in _rows()
+               if r["event_type"] == "turn.provider_alive"]
+    assert signals == ["accepted", "keepalive"]
+    await rec.close()
+
+
 async def test_indexed_model_call_usage_is_never_coalesced_and_keeps_request_ids(mock_db):
     _mk_session()
     rec = await _recorder()

@@ -662,6 +662,27 @@ class TestProgressBounding:
         assert f.frames_forwarded == 0
         assert _types(_parent_rows()) == ["subagent.started", "task.updated"]
 
+    def test_provider_alive_counts_without_reaching_the_parent(self, db):
+        """An encrypted-only reasoning worker writes nothing but
+        ``turn.provider_alive`` until its reasoning ends. That proves the
+        request was accepted, so it counts as liveness, and it is never
+        mirrored."""
+        f = _feed()
+
+        async def run():
+            await f.started()
+            _seed_worker(
+                {"type": "turn.started", "payload": {}},
+                {"type": "turn.provider_alive", "payload": {"signal": "accepted"}},
+            )
+            await f.drain()
+
+        asyncio.run(run())
+
+        assert f.provider_progress == 1
+        assert f.frames_forwarded == 0
+        assert _types(_parent_rows()) == ["subagent.started", "task.updated"]
+
     def test_lifecycle_rows_alone_are_not_provider_progress(self, db):
         """``turn.started`` is written before any provider request exists."""
         f = _feed()

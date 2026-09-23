@@ -383,6 +383,35 @@ class ProviderRetry(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class ProviderAlive(Event):
+    """The provider has accepted this model call and its stream is open.
+
+    Carries no content, and it says nothing about whether the model is doing
+    useful work: only that the request was accepted and the connection is
+    still delivering frames. It exists for the stretch where a stream is
+    healthy but silent. A reasoning model whose reasoning is encrypted-only
+    streams nothing visible until the reasoning item ends, and without this a
+    host watching the event stream cannot tell that from a request that never
+    started.
+
+    ``signal`` names what the provider sent:
+
+    * ``"accepted"``: the response began (``message_start``; Responses
+      ``response.created``). Emitted by every provider.
+    * ``"reasoning"``: a reasoning item opened (Responses
+      ``output_item.added``), which may stream nothing until it finishes.
+    * ``"keepalive"``: an SSE comment heartbeat on an otherwise quiet stream.
+
+    Bounded by the engine: the first signal of each model call is published,
+    and later ones only after ``NativeLoop.PROVIDER_ALIVE_INTERVAL_S`` without
+    any other event. A call that streams content publishes one of these at
+    most. Never terminal, never part of the model conversation.
+    """
+
+    signal: str = "accepted"
+
+
+@dataclass(frozen=True, kw_only=True)
 class DelegatedSurface(Event):
     """The tool surface a delegated CLI announced in its ``init`` frame.
 
@@ -526,7 +555,8 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         BlockStart, BlockStop, TextDelta, ThinkingDelta, ToolArgsDelta,
         ToolUse, ToolResult, SteerDelivered,
         PermissionRequest, QuestionRequest, QuestionAnswered, QuestionDelivered, HandoffCreated,
-        ContextCompaction, Usage, RateLimit, ProviderRetry, SubagentEvent, HookEvent,
+        ContextCompaction, Usage, RateLimit, ProviderRetry, ProviderAlive,
+        SubagentEvent, HookEvent,
         CacheMissAlert,
         ContinualUpdate, DelegatedSurface, SwarmUpdated,
     )

@@ -406,6 +406,9 @@ _WS_TRIMMED_RENDER_FRAMES = frozenset({
     # deltas — this only stops the duplicate on the WS leg.
     "text",
     "thinking_block",
+    # Not a render frame, but no WS consumer either: provider liveness for the
+    # Task worker watchdog, which reads it from the event log (#1418).
+    "provider_alive",
 })
 
 # W3: cap on the serialized size of a tool frame's ``input`` on the WS leg.

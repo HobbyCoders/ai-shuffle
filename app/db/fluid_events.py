@@ -6,8 +6,10 @@ held 27,510 ``ToolArgsDelta`` rows by itself. Left alone the table becomes the
 largest thing in the database, and it has no timestamp column or secondary
 index to make that cheap to live with.
 
-Only PURE STREAMING DELTAS are prunable. A delta carries an incremental
-fragment of something the record already holds in completed form:
+Only PURE STREAMING DELTAS are prunable, plus ``ProviderAlive``, a content-free
+liveness signal that only matters while its model call is running. A delta
+carries an incremental fragment of something the record already holds in
+completed form:
 
 * ``ToolArgsDelta`` fragments are superseded by the ``ToolUse`` row carrying the
   finished arguments — fluid's own docstring says consumers "never depend on
@@ -48,6 +50,10 @@ PRUNABLE_EVENT_CLASSES: Tuple[str, ...] = (
     "ToolArgsDelta",
     "TextDelta",
     "ThinkingDelta",
+    # Not a fragment of anything: a content-free "the provider accepted the
+    # call and is streaming" signal, which is evidence of nothing once the
+    # call's Usage row exists.
+    "ProviderAlive",
 )
 
 

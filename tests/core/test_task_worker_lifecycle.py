@@ -220,6 +220,9 @@ class TestFirstFrameWatchdog:
         ("assistant.thinking_delta", False),
         ("tool.input_delta", False),
         ("turn.usage", False),
+        # The provider accepted the request and is streaming, though nothing
+        # else is visible yet: encrypted-only reasoning.
+        ("turn.provider_alive", False),
         # turn.started is written before any provider request exists.
         ("turn.started", True),
     ])

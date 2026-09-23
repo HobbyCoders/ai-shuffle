@@ -58,6 +58,20 @@ class TurnUsage(EventBase):
     context_usage: dict | None = None
 
 
+class TurnProviderAlive(EventBase):
+    """The provider accepted this turn's model request and is still streaming.
+
+    Recorded from fluid's ``ProviderAlive``. It proves the request was accepted
+    and the response stream was open at that moment. It does not prove that
+    useful work continues. Liveness evidence for the Task worker's first-frame
+    watchdog (#1418), never content: clients ignore it. ``signal`` is fluid's
+    reason ("accepted", "reasoning", "keepalive").
+    """
+
+    type: Literal["turn.provider_alive"] = "turn.provider_alive"
+    signal: str | None = None
+
+
 class TurnAborted(EventBase):
     type: Literal["turn.aborted"] = "turn.aborted"
     reason: str | None = None
@@ -311,6 +325,7 @@ SessionEvent = Annotated[
         InteractionExpired,
         TranscriptRewound,
         ArtifactCreated,
+        TurnProviderAlive,
     ],
     Field(discriminator="type"),
 ]
@@ -345,4 +360,5 @@ EVENT_TYPES: tuple[str, ...] = (
     "interaction.expired",
     "transcript.rewound",
     "artifact.created",
+    "turn.provider_alive",
 )

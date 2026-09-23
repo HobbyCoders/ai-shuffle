@@ -2461,6 +2461,17 @@ class HarnessAdapter(ProviderAdapter):
                 },
             )]
 
+        if cls == "ProviderAlive":
+            # fluid: the provider accepted this model call and its stream is
+            # open, during a stretch that may stream nothing else (encrypted-
+            # only reasoning). Not content. The pump turns it into a
+            # ``provider_alive`` frame that only the turn recorder keeps, as
+            # liveness evidence for the Task worker watchdog (#1418).
+            return [self._stream_event(event, {
+                "type": "provider_alive",
+                "signal": getattr(event, "signal", None) or "accepted",
+            })]
+
         if cls == "RateLimit":
             return [
                 RateLimitEvent(

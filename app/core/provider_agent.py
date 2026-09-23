@@ -828,9 +828,12 @@ async def _await_worker_idle(
     * ``first_frame_deadline`` — an absolute ``loop.time()`` by which the
       worker must have shown progress: a forwarded frame, or a worker row that
       proves its provider is answering (reasoning or tool-argument deltas, a
-      finished call's usage). A reasoning model can stream only reasoning for
-      minutes, and those rows are liveness even though the parent card never
-      shows them (#1418). The audit found ten stalled workers reported ~900s
+      finished call's usage, or ``turn.provider_alive``, which proves only that
+      the provider accepted the request and was streaming). A reasoning model
+      can stream only reasoning for minutes, encrypted and invisible, and those
+      rows are liveness even though the parent card never shows them (#1418).
+      What is left for the deadline is a request that never started. The
+      audit found ten stalled workers reported ~900s
       late, one after fifteen minutes of a parent parked on a corpse. Once
       progress has been seen the deadline stops applying, permanently.
     * ``hard_deadline`` — an absolute ``loop.time()`` ceiling for a dispatch

@@ -89,6 +89,7 @@ from fluid.events.model import (
     HookEvent,
     Interrupted,
     PermissionRequest,
+    ProviderAlive,
     ProviderRetry,
     QuestionRequest,
     SteerDelivered,
@@ -786,6 +787,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         inproc_tools=True,
         fork=True, rewind=True, cache_metrics=True, context_usage=True,
     )
+
+    #: After a model call's first ProviderAlive, how long the engine must have
+    #: emitted nothing at all before it publishes another. A call that streams
+    #: content therefore publishes one; a silent reasoning stream with
+    #: heartbeats publishes one per interval.
+    PROVIDER_ALIVE_INTERVAL_S = 15.0
 
     def __init__(
         self,
@@ -3543,6 +3550,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         native_stop_reason: str | None = None
         interrupted = False
         arg_abort: tuple[int, str] | None = None
+        alive_published = False
 
         async for chunk in self._provider_chunks_interruptible(request):
             if self._interrupted.is_set():
@@ -3561,7 +3569,22 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # potentially billed request.
                 if payload.get("provider_requests"):
                     usage_totals["provider_requests"] = payload["provider_requests"]
-            elif chunk.kind == "message_start":
+            if chunk.kind in ("message_start", "provider_alive"):
+                # Evidence the provider accepted this call and is streaming,
+                # for a host that otherwise sees nothing until the first
+                # content (encrypted-only reasoning). The first one per call
+                # is always published; later ones only after a stretch with
+                # no event at all, so a streaming call adds one event.
+                if not alive_published or (
+                    time.monotonic() - self._turn_progress_at
+                    >= self.PROVIDER_ALIVE_INTERVAL_S
+                ):
+                    alive_published = True
+                    await self._emit(ProviderAlive(
+                        session_id=sid, turn_id=turn_id,
+                        signal=str(payload.get("signal") or "accepted"),
+                    ))
+            if chunk.kind == "message_start":
                 self._merge_usage(usage_totals, payload.get("usage", {}))
             elif chunk.kind == "block_start":
                 index = payload["index"]

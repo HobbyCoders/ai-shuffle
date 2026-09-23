@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 FLUSH_INTERVAL_SECONDS = 0.15  # flush deltas this long after the first buffered
 FLUSH_MAX_BUFFER_CHARS = 2048  # ...or once a kind's buffer reaches this size
 USAGE_COALESCE_SECONDS = 2.0   # at most one turn.usage append per window
+# turn.provider_alive: the first of a turn is always recorded; a later one only
+# after this long with nothing appended at all. A turn that streams content
+# therefore records one, and a silent reasoning stream one per window.
+PROVIDER_ALIVE_MIN_GAP_SECONDS = 15.0
 RESULT_TRUNCATE_CHARS = 65536  # tool.result content / subagent result previews
 RUN_LEASE_TTL_SECONDS = 60
 RUN_LEASE_RENEW_SECONDS = 20
@@ -513,6 +517,10 @@ class TurnRecorder:
         # still describes the most recent model call.
         self._pending_context_usage: Optional[Dict[str, Any]] = None
 
+        # turn.provider_alive bounding (PROVIDER_ALIVE_MIN_GAP_SECONDS).
+        self._provider_alive_recorded = False
+        self._last_append_at: float = float("-inf")
+
         self._terminal_recorded = False
         self._closed = False
         # Fence state. The first FenceViolation from append_events means the
@@ -914,6 +922,23 @@ class TurnRecorder:
             if content_block.get("type") == "tool_use" and content_block.get("id"):
                 self._open_tool_use_id = content_block["id"]
                 self._open_tool_use_name = str(content_block.get("name") or "")
+        elif etype == "provider_alive":
+            # The provider accepted a model request and its stream is open.
+            # Recorded for the Task worker's first-frame watchdog, which reads
+            # only this log (#1418): it proves the request started, not that
+            # the model is doing useful work. Bounded, since fluid sends one
+            # per model call even when content follows at once.
+            silent = not events and (
+                time.monotonic() - self._last_append_at
+                >= PROVIDER_ALIVE_MIN_GAP_SECONDS
+            )
+            if not self._provider_alive_recorded or silent:
+                self._provider_alive_recorded = True
+                signal = event.get("signal")
+                events.append(self._event(
+                    contract.TurnProviderAlive,
+                    signal=str(signal) if signal else None,
+                ))
         elif etype == "turn_usage":
             events.extend(self._coalesce_usage(_as_dict(event.get("usage"))))
         elif etype == "stream_start":
@@ -1217,6 +1242,7 @@ class TurnRecorder:
                 )
             if self._first_seq is None and seqs:
                 self._first_seq = seqs[0]
+            self._last_append_at = time.monotonic()
         except session_events_db.FenceViolation:
             self._mark_superseded(len(events))
         except Exception:

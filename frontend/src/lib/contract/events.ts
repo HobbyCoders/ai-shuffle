@@ -29,7 +29,8 @@ export type SessionEvent =
   | InteractionAnswered
   | InteractionExpired
   | TranscriptRewound
-  | ArtifactCreated;
+  | ArtifactCreated
+  | TurnProviderAlive;
 export type CommandId = string | null;
 export type CreatedAt = string;
 export type Id = string;
@@ -376,6 +377,15 @@ export type SessionId29 = string;
 export type Size = number;
 export type TurnId28 = string | null;
 export type Type28 = 'artifact.created';
+export type CommandId29 = string | null;
+export type CreatedAt30 = string;
+export type Id31 = string;
+export type RunId29 = string | null;
+export type Seq29 = number;
+export type SessionId30 = string;
+export type Signal = string | null;
+export type TurnId29 = string | null;
+export type Type29 = 'turn.provider_alive';
 
 export interface TurnQueued {
   command_id?: CommandId;
@@ -841,5 +851,26 @@ export interface ArtifactCreated {
   size: Size;
   turn_id?: TurnId28;
   type?: Type28;
+  [k: string]: unknown;
+}
+/**
+ * The provider accepted this turn's model request and is still streaming.
+ *
+ * Recorded from fluid's ``ProviderAlive``. It proves the request was accepted
+ * and the response stream was open at that moment. It does not prove that
+ * useful work continues. Liveness evidence for the Task worker's first-frame
+ * watchdog (#1418), never content: clients ignore it. ``signal`` is fluid's
+ * reason ("accepted", "reasoning", "keepalive").
+ */
+export interface TurnProviderAlive {
+  command_id?: CommandId29;
+  created_at: CreatedAt30;
+  id: Id31;
+  run_id?: RunId29;
+  seq: Seq29;
+  session_id: SessionId30;
+  signal?: Signal;
+  turn_id?: TurnId29;
+  type?: Type29;
   [k: string]: unknown;
 }

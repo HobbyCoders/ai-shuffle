@@ -174,6 +174,26 @@ describe('turn lifecycle', () => {
 		expect(s.contextUsage).toEqual(snapshot);
 	});
 
+	it('turn.provider_alive is worker liveness only and changes nothing rendered', () => {
+		// #1418: recorded so a Task worker's watchdog can see an accepted but
+		// silent reasoning stream. It must not add a message, end the turn or
+		// touch usage.
+		const before = fold([
+			ev('turn.started', { turn_id: 't1' }),
+			ev('assistant.text_delta', { turn_id: 't1', text: 'Hi' }),
+		]);
+		const after = reduce(
+			sealState(before),
+			ev('turn.provider_alive', { turn_id: 't1', signal: 'reasoning' }),
+		);
+		expect(after.messages).toEqual(before.messages);
+		expect(after.isStreaming).toBe(true);
+		expect(after.usage).toEqual(before.usage);
+		expect(after.lastSeq).toBeGreaterThan(before.lastSeq);
+		const next = reduce(after, ev('assistant.text_delta', { turn_id: 't1', text: ' there' }));
+		expect(next.messages.at(-1)?.content).toBe('Hi there');
+	});
+
 	it('a newer turn.usage snapshot replaces the older one', () => {
 		const older = { categories: [], totalTokens: 10, maxTokens: 200_000 };
 		const newer = { categories: [], totalTokens: 20, maxTokens: 200_000 };

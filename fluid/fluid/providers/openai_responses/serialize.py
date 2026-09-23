@@ -46,6 +46,7 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from fluid.providers._sse import KEEPALIVE_EVENT
 from fluid.providers.base import ProviderRequest, StreamChunk
 
 # Fields echoed on output items that MUST be removed before a stateless
@@ -449,6 +450,11 @@ class ResponsesStreamNormalizer:
         name = name or data.get("type", "")
         out: list[StreamChunk] = []
 
+        if name == KEEPALIVE_EVENT:
+            # An SSE comment heartbeat: the connection is open and the server
+            # is still answering, nothing more. The engine rate-limits these.
+            return [StreamChunk("provider_alive", {"signal": "keepalive"})]
+
         if name.startswith("response.image_generation_call."):
             # Partial previews are observations, never completed artifacts.
             return [StreamChunk("image_generation_progress", {
@@ -490,6 +496,12 @@ class ResponsesStreamNormalizer:
             # that never streams must not leave an empty block behind. The
             # first delta opens it; ``output_item.done`` opens it if neither
             # channel produced one (encrypted content with no visible text).
+            if itype == "reasoning":
+                # Encrypted-only reasoning streams nothing else until the item
+                # is done, which can take minutes. Say that the provider is
+                # reasoning, so the silence reads as an open stream rather than
+                # a request that never started. Not content: no block opens.
+                out.append(StreamChunk("provider_alive", {"signal": "reasoning"}))
             return out
 
         if name in ("response.output_text.delta", "response.refusal.delta"):

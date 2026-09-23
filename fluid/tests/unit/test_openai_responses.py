@@ -41,6 +41,8 @@ async def test_sse_normalization_kind_sequence() -> None:
     chunks = await _golden_chunks()
     assert [c.kind for c in chunks] == [
         "message_start",
+        # The reasoning item's output_item.added: liveness, not a block.
+        "provider_alive",
         "block_start", "thinking_delta", "block_stop",
         "block_start", "text_delta", "text_delta", "block_stop",
         "block_start", "tool_args_delta", "tool_args_delta", "block_stop",

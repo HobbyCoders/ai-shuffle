@@ -25,11 +25,21 @@ def _decode(data: str) -> dict[str, Any] | None:
     return decoded if isinstance(decoded, dict) else None
 
 
-async def sse_events(lines: AsyncIterator[str]) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+#: Event name ``sse_events(..., keepalives=True)`` yields for a comment line.
+#: No provider can send it: an SSE event name cannot start with ``:``.
+KEEPALIVE_EVENT = ":keepalive"
+
+
+async def sse_events(
+    lines: AsyncIterator[str], *, keepalives: bool = False
+) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Parse an SSE byte-line stream into (event_name, json_data) pairs.
 
-    Handles multi-line ``data:`` fields and ignores comments, heartbeats and
-    frames that do not carry a decodable JSON object.
+    Handles multi-line ``data:`` fields and ignores frames that do not carry a
+    decodable JSON object. Comment lines (heartbeats) are dropped unless
+    ``keepalives`` is set; then each one yields ``(KEEPALIVE_EVENT, {})``, so a
+    caller can tell a quiet but open stream from a dead one. A comment does not
+    disturb a frame being assembled around it.
     """
     event_name = ""
     data_parts: list[str] = []
@@ -42,6 +52,8 @@ async def sse_events(lines: AsyncIterator[str]) -> AsyncIterator[tuple[str, dict
             event_name = ""
             data_parts = []
         elif line.startswith(":"):
+            if keepalives:
+                yield KEEPALIVE_EVENT, {}
             continue
         elif line.startswith("event:"):
             event_name = line[len("event:"):].strip()

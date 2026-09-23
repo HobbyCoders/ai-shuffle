@@ -700,13 +700,17 @@ class Settings(BaseSettings):
     # before it is stopped as "forwarded no output". 0 disables the watchdog.
     #
     # Provider progress the parent card never shows also counts: reasoning and
-    # tool-argument deltas and a finished call's usage in the worker's own log
-    # (#1418). One case stays invisible: a reasoning model whose reasoning is
-    # encrypted-only streams nothing the engine records until the reasoning
-    # item ends, so it looks the same as a wedged connection until then. Raise
-    # this if such models are stopped early. A watchdog stop is never
-    # re-dispatched automatically, because the provider may already have been
-    # working when the interrupt landed.
+    # tool-argument deltas, a finished call's usage, and turn.provider_alive in
+    # the worker's own log (#1418). The last is fluid's ProviderAlive: the
+    # provider accepted the request and its stream is open. That covers a
+    # reasoning model whose reasoning is encrypted-only, which streams nothing
+    # else until the reasoning item ends. So this deadline now catches a
+    # request that was never accepted (queued, refused, or a connection that
+    # never answered), not a slow model. It does not catch a stream that was
+    # accepted and then stalled; fluid's per-call stream deadline and turn
+    # watchdog bound that. A watchdog stop is never re-dispatched
+    # automatically, because the provider may already have been working when
+    # the interrupt landed.
     # Override via TASK_WORKER_FIRST_FRAME_SECONDS.
     task_worker_first_frame_seconds: float = 90.0
     # Hard wall-clock cap on a SYNCHRONOUS Task worker, measured across every

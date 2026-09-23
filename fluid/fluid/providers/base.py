@@ -32,7 +32,12 @@ class StreamChunk:
 
     kind ∈ {provider_request, message_start, block_start, text_delta, thinking_delta,
             tool_args_delta, block_stop, usage, message_stop, rate_limit,
-            image_generation, image_generation_progress}
+            image_generation, image_generation_progress, provider_alive}
+
+    ``provider_alive`` (payload ``{"signal": ...}``) is a content-free sign
+    that the accepted response is still streaming, for provider frames that
+    otherwise produce no chunk: a reasoning item opening, an SSE keepalive.
+    Consumers that do not care ignore it.
     """
 
     kind: str

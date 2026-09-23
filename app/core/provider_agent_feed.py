@@ -133,10 +133,14 @@ _TOOL_RESULT_TYPE = "tool.result"
 #: Worker rows that prove its provider request is streaming or has answered,
 #: though the tap does not mirror them: reasoning deltas, tool-argument deltas
 #: and a finished model call's usage. A reasoning model can spend minutes on
-#: these before its first text or tool call (#1418). ``turn.started`` is not
-#: one: the recorder writes it before any provider request is made.
+#: these before its first text or tool call (#1418). ``turn.provider_alive``
+#: is the weakest of them: the provider accepted the request and its stream was
+#: open, nothing more. It is the only row an encrypted-only reasoning model
+#: produces before its reasoning item ends. ``turn.started`` is not one: the
+#: recorder writes it before any provider request is made.
 _PROVIDER_PROGRESS_TYPES = (
     "assistant.thinking_delta", "tool.input_delta", "turn.usage",
+    "turn.provider_alive",
 )
 
 

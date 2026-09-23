@@ -3214,6 +3214,16 @@ async def _stream_to_websocket_impl(
                         "message": event.get("message", {})
                     }
 
+                elif event_type == "provider_alive":
+                    # fluid's ProviderAlive: the provider accepted the request
+                    # and is still streaming. Not visible content; the
+                    # recorder keeps it as worker liveness and the runtime
+                    # keeps it off the WS leg (#1418).
+                    yield {
+                        "type": "provider_alive",
+                        "signal": event.get("signal"),
+                    }
+
                 elif event_type == "content_block_start":
                     # Start of a content block (text, thinking, tool_use)
                     content_block = event.get("content_block", {})

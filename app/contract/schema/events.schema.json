@@ -2896,6 +2896,90 @@
       "title": "TurnParked",
       "type": "object"
     },
+    "TurnProviderAlive": {
+      "description": "The provider accepted this turn's model request and is still streaming.\n\nRecorded from fluid's ``ProviderAlive``. It proves the request was accepted\nand the response stream was open at that moment. It does not prove that\nuseful work continues. Liveness evidence for the Task worker's first-frame\nwatchdog (#1418), never content: clients ignore it. ``signal`` is fluid's\nreason (\"accepted\", \"reasoning\", \"keepalive\").",
+      "properties": {
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "signal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Signal"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "turn.provider_alive",
+          "default": "turn.provider_alive",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "seq",
+        "created_at"
+      ],
+      "title": "TurnProviderAlive",
+      "type": "object"
+    },
     "TurnQueued": {
       "properties": {
         "command_id": {
@@ -3180,6 +3264,7 @@
       "turn.completed": "#/$defs/TurnCompleted",
       "turn.interrupting": "#/$defs/TurnInterrupting",
       "turn.parked": "#/$defs/TurnParked",
+      "turn.provider_alive": "#/$defs/TurnProviderAlive",
       "turn.queued": "#/$defs/TurnQueued",
       "turn.started": "#/$defs/TurnStarted",
       "turn.usage": "#/$defs/TurnUsage"
@@ -3273,6 +3358,9 @@
     },
     {
       "$ref": "#/$defs/ArtifactCreated"
+    },
+    {
+      "$ref": "#/$defs/TurnProviderAlive"
     }
   ],
   "title": "SessionEvent"
