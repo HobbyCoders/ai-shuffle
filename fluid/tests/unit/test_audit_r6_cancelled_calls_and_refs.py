@@ -349,3 +349,38 @@ async def test_a_cell_with_no_refs_gets_no_footer(tmp_path):
     async with _Kernel(tmp_path) as k:
         out = await k.run("print('hello')\n")
         assert out.stdout == "hello\n"
+
+
+async def test_a_missing_file_used_as_text_numbers_on_after_the_read(tmp_path) -> None:
+    # A missing Read returns a MissingFile and counts as a completed call (the
+    # host lists it as "1. Read(...) FAILED"). The MissingPathError raised
+    # when the cell then uses it as text is not a host call, so the queued
+    # calls pick up at 2, not 3.
+    from fluid.codemode.session import CodeModeSession
+    from fluid.tools.builtins import register_builtins
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    session = CodeModeSession(registry)
+    loop = _MiniLoop(registry)
+    loop.ctx = ToolCtx(cwd=str(tmp_path))
+    code = (
+        "from tools import Read, Glob\n"
+        "text = Read(file_path='absent.txt')\n"
+        "text.splitlines()\n"
+        "Glob(pattern='*.py')\n"
+    )
+    try:
+        outcome = await session.run_python(
+            sid="s1", turn_id="t1", input={"code": code, "timeout": 30}, loop=loop
+        )
+    finally:
+        await session.aclose()
+
+    assert outcome.is_error
+    assert "MissingPathError" in outcome.text
+    assert "1. Read(absent.txt) FAILED" in outcome.text
+    line = next(
+        l for l in outcome.text.splitlines() if l.startswith("never attempted")
+    )
+    assert "2. Glob(*.py)" in line, line

@@ -739,7 +739,11 @@ def _unattempted_note(code: str, exc: BaseException) -> str:
             return ""
         # The host numbers completed calls 1..N and the failing one last, so
         # picking up from there keeps one sequence across both lines.
-        failed = isinstance(exc, (vfs.ToolError, vfs.HostCallDenied))
+        # MissingPathError is raised when a MissingFile is used as text, after
+        # its Read already counted as completed, so no host call failed here.
+        failed = isinstance(
+            exc, (vfs.ToolError, vfs.HostCallDenied)
+        ) and not isinstance(exc, vfs.MissingPathError)
         index = len(_CELL_DONE) + (2 if failed else 1)
         shown = sites[:_UNATTEMPTED_MAX]
         # Numbered in the order they are listed, not in source order: a loop
