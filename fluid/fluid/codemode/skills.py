@@ -87,7 +87,7 @@ _log = logging.getLogger(__name__)
 # describe this Python process since import, not durable or cross-worker totals.
 _JOURNAL_METRICS_LOCK = threading.Lock()
 _JOURNAL_METRICS = {
-    "appended_entries": 0, "reaped_entries": 0,
+    "appended_entries": 0, "reaped_entries": 0, "dropped_unsynthesized": 0,
     "skipped_busy": 0, "skipped_quota": 0,
     "explicit_busy_failures": 0, "explicit_quota_failures": 0,
 }
@@ -171,6 +171,15 @@ JOURNAL_MAX_BYTES = 1_048_576  # append refuses lines that would cross this
 # fat lines sat at the cap forever: the tail rule kept every line, append
 # refused every new one, and the store went deaf.
 JOURNAL_REAP_FRACTION = 0.5
+# Backlog ceiling: when the file is past this fraction of JOURNAL_MAX_BYTES
+# and the consumed prefix is already gone, the oldest UNSYNTHESIZED lines are
+# dropped down to the reap target (explicit kinds excepted). Inference is
+# allowed to be lossy; a store that refuses every new line because synthesis
+# keeps failing is not. A failed pass never advances the cursor, so after a
+# run of failures nothing is consumed, nothing is reapable, and every new
+# event is refused: the Unraid journal sat at its 1 MiB cap from 2026-09-14
+# on while every pass failed.
+JOURNAL_OVERFLOW_FRACTION = 0.9
 # Journal kinds a person (or the model on their behalf) wrote on purpose. An
 # append that cannot land one of these raises instead of logging, so the
 # caller can surface the loss instead of reporting "recorded".
@@ -208,6 +217,38 @@ def trim_jsonl(path: Path, keep: int) -> int:
     # that grew unbounded before this cap existed must not need the whole
     # thing in memory.
     return drop if _rewrite_dropping_prefix(path, drop) else 0
+
+
+_LEGACY_PREVIEW_KEYS = ("output_head", "output_preview", "output")
+
+
+def _scrub_legacy_previews(path: Path) -> None:
+    """Strip model-output previews older builds wrote into a pass log.
+
+    Rewrites only when a row actually carries one; unreadable lines are
+    dropped (they may be a preview cut mid-write). Raises ``OSError`` when
+    the rewrite fails, like the journal purge beside it.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
+    kept: list[str] = []
+    changed = False
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            changed = True
+            continue
+        if isinstance(row, dict) and any(k in row for k in _LEGACY_PREVIEW_KEYS):
+            for key in _LEGACY_PREVIEW_KEYS:
+                row.pop(key, None)
+            line = json.dumps(row, ensure_ascii=False)
+            changed = True
+        kept.append(line)
+    if changed:
+        atomic_write_text(path, "".join(line + "\n" for line in kept))
 
 
 def _tmp_path(path: Path) -> Path:
@@ -344,6 +385,30 @@ def _rewrite_dropping_prefix(
                 tmp.open("w", encoding="utf-8") as dst:
             for i, line in enumerate(src):
                 if i >= drop:
+                    dst.write(line)
+            dst.flush()
+            os.fsync(dst.fileno())
+        if expect_size is not None and path.stat().st_size != expect_size:
+            _discard(tmp)
+            return False
+        os.replace(tmp, path)
+    except OSError:
+        _discard(tmp)
+        return False
+    return True
+
+
+def _rewrite_dropping_lines(
+    path: Path, drop: set[int], *, expect_size: int | None = None
+) -> bool:
+    """Atomically rewrite ``path`` without the lines whose indices are in
+    ``drop``. Same abort rule as :func:`_rewrite_dropping_prefix`."""
+    tmp = _tmp_path(path)
+    try:
+        with path.open("r", encoding="utf-8") as src, \
+                tmp.open("w", encoding="utf-8") as dst:
+            for i, line in enumerate(src):
+                if i not in drop:
                     dst.write(line)
             dst.flush()
             os.fsync(dst.fileno())
@@ -819,10 +884,20 @@ class SkillStore:
         the tail, until it is under the target or nothing consumed is left.
         A file already at the cap with a consumed prefix of any length is
         therefore always freed (the desktop journal that sat at 436 lines /
-        1 MiB with cursor 436 drains on the first call). The cursor is
-        rebased by exactly the number of lines removed, so
-        ``journal_entries(start=synth_cursor())`` keeps meaning the same
-        slice. Returns the number of lines dropped; every failure path
+        1 MiB with cursor 436 drains on the first call).
+
+        Backlog overflow: when the file is past
+        ``JOURNAL_OVERFLOW_FRACTION`` of the cap and dropping every
+        droppable consumed line would not bring it back under that line,
+        synthesis is not consuming the journal (a failing provider, a spent
+        budget). The oldest unsynthesized lines then go too, down to the
+        reap target, except explicit kinds, with a warning naming the count.
+        Dropping old evidence is lossy; refusing all new evidence forever,
+        which is what happened before, is worse.
+
+        The cursor is rebased by the number of removed lines that were behind
+        it, so ``journal_entries(start=synth_cursor())`` keeps meaning the
+        same slice. Returns the number of lines dropped; every failure path
         returns 0 and leaves the journal untouched.
 
         The read-and-replace runs under the journal lock so a cooperating
@@ -847,17 +922,75 @@ class SkillStore:
                 drop = max(drop, _lines_to_free(
                     self._journal_path, consumed, size - target,
                 ))
-            if drop <= 0 or not _rewrite_dropping_prefix(
-                self._journal_path, drop, expect_size=size
-            ):
+            backlog: list[int] = []
+            if size > JOURNAL_MAX_BYTES * JOURNAL_OVERFLOW_FRACTION:
+                backlog = self._backlog_to_drop(drop, size, target)
+            if backlog:
+                removed = set(range(drop)) | set(backlog)
+                ok = _rewrite_dropping_lines(
+                    self._journal_path, removed, expect_size=size
+                )
+            else:
+                removed = set(range(drop))
+                ok = drop > 0 and _rewrite_dropping_prefix(
+                    self._journal_path, drop, expect_size=size
+                )
+            if not removed or not ok:
                 return 0
+            behind = sum(1 for i in removed if i < cursor)
             meta = self._load_meta()
-            meta["synth_cursor"] = max(0, int(meta.get("synth_cursor", 0)) - drop)
+            meta["synth_cursor"] = max(0, int(meta.get("synth_cursor", 0)) - behind)
             self._save_meta(meta)
-            self._journal_lines = max(0, total - drop)
+            self._journal_lines = max(0, total - len(removed))
             self._journal_bytes = self._journal_size()
             _journal_event("reaped_entries", drop)
-            return drop
+            if backlog:
+                _journal_event("dropped_unsynthesized", len(backlog))
+                _log.warning(
+                    "Memory journal backlog overflow: dropped %d unsynthesized "
+                    "entries (oldest first) from %s; synthesis has not been "
+                    "consuming the journal, see .synthesis-log.jsonl beside it",
+                    len(backlog), self._journal_path,
+                )
+            return len(removed)
+
+    def _backlog_to_drop(
+        self, drop: int, size: int, target: int,
+    ) -> list[int]:
+        """Line indices of unsynthesized entries to drop on overflow.
+
+        Only called when the file is past the overflow line. Counts the bytes
+        the consumed-prefix drop already frees; when that is not enough to
+        get under the overflow line, returns the oldest lines at or past
+        ``drop`` (skipping explicit kinds) until the file would be under
+        ``target``. Returns [] when the consumed drop suffices.
+        """
+        sizes: list[int] = []
+        explicit: set[int] = set()
+        try:
+            with self._journal_path.open("rb") as fh:
+                for i, raw in enumerate(fh):
+                    sizes.append(len(raw))
+                    if i >= drop:
+                        try:
+                            if json.loads(raw).get("kind") in JOURNAL_EXPLICIT_KINDS:
+                                explicit.add(i)
+                        except (ValueError, AttributeError):
+                            pass
+        except OSError:
+            return []
+        remaining = size - sum(sizes[:drop])
+        if remaining <= JOURNAL_MAX_BYTES * JOURNAL_OVERFLOW_FRACTION:
+            return []
+        out: list[int] = []
+        for i in range(drop, len(sizes)):
+            if remaining <= target:
+                break
+            if i in explicit:
+                continue
+            out.append(i)
+            remaining -= sizes[i]
+        return out
 
     def reap(self) -> dict[str, int]:
         """Bound every append-only file the store owns. Never raises.
@@ -939,7 +1072,17 @@ class SkillStore:
         the number of entries returned would fall short of the lines read
         and hand the next pass a slice it had already synthesized.
         """
-        out: list[dict] = []
+        indexed, reached = self.journal_slice_indexed(start, limit)
+        return [entry for _, entry in indexed], reached
+
+    def journal_slice_indexed(
+        self, start: int = 0, limit: int | None = None
+    ) -> tuple[list[tuple[int, dict]], int]:
+        """:meth:`journal_slice` with each entry's end line: ``(n, entry)``
+        where ``n`` is the cursor value that consumes the entry (its line
+        index + 1). A pass that only fits part of a slice into its prompt
+        advances the cursor to the last shown entry's ``n``."""
+        out: list[tuple[int, dict]] = []
         reached = start
         try:
             with self._journal_path.open("r", encoding="utf-8") as fh:
@@ -950,7 +1093,7 @@ class SkillStore:
                         break
                     reached = i + 1
                     try:
-                        out.append(json.loads(line))
+                        out.append((i + 1, json.loads(line)))
                     except ValueError:
                         continue
         except OSError:
@@ -1041,8 +1184,11 @@ class SkillStore:
                     self.set_synth_cursor(0)
             # Older versions logged model-output previews. These are diagnostic
             # derivatives, not facts; removing them prevents a forgotten value
-            # from surviving in an old preview.
-            (self.root / ".synthesis-log.jsonl").unlink(missing_ok=True)
+            # from surviving in an old preview. Current rows carry counts and
+            # errors only, so the log itself stays: deleting it on every
+            # maintenance sweep after any Forget erased the learner's only
+            # audit trail every five minutes.
+            _scrub_legacy_previews(self.root / ".synthesis-log.jsonl")
 
 
     def render_memory_section(self, project: str | None = None) -> str | None:
@@ -1265,6 +1411,58 @@ class SkillStore:
     def set_synth_cursor(self, cursor: int) -> None:
         meta = self._load_meta()
         meta["synth_cursor"] = int(cursor)
+        self._save_meta(meta)
+
+    # ─── learner failure backoff (see Synthesizer.due) ────────────────────
+    #
+    # Shared through meta.json so every session's synthesizer over this store
+    # honors it; a per-instance guard would reset with each new session.
+    # Without any guard a provider that rejects every request spends the
+    # whole day's budget at once: the Codex backend answered HTTP 400 to 48
+    # learner calls in five minutes on 2026-09-13.
+    # Keyed by model so one broken provider does not stop another from
+    # learning.
+    MAX_BACKOFF_MODELS = 16
+
+    def learner_backoff(self, model: str) -> dict:
+        """``{"until", "failures", "error"}`` for ``model``, or {}."""
+        entry = (self._load_meta().get("learner_backoff") or {}).get(model)
+        return dict(entry) if isinstance(entry, dict) else {}
+
+    def note_learner_failure(
+        self, model: str, error: str, *, now: float, base: float, cap: float,
+    ) -> dict:
+        """Record one failed pass for ``model``: the delay doubles from
+        ``base`` up to ``cap``. Returns the stored entry."""
+        meta = self._load_meta()
+        table = meta.get("learner_backoff")
+        if not isinstance(table, dict):
+            table = {}
+        prior = table.get(model) if isinstance(table.get(model), dict) else {}
+        failures = int(prior.get("failures", 0)) + 1
+        delay = min(cap, base * (2 ** min(failures - 1, 20)))
+        entry = {"failures": failures, "until": now + delay, "error": str(error)[:300]}
+        table.pop(model, None)
+        table[model] = entry
+        while len(table) > self.MAX_BACKOFF_MODELS:
+            table.pop(next(iter(table)))
+        meta["learner_backoff"] = table
+        self._save_meta(meta)
+        return entry
+
+    def clear_learner_backoff(self, model: str) -> None:
+        meta = self._load_meta()
+        table = meta.get("learner_backoff")
+        if isinstance(table, dict) and model in table:
+            table.pop(model)
+            self._save_meta(meta)
+
+    def consolidation_retry_at(self) -> float:
+        return float(self._load_meta().get("consolidation_retry_at", 0.0))
+
+    def set_consolidation_retry_at(self, ts: float) -> None:
+        meta = self._load_meta()
+        meta["consolidation_retry_at"] = float(ts)
         self._save_meta(meta)
 
 

@@ -149,8 +149,12 @@ async def test_budget_exhaustion_retains_slice_and_quiets_kicks(tmp_path, monkey
     assert provider.requests == []
     assert store.synth_cursor() == 0
     assert store.journal_count() == 4
-    # Reap keeps everything unconsumed even past the byte target.
-    monkeypatch.setattr(skills_mod, "JOURNAL_MAX_BYTES", 64)
+    # Reap keeps everything unconsumed past the byte target, as long as the
+    # file is below the overflow line (the backlog rule is pinned in
+    # test_learner_writes.py).
+    size = store._journal_size()
+    monkeypatch.setattr(skills_mod, "JOURNAL_MAX_BYTES", int(size / 0.7))
+    assert size > skills_mod.JOURNAL_MAX_BYTES * skills_mod.JOURNAL_REAP_FRACTION
     assert store.reap_journal() == 0
     assert store.journal_count() == 4
     row = _log_rows(store)[-1]
@@ -205,16 +209,27 @@ def test_append_reaps_on_its_own_and_raises_for_explicit_entries(tmp_path, monke
     assert [e["kind"] for e in store.journal_entries()][-1] == "remember"
     assert store.journal_count() < 11
 
-    # Nothing consumed and no room: mechanical entries drop with a warning,
-    # explicit ones raise so the caller can say so.
+    # Nothing consumed and no room: the oldest unsynthesized entries give way
+    # (with a warning) so new evidence still lands. Before, the new entry was
+    # refused and a store whose passes kept failing went deaf for good.
     store2 = SkillStore(tmp_path / "b")
     for i in range(5):
         store2.journal_append({"kind": "cell", "code": f"{i}:{fat}", "host_calls": 0})
     monkeypatch.setattr(skills_mod, "JOURNAL_MAX_BYTES", store2._journal_size())
-    store2.journal_append({"kind": "cell", "code": "dropped", "host_calls": 0})  # no raise
-    assert store2.journal_count() == 5
+    store2.journal_append({"kind": "cell", "code": "landed", "host_calls": 0})  # no raise
+    codes = [e["code"] for e in store2.journal_entries()]
+    assert codes[-1] == "landed" and len(codes) < 6
+    assert store2.synth_cursor() == 0
+
+    # Explicit entries are never dropped for room; when they are all that is
+    # left, an explicit append raises so the caller can say so.
+    store3 = SkillStore(tmp_path / "c")
+    for i in range(5):
+        store3.journal_append({"kind": "remember", "text": f"{i}:{fat}"})
+    monkeypatch.setattr(skills_mod, "JOURNAL_MAX_BYTES", store3._journal_size())
     with pytest.raises(OSError):
-        store2.journal_append({"kind": "remember", "text": "must not vanish silently"})
+        store3.journal_append({"kind": "remember", "text": "must not vanish silently"})
+    assert store3.journal_count() == 5
 
 
 def test_reap_journal_is_safe_on_the_deadlocked_desktop_shape(tmp_path, monkeypatch) -> None:

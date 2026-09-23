@@ -14,14 +14,18 @@ the next cell and in every future session.
 
 Failure posture: synthesis is best-effort and must never break a turn. The
 trigger runs as a single-flight background task; any provider or parse error
-is recorded on ``last_error`` and swallowed. The journal cursor only advances
-after a successful pass, so failed slices are retried next time.
+is recorded on ``last_error``, written to ``.synthesis-log.jsonl`` and logged,
+then swallowed. The journal cursor only advances after a successful pass, so
+failed slices are retried — after a backoff shared by every session over the
+store, so a provider that rejects every request cannot spend the day's
+budget in minutes.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 from typing import Any
@@ -38,6 +42,8 @@ from fluid.codemode.skills import (
 from fluid.codemode.verify import verify_sources
 from fluid.messages.content import Message, Text
 from fluid.providers.base import ProviderRequest
+
+_log = logging.getLogger(__name__)
 
 _SYNTH_SYSTEM = """\
 You maintain a library of reusable Python "skills" for a code-mode agent
@@ -154,6 +160,8 @@ Output format — nothing else:
   (project-scoped: <memory scope="project">the fact</memory>)
 - to rewrite a memory: <memory id="m3">the corrected fact</memory>
 - to remove a memory: <delete-memory id="m3"/>
+- a memory listed as "explicit" was saved on the user's request: never
+  rewrite or delete it, and do not add a new memory that repeats it
 - to propose a model-guidance edit (queued for the replay gate, not applied):
   <guidance stem="glm">
   {"content": "full replacement guidance file",
@@ -196,10 +204,12 @@ Output format — nothing else:
 
 _SKILL_RE = re.compile(r'<skill name="([a-z0-9_]+)">\n?(.*?)</skill>', re.DOTALL)
 _DELETE_RE = re.compile(r'<delete-skill name="([a-z0-9_]+)"\s*/>')
-_MEMORY_RE = re.compile(
-    r'<memory(?:\s+id="([A-Za-z0-9_:.\-]{1,160})")?(?:\s+scope="([^"]*)")?\s*>\n?(.*?)</memory>',
-    re.DOTALL,
-)
+# Attributes in any order: a model that writes ``scope`` before ``id`` (or
+# adds one we do not use) produced a tag the old fixed-order pattern skipped
+# without a trace.
+_MEMORY_RE = re.compile(r'<memory((?:\s+[a-z_]+="[^"]*")*)\s*>\n?(.*?)</memory>', re.DOTALL)
+_ATTR_RE = re.compile(r'([a-z_]+)="([^"]*)"')
+_MEMORY_ID_RE = re.compile(r"[A-Za-z0-9_:.\-]{1,160}")
 _DELETE_MEMORY_RE = re.compile(r'<delete-memory id="([A-Za-z0-9_:.\-]{1,160})"\s*/>')
 _GUIDANCE_RE = re.compile(
     r'<guidance stem="([^"]{1,64})">\n?(.*?)</guidance>', re.DOTALL
@@ -209,6 +219,23 @@ _WORD_RE = re.compile(r"[a-z0-9]{4,}")
 # Journal kinds whose text a user wrote (or asked to have remembered).
 _USER_KINDS = ("user", "remember")
 _PROVENANCE_MATCH = 0.5
+
+
+def _memory_tags(text: str) -> list[tuple[str | None, str | None, str, str | None]]:
+    """``(id, scope, body, problem)`` for every ``<memory>`` tag in ``text``.
+
+    ``problem`` is set (and the tag must be skipped) when the id attribute is
+    malformed; it lands in the pass's error list instead of vanishing.
+    """
+    out: list[tuple[str | None, str | None, str, str | None]] = []
+    for match in _MEMORY_RE.finditer(text or ""):
+        attrs = dict(_ATTR_RE.findall(match.group(1) or ""))
+        memory_id = attrs.get("id")
+        problem = None
+        if memory_id is not None and not _MEMORY_ID_RE.fullmatch(memory_id):
+            problem = f"memory: malformed id {memory_id[:40]!r}"
+        out.append((memory_id, attrs.get("scope"), match.group(2), problem))
+    return out
 
 
 def _content_words(text: str) -> set[str]:
@@ -286,12 +313,62 @@ class SynthesisIncomplete(RuntimeError):
         )
 
 
+class SynthesisProviderError(RuntimeError):
+    """The provider answered the learner's request with an error chunk.
+
+    Providers report HTTP and stream failures as a ``kind="error"`` chunk
+    rather than raising. The learner used to ignore that chunk, so a
+    rejected request looked like an empty completion ("synthesis returned no
+    text (stop_reason=unknown, output_tokens=0)") and the provider's reason
+    was thrown away. The desktop worker logged 273 such rows; per local day
+    their count matches the app log's HTTP 400 answers from the Codex
+    backend exactly (96, 48, 48 on 2026-09-13/14/15-16).
+    """
+
+    def __init__(self, payload: dict[str, Any], usage: dict[str, int]) -> None:
+        self.status = payload.get("status")
+        self.usage = dict(usage)
+        self.output_chars = 0
+        self.stop_reason = None
+        message = " ".join(str(payload.get("message") or payload.get("type") or "").split())
+        self.detail = message[:300]
+        where = f"HTTP {self.status}" if self.status else "stream error"
+        super().__init__(f"provider error ({where}): {self.detail or 'no message'}")
+
+
 class InferenceBudgetExhausted(RuntimeError):
     """The store's daily inference-call budget is spent (see facts.py)."""
 
 
 # Journal previews are already trimmed at write time; cap the slice we show.
 MAX_ENTRIES_PER_PASS = 40
+# The request's user-message size. Split so the journal always fits: the old
+# prompt put the skill library and the whole memory list first and then cut
+# the text at 32,000 characters, so a store with 95 facts (33,274 characters
+# of memory lines on the desktop worker) sent every pass without a single
+# journal line. The model answered NO_CHANGES and the cursor advanced over
+# evidence nobody read. Now memory lines have a fixed budget, the skill
+# library a reserve, and the journal the rest (never less than the minimum);
+# the library then fills whatever the journal left unused.
+PROMPT_CHAR_LIMIT = 32_000
+MEMORY_PROMPT_CHARS = 6_000
+LIBRARY_PROMPT_RESERVE = 8_000
+JOURNAL_MIN_PROMPT_CHARS = 8_000
+# Consolidation lists only facts it may change (inferred, not explicit).
+CONSOLIDATE_MEMORY_CHARS = 24_000
+# Rough cost of a "--- session ... ---" divider when sizing the journal.
+_SESSION_LABEL_ALLOWANCE = 80
+# Failed passes back off per model, shared through meta.json: 5 min, 10,
+# 20, ... up to 6 h. A deterministic rejection then costs about a dozen
+# calls a day instead of the whole 48-call budget.
+FAILURE_BACKOFF_BASE = 300.0
+FAILURE_BACKOFF_MAX = 6 * 3600.0
+# A failed consolidation waits this long before its next attempt instead of
+# riding (and doubling the cost of) every following pass.
+CONSOLIDATE_RETRY_SECONDS = 6 * 3600.0
+# How often one synthesizer may record that it found the synthesis lock
+# held for longer than a pass can legitimately take.
+LOCK_BUSY_LOG_INTERVAL = 600.0
 # A pass costs one of the day's 48 inference calls (facts.MAX_INFERENCE_CALLS_
 # PER_DAY), so it has to see a real slice: a turn writes its user prompt, its
 # assistant reply and a handful of cells, so 20 is roughly three turns of
@@ -384,6 +461,17 @@ class Synthesizer:
         # ``"<id>: <text>"``: stored, held out of the prompt, surfaced to the
         # host so the user can confirm or ignore them.
         self.last_held: list[str] = []
+        # Outcome of the last run(): a failed or skipped pass must not be
+        # followed by a consolidation call (each failed pass on the desktop
+        # worker was followed by a failed consolidation, 24 + 24 calls a
+        # day, the whole budget).
+        self.last_pass_failed = False
+        self.last_pass_skipped = False
+        # When this synthesizer first found the synthesis lock held, and when
+        # it last wrote that down (see run()).
+        self._lock_busy_since: float | None = None
+        self._lock_logged_at = float("-inf")
+        self._kick_warned = False
 
     # ─── triggering ──────────────────────────────────────────────────────
     def mark_urgent(self) -> None:
@@ -395,6 +483,12 @@ class Synthesizer:
             if int(time.time() // 86400) == self._budget_spent_day:
                 return False
             self._budget_spent_day = None
+        try:
+            backoff = self._store.learner_backoff(self._model)
+        except Exception:
+            backoff = {}
+        if backoff and time.time() < float(backoff.get("until", 0.0)):
+            return False
         new = self._store.journal_count() - self._store.synth_cursor()
         if self._urgent and new >= 1:
             return True
@@ -406,7 +500,21 @@ class Synthesizer:
             return
         if not self.due():
             return
-        self._task = asyncio.get_running_loop().create_task(self._run_safe())
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Callers swallow exceptions from kick(), so without this line a
+            # host that journals from a worker thread would never learn and
+            # never say why.
+            if not self._kick_warned:
+                self._kick_warned = True
+                _log.warning(
+                    "Memory learner: a pass is due but kick() was called with "
+                    "no running event loop; synthesis will wait for the next "
+                    "kick from the loop thread or session close"
+                )
+            return
+        self._task = loop.create_task(self._run_safe())
 
     async def drain(self) -> None:
         """Await any in-flight pass, then run a final one if entries remain.
@@ -443,7 +551,8 @@ class Synthesizer:
             changed = await asyncio.wait_for(self.run(), timeout=self._pass_timeout)
         except TimeoutError:
             self.last_error = f"synthesis pass exceeded {self._pass_timeout:.0f}s"
-            self._log_pass("synthesis", [], error=self.last_error)
+            retry = self._note_failure(self.last_error)
+            self._log_pass("synthesis", [], error=self.last_error, retry_after_s=retry)
             return []
         except InferenceBudgetExhausted as exc:
             # The slice stays unconsumed (cursor untouched, journal lines
@@ -454,17 +563,56 @@ class Synthesizer:
             return []
         except Exception as exc:  # never let synthesis break the session
             self.last_error = f"{type(exc).__name__}: {exc}"
-            self._log_pass("synthesis", [], error=self.last_error)
+            retry = self._note_failure(self.last_error)
+            self._log_pass("synthesis", [], error=self.last_error, retry_after_s=retry)
             return []
-        if self._consolidation_due():
+        if not (self.last_pass_failed or self.last_pass_skipped) and self._consolidation_due():
             try:
                 changed += await asyncio.wait_for(
-                    self.consolidate(), timeout=self._pass_timeout
+                    self._consolidate_locked(), timeout=self._pass_timeout
                 )
-            except Exception:  # consolidation is opportunistic, never fatal
-                pass
+            except InferenceBudgetExhausted as exc:
+                self._budget_spent_day = int(time.time() // 86400)
+                self._log_pass("consolidation", [], error=f"{type(exc).__name__}: {exc}")
+            except Exception as exc:  # consolidation is opportunistic, never fatal
+                self._consolidation_failed(f"{type(exc).__name__}: {exc}")
         await self._notify(changed)
         return changed
+
+    def _note_failure(self, error: str) -> float:
+        """Record a failed pass in the store's shared backoff; returns the
+        seconds until this model's next attempt (0 when it could not be
+        recorded)."""
+        self.last_pass_failed = True
+        now = time.time()
+        try:
+            entry = self._store.note_learner_failure(
+                self._model, error, now=now,
+                base=FAILURE_BACKOFF_BASE, cap=FAILURE_BACKOFF_MAX,
+            )
+        except Exception:
+            return 0.0
+        return max(0.0, float(entry.get("until", now)) - now)
+
+    def _consolidation_failed(self, error: str, **fields: Any) -> None:
+        """A failed consolidation waits ``CONSOLIDATE_RETRY_SECONDS``."""
+        self.last_error = error
+        try:
+            self._store.set_consolidation_retry_at(time.time() + CONSOLIDATE_RETRY_SECONDS)
+        except Exception:
+            pass
+        self._log_pass(
+            "consolidation", [], error=error,
+            retry_after_s=CONSOLIDATE_RETRY_SECONDS, **fields,
+        )
+
+    async def _consolidate_locked(self) -> list[str]:
+        """Consolidate under the synthesis lock, so two sessions that finish
+        a pass together do not both pay for the same curation."""
+        with journal_lock(self._store.root / SYNTHESIS_LOCK) as held:
+            if not held:
+                return []
+            return await self.consolidate()
 
     async def _notify(self, changed: list[str]) -> None:
         """Tell the host what landed (events/UI). Best-effort, never raises."""
@@ -486,22 +634,54 @@ class Synthesizer:
         the lock taken does nothing, so two engines over one store never pay
         twice for a slice or write near-duplicate memories from it.
         """
+        self.last_pass_failed = False
+        self.last_pass_skipped = False
         with journal_lock(self._store.root / SYNTHESIS_LOCK) as held:
             if not held:
+                self.last_pass_skipped = True
+                self._note_lock_busy()
                 return []
+            self._lock_busy_since = None
             return await self._run_locked()
+
+    def _note_lock_busy(self) -> None:
+        """Another pass holds the synthesis lock. Normal while it runs; a
+        hold longer than a pass may take means a wedged holder, and before
+        this line that state was completely silent (no pass row at all)."""
+        now = time.monotonic()
+        if self._lock_busy_since is None:
+            self._lock_busy_since = now
+        busy = now - self._lock_busy_since
+        if busy < self._pass_timeout or now - self._lock_logged_at < LOCK_BUSY_LOG_INTERVAL:
+            return
+        self._lock_logged_at = now
+        self._log_pass(
+            "synthesis", [],
+            error=(
+                f"skipped: {SYNTHESIS_LOCK}.lock has been held by another pass for "
+                f"at least {busy:.0f}s (longer than the {self._pass_timeout:.0f}s "
+                "pass limit); a holder may be wedged"
+            ),
+        )
 
     async def _run_locked(self) -> list[str]:
         cursor = self._store.synth_cursor()
         forgotten_before = self._store._facts.snapshot().get("forgotten_before", 0)
-        entries, reached = self._store.journal_slice(cursor, self._max_entries)
-        entries = [e for e in entries if e.get("ts", 0) > forgotten_before]
-        if not entries:
+        indexed, reached = self._store.journal_slice_indexed(cursor, self._max_entries)
+        indexed = [(n, e) for n, e in indexed if e.get("ts", 0) > forgotten_before]
+        if not indexed:
             if reached > cursor:
                 # Only malformed lines in the slice: step past them, or every
                 # later pass would stop at the same corrupt line.
                 self._store.set_synth_cursor(reached)
             return []
+        # Only what the prompt can show is consumed: the rest of the slice
+        # stays behind the cursor for the next pass.
+        fitted = self._fit_journal(indexed)
+        deferred = len(indexed) - len(fitted)
+        if deferred:
+            reached = fitted[-1][0]
+        entries = [e for _, e in fitted]
         groups: dict[str | None, list[dict]] = {}
         for entry in entries:
             groups.setdefault(entry.get("project"), []).append(entry)
@@ -516,18 +696,21 @@ class Synthesizer:
                 self._project = project or "legacy:unassigned"
                 try:
                     text, group_usage = await self._complete(self._prompt(group), _SYNTH_SYSTEM)
-                except SynthesisIncomplete as exc:
+                except (SynthesisIncomplete, SynthesisProviderError) as exc:
                     # Not a verdict on the slice: leave the cursor where it
-                    # is so the next pass retries it, and log what came
-                    # back so an empty stream is never mistaken for
-                    # NO_CHANGES again.
+                    # is so the next pass retries it (after the backoff),
+                    # and log what came back so a rejected or empty stream
+                    # is never mistaken for NO_CHANGES again.
                     for key, value in exc.usage.items():
                         usage[key] = usage.get(key, 0) + value
                     self.last_error = str(exc)
+                    retry = self._note_failure(self.last_error)
                     self._log_pass(
                         "synthesis", changed, error=self.last_error,
                         consumed=0, output_chars=exc.output_chars,
                         usage=usage, stop_reason=exc.stop_reason,
+                        provider_status=getattr(exc, "status", None),
+                        retry_after_s=retry,
                     )
                     return changed
                 for key, value in group_usage.items():
@@ -538,6 +721,10 @@ class Synthesizer:
         finally:
             self._project = original_project
         self._store.set_synth_cursor(reached)
+        try:
+            self._store.clear_learner_backoff(self._model)
+        except Exception:
+            pass
         # Consumed entries have no reader left: drop the ones past the
         # retention tail and rebase the cursor. Best-effort — a failed reap
         # must never cost us the pass that just succeeded.
@@ -546,12 +733,12 @@ class Synthesizer:
         except Exception:
             pass
         # The urgency flag covered the slice just consumed; a new Remember
-        # re-arms it.
-        self._urgent = False
+        # re-arms it (unless part of the slice was deferred).
+        self._urgent = self._urgent and bool(deferred)
         self._log_pass(
             "synthesis", changed, error=self.last_error,
             consumed=len(entries), output_preview=text, usage=usage,
-            stop_reason=self.last_stop_reason,
+            stop_reason=self.last_stop_reason, deferred=deferred or None,
         )
         return changed
 
@@ -566,6 +753,9 @@ class Synthesizer:
         usage: dict[str, int] | None = None,
         stop_reason: str | None = None,
         output_chars: int | None = None,
+        provider_status: int | None = None,
+        retry_after_s: float | None = None,
+        deferred: int | None = None,
     ) -> None:
         """Append one pass record to ``.synthesis-log.jsonl`` (best-effort).
 
@@ -573,18 +763,27 @@ class Synthesizer:
         silently fails — or silently decides NO_CHANGES — is otherwise
         indistinguishable from one that never ran. The log is the audit
         trail: when it ran, what it consumed, what changed, what went wrong.
+        The same outcome goes to the process log (warning on failure), so a
+        broken learner shows up where operators already look.
 
         Bounded like everything else the store owns: once the file grows past
         ``MAX_LOG_BYTES`` it is rotated down to the most recent
         ``MAX_LOG_ENTRIES`` passes.
         """
         record: dict[str, Any] = {"ts": time.time(), "kind": kind, "changed": changed}
+        record["model"] = self._model
         if consumed is not None:
             record["consumed"] = consumed
+        if deferred:
+            record["deferred"] = int(deferred)
         if usage:
             record["usage"] = dict(usage)
         if error:
             record["error"] = error
+        if provider_status is not None:
+            record["provider_status"] = provider_status
+        if retry_after_s:
+            record["retry_after_s"] = round(float(retry_after_s))
         if output_chars is not None:
             record["output_chars"] = int(output_chars)
         elif output_preview is not None:
@@ -593,6 +792,23 @@ class Synthesizer:
             record["output_tokens"] = int(usage["output_tokens"])
         if stop_reason:
             record["stop_reason"] = stop_reason
+        if error and consumed:
+            # The pass ran; some proposals were rejected by validation.
+            _log.warning(
+                "Memory learner %s pass (model=%s): consumed %s, changed %s, rejected: %s",
+                kind, self._model, consumed, changed or "nothing", error,
+            )
+        elif error:
+            _log.warning(
+                "Memory learner %s pass failed (model=%s, store=%s): %s%s",
+                kind, self._model, self._store.root, error,
+                f"; next attempt in {retry_after_s:.0f}s" if retry_after_s else "",
+            )
+        else:
+            _log.info(
+                "Memory learner %s pass (model=%s): consumed %s, changed %s",
+                kind, self._model, consumed, changed or "nothing",
+            )
         path = self._store.root / ".synthesis-log.jsonl"
         try:
             with path.open("a", encoding="utf-8") as fh:
@@ -608,7 +824,12 @@ class Synthesizer:
     # ─── consolidation (whole-store curation, interval-gated) ────────────
     def _consolidation_due(self, now: float | None = None) -> bool:
         now = time.time() if now is None else now
-        if len(self._store.memories()) < CONSOLIDATE_MIN_MEMORIES:
+        # Only inferred facts can be merged or retired; a store of explicit
+        # saves has nothing for this pass to do.
+        editable = [m for m in self._store.memories() if not m.protected]
+        if len(editable) < CONSOLIDATE_MIN_MEMORIES:
+            return False
+        if now < self._store.consolidation_retry_at():
             return False
         return (
             now - self._store.last_consolidated_at()
@@ -618,9 +839,10 @@ class Synthesizer:
     async def consolidate(self) -> list[str]:
         """One whole-store curation pass: merge, generalize, retire.
 
-        Sees every memory (with usage counts) and the skill index — no journal
-        slice. Only rewrites and deletions apply; a ``<skill>`` tag in the
-        output is ignored, so a confused pass cannot inject unproven code.
+        Sees the facts it may change (inferred, with usage counts) and the
+        skill index — no journal slice. Only rewrites and deletions apply; a
+        ``<skill>`` tag in the output is ignored, so a confused pass cannot
+        inject unproven code.
 
         This is also where the store's storage bounds are enforced: the
         deterministic reap runs first, so the model curates a store that is
@@ -632,16 +854,26 @@ class Synthesizer:
             pass
         lines = ["## Memory store (id, recalls, age, scope, text)"]
         now = time.time()
-        memories = self._store.memories()
-        revisions = {m.id: m.revision for m in memories if not m.protected}
+        memories = [m for m in self._store.memories() if not m.protected]
+        revisions = {m.id: m.revision for m in memories}
+        memories.sort(key=lambda m: -(m.updated_at or m.created_at or 0.0))
+        budget = CONSOLIDATE_MEMORY_CHARS
+        omitted = 0
         if not memories:
             lines.append("(empty)")
         for m in memories:
             age_days = (now - (m.updated_at or m.created_at or now)) / 86_400
-            lines.append(
+            line = (
                 f"[{m.id}] recalls={m.uses} age={age_days:.0f}d "
                 f"scope={m.scope}: {m.text}"
             )
+            if len(line) + 1 > budget:
+                omitted += 1
+                continue
+            lines.append(line)
+            budget -= len(line) + 1
+        if omitted:
+            lines.append(f"({omitted} older facts not listed this pass)")
         lines.append("")
         lines.append("## Skill library (name, uses, description)")
         skills = self._store.list()
@@ -651,16 +883,19 @@ class Synthesizer:
             lines.append(f"- {s.name} (used {s.uses}x): {s.description}")
         try:
             text, usage = await self._complete("\n".join(lines), _CONSOLIDATE_SYSTEM)
-        except SynthesisIncomplete as exc:
-            self.last_error = str(exc)
-            self._log_pass(
-                "consolidation", [], error=self.last_error, usage=exc.usage,
-                output_chars=exc.output_chars, stop_reason=exc.stop_reason,
+        except (SynthesisIncomplete, SynthesisProviderError) as exc:
+            self._consolidation_failed(
+                str(exc), usage=exc.usage, output_chars=exc.output_chars,
+                stop_reason=exc.stop_reason,
+                provider_status=getattr(exc, "status", None),
             )
             return []
         changed: list[str] = []
-        for match in _MEMORY_RE.finditer(text or ""):
-            memory_id, scope_attr, memory_text = match.groups()
+        errors: list[str] = []
+        for memory_id, scope_attr, memory_text, problem in _memory_tags(text):
+            if problem:
+                errors.append(problem)
+                continue
             if memory_id not in revisions:
                 continue  # no inserts, protected edits, or unknown snapshot IDs
             try:
@@ -670,7 +905,8 @@ class Synthesizer:
                     scope=self._resolve_scope(scope_attr),
                     expected_revision=revisions[memory_id],
                 )
-            except ValueError:
+            except ValueError as exc:
+                errors.append(f"memory {memory_id}: {exc}")
                 continue
             changed.append(f"memory:{saved.id}")
         for match in _DELETE_MEMORY_RE.finditer(text or ""):
@@ -679,7 +915,11 @@ class Synthesizer:
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
-        self._log_pass("consolidation", changed, usage=usage)
+        self._log_pass(
+            "consolidation", changed, usage=usage,
+            error="; ".join(errors) or None, consumed=len(memories),
+            stop_reason=self.last_stop_reason,
+        )
         self._store.set_last_consolidated_at(time.time())
         return changed
 
@@ -696,15 +936,22 @@ class Synthesizer:
             return self._project or "global"
         return "global"
 
-    def _library_lines(self, entries: list[dict]) -> list[str]:
+    # ─── the synthesis prompt ────────────────────────────────────────────
+    def _library_lines(self, entries: list[dict], budget: int | None = None) -> list[str]:
         """The skill library as the prompt shows it: skills the slice
         referenced in full, then the most used, until ``SKILL_SOURCE_BUDGET``
-        characters of source are spent; the rest as an index line."""
+        characters of source are spent; the rest as an index line.
+
+        ``budget`` bounds the whole section (headers, index lines and
+        source); skills that do not fit even as an index line are counted.
+        """
         lines = ["## Current skill library"]
         skills = self._store.list()
         if not skills:
             lines.append("(empty)")
             return lines
+        limit = PROMPT_CHAR_LIMIT if budget is None else max(0, budget)
+        used = len(lines[0]) + 1
         referenced: set[str] = set()
         for e in entries:
             if e.get("kind", "cell") == "cell":
@@ -712,41 +959,138 @@ class Synthesizer:
         ordered = sorted(
             skills, key=lambda s: (s.name not in referenced, -s.uses, s.name)
         )
-        budget = SKILL_SOURCE_BUDGET
+        source_budget = SKILL_SOURCE_BUDGET
+        omitted = 0
         for s in ordered:
             header = f"### skills.{s.name}  (used {s.uses}x)"
             source = s.source.rstrip("\n")
-            if source and (s.name in referenced or len(source) <= budget):
+            whole = len(header) + len(source) + 16  # fences and newlines
+            if (
+                source
+                and (s.name in referenced or len(source) <= source_budget)
+                and used + whole <= limit
+            ):
                 lines += [header, "```python", source, "```"]
-                budget -= len(source)
+                source_budget -= len(source)
+                used += whole
+                continue
+            index = (
+                f"{header}: {s.description} (source not shown this pass; "
+                f"{len(s.source)} bytes)"
+            )
+            if used + len(index) + 1 <= limit:
+                lines.append(index)
+                used += len(index) + 1
             else:
-                lines.append(
-                    f"{header}: {s.description} (source not shown this pass; "
-                    f"{len(s.source)} bytes)"
-                )
+                omitted += 1
+        if omitted:
+            lines.append(f"({omitted} more skills not listed this pass)")
         return lines
 
-    def _prompt(self, entries: list[dict]) -> str:
-        lines = self._library_lines(entries)
-        lines.append("")
-        lines.append("## Current memory (id, recalls, scope, text)")
-        memories = self._store.memories()
+    def _memory_lines(self) -> list[str]:
+        """Saved facts the pass should know about, within
+        ``MEMORY_PROMPT_CHARS``: this project's and global ones, newest
+        first. Explicit saves are marked read-only. The old prompt listed
+        every fact in every scope ahead of the journal and pushed the journal
+        past the request's character cut."""
+        lines = ["## Current memory (id, recalls, scope, text)"]
+        project = self._project
+        memories = [
+            m for m in self._store.memories()
+            if m.scope == "global" or (project is not None and m.scope == project)
+        ]
         if not memories:
             lines.append("(empty)")
+            return lines
+        memories.sort(key=lambda m: -(m.updated_at or m.created_at or 0.0))
+        budget = MEMORY_PROMPT_CHARS
+        omitted = 0
         for m in memories:
-            lines.append(f"[{m.id}] recalls={m.uses} scope={m.scope}: {m.text}")
-        if self._session_model is not None:
-            lines.append("")
-            lines.append(f"## Session model: {self._session_model}")
-            if self._guidance_snapshot:
-                lines.append("Current model-guidance file(s) — a proposal replaces the whole file:")
-                for stem, content in sorted(self._guidance_snapshot.items()):
-                    lines.append(f"### {stem}.md")
-                    lines.append(content)
-            else:
-                lines.append("(no model-guidance file exists for this model yet)")
-        lines.append("")
-        lines.append("## Session journal (conversation + executed cells, in order)")
+            flag = " explicit" if m.protected else ""
+            line = f"[{m.id}] recalls={m.uses} scope={m.scope}{flag}: {m.text}"
+            if len(line) + 1 > budget:
+                omitted += 1
+                continue
+            lines.append(line)
+            budget -= len(line) + 1
+        if omitted:
+            lines.append(
+                f"({omitted} older facts not listed; a new memory that repeats "
+                "a saved fact word for word is merged, not duplicated)"
+            )
+        return lines
+
+    @staticmethod
+    def _render_entry(e: dict, cell_no: int) -> list[str]:
+        """One journal entry as prompt lines (no session divider)."""
+        kind = e.get("kind", "cell")
+        if kind in ("user", "assistant", "remember", "friction"):
+            scope_hint = (
+                f" (scope={e['scope']})"
+                if kind == "remember" and e.get("scope")
+                else ""
+            )
+            return [f"[{kind}]{scope_hint} {str(e.get('text', '')).strip()}"]
+        if kind == "tool":
+            # JSON-surface call (ToolJournal): one compact line.
+            outcome = "error" if e.get("error") else str(e.get("output", "")).strip()
+            return [(
+                f"[tool] {e.get('name')}({str(e.get('input', '')).strip()}) "
+                f"-> {outcome}"
+            )]
+        lines = [
+            f"### cell {cell_no}",
+            "```python",
+            str(e.get("code", "")).rstrip("\n"),
+            "```",
+        ]
+        summary = {
+            k: e[k]
+            for k in ("stdout", "value", "error", "host_calls", "tools")
+            if e.get(k)
+        }
+        if summary:
+            lines.append(f"outcome: {json.dumps(summary, ensure_ascii=False)}")
+        return lines
+
+    def _entry_cost(self, e: dict) -> int:
+        return len("\n".join(self._render_entry(e, 0))) + 1 + _SESSION_LABEL_ALLOWANCE
+
+    def _journal_budget(self) -> int:
+        """Characters the journal may use in one pass's prompt: the request
+        limit minus the memory budget, the guidance section and a reserve
+        for the skill library (only as much as the library needs)."""
+        guidance = len("\n".join(self._guidance_lines()))
+        try:
+            library = sum(len(s.source) + 80 for s in self._store.list())
+        except Exception:
+            library = LIBRARY_PROMPT_RESERVE
+        reserve = min(library, LIBRARY_PROMPT_RESERVE) + 200  # headers
+        return max(
+            JOURNAL_MIN_PROMPT_CHARS,
+            PROMPT_CHAR_LIMIT - MEMORY_PROMPT_CHARS - guidance - reserve,
+        )
+
+    def _fit_journal(self, indexed: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
+        """The prefix of the slice that fits :meth:`_journal_budget`.
+
+        Always at least one entry, so an oversized line cannot stall the
+        cursor; it is clipped when rendered.
+        """
+        budget = self._journal_budget()
+        out: list[tuple[int, dict]] = []
+        used = 0
+        for n, e in indexed:
+            cost = self._entry_cost(e)
+            if out and used + cost > budget:
+                break
+            out.append((n, e))
+            used += cost
+        return out
+
+    def _journal_lines(self, entries: list[dict]) -> list[str]:
+        lines = ["## Session journal (conversation + executed cells, in order)"]
+        clip = self._journal_budget()
         cell_no = 0
         current: tuple[Any, Any] | None = None
         for e in entries:
@@ -757,36 +1101,39 @@ class Synthesizer:
                 if tag[1]:
                     label += f", agent {tag[1]}"
                 lines.append(f"--- {label} ---")
-            kind = e.get("kind", "cell")
-            if kind in ("user", "assistant", "remember", "friction"):
-                scope_hint = (
-                    f" (scope={e['scope']})"
-                    if kind == "remember" and e.get("scope")
-                    else ""
-                )
-                lines.append(f"[{kind}]{scope_hint} {str(e.get('text', '')).strip()}")
-                continue
-            if kind == "tool":
-                # JSON-surface call (ToolJournal): one compact line.
-                outcome = "error" if e.get("error") else str(e.get("output", "")).strip()
-                lines.append(
-                    f"[tool] {e.get('name')}({str(e.get('input', '')).strip()}) "
-                    f"-> {outcome}"
-                )
-                continue
-            cell_no += 1
-            lines.append(f"### cell {cell_no}")
-            lines.append("```python")
-            lines.append(str(e.get("code", "")).rstrip("\n"))
-            lines.append("```")
-            summary = {
-                k: e[k]
-                for k in ("stdout", "value", "error", "host_calls", "tools")
-                if e.get(k)
-            }
-            if summary:
-                lines.append(f"outcome: {json.dumps(summary, ensure_ascii=False)}")
-        return "\n".join(lines)
+            if e.get("kind", "cell") not in ("user", "assistant", "remember", "friction", "tool"):
+                cell_no += 1
+            rendered = "\n".join(self._render_entry(e, cell_no))
+            if len(rendered) > clip:
+                rendered = rendered[:clip] + " …[entry truncated]"
+            lines.append(rendered)
+        return lines
+
+    def _guidance_lines(self) -> list[str]:
+        if self._session_model is None:
+            return []
+        lines = ["", f"## Session model: {self._session_model}"]
+        if self._guidance_snapshot:
+            lines.append("Current model-guidance file(s) — a proposal replaces the whole file:")
+            for stem, content in sorted(self._guidance_snapshot.items()):
+                lines.append(f"### {stem}.md")
+                lines.append(content)
+        else:
+            lines.append("(no model-guidance file exists for this model yet)")
+        return lines
+
+    def _prompt(self, entries: list[dict]) -> str:
+        """The user message of one pass, at most ``PROMPT_CHAR_LIMIT`` chars
+        for any journal slice :meth:`_fit_journal` admitted: the journal and
+        the memory list have their own budgets and the skill library gets
+        what is left. The model-guidance section goes last, so the only text
+        a final safety cut could remove is guidance, never the journal."""
+        memory = self._memory_lines()
+        journal = self._journal_lines(entries)
+        guidance = self._guidance_lines()
+        fixed = len("\n".join(memory + [""] + journal + guidance)) + 2
+        library = self._library_lines(entries, PROMPT_CHAR_LIMIT - fixed)
+        return "\n".join(library + [""] + memory + [""] + journal + guidance)
 
     async def _complete(
         self, prompt: str, system: str = _SYNTH_SYSTEM,
@@ -798,7 +1145,9 @@ class Synthesizer:
         value per counter wins within the call before it is added to the
         running totals. The stop reason rides the same chunks (or
         ``message_stop`` on chat-completions dialects); a ``max_tokens`` stop
-        or an empty text channel raises :class:`SynthesisIncomplete` — the
+        or an empty text channel raises :class:`SynthesisIncomplete`, and an
+        error chunk (HTTP rejection, stream failure) raises
+        :class:`SynthesisProviderError` carrying the provider's message — the
         model never reached a verdict, so the caller must not treat the
         result as NO_CHANGES.
         """
@@ -806,7 +1155,14 @@ class Synthesizer:
             raise InferenceBudgetExhausted(
                 "Daily inference-model budget reached; explicit memory saves remain available"
             )
-        prompt = prompt[:32000]
+        if len(prompt) > PROMPT_CHAR_LIMIT:
+            # _prompt keeps the journal inside the limit; reaching this cut
+            # means an oversized guidance file, and it is worth a line.
+            _log.warning(
+                "Memory learner prompt of %d chars cut to %d (model=%s)",
+                len(prompt), PROMPT_CHAR_LIMIT, self._model,
+            )
+            prompt = prompt[:PROMPT_CHAR_LIMIT]
         request = ProviderRequest(
             model=self._model,
             messages=[Message(role="user", content=[Text(text=prompt)])],
@@ -818,6 +1174,7 @@ class Synthesizer:
         parts: list[str] = []
         raw: dict[str, Any] = {}
         stop_reason: str | None = None
+        error: dict[str, Any] | None = None
         async for chunk in self._provider.stream(request):
             payload = chunk.payload or {}
             if chunk.kind == "text_delta":
@@ -828,11 +1185,15 @@ class Synthesizer:
                     raw.update({k: v for k, v in reported.items() if v})
                 if payload.get("stop_reason"):
                     stop_reason = str(payload["stop_reason"])
+            elif chunk.kind == "error" and error is None:
+                error = dict(payload)
         usage: dict[str, int] = {}
         _add_usage(usage, raw)
         self.last_pass_usage = dict(usage)
         self.last_stop_reason = stop_reason
         _add_usage(self.usage, raw)
+        if error is not None:
+            raise SynthesisProviderError(error, usage)
         text = "".join(parts)
         if stop_reason == "max_tokens" or not text.strip():
             raise SynthesisIncomplete(stop_reason, usage, len(text))
@@ -883,8 +1244,10 @@ class Synthesizer:
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
-        for match in _MEMORY_RE.finditer(text or ""):
-            memory_id, scope_attr, memory_text = match.groups()
+        for memory_id, scope_attr, memory_text, problem in _memory_tags(text):
+            if problem:
+                errors.append(problem)
+                continue
             provenance = (
                 memory_provenance(memory_text, entries) if entries is not None else None
             )

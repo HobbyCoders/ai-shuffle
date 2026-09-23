@@ -60,17 +60,21 @@ Current per-owner defaults:
 | Fact text | 500 characters; oversize saves fail rather than truncate meaning |
 | Fact document | 2 MiB; commit rejected if exceeded |
 | Prompt fact lines | 8,000 characters, with profile facts prioritized |
-| Raw inference journal | 1 MiB; new inference events may be skipped at capacity or lock contention |
-| Model-assisted inference | At most 48 attempted calls per UTC day, per store; input capped at 32,000 characters plus the fixed system prompt; output bounded by the configured synthesis token limit |
+| Raw inference journal | 1 MiB; consumed lines are reaped first; past 90% with nothing consumed left to reap, the oldest unsynthesized lines (never explicit ones) are dropped down to half the cap with a warning; events may still be skipped under lock contention |
+| Model-assisted inference | At most 48 attempted calls per UTC day, per store; input capped at 32,000 characters plus the fixed system prompt (6,000 for saved facts, the journal slice, then the skill library); output bounded by the configured synthesis token limit; a failed call backs off per model, 5 minutes doubling to 6 hours, shared by every session on the store |
 | Recent deletion records | 256, plus a fixed 16 KiB monotonic deletion filter (32 KiB as hexadecimal JSON) |
 
 These defaults are conservative initial policy, not benchmark-derived optimal
 values. Inference is allowed to be lossy; acknowledged explicit saves are not.
 The existing deterministic skill reaper remains separate. Model consolidation
 can propose merges or retirements of inferred facts, but cannot update unknown
-IDs, overwrite a protected fact, or delete one. A failed consolidation does not
-consume its next ordinary retry interval. Inference batches retain source-project
-identity; a forget during a model call invalidates that proposal.
+IDs, overwrite a protected fact, or delete one. Consolidation runs only after a
+successful synthesis pass, under the same lock; a failed consolidation is retried
+after six hours instead of waiting a full interval. Inference batches retain
+source-project identity; a forget during a model call invalidates that proposal.
+Every pass, failed or not, writes a row to `.synthesis-log.jsonl` in the store
+and a line to the process log; a provider's error message is kept, not
+reported as an empty completion.
 
 ## Replication and concurrency
 

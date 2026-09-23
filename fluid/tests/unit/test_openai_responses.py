@@ -318,6 +318,59 @@ async def test_client_account_id_header_present() -> None:
     assert captured["beta"] == "responses=experimental"
 
 
+@pytest.mark.parametrize(
+    "base_url,expect_ceiling",
+    [
+        ("https://chatgpt.com/backend-api/codex/responses", False),
+        ("https://api.openai.com/v1/responses", True),
+    ],
+)
+async def test_codex_backend_request_carries_no_output_ceiling(
+    base_url: str, expect_ceiling: bool,
+) -> None:
+    """The memory learner sets max_tokens on every request; on the Codex
+    backend every such request came back HTTP 400 while session turns (no
+    ceiling) succeeded. The public API keeps the field."""
+
+    class FakeAuth:
+        account_id = "acct_1"
+
+        async def get_access_token(self) -> str:
+            return "tok"
+
+        async def on_401(self) -> None:  # pragma: no cover - not hit here
+            pass
+
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        bodies.append(_json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=GOLDEN.read_text().encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAIResponsesClient(auth=FakeAuth(), base_url=base_url, http_client=http)
+    request = ProviderRequest(
+        model="gpt-5.6-sol",
+        messages=[Message(role="user", content=[Text("journal slice")])],
+        system="You maintain a library",
+        max_tokens=16_000,
+        effort="low",
+    )
+    async for _ in client.stream(request):
+        pass
+    await http.aclose()
+    (body,) = bodies
+    assert ("max_output_tokens" in body) is expect_ceiling
+    assert body["reasoning"]["effort"] == "low"
+    assert body["instructions"] == "You maintain a library"
+
+
 async def test_xai_auth_does_not_send_codex_headers() -> None:
     class FakeAuth:
         account_id = "should-not-leak"
