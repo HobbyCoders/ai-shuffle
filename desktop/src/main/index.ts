@@ -17,6 +17,8 @@ import path from 'node:path';
 import { registerIpc, type DesktopState, type PostgresStatus, type WorkerControl } from './ipc';
 import { installMenu } from './menu';
 import { installPermissionPolicy } from './navigation';
+import { installListenerHeader, type ListenerTarget } from './listener';
+import { AGENT_ACCESS, agentAccessDetail, DisclosureStore, ensureAgentAccessAcknowledged } from './disclosure';
 import { PostgresSupervisor, resolvePostgresBinaries } from './postgres';
 import { plainCipher, SettingsStore, type Cipher } from './settings';
 import { desktopIdentity, stableDataDir } from './identity';
@@ -137,6 +139,13 @@ async function main(): Promise<void> {
 	const ses = session.fromPartition(PARTITION);
 	ses.setUserAgent(`${ses.getUserAgent()} AIShuffleDesktop/${app.getVersion()}`);
 	installPermissionPolicy(() => window.currentWorkerUrl);
+	// Every request this window makes to its own worker carries the listener token.
+	const listenerTarget = (): ListenerTarget | null => {
+		const token = supervisor?.listenerToken;
+		if (!supervisor || !token) return null;
+		try { return { origin: new URL(supervisor.state.url).origin, token }; } catch { return null; }
+	};
+	installListenerHeader(ses, listenerTarget);
 
 	const failedState = (error: string): WorkerState => ({
 		phase: 'failed',
@@ -186,6 +195,7 @@ async function main(): Promise<void> {
 		runtimeError,
 		bundledPostgresError: postgresError,
 		state: desktopState,
+		listener: listenerTarget,
 		tail: () => [...(postgres?.tail().map((line) => `[postgres] ${line}`) ?? []), ...(supervisor?.tail() ?? [])],
 		openStatus: () => window.showPage('status'),
 		restart: async () => {
@@ -273,6 +283,7 @@ async function main(): Promise<void> {
 		},
 		checkForUpdates: () => void updater.check(true),
 		reload: () => window.browserWindow?.webContents.reload(),
+		showAgentAccess: () => void showAgentAccess(false),
 		openDocs: () => {
 			if (window.currentWorkerUrl) window.send('desktop:command', 'open-docs');
 			else window.openExternal('https://github.com/HobbyCoders/ai-shuffle#readme');
@@ -333,9 +344,32 @@ async function main(): Promise<void> {
 	});
 	app.on('activate', () => void open());
 
+	// "Agents run as you": once, before the first worker ever starts.
+	// Isolated test profiles are driven by scripts, not people.
+	if (!isolation && !(await ensureAgentAccessAcknowledged(DisclosureStore.forProfile(userData), () => showAgentAccess(true)))) {
+		app.quit();
+		return;
+	}
+
 	await open();
 	updater.start();
 	installScreenshotHook(window);
+
+	async function showAgentAccess(firstRun: boolean): Promise<'continue' | 'quit'> {
+		const options = {
+			type: 'warning' as const,
+			title: AGENT_ACCESS.title,
+			message: AGENT_ACCESS.message,
+			detail: agentAccessDetail(),
+			buttons: firstRun ? ['I understand, continue', 'Quit'] : ['OK'],
+			defaultId: 0,
+			cancelId: firstRun ? 1 : 0,
+			noLink: true
+		};
+		const parent = window.browserWindow;
+		const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+		return response === 0 ? 'continue' : 'quit';
+	}
 
 	async function open(): Promise<void> {
 		if (window.browserWindow) {

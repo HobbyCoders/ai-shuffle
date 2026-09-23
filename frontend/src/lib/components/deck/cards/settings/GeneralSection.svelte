@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { Palette, FolderOpen, RefreshCw, Info } from 'lucide-svelte';
+	import { Palette, FolderOpen, RefreshCw, Info, ShieldAlert } from 'lucide-svelte';
+	import { desktop } from '$lib/services/desktop';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import ApplicationUpdates from './ApplicationUpdates.svelte';
 	import { theme, themePreference, currentPresetId, themePresets } from '$lib/stores/theme.svelte';
@@ -31,7 +32,27 @@
 		onValidateWorkspace,
 		onSaveWorkspace,
 	}: Props = $props();
+
+	// Desktop only: agents run on this computer as the signed-in user.
+	const agentAccess = desktop?.agentAccess ?? null;
 </script>
+
+{#if agentAccess}
+	<div class="set-group">
+		<div class="set-grouphead"><h3><ShieldAlert />{agentAccess.title}</h3></div>
+		<div class="set-row stack">
+			<div class="ctl agent-access">
+				<p>{agentAccess.message}</p>
+				<ul>
+					{#each agentAccess.points as point}
+						<li>{point}</li>
+					{/each}
+				</ul>
+				<p class="footer">{agentAccess.footer}</p>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <!-- Appearance -->
 <div class="set-group">
@@ -170,6 +191,21 @@
 	.ws-input {
 		flex: 1;
 		min-width: 220px;
+	}
+	.agent-access p,
+	.agent-access li {
+		font-size: 13px;
+		line-height: 1.5;
+	}
+	.agent-access p {
+		margin: 0 0 6px;
+	}
+	.agent-access ul {
+		margin: 0 0 6px;
+		padding-left: 18px;
+	}
+	.agent-access .footer {
+		color: var(--muted-foreground);
 	}
 	.version {
 		font-family: var(--font-mono);

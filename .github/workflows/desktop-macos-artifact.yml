@@ -1,5 +1,10 @@
 name: Build macOS desktop artifact (manual opt-in)
 
+# Developer ID signing and notarization come from repository secrets
+# (desktop/RELEASING.md). Without them the build is unsigned, as before;
+# half-configured secrets fail. DESKTOP_REQUIRE_SIGNING=true (repository
+# variable) refuses an unsigned build.
+
 on:
   workflow_dispatch:
     inputs:
@@ -21,14 +26,14 @@ jobs:
     if: inputs.build_macos == true
     name: macOS arm64 artifact with source provenance
     runs-on: blacksmith-6vcpu-macos-latest
-    timeout-minutes: 90
+    # Notarization of a large app can queue at Apple for a while.
+    timeout-minutes: 150
     defaults:
       run:
         working-directory: desktop
         shell: bash
     env:
       REQUESTED_VERSION: ${{ inputs.version }}
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,9 +66,58 @@ jobs:
             buildUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
           }, null, 2) + '\n');
           NODE
+      - name: Choose code signing
+        id: signing
+        env:
+          DESKTOP_REQUIRE_SIGNING: ${{ vars.DESKTOP_REQUIRE_SIGNING }}
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node scripts/signing.mjs mac --args-file "$RUNNER_TEMP/signing-args.txt" --github-env
       - name: Build Mac installers
-        run: npm run build && npx electron-builder --publish never --arm64
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # notarytool takes the App Store Connect key as a file path.
+          if [ -n "$APPLE_API_KEY_P8" ]; then
+            export APPLE_API_KEY="$RUNNER_TEMP/notary-api-key.p8"
+            (umask 077; printf '%s\n' "$APPLE_API_KEY_P8" > "$APPLE_API_KEY")
+          fi
+          unset APPLE_API_KEY_P8
+          signing=()
+          while IFS= read -r arg; do if [ -n "$arg" ]; then signing+=("$arg"); fi; done < "$RUNNER_TEMP/signing-args.txt"
+          npm run build
+          node node_modules/electron-builder/cli.js --publish never --arm64 "${signing[@]}"
+          rm -f "$RUNNER_TEMP/notary-api-key.p8"
+      - name: Check signature, notarization and Gatekeeper
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          NOTARIZED: ${{ steps.signing.outputs.notarized }}
+        run: |
+          app=$(find release/mac-arm64 -maxdepth 1 -name '*.app' | head -n 1)
+          [ -n "$app" ] || { echo '::error::No .app in release/mac-arm64'; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -E '^(Authority|TeamIdentifier|Runtime)'
+          if [ "$NOTARIZED" = 'true' ]; then
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=4 "$app"
+            for dmg in release/*.dmg; do spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg" || echo "::warning::$dmg is not stapled; the app inside is."; done
+          fi
       - name: Record artifact digests
+        env:
+          SIGNING_MODE: ${{ steps.signing.outputs.signing_mode }}
         run: |
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
@@ -76,7 +130,8 @@ jobs:
             const bytes = fs.readFileSync(`release/${name}`);
             return { name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
           });
-          fs.writeFileSync('release/macos-build-provenance.json', JSON.stringify({ ...source, cloudflared: worker.cloudflared, artifacts }, null, 2) + '\n');
+          fs.writeFileSync('release/macos-build-provenance.json', JSON.stringify({ ...source, signing: process.env.SIGNING_MODE, cloudflared: worker.cloudflared, artifacts }, null, 2) + '\n');
+          fs.writeFileSync('release/SHA256SUMS', artifacts.filter(a => /\.(dmg|zip)$/.test(a.name)).map(a => `${a.sha256}  ${a.name}\n`).join(''));
           NODE
       - name: Upload Mac installers and provenance
         uses: actions/upload-artifact@v4
@@ -88,5 +143,6 @@ jobs:
             desktop/release/*.blockmap
             desktop/release/latest-mac.yml
             desktop/release/macos-build-provenance.json
+            desktop/release/SHA256SUMS
           if-no-files-found: error
           retention-days: 1

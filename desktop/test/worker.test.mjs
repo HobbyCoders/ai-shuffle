@@ -116,6 +116,25 @@ test('buildWorkerEnv preserves non-DB settings and drops ALL inherited DB settin
 	}
 });
 
+test('D5: the packaged (non-preview) worker runs on the user\'s own home and Claude Code config dir', async () => {
+	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-worker-'));
+	try {
+		for (const platform of ['win32', 'darwin', 'linux']) {
+			await fakeBundle(path.join(dir, platform, 'worker'), platform);
+			const runtime = resolveRuntime({ packaged: true, resourcesPath: path.join(dir, platform), repoDir: '/nowhere', platform });
+			// No profileDir: that is only ever set for preview and isolated builds.
+			const plain = buildWorkerEnv({ runtime, port: 8000, dataDir: '/d', envFile: '/d/.env', platform, baseEnv: { PATH: '/bin', HOME: '/home/me', USERPROFILE: 'C:\\Users\\me' } });
+			assert.equal(plain.HOME, '/home/me', platform);
+			assert.equal(plain.USERPROFILE, 'C:\\Users\\me', platform);
+			assert.equal(plain.CLAUDE_CONFIG_DIR, undefined, `${platform}: the CLI falls back to ~/.claude of the real home`);
+			const custom = buildWorkerEnv({ runtime, port: 8000, dataDir: '/d', envFile: '/d/.env', platform, baseEnv: { PATH: '/bin', HOME: '/home/me', CLAUDE_CONFIG_DIR: '/home/me/.config/claude' } });
+			assert.equal(custom.CLAUDE_CONFIG_DIR, '/home/me/.config/claude', platform);
+		}
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test('isPortFree tells a bound port from a free one', async () => {
 	const server = net.createServer();
 	await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -297,13 +316,49 @@ test('DESK-03: the attach token reaches the worker and never leaks in from the p
 	t.after(() => rm(dir, { recursive: true, force: true }));
 	await fakeBundle(path.join(dir, 'worker'), 'linux');
 	const runtime = resolveRuntime({ packaged: true, resourcesPath: dir, repoDir: '/nowhere', platform: 'linux' });
-	const env = buildWorkerEnv({ runtime, port: 8000, baseEnv: { PATH: '/bin', SHUFFLE_DESKTOP_ATTACH_TOKEN: 'inherited', shuffle_desktop_attach_token: 'inherited' } });
+	const env = buildWorkerEnv({ runtime, port: 8000, baseEnv: { PATH: '/bin', SHUFFLE_DESKTOP_ATTACH_TOKEN: 'inherited', shuffle_desktop_attach_token: 'inherited', SHUFFLE_DESKTOP_LISTENER_TOKEN: 'inherited', shuffle_desktop_listener_token: 'inherited' } });
 	assert.equal(env.SHUFFLE_DESKTOP_ATTACH_TOKEN, undefined);
+	assert.equal(env.SHUFFLE_DESKTOP_LISTENER_TOKEN, undefined);
+	assert.equal(env.shuffle_desktop_listener_token, undefined);
 	assert.equal(env.shuffle_desktop_attach_token, undefined);
 	assert.equal(attachTokenHash('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
 	assert.equal(await readWorkerProcessRecord(path.join(dir, 'missing.json')), null);
 	await writeFile(path.join(dir, 'bad.json'), JSON.stringify({ version: 1, token: 'short' }));
 	assert.equal(await readWorkerProcessRecord(path.join(dir, 'bad.json')), null);
+});
+
+test('SEC-08: every spawn gets a fresh listener token that the app sends and records privately', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t, { SHUFFLE_DESKTOP_LISTENER_TOKEN: 'f'.repeat(64) });
+	const state = await f.supervisor.start();
+	// The fake worker refuses startup sync without the header, so ready proves the app sent it.
+	assert.equal(state.phase, 'ready');
+	const [spawn] = await f.spawns();
+	const listener = spawn.split(' ')[2];
+	assert.match(listener, /^[a-f0-9]{64}$/);
+	assert.notEqual(listener, 'f'.repeat(64), 'an inherited token never reaches the worker');
+	assert.equal(f.supervisor.listenerToken, listener);
+	assert.equal(JSON.stringify(f.supervisor.state).includes(listener), false, 'worker state sent to pages never carries the token');
+	assert.equal((await readWorkerProcessRecord(f.processFile)).listener, listener);
+	await f.supervisor.restart();
+	const second = (await f.spawns())[1].split(' ')[2];
+	assert.notEqual(second, listener);
+	assert.equal(f.supervisor.listenerToken, second);
+});
+
+test('SEC-08: an adopted worker of ours keeps its recorded listener token; a foreign one gets none', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t);
+	const token = 'c'.repeat(64);
+	const listener = 'd'.repeat(64);
+	await writePrivateFile(f.processFile, JSON.stringify({ version: 1, pid: null, token, port: f.port, listener }));
+	await foreignWorker(t, f.port, { status: 'healthy', service: 'ai-shuffle', attach: attachTokenHash(token) });
+	assert.equal((await f.supervisor.start()).external, true);
+	assert.equal(f.supervisor.listenerToken, listener);
+	const g = await fakeSupervisor(t, { [ATTACH_ANY_ENV]: '1' });
+	await foreignWorker(t, g.port, { status: 'healthy', service: 'ai-shuffle' });
+	assert.equal((await g.supervisor.start()).external, true);
+	assert.equal(g.supervisor.listenerToken, null);
+	await writeFile(path.join(g.dir, 'bad-listener.json'), JSON.stringify({ version: 1, token, listener: 'short' }));
+	assert.equal((await readWorkerProcessRecord(path.join(g.dir, 'bad-listener.json'))).listener, undefined);
 });
 
 test('DESK-04: an orphaned worker from a previous run is stopped by pid and a fresh one started', { skip: !posix }, async (t) => {

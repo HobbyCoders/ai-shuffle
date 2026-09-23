@@ -17,6 +17,10 @@
  * file so the next launch can tell its own orphan from another user's worker
  * or a Docker container. `SHUFFLE_DESKTOP_ATTACH_ANY=1` restores unverified
  * attaching for developers running a manual worker.
+ *
+ * Each spawn also gets a fresh listener token (SHUFFLE_DESKTOP_LISTENER_TOKEN,
+ * see listener.ts). Only this app's window sends it, so the worker can tell
+ * the app apart from any other local process that reaches its loopback port.
  */
 import { EventEmitter } from 'node:events';
 import { createHash, randomBytes } from 'node:crypto';
@@ -29,6 +33,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { isManagedConnection, type PostgresConfig } from './settings';
 import { writePrivateFile } from './private-file';
+import { isListenerToken, LISTENER_HEADER, LISTENER_TOKEN_ENV, newListenerToken } from './listener';
 
 export const DEFAULT_PORT = 8000;
 /** Default protected listener; isolated previews may choose another loopback port. */
@@ -152,7 +157,7 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 	if (opts.runtime.nodeBinDir) pathParts.push(opts.runtime.nodeBinDir);
 	if (base[pathKey]) pathParts.push(base[pathKey] as string);
 	for (const key of Object.keys(base)) {
-		if (/^(POSTGRES_|DATABASE_|PG|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$|SHUFFLE_DESKTOP_ISOLATED$|SHUFFLE_PROTECTED_PORT$|SHUFFLE_DESKTOP_PROTECTED_PORT$|SHUFFLE_DESKTOP_ATTACH_TOKEN$)/i.test(key)) delete base[key];
+		if (/^(POSTGRES_|DATABASE_|PG|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$|SHUFFLE_DESKTOP_ISOLATED$|SHUFFLE_PROTECTED_PORT$|SHUFFLE_DESKTOP_PROTECTED_PORT$|SHUFFLE_DESKTOP_ATTACH_TOKEN$|SHUFFLE_DESKTOP_LISTENER_TOKEN$)/i.test(key)) delete base[key];
 	}
 	let profile: NodeJS.ProcessEnv = {};
 	if (opts.profileDir) {
@@ -296,6 +301,8 @@ export interface WorkerProcessRecord {
 	pid: number | null;
 	token: string;
 	port: number;
+	/** The listener token the worker was started with; absent in records from older app versions. */
+	listener?: string;
 }
 
 export async function readWorkerProcessRecord(file: string): Promise<WorkerProcessRecord | null> {
@@ -304,7 +311,7 @@ export async function readWorkerProcessRecord(file: string): Promise<WorkerProce
 		if (record.version !== 1 || typeof record.token !== 'string' || !/^[a-f0-9]{64}$/.test(record.token)) return null;
 		const pid = Number.isSafeInteger(record.pid) && (record.pid as number) > 0 ? (record.pid as number) : null;
 		const port = Number.isSafeInteger(record.port) ? (record.port as number) : 0;
-		return { version: 1, pid, token: record.token, port };
+		return { version: 1, pid, token: record.token, port, ...(isListenerToken(record.listener) ? { listener: record.listener } : {}) };
 	} catch {
 		return null;
 	}
@@ -339,11 +346,11 @@ export async function terminateProcessTree(pid: number, timeoutMs = 10_000): Pro
 }
 
 /** Owner-only launch barrier, also used when attaching to a running local worker. */
-export function syncBeforeOpen(port: number): Promise<{ status: string }> {
+export function syncBeforeOpen(port: number, listener: string | null = null): Promise<{ status: string }> {
 	return new Promise((resolve, reject) => {
 		const req = http.request({
 			host: '127.0.0.1', port, path: '/api/v1/network/startup-sync', method: 'POST',
-			timeout: 65_000, headers: { accept: 'application/json', 'content-length': '0' }
+			timeout: 65_000, headers: { accept: 'application/json', 'content-length': '0', ...listenerHeaders(listener) }
 		}, (res) => {
 			let body = '';
 			res.setEncoding('utf8');
@@ -368,14 +375,18 @@ export function syncBeforeOpen(port: number): Promise<{ status: string }> {
 }
 
 
+function listenerHeaders(listener: string | null): Record<string, string> {
+	return isListenerToken(listener) ? { [LISTENER_HEADER]: listener } : {};
+}
+
 /** Authenticated, loopback-only control of the child we launched. Never a renderer API. */
-export function requestLifecycle(port: number, token: string, action: 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge', state?: object): Promise<Record<string, unknown>> {
+export function requestLifecycle(port: number, token: string, action: 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge', state?: object, listener: string | null = null): Promise<Record<string, unknown>> {
 	return new Promise((resolve, reject) => {
 		const req = http.request({
 			host: '127.0.0.1', port, path: `/api/v1/internal/desktop/${action}`,
 			method: action === 'stop-sessions' || action === 'update-bridge' ? 'POST' : 'GET',
 			timeout: action === 'active-sessions' ? 3000 : 30_000,
-			headers: { authorization: `Bearer ${token}`, accept: 'application/json', 'content-type': 'application/json' }
+			headers: { authorization: `Bearer ${token}`, accept: 'application/json', 'content-type': 'application/json', ...listenerHeaders(listener) }
 		}, (res) => {
 			let body = '';
 			res.setEncoding('utf8');
@@ -428,6 +439,8 @@ export class WorkerSupervisor extends EventEmitter {
 	private restartPending = false;
 	private restartTimer: NodeJS.Timeout | null = null;
 	private readonly processFile: string;
+	/** The listener token of the worker this app talks to; null when it does not know one. */
+	private listener: string | null = null;
 
 	constructor(private readonly opts: SupervisorOptions) {
 		super();
@@ -447,6 +460,11 @@ export class WorkerSupervisor extends EventEmitter {
 
 	get state(): WorkerState {
 		return { ...this._state };
+	}
+
+	/** For the window's session and IPC only; never part of the state sent to pages. */
+	get listenerToken(): string | null {
+		return this.listener;
 	}
 
 	get runtime(): WorkerRuntime {
@@ -474,6 +492,7 @@ export class WorkerSupervisor extends EventEmitter {
 		this.restartPending = false;
 		this.stopping = false;
 		this.set({ phase: 'starting', startupStep: undefined, syncStatus: undefined, error: null, exitCode: null, pid: null, external: false });
+		this.listener = null;
 
 		const port = this.opts.port ?? DEFAULT_PORT;
 		const protectedPort = this.opts.protectedPort ?? PROTECTED_PORT;
@@ -495,6 +514,8 @@ export class WorkerSupervisor extends EventEmitter {
 				}
 				if (this.stopping) return this.state;
 			} else if (this.opts.allowAttach !== false && (ours || (this.opts.baseEnv ?? process.env)[ATTACH_ANY_ENV] === '1')) {
+				// A worker we started keeps the listener token it was started with.
+				this.listener = ours ? previous!.listener ?? null : null;
 				this.set({ external: true, port, url: `http://127.0.0.1:${port}`, startedAt: new Date().toISOString() });
 				await this.finishStartup(port);
 				return this.state;
@@ -540,6 +561,9 @@ export class WorkerSupervisor extends EventEmitter {
 		env.SHUFFLE_DESKTOP_LIFECYCLE_TOKEN = this.lifecycleToken;
 		const attachToken = randomBytes(32).toString('hex');
 		env.SHUFFLE_DESKTOP_ATTACH_TOKEN = attachToken;
+		const listener = newListenerToken();
+		env[LISTENER_TOKEN_ENV] = listener;
+		this.listener = listener;
 		// The preview job owns descendants even after an intermediate parent exits.
 		// Normal installed workers retain their existing lifecycle.
 		const entry = process.platform === 'win32' && this.opts.runtime.mode === 'repo'
@@ -572,7 +596,7 @@ export class WorkerSupervisor extends EventEmitter {
 		void exited.then((code) => this.onExit(code));
 		this.set({ pid: child.pid ?? null, port, url: `http://127.0.0.1:${port}`, startedAt: new Date().toISOString() });
 		try {
-			const record: WorkerProcessRecord = { version: 1, pid: child.pid ?? null, token: attachToken, port };
+			const record: WorkerProcessRecord = { version: 1, pid: child.pid ?? null, token: attachToken, port, listener };
 			await writePrivateFile(this.processFile, JSON.stringify(record));
 		} catch (error) {
 			this.log(`could not record the worker process: ${(error as Error).message}`);
@@ -654,7 +678,7 @@ export class WorkerSupervisor extends EventEmitter {
 	private async finishStartup(port: number): Promise<void> {
 		this.set({ startupStep: 'syncing' });
 		try {
-			const result = await syncBeforeOpen(port);
+			const result = await syncBeforeOpen(port, this.listener);
 			if (this.stopping || this._state.phase !== 'starting') return;
 			this.log(`startup sync: ${result.status}`);
 			this.set({ phase: 'ready', startupStep: undefined, syncStatus: result.status });
@@ -665,7 +689,7 @@ export class WorkerSupervisor extends EventEmitter {
 	}
 
 	private lifecycleRequest(action: 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge', state?: object): Promise<Record<string, unknown>> {
-		return requestLifecycle(this._state.port, this.lifecycleToken, action, state);
+		return requestLifecycle(this._state.port, this.lifecycleToken, action, state, this.listener);
 	}
 
 	async stop(): Promise<void> {

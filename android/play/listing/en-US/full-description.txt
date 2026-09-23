@@ -1,0 +1,19 @@
+AI Shuffle is the phone companion for AI Shuffle, the self-hosted agent workspace from HobbyCoders. Your agents run on your own AI Shuffle worker: a home server, an Unraid box, a Docker host or the AI Shuffle desktop app. This app connects to it so you can keep working away from your desk.
+
+What you can do
+• Start sessions and chat with your agents, with streaming replies and file downloads.
+• Approve or deny tool requests from anywhere, so long-running work does not stall.
+• Talk to an agent hands-free with voice chat.
+• Switch between several workers, on your home network or through protected remote access.
+• Optionally let an agent use phone tools you allow, such as timers or maps, with every action approved by you.
+
+Your worker, your accounts
+AI Shuffle does not provide AI models. Agents run on your worker with the AI accounts and API keys you set up there. Conversations and files stay on your worker; the optional AI Shuffle account only links your devices and workers.
+
+Requirements
+• A running AI Shuffle worker (sold separately). This app does not run agents on the phone.
+• Android 8.0 or newer.
+
+Try the offline demo from Settings to see the app without a worker or an account.
+
+Delete your account at any time from Settings > Delete account in the app, or at https://hobbycoders.com/delete-account.

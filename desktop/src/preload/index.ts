@@ -26,6 +26,7 @@ const info = ipcRenderer.sendSync('desktop:info') as {
 	worker: { url: string; phase: string; external: boolean } | null;
 	windowState: { maximized: boolean; fullscreen: boolean; focused: boolean };
 	updateState: unknown;
+	agentAccess?: { title: string; message: string; points: string[]; footer: string };
 } | null;
 
 const bridge = {
@@ -33,6 +34,8 @@ const bridge = {
 	version: info?.version ?? '0.0.0',
 	platform: info?.platform ?? process.platform,
 	titleBarHeight: info?.titleBarHeight ?? 52,
+	/** "Agents run as you": the disclosure shown on first launch, for Settings to repeat. */
+	agentAccess: info?.agentAccess ?? null,
 
 	window: {
 		getState: () => ipcRenderer.invoke('desktop:window-state') as Promise<{ maximized: boolean; fullscreen: boolean; focused: boolean }>,
@@ -64,7 +67,13 @@ const bridge = {
 		onState: (listener: Listener<unknown>) => subscribe('desktop:worker-state', listener),
 		restart: () => ipcRenderer.invoke('desktop:worker-restart'),
 		openLogs: () => void ipcRenderer.invoke('desktop:worker-open-logs'),
-		openStatus: () => void ipcRenderer.invoke('desktop:worker-open-status')
+		openStatus: () => void ipcRenderer.invoke('desktop:worker-open-status'),
+		/**
+		 * The header and per-launch token the shell already adds to every
+		 * request this window makes to its worker. Only the worker's own
+		 * top-level page gets an answer; everything else gets null.
+		 */
+		listenerToken: () => ipcRenderer.invoke('desktop:listener-token') as Promise<{ header: string; token: string } | null>
 	},
 
 	updates: {

@@ -28,6 +28,8 @@ export interface MenuActions {
 	checkForUpdates(): void;
 	reload(): void;
 	openDocs(): void;
+	/** The "agents run as you" disclosure. */
+	showAgentAccess(): void;
 }
 
 export function installMenu(actions: MenuActions): void {
@@ -128,6 +130,7 @@ export function installMenu(actions: MenuActions): void {
 		role: 'help',
 		submenu: [
 			{ label: 'Documentation', click: () => actions.openDocs() },
+			{ label: 'Agent Access…', click: () => actions.showAgentAccess() },
 			{ label: 'Report a Problem', click: () => void shell.openExternal('https://github.com/HobbyCoders/ai-shuffle/issues') },
 			...(isMac
 				? []
