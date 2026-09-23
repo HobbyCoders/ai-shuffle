@@ -35,11 +35,12 @@ from fluid.providers._transport import (
     is_usable_client,
     with_deadline,
 )
-from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.providers.base import ErrorClass, ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers.openai_responses.pricing import estimate_cost as _estimate_cost
 from fluid.providers.openai_responses.serialize import (
     ResponsesStreamNormalizer,
     build_request_body,
+    classify_error as _classify_error,
 )
 
 API_URL = "https://api.openai.com/v1/responses"
@@ -89,6 +90,10 @@ class OpenAIResponsesClient:
     def estimate_cost(self, model: str, usage: dict) -> float | None:
         """Optional engine cost hook: list-price estimate for one model call."""
         return _estimate_cost(model, usage)
+
+    def classify_error(self, error: dict) -> ErrorClass:
+        """Retry class of an in-stream error; never drops the affinity key."""
+        return _classify_error(error)
 
     def _is_codex_backend(self) -> bool:
         """True when this client is pointed at the ChatGPT/Codex responses URL.
@@ -163,6 +168,7 @@ class OpenAIResponsesClient:
         owned: httpx.AsyncClient | None = None
         attempt = 0
         refreshed_401 = False
+        start_sent = False
         try:
             while True:
                 yielded = False
@@ -187,14 +193,62 @@ class OpenAIResponsesClient:
                                 sse_events(diagnostics.lines(), keepalives=True),
                                 self._stream_deadline,
                             )
+                            # message_start (sent on response.created) is held
+                            # until the next chunk, and an in-stream error that
+                            # arrives before any content is retried when it is
+                            # retriable. Exactly one message_start reaches the
+                            # engine across attempts: once one has been
+                            # released, a retry's own start is dropped.
+                            pending_start: StreamChunk | None = None
+                            content = False
+                            retry_class: ErrorClass | None = None
                             async for event_name, data in events:
                                 for chunk in normalizer.consume(event_name, data):
+                                    if chunk.kind == "message_start":
+                                        # Unchanged transport rule: a failure
+                                        # after the provider accepted the call
+                                        # is not replayed.
+                                        yielded = True
+                                        if not start_sent:
+                                            pending_start = chunk
+                                        continue
+                                    if chunk.kind == "error" and not content and not native_image:
+                                        verdict = self.classify_error(chunk.payload)
+                                        budget = self._retry.max_retries
+                                        if verdict.max_retries is not None:
+                                            budget = min(budget, verdict.max_retries)
+                                        if verdict.retriable and attempt < budget:
+                                            retry_class = verdict
+                                            break
+                                    if pending_start is not None:
+                                        start_sent = True
+                                        yield pending_start
+                                        pending_start = None
                                     # A liveness signal is not delivered
                                     # content, so it leaves a pre-content
-                                    # transport failure retriable.
+                                    # failure retriable.
                                     if chunk.kind != "provider_alive":
                                         yielded = True
+                                        content = True
                                     yield chunk
+                                if retry_class is not None:
+                                    break
+                            if retry_class is not None:
+                                await events.aclose()
+                                log.info(
+                                    "Retrying openai_responses call after an "
+                                    "in-stream error before content (code=%s, "
+                                    "attempt %d)", retry_class.code, attempt + 1,
+                                )
+                                await asyncio.sleep(max(
+                                    self._retry.delay(attempt),
+                                    retry_class.backoff_floor,
+                                ))
+                                attempt += 1
+                                continue
+                            if pending_start is not None:
+                                start_sent = True
+                                yield pending_start
                             return
                         text = (await resp.aread()).decode(errors="replace")
                         # One free retry: a 401 with the OAuth hook refreshes

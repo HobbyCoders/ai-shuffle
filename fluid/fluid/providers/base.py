@@ -44,6 +44,25 @@ class StreamChunk:
     payload: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ErrorClass:
+    """How a client classifies one provider error.
+
+    ``max_retries`` caps retries for this class below the client's policy
+    (None means the policy's own budget). ``backoff_floor`` is the minimum
+    wait in seconds before the retry. ``drop_sticky`` says whether the
+    engine should stop sending the provider's cache-affinity key after this
+    error: OpenRouter drops it (a dead replica stays dead), the Responses
+    API never does (the key is what keeps its prompt cache warm).
+    """
+
+    retriable: bool = False
+    code: str | None = None
+    backoff_floor: float = 0.0
+    max_retries: int | None = None
+    drop_sticky: bool = False
+
+
 @dataclass
 class ProviderRequest:
     model: str

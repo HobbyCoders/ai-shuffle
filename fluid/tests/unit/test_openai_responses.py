@@ -883,3 +883,226 @@ async def test_engine_keeps_one_reasoning_envelope_for_a_split_thinking_pair() -
     reasoning_items = [i for i in body["input"] if i.get("type") == "reasoning"]
     assert len(reasoning_items) == 1
     assert reasoning_items[0]["encrypted_content"] == "BLOB_RS1"
+
+
+# ─── in-stream errors: classify, hold message_start, retry before content ───
+# Modelled on test_anthropic_client.py: an error sent in place of content is
+# retried transparently; one after content surfaces.
+
+import json as _json
+
+from fluid.providers._retry import RetryPolicy
+from fluid.providers.openai_responses import client as responses_client_module
+from fluid.providers.openai_responses.serialize import (
+    OVERLOAD_BACKOFF_FLOOR_S,
+    OVERLOAD_MAX_RETRIES,
+    classify_error,
+)
+
+
+def _event(name: str, data: dict) -> str:
+    return f"event: {name}\ndata: {_json.dumps({'type': name, **data})}\n\n"
+
+
+_CREATED = _event("response.created", {"response": {"id": "resp_1", "status": "in_progress"}})
+_TEXT = (
+    _event("response.output_text.delta", {"item_id": "msg_1", "delta": "hi"})
+    + _event("response.output_item.done", {"item": {
+        "id": "msg_1", "type": "message", "role": "assistant",
+        "content": [{"type": "output_text", "text": "hi"}],
+    }})
+)
+_COMPLETED = _event("response.completed", {"response": {
+    "id": "resp_1", "status": "completed", "output": [],
+    "usage": {"input_tokens": 5, "output_tokens": 1},
+}})
+
+
+def _failed(code: str, etype: str = "service_unavailable_error") -> str:
+    return _event("response.failed", {"response": {
+        "id": "resp_1", "status": "failed",
+        "error": {"code": code, "type": etype, "message": code},
+    }})
+
+
+def _sse(body: str, headers: dict[str, str] | None = None) -> httpx.Response:
+    return httpx.Response(
+        200, content=body.encode(),
+        headers={"content-type": "text/event-stream", **(headers or {})},
+    )
+
+
+@pytest.fixture
+def _sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record every backoff the client asks for instead of sleeping."""
+    slept: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        slept.append(delay)
+
+    monkeypatch.setattr(responses_client_module.asyncio, "sleep", fake_sleep)
+    return slept
+
+
+async def _run_client(handler, *, retries: int = 3, tools: list | None = None) -> list[StreamChunk]:
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAIResponsesClient(
+        api_key="sk-test", http_client=http,
+        retry=RetryPolicy(max_retries=retries, base_delay=0, jitter=0),
+    )
+    request = ProviderRequest(
+        model="gpt-6-astra", messages=[Message(role="user", content=[Text("hi")])],
+    )
+    if tools is not None:
+        request.extra["tools"] = tools
+    chunks = [c async for c in client.stream(request)]
+    await http.aclose()
+    return chunks
+
+
+@pytest.mark.parametrize("code,etype,retriable", [
+    ("server_is_overloaded", "service_unavailable_error", True),
+    ("server_error", "server_error", True),
+    ("rate_limit_exceeded", "rate_limit_error", True),
+    ("slow_down", "invalid_request_error", True),
+    ("invalid_prompt", "invalid_request_error", False),
+    ("cyber_policy", "invalid_request_error", False),
+    ("context_length_exceeded", "invalid_request_error", False),
+])
+def test_in_stream_errors_are_classified(code: str, etype: str, retriable: bool) -> None:
+    for events in (
+        [("response.created", {"response": {"id": "r"}}),
+         ("response.failed", {"response": {"error": {"code": code, "type": etype}}})],
+        # The bare SSE error event carries its fields at the top level.
+        [("error", {"type": "error", "code": code, "message": code})],
+    ):
+        error = _consume_all(events)[-1]
+        assert error.kind == "error"
+        assert error.payload["retriable"] is retriable
+        assert error.payload["code"] == code
+
+
+def test_overload_class_has_a_small_budget_and_a_long_floor() -> None:
+    verdict = classify_error({"code": "server_is_overloaded"})
+    assert verdict.retriable is True
+    assert verdict.max_retries == OVERLOAD_MAX_RETRIES <= 2
+    assert verdict.backoff_floor >= 10.0
+    assert classify_error({"code": "server_error"}).backoff_floor == 0.0
+    assert classify_error({"code": "invalid_prompt"}).drop_sticky is False
+
+
+async def test_overload_before_content_is_retried_then_succeeds(_sleeps: list[float]) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _sse(_CREATED + _failed("server_is_overloaded"))
+        return _sse(_CREATED + _TEXT + _COMPLETED)
+
+    chunks = await _run_client(handler)
+    kinds = [c.kind for c in chunks]
+    assert calls == 2
+    assert kinds.count("message_start") == 1
+    assert kinds[0] == "message_start"
+    assert "error" not in kinds
+    assert kinds[-1] == "message_stop"
+    assert _sleeps == [OVERLOAD_BACKOFF_FLOOR_S]
+
+
+async def test_overload_retries_stop_at_the_overload_budget(_sleeps: list[float]) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _sse(_CREATED + _failed("server_is_overloaded"))
+
+    chunks = await _run_client(handler, retries=5)
+    assert calls == 1 + OVERLOAD_MAX_RETRIES
+    assert [c.kind for c in chunks] == ["message_start", "error"]
+    assert chunks[-1].payload["retriable"] is True
+    assert chunks[-1].payload["code"] == "server_is_overloaded"
+
+
+async def test_server_error_before_content_uses_the_normal_policy(_sleeps: list[float]) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls <= 3:
+            return _sse(_CREATED + _failed("server_error", "server_error"))
+        return _sse(_CREATED + _TEXT + _COMPLETED)
+
+    chunks = await _run_client(handler, retries=3)
+    assert calls == 4
+    assert [c.kind for c in chunks].count("message_start") == 1
+    assert chunks[-1].kind == "message_stop"
+    assert all(delay < OVERLOAD_BACKOFF_FLOOR_S for delay in _sleeps)
+
+
+async def test_error_after_content_is_surfaced_not_retried(_sleeps: list[float]) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _sse(_CREATED + _TEXT + _failed("server_is_overloaded"))
+
+    chunks = await _run_client(handler)
+    assert calls == 1
+    assert any(c.kind == "text_delta" for c in chunks)
+    assert chunks[-1].kind == "error"
+    assert chunks[-1].payload["retriable"] is True
+    assert _sleeps == []
+
+
+async def test_non_retriable_in_stream_error_is_terminal(_sleeps: list[float]) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _sse(_CREATED + _failed("cyber_policy", "invalid_request_error"))
+
+    chunks = await _run_client(handler)
+    assert calls == 1
+    assert [c.kind for c in chunks] == ["message_start", "error"]
+    assert chunks[-1].payload["retriable"] is False
+    assert _sleeps == []
+
+
+async def test_native_image_request_never_replays_an_in_stream_error(_sleeps: list[float]) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _sse(_CREATED + _failed("server_is_overloaded"))
+
+    chunks = await _run_client(handler, tools=[{"type": "image_generation"}])
+    assert calls == 1
+    assert chunks[-1].kind == "error"
+
+
+async def test_liveness_before_content_keeps_the_start_first_and_single(_sleeps: list[float]) -> None:
+    # The reasoning item's provider_alive releases the held start, so the host
+    # still sees acceptance first; the retry's own start is then dropped.
+    calls = 0
+    reasoning = _event("response.output_item.added", {"item": {"id": "rs_1", "type": "reasoning"}})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _sse(_CREATED + reasoning + _failed("server_error", "server_error"))
+        return _sse(_CREATED + _TEXT + _COMPLETED)
+
+    chunks = await _run_client(handler)
+    kinds = [c.kind for c in chunks]
+    assert calls == 2
+    assert kinds[:2] == ["message_start", "provider_alive"]
+    assert kinds.count("message_start") == 1
+    assert "error" not in kinds
