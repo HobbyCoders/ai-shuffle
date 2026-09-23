@@ -1059,6 +1059,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # while that node is still on the loaded path — a fork or rewind past
         # it means the numbers describe a prompt this session no longer sends.
         self._last_call_usage: dict[str, tuple[str, dict[str, Any]]] = {}
+        # The model that billed each ``_last_call_usage`` entry; None when a
+        # rehydrated Usage event did not record one. Window protection ignores
+        # a measurement another model's tokenizer produced.
+        self._last_call_model: dict[str, str | None] = {}
         # Sessions whose ``_last_call_usage`` entry was already looked for in
         # the persisted Usage events (a resume recovers it from there once).
         self._usage_rehydrated: set[str] = set()
@@ -1765,6 +1769,24 @@ class NativeLoop(BackgroundLifecycleMixin):
         appended = [n.message for n in nodes[index:]]
         return _measured_prompt_tokens(usage) + estimate_tokens_of_messages(appended)
 
+    async def _measured_window_prompt(
+        self, sid: str, nodes: list[SessionNode]
+    ) -> int | None:
+        """``_measured_next_prompt`` for the compactor's window decision.
+
+        None after a model switch as well: the billed count came from the
+        previous model's tokenizer, so it says nothing about how the current
+        model will count the same prompt. The chars/4 estimate stands in until
+        the new model's first call is measured.
+        """
+        measured = await self._measured_next_prompt(sid, nodes)
+        if measured is None:
+            return None
+        model = self._last_call_model.get(sid)
+        if model is not None and model != self.model:
+            return None
+        return measured
+
     async def _rehydrate_last_call_usage(
         self, sid: str, nodes: list[SessionNode]
     ) -> tuple[str, dict[str, Any]] | None:
@@ -1796,6 +1818,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             }
             if _measured_prompt_tokens(usage) > 0:
                 self._last_call_usage[sid] = (event.node_id, usage)
+                model = (event.context_usage or {}).get("model")
+                self._last_call_model[sid] = model if isinstance(model, str) else None
                 return self._last_call_usage[sid]
         return None
 
@@ -2515,6 +2539,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
             decision_reason=promo.decision_reason,
             first_changed_message=promo.first_changed_message,
+            token_basis=promo.token_basis,
+            measured_prompt_tokens=promo.measured_prompt_tokens,
         ))
 
     def _context_overhead_tokens(self) -> int:
@@ -2595,6 +2621,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # calls of one turn the provider is holding a prefix it built
                 # seconds ago; rewriting it there re-bills the whole prompt.
                 turn_boundary=num_calls == 0,
+                # Window protection sizes the prompt on what the provider
+                # billed last call, not on the chars/4 estimate alone.
+                measured_prompt_tokens=await self._measured_window_prompt(sid, nodes),
             )
             history = repair_dangling_tool_calls(rendered)
             if self._encrypted_reasoning_poisoned:
@@ -2615,6 +2644,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
             num_calls += 1
             self._turn_model_calls = num_calls
+            call_model = self.model
             result = await self._stream_once(
                 sid, turn_id, history, sticky=call_was_sticky
             )
@@ -2894,6 +2924,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # A provider that reported nothing leaves the estimate in place
                 # rather than pinning the whole context at zero tokens.
                 self._last_call_usage[sid] = (node.node_id, dict(result.usage))
+                self._last_call_model[sid] = call_model
             snapshot: dict[str, Any] | None = None
             try:
                 snapshot = self._context_usage_snapshot(
