@@ -1,6 +1,6 @@
 <!--
 title: iMessage
-description: Connect Claude to iMessage using the imsg CLI on macOS
+description: Connect AI Shuffle agents to iMessage using the imsg CLI on macOS
 order: 8
 -->
 
@@ -8,7 +8,7 @@ order: 8
 
 ## Overview
 
-The iMessage connector allows Claude to send and receive iMessages through AI Shuffle. Under the hood, it drives the [`imsg`](https://github.com/) command-line tool, which exposes a JSON-RPC interface over a subprocess. AI Shuffle spawns `imsg rpc`, subscribes to incoming messages, and sends replies through the same connection. This means Claude can participate in your iMessage (and SMS) conversations and respond to texts — all from the Mac that owns the iMessage account.
+The iMessage connector lets an AI Shuffle agent send and receive iMessages. Under the hood, it drives the [`imsg`](https://github.com/) command-line tool, which exposes a JSON-RPC interface over a subprocess. AI Shuffle spawns `imsg rpc`, subscribes to incoming messages, and sends replies through the same connection. This means the agent can take part in your iMessage (and SMS) conversations and respond to texts — all from the Mac that owns the iMessage account.
 
 Because iMessage is a proprietary Apple protocol with no public API, the connector relies on the `imsg` CLI talking directly to the local Messages database and `Messages.app`. As a result, **this connector only runs on macOS** — the machine running the AI Shuffle backend must be a Mac that is signed into iMessage.
 
@@ -70,7 +70,7 @@ When activated, the connector spawns `imsg rpc`, probes it with a `chats.list` r
 
 ### 5. Test the connection
 
-Send an iMessage to the Apple ID or phone number signed into Messages on the Mac. The message should appear in AI Shuffle, and Claude's response will be delivered back through iMessage. Messages sent by the account itself are ignored to avoid echoes.
+Send an iMessage to the Apple ID or phone number signed into Messages on the Mac. The message should appear in AI Shuffle, and the agent's response will be delivered back through iMessage. Messages sent by the account itself are ignored to avoid echoes.
 
 ## Configuration Reference
 

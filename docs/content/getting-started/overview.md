@@ -6,12 +6,12 @@ order: 1
 
 # AI Shuffle
 
-AI Shuffle is a self-hosted web interface for Claude Code — Anthropic's AI coding assistant. It provides a rich chat UI, multi-platform connectors, automation pipelines, and a full REST API for building integrations.
+AI Shuffle is a self-hosted workspace for AI agents. It can run Claude Code, and it can also run models from other providers. It includes a chat interface, connectors for messaging platforms and services, automation pipelines, and a REST API for building integrations.
 
 ## Key Features
 
 ### Chat Interface
-A real-time chat workspace powered by Claude via the Agent SDK. Features include:
+A real-time chat workspace for the model and provider you choose. Features include:
 - Streaming responses with tool use visualization
 - Session management with search, tags, and an Active group — sessions you're working in stay in Active until you mark them Complete, which moves them to Recent
 - Session forking to branch conversations
@@ -20,12 +20,12 @@ A real-time chat workspace powered by Claude via the Agent SDK. Features include
 - Thinking mode control (default, think, think harder, ultra think)
 
 ### Connectors
-Connect AI Shuffle to external platforms so Claude can respond to messages from:
+Connect AI Shuffle to external platforms so an agent can respond to messages from:
 - **Messaging:** Telegram, Discord, WhatsApp, Slack, Line, Signal, MS Teams, iMessage, BlueBubbles
 - **Smart Home:** Home Assistant, Philips Hue
 - **Other:** Spotify, Gmail, Webhooks
 
-Each connector creates a bridge — messages from the platform flow into Claude, and responses flow back.
+Each connector creates a bridge — messages from the platform flow to the agent, and responses flow back.
 
 ### Automations
 Schedule and trigger AI workflows:
@@ -43,7 +43,7 @@ Execute custom bash scripts or webhook calls at key points in the AI workflow:
 - On notifications
 
 ### MCP Servers
-Extend Claude's capabilities by connecting Model Context Protocol (MCP) servers:
+Extend what agents can do by connecting Model Context Protocol (MCP) servers:
 - **stdio** servers (subprocess-based)
 - **SSE** servers (Server-Sent Events)
 - **HTTP** servers
@@ -56,7 +56,7 @@ Define specialized AI agents for specific tasks:
 - Per-profile agent enablement
 
 ### Profiles
-Configuration containers that control Claude's behavior:
+Configuration containers that control an agent's behavior:
 - System prompt and tool permissions
 - Model selection and thinking mode
 - MCP servers, plugins, and subagents
@@ -80,8 +80,8 @@ Full REST API for external integrations:
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   SvelteKit UI  │────▶│   FastAPI Backend │────▶│  Claude Agent   │
-│   (Frontend)    │◀────│   (WebSocket/REST)│◀────│  SDK (Python)   │
+│   SvelteKit UI  │────▶│   FastAPI Backend │────▶│  Fluid harness  │
+│   (Frontend)    │◀────│   (WebSocket/REST)│◀────│  and providers  │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
                               │
                     ┌─────────┼─────────┐
@@ -94,5 +94,5 @@ Full REST API for external integrations:
 
 - **Frontend:** SvelteKit with Svelte 5, Tailwind CSS, TipTap editor
 - **Backend:** FastAPI with WebSocket support, PostgreSQL database
-- **AI:** Claude Agent SDK for Python — manages sessions, streaming, tool execution
+- **Agents:** the Fluid harness runs sessions, streaming and tool execution against the configured provider; Claude Code sessions go through the Claude Agent SDK
 - **Storage:** PostgreSQL for metadata, JSONL files for message history

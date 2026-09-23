@@ -13,20 +13,20 @@ This guide walks you through the essential workflows after installation.
 1. Click **New Session** (+ button) in the sidebar
 2. Select a **Profile** (or use Default) and a **Project**
 3. Type your message and press Enter
-4. Claude responds with streaming text, and you can see tool usage in real-time
+4. The agent responds with streaming text, and you can see tool usage in real time
 
 ## Create a Profile
 
-Profiles control how Claude behaves. To create one:
+Profiles control how the agent behaves. To create one:
 
 1. Navigate to **Profiles** in the sidebar
 2. Click **Create Profile**
 3. Configure:
    - **Name** — A descriptive name
-   - **System Prompt** — Instructions for Claude
+   - **System Prompt** — Instructions for the agent
    - **Model** — sonnet, opus, fable, etc.
-   - **Allowed Tools** — Which tools Claude can use
-   - **Thinking Mode** — How deeply Claude reasons
+   - **Allowed Tools** — Which tools the agent can use
+   - **Thinking Mode** — How deeply the model reasons
 4. Save the profile
 
 You can also use **AI Generate** to create a profile from a description.
