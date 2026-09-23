@@ -25,6 +25,7 @@ import { createWriteStream, existsSync, type WriteStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { isManagedConnection, type PostgresConfig } from './settings';
 import { writePrivateFile } from './private-file';
@@ -62,6 +63,8 @@ export interface WorkerState {
 	exitCode: number | null;
 	startedAt: string | null;
 	logPath: string;
+	/** Set when the worker's PATH has no `claude`: how to install it. */
+	setupNotice?: string | null;
 }
 
 export interface ResolveOptions {
@@ -153,6 +156,14 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 	}
 	let profile: NodeJS.ProcessEnv = {};
 	if (opts.profileDir) {
+		// The Claude CLI is the user's own install and runs on the user's own
+		// `claude` login, so its config dir stays the host one: an inherited
+		// CLAUDE_CONFIG_DIR, else ~/.claude of the real home. Everything else
+		// (Fluid settings, app data, other CLIs) stays in the private profile.
+		const inheritedKey = (name: string) => Object.keys(base).find((k) => k.toUpperCase() === name);
+		const configKey = inheritedKey('CLAUDE_CONFIG_DIR');
+		const homeKey = inheritedKey(platform === 'win32' ? 'USERPROFILE' : 'HOME');
+		const userClaudeDir = (configKey && base[configKey]) || path.join((homeKey && base[homeKey]) || os.homedir(), '.claude');
 		// Case-insensitive removal matters on Windows: do not leave HOME/home
 		// aliases or inherited config overrides that point at the stable profile.
 		for (const key of Object.keys(base)) {
@@ -165,7 +176,7 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 			XDG_CONFIG_HOME: path.join(opts.profileDir, '.config'),
 			XDG_DATA_HOME: path.join(opts.profileDir, '.local', 'share'),
 			XDG_CACHE_HOME: path.join(opts.profileDir, '.cache'),
-			CLAUDE_CONFIG_DIR: path.join(opts.profileDir, '.claude'),
+			CLAUDE_CONFIG_DIR: userClaudeDir,
 			CODEX_HOME: path.join(opts.profileDir, '.codex'),
 			GH_CONFIG_DIR: path.join(opts.profileDir, '.config', 'gh')
 		};
@@ -184,6 +195,33 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 		PYTHONPATH: opts.runtime.mode === 'bundled' ? opts.runtime.serverDir : path.join(opts.runtime.serverDir, 'fluid'),
 		PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', SHUFFLE_DESKTOP: '1'
 	};
+}
+
+/** How to install the Claude Code CLI with Anthropic's installer on this platform. */
+export function claudeCliSetupMessage(platform: NodeJS.Platform = process.platform): string {
+	const install = platform === 'win32'
+		? 'irm https://claude.ai/install.ps1 | iex   (in PowerShell)'
+		: 'curl -fsSL https://claude.ai/install.sh | bash';
+	return `Claude Code CLI not found. Install it with Anthropic's installer, then sign in with \`claude\`:\n  ${install}\nRestart AI Shuffle afterwards.`;
+}
+
+/**
+ * The `claude` the worker would run: the first match on the worker's PATH, or
+ * null. Copies inside a Python package dir (the Agent SDK's vendored binary)
+ * do not count; the worker never runs those.
+ */
+export function findClaudeOnPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform, exists: (file: string) => boolean = existsSync): string | null {
+	const pathKey = platform === 'win32' ? Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? 'Path' : 'PATH';
+	const names = platform === 'win32' ? ['claude.exe', 'claude.cmd', 'claude.bat'] : ['claude'];
+	const join = platform === 'win32' ? path.win32.join : path.posix.join;
+	for (const dir of (env[pathKey] ?? '').split(platform === 'win32' ? ';' : ':')) {
+		if (!dir || /[\\/](site|dist)-packages([\\/]|$)/i.test(dir)) continue;
+		for (const name of names) {
+			const candidate = join(dir, name);
+			if (exists(candidate)) return candidate;
+		}
+	}
+	return null;
 }
 
 /** Private, atomic handoff to the backend; called before spawning it. */
@@ -517,6 +555,11 @@ export class WorkerSupervisor extends EventEmitter {
 		this.child = child;
 		this.recentLog = [];
 		this.log(`--- worker start ${new Date().toISOString()} (${this.opts.runtime.mode} runtime at ${this.opts.runtime.root}) ---`);
+		// Claude sessions run the user's own `claude` from PATH, never a bundled copy.
+		const claudeCli = findClaudeOnPath(env);
+		const setupNotice = claudeCli ? null : claudeCliSetupMessage();
+		this.log(claudeCli ? `Claude Code CLI: ${claudeCli}` : setupNotice!);
+		this.set({ setupNotice });
 		child.stdout?.on('data', (chunk: Buffer) => this.log(chunk.toString('utf8')));
 		child.stderr?.on('data', (chunk: Buffer) => this.log(chunk.toString('utf8')));
 		const exited = new Promise<number | null>((resolve) => {

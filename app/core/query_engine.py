@@ -46,6 +46,7 @@ from app.core.provider.events import (
 _SERVER_TOOL_TYPES: tuple = (ServerToolUseBlock,)
 _SERVER_TOOL_RESULT_TYPES: tuple = (ServerToolResultBlock,)
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
+from fluid.engine.delegated import ClaudeCliMissingError
 
 from app.db import database
 from app.db import turns as turns_db
@@ -1504,7 +1505,7 @@ async def stream_query(
         # Evict LRU if pool is full
         await pool.evict_if_needed(incoming_lane)
 
-        logger.debug(f"Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+        logger.debug(f"Creating fluid harness adapter for session {session_id} (resume={resume_id is not None})")
 
         # Attribute this session to the SDK's detached message-reader task, which
         # is created inside adapter.connect() below and inherits this context. A
@@ -1532,6 +1533,11 @@ async def stream_query(
         except asyncio.TimeoutError:
             logger.error(f"Timed out connecting to Claude SDK for session {session_id} (60s)")
             yield {"type": "error", "message": "Connection timed out — an MCP server may be unreachable"}
+            return
+        except ClaudeCliMissingError as e:
+            # Setup problem, not a crash: no traceback, the message is the fix.
+            logger.warning(f"Claude CLI missing for session {session_id}: {e}")
+            yield {"type": "error", "message": str(e)}
             return
         except Exception as e:
             import traceback
@@ -2669,7 +2675,7 @@ async def _stream_to_websocket_impl(
             logger.debug(f"[WS] Evicted LRU session {evicted} to make room for {session_id}")
 
         # Create and connect new client
-        logger.debug(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None}, include_partial={options.include_partial_messages})")
+        logger.debug(f"[WS] Creating fluid harness adapter for session {session_id} (resume={resume_id is not None}, include_partial={options.include_partial_messages})")
         logger.debug(f"[WS] Options cwd: {options.cwd}")
 
         # Verify CWD exists before spawning subprocess
@@ -2700,6 +2706,11 @@ async def _stream_to_websocket_impl(
             await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             _connect_elapsed = time.monotonic() - _connect_start
             logger.info(f"[WS] SDK connect for session {session_id}: {_connect_elapsed:.1f}s (reuse=False)")
+        except ClaudeCliMissingError as e:
+            # Setup problem, not a crash: no traceback, the message is the fix.
+            logger.warning(f"[WS] Claude CLI missing for session {session_id}: {e}")
+            yield {"type": "error", "message": str(e)}
+            return
         except Exception as e:
             import traceback
             logger.error(f"[WS] Failed to connect for session {session_id}: {e}")

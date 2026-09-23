@@ -55,7 +55,11 @@ test('preview pins all data/config/credential homes and ignores inherited DB env
 	const env = buildWorkerEnv({ runtime, port: 8000, dataDir: path.join(dir, 'data'), workspaceDir: path.join(dir, 'workspace'), envFile: path.join(dir, 'worker', '.env'), profileDir, baseEnv, platform: 'win32' });
 	assert.equal(env.DATA_DIR, path.join(dir, 'data')); assert.equal(env.WORKSPACE_DIR, path.join(dir, 'workspace'));
 	assert.equal(env.AI_SHUFFLE_ENV_FILE, path.join(dir, 'worker', '.env'));
-	for (const key of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'GH_CONFIG_DIR']) assert.ok(env[key].startsWith(profileDir), key);
+	for (const key of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'CODEX_HOME', 'GH_CONFIG_DIR']) assert.ok(env[key].startsWith(profileDir), key);
+	// The Claude CLI keeps the user's own login: its config dir is the host ~/.claude.
+	assert.equal(env.CLAUDE_CONFIG_DIR, path.join('/stable', '.claude'));
+	const inherited = buildWorkerEnv({ runtime, port: 8000, dataDir: path.join(dir, 'data'), envFile: path.join(dir, 'worker', '.env'), profileDir, baseEnv: { ...baseEnv, CLAUDE_CONFIG_DIR: '/custom-claude' }, platform: 'win32' });
+	assert.equal(inherited.CLAUDE_CONFIG_DIR, '/custom-claude');
 	for (const key of ['CLAUDE_PROJECTS_DIR', 'FLUID_PROJECTS_DIR', 'FLUID_SKILLS_DIR', 'ANTHROPIC_API_KEY', 'SECRET_KEY', 'INSTANCE_ID', 'data_dir']) assert.equal(env[key], undefined, key);
 	assert.equal(Object.keys(env).some((key) => /^(DATABASE_|POSTGRES_|PG)/i.test(key)), false);
 	assert.equal(env.CHROME_CDP_PORT, '19221'); assert.equal(env.CORS_ORIGINS, 'unchanged');

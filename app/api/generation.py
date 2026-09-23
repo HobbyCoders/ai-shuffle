@@ -44,83 +44,6 @@ from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# [gen-debug] Diagnostic instrumentation for one-shot generation latency.
-# Monkey-patches SDK's SubprocessCLITransport._build_command to log the final
-# argv list sent to claude.exe. Generation always goes through the SDK
-# subprocess path. Cheap one-time patch; no hot-path impact. Safe to remove
-# once the investigation closes; idempotent via `_ai_shuffle_gen_debug_patched`
-# marker if left in place.
-# ---------------------------------------------------------------------------
-try:
-    import os as _gen_debug_os
-    from claude_agent_sdk._internal.transport.subprocess_cli import (
-        SubprocessCLITransport as _SubprocessCLITransport,
-    )
-
-    if not getattr(_SubprocessCLITransport, "_ai_shuffle_gen_debug_patched", False):
-        _orig_build_command = _SubprocessCLITransport._build_command
-
-        def _patched_build_command(self):
-            cmd = _orig_build_command(self)
-            try:
-                # Redact large JSON payloads but keep flag names and short values.
-                redacted = []
-                skip_next = False
-                for tok in cmd:
-                    if skip_next:
-                        if isinstance(tok, str) and len(tok) > 200:
-                            redacted.append(f"<{len(tok)} chars>")
-                        else:
-                            redacted.append(tok)
-                        skip_next = False
-                        continue
-                    redacted.append(tok)
-                    if tok in (
-                        "--system-prompt",
-                        "--append-system-prompt",
-                        "--settings",
-                        "--mcp-config",
-                        "--json-schema",
-                    ):
-                        skip_next = True
-                logger.info(f"[gen-debug] CLI argv ({len(cmd)} tokens): {redacted}")
-                # Dump relevant env leaks that could silently change behavior
-                leak_keys = [
-                    "ANTHROPIC_MODEL",
-                    "ANTHROPIC_SMALL_FAST_MODEL",
-                    "ANTHROPIC_BASE_URL",
-                    "CLAUDE_CODE_USE_BEDROCK",
-                    "CLAUDE_CODE_USE_VERTEX",
-                    "DISABLE_PROMPT_CACHING",
-                    "MAX_THINKING_TOKENS",
-                    "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK",
-                ]
-                env_snapshot = {
-                    k: _gen_debug_os.environ.get(k, "<unset>")
-                    for k in leak_keys
-                }
-                logger.info(f"[gen-debug] env snapshot: {env_snapshot}")
-                logger.info(
-                    f"[gen-debug] options: model={self._options.model!r} "
-                    f"effort={self._options.effort!r} "
-                    f"thinking={self._options.thinking!r} "
-                    f"max_thinking_tokens={self._options.max_thinking_tokens!r} "
-                    f"setting_sources={self._options.setting_sources!r} "
-                    f"settings={(self._options.settings or '')[:200]!r} "
-                    f"cwd={self._options.cwd!r} "
-                    f"max_turns={self._options.max_turns!r}"
-                )
-            except Exception as _e:
-                logger.warning(f"[gen-debug] instrumentation failure: {_e}")
-            return cmd
-
-        _SubprocessCLITransport._build_command = _patched_build_command
-        _SubprocessCLITransport._ai_shuffle_gen_debug_patched = True
-        logger.info("[gen-debug] SubprocessCLITransport._build_command patched")
-except Exception as _patch_err:
-    logger.warning(f"[gen-debug] failed to install SDK patch: {_patch_err}")
-
 
 router = APIRouter(prefix="/api/v1/generate", tags=["Generation"])
 
@@ -319,6 +242,7 @@ async def generate_with_claude(
         text_generation_config,
     )
     from app.core.environment import ProviderConfigError
+    from fluid.engine.delegated import ClaudeCliMissingError
 
     # Both reads hit the settings / model_providers tables synchronously
     # (``text_generation_config`` reads two system settings,
@@ -419,11 +343,11 @@ async def generate_with_claude(
         try:
             try:
                 await adapter.connect_with_sdk_options(options)
-            except ProviderConfigError as e:
+            except (ProviderConfigError, ClaudeCliMissingError) as e:
                 # Missing/undecryptable provider credentials (ProviderCredentialError
-                # subclasses ProviderConfigError) or any other provider-config
-                # failure raised while building the native client. Actionable 400,
-                # not a generic 500.
+                # subclasses ProviderConfigError), any other provider-config
+                # failure raised while building the native client, or a Claude
+                # CLI that is not installed. Actionable 400, not a generic 500.
                 raise HTTPException(status_code=400, detail=str(e)) from e
 
             try:

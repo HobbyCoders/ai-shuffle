@@ -208,9 +208,15 @@ async function main(): Promise<void> {
 	// A worker that has just answered /health/ready can still refuse its first
 	// page load for a moment; retry briefly before showing the failure.
 	let loadRetries = 0;
+	let claudeNoticeShown = false;
 	function observeWorker(): void {
 	supervisor?.on('state', (state: WorkerState) => {
 		if (quitting) return;
+		if (state.phase === 'ready' && state.setupNotice && !claudeNoticeShown) {
+			// Claude sessions need the user's own CLI; say how to install it once per launch.
+			claudeNoticeShown = true;
+			void dialog.showMessageBox({ type: 'info', title: 'AI Shuffle', message: 'Claude Code CLI not installed', detail: state.setupNotice, buttons: ['OK'] });
+		}
 		if (applications && state.phase === 'ready' && !state.external) {
 			// The initial timer may have fired while this revision was still booting.
 			void applications.healthy().then(() => updater.check()).catch(error => console.error('Could not record healthy application', error));

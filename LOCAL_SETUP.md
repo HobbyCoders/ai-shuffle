@@ -21,6 +21,14 @@ installation and protected backups unchanged.
   newer interpreter cannot install it.
 - **Node.js 22.12+** — [Download](https://nodejs.org/) (for building frontend)
 - **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
+- **Claude Code CLI** — install it yourself with Anthropic's installer, then
+  run `claude` once to sign in. Claude sessions run the `claude` on your PATH;
+  AI Shuffle does not bundle, pin or install a copy for native runs.
+  - macOS/Linux/WSL: `curl -fsSL https://claude.ai/install.sh | bash`
+  - Windows (PowerShell): `irm https://claude.ai/install.ps1 | iex`
+
+  The desktop app uses the same PATH copy and tells you at startup when it is
+  missing. The Docker image installs it on first start with the same installer.
 - **Managed runtime** — Desktop or Docker supplies the database; an external
   PostgreSQL server is not supported.
 

@@ -46,8 +46,6 @@ from app.core.models import (
     RewindRequest, RewindCheckpoint, RewindCheckpointsResponse,
     RewindExecuteResponse
 )
-# SDK client for file rewind operations
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 
 logger = logging.getLogger(__name__)
 
@@ -480,58 +478,6 @@ def _get_checkpoints(sdk_session_id: str, working_dir: str):
     return jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
 
 
-async def rewind_files_via_sdk(
-    sdk_session_id: str,
-    target_uuid: str,
-    working_dir: str
-) -> tuple[bool, Optional[str]]:
-    """
-    Rewind files to a checkpoint using the Claude SDK.
-
-    This creates a temporary SDK client, resumes the session with an empty prompt,
-    and calls rewind_files() within the response loop per the SDK's documented pattern.
-
-    IMPORTANT: This requires that the session was originally created with
-    enable_file_checkpointing=True in ClaudeAgentOptions. If file checkpointing
-    was not enabled when the session started, this operation will fail.
-
-    Args:
-        sdk_session_id: The SDK session ID to resume
-        target_uuid: UUID of the user message to rewind files to
-        working_dir: Working directory for the project
-
-    Returns:
-        Tuple of (success, error_message)
-    """
-    try:
-        # Create options for file rewind - must include enable_file_checkpointing
-        # even when resuming to ensure SDK knows about the checkpointing state
-        options = ClaudeAgentOptions(
-            resume=sdk_session_id,
-            cwd=working_dir,
-            enable_file_checkpointing=True,  # Required for rewind_files() operation
-        )
-
-        logger.debug(f"Rewinding files for session {sdk_session_id} to UUID {target_uuid}")
-
-        # Per SDK docs: resume the session with an empty prompt, then call
-        # rewind_files() inside the receive_response() loop. The CLI subprocess
-        # needs an active query/response cycle for control requests to work.
-        async with ClaudeSDKClient(options) as client:
-            await client.query("")  # Empty prompt opens the connection
-            async for message in client.receive_response():
-                await client.rewind_files(target_uuid)
-                break
-
-        logger.debug(f"Successfully rewound files for session {sdk_session_id} to {target_uuid}")
-        return True, None
-
-    except Exception as e:
-        error_msg = f"File rewind failed: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        return False, error_msg
-
-
 @router.get("/rewind/checkpoints/{session_id}")
 async def get_rewind_checkpoints(session_id: str, http_request: Request = None):
     """
@@ -930,8 +876,7 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
 
     # CRITICAL: evict any live pooled CLI subprocess for this session BEFORE we
     # touch the transcript. A pooled ``ClaudeSDKClient`` keeps the JSONL file
-    # open and appends to it; a concurrent SDK resume (``rewind_files_via_sdk``)
-    # opens the *same* transcript too. If we truncate/rewrite the file underneath
+    # open and appends to it. If we truncate/rewrite the file underneath
     # a live process, its next write lands past the new (shorter) EOF — leaving a
     # gap of NUL bytes — or flushes a stale buffer, producing duplicate/partial
     # lines. That corrupts the JSONL, breaks the next resume, and (because the
@@ -955,28 +900,14 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                 exc_info=True,
             )
 
-    # IMPORTANT: File rewind must happen BEFORE chat rewind.
-    # Chat rewind truncates the JSONL file, which can remove the target message UUID.
-    # The SDK needs that UUID present in the JSONL to find the file checkpoint.
-    if request.restore_files and fluid_session:
-        # File checkpoints are an SDK feature keyed to a CLI transcript uuid;
-        # ``rewind_files_via_sdk`` would resume the SDK on a fluid ``ses_...``
-        # id it cannot find. Refuse explicitly instead of surfacing a confusing
-        # SDK error — the chat rewind below still runs (partial success).
+    # File restore is not supported. It relied on the Agent SDK resuming the
+    # session to replay file checkpoints, and nothing drives the CLI through the
+    # SDK any more. Refuse for every session so the chat rewind below still runs
+    # (partial success) and the user gets a clear reason.
+    if request.restore_files:
         errors.append(
-            "File restore is not available for fluid-harness sessions "
-            "(no SDK file checkpoints)"
+            "File restore is not available (file checkpoints are not supported)"
         )
-    elif request.restore_files:
-        file_success, file_error = await rewind_files_via_sdk(
-            sdk_session_id=sdk_session_id,
-            target_uuid=request.target_uuid,
-            working_dir=working_dir
-        )
-        if file_success:
-            files_rewound = True
-        else:
-            errors.append(file_error or "File rewind failed")
 
     # Chat rewind, fluid (flag-on) sessions. The transcript is fluid's node tree,
     # so the rewind is fluid's NATIVE one: move ``fluid_sessions.head_node_id``

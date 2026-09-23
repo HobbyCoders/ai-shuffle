@@ -254,7 +254,7 @@ def _warn_removed_env_vars() -> None:
     """Log names (never values) of removed application environment flags."""
     import os
 
-    for removed in ("SESSION_STORE_MODE", "PRESERVE_BACKGROUND_ON_INTERRUPT"):
+    for removed in ("SESSION_STORE_MODE",):
         if os.environ.get(removed):
             logger.warning(
                 "%s is set but no longer read — the flag was removed. "

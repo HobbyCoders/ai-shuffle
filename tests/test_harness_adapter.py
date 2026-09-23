@@ -60,6 +60,16 @@ from fluid.store.base import MemoryStore
 SID = "ses_test"
 
 
+@pytest.fixture(autouse=True)
+def _claude_cli_on_path(monkeypatch):
+    """Delegated connects here never spawn the CLI, but connect resolves it and
+    raises when no ``claude`` is on PATH (CI has none). The resolver itself is
+    covered in tests/core/test_claude_cli_resolver.py."""
+    monkeypatch.setattr(
+        "app.core.provider.harness_adapter._resolve_claude_cmd", lambda: ["claude"]
+    )
+
+
 # ─── Fakes ────────────────────────────────────────────────────────────────────
 
 

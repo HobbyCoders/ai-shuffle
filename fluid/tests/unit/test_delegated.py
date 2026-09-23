@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from fluid.engine.base import EngineCaps
-from fluid.engine.delegated import DelegatedLoop
+from fluid.engine.delegated import CLAUDE_CLI_MISSING_MESSAGE, ClaudeCliMissingError, DelegatedLoop
 from fluid.engine.delegated_proto import StreamJsonMapper, stop_reason_from_subtype
 from fluid.events import (
     BlockStart,
@@ -1805,5 +1805,35 @@ async def test_a_system_origin_steer_reaches_the_cli_in_the_notice_marker() -> N
             e for e in loop.bus.log(sid) if isinstance(e, SteerDelivered)
         )
         assert receipt.steers[0]["origin"] == "system"
+    finally:
+        await loop.aclose()
+
+
+# ─── Missing CLI ─────────────────────────────────────────────────────────────
+
+
+async def test_missing_cli_raises_typed_setup_error() -> None:
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake",
+        claude_cmd=["/definitely/missing/claude"],
+    )
+    with pytest.raises(ClaudeCliMissingError) as caught:
+        await loop._version_guard()
+    assert str(caught.value) == CLAUDE_CLI_MISSING_MESSAGE
+    await loop.aclose()
+
+
+async def test_missing_cli_turn_reports_setup_message() -> None:
+    """A turn against a missing binary ends with the setup message as its
+    error event, not a ``spawn failed: FileNotFoundError(...)`` repr."""
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake",
+        claude_cmd=["/definitely/missing/claude"],
+    )
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=5)
+        errors = [e for e in loop.bus.log(loop.session_id) if isinstance(e, ErrorEvent)]
+        assert [e.message for e in errors] == [CLAUDE_CLI_MISSING_MESSAGE]
     finally:
         await loop.aclose()

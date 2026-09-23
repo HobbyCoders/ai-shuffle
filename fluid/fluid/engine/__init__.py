@@ -1,7 +1,8 @@
 from fluid.engine.base import EngineCaps, ExecutionEngine
-from fluid.engine.delegated import DelegatedLoop
+from fluid.engine.delegated import ClaudeCliMissingError, DelegatedLoop
 
 __all__ = [
+    "ClaudeCliMissingError",
     "DelegatedLoop",
     "EngineCaps",
     "ExecutionEngine",

@@ -12,6 +12,8 @@ RUN npm ci
 # Build frontend
 ARG CACHEBUST=0
 COPY frontend/ ./
+ARG APP_VERSION=
+ENV APP_VERSION=$APP_VERSION
 RUN npm run build
 
 
@@ -177,12 +179,13 @@ COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/node_module
 COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/package.json /opt/browser-mcp/package.json
 
 COPY --chown=appuser:appuser .env.example .
+COPY --chown=appuser:appuser THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 
 # Copy entrypoint + browser (Chromium supervisor) helper scripts
 COPY entrypoint.sh /entrypoint.sh
 COPY docker/container_runtime.py docker/application_updates.py docker/update_contract.py ./docker/
 COPY Dockerfile entrypoint.sh ./
-COPY docker/start-chrome.sh docker/chrome-supervisor.sh docker/chrome-doctor.sh ./docker/
+COPY docker/start-chrome.sh docker/chrome-supervisor.sh docker/chrome-doctor.sh docker/install-claude-cli.sh ./docker/
 COPY desktop/build/application-update-key.pem ./docker/application-update-key.pem
 COPY docker/start-chrome.sh /usr/local/bin/start-chrome
 COPY docker/chrome-supervisor.sh /usr/local/bin/chrome-supervisor
@@ -198,6 +201,8 @@ RUN chown appuser:appuser /app
 # "container restarted but old image is still running" (mismatch). Falls back
 # to boot-time-only detection (landed_unverified) if this file is absent.
 ARG GIT_SHA=unknown
+ARG APP_VERSION=
+ENV APP_VERSION=$APP_VERSION
 # Production publishing supplies a first-parent ordinal. Ad-hoc/lab images
 # without provenance remain pinned instead of silently following main.
 ARG APPLICATION_SEQUENCE=0

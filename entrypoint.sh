@@ -4,6 +4,10 @@ set -e
 # Direct --user launches cannot mutate accounts. The Python runtime validates
 # identity and mount ownership and gives a clear error instead of chowning data.
 if [ "$(id -u)" != "0" ]; then
+    case "${1:-run}" in
+        dump|restore) ;;
+        *) bash /app/docker/install-claude-cli.sh || true ;;
+    esac
     exec python /app/docker/container_runtime.py "$@"
 fi
 
@@ -14,29 +18,7 @@ case "$PUID:$PGID" in
     *[!0-9:]*|0:*|*:0|:*|*:) echo "PUID/PGID must be non-root numeric IDs" >&2; exit 1 ;;
 esac
 
-# Image pulls deliver updates. Startup is offline-capable by default; the
-# legacy GitHub CLI updater remains explicit opt-in, never a boot dependency.
-AUTO_UPDATE=${AUTO_UPDATE:-false}
-
 echo "Starting with PUID=${PUID} and PGID=${PGID}" >&2
-
-# Update GitHub CLI if enabled. Provider runtimes remain pinned to the image
-# and are never rewritten by startup scripts.
-if [ "$AUTO_UPDATE" = "true" ] && [ "${1:-run}" = "run" ]; then
-    echo "Checking for updates..."
-
-    # Update GitHub CLI
-    echo "Updating GitHub CLI..."
-    if ! timeout 60s bash -c 'apt-get update -qq && apt-get install -y --only-upgrade gh' 2>/dev/null; then
-        echo "GitHub CLI update check failed or timed out (continuing anyway)" >&2
-    fi
-
-    # Clean up apt cache
-    rm -rf /var/lib/apt/lists/* 2>/dev/null || true
-
-    echo "Update check complete"
-    gh --version
-fi
 
 # Get current UID/GID of appuser
 CURRENT_UID=$(id -u appuser)
@@ -72,6 +54,17 @@ esac
 # Ensure config directories exist with correct permissions
 mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh
 chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuser/.claude
+
+# =============================================================================
+# Claude Code CLI
+# =============================================================================
+# The delegated Claude leg runs the stock `claude` from PATH and nothing else.
+# Install it with Anthropic's installer as appuser when it is missing; the CLI
+# then updates itself in ~/.local. Never pinned, patched or wrapped here.
+mkdir -p /home/appuser/.local/bin
+chown appuser:appuser /home/appuser/.local /home/appuser/.local/bin
+setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+    bash /app/docker/install-claude-cli.sh || true
 
 # =============================================================================
 # Provider configuration compatibility
