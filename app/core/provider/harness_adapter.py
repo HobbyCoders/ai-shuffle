@@ -318,8 +318,9 @@ def _extra_opt(options: SessionOptions, key: str, default: Any = None) -> Any:
 
 # App turn source -> fluid ``TurnStarted.source`` (one of
 # ``fluid.events.model.TURN_SOURCES``). Everything not listed is a prompt
-# submitted from outside (the user, the queue, the API, an automation, a
-# failover retry of the user's prompt) and records as "user".
+# submitted from outside (the user, the queue, the API) and records as
+# "user". A failover retry is resolved to the source of the turn it retries
+# before it gets here (``turn_scheduler.effective_turn_source``).
 _FLUID_TURN_SOURCES = {
     "agent_message": "agent_message",
     "unpark": "unpark",
@@ -327,6 +328,8 @@ _FLUID_TURN_SOURCES = {
     "wakeup": "wakeup",
     "auto_continue": "wakeup",
     "promotion": "promotion",
+    "automation": "automation",
+    "automation_step": "automation",
 }
 
 

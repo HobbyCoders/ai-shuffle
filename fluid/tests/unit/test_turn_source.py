@@ -23,8 +23,10 @@ from fluid.store.base import MemoryStore
 from fluid.tools.registry import BackgroundTaskReceipt
 
 
-def test_turn_sources_are_the_five_documented_values() -> None:
-    assert TURN_SOURCES == ("user", "agent_message", "wakeup", "unpark", "promotion")
+def test_turn_sources_are_the_six_documented_values() -> None:
+    assert TURN_SOURCES == (
+        "user", "agent_message", "wakeup", "unpark", "promotion", "automation",
+    )
 
 
 @pytest.mark.parametrize("source", TURN_SOURCES)

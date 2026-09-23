@@ -654,14 +654,19 @@ class TurnRecorder:
         user_message: str,
         profile_id: str | None = None,
         record_user: bool = True,
+        source: str | None = None,
     ) -> None:
         """Append ``turn.started`` then ``message.user``.
 
         ``record_user=False`` appends only ``turn.started`` — a resumed turn
-        re-runs from the head node and adds no new user message.
+        re-runs from the head node and adds no new user message. ``source``
+        is what started the turn, in fluid's vocabulary; None leaves it off.
         """
         try:
-            events = [self._event(contract.TurnStarted, profile_id=profile_id)]
+            started: Dict[str, Any] = {"profile_id": profile_id}
+            if source is not None:
+                started["source"] = source
+            events = [self._event(contract.TurnStarted, **started)]
             if record_user:
                 events.append(self._event(
                     contract.MessageUser,

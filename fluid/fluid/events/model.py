@@ -64,13 +64,17 @@ class Event:
 #: What started a turn, as recorded on :class:`TurnStarted`.
 #:
 #: * ``user`` — a prompt submitted from outside the engine: the user, or a
-#:   host acting for them (an API call, an automation, a failover retry).
+#:   host acting for them (an API call, a failover retry of a user's prompt).
 #: * ``agent_message`` — a peer's message woke an idle receiver.
 #: * ``wakeup`` — a timer fired: a scheduled wakeup or a host continuation.
 #: * ``unpark`` — background work came to rest and woke its parked parent.
 #: * ``promotion`` — peer messages held while the parent was parked were
 #:   promoted to a wake of their own.
-TURN_SOURCES = ("user", "agent_message", "wakeup", "unpark", "promotion")
+#: * ``automation`` — a host automation started the turn on a schedule or
+#:   trigger, with no person behind it.
+#: A host's retry of a turn (a failover to another account) records the
+#: source of the turn it retries.
+TURN_SOURCES = ("user", "agent_message", "wakeup", "unpark", "promotion", "automation")
 
 
 @dataclass(frozen=True, kw_only=True)

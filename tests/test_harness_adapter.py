@@ -1339,7 +1339,7 @@ async def test_send_resume_submits_a_resume_op():
     ("app_source", "fluid_source"),
     [
         ("user", "user"), ("queue", "user"), ("failover", "user"),
-        ("api", "user"), ("automation", "user"), (None, "user"),
+        ("api", "user"), ("automation", "automation"), ("automation_step", "automation"), (None, "user"),
         ("agent_message", "agent_message"),
         ("wakeup", "wakeup"), ("auto_continue", "wakeup"),
         ("unpark", "unpark"), ("unpark_pump", "unpark"),

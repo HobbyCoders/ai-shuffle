@@ -1174,8 +1174,14 @@ class SessionRuntime:
             # its durable pending-task state without starting a second wake turn.
             turn_overrides["background_task_completions"] = completion_frames
         # Fluid records what started the turn on its TurnStarted event; the
-        # adapter maps this app source onto fluid's vocabulary.
-        turn_overrides["turn_source"] = self.source
+        # adapter maps this app source onto fluid's vocabulary. A failover
+        # retry records the source of the turn it retries, so a retried wake
+        # still counts as a wake.
+        from app.core.provider.harness_adapter import fluid_turn_source
+        from app.core.turn_scheduler import effective_turn_source
+
+        app_source = await asyncio.to_thread(effective_turn_source, self.turn)
+        turn_overrides["turn_source"] = app_source
         # A resumed turn re-runs the engine loop from the session head: no new
         # prompt is sent and no message.user is recorded, so the transcript
         # gains only the answer the failed turn never produced.
@@ -1211,6 +1217,7 @@ class SessionRuntime:
                 prompt,
                 profile_id=self.turn.get("profile_id"),
                 record_user=not resume and not already_recorded,
+                source=fluid_turn_source(app_source),
             )
             if self._abort_reason == "recording_failed":
                 return

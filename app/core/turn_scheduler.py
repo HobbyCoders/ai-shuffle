@@ -724,6 +724,38 @@ async def _maybe_auto_continue(
     return True
 
 
+# Sources that re-run another turn: the retry reports the source of the turn
+# it retries (``effective_turn_source``).
+RETRY_SOURCES = frozenset({"failover"})
+_MAX_RETRY_CHAIN = 16
+
+
+def effective_turn_source(turn: Dict[str, Any]) -> Optional[str]:
+    """The source that started ``turn``'s chain of retries.
+
+    A failover retry is enqueued with ``source=failover`` and the retried
+    turn as its ``parent_turn_id``. Metrics that count wakes need the
+    original source: a failover retry of an unpark wake is still a wake. The
+    walk follows ``parent_turn_id`` through retry sources, bounded, and
+    stops at the first row it cannot read. Blocking DB reads; call it off
+    the event loop.
+    """
+    source = turn.get("source")
+    parent_id = turn.get("parent_turn_id")
+    for _ in range(_MAX_RETRY_CHAIN):
+        if source not in RETRY_SOURCES or not parent_id:
+            break
+        try:
+            parent = turns_db.get_turn(parent_id)
+        except Exception:  # noqa: BLE001 — a label, never a failed turn
+            logger.debug("effective_turn_source: parent %s unreadable", parent_id, exc_info=True)
+            break
+        if not parent:
+            break
+        source, parent_id = parent.get("source"), parent.get("parent_turn_id")
+    return source
+
+
 def _enqueue(session_id: str, source: str, **kwargs: Any) -> Dict[str, Any]:
     """Thin sync wrapper so policy enqueues run off the event loop uniformly."""
     return turns_db.enqueue_turn(session_id, source, **kwargs)
