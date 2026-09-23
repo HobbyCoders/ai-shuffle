@@ -37,4 +37,4 @@ def test_the_site_and_license_limiters_no_longer_collide():
     assert wrangler_limiters("site")["WAITLIST_LIMITER"] != wrangler_limiters("license")["LICENSE_LIMITER"]
     for worker in ("site", "license", "registry"):
         text = (ROOT / "android" / worker / "wrangler.toml").read_text()
-        assert "In use: hub 4201-4203, site 4301, registry 4401-4402, license 4501." in text, worker
+        assert "In use: hub 4201-4203, site 4301-4302, registry 4401-4402, license 4501." in text, worker
