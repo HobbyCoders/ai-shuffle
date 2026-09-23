@@ -111,7 +111,7 @@ The WhatsApp connector supports the following capabilities:
 | Reactions | Yes | Available to the AI via the `send_reaction`/`remove_reaction` actions (see below). Not sent automatically. |
 | Rich text | Yes | Supports bold (`*text*`), italic (`_text_`), strikethrough (`~text~`), and monospace (`` ```text``` ``) formatting |
 | File upload | Yes | Send images, documents, audio, video, and stickers. File size limits: 16 MB for media, 100 MB for documents |
-| Buttons | Yes | Used for interactive permission prompts, where the agent sends Approve/Deny reply buttons |
+| Buttons | Yes | Supported by the platform. Tool approvals are answered by the owner in the app; the chat only sees a waiting notice |
 | Threads | No | WhatsApp does not have a thread model |
 
 **Message Length Limit:** 4,096 characters per message. Messages exceeding this limit are automatically split.

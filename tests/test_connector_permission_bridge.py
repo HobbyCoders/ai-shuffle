@@ -8,12 +8,13 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.core.connector_permissions import deliver_permission_prompt
-from app.core.connectors.base import PermissionPrompt
+from app.core.connectors.base import OutgoingMessage
 
 
 def _fake_instance(sent=True):
     inst = MagicMock()
     inst.send_permission_prompt = AsyncMock(return_value=sent)
+    inst.send_message = AsyncMock(return_value=sent)
     return inst
 
 
@@ -44,15 +45,14 @@ class TestDeliverPermissionPrompt:
             )
 
         mgr.get_running_instance.assert_called_once_with("c1")
-        inst.send_permission_prompt.assert_awaited_once()
-        args = inst.send_permission_prompt.await_args.args
-        assert args[0] == "chan-9"
-        prompt = args[1]
-        assert isinstance(prompt, PermissionPrompt)
-        assert prompt.request_id == "req-1"
-        assert prompt.session_id == "sess-1"
-        assert prompt.tool_name == "Bash"
-        assert prompt.tool_input == {"command": "ls"}
+        # The chat gets one plain line; approval happens in the owner's app.
+        inst.send_permission_prompt.assert_not_awaited()
+        inst.send_message.assert_awaited_once()
+        outgoing = inst.send_message.await_args.args[0]
+        assert isinstance(outgoing, OutgoingMessage)
+        assert outgoing.platform_chat_id == "chan-9"
+        assert outgoing.text == "Waiting for the owner to approve Bash."
+        assert not outgoing.buttons
 
     @pytest.mark.asyncio
     async def test_skips_connector_not_running(self):
@@ -104,12 +104,12 @@ class TestDeliverPermissionPrompt:
             await deliver_permission_prompt(
                 "sess-1", "req-1", "Bash", {}, "d"
             )
-        inst.send_permission_prompt.assert_awaited_once()
+        inst.send_message.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_one_connectors_failure_does_not_stop_the_other(self):
         bad = _fake_instance()
-        bad.send_permission_prompt = AsyncMock(side_effect=RuntimeError("boom"))
+        bad.send_message = AsyncMock(side_effect=RuntimeError("boom"))
         good = _fake_instance()
         cs = [
             {"connector_id": "c1", "platform_chat_id": "chan-1"},
@@ -127,7 +127,7 @@ class TestDeliverPermissionPrompt:
             await deliver_permission_prompt(
                 "sess-1", "req-1", "Bash", {}, "d"
             )
-        good.send_permission_prompt.assert_awaited_once()
+        good.send_message.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_rows_missing_ids_are_skipped(self):
@@ -146,5 +146,5 @@ class TestDeliverPermissionPrompt:
             await deliver_permission_prompt(
                 "sess-1", "req-1", "Bash", {}, "d"
             )
-        inst.send_permission_prompt.assert_not_awaited()
+        inst.send_message.assert_not_awaited()
         mgr.get_running_instance.assert_not_called()
