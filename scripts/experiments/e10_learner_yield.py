@@ -15,7 +15,10 @@ Reads, for a date range:
   fact.
 
 Postgres is found the way the app finds it: ``DATA_DIR/managed-postgres.json``
-through ``app.db.base``. ``--no-db`` skips it and reads files only.
+through ``app.db.base``. ``--no-db`` skips it and reads files only. ``--dry-run``
+is the offline mode the other runners have: no Postgres and no app configuration
+at all, so only the stores and logs named on the command line (and
+``--skills-root``, if given) are read.
 
 Reports per replica per day: facts written by class (learner, Remember,
 environment harvest), learner passes run and passes that wrote, the longest
@@ -504,8 +507,12 @@ def main(argv: list[str] | None = None, *, emit: Callable[[str], None] = print,
     parser.add_argument("--skills-root", help="local fluid skills root (default: the app's)")
     parser.add_argument("--no-local", action="store_true", help="do not read the local skills root")
     parser.add_argument("--no-db", action="store_true", help="files only; skip Postgres")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="offline: no Postgres and no app configuration; reads only the files "
+                             "named here (--store, --log, --skills-root)")
     parser.add_argument("--json", help="also write the report as JSON here")
     args = parser.parse_args(argv)
+    use_db = not (args.no_db or args.dry_run)
 
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     since = _parse_date(args.since) if args.since else (today - timedelta(days=7)).timestamp()
@@ -514,20 +521,20 @@ def main(argv: list[str] | None = None, *, emit: Callable[[str], None] = print,
     if not args.no_local:
         if args.skills_root:
             local_root = Path(args.skills_root)
-        else:
+        elif not args.dry_run:
             from app.core.fluid_memory import skills_root
 
             local_root = skills_root()
     logs = [(label or path.stem, path) for label, path in _labelled(args.log)]
     pool = False
-    if not args.no_db and get_db is None:
+    if use_db and get_db is None:
         from app.db.base import init_pool
 
         init_pool(min_conn=1, max_conn=2)
         pool = True
     try:
         sources = gather(since=since, until=until, store_files=_labelled(args.store), logs=logs,
-                         use_db=not args.no_db, get_db=get_db, local_root=local_root)
+                         use_db=use_db, get_db=get_db, local_root=local_root)
     finally:
         if pool:
             from app.db.base import close_pool

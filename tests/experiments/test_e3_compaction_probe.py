@@ -85,6 +85,22 @@ async def test_a_refused_ttl_is_retried_with_the_extended_ttl_beta():
     assert results["anthropic_ttl_1h_no_beta"].detail == "ttl requires a beta header"
 
 
+def test_ttl_acceptance_needs_a_reported_1h_write():
+    """Only a 1h cache write proves the TTL took effect. A 5m write means it
+    was ignored, and a bare cache read does not say which TTL wrote the entry."""
+    def result(usage):
+        return e3._anthropic_result("p", 200, {"content": [], "usage": usage}, want_ttl=True)
+
+    assert result({"cache_creation": {"ephemeral_1h_input_tokens": 5000}}).outcome == "accepted"
+    downgraded = result({"cache_creation": {"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 5000}})
+    assert downgraded.outcome == "accepted_no_effect" and "5m" in downgraded.detail
+    read_only = result({"cache_read_input_tokens": 5000, "cache_creation": {}})
+    assert read_only.outcome == "accepted_no_effect" and "re-run" in read_only.detail
+    assert result({}).outcome == "accepted_no_effect"
+    # Without the TTL under test, HTTP 200 is acceptance of the identifier.
+    assert e3._anthropic_result("p", 200, {"content": [], "usage": {}}, want_ttl=False).outcome == "accepted"
+
+
 async def test_openai_outcomes_without_a_compaction_item_or_with_a_stream_error():
     def quiet(request):
         return httpx.Response(200, content=responses_sse(response_id="r", model="m", usage={}))

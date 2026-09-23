@@ -19,7 +19,7 @@ python -m pytest tests/experiments -q
 |---|---|---|
 | `e1_cache_routing.py` | ChatGPT subscription quota, about 600 calls over 3 days | `run --dry-run` |
 | `e3_compaction_probe.py` | Under $5 (OpenAI API key, Codex quota, Anthropic API key) | `--dry-run` |
-| `e10_learner_yield.py` | Nothing: it reads logs, fact stores and Postgres | always offline; `--no-db` skips Postgres |
+| `e10_learner_yield.py` | Nothing: it reads logs, fact stores and Postgres | `--dry-run` (files named on the command line only; `--no-db` alone skips just Postgres) |
 
 ---
 
@@ -184,8 +184,11 @@ What it sends:
 Outcomes:
 
 - `accepted`: HTTP 200 and the feature visibly took effect (a compaction item was
-  returned, or a 1h cache write was reported).
-- `accepted_no_effect`: HTTP 200 with no evidence either way.
+  returned, or a 1h cache write was reported in `usage.cache_creation`).
+- `accepted_no_effect`: HTTP 200 without that evidence. For the 1h TTL the
+  detail says why: a write reported at 5m means the TTL was ignored; a cache
+  read with no write means an earlier entry was hit, which does not say which
+  TTL wrote it, so re-run after 5 minutes.
 - `rejected`: a 4xx response or a stream error, with the API's message.
 - `error`: anything else that failed.
 - `skipped`: no credential was available.
@@ -252,8 +255,13 @@ usefulness.
 
 ```powershell
 python scripts/experiments/e10_learner_yield.py --since 2026-09-24 --until 2026-10-01 --log peer=C:\path\to\peer-synthesis-log.jsonl --json e10.json
-python scripts/experiments/e10_learner_yield.py --no-db --since 2026-09-24   # files only
+python scripts/experiments/e10_learner_yield.py --no-db --since 2026-09-24   # local root and files, no Postgres
+python scripts/experiments/e10_learner_yield.py --dry-run --store peer=C:\path\to\memories.json --log peer=C:\path\to\peer-synthesis-log.jsonl   # offline: no Postgres, no app config
 ```
+
+`--dry-run` reads only what the command line names (`--store`, `--log`,
+`--skills-root`); without `--skills-root` there is no local replica in the
+report.
 
 Not covered here: the 25-session replay through the rollout-learner stub. It
 needs a learner stub that does not exist yet, and model calls.

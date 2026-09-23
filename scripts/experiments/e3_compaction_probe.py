@@ -224,10 +224,22 @@ def _anthropic_result(name: str, status: int | None, payload: Any, *, want_ttl: 
     creation = usage.get("cache_creation") or {}
     evidence = {"usage": usage, "context_management": payload.get("context_management"),
                 "content_types": [b.get("type") for b in payload.get("content") or []]}
-    if want_ttl and not creation.get("ephemeral_1h_input_tokens") and not usage.get("cache_read_input_tokens"):
+    if not want_ttl:
+        return ProbeResult(name, "accepted", 200, "", evidence)
+    # Acceptance rule for the 1h TTL: only a reported 1h cache write proves the
+    # TTL took effect. A cache read proves a cache was hit, not which TTL wrote
+    # it (a re-run inside the 5m window reads a 5m entry just as well), and a
+    # 5m write where 1h was asked for means the TTL was ignored.
+    if creation.get("ephemeral_1h_input_tokens"):
+        return ProbeResult(name, "accepted", 200, "1h cache write reported", evidence)
+    if creation.get("ephemeral_5m_input_tokens"):
         return ProbeResult(name, "accepted_no_effect", 200,
-                           "HTTP 200 but no 1h cache write or read was reported", evidence)
-    return ProbeResult(name, "accepted", 200, "", evidence)
+                           "HTTP 200 but the write was reported at 5m, not 1h: the TTL was ignored", evidence)
+    if usage.get("cache_read_input_tokens"):
+        return ProbeResult(name, "accepted_no_effect", 200,
+                           "HTTP 200 with a cache read but no write: re-run after 5 minutes so the "
+                           "write is visible", evidence)
+    return ProbeResult(name, "accepted_no_effect", 200, "HTTP 200 but no 1h cache write was reported", evidence)
 
 
 # clear_thinking goes first: the API applies edits in order and wants the

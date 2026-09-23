@@ -190,6 +190,40 @@ def test_files_only_mode_reads_no_database(tmp_path):
     assert "Replica local:" in printed[0]
 
 
+def test_dry_run_reads_only_the_files_named(tmp_path, monkeypatch):
+    """--dry-run touches neither Postgres nor the app's configuration: without
+    --skills-root there is no local replica, only the stores and logs given."""
+    from app.core import fluid_memory
+
+    root, peer_log = make_fixture(tmp_path)
+
+    def forbidden(what):
+        def _raise(*_args, **_kwargs):
+            raise AssertionError(f"{what} in --dry-run")
+        return _raise
+
+    monkeypatch.setattr(e10, "load_db_snapshots", forbidden("Postgres read"))
+    monkeypatch.setattr(e10, "load_db_nodes", forbidden("Postgres read"))
+    monkeypatch.setattr(fluid_memory, "skills_root", forbidden("app configuration read"))
+    out = tmp_path / "dry.json"
+    printed = []
+    assert e10.main(["--since", SINCE, "--until", UNTIL, "--dry-run", "--log", f"peer={peer_log}",
+                     "--store", f"desktop={root / 'memories.json'}", "--json", str(out)],
+                    emit=printed.append) == 0
+    report = json.loads(out.read_text())
+    assert "local" not in report["replicas"]
+    # The store file is credited by its label; the log rows by their store_id.
+    assert report["facts_written"]["desktop"]["2026-09-23"] == {"learner": 1}
+    assert report["passes"]["74c828"]["2026-09-23"]["passes"] == 3
+    # No transcripts were read, so nothing can be cited.
+    assert not any(v.get("learner_cited") for v in report["citations"].values())
+    # --dry-run with --skills-root still reads that root, and nothing else.
+    printed.clear()
+    assert e10.main(["--since", SINCE, "--until", UNTIL, "--dry-run", "--skills-root", str(root)],
+                    emit=printed.append) == 0
+    assert "Replica local:" in printed[0]
+
+
 def test_reminder_stripping_covers_unterminated_blocks():
     text = "keep going\n<system-reminder>\n# Memory\n- a fact that was echoed"
     assert e10.strip_reminders(text).strip() == "keep going"
