@@ -296,12 +296,16 @@ async def test_session_start_after_compact_reinjects_the_ledger(tmp_path) -> Non
         ToolCtx(cwd=str(tmp_path), session_id=loop.session_id),
     )
     expected = ledger.render_ledger_reminder(
-        ledger.read_ledger(ToolCtx(cwd=str(tmp_path)), loop.session_id)
+        ledger.read_ledger(ToolCtx(cwd=str(tmp_path)), loop.session_id), tool_name=None,
     )
     output = await _fire(loop, written, "SessionStart", {"source": "compact"})
     context = output["hookSpecificOutput"]["additionalContext"]
     assert context == f"{expected}\n\nhook context"
     assert "never push to main" in context
+    # This loop has no bundled bridge, so no Ledger tool: the reminder must
+    # not tell the model to curate with one.
+    assert "curate with" not in context
+    assert "read-only here" in context
     # Only a compaction brings it back; a plain start leaves it to the turns.
     startup = await _fire(loop, written, "SessionStart", {"source": "startup"})
     assert "never push to main" not in startup["hookSpecificOutput"]["additionalContext"]
@@ -406,3 +410,25 @@ async def test_a_refused_initialize_fails_closed_when_a_deny_policy_rides_it(
     else:
         assert isinstance(events[-1], TurnComplete)
         assert len(results) == 1
+
+
+async def test_the_ledger_reminder_names_the_bridged_ledger_tool(tmp_path) -> None:
+    """When the bundled bridge serves the Ledger tool, the reminder names it
+    the way the CLI's model calls it."""
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    loop, written = await _loop(tmp_path, hooks=HookBus(), registry=registry)
+    await ledger.handler(
+        {"action": "add", "section": "constraints", "text": "never push to main"},
+        ToolCtx(cwd=str(tmp_path), session_id=loop.session_id),
+    )
+    loop._socket_server = object()  # the bridge is up
+    try:
+        output = await _fire(loop, written, "SessionStart", {"source": "compact"})
+    finally:
+        loop._socket_server = None
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert "curate with the mcp__fluid_bundled__Ledger tool" in context

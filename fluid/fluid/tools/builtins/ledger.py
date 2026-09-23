@@ -176,11 +176,20 @@ def _no_match(section: str, needle: str, entries: list[str]) -> ToolOutcome:
     )
 
 
-def render_ledger_reminder(text: str) -> str:
+def render_ledger_reminder(text: str, *, tool_name: str | None = "Ledger") -> str:
+    """The ledger as a system reminder.
+
+    ``tool_name`` is the name the model calls the Ledger tool by on this
+    leg. None says there is no such tool (the delegated leg without the
+    bundled bridge), so the reminder does not point the model at one.
+    """
+    if tool_name:
+        hint = f"curate with the {tool_name} tool"
+    else:
+        hint = "no Ledger tool on this leg, so it is read-only here"
     return (
         "<system-reminder>\n"
-        "Session ledger (pinned state — survives history compaction; curate "
-        "with the Ledger tool):\n"
+        f"Session ledger (pinned state — survives history compaction; {hint}):\n"
         f"{text}\n</system-reminder>"
     )
 

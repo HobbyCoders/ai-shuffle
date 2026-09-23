@@ -1691,7 +1691,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         }}
 
     def _ledger_context(self) -> str | None:
-        """The session ledger in the native loop's reminder form, or None."""
+        """The session ledger in the native loop's reminder form, or None.
+
+        The ledger file exists only if something wrote it: a native-leg turn
+        of this session, or the Ledger tool served through the bundled
+        bridge. The reminder names that tool by its bridged name when the
+        bridge serves it, and otherwise says the ledger is read-only here.
+        """
         from fluid.tools.builtins.ledger import read_ledger, render_ledger_reminder
 
         try:
@@ -1699,7 +1705,21 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         except Exception:  # noqa: BLE001 — a reminder never fails a hook
             logger.debug("reading the session ledger failed", exc_info=True)
             return None
-        return render_ledger_reminder(text) if text else None
+        if not text:
+            return None
+        return render_ledger_reminder(text, tool_name=self._bridged_tool_name("Ledger"))
+
+    def _bridged_tool_name(self, name: str) -> str | None:
+        """The name the CLI's model calls a registry tool by, or None when
+        the bundled bridge does not serve it."""
+        if self.registry is None or self._socket_server is None:
+            return None
+        spec = self.registry.get(name)
+        if spec is None or spec.source not in ("inproc", "builtin"):
+            return None
+        if not self._bridge_tool_permitted(name):
+            return None
+        return _BUNDLED_PREFIX + name
 
     # ─── control frames ──────────────────────────────────────────────────
 
