@@ -266,8 +266,8 @@ async def test_dispatch_event_reads_subscribers_off_the_loop(
 async def test_incoming_message_routing_resolves_off_the_loop_in_one_hop(
     conn_manager, mock_db, loop_thread
 ):
-    """The inbound path's five routing reads (connector session, connector row,
-    API user, profile fallback) share ONE hop; the "no session yet → create
+    """The inbound path's routing reads (connector row, API user, connector
+    session) share ONE hop; the "no session yet → create
     one" decision inside it stays atomic. LOOP-AFFINITY SPLIT: the durable turn
     submit stays on the loop, because its scheduler kick needs a running loop
     (see turn_manager.submit_async)."""
@@ -275,8 +275,8 @@ async def test_incoming_message_routing_resolves_off_the_loop_in_one_hop(
         lambda cid, chat: {"id": "cs-1", "session_id": "sess-ai"}
     )
     connector_spy = _ThreadSpy(lambda cid: {"id": cid, "type": "webhook",
-                                            "name": "wh", "api_user_id": None})
-    profiles_spy = _ThreadSpy(lambda: [{"id": "default"}])
+                                            "name": "wh", "api_user_id": "api-1"})
+    api_user_spy = _ThreadSpy(lambda uid: {"id": uid, "profile_ids": ["default"]})
     log_spy = _ThreadSpy(lambda **kw: None)
     submit_threads = []
 
@@ -295,7 +295,7 @@ async def test_incoming_message_routing_resolves_off_the_loop_in_one_hop(
 
     with patch.object(database, "get_connector_session", session_spy), \
          patch.object(database, "get_connector", connector_spy), \
-         patch.object(database, "get_all_profiles", profiles_spy), \
+         patch.object(database, "get_api_user", api_user_spy), \
          patch.object(database, "create_connector_event_log", log_spy), \
          patch.object(database, "update_connector_event_dispatched",
                       lambda cid, success: None), \
@@ -308,7 +308,7 @@ async def test_incoming_message_routing_resolves_off_the_loop_in_one_hop(
                return_value="hi back"):
         await conn_manager.handle_incoming_message(message)
 
-    routing = session_spy.threads + connector_spy.threads + profiles_spy.threads
+    routing = session_spy.threads + connector_spy.threads + api_user_spy.threads
     assert routing, "the routing reads never ran"
     assert loop_thread not in routing
     assert len(set(routing)) == 1, "routing reads were split across hops"
