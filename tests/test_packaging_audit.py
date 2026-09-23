@@ -340,6 +340,7 @@ def test_operator_examples_have_no_database_environment_options():
     retired = re.compile(r"DATABASE_(?:MODE|URL)|POSTGRES_[A-Z_]+|DB_POOL_(?:MIN|MAX)")
     for name in (
         ".env.example", "docker-compose.yml", "README.md", "LOCAL_SETUP.md",
+        "docs/internal/LOCAL_SETUP.md", "docs/internal/DEVELOPMENT.md",
         "docs/RESTORE.md", "docs/content/getting-started/installation.md",
         "scripts/backup.sh", "scripts/deploy.sh", "tools/backup-db.sh",
         "tools/restore-db.sh",
