@@ -132,3 +132,44 @@ def test_the_stream_parser_leaves_5_minute_only_usage_unchanged() -> None:
     chunk = sse_to_chunk("message_start", {"type": "message_start", "message": {"usage": usage}})
     assert chunk is not None
     assert chunk.payload["usage"] == usage
+
+
+def test_a_streamed_1h_write_reaches_the_cost_estimate_through_the_engine_merge() -> None:
+    """Parser, engine merge and provider estimate together.
+
+    Each piece is pinned above on its own. This checks the chain the fix
+    relies on: ``_merge_usage`` drops the nested split and keeps only the flat
+    key, so a merge that stopped keeping that key would bill every 1-hour
+    write at the 5-minute rate again.
+    """
+    from fluid.engine.native import NativeLoop
+    from fluid.providers.anthropic.client import AnthropicClient
+
+    start = sse_to_chunk("message_start", {
+        "type": "message_start",
+        "message": {"usage": {
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 2 * _MTOK,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": _MTOK,
+                "ephemeral_1h_input_tokens": _MTOK,
+            },
+        }},
+    })
+    delta = sse_to_chunk("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn"},
+        "usage": {"output_tokens": 0},
+    })
+    assert start is not None and delta is not None
+
+    totals: dict = {}
+    NativeLoop._merge_usage(totals, start.payload["usage"])
+    NativeLoop._merge_usage(totals, delta.payload["usage"])
+    assert "cache_creation" not in totals
+    assert totals[CACHE_WRITE_1H_KEY] == _MTOK
+
+    # Opus 5.5 at $4 input: 1M x 1.25 x 4 + 1M x 2 x 4.
+    cost = AnthropicClient(api_key="unused").estimate_cost("claude-opus-5-5", totals)
+    assert cost == pytest.approx(13.00)
