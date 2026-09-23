@@ -49,11 +49,7 @@ def app(monkeypatch, mock_db):
     monkeypatch.setattr(owner_auth, '_ARGON2_MEMORY_KIB', 1024)
     monkeypatch.setattr(owner_auth, '_ARGON2_ITERATIONS', 1)
     monkeypatch.setattr(owner_auth, '_ARGON2_LANES', 1)
-    monkeypatch.setattr(auth.direct_oauth, 'ensure_fresh_credentials', lambda: _done())
-    monkeypatch.setattr(auth, '_sync_back_active_account_safe', lambda: None)
     monkeypatch.setattr(auth, 'is_github_authenticated_cached', lambda *args: False)
-    monkeypatch.setattr(auth.auth_service, 'is_claude_authenticated', lambda: False)
-    monkeypatch.setattr(auth.auth_service, 'get_claude_token_status', lambda: {'token_valid': False})
     owner_login.limiter.reset()
     invalidate_system_setting_memo()
     desktop_listener.configure(None)
@@ -90,10 +86,6 @@ def app(monkeypatch, mock_db):
     yield result
     desktop_listener.configure(None)
     invalidate_system_setting_memo()
-
-
-async def _done():
-    return None
 
 
 def client(app, where=LAN, ingress='local', origin=True, headers=None):
