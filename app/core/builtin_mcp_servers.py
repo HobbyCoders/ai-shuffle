@@ -38,9 +38,10 @@ Architecture (the decision record):
 
 SECURITY NOTE (SSRF / local-network reach): browser-mcp intercepts HTTP(S) requests
 and checks resolved addresses against its SSRF policy. Cloud metadata is always
-blocked; private LAN addresses are allowed, and this app enables loopback for local
-development unless the operator disables it. BROWSER_SSRF_BLOCK/ALLOW configure the
-policy. Request interception is not a complete network sandbox: WebSocket coverage
+blocked; private LAN and carrier-grade NAT addresses are refused unless listed in
+BROWSER_SSRF_ALLOW; this app enables loopback for local development unless the
+operator disables it, and the worker's own ports stay closed on every internal
+address (BROWSER_SSRF_DENY_PORTS). BROWSER_SSRF_BLOCK/ALLOW configure the policy. Request interception is not a complete network sandbox: WebSocket coverage
 and independent Chromium DNS resolution remain limitations. Separate session pages
 also share the persistent context's cookies; page ownership is not profile isolation.
 """

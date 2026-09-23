@@ -94,10 +94,12 @@ export class SsrfGuard {
   private async handle(route: Route): Promise<void> {
     let host = "";
     let scheme = "";
+    let port: number | undefined;
     try {
       const u = new URL(route.request().url());
       host = u.hostname;
       scheme = u.protocol.replace(/:$/, "");
+      port = u.port ? Number(u.port) : scheme === "https" || scheme === "wss" ? 443 : 80;
     } catch {
       return this.safeContinue(route);
     }
@@ -105,7 +107,7 @@ export class SsrfGuard {
 
     let verdict: Verdict;
     try {
-      verdict = await this.classifyHost(host);
+      verdict = await this.classifyHost(host, port);
     } catch {
       // Never let a guard bug wedge the page: fail open on unexpected errors.
       return this.safeContinue(route);
@@ -131,19 +133,19 @@ export class SsrfGuard {
   }
 
   /** Classify a URL host: IP literals directly, hostnames via cached DNS. */
-  async classifyHost(rawHost: string): Promise<Verdict> {
+  async classifyHost(rawHost: string, port?: number): Promise<Verdict> {
     const host = normalizeHost(rawHost);
     // localhost is loopback even without a DNS call; route it through the policy
     // (127.0.0.1) so an operator BROWSER_SSRF_ALLOW override still applies.
     if (host === "localhost" || host.endsWith(".localhost")) {
-      const v = classifyIp("127.0.0.1", this.policy);
+      const v = classifyIp("127.0.0.1", this.policy, port);
       // Keep the classifier's reason: it names the setting that would allow it.
       return v.blocked
         ? { blocked: true, reason: `host "${host}" (127.0.0.1) is ${v.reason}` }
         : v;
     }
     if (parseIp(host)) {
-      const v = classifyIp(host, this.policy);
+      const v = classifyIp(host, this.policy, port);
       return v.blocked ? { blocked: true, reason: `host ${host} is ${v.reason}` } : v;
     }
 
@@ -152,7 +154,7 @@ export class SsrfGuard {
     // manufacturing a block (nothing to protect — the connection cannot form).
     if (addrs.length === 0) return { blocked: false };
     for (const addr of addrs) {
-      const v = classifyIp(addr, this.policy);
+      const v = classifyIp(addr, this.policy, port);
       if (v.blocked) return { blocked: true, reason: `${host} → ${addr}: ${v.reason}` };
     }
     return { blocked: false };
