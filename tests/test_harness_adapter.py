@@ -5330,6 +5330,17 @@ def test_native_thinking_shapes(kind, thinking, display, expected):
     assert ha._native_thinking(kind, options) == expected
 
 
+@pytest.mark.parametrize("model", ["glm-5.1", "kimi-k2.5", "MiniMax-M2"])
+def test_native_thinking_is_not_forwarded_to_non_claude_models(model):
+    import app.core.provider.harness_adapter as ha
+
+    options = SessionOptions(
+        model=model, thinking={"type": "adaptive"},
+        extra={"thinking_display": "summarized"},
+    )
+    assert ha._native_thinking("anthropic", options) is None
+
+
 @pytest.mark.asyncio
 async def test_native_leg_without_a_thinking_setting_passes_none(recording_adapter):
     adapter, made = recording_adapter

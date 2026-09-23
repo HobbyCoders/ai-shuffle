@@ -1004,6 +1004,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         # instead of each waking the parent on its own.
         self._queued_peer_messages: list[AgentMessage] = []
         self._queued_peer_rehydrated = False
+        # The model the last ProfileResolved event was emitted for.
+        self._profile_resolved_for: str | None = None
         # The last AgentMessage op submit() held rather than delivered, so a
         # host can tell its sender "held" instead of "delivered".
         self.last_held_message: AgentMessage | None = None
@@ -2104,6 +2106,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 model=self.model, provider=self.provider.name, source=op.source,
                 thinking=self._session_thinking.get(sid),
             ))
+            await self._emit_profile_resolved(sid, turn_id)
             blocked, _ = await self._turn_start_hook(
                 sid, turn_id, head.message.text(), with_context=False
             )
@@ -2141,6 +2144,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             model=self.model, provider=self.provider.name, source=op.source,
             thinking=self._session_thinking.get(sid),
         ))
+        await self._emit_profile_resolved(sid, turn_id)
         blocked, hook_context = await self._turn_start_hook(sid, turn_id, prompt_text)
         if blocked:
             return
@@ -2407,6 +2411,23 @@ class NativeLoop(BackgroundLifecycleMixin):
             write_harvested_facts(store, self.ctx.extra.get("memory_project"), facts)
         except Exception:  # noqa: BLE001 — never let bookkeeping touch a turn
             log.debug("runtime fact harvest failed", exc_info=True)
+
+    async def _emit_profile_resolved(self, sid: str, turn_id: str) -> None:
+        """Record which guidance family this engine's model resolved to.
+
+        Right after the turn's TurnStarted, once per engine and again after a
+        model change. Never fails a turn.
+        """
+        if self._profile_resolved_for == self.model:
+            return
+        try:
+            from fluid.cli.prompt import profile_resolved_event
+
+            await self._emit(profile_resolved_event(sid, self.model, turn_id=turn_id))
+        except Exception:  # noqa: BLE001 — bookkeeping never touches a turn
+            log.debug("profile resolution event failed", exc_info=True)
+            return
+        self._profile_resolved_for = self.model
 
     async def _queue_if_parked(self, op: AgentMessage) -> bool:
         """Hold an idle-time peer message when the session is parked.

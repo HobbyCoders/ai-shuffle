@@ -34,6 +34,7 @@ from fluid.events.model import (
     TURN_SOURCES,
     UnknownEvent,
     Usage,
+    ProfileResolved,
     register_event_type,
 )
 from fluid.events.ops import (
@@ -94,6 +95,7 @@ __all__ = [
     "ToolUse",
     "TurnComplete",
     "TurnStarted",
+    "ProfileResolved",
     "TURN_SOURCES",
     "UnknownEvent",
     "Usage",

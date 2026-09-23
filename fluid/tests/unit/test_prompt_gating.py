@@ -403,3 +403,74 @@ def test_skill_one_liner_names_the_code_mode_import() -> None:
     first = _first_line(SPEC.description)
     assert "from tools.Skill import Skill" in first
     assert 'Skill(name="<skill>")' in first
+
+
+# ─── ProfileResolved: untargeted sessions are countable from the log ────────
+
+
+def test_profile_resolved_round_trips_through_the_codec() -> None:
+    import json
+
+    from fluid.events.model import ProfileResolved, event_from_dict, event_to_dict
+
+    event = ProfileResolved(
+        session_id="s", turn_id="t", seq=3, ts=1.5, model="gpt-6-astra",
+        family="gpt", generation="gpt-6", matched_by="exact", fallback=False,
+    )
+    revived = event_from_dict(json.loads(json.dumps(event_to_dict(event))))
+    assert revived == event
+    # A row written by an older build, or one with a field this build lacks.
+    legacy = event_from_dict({
+        "_cls": "ProfileResolved", "_v": 1, "session_id": "s", "seq": 1,
+        "ts": 0.0, "model": "m", "added_later": 1,
+    })
+    assert isinstance(legacy, ProfileResolved)
+    assert legacy.family is None and legacy.fallback is False
+
+
+@pytest.mark.parametrize(("model", "family", "fallback"), [
+    ("totally-unknown-model-x", "generic", True),
+    ("stealth/raven-7", "generic", True),
+    ("gpt-6-astra", "gpt", False),
+    ("gpt-5.4", "gpt", False),
+    ("glm-5.1", "glm", False),
+    ("z-ai/glm-4.6", "glm", False),
+])
+def test_profile_resolution_flags_the_generic_fallback(model, family, fallback) -> None:
+    from fluid.cli.prompt import profile_resolved_event
+
+    event = profile_resolved_event("s", model)
+    assert event.model == model
+    assert event.family == family
+    assert event.fallback is fallback
+
+
+async def test_a_session_records_its_profile_once() -> None:
+    import asyncio
+    from collections.abc import AsyncIterator
+
+    from fluid.engine.native import NativeLoop
+    from fluid.events import ProfileResolved, UserTurn
+    from fluid.providers.base import ProviderCaps, StreamChunk
+    from fluid.store.base import MemoryStore
+
+    class _Provider:
+        name = "fake"
+        caps = ProviderCaps()
+
+        async def stream(self, request) -> AsyncIterator[StreamChunk]:
+            yield StreamChunk("text_delta", text="ok")
+            yield StreamChunk("done", stop_reason="end_turn")
+
+    loop = NativeLoop(provider=_Provider(), store=MemoryStore(), model="mystery-model-9")
+    try:
+        for text in ("one", "two"):
+            await loop.submit(UserTurn(content=text))
+            await asyncio.wait_for(loop.wait_turn(), 5)
+        resolved = [e for e in loop.bus.log(loop.session_id) if isinstance(e, ProfileResolved)]
+        assert len(resolved) == 1
+        assert resolved[0].model == "mystery-model-9"
+        assert resolved[0].fallback is True
+        assert resolved[0].family == "generic"
+    finally:
+        await loop.aclose()

@@ -3610,9 +3610,23 @@ def _native_thinking(kind: Optional[str], options: SessionOptions) -> Optional[D
     ``thinking_display`` is "summarized" or "omitted". A display with no mode
     becomes ``{"display": ...}``, which fluid reads as "the model's default
     mode, shown this way", so it never turns thinking on by itself. Other lanes
-    get None: their serializers read ``thinking`` differently.
+    get None: their serializers read ``thinking`` differently. So does a
+    non-Claude model on the anthropic lane (GLM, Kimi, MiniMax).
     """
     if kind != "anthropic":
+        return None
+    try:
+        from fluid.providers.anthropic.thinking import is_claude_model
+    except Exception:  # noqa: BLE001 — a vendored fluid may predate it
+        is_claude_model = None
+    if is_claude_model is not None and not is_claude_model(options.model):
+        # GLM, Kimi and MiniMax speak the Anthropic dialect but not its
+        # thinking field; their requests go out without it.
+        if getattr(options, "thinking", None) or (options.extra or {}).get("thinking_display"):
+            logger.debug(
+                "[HarnessAdapter] thinking not forwarded to non-Claude model %r",
+                options.model,
+            )
         return None
     raw = getattr(options, "thinking", None)
     thinking: Dict[str, Any] = {}

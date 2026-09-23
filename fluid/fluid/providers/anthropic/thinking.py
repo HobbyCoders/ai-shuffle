@@ -15,15 +15,21 @@ request rather than clamping:
 Source: the Anthropic API reference as bundled with the claude-api skill
 (cached 2026-06-24), not a live probe.
 
-A model id this module does not recognise as Claude passes through unchanged:
-the host chose the value for a model fluid knows nothing about.
+Effort for a model id this module does not recognise as Claude passes
+through unchanged: the host chose the value for a model fluid knows nothing
+about. Thinking does not: other Anthropic-dialect endpoints (GLM, Kimi,
+MiniMax) read the field their own way or not at all, so an explicit setting
+is forwarded to Claude models only and the request is otherwise unchanged.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 EFFORT_LADDER: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
@@ -125,6 +131,11 @@ def clamp_effort(model: str | None, effort: str | None) -> str | None:
     return lower[-1] if lower else accepted[0]
 
 
+def is_claude_model(model: str | None) -> bool:
+    """True for a Claude model id, including one this module cannot parse."""
+    return parse_claude_model(model) is not None or "claude" in (model or "").lower()
+
+
 def resolve_thinking(
     model: str | None,
     thinking: dict[str, Any] | None,
@@ -140,6 +151,12 @@ def resolve_thinking(
     :func:`clamp_effort`).
     """
     if not thinking:
+        return None
+    if not is_claude_model(model):
+        log.debug(
+            "thinking setting %r not forwarded: %r is not a Claude model",
+            thinking, model,
+        )
         return None
     parsed = parse_claude_model(model)
     if parsed is None:

@@ -94,6 +94,24 @@ class TurnStarted(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class ProfileResolved(Event):
+    """Which guidance family the session's model id resolved to.
+
+    Emitted once per engine when its first turn starts, and again if the
+    model changes. ``fallback`` is True when no rule recognised the id and
+    the generic pack was used, so "sessions with no model targeting" can be
+    counted from the event log. Every field is optional so a reader that
+    predates one drops it and a row without it still loads.
+    """
+
+    model: str | None = None
+    family: str | None = None
+    generation: str | None = None
+    matched_by: str | None = None
+    fallback: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
 class TurnComplete(Event):
     stop_reason: str
     num_model_calls: int
@@ -589,6 +607,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
     cls.__name__: cls
     for cls in (
         TurnStarted, TurnComplete, SessionParked, SessionWoken,
+        ProfileResolved,
         Interrupted, ErrorEvent,
         BlockStart, BlockStop, TextDelta, ThinkingDelta, ToolArgsDelta,
         ToolUse, ToolResult, SteerDelivered,

@@ -364,6 +364,20 @@ def resolve_model_family(model: str | None) -> ModelFamily:
         return ModelFamily(_VENDOR_FAMILIES[vendor], None, "vendor")
     return ModelFamily(GENERIC_FAMILY, None, "generic")
 
+def profile_resolved_event(
+    session_id: str, model: str | None, *, turn_id: str | None = None,
+):
+    """The :class:`~fluid.events.model.ProfileResolved` event for ``model``."""
+    from fluid.events.model import ProfileResolved
+
+    resolved = resolve_model_family(model)
+    return ProfileResolved(
+        session_id=session_id, turn_id=turn_id, model=model,
+        family=resolved.family, generation=resolved.generation,
+        matched_by=resolved.matched_by, fallback=resolved.fallback,
+    )
+
+
 # Shared with the synthesizer (raw sources for evidence-based proposals) and
 # the anchor-replay runner (candidate staging) — see fluid.context.guidance.
 from fluid.context.guidance import (  # noqa: E402 — re-exported names

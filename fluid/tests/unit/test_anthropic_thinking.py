@@ -97,9 +97,14 @@ def test_a_model_that_rejects_effort_gets_no_output_config() -> None:
         ("claude-opus-5", {"type": "disabled"}, "high", {"type": "disabled"}),
         # No adaptive mode before 4.6.
         ("claude-haiku-4-5", {"type": "adaptive"}, None, None),
-        # Unset stays unset; a non-Claude model gets the host's value verbatim.
+        # Unset stays unset. A Claude id this module cannot parse still gets
+        # the host's value; other Anthropic-dialect models get nothing.
         ("claude-opus-4-8", None, None, None),
-        ("some-proxy-model", {"type": "adaptive"}, None, {"type": "adaptive"}),
+        ("claude-next-preview", {"type": "adaptive"}, None, {"type": "adaptive"}),
+        ("some-proxy-model", {"type": "adaptive"}, None, None),
+        ("glm-5.1", {"type": "enabled", "budget_tokens": 8000}, None, None),
+        ("kimi-k2.5", {"type": "adaptive"}, None, None),
+        ("MiniMax-M2", {"type": "disabled"}, None, None),
     ],
 )
 def test_thinking_fitted_per_model(model, thinking, effort, sent) -> None:
@@ -219,3 +224,28 @@ def test_turn_started_rows_from_before_the_field_load_as_none() -> None:
     event = event_from_dict(row)
     assert isinstance(event, TurnStarted)
     assert event.thinking is None
+
+
+@pytest.mark.parametrize("model", ["glm-5.1", "kimi-k2.5", "MiniMax-M2"])
+async def test_thinking_is_not_forwarded_to_other_anthropic_dialect_models(
+    model: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """GLM, Kimi and MiniMax take the Anthropic dialect but not its thinking
+    field: the request goes out exactly as it would with no setting."""
+    import logging
+
+    plain, explicit = _Provider(), _Provider()
+    await _one_turn(NativeLoop(provider=plain, store=MemoryStore(), model=model))
+    with caplog.at_level(logging.DEBUG, logger="fluid.providers.anthropic.thinking"):
+        await _one_turn(NativeLoop(
+            provider=explicit, store=MemoryStore(), model=model,
+            thinking=ADAPTIVE_SUMMARIZED,
+        ))
+        body = _body(explicit)
+
+    assert "thinking" not in body
+    assert body == _body(plain)
+    assert any(
+        "not forwarded" in r.getMessage() and r.levelno == logging.DEBUG
+        for r in caplog.records
+    )
