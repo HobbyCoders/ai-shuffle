@@ -79,7 +79,10 @@ def test_unraid_template_pins_the_release_under_the_buyer_registry_path():
     assert template.findtext("Repository") == f"registry.hobbycoders.com/YOUR-PULL-TOKEN/ai-shuffle:{__version__}"
     public = "https://raw.githubusercontent.com/HobbyCoders/ai-shuffle-unraid/main/"
     assert template.findtext("TemplateURL") == public + "ai-shuffle.xml"
-    assert template.findtext("Icon") == public + "images/ai-shuffle.png"
+    # The icon is served by the website, which exists today; the community
+    # template repository does not yet. android/site/test/brand.test.ts checks
+    # the same URL from the other side.
+    assert template.findtext("Icon") == "https://hobbycoders.com/ai-shuffle/icon.png"
     assert template.findtext("Support") == "https://github.com/HobbyCoders/ai-shuffle-unraid/issues"
     text = (ROOT / "docs/install/unraid/ai-shuffle.xml").read_text()
     assert "claude-sdk" not in text and "claude-icon" not in text and ":latest" not in text
