@@ -6,7 +6,8 @@
 	 * configured, always in the same order, so the page reads as a catalog rather
 	 * than a log of what happens to be connected. Slots, top to bottom:
 	 *
-	 *   1. Claude              — native subscription auth (no toggle)
+	 *   1. Claude              — the stock CLI's own login (no toggle); signing
+	 *                            in and out lives in the Claude Code CLI group
 	 *   2. Anthropic API key   — overrides the subscription while it is set
 	 *   3. ChatGPT             — Codex subscription (auth_mode='chatgpt')
 	 *   4. OpenAI API key      — gateway row, provider_type='openai'
@@ -32,7 +33,8 @@
 	import { untrack } from 'svelte';
 	import { X } from 'lucide-svelte';
 	import { platform } from '$lib/stores/platform.svelte';
-	import { claudeAuthenticated, claudeTokenValid } from '$lib/stores/auth.svelte';
+	import { auth, claudeAuthenticated } from '$lib/stores/auth.svelte';
+	import { claudePlanLabel } from '$lib/api/claude-cli';
 	import { type ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
 	import type { ProviderGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
@@ -42,7 +44,6 @@
 	import AddProviderModal, { type Step } from './AddProviderModal.svelte';
 	import ChatGptDeviceFlow from './flows/ChatGptDeviceFlow.svelte';
 	import GrokDeviceFlow from './flows/GrokDeviceFlow.svelte';
-	import ClaudeSubscriptionFlow from './flows/ClaudeSubscriptionFlow.svelte';
 
 	type Tone = 'ok' | 'warn' | 'off';
 
@@ -52,23 +53,14 @@
 	// status. API-key login wins whenever a key is set — no silent billing switch.
 	let usingApiKeyAuth = $derived(s.claudeCodeAuthMethod === 'api_key');
 
-	// The single Claude account backing the subscription row — the active one, or
-	// the sole saved account when none is flagged active.
-	const claudeAccount = $derived(s.claudeAccounts.find((a) => a.is_active) ?? s.claudeAccounts[0]);
-
-	// Token present but expired/invalid: the credential exists (so
-	// $claudeAuthenticated is true) yet the OAuth token can't be used.
-	let tokenExpired = $derived($claudeAuthenticated && !$claudeTokenValid);
+	// What the Claude Code CLI reports about its own login (`claude auth status`).
+	const claudeCli = $derived($auth.status?.claude_cli ?? null);
 
 	// ----- Transient view state (component-local) -----
 	// Which row's panel is open (`claude`, `openai-key`, `custom:{id}`, …), or null.
 	let expandedKey = $state<string | null>(null);
 	// Which step the add-provider modal is pinned to, or null when it is closed.
 	let addStep = $state<Step | null>(null);
-	// Whether the Claude sign-in modal is open.
-	let claudeSignInOpen = $state(false);
-	// Whether the Claude row is armed for disconnect (inline confirm).
-	let confirmDeleteClaude = $state(false);
 	// Whether the Anthropic-key row's replace-key panel is expanded.
 	let keyEditOpen = $state(false);
 	// Whether the Anthropic-key row is armed for delete (inline confirm).
@@ -79,8 +71,6 @@
 	let reconnectId = $state<string | null>(null);
 	// True while the reconnect device flow has an operation in flight — guards close.
 	let reconnectBusy = $state(false);
-	// True while the Claude sign-in flow has an operation in flight — guards close.
-	let claudeSignInBusy = $state(false);
 
 	// Fullscreen on the mobile shell for the reconnect modal (mirrors AddProviderModal).
 	const reconnectFullscreen = $derived(platform.isMobile);
@@ -88,14 +78,10 @@
 	// Esc fires on keydown within the dialog container, which only receives events
 	// while focus is inside it — so focus it on open (AddProviderModal precedent).
 	let reconnectDialogEl = $state<HTMLDivElement | null>(null);
-	let claudeSignInDialogEl = $state<HTMLDivElement | null>(null);
 
 	// Focus the dialog container once it mounts so Esc works before the first click.
 	$effect(() => {
 		if (reconnectId !== null) reconnectDialogEl?.focus();
-	});
-	$effect(() => {
-		if (claudeSignInOpen) claudeSignInDialogEl?.focus();
 	});
 
 	// ----- Expansion -----
@@ -104,7 +90,6 @@
 	function toggleExpand(key: string) {
 		expandedRows = [];
 		expandedKey = expandedKey === key ? null : key;
-		confirmDeleteClaude = false;
 		confirmDeleteKey = false;
 		keyEditOpen = false;
 		confirmDeleteId = null;
@@ -115,13 +100,6 @@
 	}
 	function handleReconnectKeydown(event: KeyboardEvent) {
 		if (event.key === 'Escape') closeReconnect();
-	}
-
-	function closeClaudeSignIn() {
-		if (!claudeSignInBusy) claudeSignInOpen = false;
-	}
-	function handleClaudeSignInKeydown(event: KeyboardEvent) {
-		if (event.key === 'Escape') closeClaudeSignIn();
 	}
 
 	// ----- model_providers classification (ruling PR1) -----
@@ -180,28 +158,21 @@
 	let reconnectTitle = $derived(reconnectKind === 'grok' ? 'Reconnect Grok' : 'Reconnect ChatGPT');
 
 	// ----- Status lines -----
-	/** Human name for a Claude plan code. Unknown or missing → the plain label. */
-	function subscriptionLabel(type: string | null | undefined): string {
-		const value = (type ?? '').trim().toLowerCase();
-		if (value === 'max') return 'Claude Max Subscription';
-		if (value === 'pro') return 'Claude Pro Subscription';
-		return 'Claude Subscription';
-	}
-
 	let claudeStatus = $derived.by((): { subtitle: string; tone: Tone } => {
 		if (!$claudeAuthenticated) {
-			return { subtitle: 'Not connected — sign in with your Claude account.', tone: 'off' };
+			return { subtitle: 'Not signed in — sign in to the Claude Code CLI above.', tone: 'off' };
 		}
-		if (tokenExpired) return { subtitle: 'Token expired — reconnect', tone: 'warn' };
 		if (usingApiKeyAuth) return { subtitle: 'Overridden by Anthropic API key', tone: 'off' };
-		const label = subscriptionLabel(claudeAccount?.subscription_type);
-		const pending = claudeAccount?.sync_pending ? ' · sync pending' : '';
-		const email = claudeAccount?.email;
-		return {
-			subtitle: email ? `Authenticated as ${email} · ${label}${pending}` : `${label}${pending}`,
-			tone: 'ok'
-		};
+		const plan = claudePlanLabel(claudeCli?.plan);
+		const label = plan ? `Claude ${plan} subscription` : 'Claude subscription';
+		const email = claudeCli?.email;
+		return { subtitle: email ? `Signed in as ${email} · ${label}` : label, tone: 'ok' };
 	});
+
+	/** The Claude row's "Sign in" goes to the Claude Code CLI group. */
+	function showClaudeCli() {
+		document.getElementById('claude-cli-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	}
 
 	let anthropicKeyStatus = $derived.by((): { subtitle: string; tone: Tone } => {
 		if (!s.anthropicKeySet) {
@@ -240,17 +211,6 @@
 	}
 
 	// ----- Actions -----
-	function armDeleteClaude() {
-		confirmDeleteClaude = true;
-	}
-	function cancelDeleteClaude() {
-		confirmDeleteClaude = false;
-	}
-	async function confirmDeleteClaude_() {
-		confirmDeleteClaude = false;
-		await providers.disconnectClaude();
-	}
-
 	function toggleKeyEdit() {
 		confirmDeleteKey = false;
 		keyEditOpen = !keyEditOpen;
@@ -397,20 +357,6 @@
 	{/if}
 {/snippet}
 
-<!-- Claude row extras: encryption / auth notices, under the action row. -->
-{#snippet claudeNotes()}
-	{#if !s.accountsEncryptionReady}
-		<p class="prov-note warn">
-			Encryption is locked — log in again as admin to manage the Claude account.
-		</p>
-	{:else if s.accountsError}
-		<p class="prov-note err">{s.accountsError}</p>
-	{/if}
-	{#if s.claudeAuthError}
-		<p class="prov-note err">{s.claudeAuthError}</p>
-	{/if}
-{/snippet}
-
 <!-- Anthropic-key row extras: the replace-key form `Add key` toggles. -->
 {#snippet anthropicKeyForm()}
 	{#if keyEditOpen}
@@ -430,7 +376,7 @@
 	<p class="prov-note" role="status">This provider was removed elsewhere. Your open settings and any typed token remain here until you close the row.</p>
 {/if}
 <div class="prov-list">
-	<!-- 1. Claude subscription (native auth, no toggle). -->
+	<!-- 1. Claude subscription: the CLI's own login, no toggle. -->
 	<ProviderRow
 		title="Claude"
 		badge="Subscription"
@@ -440,17 +386,7 @@
 		expanded={expandedKey === 'claude'}
 		onToggleExpand={() => toggleExpand('claude')}
 	>
-		<ProviderPanel
-			kind="subscription"
-			nativeModels
-			configured={s.claudeAccounts.length > 0}
-			onPrimary={() => (claudeSignInOpen = true)}
-			confirming={confirmDeleteClaude}
-			onArmRemove={armDeleteClaude}
-			onConfirmRemove={confirmDeleteClaude_}
-			onCancelRemove={cancelDeleteClaude}
-			afterActions={claudeNotes}
-		/>
+		<ProviderPanel kind="subscription" nativeModels onPrimary={showClaudeCli} />
 	</ProviderRow>
 
 	<!-- 2. Anthropic API key — overrides the subscription while it is set. -->
@@ -623,58 +559,6 @@
 	</div>
 {/if}
 
-{#if claudeSignInOpen}
-	<!-- Claude subscription sign-in: hosts ClaudeSubscriptionFlow (primary connect
-	     when signed out, add-account reconnect when signed in). Modal chrome copies
-	     the ChatGPT reconnect modal above verbatim. -->
-	<div
-		bind:this={claudeSignInDialogEl}
-		class="fixed inset-0 z-50 flex items-center justify-center {reconnectFullscreen ? 'p-0' : 'p-4'}"
-		role="dialog"
-		aria-modal="true"
-		aria-label="Claude subscription"
-		onkeydown={handleClaudeSignInKeydown}
-		tabindex="-1"
-	>
-		<!-- Backdrop -->
-		<button
-			class="absolute inset-0 bg-background/80 backdrop-blur-xs"
-			onclick={closeClaudeSignIn}
-			aria-label="Close"
-		></button>
-
-		<!-- Modal card -->
-		<div
-			class="relative flex flex-col bg-card border border-border shadow-xl {reconnectFullscreen
-				? 'w-full h-full max-w-none rounded-none'
-				: 'w-full max-w-lg max-h-[90vh] rounded-xl'}"
-		>
-			<!-- Header -->
-			<div class="flex items-center gap-2 px-6 py-4 border-b border-border">
-				<h2 class="flex-1 text-lg font-semibold text-foreground">Claude subscription</h2>
-				<button
-					type="button"
-					onclick={closeClaudeSignIn}
-					disabled={claudeSignInBusy}
-					class="p-2 -mr-2 hover:bg-muted rounded-lg transition-colors disabled:opacity-50"
-					aria-label="Close"
-				>
-					<X class="w-5 h-5 text-muted-foreground" />
-				</button>
-			</div>
-
-			<!-- Content -->
-			<div class="flex-1 overflow-y-auto p-6">
-				<ClaudeSubscriptionFlow
-					onDone={() => (claudeSignInOpen = false)}
-					onCancel={() => (claudeSignInOpen = false)}
-					onBusyChange={(b) => (claudeSignInBusy = b)}
-				/>
-			</div>
-		</div>
-	</div>
-{/if}
-
 <style>
 	.prov-list {
 		display: flex;
@@ -695,16 +579,10 @@
 	.prov-sub {
 		margin-top: 4px;
 	}
-	/* One-line status notice inside the Claude panel. */
+	/* One-line status notice. */
 	.prov-note {
 		margin: 8px 0 0;
 		font-size: 11.5px;
 		line-height: 1.4;
-	}
-	.prov-note.warn {
-		color: var(--warning, #d97706);
-	}
-	.prov-note.err {
-		color: var(--destructive);
 	}
 </style>

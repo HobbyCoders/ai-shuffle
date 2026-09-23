@@ -4,11 +4,8 @@
  * Owns the two state clusters that `SettingsCard.svelte` / `ConnectionsSection.svelte`
  * currently prop-drill (see PROVIDERS_UI_RESTRUCTURE_PLAN.md §2.4, landmine L2):
  *
- *   1. Claude native-auth: the OAuth connect/paste-code flow + the saved-accounts
- *      list (switch / rename / delete / add). Lifted verbatim from
- *      `SettingsCard.svelte` — SAME `$lib/api/auth` calls, SAME `auth.checkAuth()`
- *      / `rateLimit.markStale()` side effects, SAME error handling (D8: mechanics
- *      unchanged, presentation relocated in later chunks).
+ *   1. The Anthropic API key integration status. (Claude sign-in is the stock
+ *      CLI's own; see `ClaudeCliPanel` and `$lib/api/claude-cli`.)
  *   2. The `model_providers` registry: load / save / toggle / delete / fetch,
  *      lifted from `ConnectionsSection.svelte`. `refreshProviders()` funnels EVERY
  *      mutation through `hydrateModelRegistry()` so the profile editor's model
@@ -26,20 +23,9 @@
 
 import { apiBase, withAuth } from '$lib/api/runtime';
 import { auth } from './auth.svelte';
-import { rateLimit } from './rate-limit';
 import { createSubscribers } from './store-utils';
 import { hydrateModelRegistry } from '$lib/constants/models.svelte';
 import { getErrorMessage } from '$lib/api/client';
-import {
-	startClaudeLogin,
-	completeClaudeLogin,
-	listClaudeAccounts,
-	startAddClaudeAccount,
-	completeAddClaudeAccount,
-	activateClaudeAccount,
-	deleteClaudeAccount,
-	type ClaudeAccount
-} from '$lib/api/auth';
 import {
 	listModelProviders,
 	createModelProvider,
@@ -57,38 +43,6 @@ import {
 // ============================================================================
 
 interface ProvidersState {
-	// ----- Claude native-auth: primary connect / paste-code flow -----
-	claudeLoginLoading: boolean;
-	claudeOAuthUrl: string | null;
-	/** PKCE state echoed back on complete; not shown to the user. */
-	claudeOAuthState: string | null;
-	claudeAuthCode: string;
-	claudeCompletingLogin: boolean;
-	/**
-	 * Error surface for the primary Claude OAuth flow. In SettingsCard these
-	 * failures wrote to the card-wide `error` banner; the store owns a dedicated
-	 * field so it stays self-contained (mechanics — the messages — unchanged).
-	 */
-	claudeAuthError: string;
-
-	// ----- Claude native-auth: saved-accounts list -----
-	claudeAccounts: ClaudeAccount[];
-	activeAccountId: string | null;
-	/** When false the encrypted store can't be opened — show a banner, not rows. */
-	accountsEncryptionReady: boolean;
-	accountsLoading: boolean;
-	accountsError: string;
-
-	// ----- Claude native-auth: add-account flow -----
-	addAccountOAuthUrl: string | null;
-	addAccountState: string | null;
-	addAccountCode: string;
-	addAccountMakeActive: boolean;
-	addAccountLoading: boolean;
-	addAccountCompleting: boolean;
-	/** Id of the row mid-switch (drives its inline spinner), else null. */
-	switchingAccountId: string | null;
-
 	// ----- model_providers registry -----
 	providers: ModelProvider[];
 	providersLoading: boolean;
@@ -113,27 +67,6 @@ interface ProvidersState {
 // ============================================================================
 
 const initialState: ProvidersState = {
-	claudeLoginLoading: false,
-	claudeOAuthUrl: null,
-	claudeOAuthState: null,
-	claudeAuthCode: '',
-	claudeCompletingLogin: false,
-	claudeAuthError: '',
-
-	claudeAccounts: [],
-	activeAccountId: null,
-	accountsEncryptionReady: true,
-	accountsLoading: false,
-	accountsError: '',
-
-	addAccountOAuthUrl: null,
-	addAccountState: null,
-	addAccountCode: '',
-	addAccountMakeActive: false,
-	addAccountLoading: false,
-	addAccountCompleting: false,
-	switchingAccountId: null,
-
 	providers: [],
 	providersLoading: false,
 	providersError: '',
@@ -155,7 +88,7 @@ let _state = $state<ProvidersState>({ ...initialState });
 /**
  * One-shot guard for the first Providers-tab open (landmine L1 / ruling PR6).
  * The settings sections remount on every tab switch and re-run their `onMount`
- * fetches; this flag lets `ensureLoaded()` cache the provider + account loads
+ * fetches; this flag lets `ensureLoaded()` cache the provider and integration loads
  * across those remounts so switching to Providers doesn't refetch every time.
  * Reset by `clear()`. Not `$state` — it's a plain module-scope latch, never
  * rendered.
@@ -170,12 +103,6 @@ const { subscribe, update: _update, notifySubscribers: _notifySubscribers, creat
 		}
 	);
 
-/** Pull a `{ detail }`-style message off an unknown caught value (account cluster
- *  convention — mirrors SettingsCard's `e?.detail || '…'`). */
-function detailOf(e: unknown, fallback: string): string {
-	return (e as { detail?: string })?.detail || fallback;
-}
-
 // ============================================================================
 // Exported Store
 // ============================================================================
@@ -188,278 +115,11 @@ export const providers = {
 	subscribe,
 
 	// ------------------------------------------------------------------------
-	// Input setters (were prop `onChange` callbacks from SettingsCard)
-	// ------------------------------------------------------------------------
-
-	setClaudeAuthCode(value: string) {
-		_update((s) => ({ ...s, claudeAuthCode: value }));
-	},
-	setAddAccountCode(value: string) {
-		_update((s) => ({ ...s, addAccountCode: value }));
-	},
-	setAddAccountMakeActive(value: boolean) {
-		_update((s) => ({ ...s, addAccountMakeActive: value }));
-	},
-
-	// ------------------------------------------------------------------------
-	// Claude native-auth: primary connect flow (lifted from SettingsCard:357-403)
-	// ------------------------------------------------------------------------
-
-	/**
-	 * `forceReauth` drives the recovery path: it deletes the existing (possibly
-	 * expired / unrefreshable) credential server-side and starts a fresh OAuth
-	 * flow, so a green-but-dead token can be replaced from the UI. The non-forced
-	 * path short-circuits when already authenticated.
-	 */
-	async startClaudeOAuth(forceReauth = false) {
-		_update((s) => ({ ...s, claudeLoginLoading: true }));
-		try {
-			const result = await startClaudeLogin(forceReauth);
-			if (result.already_authenticated) {
-				await auth.checkAuth();
-				return;
-			}
-			if (result.success && result.oauth_url && result.state) {
-				_update((s) => ({
-					...s,
-					claudeOAuthUrl: result.oauth_url ?? null,
-					claudeOAuthState: result.state ?? null,
-					claudeAuthCode: ''
-				}));
-				window.open(result.oauth_url, '_blank', 'width=600,height=700');
-			} else {
-				_update((s) => ({
-					...s,
-					claudeAuthError: result.error || result.message || 'Failed to start OAuth'
-				}));
-			}
-		} catch (e) {
-			_update((s) => ({ ...s, claudeAuthError: detailOf(e, 'Failed to start OAuth') }));
-		} finally {
-			_update((s) => ({ ...s, claudeLoginLoading: false }));
-		}
-	},
-
-	/** Force a fresh login even if a credential already exists on disk. */
-	startClaudeReauth() {
-		return providers.startClaudeOAuth(true);
-	},
-
-	async completeClaudeOAuth() {
-		if (!_state.claudeAuthCode.trim() || !_state.claudeOAuthState) return;
-		_update((s) => ({ ...s, claudeCompletingLogin: true }));
-		try {
-			const result = await completeClaudeLogin(
-				_state.claudeAuthCode.trim(),
-				_state.claudeOAuthState
-			);
-			if (!result.success) {
-				_update((s) => ({
-					...s,
-					claudeAuthError: result.error || result.message || 'Failed to complete OAuth'
-				}));
-				return;
-			}
-			_update((s) => ({
-				...s,
-				claudeOAuthUrl: null,
-				claudeOAuthState: null,
-				claudeAuthCode: ''
-			}));
-			await auth.checkAuth();
-		} catch (e) {
-			_update((s) => ({ ...s, claudeAuthError: detailOf(e, 'Failed to complete OAuth') }));
-		} finally {
-			_update((s) => ({ ...s, claudeCompletingLogin: false }));
-		}
-	},
-
-	// ------------------------------------------------------------------------
-	// Claude native-auth: saved accounts (lifted from SettingsCard:405-533)
-	// ------------------------------------------------------------------------
-
-	/**
-	 * Refresh the account list. Called on mount and after every mutation so the
-	 * UI stays a mirror of the server (switching is instant server-side). Never
-	 * throws — a locked store just flips `accountsEncryptionReady` false.
-	 */
-	async loadClaudeAccounts(silent = false) {
-		// SILENT background refresh: don't flip the loading flag when rows are
-		// already on screen, so a re-open refetch never flickers them.
-		const showLoading = !silent || _state.claudeAccounts.length === 0;
-		_update((s) => ({ ...s, accountsError: '', ...(showLoading ? { accountsLoading: true } : {}) }));
-		try {
-			const res = await listClaudeAccounts();
-			_update((s) => ({
-				...s,
-				claudeAccounts: res.accounts,
-				activeAccountId: res.active_account_id,
-				accountsEncryptionReady: res.encryption_ready
-			}));
-		} catch (e) {
-			// A locked store surfaces as a friendly banner via the flag, not an
-			// error toast; only genuinely unexpected failures set accountsError.
-			_update((s) => ({ ...s, accountsError: detailOf(e, 'Failed to load Claude accounts') }));
-		} finally {
-			if (showLoading) _update((s) => ({ ...s, accountsLoading: false }));
-		}
-	},
-
-	/**
-	 * Start OAuth for ADDING an account — opens the browser popup exactly like the
-	 * primary connect flow, but hits the /accounts/start endpoint so the current
-	 * login is untouched.
-	 */
-	async startAddAccount() {
-		_update((s) => ({ ...s, addAccountLoading: true, accountsError: '' }));
-		try {
-			const result = await startAddClaudeAccount();
-			if (result.success && result.oauth_url && result.state) {
-				_update((s) => ({
-					...s,
-					addAccountOAuthUrl: result.oauth_url ?? null,
-					addAccountState: result.state ?? null,
-					addAccountCode: ''
-				}));
-				window.open(result.oauth_url, '_blank', 'width=600,height=700');
-			} else {
-				_update((s) => ({
-					...s,
-					accountsError: result.error || result.message || 'Failed to start sign-in'
-				}));
-			}
-		} catch (e) {
-			_update((s) => ({ ...s, accountsError: detailOf(e, 'Failed to start sign-in') }));
-		} finally {
-			_update((s) => ({ ...s, addAccountLoading: false }));
-		}
-	},
-
-	async completeAddAccount() {
-		if (!_state.addAccountCode.trim() || !_state.addAccountState) return;
-		_update((s) => ({ ...s, addAccountCompleting: true, accountsError: '' }));
-		try {
-			await completeAddClaudeAccount(
-				_state.addAccountCode.trim(),
-				_state.addAccountState,
-				_state.addAccountMakeActive
-			);
-			// Reset the add-account flow.
-			const wasMadeActive = _state.addAccountMakeActive;
-			_update((s) => ({
-				...s,
-				addAccountOAuthUrl: null,
-				addAccountState: null,
-				addAccountCode: '',
-				addAccountMakeActive: false
-			}));
-			await providers.loadClaudeAccounts();
-			// Multiple Claude accounts are no longer allowed: a new sign-in replaces the
-			// session, so prune every non-active sibling left behind by the add. The
-			// active account is always kept; each delete is best-effort (a failure just
-			// leaves that stale row, which the UI's single-account model tolerates).
-			let pruned = false;
-			for (const acc of _state.claudeAccounts) {
-				if (acc.is_active) continue;
-				try {
-					await deleteClaudeAccount(acc.id);
-					pruned = true;
-				} catch {
-					// Swallow — best-effort prune; a leftover sibling is non-fatal.
-				}
-			}
-			if (pruned) await providers.loadClaudeAccounts();
-			// If the new account became active, the app's live credentials changed —
-			// refresh the token-valid stores.
-			if (wasMadeActive) await auth.checkAuth();
-		} catch (e) {
-			// 409 = encryption locked while completing.
-			_update((s) => ({ ...s, accountsError: detailOf(e, 'Failed to add account') }));
-		} finally {
-			_update((s) => ({ ...s, addAccountCompleting: false }));
-		}
-	},
-
-	cancelAddAccount() {
-		_update((s) => ({
-			...s,
-			addAccountOAuthUrl: null,
-			addAccountState: null,
-			addAccountCode: '',
-			addAccountMakeActive: false,
-			accountsError: ''
-		}));
-	},
-
-	/**
-	 * Switch the active account, then re-check auth: the credentials the app runs
-	 * with just changed, so the token-valid stores must be refreshed.
-	 */
-	async activateAccount(id: string) {
-		_update((s) => ({ ...s, switchingAccountId: id, accountsError: '' }));
-		// Dim the usage indicator immediately — the shown numbers belong to the
-		// outgoing account until the backend broadcasts the new one's snapshot.
-		rateLimit.markStale();
-		try {
-			await activateClaudeAccount(id);
-			await providers.loadClaudeAccounts();
-			await auth.checkAuth();
-		} catch (e) {
-			// 409 = encryption locked, 404 = unknown id.
-			_update((s) => ({ ...s, accountsError: detailOf(e, 'Failed to switch account') }));
-		} finally {
-			_update((s) => ({ ...s, switchingAccountId: null }));
-		}
-	},
-
-	/**
-	 * Delete surfaces the server's 409 "switch first" message verbatim so the user
-	 * knows why an active-account delete was refused. Deleting the active account
-	 * changed the app's credentials → re-check auth after a successful delete.
-	 */
-	async deleteAccount(id: string) {
-		_update((s) => ({ ...s, accountsError: '' }));
-		const wasActive = id === _state.activeAccountId;
-		try {
-			await deleteClaudeAccount(id);
-			await providers.loadClaudeAccounts();
-			if (wasActive) await auth.checkAuth();
-		} catch (e) {
-			_update((s) => ({ ...s, accountsError: detailOf(e, 'Failed to delete account') }));
-		}
-	},
-
-	/**
-	 * Fully disconnect the Claude subscription: delete EVERY saved account. The
-	 * backend refuses to delete the active account while inactive siblings remain
-	 * (409 "switch first"), so every inactive account is deleted first and the
-	 * active one last — deleting the sole active account logs the Claude auth out.
-	 * Afterwards refresh the account list and re-check auth (the live credentials
-	 * are gone). A failure surfaces via `accountsError`.
-	 */
-	async disconnectClaude() {
-		_update((s) => ({ ...s, accountsError: '' }));
-		try {
-			const accounts = _state.claudeAccounts;
-			const inactive = accounts.filter((a) => !a.is_active);
-			const active = accounts.filter((a) => a.is_active);
-			// Inactive first, active last (delete-order contract above).
-			for (const acc of [...inactive, ...active]) {
-				await deleteClaudeAccount(acc.id);
-			}
-			await providers.loadClaudeAccounts();
-			await auth.checkAuth();
-		} catch (e) {
-			_update((s) => ({ ...s, accountsError: detailOf(e, 'Failed to disconnect Claude') }));
-		}
-	},
-
-	// ------------------------------------------------------------------------
 	// model_providers registry (lifted from ConnectionsSection:454-609)
 	// ------------------------------------------------------------------------
 
 	/**
-	 * Load providers + Claude accounts exactly once per session (L1/PR6). Safe to
+	 * Load providers and integrations exactly once per session (L1/PR6). Safe to
 	 * call from every `ProvidersSection` mount — only the first call fetches; later
 	 * mounts read the already-populated store. Mutations refresh independently, so
 	 * the cache never goes stale after a create/toggle/delete/switch.
@@ -469,7 +129,6 @@ export const providers = {
 		_initialLoadStarted = true;
 		await Promise.all([
 			providers.loadProviders(),
-			providers.loadClaudeAccounts(),
 			providers.loadIntegrations()
 		]);
 	},
@@ -486,7 +145,6 @@ export const providers = {
 		_initialLoadStarted = true;
 		await Promise.all([
 			providers.loadProviders(true),
-			providers.loadClaudeAccounts(true),
 			providers.loadIntegrations()
 		]);
 	},
@@ -646,5 +304,4 @@ export const providers = {
 // Derived stores
 // ============================================================================
 
-export const claudeAccountsList = createDerived(() => _state.claudeAccounts);
 export const modelProvidersList = createDerived(() => _state.providers);

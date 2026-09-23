@@ -37,6 +37,14 @@ export interface ClaudeCliStatus {
 	/** Unix seconds. */
 	checked_at: number;
 	login: ClaudeCliLoginHint;
+	/** One-time upgrade notice: sign out and in again with the CLI, or null. */
+	relogin_notice?: ClaudeReloginNotice | null;
+}
+
+export interface ClaudeReloginNotice {
+	message: string;
+	logout_command: string;
+	login_command: string;
 }
 
 export interface ClaudeCliLoginState {
@@ -81,6 +89,11 @@ export function cancelClaudeCliLogin(): Promise<ClaudeCliLoginState> {
 /** Sign the CLI out with its own `claude auth logout`. */
 export function logoutClaudeCli(): Promise<{ success: boolean; message?: string; error?: string }> {
 	return api.post('/auth/claude/logout', {});
+}
+
+/** Hide the one-time "sign in to the CLI again" notice on this worker. */
+export function dismissClaudeReloginNotice(): Promise<{ success: boolean }> {
+	return api.post('/auth/claude/relogin-notice/dismiss', {});
 }
 
 /** Human name for the plan code the CLI prints, when it prints one. */

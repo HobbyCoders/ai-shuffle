@@ -28,6 +28,7 @@
 		type ClaudeCliStatus
 	} from '$lib/api/claude-cli';
 	import { platform } from '$lib/stores/platform.svelte';
+	import { auth } from '$lib/stores/auth.svelte';
 
 	interface Props {
 		/** Only the install owner may run the sign-in terminal. */
@@ -73,7 +74,11 @@
 		try {
 			const next = await getClaudeCliStatus(refresh);
 			if (disposed) return;
+			const changed = status !== null && (status.signed_in !== next.signed_in
+				|| !!status.relogin_notice !== !!next.relogin_notice);
 			status = next;
+			// The app-wide gates and the upgrade notice read /auth/status.
+			if (changed) auth.checkAuth().catch(() => {});
 			loadError = '';
 			onStatus?.(next);
 		} catch (e) {
@@ -234,6 +239,9 @@
 		{#if status.error}
 			<p class="hint pad" role="status">{status.error}</p>
 		{/if}
+		{#if status.relogin_notice}
+			<p class="msg warn pad" role="status" data-testid="claude-cli-relogin">{status.relogin_notice.message}</p>
+		{/if}
 		{#if status.signed_in}
 			<p class="hint pad">Agents in subscription mode run on this account's plan. To switch accounts, sign out (the CLI's <code>{status.login.logout_command}</code>), then sign in again.</p>
 		{/if}
@@ -342,6 +350,7 @@
 	.msg { margin: 0; font-size: 12.5px; }
 	.msg.ok { color: var(--success, #16a34a); }
 	.msg.err { color: var(--destructive); }
+	.msg.warn { color: var(--warning, #d97706); }
 	.linkish { background: none; border: none; padding: 0; color: var(--primary); cursor: pointer; font-size: inherit; text-decoration: underline; }
 	.cli-panel button, .cli-panel a.link { display: inline-flex; align-items: center; gap: 6px; }
 	.cli-panel .linkish { display: inline; }

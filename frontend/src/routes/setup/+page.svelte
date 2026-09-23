@@ -135,8 +135,8 @@
 
 	// ── Providers & GitHub ──────────────────────────────────────────────────
 	let addProviderOpen = $state(false);
-	// Native Claude credentials and media keys live outside model_providers.
-	const hasClaude = $derived($claudeAuthenticated || providers.current.claudeAccounts.length > 0);
+	// The Claude Code CLI's own login and media keys live outside model_providers.
+	const hasClaude = $derived($claudeAuthenticated);
 	const hasProviders = $derived(hasClaude || providers.current.anthropicKeySet || providers.current.falKeySet || providers.current.providers.length > 0);
 
 	function closeAddProvider() {
@@ -144,7 +144,6 @@
 		addProviderStep = undefined;
 		auth.checkAuth().catch(() => {});
 		providers.refreshProviders().catch(() => {});
-		providers.loadClaudeAccounts(true).catch(() => {});
 		providers.loadIntegrations().catch(() => {});
 	}
 
@@ -372,7 +371,7 @@
 								{#if hasClaude}
 									<div class="flex items-center justify-between gap-2 bg-muted/30 border border-border rounded-lg px-3 py-2">
 										<span class="text-sm text-foreground truncate">Claude Code</span>
-										<span class="text-xs text-muted-foreground shrink-0">Subscription added</span>
+										<span class="text-xs text-muted-foreground shrink-0">CLI signed in</span>
 									</div>
 								{/if}
 								{#if providers.current.anthropicKeySet}
