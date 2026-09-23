@@ -189,3 +189,25 @@ test('metadata failures retry and a current result clears stale availability', a
  await updater.check(); assert.equal(updater.current.phase, 'available'); assert.equal(updater.current.error, null);
  await updater.check(); assert.equal(updater.current.phase, 'idle'); assert.equal(updater.current.version, null);
 });
+
+test('D22: installed apps check once shortly after launch and then daily, with no consent prompt', async () => {
+ const delays = []; const fns = [];
+ const module = { exports: {} };
+ vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
+  exports: module.exports, module, require: id => id === 'electron' ? { app: {} } : path, process: { env: {} },
+  setTimeout: (fn, ms) => { delays.push(['timeout', ms]); fns.push(fn); return fns.length; }, clearTimeout() {},
+  setInterval: (fn, ms) => { delays.push(['interval', ms]); fns.push(fn); return fns.length; }, clearInterval() {}, Date
+ });
+ const updater = new module.exports.Updater();
+ let checks = 0;
+ updater.useApplications(source({ check: async () => { checks++; return { kind: 'current' }; } }));
+ updater.start();
+ assert.deepEqual(delays, [['timeout', 15_000], ['interval', 24 * 60 * 60 * 1000]]);
+ for (const fn of fns) { fn(); await new Promise(setImmediate); }
+ assert.equal(checks, 2);
+ // A preview build has no update checks at all.
+ const preview = new module.exports.Updater(false);
+ preview.useApplications(source());
+ delays.length = 0; preview.start();
+ assert.deepEqual(delays, []);
+});
