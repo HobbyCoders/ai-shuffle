@@ -25,6 +25,7 @@ import { createWriteStream, existsSync, type WriteStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { isManagedConnection, type PostgresConfig } from './settings';
 import { writePrivateFile } from './private-file';
@@ -155,6 +156,14 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 	}
 	let profile: NodeJS.ProcessEnv = {};
 	if (opts.profileDir) {
+		// The Claude CLI is the user's own install and runs on the user's own
+		// `claude` login, so its config dir stays the host one: an inherited
+		// CLAUDE_CONFIG_DIR, else ~/.claude of the real home. Everything else
+		// (Fluid settings, app data, other CLIs) stays in the private profile.
+		const inheritedKey = (name: string) => Object.keys(base).find((k) => k.toUpperCase() === name);
+		const configKey = inheritedKey('CLAUDE_CONFIG_DIR');
+		const homeKey = inheritedKey(platform === 'win32' ? 'USERPROFILE' : 'HOME');
+		const userClaudeDir = (configKey && base[configKey]) || path.join((homeKey && base[homeKey]) || os.homedir(), '.claude');
 		// Case-insensitive removal matters on Windows: do not leave HOME/home
 		// aliases or inherited config overrides that point at the stable profile.
 		for (const key of Object.keys(base)) {
@@ -167,7 +176,7 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 			XDG_CONFIG_HOME: path.join(opts.profileDir, '.config'),
 			XDG_DATA_HOME: path.join(opts.profileDir, '.local', 'share'),
 			XDG_CACHE_HOME: path.join(opts.profileDir, '.cache'),
-			CLAUDE_CONFIG_DIR: path.join(opts.profileDir, '.claude'),
+			CLAUDE_CONFIG_DIR: userClaudeDir,
 			CODEX_HOME: path.join(opts.profileDir, '.codex'),
 			GH_CONFIG_DIR: path.join(opts.profileDir, '.config', 'gh')
 		};
