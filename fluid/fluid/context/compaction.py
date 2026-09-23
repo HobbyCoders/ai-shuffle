@@ -186,6 +186,12 @@ class Promotion:
     after_tokens: int = 0
     decision_reason: str = ""
     first_changed_message: int | None = None
+    # What the window-protection decision was sized on: "measured" (the last
+    # provider-billed prompt carried forward) or "estimate" (chars/4, used only
+    # when no measured call is on the path). "" for provider-overflow rungs.
+    token_basis: str = ""
+    # The measured next-prompt size the decision used; 0 with an estimate.
+    measured_prompt_tokens: int = 0
 
 
 def describe_promotions(
@@ -605,17 +611,38 @@ class Compactor:
         context_window: int | None = None,
         output_reserve_tokens: int = 0,
         turn_boundary: bool = True,
+        measured_prompt_tokens: int | None = None,
     ) -> tuple[list[Message], list[Promotion]]:
-        """Commit an optional batch only when its complete view saves enough.
+        """Commit a batch only when its complete view saves enough.
 
         The 5% floor amortizes prefix rewrites; it is not a savings estimate.
-        Window protection bypasses both that floor and the retry watermark.
+        It applies to window protection too: a mandatory pass that cannot free
+        5% is a cache break for almost nothing, and a prompt that really is
+        too large is caught by the provider's overflow error and the unguarded
+        ``escalate`` the engine runs then. Window protection bypasses only the
+        retry watermark.
+
+        ``measured_prompt_tokens`` is the last billed prompt carried forward to
+        this request. chars/4 runs about 12% high at the median and up to 49%
+        high, which fired window protection at 55-64% real occupancy, so when
+        a measurement exists the window decision is sized on it: the estimate
+        is scaled by ``clamp(measured / estimate, 0.6, 1.0)``. The factor never
+        exceeds 1, so a stale measurement falls back to the estimate and can
+        never inflate it.
         """
         before_view = self.view(nodes)
         before = overhead_tokens + estimate_tokens_of_messages(before_view)
-        mandatory = context_window is not None and before >= max(
-            1, context_window - self.config.headroom_tokens - output_reserve_tokens
+        limit = (
+            max(1, context_window - self.config.headroom_tokens - output_reserve_tokens)
+            if context_window is not None
+            else None
         )
+        if measured_prompt_tokens is not None and measured_prompt_tokens > 0 and before > 0:
+            basis, measured = "measured", measured_prompt_tokens
+            scale = min(1.0, max(0.6, measured / before))
+        else:
+            basis, measured, scale = "estimate", 0, 1.0
+        mandatory = limit is not None and before * scale >= limit
         minimum = max(1, int(before * 0.05))
         eligible_chars = _chars_of(nodes, self.trimmer._eligible(nodes))
         if self.config.enabled:
@@ -623,44 +650,50 @@ class Compactor:
                 block_chars(b) for span in self._eligible_spans(nodes)
                 for node in span for b in node.message.content
             )
+        basis_fields = {"token_basis": basis, "measured_prompt_tokens": measured}
+        decision_fields = {"window_protection": mandatory, **basis_fields}
         retry = self._optional_retry
         if not mandatory and retry is not None and not turn_boundary:
             last_chars, growth = retry
             if eligible_chars < last_chars + growth:
                 self.last_decision = {"reason": "awaiting_reclaimable_growth",
-                                      "before_tokens": before, "after_tokens": before}
+                                      "before_tokens": before, "after_tokens": before,
+                                      **decision_fields}
                 return before_view, []
         restore = self._tier_snapshot()
         rendered, promotions = self._apply_candidate(
             nodes, overhead_tokens=overhead_tokens, context_window=context_window,
             output_reserve_tokens=output_reserve_tokens, turn_boundary=turn_boundary,
         )
-        if mandatory and self._estimate(nodes, overhead_tokens) >= max(
-            1, context_window - self.config.headroom_tokens - output_reserve_tokens
-        ):
+        if mandatory and self._estimate(nodes, overhead_tokens) * scale >= limit:
+            # Recency-guarded rungs only. The unguarded ones trim and digest
+            # the in-flight turn, including its newest result and any steer
+            # delivered with it; they are for a prompt the provider rejected.
             promotions.extend(self.escalate(
                 nodes, overhead_tokens=overhead_tokens, context_window=context_window,
-                output_reserve_tokens=output_reserve_tokens,
+                output_reserve_tokens=output_reserve_tokens, guarded_only=True,
             ))
             rendered = self.view(nodes)
         after = overhead_tokens + estimate_tokens_of_messages(rendered)
         reason = "window_protection" if mandatory else "meaningful_reclaim"
-        if before - after < (1 if mandatory else minimum):
+        if before - after < minimum:
             restore()
             self._optional_retry = (eligible_chars, minimum * 4)
             self.last_decision = {"reason": "insufficient_reclaim",
                                   "before_tokens": before, "after_tokens": before,
-                                  "candidate_after_tokens": after}
+                                  "candidate_after_tokens": after, **decision_fields}
             return before_view, []
         self._optional_retry = None
         first_changed = next((i for i, (a, b) in enumerate(zip(before_view, rendered))
                               if a != b), min(len(before_view), len(rendered)))
         self.last_decision = {"reason": reason, "before_tokens": before,
                               "after_tokens": after,
-                              "first_changed_message": first_changed}
+                              "first_changed_message": first_changed,
+                              **decision_fields}
         return rendered, [replace(p, before_tokens=before, after_tokens=after,
                                   decision_reason=reason,
-                                  first_changed_message=first_changed)
+                                  first_changed_message=first_changed,
+                                  **basis_fields)
                           for p in promotions]
 
     def _apply_candidate(
@@ -889,6 +922,7 @@ class Compactor:
         overhead_tokens: int = 0,
         context_window: int | None = None,
         output_reserve_tokens: int = 0,
+        guarded_only: bool = False,
     ) -> list[Promotion]:
         """Overflow recovery: the provider rejected the prompt, so reclaim.
 
@@ -904,6 +938,11 @@ class Compactor:
         With an unknown window one rung runs per call (the engine retries
         after each). With a known window rungs keep running until the
         estimate is under the normal trigger, so one retry usually suffices.
+
+        ``guarded_only`` drops the two unguarded rungs. ``apply`` sets it for
+        window protection, which acts on a size check before any request is
+        sent; only a prompt the provider actually rejected may reach into the
+        in-flight turn.
         """
         if not self.active:
             return []
@@ -975,6 +1014,8 @@ class Compactor:
             if trim_only
             else [images, trim(None), digest(None), fold, trim(0), digest(0)]
         )
+        if guarded_only:
+            rungs = rungs[:2] if trim_only else rungs[:4]
         promotions: list[Promotion] = []
         for rung in rungs:
             before_view = self.view(nodes)

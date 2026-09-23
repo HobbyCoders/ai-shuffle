@@ -302,6 +302,11 @@ class ContextCompaction(Event):
     after_tokens: int = 0
     decision_reason: str = ""
     first_changed_message: int | None = None
+    # What the window decision was sized on: "measured" (the last billed
+    # prompt carried forward) or "estimate" (chars/4, only when no measured
+    # call is on the path). "" on provider-overflow rungs and older events.
+    token_basis: str = ""
+    measured_prompt_tokens: int = 0
 
 
 # ─── Accounting / signals ────────────────────────────────────────────────────

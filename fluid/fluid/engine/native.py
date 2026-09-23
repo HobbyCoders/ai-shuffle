@@ -2489,6 +2489,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
             decision_reason=promo.decision_reason,
             first_changed_message=promo.first_changed_message,
+            token_basis=promo.token_basis,
+            measured_prompt_tokens=promo.measured_prompt_tokens,
         ))
 
     def _context_overhead_tokens(self) -> int:
@@ -2569,6 +2571,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # calls of one turn the provider is holding a prefix it built
                 # seconds ago; rewriting it there re-bills the whole prompt.
                 turn_boundary=num_calls == 0,
+                # Window protection sizes the prompt on what the provider
+                # billed last call, not on the chars/4 estimate alone.
+                measured_prompt_tokens=await self._measured_next_prompt(sid, nodes),
             )
             history = repair_dangling_tool_calls(rendered)
             if self._encrypted_reasoning_poisoned:
