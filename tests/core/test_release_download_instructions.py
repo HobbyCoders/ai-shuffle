@@ -8,6 +8,7 @@ import subprocess
 
 from fluid.tools.shell import resolve_shell
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def release_body():
     workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
     steps = workflow["jobs"]["create-release"]["steps"]
-    return next(step["with"]["body"] for step in steps if "with" in step)
+    return next(step["with"]["body"] for step in steps if "body" in step.get("with", {}))
 
 
 def test_release_downloads_include_desktop_mobile_and_docker():
@@ -26,20 +27,21 @@ def test_release_downloads_include_desktop_mobile_and_docker():
     assert "| **Docker** |" in body
     assert "https://hobbycoders.com/desktop" in body
     assert "run the installer" in body
-    assert "latest code from main" in body
+    assert "newest stable release" in body and "latest code from main" not in body
     assert "Start AI Shuffle.cmd" not in body
     assert "https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle" in body
     assert "releases/download/" not in body
     assert "Signed Android APK" not in body
     assert "Desktop installers are opt-in" in body
-    assert "https://github.com/${{ github.repository }}/pkgs/container/ai-shuffle" in body
+    assert "https://github.com/orgs/HobbyCoders/packages/container/package/ai-shuffle-server" in body
+    assert "docs/install" in body
 
 
 def test_docker_commands_pin_release_and_preserve_runtime_data():
     body = release_body().replace("${{ env.RELEASE_VERSION }}", "0.8.12")
     script = re.search(r"```bash\n(.*?)```", body, re.DOTALL).group(1)
     commands = script.replace("\\\n", "").strip().splitlines()
-    image = "ghcr.io/hobbycoders/ai-shuffle:0.8.12"
+    image = "ghcr.io/hobbycoders/ai-shuffle-server:0.8.12"
     assert shlex.split(commands[0]) == ["docker", "pull", image]
     run = shlex.split(commands[1])
     assert run[:3] == ["docker", "run", "-d"]
@@ -124,6 +126,64 @@ def test_docker_is_called_once_per_release_and_remains_manually_available():
     assert set(workflow["on"]) == {"workflow_dispatch", "workflow_call"}
     assert workflow["on"]["workflow_call"]["inputs"]["release_tag"]["required"] == "true"
     assert workflow["on"]["workflow_dispatch"]["inputs"]["no_cache"]["default"] == "false"
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["promote_latest"]["default"] == "false"
+
+
+def meta_tags():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker-publish.yml").read_text())
+    steps = {step.get("id"): step for step in workflow["jobs"]["build"]["steps"]}
+    return [line.strip() for line in steps["meta"]["with"]["tags"].splitlines()
+            if line.strip() and not line.strip().startswith("#")]
+
+
+def test_only_a_promoted_release_moves_latest_and_main_builds_are_edge():
+    tags = meta_tags()
+    latest = next(tag for tag in tags if tag.startswith("type=raw,value=latest"))
+    assert "inputs.release_tag != ''" in latest and "inputs.promote_latest" in latest
+    assert "!contains(inputs.release_tag, '-')" in latest
+    assert "is_default_branch" not in "".join(tags)
+    edge = next(tag for tag in tags if tag.startswith("type=raw,value=edge"))
+    assert "inputs.release_tag == ''" in edge and "refs/heads/main" in edge
+    for pattern in ("{{major}}.{{minor}}", "{{major}},"):
+        tag = next(tag for tag in tags if pattern in tag)
+        assert "inputs.promote_latest" in tag
+    release = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+    assert release["jobs"]["docker"]["with"]["promote_latest"] == (
+        "${{ needs.create-release.outputs.promote_latest == 'true' }}")
+
+
+def test_images_go_to_the_private_package_only():
+    for name in ("docker-publish.yml", "build-branch.yml"):
+        workflow = yaml.safe_load((ROOT / ".github/workflows" / name).read_text())
+        assert workflow["env"]["IMAGE_NAME"] == "${{ github.repository_owner }}/ai-shuffle-server"
+    assert "ghcr.io/hobbycoders/ai-shuffle:" not in release_body()
+
+
+def test_promote_step_moves_latest_only_for_the_newest_final_release(tmp_path):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+    steps = workflow["jobs"]["create-release"]["steps"]
+    script = next(step["run"] for step in steps if step.get("id") == "promote")
+    bash = shutil.which("bash")
+    if os.name == "nt" or bash is None:
+        pytest.skip("needs POSIX bash and git")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x")
+    for tag in ("v0.8.18", "v0.9.0", "v0.9.1-rc.1"):
+        git("tag", tag)
+    output = tmp_path / "output"
+    for version, expected in (("v0.9.1", "true"), ("v0.9.0", "true"), ("v0.8.19", "false"),
+                              ("v0.9.2-rc.1", "false"), ("v1.0.0", "true")):
+        output.write_text("")
+        result = subprocess.run([bash, "-e", "-c", script], cwd=repo, capture_output=True, text=True, timeout=15,
+                                env={**env, "VERSION": version, "GITHUB_OUTPUT": str(output)})
+        assert result.returncode == 0, result.stderr
+        assert output.read_text() == f"promote_latest={expected}\n", version
 
 
 def test_installation_pages_direct_android_users_to_play():

@@ -27,7 +27,8 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Lab images go to the private package too (see docker-publish.yml).
+  IMAGE_NAME: ${{ github.repository_owner }}/ai-shuffle-server
 
 jobs:
   build:
