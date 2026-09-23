@@ -203,7 +203,11 @@ def _submit_blocking(
         try:
             from app.core import wakeup_service
 
-            wakeup_service.cancel_session_wakeups(session_id)
+            # Held peer messages are not a wake the agent armed; their row is
+            # the only copy of the messages, so the user's turn keeps it.
+            wakeup_service.cancel_session_wakeups(
+                session_id, exclude_source=wakeup_service.HELD_PEER_SOURCE,
+            )
         except Exception:  # noqa: BLE001 — never let this break an enqueue.
             logger.exception(
                 "wakeup supersede failed for session %s", session_id

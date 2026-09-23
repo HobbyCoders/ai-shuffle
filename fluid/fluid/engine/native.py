@@ -1404,6 +1404,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         assert self._session is not None, "no session yet — submit a turn first"
         return self._session.session_id
 
+    @property
+    def turn_running(self) -> bool:
+        """True while a turn task is live. A host that owns wake scheduling
+        reads this to route a peer message: into the running turn, or to its
+        own queue when the receiver is idle."""
+        return self._turn_task is not None and not self._turn_task.done()
+
     # ─── ExecutionEngine interface ───────────────────────────────────────
 
     async def submit(self, op: Op) -> None:
@@ -1456,10 +1463,15 @@ class NativeLoop(BackgroundLifecycleMixin):
                     raise RuntimeError("receiver is finishing its turn; retry the peer message")
                 self._pending_steers.append(replace(op, text=text))
             else:
-                if not op.wake:
-                    raise RuntimeError("no turn is running; peer message was not delivered")
+                # Parked comes first: a parent waiting on background work holds
+                # an ordinary message for its next wake whether or not the host
+                # owns wakes. Checking ``wake`` first sent every host-owned
+                # (wake=False) message to a parked parent back to the host,
+                # which woke the parent for it.
                 if not op.urgent and await self._queue_if_parked(replace(op, text=text)):
                     return
+                if not op.wake:
+                    raise RuntimeError("no turn is running; peer message was not delivered")
                 from fluid.context.peer import format_peer_message
 
                 self._interrupted.clear()

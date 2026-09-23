@@ -795,7 +795,8 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
 
     A dead-lease live turn is resolved by its ``source`` and ``state``:
 
-    * ``running`` ``user`` / ``queue`` / ``agent_message`` turns are **re-queued**
+    * ``running`` ``user`` / ``queue`` / ``agent_message`` / ``promotion`` turns
+      are **re-queued**
       at their original position so accepted messages survive a runner crash;
     * ``interrupting`` / ``draining`` turns are **aborted** regardless of
       source: the user already asked this turn to stop, so retrying it would
@@ -818,7 +819,7 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
         dead = [t for t in _rows(cursor.fetchall()) if t["id"] not in skip]
         for turn in dead:
             if turn["state"] == "running" and turn["source"] in (
-                "user", "queue", "agent_message",
+                "user", "queue", "agent_message", "promotion",
             ):
                 cursor.execute(
                     "UPDATE turns SET state='queued', run_id=NULL, instance_id=NULL, "

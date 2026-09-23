@@ -639,6 +639,7 @@ class CliHost:
             )
         message = AgentMessage(
             text=str(input.get("message") or ""), sender=self.identity,
+            urgent=bool(input.get("urgent")),
         )
         if target.engine is None:
             assert target.worker is not None  # _resolve_target's invariant

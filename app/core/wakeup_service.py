@@ -86,6 +86,12 @@ _retry_attempts: "dict[str, int]" = {}
 #: ``system.note`` subtype for the "this wake never ran" line.
 DROPPED_NOTE_SUBTYPE = "wakeup_dropped"
 
+#: ``pending_wakeups.source`` for peer messages held while their receiver was
+#: parked (``turn_scheduler``). The row's prompt is the held messages; firing
+#: it promotes them to a ``source="promotion"`` turn. A user's message does not
+#: supersede it, because the row is the only copy of those messages.
+HELD_PEER_SOURCE = "held_peer_promotion"
+
 # Live references to in-flight wake timer tasks, keyed by wakeup id (asyncio
 # keeps only weak refs, and the key is what lets a specific wake be disarmed
 # when its row is deleted out from under it).
@@ -354,14 +360,23 @@ async def _fire(row: Dict[str, Any]) -> None:
     from app.core import turn_manager
 
     try:
-        turn_id = await turn_manager.submit_async(
-            session_id,
-            "wakeup",
-            prompt=row.get("prompt"),
-            profile_id=profile_id,
-            project_id=row.get("project_id"),
-            overrides=overrides,
-        )
+        if row.get("source") == HELD_PEER_SOURCE:
+            # Held peer messages run as a context wake (the parked turn's
+            # overrides and attribution), not a bare prompt on the profile.
+            from app.core import turn_scheduler
+
+            turn_id = await turn_scheduler.promote_held_peer_messages(
+                session_id, row.get("prompt") or "",
+            )
+        else:
+            turn_id = await turn_manager.submit_async(
+                session_id,
+                "wakeup",
+                prompt=row.get("prompt"),
+                profile_id=profile_id,
+                project_id=row.get("project_id"),
+                overrides=overrides,
+            )
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 — a raise must not lose the wake.
@@ -422,11 +437,15 @@ def _disarm(wakeup_ids: "list[str]") -> None:
 
 
 def cancel_session_wakeups(
-    session_id: str, source: Optional[str] = None
+    session_id: str,
+    source: Optional[str] = None,
+    *,
+    exclude_source: Optional[str] = None,
 ) -> int:
     """Delete a session's pending wakeups and disarm their local timers.
 
-    Returns the number of rows removed. Synchronous on purpose: the callers are
+    Returns the number of rows removed. ``exclude_source`` keeps that
+    source's rows when ``source`` is None. Synchronous on purpose: the callers are
     sync (``turn_manager.submit``, the session-delete path). Use
     :func:`cancel_session_wakeups_async` from async code so the DB hit lands on
     a worker thread.
@@ -436,7 +455,10 @@ def cancel_session_wakeups(
     no-ops.
     """
     try:
-        ids = wakeups_db.pop_session_wakeups(session_id, source)
+        ids = wakeups_db.pop_session_wakeups(
+            session_id, source,
+            **({"exclude_source": exclude_source} if exclude_source else {}),
+        )
     except Exception:  # noqa: BLE001 — cancelling must never break the caller.
         logger.exception(
             "wakeup cancel failed for session %s (source=%s)", session_id, source
@@ -471,6 +493,14 @@ async def cancel_session_wakeups_async(
             len(ids), session_id, source or "*",
         )
     return len(ids)
+
+
+async def take_session_wakeups(session_id: str, source: str) -> List[Dict[str, Any]]:
+    """Delete a session's pending wakeups of ``source``, disarm their timers,
+    and return the rows. A row a timer already claimed is not returned."""
+    rows = await asyncio.to_thread(wakeups_db.take_session_wakeups, session_id, source)
+    _disarm([str(row["id"]) for row in rows if row.get("id")])
+    return rows
 
 
 def _arm(row: Dict[str, Any], delay_seconds: float) -> None:
@@ -508,6 +538,16 @@ def _arm(row: Dict[str, Any], delay_seconds: float) -> None:
             _timers.pop(_id, None)
 
     task.add_done_callback(_forget)
+
+
+def arm_persisted(row: Dict[str, Any]) -> None:
+    """Arm the timer for a row a sync caller already persisted, at its
+    ``fire_at``. Without a running loop the row waits for boot rehydrate."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _arm(row, max(0.0, float(row.get("fire_at") or 0.0) - _now_epoch()))
 
 
 async def schedule(

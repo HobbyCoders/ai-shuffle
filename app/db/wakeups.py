@@ -91,7 +91,10 @@ def claim_wakeup(wakeup_id: str) -> bool:
 
 
 def pop_session_wakeups(
-    session_id: str, source: Optional[str] = None
+    session_id: str,
+    source: Optional[str] = None,
+    *,
+    exclude_source: Optional[str] = None,
 ) -> List[str]:
     """Delete a session's pending wakeups and return the deleted row ids.
 
@@ -103,10 +106,24 @@ def pop_session_wakeups(
 
     A peer install's armed timer is unaffected and safe: its
     :func:`claim_wakeup` finds no row and no-ops.
+
+    ``exclude_source`` keeps that source's rows when ``source`` is None.
     """
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
+        if source is None and exclude_source is not None:
+            cursor.execute(
+                f"SELECT id FROM pending_wakeups WHERE session_id = {_ph} "
+                f"AND (source IS NULL OR source <> {_ph})",
+                (session_id, exclude_source),
+            )
+            ids = [r["id"] for r in rows_to_list(list(cursor.fetchall() or []))]
+            for wakeup_id in ids:
+                cursor.execute(
+                    f"DELETE FROM pending_wakeups WHERE id = {_ph}", (wakeup_id,)
+                )
+            return ids
         if source is None:
             cursor.execute(
                 f"SELECT id FROM pending_wakeups WHERE session_id = {_ph}",
@@ -133,6 +150,45 @@ def pop_session_wakeups(
                 (session_id, source),
             )
     return ids
+
+
+def take_session_wakeups(session_id: str, source: str) -> List[Dict[str, Any]]:
+    """Delete a session's pending wakeups of one ``source``; return the rows.
+
+    Oldest ``fire_at`` first. Each row is deleted by id, so a row inserted
+    after the read is left for the next caller, and a row a timer already
+    claimed is simply not returned.
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT * FROM pending_wakeups WHERE session_id = {_ph} "
+            f"AND source = {_ph} ORDER BY fire_at ASC",
+            (session_id, source),
+        )
+        rows = rows_to_list(list(cursor.fetchall() or []))
+        taken = []
+        for row in rows:
+            cursor.execute(
+                f"DELETE FROM pending_wakeups WHERE id = {_ph}", (row["id"],)
+            )
+            if cursor.rowcount and cursor.rowcount > 0:
+                taken.append(row)
+    return taken
+
+
+def get_session_wakeups(session_id: str, source: str) -> List[Dict[str, Any]]:
+    """A session's pending wakeups of one ``source``, oldest ``fire_at`` first."""
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT * FROM pending_wakeups WHERE session_id = {_ph} "
+            f"AND source = {_ph} ORDER BY fire_at ASC",
+            (session_id, source),
+        )
+        return rows_to_list(list(cursor.fetchall() or []))
 
 
 def delete_session_wakeups(session_id: str, source: Optional[str] = None) -> int:
