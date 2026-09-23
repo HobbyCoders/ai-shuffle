@@ -17,6 +17,7 @@ import path from 'node:path';
 import { registerIpc, type DesktopState, type PostgresStatus, type WorkerControl } from './ipc';
 import { installMenu } from './menu';
 import { installPermissionPolicy } from './navigation';
+import { installListenerHeader, type ListenerTarget } from './listener';
 import { PostgresSupervisor, resolvePostgresBinaries } from './postgres';
 import { plainCipher, SettingsStore, type Cipher } from './settings';
 import { desktopIdentity, stableDataDir } from './identity';
@@ -137,6 +138,13 @@ async function main(): Promise<void> {
 	const ses = session.fromPartition(PARTITION);
 	ses.setUserAgent(`${ses.getUserAgent()} AIShuffleDesktop/${app.getVersion()}`);
 	installPermissionPolicy(() => window.currentWorkerUrl);
+	// Every request this window makes to its own worker carries the listener token.
+	const listenerTarget = (): ListenerTarget | null => {
+		const token = supervisor?.listenerToken;
+		if (!supervisor || !token) return null;
+		try { return { origin: new URL(supervisor.state.url).origin, token }; } catch { return null; }
+	};
+	installListenerHeader(ses, listenerTarget);
 
 	const failedState = (error: string): WorkerState => ({
 		phase: 'failed',
@@ -186,6 +194,7 @@ async function main(): Promise<void> {
 		runtimeError,
 		bundledPostgresError: postgresError,
 		state: desktopState,
+		listener: listenerTarget,
 		tail: () => [...(postgres?.tail().map((line) => `[postgres] ${line}`) ?? []), ...(supervisor?.tail() ?? [])],
 		openStatus: () => window.showPage('status'),
 		restart: async () => {

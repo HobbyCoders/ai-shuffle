@@ -12,6 +12,7 @@ import { managedContext } from './managed-context';
 import { desktopSampler } from './diagnostics';
 import { MainWindow, TITLE_BAR_HEIGHT, type TitleBarTheme } from './window';
 import { type WorkerState, type WorkerSupervisor } from './worker';
+import { LISTENER_HEADER, type ListenerTarget } from './listener';
 
 /** The database behind the worker, as the status page shows it. */
 export interface PostgresStatus {
@@ -34,6 +35,8 @@ export interface WorkerControl {
 	/** Whether the bundled PostgreSQL can be used, and if not, why. */
 	bundledPostgresError: string | null;
 	state(): DesktopState;
+	/** The worker origin and listener token this window sends, or null. */
+	listener(): ListenerTarget | null;
 	/** The supervisor lines followed by the worker's, for the status page log. */
 	tail(): string[];
 	openStatus(): Promise<void>;
@@ -75,6 +78,21 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 			windowState: window.windowState(),
 			updateState: updater.current
 		};
+	});
+
+	// The worker's own top-level page only. The session already sends the
+	// token on every request to the worker; this is for anything that has to
+	// leave the session (for example a URL handed to another program).
+	const fromWorkerMainFrame = (event: IpcMainInvokeEvent) => {
+		if (!fromMainWindow(event) || event.senderFrame !== event.sender.mainFrame) return false;
+		try {
+			return !!window.currentWorkerUrl && new URL(event.senderFrame.url).origin === new URL(window.currentWorkerUrl).origin;
+		} catch { return false; }
+	};
+	handle('desktop:listener-token', fromWorkerMainFrame, () => {
+		const target = worker.listener();
+		if (!target || target.origin !== new URL(window.currentWorkerUrl!).origin) return null;
+		return { header: LISTENER_HEADER, token: target.token };
 	});
 
 	// Opt-in only, with the existing sender guard plus a main-frame origin check.

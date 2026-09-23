@@ -17,6 +17,7 @@ test('diagnostics IPC rejects foreign windows, subframes and origins before samp
     if (name === './managed-context') return {managedContext: () => null};
     if (name === './diagnostics') return {desktopSampler};
     if (name === './window') return {TITLE_BAR_HEIGHT: 52};
+    if (name === './listener') return require('../dist/main/listener.js');
     throw new Error(name);
   }});
   exports.registerIpc({window: {isOwnSender: id => id === 1, currentWorkerUrl: 'http://127.0.0.1:18340'}, updater: {}, worker: {}});

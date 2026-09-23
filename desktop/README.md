@@ -95,7 +95,14 @@ hosted public downloads or GitHub download permissions.
   user's worker, a Docker container or a manual run is reported as "in use by
   another AI Shuffle worker that this app did not start" and no second worker
   is spawned. An orphan of our own from a crashed run is stopped by pid and
-  replaced. Set `SHUFFLE_DESKTOP_ATTACH_ANY=1` to attach to any local worker
+  replaced. Every spawn also gets a fresh listener token
+  (`SHUFFLE_DESKTOP_LISTENER_TOKEN`, see `src/main/listener.ts`). The main
+  process adds it as `X-Shuffle-Desktop-Listener` to every request the window
+  makes to the worker's exact origin, WebSocket handshakes included, and strips
+  it from every other request; the worker's top-level page can also read it
+  over IPC. The worker uses it to tell this app from any other local process
+  that reaches its loopback port.
+  Set `SHUFFLE_DESKTOP_ATTACH_ANY=1` to attach to any local worker
   (developers running the worker by hand). Preview builds refuse occupied ports
   and never attach. Exit the old app before opening Preview. Quitting stops the
   worker and database that this app started. A worker that crashes after it was
