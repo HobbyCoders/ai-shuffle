@@ -6,7 +6,7 @@
  * whichever credentials exist.
  */
 
-import { api } from './client';
+import { api, type AgentGateStatus } from './client';
 
 export type ClaudeAuthMode = 'subscription' | 'api_key';
 
@@ -28,6 +28,8 @@ export interface ClaudeAuthSummary {
 	};
 	/** Whether a key is stored, and its last four characters. Never the key. */
 	api_key: { set: boolean; last4: string | null };
+	/** Whether new Claude agent runs can start on this worker, and why not. */
+	gate?: AgentGateStatus;
 }
 
 export function getClaudeAuth(refresh = false): Promise<ClaudeAuthSummary> {

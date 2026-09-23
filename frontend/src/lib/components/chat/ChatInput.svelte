@@ -27,7 +27,7 @@
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration } from '$lib/stores/session/session-init';
 	import { profiles } from '$lib/stores/app-data.svelte';
-	import { anyCredential } from '$lib/stores/auth.svelte';
+	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
 
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import { notify } from '$lib/stores/notifications';
@@ -980,6 +980,12 @@
 		<!-- Error Message (upload errors, voice recording errors) -->
 		{#if errorMessage}
 			<Banner severity="error" message={errorMessage} dismissible onDismiss={() => (errorMessage = '')} />
+		{/if}
+
+		<!-- Agents cannot start here yet (no license, or no credential for the
+		     chosen Claude Code mode): say what is missing instead of failing later. -->
+		{#if $agentGate && !$agentGate.ready && $agentGate.reason && (!$anyCredential || $agentGate.license_allows_runs === false)}
+			<Banner severity="warning" message={$agentGate.reason} />
 		{/if}
 
 		<!-- Worktree Error Message -->

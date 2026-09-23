@@ -48,6 +48,23 @@ def _no_real_claude_cli_probe(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _agent_credentials_ready_by_default(request, monkeypatch):
+    """Turn-start tests run on a worker that is set up to start agents.
+
+    The test machine has no signed-in CLI (see above) and no stored key, so the
+    credential gate would refuse every turn. Tests of the gate itself opt out
+    with ``@pytest.mark.real_agent_gate``.
+    """
+    if request.node.get_closest_marker("real_agent_gate"):
+        yield
+        return
+    from app.core import credential_gate
+
+    monkeypatch.setattr(credential_gate, "claude_credential_ready", lambda cli=None: (True, None))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _test_only_memory_store(monkeypatch):
     from app.core.provider.harness_adapter import HarnessAdapter, MemoryStore
     monkeypatch.setattr(HarnessAdapter, "_test_memory_store_factory", MemoryStore)

@@ -119,6 +119,9 @@
 			{/if}
 			AI Shuffle never switches modes on its own.
 		</p>
+		{#if summary.gate && summary.gate.license_allows_runs === false && summary.gate.reason}
+			<p class="msg warn pad" role="status" data-testid="claude-auth-license">{summary.gate.reason}</p>
+		{/if}
 		{#if !activeReady}
 			<p class="msg warn pad" role="status" data-testid="claude-auth-missing">
 				{#if summary.mode === 'subscription'}

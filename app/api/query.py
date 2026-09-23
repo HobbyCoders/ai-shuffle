@@ -105,12 +105,16 @@ async def _stream_query_with_failover(
     return
 
 
-def require_claude_auth():
-    """Dependency that requires Claude CLI authentication"""
-    if not auth_service.is_claude_authenticated():
+async def require_claude_auth():
+    """Dependency: this worker may start agent runs (license plus the active
+    Claude Code mode's credential; see ``app.core.credential_gate``)."""
+    from app.core import credential_gate
+
+    ready, reason = await credential_gate.agent_credentials_ready_async()
+    if not ready:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Claude CLI not authenticated. Please run 'claude login' in the container."
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=reason or "This worker is not set up to start agents.",
         )
 
 

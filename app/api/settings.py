@@ -404,11 +404,17 @@ class ClaudeAuthModeRequest(BaseModel):
 
 
 async def claude_auth_payload(refresh: bool = False) -> dict:
-    """The mode, the CLI account from the probe, and the key's last four."""
-    from app.core import claude_auth_mode, claude_cli_status
+    """The mode, the CLI account from the probe, the key's last four, and the
+    credential gate (whether new agent runs can start, and why not)."""
+    from app.core import claude_auth_mode, claude_cli_status, credential_gate
 
     status = await claude_cli_status.get_status_async(refresh)
-    return await run_sync(claude_auth_mode.summary, status.to_dict())
+    cli = status.to_dict()
+
+    def _load() -> dict:
+        return {**claude_auth_mode.summary(cli), "gate": credential_gate.status_payload(cli)}
+
+    return await run_sync(_load)
 
 
 @router.get("/claude-auth")
@@ -418,7 +424,8 @@ async def get_claude_auth(refresh: bool = False, token: str = Depends(require_au
     ``mode`` is ``subscription`` or ``api_key``; ``explicit`` is false only
     before startup has recorded the default. ``cli`` is what `claude auth
     status` reports (account shown only when signed in); ``api_key`` says
-    whether a key is stored and its last four characters.
+    whether a key is stored and its last four characters; ``gate`` is the
+    credential gate (``ready``, ``reason``, ``license_allows_runs``...).
     """
     return await claude_auth_payload(refresh)
 

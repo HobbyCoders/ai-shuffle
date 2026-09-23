@@ -195,6 +195,16 @@ async def _run_background_query_impl(
             await recorder.on_event({"type": "error", "message": str(e)})
         return
 
+    # Credential gate (see query_engine._stream_to_websocket_impl).
+    from app.core import credential_gate
+
+    _refusal = await credential_gate.refusal_for_options_async(options)
+    if _refusal:
+        logger.warning(f"[Background] Turn refused for session {session_id}: {_refusal}")
+        if recorder:
+            await recorder.on_event(credential_gate.refusal_event(_refusal))
+        return
+
     # --- Session Pool: Acquire or create SDK client ---
     pool = get_session_pool()
     existing_state = pool.get(session_id)

@@ -1,6 +1,8 @@
 """GET/PUT /settings/claude-auth: the explicit Claude Code auth mode."""
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from app.core import claude_auth_mode, claude_cli_status, encryption
 from app.db import database as db
 
@@ -66,3 +68,18 @@ def test_removing_the_key_keeps_api_key_mode(authenticated_client):
     claude_auth_mode.set_mode("api_key")
     assert authenticated_client.delete("/api/v1/settings/integrations/anthropic").status_code == 200
     assert claude_auth_mode.stored_mode() == "api_key"
+
+
+@pytest.mark.real_agent_gate
+def test_payload_carries_the_credential_gate(authenticated_client):
+    from app.core import credential_gate
+
+    claude_auth_mode.set_mode("api_key")
+    with _probe(True):
+        body = authenticated_client.get(ENDPOINT).json()
+    assert body["gate"]["ready"] is False
+    assert body["gate"]["reason"] == credential_gate.NO_KEY_MESSAGE
+    db.set_system_setting("anthropic_api_key", encryption.encrypt_value("sk-ant-api03-secret-ABCD"))
+    with _probe(False):
+        body = authenticated_client.get(ENDPOINT).json()
+    assert body["gate"]["ready"] is True and body["gate"]["reason"] is None

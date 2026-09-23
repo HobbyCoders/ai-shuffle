@@ -916,6 +916,15 @@ async def execute_query(
         hook_project_id=project_id,
     )
 
+    # Credential gate (see _stream_to_websocket_impl): refuse with the setup
+    # message rather than spawn a CLI that has no credential.
+    from app.core import credential_gate
+
+    _refusal = await credential_gate.refusal_for_options_async(options)
+    if _refusal:
+        logger.warning(f"[Query] Turn refused for session {session_id}: {_refusal}")
+        raise credential_gate.AgentSetupRequired(_refusal)
+
     # Resolve virtual @Notes/note-id references to actual content
     prompt = resolve_note_references(prompt)
 
@@ -1379,6 +1388,15 @@ async def stream_query(
         # error instead of an opaque subprocess spawn failure.
         logger.error(f"[Query] Cannot build session options for {session_id}: {e}")
         yield {"type": "error", "message": str(e)}
+        return
+
+    # Credential gate (see _stream_to_websocket_impl).
+    from app.core import credential_gate
+
+    _refusal = await credential_gate.refusal_for_options_async(options)
+    if _refusal:
+        logger.warning(f"[Query] Turn refused for session {session_id}: {_refusal}")
+        yield credential_gate.refusal_event(_refusal)
         return
 
     # Wire plugin + DB hooks (incl. blocking PreToolUse guards) into this
@@ -2144,6 +2162,18 @@ async def _stream_to_websocket_impl(
     _build_opts_elapsed = time.monotonic() - _build_opts_start
     if _build_opts_elapsed > 0.5:
         logger.warning(f"[WS] build_options_from_profile took {_build_opts_elapsed:.2f}s for session {session_id}")
+
+    # Credential gate: every turn starts here whatever its source (chat,
+    # connector, automation, wake-up, worker, a turn handed over from another
+    # device). No license or no credential for the active Claude Code mode
+    # refuses the turn with a setup message; nothing falls back.
+    from app.core import credential_gate
+
+    _refusal = await credential_gate.refusal_for_options_async(options)
+    if _refusal:
+        logger.warning(f"[WS] Turn refused for session {session_id}: {_refusal}")
+        yield credential_gate.refusal_event(_refusal)
+        return
 
     # Cross-install uploads (D8): the turn's blobs were lifted on the SENDING
     # install; write them into the now-resolved working dir and rewrite the

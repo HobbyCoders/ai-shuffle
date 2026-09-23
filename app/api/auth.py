@@ -52,13 +52,15 @@ def _has_provider_credential_safe() -> bool:
         return False
 
 
-def _has_stored_anthropic_key_safe() -> bool:
+def _agent_gate_safe(cli: dict) -> dict:
+    """``credential_gate.status_payload`` that never breaks ``/auth/status``."""
     try:
-        from app.core import claude_auth_mode
-        return claude_auth_mode.has_stored_api_key()
+        from app.core import credential_gate
+        return credential_gate.status_payload(cli)
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"Stored-key probe failed (ignored): {e}")
-        return False
+        logger.warning(f"Credential gate status failed (ignored): {e}")
+        return {"ready": False, "reason": None, "mode": None, "claude_credential_ready": False,
+                "license_allows_runs": True, "startup_state": None}
 
 
 def get_session_token(request: Request) -> Optional[str]:
@@ -382,9 +384,12 @@ async def get_auth_status(request: Request, response: Response = None):
     pref_identity = (await run_sync(principal_preference_identity, preference_principal)
                      if preference_principal else None)
 
+    agent_gate = await run_sync(_agent_gate_safe, cli)
+
     # Account details only go to a caller who is signed in to this worker.
     if not (is_admin_authenticated or is_paired_authenticated):
         cli = {"installed": cli["installed"], "signed_in": cli["signed_in"]}
+        agent_gate = {k: agent_gate[k] for k in ("ready", "mode", "claude_credential_ready")}
 
     return {
         "authenticated": is_admin_authenticated or is_paired_authenticated,
@@ -405,12 +410,13 @@ async def get_auth_status(request: Request, response: Response = None):
         # enabled model-provider row with a stored credential. The composer and
         # first-run setup gate on THIS, not on claude auth alone; Claude-CLI
         # auth remains required only for claude-subscription agents.
-        # The stored Anthropic API key counts as a credential too.
-        "has_any_credential": (
-            claude_authenticated
-            or await run_sync(_has_stored_anthropic_key_safe)
-            or _has_provider_credential_safe()
-        ),
+        # The active Claude Code mode's credential (CLI sign-in, or the stored
+        # API key in api_key mode) or a configured provider row.
+        "has_any_credential": bool(agent_gate["claude_credential_ready"]) or _has_provider_credential_safe(),
+        # The one credential gate (license plus the active mode's credential):
+        # when ``ready`` is false, new Claude agent runs are refused with
+        # ``reason``. See app/core/credential_gate.py.
+        "agent_gate": agent_gate,
         # Kept for older clients: the CLI reports one signed-in state.
         "claude_token_valid": claude_authenticated,
         "claude_cli": cli,

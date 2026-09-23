@@ -67,6 +67,8 @@ The message in the app says which of these it is.
 
 **No credential is set up.** AI Shuffle never falls back to another account. Follow [First run](/docs/getting-started/first-run) to sign in to the Claude Code CLI or add an API key.
 
+**API key mode, but no key is stored.** The mode you chose has no credential, so AI Shuffle waits instead of using the CLI's sign-in. Add your key in **Settings → Providers**, or switch **Claude Code mode** to subscription.
+
 **The Claude Code CLI is not signed in** (subscription mode):
 
 <!-- verify against wizard v2 -->

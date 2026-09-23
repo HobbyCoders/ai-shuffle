@@ -313,9 +313,22 @@ export interface AuthStatus {
 	 *  at least one enabled model provider with a stored credential (PA10).
 	 *  May be undefined on older backends — fall back to claude_authenticated. */
 	has_any_credential?: boolean;
+	/** The server's one credential gate (license plus the active Claude Code
+	 *  mode's credential). When `ready` is false, new Claude agent runs are
+	 *  refused with `reason` (reason only for callers signed in to the worker). */
+	agent_gate?: AgentGateStatus;
 	github_authenticated: boolean;
 	onboarding_complete: boolean;
 	username: string | null;
+}
+
+export interface AgentGateStatus {
+	ready: boolean;
+	mode: 'subscription' | 'api_key' | null;
+	claude_credential_ready: boolean;
+	reason?: string | null;
+	license_allows_runs?: boolean;
+	startup_state?: 'ready' | 'setup_required' | null;
 }
 
 // Profile types — Fluid harness options. Legacy SDK keys remain tolerated on

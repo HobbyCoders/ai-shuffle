@@ -129,8 +129,10 @@ async def test_auth_status_reports_preview_limit_even_for_local_owner(mock_db, l
     assert status["preview_access"] is True
 
 
+@pytest.mark.real_agent_gate
 class TestAuthStatusAnyCredential:
-    """``has_any_credential`` = claude subscription OR a configured provider."""
+    """``has_any_credential`` = the active Claude Code mode's credential (CLI
+    sign-in, or the stored key in api_key mode) OR a configured provider."""
 
     @pytest.mark.asyncio
     async def test_false_when_nothing_configured(self, mock_db):

@@ -241,6 +241,13 @@ def check_prerequisites() -> None:
     except Exception:
         logger.warning("Could not record the Claude Code auth mode", exc_info=True)
 
+    # The one credential gate (license plus the active mode's credential). With
+    # neither a CLI sign-in nor a stored key the worker stays in a blocking
+    # setup state: every new agent run is refused with the setup message, and
+    # nothing falls back to any other credential.
+    from app.core import credential_gate
+    credential_gate.record_startup(cli)
+
     if auth_service.is_setup_required():
         logger.info("Local setup required - visit /setup on this computer or your LAN")
     else:
