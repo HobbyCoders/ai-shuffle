@@ -387,6 +387,12 @@ async def get_auth_status(request: Request, response: Response = None):
     pref_identity = (await run_sync(principal_preference_identity, preference_principal)
                      if preference_principal else None)
 
+    # What the stock CLI reports about its own login. Account details only go
+    # to a caller who is signed in to this worker.
+    cli = await claude_cli_summary()
+    if not (is_admin_authenticated or is_paired_authenticated):
+        cli = {"installed": cli["installed"], "signed_in": cli["signed_in"]}
+
     return {
         "authenticated": is_admin_authenticated or is_paired_authenticated,
         "local_access": local,
@@ -412,6 +418,7 @@ async def get_auth_status(request: Request, response: Response = None):
         # reconnect" state even though `claude_authenticated` stays True (file
         # exists) for back-compat.
         "claude_token_valid": auth_service.get_claude_token_status()["token_valid"],
+        "claude_cli": cli,
         "github_authenticated": github_authenticated,
         "onboarding_complete": auth_service.is_onboarding_complete(),
         "username": username,
@@ -486,8 +493,46 @@ async def logout(request: Request, response: Response):
     return {"status": "ok", "message": "Logged out"}
 
 
+def claude_cli_login_hint() -> dict:
+    """Where the user runs the CLI's own login on this worker."""
+    from app.core.claude_cli_login import terminal_supported
+    from app.core.platform import is_docker_mode
+
+    if os.environ.get("SHUFFLE_DESKTOP") == "1":
+        surface = "desktop"
+    elif is_docker_mode():
+        surface = "docker"
+    else:
+        surface = "local"
+    return {
+        "surface": surface,
+        "terminal": terminal_supported(),
+        "command": "claude auth login",
+        "logout_command": "claude auth logout",
+        "status_command": "claude auth status",
+        "docker_command": "docker exec -it -u appuser <container> claude auth login" if surface == "docker" else None,
+    }
+
+
+async def claude_cli_summary(force: bool = False) -> dict:
+    """The CLI probe plus the login hint, as the status endpoints return it."""
+    from app.core import claude_cli_status
+
+    status = await claude_cli_status.get_status_async(force)
+    return {**status.to_dict(), "login": claude_cli_login_hint()}
+
+
+@router.get("/claude/cli")
+async def claude_cli_status_route(refresh: bool = False, token: str = Depends(require_auth)):
+    """What `claude auth status` reports: signed in, account, method, plan, version, path.
+
+    ``refresh=true`` runs the CLI again instead of using the brief cache.
+    """
+    return await claude_cli_summary(force=refresh)
+
+
 @router.get("/claude/status")
-async def claude_auth_status():
+async def claude_auth_status(refresh: bool = False, token: str = Depends(require_auth)):
     """Get Claude CLI authentication status"""
     # Renew an expiring OAuth token (using the refresh token) before reporting,
     # so a short-lived access token doesn't surface as "expired" unnecessarily.
@@ -504,7 +549,55 @@ async def claude_auth_status():
         logger.warning(f"Could not attach Claude account info to status: {e}")
         info.setdefault("active_account", None)
         info.setdefault("accounts_count", 0)
+    info["cli"] = await claude_cli_summary(force=refresh)
     return info
+
+
+def _login_terminal_call(fn, *args):
+    """Run a login-terminal action, mapping its refusals to HTTP errors."""
+    try:
+        return fn(*args)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:  # includes ClaudeCliMissingError
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/claude/cli-login/start")
+async def claude_cli_login_start(token: str = Depends(require_admin)):
+    """Run the stock CLI's `claude auth login` in the in-app terminal."""
+    from app.core.claude_cli_login import login_terminal
+    return await run_sync(_login_terminal_call, login_terminal.start)
+
+
+@router.get("/claude/cli-login")
+async def claude_cli_login_output(offset: int = 0, token: str = Depends(require_admin)):
+    """Terminal output after *offset*, and whether the login is still running."""
+    from app.core.claude_cli_login import login_terminal
+    return await run_sync(login_terminal.read, max(0, offset))
+
+
+@router.post("/claude/cli-login/input")
+async def claude_cli_login_input(request: Request, token: str = Depends(require_admin)):
+    """Type one line into the running login (the code Anthropic's page shows)."""
+    from app.core.claude_cli_login import login_terminal
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    text = body.get("text") if isinstance(body, dict) else None
+    offset = body.get("offset", 0) if isinstance(body, dict) else 0
+    if not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="text is required")
+    return await run_sync(_login_terminal_call, login_terminal.send, text,
+                          offset if isinstance(offset, int) and offset >= 0 else 0)
+
+
+@router.post("/claude/cli-login/cancel")
+async def claude_cli_login_cancel(token: str = Depends(require_admin)):
+    """Stop the running login."""
+    from app.core.claude_cli_login import login_terminal
+    return await run_sync(login_terminal.cancel)
 
 
 @router.get("/claude/validate")

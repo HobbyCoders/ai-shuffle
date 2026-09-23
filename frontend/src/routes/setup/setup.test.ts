@@ -24,6 +24,7 @@ vi.mock('$lib/stores/auth.svelte', () => ({
 	auth: { checkAuth: mocks.checkAuth, current: { status: { setup_required: true, auth_mode: 'local' } }, logout: vi.fn(),
 		subscribe(run: (v: unknown) => void) { run({ status: { auth_mode: 'local' } }); return () => {}; } },
 	anyCredential: { subscribe(run: (v: boolean) => void) { run(mocks.hasCredential); return () => {}; } },
+	isAdmin: { subscribe(run: (v: boolean) => void) { run(true); return () => {}; } },
 	claudeAuthenticated: { subscribe(run: (v: boolean) => void) { mocks.claudeSubscribers.add(run); run(mocks.claudeAuthenticated); return () => mocks.claudeSubscribers.delete(run); } }
 }));
 vi.mock('$lib/stores/providers.svelte', () => ({ providers: { current: {
@@ -31,6 +32,7 @@ vi.mock('$lib/stores/providers.svelte', () => ({ providers: { current: {
 	get anthropicKeySet() { return mocks.anthropicKeySet; }, get falKeySet() { return mocks.falKeySet; }
 }, ensureLoaded: vi.fn(), refreshProviders: mocks.refreshProviders, loadClaudeAccounts: mocks.loadClaudeAccounts, loadIntegrations: mocks.loadIntegrations } }));
 vi.mock('$lib/components/DirectoryBrowser.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+vi.mock('$lib/components/settings/ClaudeCliPanel.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/deck/cards/settings/providers/AddProviderModal.svelte', () => import('$lib/test-stubs/CompleteProviderModal.svelte'));
 import Setup from './+page.svelte';
 
@@ -71,6 +73,9 @@ async function cleanInstall() {
 }
 async function continueToProviders() {
 	await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+	// The Claude Code step: sign-in happens in the CLI; skipping is allowed.
+	await screen.findByText(/AI Shuffle runs the standard Claude Code CLI/);
+	await fireEvent.click(screen.getByRole('button', { name: /Skip for now|Continue/ }));
 	await screen.findByRole('button', { name: 'Add provider' });
 }
 
@@ -101,7 +106,7 @@ describe('first-run setup', () => {
 		expect(mocks.loadIntegrations).toHaveBeenCalledOnce();
 	});
 
-	it('shows sign-in immediately with local and invite alternatives and three steps', async () => {
+	it('shows sign-in immediately with local and invite alternatives and four steps', async () => {
 		render(Setup);
 		expect(await screen.findByRole('button', { name: /Continue without an account/ })).toBeTruthy();
 		expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
@@ -111,8 +116,8 @@ describe('first-run setup', () => {
 		const progress = screen.getByRole('navigation', { name: 'Setup progress' });
 		expect(progress.textContent).toContain('Start');
 		expect(progress.textContent).toContain('Workspace');
+		expect(progress.textContent).toContain('Claude Code CLI');
 		expect(progress.textContent).toContain('Providers & GitHub');
-		expect(screen.queryByText(/Claude Code/)).toBeNull();
 	});
 
 	it.each([false, true])('finishes a clean install with workspace, providers and GitHub only (existing credential: %s)', async (existingCredential) => {
@@ -123,7 +128,7 @@ describe('first-run setup', () => {
 		await continueToProviders();
 		expect(screen.getByText('GitHub', { exact: true })).toBeTruthy();
 		expect(await screen.findByRole('button', { name: 'Sign in with GitHub' })).toBeTruthy();
-		expect(screen.queryByText(/Claude Code/)).toBeNull();
+		expect(screen.queryByText('Claude Code')).toBeNull();
 		expect(screen.queryByText(/Connect Claude/)).toBeNull();
 		if (existingCredential) expect(screen.getByText('My OpenAI account')).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: existingCredential ? 'Finish Setup' : 'Finish without a provider' }));

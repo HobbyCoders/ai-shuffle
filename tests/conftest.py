@@ -30,6 +30,24 @@ os.environ["DATA_DIR"] = _TEST_DATA.name
 
 
 @pytest.fixture(autouse=True)
+def _no_real_claude_cli_probe(monkeypatch):
+    """Status endpoints must not run whatever `claude` the test machine has.
+
+    The probe finds no CLI unless a test installs its own resolver or stubs
+    ``claude_cli_status.probe``; the cache starts empty in every test.
+    """
+    from app.core import claude_cli_status
+
+    def _missing():
+        raise RuntimeError("The Claude Code CLI is not installed (test default).")
+
+    monkeypatch.setattr(claude_cli_status, "_default_resolver", _missing)
+    claude_cli_status.invalidate()
+    yield
+    claude_cli_status.invalidate()
+
+
+@pytest.fixture(autouse=True)
 def _test_only_memory_store(monkeypatch):
     from app.core.provider.harness_adapter import HarnessAdapter, MemoryStore
     monkeypatch.setattr(HarnessAdapter, "_test_memory_store_factory", MemoryStore)

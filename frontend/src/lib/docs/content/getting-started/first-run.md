@@ -45,15 +45,13 @@ AI Shuffle runs Claude Code in one of two modes. Pick one; you can change it lat
 
 ## 5a. Subscription: sign in to the Claude Code CLI
 
-<!-- verify against wizard v2 -->
-
 In subscription mode, AI Shuffle runs the standard, unmodified Claude Code CLI inside the container, and **you** sign in to it yourself through Anthropic's own sign-in page. AI Shuffle never sees, copies or stores your Claude sign-in.
 
 **In the app (recommended):** the wizard opens a terminal connected to the container and runs the CLI's login there.
 
 1. Choose **Sign in**. The terminal starts `claude auth login`.
 2. Open the link it prints, in any browser, and sign in to your Claude account on Anthropic's page.
-3. If Anthropic's page shows a code, paste it back into the terminal.
+3. If Anthropic's page shows a code, paste it into the field under the terminal and choose **Send**.
 4. Choose **Check again**. The wizard shows the account the CLI is signed in as, so you can see whose plan the usage goes to.
 
 **From the host instead:** open a terminal on the machine running Docker (on Unraid, **>_ Terminal** in the web interface) and run:
