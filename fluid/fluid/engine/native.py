@@ -976,6 +976,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # instead of each waking the parent on its own.
         self._queued_peer_messages: list[AgentMessage] = []
         self._queued_peer_rehydrated = False
+        # The last AgentMessage op submit() held rather than delivered, so a
+        # host can tell its sender "held" instead of "delivered".
+        self.last_held_message: AgentMessage | None = None
         # Runtime-facts block bookkeeping (see _environment_reminder): the
         # facts text last sent to the model, and whether this engine has
         # already harvested them into the memory store.
@@ -1412,6 +1415,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         assert self._session is not None, "no session yet — submit a turn first"
         return self._session.session_id
 
+    @property
+    def turn_running(self) -> bool:
+        """True while a turn task is live. A host that owns wake scheduling
+        reads this to route a peer message: into the running turn, or to its
+        own queue when the receiver is idle."""
+        return self._turn_task is not None and not self._turn_task.done()
+
     # ─── ExecutionEngine interface ───────────────────────────────────────
 
     async def submit(self, op: Op) -> None:
@@ -1464,16 +1474,23 @@ class NativeLoop(BackgroundLifecycleMixin):
                     raise RuntimeError("receiver is finishing its turn; retry the peer message")
                 self._pending_steers.append(replace(op, text=text))
             else:
+                # Parked comes first: a parent waiting on background work holds
+                # an ordinary message for its next wake whether or not the host
+                # owns wakes. Checking ``wake`` first sent every host-owned
+                # (wake=False) message to a parked parent back to the host,
+                # which woke the parent for it.
+                if not op.urgent and await self._queue_if_parked(replace(op, text=text)):
+                    self.last_held_message = op
+                    return
                 if not op.wake:
                     raise RuntimeError("no turn is running; peer message was not delivered")
-                if not op.urgent and await self._queue_if_parked(replace(op, text=text)):
-                    return
                 from fluid.context.peer import format_peer_message
 
                 self._interrupted.clear()
                 self._peer_delivery_sealed = False
                 self._turn_task = asyncio.create_task(self._run_turn(UserTurn(
                     content=format_peer_message(op.sender, text).strip(),
+                    source="agent_message",
                 )))
         elif isinstance(op, RespondPermission):
             fut = self._pending_permissions.get(op.request_id)
@@ -2000,6 +2017,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._emit(TurnStarted(
                     session_id=sid, node_id=head.node_id if head else "",
                     turn_id=turn_id, model=self.model, provider=self.provider.name,
+                    source=op.source,
                 ))
                 await self._emit_terminal_with_park(ErrorEvent(
                     session_id=sid,
@@ -2016,7 +2034,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 return
             await self._emit(TurnStarted(
                 session_id=sid, node_id=head.node_id, turn_id=turn_id,
-                model=self.model, provider=self.provider.name,
+                model=self.model, provider=self.provider.name, source=op.source,
             ))
             blocked, _ = await self._turn_start_hook(
                 sid, turn_id, head.message.text(), with_context=False
@@ -2052,7 +2070,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         node_id = new_id("node")
         await self._emit(TurnStarted(
             session_id=sid, node_id=node_id, turn_id=turn_id,
-            model=self.model, provider=self.provider.name,
+            model=self.model, provider=self.provider.name, source=op.source,
         ))
         blocked, hook_context = await self._turn_start_hook(sid, turn_id, prompt_text)
         if blocked:

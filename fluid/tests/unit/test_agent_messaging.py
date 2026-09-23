@@ -917,6 +917,42 @@ async def test_delivery_submits_an_agent_message_naming_the_sender(tmp_path) -> 
     assert submitted[0].sender == "main"
 
 
+async def test_a_message_held_by_a_parked_receiver_gets_a_held_receipt(tmp_path) -> None:
+    """A parked receiver holds an ordinary message for its next wake, so the
+    sender must not read "Delivered" and wait for a reply; urgent still wakes."""
+    from fluid.engine.native import NativeLoop
+    from fluid.tools.registry import BackgroundTaskReceipt
+    from tests.unit.test_turn_source import _Provider
+
+    provider = _Provider()
+    receiver = NativeLoop(provider=provider, store=MemoryStore(), model="m")
+    try:
+        await receiver.submit(UserTurn(content="delegate"))
+        await asyncio.wait_for(receiver.wait_turn(), 5)
+        await receiver._background_task_started(BackgroundTaskReceipt(
+            task_id="task_1", worker_session_id=None, description="worker",
+        ))
+        host = _host(tmp_path)
+        worker = _worker(host, "research", "task_aaaaaaaaaaaa")
+        worker.engine = receiver
+
+        outcome = await host.agent_message(
+            {"to": "research", "message": "halfway there"}, ToolCtx(),
+        )
+        assert not outcome.is_error
+        assert outcome.text.startswith("Held for research until it wakes")
+        assert "Delivered" not in outcome.text
+        assert not receiver.turn_running
+
+        outcome = await host.agent_message(
+            {"to": "research", "message": "blocked", "urgent": True}, ToolCtx(),
+        )
+        assert outcome.text.startswith("Delivered to research")
+        await asyncio.wait_for(receiver.wait_turn(), 5)
+    finally:
+        await receiver.aclose()
+
+
 async def test_a_worker_addresses_its_parent_as_main(tmp_path) -> None:
     submitted: list[Any] = []
 

@@ -1111,6 +1111,23 @@ async def test_unpark_turn_threads_completion_frames_to_provider_overrides(mock_
     assert captured["overrides"]["background_task_completions"] == frames
 
 
+@pytest.mark.parametrize("source", ["user", "unpark", "agent_message", "wakeup", "promotion"])
+async def test_turn_source_threads_to_provider_overrides(mock_db, source):
+    """Fluid records the source on TurnStarted; it reaches the adapter here."""
+    turn = turns_db.enqueue_turn("s12s", source, prompt="go")
+    captured = {}
+
+    async def pump(**kwargs):
+        captured.update(kwargs)
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=pump):
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    assert captured["overrides"]["turn_source"] == source
+
+
 async def test_unpark_turn_records_terminal_task_events_after_start(mock_db):
     """The wake turn is the delivery point for a completion that happened
     between turns, so it must write the terminal task.updated to the event log —

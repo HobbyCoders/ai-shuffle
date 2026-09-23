@@ -683,7 +683,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # parity with NativeLoop requires the loop to own this event.
             await self._emit(TurnStarted(
                 session_id=sid, node_id=user_node.node_id, turn_id=turn_id,
-                model=self.model, provider=self.provider,
+                model=self.model, provider=self.provider, source=op.source,
             ))
             self._journal_turn_start(content)
             mapper = await self._drive_turn(sid, turn_id, user_node, content)

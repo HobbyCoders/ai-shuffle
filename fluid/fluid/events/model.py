@@ -61,10 +61,26 @@ class Event:
 # ─── Turn lifecycle ──────────────────────────────────────────────────────────
 
 
+#: What started a turn, as recorded on :class:`TurnStarted`.
+#:
+#: * ``user`` — a prompt submitted from outside the engine: the user, or a
+#:   host acting for them (an API call, an automation, a failover retry).
+#: * ``agent_message`` — a peer's message woke an idle receiver.
+#: * ``wakeup`` — a timer fired: a scheduled wakeup or a host continuation.
+#: * ``unpark`` — background work came to rest and woke its parked parent.
+#: * ``promotion`` — peer messages held while the parent was parked were
+#:   promoted to a wake of their own.
+TURN_SOURCES = ("user", "agent_message", "wakeup", "unpark", "promotion")
+
+
 @dataclass(frozen=True, kw_only=True)
 class TurnStarted(Event):
     model: str
     provider: str
+    source: str | None = None
+    """One of :data:`TURN_SOURCES`. ``None`` means not recorded: a row written
+    before this field existed, or an emitter that does not know. Optional so a
+    reader that predates it drops the key and a row without it still loads."""
 
 
 @dataclass(frozen=True, kw_only=True)

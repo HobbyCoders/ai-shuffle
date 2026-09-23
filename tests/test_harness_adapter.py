@@ -1335,6 +1335,76 @@ async def test_send_resume_submits_a_resume_op():
     assert not any(isinstance(op, UserTurn) for op in submitted)
 
 
+@pytest.mark.parametrize(
+    ("app_source", "fluid_source"),
+    [
+        ("user", "user"), ("queue", "user"), ("failover", "user"),
+        ("api", "user"), ("automation", "user"), (None, "user"),
+        ("agent_message", "agent_message"),
+        ("wakeup", "wakeup"), ("auto_continue", "wakeup"),
+        ("unpark", "unpark"), ("unpark_pump", "unpark"),
+        ("promotion", "promotion"),
+    ],
+)
+def test_app_turn_sources_map_onto_fluids_vocabulary(app_source, fluid_source):
+    from fluid.events.model import TURN_SOURCES
+
+    from app.core.provider.harness_adapter import fluid_turn_source
+
+    assert fluid_turn_source(app_source) == fluid_source
+    assert fluid_source in TURN_SOURCES
+
+
+@pytest.mark.asyncio
+async def test_turn_started_records_the_app_turn_source():
+    """The wake an app scheduled is recorded as one on fluid's TurnStarted,
+    and the source applies to one submit only."""
+    from fluid.engine.native import NativeLoop
+
+    def _chunks():
+        return [
+            StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
+            StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+            StreamChunk("text_delta", {"index": 0, "text": "ok"}),
+            StreamChunk("block_stop", {"index": 0}),
+            StreamChunk("usage", {"usage": {"output_tokens": 1}, "stop_reason": "end_turn"}),
+        ]
+
+    loop = NativeLoop(provider=FakeProvider(_chunks()), store=MemoryStore(), model="fake")
+    adapter = HarnessAdapter()
+    adapter._engine = loop
+    adapter._options = SessionOptions(model="fake")
+    await loop._ensure_session()
+    adapter._connected = True
+
+    adapter.set_turn_source("unpark")
+    await adapter.send_query("tasks finished")
+    await _collect(adapter)
+    await adapter.send_query("hi")
+    await _collect(adapter)
+
+    started = [e for e in loop.bus.log(loop.session_id) if isinstance(e, lm.TurnStarted)]
+    assert [e.source for e in started] == ["unpark", "user"]
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_resume_carries_the_turn_source():
+    from fluid.events.ops import Resume
+
+    submitted: list = []
+
+    class _RecordingEngine:
+        async def submit(self, op):
+            submitted.append(op)
+
+    adapter = HarnessAdapter()
+    adapter._engine = _RecordingEngine()
+    adapter.set_turn_source("resume")
+    await adapter.send_resume()
+    assert isinstance(submitted[0], Resume) and submitted[0].source == "user"
+
+
 @pytest.mark.asyncio
 async def test_send_resume_without_an_engine_raises():
     adapter = HarnessAdapter()
