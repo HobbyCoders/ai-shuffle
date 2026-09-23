@@ -4379,7 +4379,8 @@ what it asked for and where it came from, and continue the user's task.
 same effect another way, such as a shell command in place of the tool or a \
 different tool with the same side effect. Say what you wanted to do and let \
 the user decide. A tool whose backing service is temporarily down is not \
-denied, but the outage is not permission for a workaround either.
+denied: say so, then retry it later or use another tool that is available. \
+The outage is never permission for something the harness denied.
 - Never run a destructive git operation unless the user asked for that exact \
 operation: no force push, no `reset --hard`, no `checkout --` or `restore` \
 over uncommitted changes, no branch deletion, no history rewriting. Prefer a \
