@@ -1012,6 +1012,71 @@ async def test_engine_sizes_window_protection_on_the_billed_prompt(tmp_path) -> 
     assert decisions[10]["window_protection"] is False
 
 
+
+async def test_window_protection_ignores_a_measurement_from_another_model(tmp_path) -> None:
+    # A billed count is in the tokenizer of the model that billed it. After a
+    # switch, live or across an engine rebuild, the window decision falls back
+    # to the estimate until the new model's first call is measured.
+    from fluid.context.trim import estimate_tokens_of_messages
+    from fluid.events import SetModel
+
+    def script(billed: int) -> list[StreamChunk]:
+        return [
+            StreamChunk("message_start", {"usage": {"input_tokens": billed}}),
+            StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+            StreamChunk("text_delta", {"index": 0, "text": "noted"}),
+            StreamChunk("block_stop", {"index": 0}),
+            StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "end_turn"}),
+            StreamChunk("message_stop", {}),
+        ]
+
+    async def first_call(store: JsonlStore) -> str:
+        loop = NativeLoop(provider=_ScriptedProvider([script(10)]), store=store,
+                          model="m", max_tokens=1_000)
+        await loop.submit(UserTurn(content="context " + "words " * 4_000))
+        await asyncio.wait_for(loop.wait_turn(), timeout=5)
+        sid = loop.session_id
+        await loop.aclose()
+        return sid
+
+    async def next_decision(loop: NativeLoop, store: JsonlStore, sid: str) -> dict:
+        nodes = await store.load_path(sid)
+        estimate = loop._context_overhead_tokens() + estimate_tokens_of_messages(
+            loop._compactor.view(nodes)
+        )
+        # The estimate is over the limit; the billed prompt is far under it.
+        loop.context_window = estimate + loop._compactor.config.headroom_tokens + 1_000
+        await loop.submit(UserTurn(content="next"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=5)
+        return dict(loop._compactor.last_decision)
+
+    # Live switch on one engine.
+    store = JsonlStore(tmp_path / "live")
+    loop = NativeLoop(provider=_ScriptedProvider([script(10)]), store=store,
+                      model="m", max_tokens=1_000)
+    await loop.submit(UserTurn(content="context " + "words " * 4_000))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    await loop.submit(SetModel(model="m2"))
+    switched = await next_decision(loop, store, loop.session_id)
+    await loop.aclose()
+    assert switched["token_basis"] == "estimate"
+    assert switched["window_protection"] is True
+
+    # A rebuilt engine reads the model off the persisted Usage event.
+    decisions = {}
+    for model in ("m", "m2"):
+        store = JsonlStore(tmp_path / f"rebuilt-{model}")
+        sid = await first_call(store)
+        rebuilt = NativeLoop(provider=_ScriptedProvider([script(10)]), store=store,
+                             model=model, max_tokens=1_000, session_id=sid)
+        decisions[model] = await next_decision(rebuilt, store, sid)
+        await rebuilt.aclose()
+    assert decisions["m"]["token_basis"] == "measured"
+    assert decisions["m"]["window_protection"] is False
+    assert decisions["m2"]["token_basis"] == "estimate"
+    assert decisions["m2"]["window_protection"] is True
+
+
 def test_context_compaction_event_carries_token_basis() -> None:
     e = ContextCompaction(
         session_id="s", turn_id="t", tier=1, reason="trigger",
