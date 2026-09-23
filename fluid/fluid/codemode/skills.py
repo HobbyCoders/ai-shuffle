@@ -915,6 +915,18 @@ class SkillStore:
                 return 0
             cursor = max(0, self.synth_cursor())
             total = self.journal_count()
+            if cursor > total:
+                # A cursor past the end makes pending negative, so the
+                # learner is never due again until the journal catches up.
+                # Older builds left one after a learner delete wiped the
+                # journal; this sweep repairs such stores.
+                _log.warning(
+                    "Memory journal cursor %d was past the journal's %d lines "
+                    "in %s (store=%s); clamped", cursor, total, self._journal_path,
+                    self.store_id() or "new",
+                )
+                self.set_synth_cursor(total)
+                cursor = total
             consumed = min(cursor, total)
             drop = max(0, min(consumed, total - JOURNAL_KEEP_ENTRIES))
             target = int(JOURNAL_MAX_BYTES * JOURNAL_REAP_FRACTION)
@@ -949,8 +961,9 @@ class SkillStore:
                 _log.warning(
                     "Memory journal backlog overflow: dropped %d unsynthesized "
                     "entries (oldest first) from %s; synthesis has not been "
-                    "consuming the journal, see .synthesis-log.jsonl beside it",
-                    len(backlog), self._journal_path,
+                    "consuming the journal, see .synthesis-log.jsonl beside it "
+                    "(store=%s)", len(backlog), self._journal_path,
+                    self.store_id() or "new",
                 )
             return len(removed)
 
@@ -1158,8 +1171,14 @@ class SkillStore:
 
     def delete_memory(self, memory_id: str, *, explicit: bool = False,
                       expected_revision: int | None = None) -> bool:
+        """Delete one fact. ``explicit`` means the user asked (the Forget
+        tool); only that purges the journal evidence written before it. A
+        learner or consolidation delete retires the fact and leaves the
+        journal and the synthesis cursor alone: it used to wipe every
+        unsynthesized entry on the store and leave the cursor past the end.
+        """
         deleted = self._facts.forget(memory_id, explicit=explicit, expected_revision=expected_revision)
-        if deleted:
+        if deleted and explicit:
             self.purge_forgotten_evidence()
         return deleted
 
@@ -1172,16 +1191,24 @@ class SkillStore:
                 raise OSError("Fact deletion committed; inference cleanup is pending because the journal is busy")
             if self._journal_path.exists():
                 lines = self._journal_path.read_text(encoding="utf-8").splitlines()
+                cursor = max(0, self.synth_cursor())
                 kept = []
-                for line in lines:
+                behind = 0  # dropped lines the cursor had already passed
+                for index, line in enumerate(lines):
                     try:
                         if json.loads(line).get("ts", 0) > cutoff:
                             kept.append(line)
+                            continue
                     except (ValueError, AttributeError):
-                        continue
+                        pass
+                    behind += index < cursor
                 if len(kept) != len(lines):
                     atomic_write_text(self._journal_path, "".join(line + "\n" for line in kept))
-                    self.set_synth_cursor(0)
+                # Rebase like reap_journal does, then clamp: entries kept
+                # past the cursor stay unsynthesized.
+                rebased = min(cursor - behind, len(kept))
+                if rebased != cursor:
+                    self.set_synth_cursor(rebased)
             # Older versions logged model-output previews. These are diagnostic
             # derivatives, not facts; removing them prevents a forgotten value
             # from surviving in an old preview. Current rows carry counts and
@@ -1199,7 +1226,10 @@ class SkillStore:
         all, so the model never learned that Remember/Recall existed until a
         fact happened to exist. With a ``project`` key, only global entries
         and that project's entries render — other projects' facts stay out of
-        this session's prompt (a count line says they exist). Entries pass
+        this session's prompt (a count line says they exist). Unprotected
+        facts get a reserved share of the budget (``RESERVED_INFERRED_CHARS``)
+        and facts that do not fit are counted on their own "omitted for
+        space" line, separate from the other-projects count. Entries pass
         the injection screen; a finding replaces that entry with a note naming
         the file, never silently deleting it. Entries whose only evidence was
         tool output (``provenance == "tool"``) render with a one-line
@@ -1215,30 +1245,32 @@ class SkillStore:
             return EMPTY_MEMORY_SECTION
         from fluid.context.screening import screen_findings
 
-        shown: list[str] = []
-        hidden = 0
+        from fluid.codemode.facts import MAX_PROMPT_CHARS, RESERVED_INFERRED_CHARS
+
+        out_of_scope = 0
+        over_budget = 0
         held = 0
-        from fluid.codemode.facts import MAX_PROMPT_CHARS
         entries.sort(key=lambda e: (not bool(e.key and e.key.startswith("profile.")), not e.protected, -e.updated_at))
-        remaining = MAX_PROMPT_CHARS
+        # (entry, line, counts against the budget) for each renderable entry.
+        candidates: list[tuple[MemoryEntry, str, bool]] = []
         for entry in entries:
             if (
                 project is not None
                 and entry.scope != "global"
                 and entry.scope != project
             ):
-                hidden += 1
+                out_of_scope += 1
                 continue
             if entry.conflicted:
                 held += 1
                 continue
             findings = screen_findings(entry.text)
             if findings:
-                shown.append(
+                candidates.append((entry, (
                     f"- [an entry was withheld — suspected injection "
                     f"pattern(s): {', '.join(findings)}. It is still in "
                     f"{self.memories_path}.]"
-                )
+                ), False))
             else:
                 hint = (
                     " (harvested from tool output, unconfirmed — confirm "
@@ -1246,25 +1278,53 @@ class SkillStore:
                     if entry.provenance == "tool" else ""
                 )
                 line = f"- [{entry.id} r{entry.revision}; {entry.provenance}] {entry.text}{hint}"
-                if len(line) <= remaining:
-                    shown.append(line)
-                    remaining -= len(line) + 1
-                else:
-                    hidden += 1
+                candidates.append((entry, line, True))
+        # Protected (Remember) facts rank first, and they alone can fill the
+        # budget: on the desktop store 92 protected facts (about 28 KB) hid
+        # every learner fact and every env.* harvest. Unprotected facts
+        # therefore get the first claim on a bounded slice of the budget,
+        # user-sourced and env.* facts before the rest, newest first. What
+        # the slice leaves unused goes back to the protected tier, and the
+        # slice is small enough that an inference flood cannot push
+        # protected facts out.
+        reserve = min(RESERVED_INFERRED_CHARS, MAX_PROMPT_CHARS)
+        reserved: set[int] = set()
+        for i in sorted(
+            (i for i, (e, _, costs) in enumerate(candidates) if costs and not e.protected),
+            key=lambda i: (
+                not (candidates[i][0].provenance == "user"
+                     or (candidates[i][0].key or "").startswith("env.")),
+                -candidates[i][0].updated_at,
+            ),
+        ):
+            cost = len(candidates[i][1]) + 1
+            if cost <= reserve:
+                reserved.add(i)
+                reserve -= cost
+        remaining = MAX_PROMPT_CHARS - sum(len(candidates[i][1]) + 1 for i in reserved)
+        shown: list[str] = []
+        for i, (_, line, costs) in enumerate(candidates):
+            if not costs or i in reserved:
+                shown.append(line)
+            elif len(line) <= remaining:
+                shown.append(line)
+                remaining -= len(line) + 1
+            else:
+                over_budget += 1
+        footer = ""
+        if out_of_scope:
+            footer += (
+                f"\n\n({out_of_scope} entr{'y' if out_of_scope == 1 else 'ies'} scoped to "
+                "other projects not shown.)"
+            )
+        if over_budget:
+            footer += (
+                f"\n\n({over_budget} saved fact{'' if over_budget == 1 else 's'} "
+                f"omitted for space; Recall finds {'it' if over_budget == 1 else 'them'} "
+                "by keyword.)"
+            )
         if not shown:
-            if hidden:
-                return (
-                    EMPTY_MEMORY_SECTION
-                    + f"\n\n({hidden} entr{'y' if hidden == 1 else 'ies'} scoped to "
-                    "other projects not shown.)"
-                )
-            return EMPTY_MEMORY_SECTION
-        footer = (
-            f"\n\n({hidden} entr{'y' if hidden == 1 else 'ies'} scoped to "
-            "other projects not shown.)"
-            if hidden
-            else ""
-        )
+            return EMPTY_MEMORY_SECTION + footer
         if held:
             footer += (
                 f"\n\n({held} conflicted entr{'y' if held == 1 else 'ies'} "
@@ -1464,6 +1524,79 @@ class SkillStore:
         meta = self._load_meta()
         meta["consolidation_retry_at"] = float(ts)
         self._save_meta(meta)
+
+    # ─── learner yield (see Synthesizer._track_yield) ─────────────────────
+    #
+    # ``meta.json["learner_yield"]``: ``last_write_at``, ``silent_passes``
+    # (passes since the last write), ``silent_since`` (the first of them) and
+    # ``last_pass_at``, plus ``alarm_at`` for the last silence warning. Shared
+    # by every session over the store; the app's diagnostics read it without
+    # a SkillStore.
+
+    def learner_yield(self) -> dict:
+        record = self._load_meta().get("learner_yield")
+        return dict(record) if isinstance(record, dict) else {}
+
+    def note_learner_pass(self, wrote: bool, *, now: float) -> dict:
+        """Record one learner pass; returns the updated yield record."""
+        meta = self._load_meta()
+        record = meta.get("learner_yield")
+        record = dict(record) if isinstance(record, dict) else {}
+        if wrote:
+            record = {"last_write_at": now, "last_pass_at": now, "silent_passes": 0}
+        else:
+            try:
+                record["silent_passes"] = int(record.get("silent_passes", 0)) + 1
+            except (TypeError, ValueError):
+                record["silent_passes"] = 1
+            record.setdefault("silent_since", now)
+            record["last_pass_at"] = now
+        meta["learner_yield"] = record
+        self._save_meta(meta)
+        return record
+
+    def note_learner_yield_alarm(self, now: float) -> None:
+        meta = self._load_meta()
+        record = meta.get("learner_yield")
+        if isinstance(record, dict):
+            record["alarm_at"] = now
+            self._save_meta(meta)
+
+    def store_id(self) -> str | None:
+        """This replica's id from ``memories.json`` (the ``origin`` of the
+        facts it writes), or None before the file first exists. Read-only:
+        naming a store in a log line must not create or migrate it."""
+        try:
+            doc = json.loads(self.memories_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        value = doc.get("store_id") if isinstance(doc, dict) else None
+        return value if isinstance(value, str) and value else None
+
+
+# A learner that has run passes for this long without writing anything is
+# reported (Synthesizer._track_yield, and the app's journal diagnostics). Both
+# replicas' learners were silent for 13 days in September 2026 and nothing
+# said so.
+LEARNER_SILENCE_ALARM_SECONDS = 3 * 86400.0
+
+
+def learner_silence_seconds(record: object, now: float) -> float:
+    """How long a ``learner_yield`` record has run passes without a write:
+    from the first silent pass to the latest pass, not to ``now``, so a
+    store whose learner simply stopped running is not reported as silent.
+    0 when the last pass wrote or no pass has run."""
+    if not isinstance(record, dict):
+        return 0.0
+    try:
+        passes = int(record.get("silent_passes", 0) or 0)
+        since = float(record.get("silent_since", 0) or 0)
+        last = float(record.get("last_pass_at", now) or now)
+    except (TypeError, ValueError):
+        return 0.0
+    if passes <= 0 or since <= 0:
+        return 0.0
+    return max(0.0, min(now, last) - since)
 
 
 # Referenced-skill extraction: ``skills.foo`` attribute use, the

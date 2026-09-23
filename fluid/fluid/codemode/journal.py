@@ -33,6 +33,7 @@ entry, and only an explicit Remember pulls a pass forward.
 from __future__ import annotations
 
 import json
+import re
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -42,6 +43,22 @@ from fluid.codemode.skills import SkillStore
 _EVENT_CAP = 1_500
 _INPUT_CAP = 600
 _OUTPUT_CAP = 400
+
+# A <system-reminder> block, closed or cut off before its end tag. The app
+# appends its "# Memory" snapshot to the user prompt and the engine adds its
+# own reminders, so a journaled user entry used to be mostly an echo of saved
+# facts (27 of 34 entries on the desktop store, 84% of their characters).
+_REMINDER_RE = re.compile(r"\n*<system-reminder>.*?(?:</system-reminder>|\Z)", re.S)
+
+
+def strip_reminders(text: str) -> str:
+    """``text`` without harness reminder blocks, for learner evidence.
+
+    An unterminated block runs to the end of the text: that is what a
+    reminder looks like after a length cap cuts it.
+    """
+    return _REMINDER_RE.sub("", text or "").strip()
+
 
 # ── friction detection ──────────────────────────────────────────────────────
 
@@ -309,6 +326,8 @@ class ToolJournal:
 
     def record_event(self, kind: str, text: str) -> None:
         """Journal a conversation event (``user`` prompt / ``assistant`` reply)."""
+        if kind == "user":
+            text = strip_reminders(text)
         if not (text or "").strip():
             return
         try:
