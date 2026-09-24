@@ -73,11 +73,15 @@ class ToolCtx:
     whether the lines it is replacing were ever in front of the model.
 
     ``read_seen`` and ``grep_seen`` are the repeat-work registries. Read records
-    ``(path, offset, limit) -> (mtime_ns, size)`` for every successful text read
-    and Grep records the search-relevant half of its input; a call that lands on
-    an entry already there returns its full result with a short note saying so.
-    Nothing is invalidated by hand — an Edit or a Write bumps the file's mtime,
-    which drops the match on its own.
+    ``(path, offset, limit) -> (mtime_ns, size)`` for every successful text read;
+    a read that lands on an entry already there returns its full result with a
+    short note saying so, and an Edit or a Write bumps the file's mtime, which
+    drops the match on its own. Grep records the search-relevant half of its
+    input mapped to a hash of the result it returned; a repeat whose result
+    hashes the same returns a pointer at the earlier copy instead of the rows,
+    and a repeat whose result changed (an edit, a new file) is delivered in
+    full. SessionSearch keeps the same kind of map in
+    ``extra["session_search_seen"]``.
 
     ``read_delivered`` is the honesty half of that registry: only the keys whose
     payload the calling surface actually put in front of the model. A repeat-read
@@ -97,7 +101,7 @@ class ToolCtx:
     read_delivered: set[tuple[str, int | None, int | None]] = field(
         default_factory=set
     )
-    grep_seen: set[tuple[Any, ...]] = field(default_factory=set)
+    grep_seen: dict[tuple[Any, ...], str] = field(default_factory=dict)
     result_budget: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 

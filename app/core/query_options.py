@@ -1878,6 +1878,9 @@ def build_options_from_profile(
     except Exception:  # noqa: BLE001 — a prompt section is never a blocker
         logger.warning("could not resolve gh connectivity", exc_info=True)
         options.aih_github_connected = False
+    # The app turn source (user, unpark, wakeup, ...). The fluid adapter
+    # records it on the turn's TurnStarted event; inert elsewhere.
+    options.aih_turn_source = overrides.get("turn_source")
     _completion_frames = overrides.get("background_task_completions")
     options.aih_background_task_completions = (
         [dict(frame) for frame in _completion_frames if isinstance(frame, dict)]

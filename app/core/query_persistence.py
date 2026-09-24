@@ -663,9 +663,10 @@ async def _turn_end_booking(
         return None
     totals = await run_sync(_partial_usage_from_events, session_id, turn_id)
     if totals["unindexed_records"]:
-        # Delegated-leg records are coalesced gauges, several per call; summing
-        # them is the kill path's best-effort fallback, not a finalizer's
-        # booking. Leave the claim to it.
+        # Unindexed records (a delegated session from before fluid indexed
+        # its calls) are coalesced gauges, several per call; summing them is
+        # the kill path's best-effort fallback, not a finalizer's booking.
+        # Leave the claim to it.
         return None
     if not _has_usage(totals):
         return None
@@ -717,12 +718,14 @@ def _partial_usage_from_events(session_id: str, turn_id: Optional[str]) -> dict:
     survives is the ``session_events`` log, where the turn recorder has already
     written one ``turn.usage`` row per model call.
 
-    Native fluid stamps ``model_call_index`` on every such record and the
+    Both fluid legs stamp ``model_call_index`` on every such record (the
+    delegated leg's context-snapshot record repeats its call's index) and the
     recorder never coalesces those away, so the records are dedupable and
     countable: the call count is the number of distinct indices, and the token
-    columns are their sum. Records without an index (the delegated leg, which
-    IS coalesced) are still summed, but contribute no call count — a partial
-    flush is best-effort evidence recovery, not a second accounting system.
+    columns are their sum. Records without an index (delegated sessions from
+    before that, which ARE coalesced) are still summed, but contribute no call
+    count — a partial flush is best-effort evidence recovery, not a second
+    accounting system.
 
     ``cost_usd`` rides the per-call record too (fluid folds an estimate in when
     the provider reports none), so the spend lands with the tokens.

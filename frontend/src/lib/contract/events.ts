@@ -47,6 +47,7 @@ export type ProfileId = string | null;
 export type RunId1 = string | null;
 export type Seq1 = number;
 export type SessionId1 = string;
+export type Source = string | null;
 export type TurnId1 = string | null;
 export type Type1 = 'turn.started';
 export type CommandId2 = string | null;
@@ -407,6 +408,7 @@ export interface TurnStarted {
   run_id?: RunId1;
   seq: Seq1;
   session_id: SessionId1;
+  source?: Source;
   turn_id?: TurnId1;
   type?: Type1;
   [k: string]: unknown;

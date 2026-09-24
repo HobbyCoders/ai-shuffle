@@ -16,7 +16,8 @@ import httpx
 from fluid.providers._chat_completions import stream_chat_completions
 from fluid.providers._retry import RetryPolicy
 from fluid.providers._transport import DEFAULT_STREAM_DEADLINE_S, is_usable_client
-from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.providers._retry import is_retriable_status
+from fluid.providers.base import ErrorClass, ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers.openrouter.serialize import build_request_body
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -71,6 +72,21 @@ class OpenRouterClient:
         if not row or "prompt" not in row:
             return None
         return max(input_tokens, 0) * row["prompt"]
+
+    def classify_error(self, error: dict) -> ErrorClass:
+        """Retry class of an error; an empty completion drops ``session_id``.
+
+        ``session_id`` pins requests to one upstream replica. When that
+        replica answers empty it stays dead for longer than one call, and one
+        that hangs costs a full first-data timeout per probe, so the engine
+        stops sending the key for the rest of the loop.
+        """
+        if error.get("kind") == "empty_completion":
+            return ErrorClass(retriable=True, drop_sticky=True)
+        return ErrorClass(
+            retriable=bool(error.get("retriable"))
+            or is_retriable_status(error.get("status")),
+        )
 
     def estimate_cost(self, model: str, usage: dict) -> float | None:
         row = self._pricing.get(model)

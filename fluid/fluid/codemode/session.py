@@ -41,7 +41,7 @@ from collections.abc import Callable
 from typing import Any
 
 from fluid.codemode.bridge import HostBridge
-from fluid.codemode.journal import FrictionDetector, append_friction
+from fluid.codemode.journal import FrictionDetector, append_friction, strip_reminders
 from fluid.codemode.kernel import HostReply
 from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
@@ -68,8 +68,9 @@ _RUN_PYTHON_DESC = (
     "kernel; from inside a cell, `dir(tools)` lists what is mounted. Then "
     "`from tools import Read, Edit` and call them as plain synchronous "
     "functions (`import tools; tools.Read(...)` also works) — each call is "
-    "permission-gated on the host. Catch only MissingPathError around "
-    "discovery (a Read whose path may not exist); other errors now return as "
+    "permission-gated on the host. A Read of a path that does not exist "
+    "returns a falsy MissingFile instead of raising (check `if not text:`; "
+    "using it as text raises MissingPathError); other errors now return as "
     "results and do not abort the cell: Grep/Glob on a missing path return "
     "'(path missing …)', an Edit whose old_string does not match returns "
     "'Edit NOT applied …', and an MCP tool error (a stale browser ref) "
@@ -683,6 +684,11 @@ class CodeModeSession:
         ran and whether the user accepted it. No-op without a store; never
         raises (called from the engine's turn path).
         """
+        if kind == "user":
+            # The prompt carries the app's memory snapshot and the engine's
+            # reminders; journaling them made learner evidence an echo of
+            # facts that are already saved.
+            text = strip_reminders(text)
         if self._skills is None or not (text or "").strip():
             return
         try:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import os
 import re
 import time
@@ -367,6 +368,19 @@ def unchanged_read_note(repeat: bool) -> str:
         "\n\n[note: unchanged since your earlier read this session — reuse "
         "what you already learned instead of re-reading]"
     )
+
+
+def result_digest(text: str, *, unordered: bool = False) -> str:
+    """A short hash of a search result, for telling a true repeat from a changed one.
+
+    ``unordered`` hashes the sorted lines, for results whose line order is not
+    stable between identical runs (ripgrep walks directories in parallel).
+    """
+    if unordered:
+        text = "\n".join(sorted(text.split("\n")))
+    return hashlib.blake2b(
+        text.encode("utf-8", "replace"), digest_size=16
+    ).hexdigest()
 
 
 def repeat_search_pointer(text: str, header_lines: int = 1) -> str:

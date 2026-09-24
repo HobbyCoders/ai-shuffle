@@ -781,15 +781,15 @@ class Settings(BaseSettings):
     # Override via TASK_WORKER_BACKGROUND_SETTLE_SECONDS.
     task_worker_background_settle_seconds: float = 120.0
 
-    # Compiled system prompt on the delegated (claude CLI) leg (agents-program
-    # ruling A3). True (default since the 2026-08 prompt overhaul): the fluid
-    # compiler's full output (base + instruction files + skills + env +
-    # blocks) replaces the CLI preset via --system-prompt, so both legs run
-    # the same prompt stack. False: the CLI keeps its own Claude Code preset
-    # and receives the agent's configured prompt + app blocks via
-    # --append-system-prompt (pre-overhaul behavior). Native legs always run
-    # the compiled prompt; this flag only affects the delegated leg. Set via
-    # PROMPT_FULL_REPLACE.
+    # Compiled system prompt for a PLAIN-STRING profile prompt on the
+    # delegated (claude CLI) leg. A preset profile is not affected: under
+    # decision D6 it always keeps Claude Code's own preset prompt and gets the
+    # app's text through --append-system-prompt. For a plain-string profile,
+    # True compiles the prompt (base + instruction files + skills + env +
+    # blocks) and False sends it uncompiled plus the agents index; either way
+    # it replaces the CLI preset via --system-prompt, because the profile
+    # chose its own prompt. Native legs always run the compiled prompt. Set
+    # via PROMPT_FULL_REPLACE.
     prompt_full_replace: bool = True
 
     # Auto-continue an autonomous turn cut at the autocompact boundary. The

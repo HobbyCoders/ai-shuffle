@@ -1111,6 +1111,60 @@ async def test_unpark_turn_threads_completion_frames_to_provider_overrides(mock_
     assert captured["overrides"]["background_task_completions"] == frames
 
 
+@pytest.mark.parametrize("source", ["user", "unpark", "agent_message", "wakeup", "promotion"])
+async def test_turn_source_threads_to_provider_overrides(mock_db, source):
+    """Fluid records the source on TurnStarted; it reaches the adapter here."""
+    turn = turns_db.enqueue_turn("s12s", source, prompt="go")
+    captured = {}
+
+    async def pump(**kwargs):
+        captured.update(kwargs)
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=pump):
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    assert captured["overrides"]["turn_source"] == source
+
+
+async def test_a_failover_retry_of_a_wake_records_the_wake_source(mock_db):
+    """#6: a failover retry is enqueued as source=failover with the retried
+    turn as its parent. It used to record source='user', which skewed the
+    wake metrics the field exists for; it now records the source of the turn
+    it retries, on fluid's TurnStarted and on the app's turn.started."""
+    wake = turns_db.enqueue_turn("s12f", "unpark", prompt="task done")
+    first = turns_db.enqueue_turn("s12f", "failover", prompt="task done",
+                                  parent_turn_id=wake["id"])
+    retry = turns_db.enqueue_turn("s12f", "failover", prompt="task done",
+                                  parent_turn_id=first["id"])
+    captured = {}
+
+    async def pump(**kwargs):
+        captured.update(kwargs)
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=pump) as env:
+        outcome = await session_runtime.SessionRuntime(retry).execute()
+
+    assert outcome == "completed"
+    assert captured["overrides"]["turn_source"] == "unpark"
+    assert env["recorder"].start.await_args.kwargs["source"] == "unpark"
+
+
+async def test_an_automation_turn_records_the_automation_source(mock_db):
+    turn = turns_db.enqueue_turn("s12g", "automation", prompt="nightly report")
+
+    async def pump(**kwargs):
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=pump) as env:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    assert env["recorder"].start.await_args.kwargs["source"] == "automation"
+
+
 async def test_unpark_turn_records_terminal_task_events_after_start(mock_db):
     """The wake turn is the delivery point for a completion that happened
     between turns, so it must write the terminal task.updated to the event log —

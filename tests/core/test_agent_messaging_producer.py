@@ -397,35 +397,36 @@ async def test_real_swarm_binding_keeps_worker_scope_and_deduplicates_parent(wor
         await asyncio.wait_for(asyncio.gather(*coordinator.jobs.values()), timeout=10)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("runtime_present", [False, True])
-async def test_worker_message_to_idle_parent_uses_owned_turn_queue(
-    workers, dispatch_env, monkeypatch, runtime_present
-):
-    """A real Task sends main a message, then completes: neither may bypass
-    app admission, including the setup window where a runtime has no engine turn.
-    """
+class _RecordingProvider:
+    """A one-reply provider that keeps each request's final user text."""
+
+    name = "fake"
+
+    def __init__(self):
+        from fluid.providers.base import ProviderCaps
+
+        self.caps = ProviderCaps()
+        self.calls = 0
+        self.prompts = []
+
+    async def stream(self, request):
+        from fluid.providers.base import StreamChunk
+
+        self.calls += 1
+        self.prompts.append(request.messages[-1].text())
+        yield StreamChunk("text_delta", text="Acknowledged")
+        yield StreamChunk("done", stop_reason="end_turn")
+
+
+async def _parked_root(workers, monkeypatch, runtime_present):
+    """``root`` delegated to a real Task worker and parked on it."""
     from fluid.engine.native import NativeLoop
-    from fluid.events.ops import UserTurn
-    from fluid.providers.base import ProviderCaps, StreamChunk
     from fluid.store.base import MemoryStore
 
     from app.core import session_runtime, turn_scheduler
     from app.db import turns as turns_db
 
-    class Provider:
-        name = "fake"
-        caps = ProviderCaps()
-
-        def __init__(self):
-            self.calls = 0
-
-        async def stream(self, request):
-            self.calls += 1
-            yield StreamChunk("text_delta", text="Acknowledged")
-            yield StreamChunk("done", stop_reason="end_turn")
-
-    provider = Provider()
+    provider = _RecordingProvider()
     engine = NativeLoop(provider=provider, store=MemoryStore(), model="fake")
     workers.receiver("root")
     get_session_pool().get("root").adapter.engine = engine
@@ -444,40 +445,185 @@ async def test_worker_message_to_idle_parent_uses_owned_turn_queue(
     )
     turns_db.start_turn(context["id"], None, "runner")
     turns_db.park_turn(context["id"], "background_tasks")
+    return engine, provider, kicks, context
+
+
+def _held_rows(session_id):
+    from app.core import wakeup_service
+    from app.db import wakeups as wakeups_db
+
+    return wakeups_db.get_session_wakeups(session_id, wakeup_service.HELD_PEER_SOURCE)
+
+
+async def _message_main(text, *, urgent=False):
+    payload = {"to": "main", "message": text}
+    if urgent:
+        payload["urgent"] = True
+    result = await send_message.handler(payload, _ctx("reporting-worker"))
+    assert not result.is_error, result.text
+    return result
+
+
+async def _run_queued(engine, session_id):
+    from fluid.events.ops import UserTurn
+
+    from app.db import turns as turns_db
+
+    ran = []
+    for row in turns_db.get_queued_turns(session_id):
+        assert turns_db.start_turn(row["id"], None, "runner")
+        await engine.submit(UserTurn(content=row["prompt"]))
+        await engine.wait_turn()
+        turns_db.settle_turn(row["id"], "completed")
+        ran.append(row)
+    return ran
+
+
+@pytest_asyncio.fixture
+async def _no_wake_timers():
+    from app.core import wakeup_service
+
+    yield
+    for task in list(wakeup_service._timers.values()):
+        task.cancel()
+    wakeup_service._timers.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_present", [False, True])
+async def test_worker_message_to_idle_parent_uses_owned_turn_queue(
+    workers, dispatch_env, monkeypatch, runtime_present, _no_wake_timers,
+):
+    """A real Task sends its parked parent a progress message, then completes.
+
+    The message must not wake the parent: it is held, the sender is told so,
+    and the parent reads it once, in the unpark wake the completion brings.
+    ``runtime_present=False`` covers the scheduler fallback; True covers a
+    live engine, which the app does not offer an idle-time message to.
+    """
+    from app.db import turns as turns_db
+
+    engine, provider, kicks, _context = await _parked_root(
+        workers, monkeypatch, runtime_present,
+    )
     try:
-        result = await send_message.handler(
-            {"to": "main", "message": "Progress before completion"},
-            _ctx("reporting-worker"),
-        )
-        assert not result.is_error, result.text
+        result = await _message_main("Progress before completion")
+        assert result.text == messaging.held_receipt("main")
         assert engine._turn_task is None, "SendMessage started an unowned engine turn"
-        (message_turn,) = turns_db.get_queued_turns("root")
-        assert message_turn["source"] == "agent_message"
-        assert "Progress before completion" in message_turn["prompt"]
-        assert "from='reporting-worker'" in message_turn["prompt"]
-        assert message_turn["profile_id"] == "profile"
-        assert message_turn["project_id"] == "project"
-        assert message_turn["worktree_id"] == "worktree"
-        assert message_turn["overrides"] == context["overrides"]
-        assert message_turn["payload"]["api_user_id"] == "owner"
-        assert message_turn["payload"]["task_ids"] == []
-        assert kicks == ["root"]
+        assert turns_db.get_queued_turns("root") == []
+        assert kicks == []
+        (held,) = _held_rows("root")
+        assert "Progress before completion" in held["prompt"]
+        assert "from='reporting-worker'" in held["prompt"]
+        assert held["profile_id"] == "profile"
 
         # dispatch_worker produces the real terminal frame. Feed that to the
         # real scheduler (dispatch_env captured it rather than auto-running it).
         await workers.finish("reporting-worker")
         # The fixture replaces the module attribute; use the import-time alias.
         await _real_task_terminal(*dispatch_env.wakes[-1])
-        queued = turns_db.get_queued_turns("root")
-        assert [row["source"] for row in queued] == ["agent_message", "unpark"]
-        assert queued[1]["payload"]["task_ids"] == ["reporting-worker"]
-        for row in queued:
-            assert turns_db.start_turn(row["id"], None, "runner")
-            await engine.submit(UserTurn(content=row["prompt"]))
-            await engine.wait_turn()
-            turns_db.settle_turn(row["id"], "completed")
-        assert provider.calls == 2
+        (wake,) = turns_db.get_queued_turns("root")
+        assert wake["source"] == "unpark"
+        assert wake["payload"]["task_ids"] == ["reporting-worker"]
+        assert "Progress before completion" in wake["payload"]["held_peer_messages"]
+        assert _held_rows("root") == []
+
+        await _run_queued(engine, "root")
+        assert provider.calls == 1
+        (request_text,) = provider.prompts
+        reminder = request_text[request_text.index("<system-reminder>"):]
+        assert "Progress before completion" in reminder
+        assert request_text.index("<task-notification>") < request_text.index(
+            "Progress before completion"
+        )
         assert turns_db.get_queued_turns("root") == []
+    finally:
+        await engine.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_present", [False, True])
+async def test_urgent_worker_message_wakes_a_parked_parent_now(
+    workers, monkeypatch, runtime_present, _no_wake_timers,
+):
+    """Urgent keeps the wake, and takes any held message along ahead of it."""
+    from app.db import turns as turns_db
+
+    engine, provider, kicks, context = await _parked_root(
+        workers, monkeypatch, runtime_present,
+    )
+    try:
+        await _message_main("Interim note")
+        assert kicks == []
+        result = await _message_main("Blocked: may I edit control.py?", urgent=True)
+        assert result.text == "Queued for main"
+        assert kicks == ["root"]
+        (turn,) = turns_db.get_queued_turns("root")
+        assert turn["source"] == "agent_message"
+        assert turn["overrides"] == context["overrides"]
+        assert turn["prompt"].index("Interim note") < turn["prompt"].index("Blocked:")
+        assert _held_rows("root") == []
+
+        await _run_queued(engine, "root")
+        assert provider.calls == 1
+        assert "Interim note" in provider.prompts[0]
+    finally:
+        await engine.aclose()
+
+
+def test_held_receipt_tells_the_sender_not_to_wait():
+    text = messaging.held_receipt("main")
+    assert text.startswith("Held for main until it wakes")
+    assert "Do not wait for a reply" in text
+    assert "urgent=true" in text
+    assert "Delivered" not in text
+
+
+@pytest.mark.asyncio
+async def test_held_messages_are_promoted_durably_across_a_restart(
+    workers, monkeypatch, _no_wake_timers,
+):
+    """The promotion deadline is a pending_wakeups row: it outlives the
+    process, keeps the first message's deadline, and fires as one
+    ``promotion`` turn carrying every held message."""
+    from app.core import turn_scheduler, wakeup_service
+    from app.db import turns as turns_db
+
+    engine, provider, kicks, context = await _parked_root(workers, monkeypatch, False)
+    try:
+        await _message_main("First interim note")
+        (first,) = _held_rows("root")
+        await _message_main("Second interim note")
+        (held,) = _held_rows("root")
+        assert held["fire_at"] == pytest.approx(first["fire_at"], abs=1.0)
+        assert held["fire_at"] - first["fire_at"] < 1.0
+        assert held["prompt"].index("First") < held["prompt"].index("Second")
+
+        # Restart: every in-process timer is gone; boot rehydrate re-arms
+        # the row from the database.
+        for task in list(wakeup_service._timers.values()):
+            task.cancel()
+        wakeup_service._timers.clear()
+        armed = []
+        monkeypatch.setattr(wakeup_service, "_arm", lambda row, delay: armed.append(row))
+        assert await wakeup_service.rehydrate_pending() == 1
+        (row,) = armed
+        assert row["source"] == wakeup_service.HELD_PEER_SOURCE
+
+        await wakeup_service._fire(row)
+        (turn,) = turns_db.get_queued_turns("root")
+        assert turn["source"] == "promotion"
+        assert turn["overrides"] == context["overrides"]
+        assert turn["payload"]["api_user_id"] == "owner"
+        assert "First interim note" in turn["prompt"]
+        assert "Second interim note" in turn["prompt"]
+        assert turn["prompt"].startswith("<system-reminder>")
+        assert kicks == ["root"]
+        assert _held_rows("root") == []
+        assert turn_scheduler.HELD_PEER_PROMOTION_SECONDS > 0
+
+        await _run_queued(engine, "root")
+        assert provider.calls == 1
     finally:
         await engine.aclose()
 

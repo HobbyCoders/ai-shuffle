@@ -445,3 +445,207 @@ def test_unsynthesized_backlog_below_the_overflow_line_is_kept(tmp_path, monkeyp
     # Only consumed lines may go below the overflow line.
     assert store.journal_count() >= 10 - n
     assert store.synth_cursor() == 0 or store.journal_count() == 10
+
+
+# ─── a learner delete is not a user Forget ──────────────────────────────────
+
+
+def _cells(store: SkillStore, n: int, start: int = 0) -> None:
+    for i in range(start, start + n):
+        store.journal_append({"kind": "cell", "code": f"x = {i}", "host_calls": 0})
+
+
+async def test_learner_delete_keeps_journal_and_cursor(tmp_path) -> None:
+    """A learner <delete-memory> used to run as a user Forget: it purged every
+    journal line older than now (the unsynthesized backlog included) and the
+    pass then wrote its pre-purge cursor back, 40 lines past the empty
+    journal, so the next 40 entries were never read."""
+    store = SkillStore(tmp_path)
+    fact = store.save_memory("The staging box is called Atlas.", scope="global")
+    store.journal_context(session_id="ses_1", project=PROJECT)
+    _cells(store, 45)
+    provider = FakeInference(reply_text(f'<delete-memory id="{fact.id}"/>'))
+    synth = Synthesizer(provider, "gpt-test", store, project=PROJECT, min_new_entries=10)
+    assert await synth.run() == [f"-memory:{fact.id}"]
+
+    assert fact.id not in [m.id for m in store.memories()]
+    assert not store._facts.snapshot().get("forgotten_before")
+    consumed = log_rows(store)[-1]["consumed"]
+    assert 0 < consumed < 45
+    assert store.journal_count() == 45
+    assert store.synth_cursor() == consumed
+    # The maintenance sweep must not finish the wipe either.
+    store.reap()
+    store.purge_forgotten_evidence()
+    assert store.journal_count() == 45 and store.synth_cursor() == consumed
+
+    _cells(store, 10, start=45)
+    assert store.journal_count() - store.synth_cursor() == 55 - consumed
+    assert synth.due()
+    indexed, _ = store.journal_slice_indexed(store.synth_cursor(), 40)
+    assert indexed[0][1]["code"] == f"x = {consumed}"
+
+
+async def test_user_forget_still_purges_evidence_and_rebases_cursor(tmp_path) -> None:
+    store = SkillStore(tmp_path)
+    fact = store.save_memory("The staging box is called Atlas.", scope="global", protected=True)
+    _cells(store, 10)
+    store.set_synth_cursor(6)
+    assert store.delete_memory(fact.id, explicit=True)
+    assert store._facts.snapshot().get("forgotten_before")
+    assert store.journal_count() == 0
+    assert store.synth_cursor() == 0
+    time.sleep(0.02)  # later entries carry a later timestamp than the cutoff
+    _cells(store, 3, start=10)
+    store.purge_forgotten_evidence()  # the maintenance sweep repeats it
+    assert store.journal_count() == 3 and store.synth_cursor() == 0
+    assert [e["code"] for e in store.journal_entries()] == ["x = 10", "x = 11", "x = 12"]
+
+
+async def test_cursor_past_the_journal_end_is_clamped(tmp_path) -> None:
+    # The state older builds left behind after a learner delete: the cursor
+    # points past the end, pending is negative and the learner is never due.
+    store = SkillStore(tmp_path)
+    _cells(store, 10)
+    store.set_synth_cursor(40)
+    synth = Synthesizer(FakeInference(), "gpt-test", store, min_new_entries=1)
+    assert not synth.due()
+    store.reap()  # the five-minute maintenance sweep
+    assert store.synth_cursor() == store.journal_count() == 10
+    _cells(store, 1, start=10)
+    assert synth.due()
+
+
+async def test_user_forget_during_a_pass_does_not_strand_the_cursor(tmp_path) -> None:
+    store = SkillStore(tmp_path)
+    fact = store.save_memory("The staging box is called Atlas.", scope="global", protected=True)
+    store.journal_context(session_id="ses_1", project=PROJECT)
+    _cells(store, 30)
+
+    synth = Synthesizer(FakeInference(reply_text("NO_CHANGES")), "gpt-test", store,
+                        project=PROJECT, min_new_entries=1)
+    apply = synth._apply
+
+    async def apply_while_the_user_forgets(text, group):
+        # Another session's Forget lands while this pass applies its output.
+        store.delete_memory(fact.id, explicit=True)
+        return await apply(text, group)
+
+    synth._apply = apply_while_the_user_forgets
+    await synth.run()
+    assert store.journal_count() == 0
+    assert 0 <= store.synth_cursor() <= store.journal_count()
+    # The pass still ran and answered: it is logged and counted like any other.
+    row = log_rows(store)[-1]
+    assert row["kind"] == "synthesis" and row["consumed"] == 30 and "error" not in row
+    assert store.learner_yield()["silent_passes"] == 1
+
+
+# ─── yield: a silent learner is reported, and a writing one is visible ──────
+
+
+async def test_yield_canary_learner_fact_lands_and_renders_past_a_full_store(tmp_path) -> None:
+    """The 09-22 overflow case end to end: 95 protected facts, a 20-entry
+    journal, one <memory> answer. The fact must land unprotected and
+    unkeyed, show in the pass log, and reach the rendered snapshot."""
+    store = SkillStore(tmp_path)
+    desktop_shaped_memories(store)
+    store.journal_context(session_id="ses_1", project=PROJECT)
+    for i in range(20):
+        store.journal_append({"kind": "cell", "code": f"run_step({i})", "stdout": "ok", "host_calls": 0})
+    provider = FakeInference(reply_text(
+        '<memory scope="project">The nightly job writes its report to reports/nightly.md.</memory>'
+    ))
+    synth = Synthesizer(provider, "gpt-test", store, project=PROJECT, min_new_entries=20)
+    assert synth.due()
+    changed = await synth.run()
+
+    learned = [e for e in memories_doc(store)["entries"] if not e.get("protected")]
+    assert len(learned) == 1 and not learned[0].get("key")
+    assert changed == [f"memory:{learned[0]['id']}"]
+    row = log_rows(store)[-1]
+    assert row["changed"] == changed
+    assert row["store_id"] == store.store_id() == memories_doc(store)["store_id"]
+    shown = prompt_of(provider.requests[0]).count("run_step(")
+    assert 0 < row["consumed"] <= shown
+    record = store.learner_yield()
+    assert record["silent_passes"] == 0 and record["last_write_at"] > 0
+    assert "reports/nightly.md" in store.render_memory_section(PROJECT)
+
+
+async def test_three_silent_days_raise_the_yield_alarm_once_a_day(tmp_path, caplog) -> None:
+    store = SkillStore(tmp_path)
+    store.save_memory("A fact so the store has an id.", scope="global", protected=True)
+    store_id = store.store_id()
+    assert store_id
+    _cells(store, 5)
+    synth = Synthesizer(FakeInference(reply_text("NO_CHANGES")), "gpt-test", store,
+                        min_new_entries=1)
+
+    # Passes have run for a day without a write: no alarm yet.
+    store.note_learner_pass(False, now=time.time() - 86400)
+    with caplog.at_level(logging.INFO, logger="fluid.codemode.continual"):
+        await synth.run()
+    assert not [r for r in caplog.records if "yield alarm" in r.message]
+
+    # The first silent pass was four days ago.
+    meta = json.loads((tmp_path / "meta.json").read_text(encoding="utf-8"))
+    meta["learner_yield"]["silent_since"] = time.time() - 4 * 86400
+    (tmp_path / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="fluid.codemode.continual"):
+        _cells(store, 1, start=5)
+        await synth.run()
+        _cells(store, 1, start=6)
+        await synth.run()  # the same day: no second warning
+    alarms = [r for r in caplog.records if "yield alarm" in r.message]
+    assert len(alarms) == 1 and alarms[0].levelno == logging.WARNING
+    assert f"store={store_id}" in alarms[0].getMessage()
+    assert "4.0 days across 3 passes" in alarms[0].getMessage()
+    # Every learner line names the replica.
+    lines = [r for r in caplog.records if r.name == "fluid.codemode.continual"]
+    assert len(lines) >= 3 and all(f"store={store_id}" in r.getMessage() for r in lines)
+
+    # A write ends the silence.
+    synth = Synthesizer(FakeInference(reply_text("<memory>The CI runner is named ci-7.</memory>")),
+                        "gpt-test", store, min_new_entries=1)
+    _cells(store, 1, start=7)
+    assert await synth.run()
+    record = store.learner_yield()
+    assert record["silent_passes"] == 0 and "silent_since" not in record
+
+
+async def test_a_long_gap_without_passes_is_not_silence(tmp_path, caplog) -> None:
+    # The last write was ten days ago but the machine was off: one pass now
+    # is not three days of passes without a write.
+    store = SkillStore(tmp_path)
+    store.note_learner_pass(True, now=time.time() - 10 * 86400)
+    _cells(store, 3)
+    synth = Synthesizer(FakeInference(reply_text("NO_CHANGES")), "gpt-test", store,
+                        min_new_entries=1)
+    with caplog.at_level(logging.WARNING, logger="fluid.codemode.continual"):
+        await synth.run()
+    assert not [r for r in caplog.records if "yield alarm" in r.message]
+    assert store.learner_yield()["silent_passes"] == 1
+
+
+def test_silence_ends_at_the_last_pass(tmp_path) -> None:
+    # A learner that ran one silent pass four days ago and has not run since
+    # is idle, not silent: diagnostics must not report it every day after.
+    from fluid.codemode.skills import learner_silence_seconds
+
+    store = SkillStore(tmp_path)
+    now = time.time()
+    store.note_learner_pass(False, now=now - 4 * 86400)
+    assert learner_silence_seconds(store.learner_yield(), now) == 0
+    store.note_learner_pass(False, now=now)
+    assert learner_silence_seconds(store.learner_yield(), now) == pytest.approx(4 * 86400)
+
+
+def test_a_skipped_pass_does_not_count_toward_yield(tmp_path) -> None:
+    store = SkillStore(tmp_path)
+    synth = Synthesizer(FakeInference(), "gpt-test", store, pass_timeout=0.0)
+    synth._log_pass("synthesis", [], error="skipped: lock held", ran=False)
+    assert store.learner_yield() == {}
+    synth._log_pass("synthesis", [], error="provider error (HTTP 400): x")
+    assert store.learner_yield()["silent_passes"] == 1

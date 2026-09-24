@@ -52,6 +52,15 @@ sequence on stdout, selected by ``FAKE_CLAUDE_SCENARIO``:
                             the first block's deltas; =interrupt parks there
                             until an ``interrupt`` control_request, then closes
                             the block and returns a success result.
+  u  hooked tool turn:      a Bash tool_use, then a ``hook_callback``
+                            control_request for the PreToolUse callback the
+                            harness registered at ``initialize``; a
+                            ``permissionDecision: deny`` answer becomes an
+                            error tool_result carrying the reason, anything
+                            else runs the command.
+
+Every scenario answers an ``initialize`` control_request with success and
+remembers the hook callback ids it registered (``HOOK_CALLBACKS``).
 
 ``claude --version`` prints a version line and exits (the loop's version guard).
 Frames model the real vocabulary (``claude_agent_sdk`` message_parser + query.py).
@@ -226,16 +235,46 @@ def context_usage_response(request_id: str) -> dict:
     }}
 
 
+# Hook event -> the callback id the harness registered for it at initialize.
+HOOK_CALLBACKS: dict[str, str] = {}
+
+
+def answer_initialize(msg: dict) -> None:
+    """Record the registered hook callbacks and accept, as the real CLI does.
+
+    ``FAKE_CLAUDE_REFUSE_INITIALIZE=1`` refuses instead, with the error
+    subtype, and registers nothing.
+    """
+    if os.environ.get("FAKE_CLAUDE_REFUSE_INITIALIZE") == "1":
+        emit({"type": "control_response", "response": {
+            "subtype": "error", "request_id": msg.get("request_id", ""),
+            "error": "initialize refused",
+        }})
+        return
+    hooks = (msg.get("request") or {}).get("hooks") or {}
+    for event, matchers in hooks.items():
+        for matcher in matchers or ():
+            for callback_id in matcher.get("hookCallbackIds") or ():
+                HOOK_CALLBACKS[event] = callback_id
+    emit({"type": "control_response", "response": {
+        "subtype": "success", "request_id": msg.get("request_id", ""),
+        "response": {"commands": [], "output_style": "default"},
+    }})
+
+
 def answer_control(msg: dict, scenario: str) -> str | None:
     """Reply to a control_request the harness sent (scenarios f/g; h stays mute).
 
     Returns a request_id when the reply is deliberately deferred (scenario i),
     for the caller to emit inside the next turn.
     """
-    if scenario == "h":
-        return None
     request_id = msg.get("request_id", "")
     subtype = (msg.get("request") or {}).get("subtype")
+    if subtype == "initialize":
+        answer_initialize(msg)
+        return None
+    if scenario == "h":
+        return None
     if subtype != "get_context_usage":
         return None
     if scenario == "i":
@@ -275,6 +314,45 @@ def turn_inline_context(sid: str) -> None:
     msg = wait_for("control_request")
     if msg is not None:
         emit(context_usage_response(msg.get("request_id", "")))
+    emit(result_frame(sid))
+
+
+def turn_hooked_tool(sid: str) -> None:
+    """A Bash call gated by the harness's PreToolUse hook callback."""
+    tid = "toolu_hook_1"
+    args = {"command": "echo hooked"}
+    emit(assistant_frame(
+        sid, [{"type": "tool_use", "id": tid, "name": "Bash", "input": args}], "tool_use",
+    ))
+    decision, reason = None, ""
+    callback_id = HOOK_CALLBACKS.get("PreToolUse")
+    if callback_id is not None:
+        emit({"type": "control_request", "request_id": "cli_hook_1", "request": {
+            "subtype": "hook_callback", "callback_id": callback_id,
+            "input": {
+                "hook_event_name": "PreToolUse", "session_id": sid,
+                "transcript_path": "/tmp/fake-transcript.jsonl", "cwd": ".",
+                "tool_name": "Bash", "tool_input": args, "tool_use_id": tid,
+            },
+            "tool_use_id": tid,
+        }})
+        resp = wait_for("control_response") or {}
+        output = (resp.get("response") or {}).get("response") or {}
+        specific = output.get("hookSpecificOutput") or {}
+        decision = specific.get("permissionDecision")
+        reason = specific.get("permissionDecisionReason", "")
+    if decision == "deny":
+        emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": tid,
+            "content": [{"type": "text", "text": reason}], "is_error": True,
+        }]}})
+        emit(assistant_frame(sid, [{"type": "text", "text": "Blocked."}], "end_turn"))
+    else:
+        emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": tid,
+            "content": [{"type": "text", "text": "hooked"}], "is_error": False,
+        }]}})
+        emit(assistant_frame(sid, [{"type": "text", "text": "Ran it."}], "end_turn"))
     emit(result_frame(sid))
 
 
@@ -426,6 +504,8 @@ def main() -> int:
             turn_partial(session_id)
         elif scenario == "s":
             turn_long_stream(session_id)
+        elif scenario == "u":
+            turn_hooked_tool(session_id)
         elif scenario == "e":
             turn_simple(session_id)
             if not wake_emitted:

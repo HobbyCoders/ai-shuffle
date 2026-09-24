@@ -429,3 +429,24 @@ async def test_session_search_flags_a_repeated_query() -> None:
 
     other = await _registry().dispatch("SessionSearch", {"query": "billing"}, ctx)
     assert "identical search already run" not in other.text
+
+
+async def test_a_repeat_session_search_with_new_hits_returns_the_new_listing() -> None:
+    # The store grows while the session runs; the same query answered
+    # differently is new information, not a repeat.
+    answers = [
+        [_hit("ses_a", 2, [("user", "terraform")])],
+        [_hit("ses_a", 2, [("user", "terraform")]), _hit("ses_b", 3, [("user", "terraform apply")])],
+    ]
+
+    def search(terms, *, limit=5, exclude_session_id=None):
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    ctx = ToolCtx(session_id="cur", extra={"session_search": search})
+    await _registry().dispatch("SessionSearch", {"query": "terraform"}, ctx)
+    second = await _registry().dispatch("SessionSearch", {"query": "terraform"}, ctx)
+    assert "identical search already run" not in second.text
+    assert "ses_b" in second.text
+
+    third = await _registry().dispatch("SessionSearch", {"query": "terraform"}, ctx)
+    assert "identical search already run" in third.text

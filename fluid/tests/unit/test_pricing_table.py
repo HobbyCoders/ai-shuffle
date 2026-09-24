@@ -80,7 +80,8 @@ def test_the_audited_models_now_carry_sourced_rates() -> None:
     ):
         price = resolve_price(model)
         assert price is not None and price.priced, model
-        assert "2026-09-04" in price.source
+        # The gpt-6 rows were re-read on 2026-09-23 (astra's cache-write rate).
+        assert ("2026-09-23" if model.startswith("gpt-6") else "2026-09-04") in price.source
         assert estimate_cost(model, _MTOK) == pytest.approx(expected), model
     # Longest prefix wins: the flash variant is not billed at the 5.3 rate.
     assert resolve_price("glm-5.3-flash") is not resolve_price("glm-5.3")

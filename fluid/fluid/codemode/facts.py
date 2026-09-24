@@ -22,6 +22,13 @@ MAX_TOMBSTONES = 256
 BLOOM_BYTES = 16 * 1024
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 MAX_PROMPT_CHARS = 8000
+# Part of MAX_PROMPT_CHARS that unprotected facts (learner output, env.*
+# harvests) claim before protected facts fill the rest. Without it a store of
+# protected Remember facts alone hides every learned and harvested fact. Sized
+# on the desktop store: its 6 in-scope unprotected facts render at about 2.2k
+# chars (median line 306 chars, plus the 80-char "harvested" hint on the
+# tool-sourced ones), which 2,000 did not cover.
+RESERVED_INFERRED_CHARS = 3000
 INFERRED_TTL = 90 * 86400
 MAX_INFERENCE_CALLS_PER_DAY = 48
 HISTORY_TTL = 30 * 86400
@@ -296,7 +303,12 @@ class FactStore:
             doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
             for bucket in ("entries", "archived"):
                 doc[bucket] = [e for e in doc[bucket] if e["id"] != memory_id]
-            doc["forgotten_before"] = time.time()
+            if explicit:
+                # Journal evidence older than this is purged and never shown
+                # to the learner again. Only a user Forget earns that; a
+                # learner delete setting it would let the next maintenance
+                # sweep wipe the journal anyway.
+                doc["forgotten_before"] = time.time()
             self._write(doc)
             return True
 

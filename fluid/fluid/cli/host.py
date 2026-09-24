@@ -639,6 +639,7 @@ class CliHost:
             )
         message = AgentMessage(
             text=str(input.get("message") or ""), sender=self.identity,
+            urgent=bool(input.get("urgent")),
         )
         if target.engine is None:
             assert target.worker is not None  # _resolve_target's invariant
@@ -661,6 +662,15 @@ class CliHost:
         except Exception as exc:  # noqa: BLE001 — a closing engine refuses ops
             return ToolOutcome(
                 text=f"could not deliver to {target.name}: {exc}", is_error=True,
+            )
+        if getattr(target.engine, "last_held_message", None) is message:
+            return ToolOutcome(
+                text=(
+                    f"Held for {target.name} until it wakes: it is parked "
+                    "waiting on background work and reads your message with "
+                    "its next wake. Do not wait for a reply. Send again with "
+                    "urgent=true only if you are blocked on its answer."
+                )
             )
         return ToolOutcome(
             text=(

@@ -60,7 +60,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "\n"
         "Messages are pushed, not polled: a busy agent picks yours up at its "
         "next tool result, and a supported idle or finished worker is queued over "
-        "its saved transcript. Queued is not delivered: read the tool's result. "
+        "its saved transcript. An agent parked waiting on background work "
+        "holds an ordinary message until it next wakes instead of waking for "
+        "it; set `urgent` only when you are blocked on its answer. Queued is "
+        "not delivered: read the tool's result. "
         "An explicit user stop or policy rejection must not be replayed; ask the user. "
         "A host without saved context reports that limitation. There is no inbox — messages sent to you arrive "
         "on their own.\n"
@@ -112,6 +115,13 @@ SPEC = ToolSpec(
                 "description": (
                     "A 5-10 word label for your own transcript row. Not "
                     "transmitted."
+                ),
+            },
+            "urgent": {
+                "type": "boolean",
+                "description": (
+                    "Wake a receiver that is parked waiting on background "
+                    "work. Only when you cannot continue without its answer."
                 ),
             },
         },

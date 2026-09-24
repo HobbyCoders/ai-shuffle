@@ -372,6 +372,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             await self._run_turn(UserTurn(
                 content=self._background_wake_content(batch),
                 wake_task_ids=task_ids,
+                source="unpark",
             ))
         finally:
             # The engine failed before persisting the synthetic user node and

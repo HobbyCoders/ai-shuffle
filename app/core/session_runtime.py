@@ -168,6 +168,7 @@ async def try_steer_task_notification(
     notification_id: str,
     frames: Optional[List[Dict[str, Any]]] = None,
     task_ids: Optional[List[str]] = None,
+    held_peer_messages: str = "",
 ) -> bool:
     """Try to hand a terminal ``<task-notification>`` to this session's RUNNING
     turn, so a background completion reaches the model at the next cell boundary
@@ -196,6 +197,7 @@ async def try_steer_task_notification(
             notification_id=notification_id,
             frames=list(frames or []),
             task_ids=list(task_ids or []),
+            **({"held_peer_messages": held_peer_messages} if held_peer_messages else {}),
         )
     except Exception:  # noqa: BLE001 — the queued wake is the correctness path.
         logger.warning(
@@ -1173,6 +1175,15 @@ class SessionRuntime:
             # Carry the claimed completions to HarnessAdapter so Fluid can clear
             # its durable pending-task state without starting a second wake turn.
             turn_overrides["background_task_completions"] = completion_frames
+        # Fluid records what started the turn on its TurnStarted event; the
+        # adapter maps this app source onto fluid's vocabulary. A failover
+        # retry records the source of the turn it retries, so a retried wake
+        # still counts as a wake.
+        from app.core.provider.harness_adapter import fluid_turn_source
+        from app.core.turn_scheduler import effective_turn_source
+
+        app_source = await asyncio.to_thread(effective_turn_source, self.turn)
+        turn_overrides["turn_source"] = app_source
         # A resumed turn re-runs the engine loop from the session head: no new
         # prompt is sent and no message.user is recorded, so the transcript
         # gains only the answer the failed turn never produced.
@@ -1196,6 +1207,8 @@ class SessionRuntime:
         engine_prompt = prompt
         if (self.turn.get("payload") or {}).get("steer_already_delivered"):
             engine_prompt = f"{_REDELIVERY_NOTE}\n\n{prompt}" if prompt else prompt
+        held_peer = ""
+        engine_started = False
         if (
             not resume
             and not already_recorded
@@ -1208,6 +1221,7 @@ class SessionRuntime:
                 prompt,
                 profile_id=self.turn.get("profile_id"),
                 record_user=not resume and not already_recorded,
+                source=fluid_turn_source(app_source),
             )
             if self._abort_reason == "recording_failed":
                 return
@@ -1255,6 +1269,26 @@ class SessionRuntime:
                 self._terminal = "interrupted"
                 self._abort_reason = "user_stopped"
                 return
+            # Peer messages held while the session was parked ride this turn,
+            # whatever started it (turn_scheduler's held-message policy). Only
+            # the engine sees them; the transcript keeps the prompt as sent.
+            if not resume:
+                try:
+                    from app.core import turn_scheduler
+
+                    held_peer = await turn_scheduler.fold_held_peer_messages_for_turn(
+                        self.session_id, self.turn,
+                    )
+                except Exception:  # noqa: BLE001 — held messages never block a turn
+                    logger.warning(
+                        "SessionRuntime: taking held peer messages failed for %s",
+                        self.session_id, exc_info=True,
+                    )
+                if held_peer:
+                    block = turn_scheduler.held_peer_block(held_peer)
+                    engine_prompt = (
+                        f"{engine_prompt}\n\n{block}" if engine_prompt else block
+                    )
             async for event in _stream_to_websocket_impl(
                 prompt=engine_prompt,
                 resume=resume,
@@ -1282,6 +1316,7 @@ class SessionRuntime:
                 turn_source=self.source,
                 loop_guard_turn=self.turn,
             ):
+                engine_started = True
                 etype = event.get("type") if isinstance(event, dict) else None
                 # ANY frame is proof the engine is still moving — a tool result,
                 # a usage record, a token of text. The watchdog only fires on
@@ -1329,6 +1364,18 @@ class SessionRuntime:
                     else:
                         await self._broadcast(ws_event)
         finally:
+            if held_peer and not engine_started:
+                # The engine never produced a frame, so it may never have had
+                # the prompt: the held messages wait for the next turn.
+                try:
+                    from app.core import turn_scheduler
+
+                    turn_scheduler.restore_held_peer_messages(self.session_id, held_peer)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "SessionRuntime: could not restore held peer messages "
+                        "for %s", self.session_id, exc_info=True,
+                    )
             self._recorder_closing = True
             await recorder.close()
         if done_event is not None and self._abort_reason != "recording_failed":
@@ -1550,6 +1597,7 @@ class SessionRuntime:
         notification_id: str,
         frames: List[Dict[str, Any]],
         task_ids: List[str],
+        held_peer_messages: str = "",
     ) -> bool:
         """Submit one terminal ``<task-notification>`` into the live turn.
 
@@ -1583,6 +1631,8 @@ class SessionRuntime:
             "frames": list(frames or []),
             "task_ids": list(task_ids or []),
         }
+        if held_peer_messages:
+            self._task_steers[notification_id]["held_peer_messages"] = held_peer_messages
         try:
             # A harness notice, not the user: the summary inside it is text a
             # worker wrote, so it goes out in the notice marker, never the
@@ -1921,10 +1971,12 @@ class SessionRuntime:
             return
         for entry in pending.values():
             try:
+                held = entry.get("held_peer_messages") or ""
                 await turn_scheduler.on_task_notification_stranded(
                     self.session_id,
                     entry.get("frames") or [],
                     entry.get("task_ids") or [],
+                    **({"held_peer_messages": held} if held else {}),
                 )
             except Exception:  # noqa: BLE001
                 logger.warning(

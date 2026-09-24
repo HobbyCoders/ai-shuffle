@@ -12,6 +12,10 @@ still return in full but say so.
 
 from __future__ import annotations
 
+import shutil
+
+import pytest
+
 from fluid.tools.builtins import register_builtins
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
@@ -237,6 +241,66 @@ async def test_a_changed_search_input_is_not_a_repeat(tmp_path) -> None:
     ):
         out = await registry.dispatch("Grep", changed, ctx)
         assert _REPEAT_SEARCH not in out.text, changed
+
+
+@pytest.fixture(params=["rg", "python"])
+def grep_engine(request, monkeypatch) -> str:
+    """Run a Grep test once per engine; the repeat check sits after both."""
+    if request.param == "rg":
+        if shutil.which("rg") is None:
+            pytest.skip("ripgrep is not installed")
+    else:
+        from fluid.tools.builtins import grep as grep_mod
+
+        real_which = grep_mod.shutil.which
+        monkeypatch.setattr(
+            grep_mod.shutil, "which",
+            lambda name, *a, **k: None if name == "rg" else real_which(name, *a, **k),
+        )
+    return request.param
+
+
+async def test_a_repeat_search_after_an_edit_returns_the_new_result(
+    tmp_path, grep_engine
+) -> None:
+    # The repeat pointer used to be keyed by the search input alone, so a
+    # verification Grep after an Edit got "the same N lines are above" and
+    # was sent back to the pre-edit listing.
+    f = tmp_path / "a.py"
+    f.write_text("foo = 1\nfoo = 2\n")
+    registry, ctx = _registry(), ToolCtx(cwd=str(tmp_path))
+    call = {"pattern": "foo", "path": str(tmp_path)}
+
+    first = await registry.dispatch("Grep", dict(call), ctx)
+    assert not first.is_error and "a.py" in first.text
+    assert not (await registry.dispatch("Read", {"file_path": str(f)}, ctx)).is_error
+    edited = await registry.dispatch(
+        "Edit",
+        {"file_path": str(f), "old_string": "foo = 1\nfoo = 2\n", "new_string": "bar = 1\n"},
+        ctx,
+    )
+    assert not edited.is_error, edited.text
+
+    second = await registry.dispatch("Grep", dict(call), ctx)
+    assert _REPEAT_SEARCH not in second.text
+    assert "(no matches)" in second.text
+
+
+async def test_a_repeat_search_sees_a_new_file(tmp_path, grep_engine) -> None:
+    (tmp_path / "a.py").write_text("foo = 1\n")
+    registry, ctx = _registry(), ToolCtx(cwd=str(tmp_path))
+    call = {"pattern": "foo", "path": str(tmp_path)}
+
+    await registry.dispatch("Grep", dict(call), ctx)
+    (tmp_path / "b.py").write_text("foo = 2\nfoo = 3\n")
+    second = await registry.dispatch("Grep", dict(call), ctx)
+    assert _REPEAT_SEARCH not in second.text
+    assert "b.py" in second.text
+
+    # The changed result is now the one a true repeat is compared with.
+    third = await registry.dispatch("Grep", dict(call), ctx)
+    assert _REPEAT_SEARCH in third.text
+    assert "b.py" not in third.text
 
 
 async def test_a_failed_search_records_nothing(tmp_path) -> None:

@@ -144,13 +144,19 @@ def make_message(supplier):
         adapter = getattr(state, "adapter", None)
         engine = getattr(adapter, "engine", None)
         text = str(data.get("message") or "")
+        urgent = bool(data.get("urgent"))
+        # An engine that says it is idle is not offered the message: the
+        # scheduler below decides between a wake and a hold on the app's own
+        # park state, which the engine's can lag. Engines that do not report
+        # (None) are offered it as before and refuse when idle.
         if (not resuming and getattr(adapter, "provider_kind", None) != "delegated"
-                and engine is not None and session_runtime.get_live_runtime(target) is not None):
+                and engine is not None and session_runtime.get_live_runtime(target) is not None
+                and getattr(engine, "turn_running", None) is not False):
             try:
                 # Only the app queue may start a turn. The atomic no-wake op
                 # also covers a runtime still starting or an engine just done.
                 await engine.submit(AgentMessage(
-                    text=text, sender=session_id, wake=False,
+                    text=text, sender=session_id, wake=False, urgent=urgent,
                 ))
             except RuntimeError:
                 # Refusal means not accepted; keep it on the durable queue.
@@ -162,17 +168,30 @@ def make_message(supplier):
                 target, session_id, text, reply_to=session_id,
             )
         else:
-            turn_id = await turn_scheduler.on_agent_message(target, session_id, text)
+            turn_id = await turn_scheduler.on_agent_message(
+                target, session_id, text, **({"urgent": True} if urgent else {}),
+            )
         if not turn_id:
             return ToolOutcome(
                 text=f"Could not deliver to {row['name']}: receiver was stopped",
                 is_error=True,
             )
+        if turn_id == turn_scheduler.HELD:
+            return ToolOutcome(text=held_receipt(row["name"]))
         if resuming:
             return ToolOutcome(text=f"Resume queued for {row['name']} (turn {turn_id})")
         return ToolOutcome(text=f"Queued for {row['name']}")
 
     return message
+
+
+def held_receipt(name: str) -> str:
+    """What the sender reads when its message was held, not delivered."""
+    return (
+        f"Held for {name} until it wakes: it is parked waiting on background "
+        "work and reads your message with its next wake. Do not wait for a "
+        "reply. Send again with urgent=true only if you are blocked on its answer."
+    )
 
 
 async def resume_unavailable(target, row):

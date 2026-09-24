@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from fluid.cli.prompt import (
     ACT_GUIDANCE_BLOCK,
     BUILTIN_TOOL_NAMES,
     DEFAULT_BASE_PROMPT,
     DISCIPLINE_GUIDANCE_BLOCK,
+    USER_DIRECTIVE_GUIDANCE_BLOCK,
     PromptProfile,
     compose_base_prompt,
     default_base_prompt,
@@ -17,6 +20,7 @@ from fluid.cli.prompt import (
     mentioned_tool_names,
     model_guidance_blocks,
     profile_for,
+    resolve_model_family,
 )
 from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge, env_overrides
 from fluid.config.model import HarnessConfig
@@ -123,6 +127,101 @@ def test_guidance_auto_matches_families() -> None:
     assert ACT_GUIDANCE_BLOCK in blocks and DISCIPLINE_GUIDANCE_BLOCK in blocks
     blocks = model_guidance_blocks("moonshot/kimi-k2")
     assert blocks == (DISCIPLINE_GUIDANCE_BLOCK,)
+
+
+@pytest.mark.parametrize(
+    ("model", "family", "matched_by"),
+    [
+        # gpt-oss is an open-weight family, not GPT, though its id starts "gpt".
+        ("openai/gpt-oss-120b", "gpt-oss", "family"),
+        ("gpt-oss-20b", "gpt-oss", "family"),
+        # Stealth and unknown ids resolve to the generic pack, never to nothing.
+        ("stealth/union-alpha", "generic", "generic"),
+        ("stealth/some-new-model", "generic", "generic"),
+        ("acme/foo-1", "generic", "generic"),
+        ("", "generic", "generic"),
+        # Existing ids keep their families.
+        ("gpt-6-astra", "gpt", "exact"),
+        ("gpt-5.6-terra", "gpt", "generation"),
+        ("openai/gpt-5-mini", "gpt", "generation"),
+        ("z-ai/glm-5.3", "glm", "generation"),
+        ("prov:1f2e:glm-5.3", "glm", "generation"),
+        ("claude-sonnet-5", "claude", "generation"),
+        ("us.anthropic.claude-opus-4-8-v1:0", "claude", "generation"),
+        ("opus", "claude", "family"),
+        ("mistralai/devstral-medium", "mistral", "family"),
+        ("google/some-new-model", "gemini", "vendor"),
+    ],
+)
+def test_model_family_resolution(model, family, matched_by) -> None:
+    resolved = resolve_model_family(model)
+    assert (resolved.family, resolved.matched_by) == (family, matched_by)
+    assert resolved.fallback is (matched_by == "generic")
+
+
+def test_generic_pack_for_unknown_and_stealth_models() -> None:
+    """union-alpha ran with no guidance at all and fabricated user directives;
+    an unrecognised model now gets ACT, DISCIPLINE and the directive rule."""
+    generic = (
+        ACT_GUIDANCE_BLOCK, DISCIPLINE_GUIDANCE_BLOCK,
+        USER_DIRECTIVE_GUIDANCE_BLOCK,
+    )
+    assert model_guidance_blocks("stealth/union-alpha") == generic
+    assert model_guidance_blocks("acme/foo-1") == generic
+    assert "never record one" in USER_DIRECTIVE_GUIDANCE_BLOCK
+
+
+def test_gpt_oss_keeps_both_blocks_under_its_own_family() -> None:
+    assert model_guidance_blocks("openai/gpt-oss-120b") == (
+        ACT_GUIDANCE_BLOCK, DISCIPLINE_GUIDANCE_BLOCK,
+    )
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gpt-6-astra", ("act", "discipline")),
+        ("gpt-5.6-terra", ("act", "discipline")),
+        ("openai/gpt-5-mini", ("act", "discipline")),
+        ("z-ai/glm-5.3", ("act", "discipline")),
+        ("glm-4.6", ("act", "discipline")),
+        ("x-ai/grok-4", ("act", "discipline")),
+        ("qwen/qwen3-coder", ("act", "discipline")),
+        ("moonshotai/kimi-k2", ("discipline",)),
+        ("minimax/minimax-m2", ("discipline",)),
+        ("google/gemini-2.5-pro", ("act",)),
+        ("claude-opus-5", ()),
+        ("claude-sonnet-4-5", ()),
+    ],
+)
+def test_known_families_keep_their_blocks(model, expected) -> None:
+    names = {ACT_GUIDANCE_BLOCK: "act", DISCIPLINE_GUIDANCE_BLOCK: "discipline"}
+    assert tuple(names[b] for b in model_guidance_blocks(model)) == expected
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        # The family name follows a vendor or product prefix. The substring
+        # tables matched these; resolution must not drop them to generic.
+        ("zai-glm-4.6", ("act", "discipline")),
+        ("cerebras/zai-glm-4.6", ("act", "discipline")),
+        ("open-mistral-nemo", ("discipline",)),
+        ("Meta-Llama-3.1-8B-Instruct", ("discipline",)),
+        ("lmstudio-community/Meta-Llama-3-8B", ("discipline",)),
+        ("hermes-3-llama-3.1-405b", ("discipline",)),
+    ],
+)
+def test_a_family_name_after_a_prefix_keeps_its_blocks(model, expected) -> None:
+    names = {ACT_GUIDANCE_BLOCK: "act", DISCIPLINE_GUIDANCE_BLOCK: "discipline"}
+    assert resolve_model_family(model).fallback is False
+    assert tuple(names[b] for b in model_guidance_blocks(model)) == expected
+
+
+@pytest.mark.parametrize("model", ["AIDC-AI/Marco-o1", "llama-3-sonnet-distill"])
+def test_a_later_token_never_matches_o_series_or_claude_tier_names(model) -> None:
+    resolved = resolve_model_family(model)
+    assert resolved.family not in ("gpt", "claude")
 
 
 def test_guidance_knob_shapes() -> None:
@@ -304,3 +403,74 @@ def test_skill_one_liner_names_the_code_mode_import() -> None:
     first = _first_line(SPEC.description)
     assert "from tools.Skill import Skill" in first
     assert 'Skill(name="<skill>")' in first
+
+
+# ─── ProfileResolved: untargeted sessions are countable from the log ────────
+
+
+def test_profile_resolved_round_trips_through_the_codec() -> None:
+    import json
+
+    from fluid.events.model import ProfileResolved, event_from_dict, event_to_dict
+
+    event = ProfileResolved(
+        session_id="s", turn_id="t", seq=3, ts=1.5, model="gpt-6-astra",
+        family="gpt", generation="gpt-6", matched_by="exact", fallback=False,
+    )
+    revived = event_from_dict(json.loads(json.dumps(event_to_dict(event))))
+    assert revived == event
+    # A row written by an older build, or one with a field this build lacks.
+    legacy = event_from_dict({
+        "_cls": "ProfileResolved", "_v": 1, "session_id": "s", "seq": 1,
+        "ts": 0.0, "model": "m", "added_later": 1,
+    })
+    assert isinstance(legacy, ProfileResolved)
+    assert legacy.family is None and legacy.fallback is False
+
+
+@pytest.mark.parametrize(("model", "family", "fallback"), [
+    ("totally-unknown-model-x", "generic", True),
+    ("stealth/raven-7", "generic", True),
+    ("gpt-6-astra", "gpt", False),
+    ("gpt-5.4", "gpt", False),
+    ("glm-5.1", "glm", False),
+    ("z-ai/glm-4.6", "glm", False),
+])
+def test_profile_resolution_flags_the_generic_fallback(model, family, fallback) -> None:
+    from fluid.cli.prompt import profile_resolved_event
+
+    event = profile_resolved_event("s", model)
+    assert event.model == model
+    assert event.family == family
+    assert event.fallback is fallback
+
+
+async def test_a_session_records_its_profile_once() -> None:
+    import asyncio
+    from collections.abc import AsyncIterator
+
+    from fluid.engine.native import NativeLoop
+    from fluid.events import ProfileResolved, UserTurn
+    from fluid.providers.base import ProviderCaps, StreamChunk
+    from fluid.store.base import MemoryStore
+
+    class _Provider:
+        name = "fake"
+        caps = ProviderCaps()
+
+        async def stream(self, request) -> AsyncIterator[StreamChunk]:
+            yield StreamChunk("text_delta", text="ok")
+            yield StreamChunk("done", stop_reason="end_turn")
+
+    loop = NativeLoop(provider=_Provider(), store=MemoryStore(), model="mystery-model-9")
+    try:
+        for text in ("one", "two"):
+            await loop.submit(UserTurn(content=text))
+            await asyncio.wait_for(loop.wait_turn(), 5)
+        resolved = [e for e in loop.bus.log(loop.session_id) if isinstance(e, ProfileResolved)]
+        assert len(resolved) == 1
+        assert resolved[0].model == "mystery-model-9"
+        assert resolved[0].fallback is True
+        assert resolved[0].family == "generic"
+    finally:
+        await loop.aclose()

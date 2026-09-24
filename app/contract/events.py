@@ -28,6 +28,10 @@ class TurnQueued(EventBase):
 class TurnStarted(EventBase):
     type: Literal["turn.started"] = "turn.started"
     profile_id: str | None = None
+    # What started the turn, in fluid's vocabulary (``TurnStarted.source``:
+    # user, agent_message, wakeup, unpark, promotion, automation). A failover
+    # retry carries the source of the turn it retries. None when not recorded.
+    source: str | None = None
 
 
 class TurnInterrupting(EventBase):
