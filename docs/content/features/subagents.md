@@ -17,6 +17,22 @@ As of schema v71 ("agents unification"), subagents are no longer a separate top-
 - Delegation from one agent to a specialist during a session still works the same way, but the specialist is now managed through the owning agent's nested-agent endpoints (`/api/v1/agents/{agent_id}/agents`) rather than a standalone router.
 - Orchestration and multi-step delegation during a session go through the app's Task tooling, not a separate subagent-dispatch mechanism.
 
+## Choosing a Task worker model
+
+Task shows each eligible agent's default model. When the target runs on a
+configured model provider, Task also offers an optional `model` argument drawn
+from that provider's user-maintained model list. Omit it to keep the agent's
+default; select another listed model to use it for that worker only. Swarm tasks
+accept the same optional `model` and pass it through Task's validation.
+
+A model choice does not change providers. If an agent is configured to run on a
+different provider, the choice must belong to that target provider's list, not
+the parent's. Dispatch rechecks the list before launching, so removed models,
+disabled providers, and agents outside the caller's allowed roster are refused.
+File/plugin agents use the caller's provider. Native Claude targets without a
+configured provider list retain their assigned model and do not accept this
+override. This does not change the parent chat's model or save a new default.
+
 ## Where to look now
 
 - [Profiles](/docs/features/profiles) — the unified configuration model (model, tools, prompt, memory, permissions), referred to as "Agents" in the API and UI.

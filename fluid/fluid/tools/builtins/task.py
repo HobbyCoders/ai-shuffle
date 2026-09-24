@@ -28,8 +28,8 @@ a plain string, which is wrapped). Contract for ``input``:
   * label   — optional short display label
 
 The host may replace this fallback spec per session with an eligible subagent
-roster. Provider and model selection remain host-owned and are not accepted as
-model-authored Task arguments.
+roster. Provider and model selection remain host-owned. A host may expose a
+validated model override in its replacement schema; this fallback does not.
 """
 
 from __future__ import annotations

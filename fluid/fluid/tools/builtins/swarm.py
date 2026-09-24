@@ -46,6 +46,10 @@ SPEC = ToolSpec(name="Swarm", description=describe(),
             "type": "object", "properties": {
                 "id": {"type": "string"}, "title": {"type": "string"},
                 "agent": {"type": "string"}, "prompt": {"type": "string"},
+                "model": {"type": "string", "description": (
+                    "Optional model override only when the host's Task schema offers it. "
+                    "Use a Task-listed model on this agent's provider; omit for its default. "
+                    "The Task dispatcher validates this choice and cannot switch providers.")},
                 "depends_on": {"type": "array", "items": {"type": "string"}}},
             "required": ["id", "agent", "prompt"]}}}, "required": ["action"]},
     risk="write", classify_risk=lambda data: "safe" if data.get("action") == "status" else "write",

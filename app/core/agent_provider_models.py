@@ -1,7 +1,8 @@
 """Provider-scoped model assignments and model-facing subagent discovery.
 
 ``config.provider_models`` is the ONE model binding an agent still carries: the
-model it runs on when another agent dispatches it as a Task subagent. Top-level
+default model when another agent dispatches it as a Task subagent. Task may
+choose another model from that provider's curated list. Top-level
 chat sessions stopped reading an agent's model in v79 — they carry their own,
 picked at creation — so the legacy ``config.provider`` / ``config.model`` pair
 survives here only as a fallback for agents configured before that move.
@@ -446,7 +447,7 @@ def build_task_contract(
         # system prompt's "# Available agent types" index (built from the same
         # roster), and repeating it here doubled the tokens for every session.
         roster = "\n".join(
-            f"- {target.id} (model: {target.model}) — {target.name}"
+            f"- {target.id} (default model: {target.model}) — {target.name}"
             for target in resolved_targets
         )
         availability = (
@@ -536,6 +537,31 @@ def build_task_contract(
             ),
         },
     }
+    # The enum is a union for mixed-provider rosters. Dispatch revalidates the
+    # selected ID against the chosen target's effective provider, not this union.
+    from app.core.provider_agent import curated_model_ids
+
+    model_ids: set[str] = set()
+    provider_ids = {
+        target.provider_id if target.provider_pinned else provider_id
+        for target in resolved_targets
+    }
+    for target_provider in provider_ids:
+        if target_provider:
+            row = _load_provider_row(target_provider)
+            if row and row.get("enabled"):
+                model_ids.update(curated_model_ids(row))
+    if model_ids:
+        properties["model"] = {
+            "type": "string",
+            "enum": sorted(model_ids),
+            "description": (
+                "Optional model ID from the user's configured model list on the "
+                "selected target's provider. Omit to use the roster's default "
+                "model. This cannot switch providers; on mixed rosters an ID "
+                "must belong to the chosen target's provider."
+            ),
+        }
     if offer_mode:
         mode_description = (
             "sync waits for the report; background returns the worker session "
@@ -623,9 +649,11 @@ def parent_subagent_guidance(
         "# Subagent delegation\n"
         "Configured agents are exposed to you as subagents through Task. "
         "Task's schema lists the only DB and file/plugin subagents available "
-        "from the current provider, including each assigned model (which may "
+        "from the current provider, including each default model (which may "
         "run on another provider). Use only those IDs; if the list is empty, "
-        "do not call Task.\n"
+        "do not call Task. When Task offers a model parameter, choose only "
+        "a listed model on the selected target's provider; omitting it keeps "
+        "the configured default. A model override never switches providers.\n"
         "A subagent receives an isolated session, not this conversation, so give "
         "it a self-contained brief with relevant context and expected output. "
         "Delegate independent or context-heavy work; handle quick direct work "

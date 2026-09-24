@@ -9,6 +9,39 @@ from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
 def spec(key, deps=()):
     return dict(id=key, agent="helper", prompt="do " + key, depends_on=list(deps))
 
+@pytest.mark.parametrize("model", [None, "other-model"])
+async def test_task_model_choice_reaches_dispatch(model):
+    calls = []
+
+    async def dispatch(data, ctx):
+        calls.append(data)
+        return ToolOutcome(text="done")
+
+    c = SwarmCoordinator("main", dispatch, AsyncMock(), AsyncMock(), AsyncMock())
+    task = spec("a")
+    if model is not None:
+        task["model"] = model
+    _, receipt = await c.start({"tasks": [task]}, ToolCtx())
+    await asyncio.wait_for(c.jobs[receipt.task_id], 5)
+    assert calls[0].get("model") == model
+    assert ("model" in calls[0]) is (model is not None)
+    snapshot = c.snapshot(receipt.task_id)
+    assert snapshot["status"] == "completed"
+
+
+@pytest.mark.parametrize("model", [False, 3, [], "", " "])
+def test_invalid_model_choice_rejected(model):
+    with pytest.raises(ValueError, match="model must be"):
+        validate({"tasks": [{**spec("a"), "model": model}]})
+
+
+def test_swarm_schema_documents_task_model_validation():
+    from fluid.tools.builtins.swarm import SPEC
+    prop = SPEC.input_schema["properties"]["tasks"]["items"]["properties"]["model"]
+    assert prop["type"] == "string"
+    assert "Task" in prop["description"]
+
+
 @pytest.mark.parametrize("data", [
     {"tasks": []}, {"tasks": [spec("a"), spec("a")]},
     {"tasks": [spec("a", ["missing"])]}, {"tasks": [spec("a", ["a"])]},

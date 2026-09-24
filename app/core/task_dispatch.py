@@ -1443,14 +1443,9 @@ async def dispatch_task_tool(
             "ok": False,
             "error": f"Unknown mode '{requested_mode}' (sync|background).",
         }
-    if args.get("model") not in (None, ""):
-        return {
-            "ok": False,
-            "error": (
-                "Task does not accept a model override. The selected subagent's "
-                "model is configured in the Agents UI."
-            ),
-        }
+    requested_model = args.get("model")
+    if requested_model is not None and not isinstance(requested_model, str):
+        return {"ok": False, "error": "Task model must be a model ID string."}
 
     caller_row = _session_row(caller_session_id) or {}
     # Resolve before the first admission await. Queuing/retries must not inherit
@@ -1492,11 +1487,28 @@ async def dispatch_task_tool(
     if target is None and definition is None:
         return {"ok": False, "error": roster_error}
 
+    # Resolve the target's effective leg first, including owner-configured pins.
+    # A call may choose another curated model, but never another provider.
+    if requested_model:
+        if not effective_provider_id:
+            return {
+                "ok": False,
+                "error": "Task model overrides require a configured provider model list.",
+            }
+        validation = provider_agent.validate_provider_model(
+            effective_provider_id, requested_model, require_servable=False
+        )
+        if not validation.ok:
+            return {"ok": False, "error": validation.reason}
+        requested_model = requested_model.strip()
+
     if definition is not None:
         target_name = str(_def_field(definition, "name", ref) or ref)
         profile_id = str(caller_pid)
-        model_id, model_error = _file_agent_model_id(
-            caller_row, str(caller_pid), effective_provider_id
+        model_id, model_error = (
+            (requested_model, None) if requested_model else _file_agent_model_id(
+                caller_row, str(caller_pid), effective_provider_id
+            )
         )
         if model_error:
             return {"ok": False, "error": model_error}
@@ -1508,7 +1520,7 @@ async def dispatch_task_tool(
         assert target is not None
         target_name = target.name
         profile_id = target.id
-        model_id = target.model
+        model_id = requested_model or target.model
         system_prompt_append = None
         tool_allowlist = None
         declared_tools = _stored_agent_tools(target.id)

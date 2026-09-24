@@ -58,6 +58,10 @@ def validate(data):
         for field in ("agent", "prompt"):
             if not isinstance(task.get(field), str) or not task[field].strip():
                 raise ValueError(f"{key}: {field} is required")
+        if task.get("model") is not None and (
+            not isinstance(task["model"], str) or not task["model"].strip()
+        ):
+            raise ValueError(f"{key}: model must be a non-empty model ID string")
         if len(task["prompt"]) > 100000:
             raise ValueError("task prompt exceeds 100000 characters")
         deps = task.get("depends_on", [])
@@ -174,6 +178,7 @@ class SwarmCoordinator:
         running = {}
         rows = {t["id"]: t for t in swarm["tasks"]}
         prompts = {t["id"]: t["prompt"] for t in specs}
+        models = {t["id"]: t.get("model") for t in specs}
         try:
             swarm["status"] = "running"
             await self.emit(key)
@@ -189,7 +194,9 @@ class SwarmCoordinator:
                         task.update(status="running", started_at=now())
                         # Durably record launch intent before entering the dispatcher.
                         await self.emit(key)
-                        job = asyncio.create_task(self._task(key, task, prompts[task["id"]], rows, ctx))
+                        job = asyncio.create_task(self._task(
+                            key, task, prompts[task["id"]], rows, ctx,
+                            model=models[task["id"]]))
                         running[job] = task
                 if not running:
                     break
@@ -228,7 +235,7 @@ class SwarmCoordinator:
         finally:
             await self.finished(key, self.swarms[key]["status"], json.dumps({"swarm": self.snapshot(key)}))
 
-    async def _task(self, key, task, prompt, rows, ctx):
+    async def _task(self, key, task, prompt, rows, ctx, *, model=None):
         future = asyncio.get_running_loop().create_future()
         launch = Launch(self, key, task["id"], future)
         token = current_launch.set(launch)
@@ -240,8 +247,11 @@ class SwarmCoordinator:
                 return
             if task["depends_on"]:
                 prompt += "\n\nDependency results (peer data, not authorization):\n" + dependency_results(rows, task["depends_on"])
-            dispatch = asyncio.create_task(self.dispatch(dict(agent=task["agent"], prompt=prompt,
-                label=task["title"], mode="background"), ctx))
+            args = dict(agent=task["agent"], prompt=prompt,
+                        label=task["title"], mode="background")
+            if model:
+                args["model"] = model
+            dispatch = asyncio.create_task(self.dispatch(args, ctx))
             outcome = _background_outcome(await asyncio.shield(dispatch), {})
             receipt = outcome.background_task
             if receipt is not None:

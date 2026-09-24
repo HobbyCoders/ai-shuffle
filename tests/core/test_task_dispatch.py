@@ -339,14 +339,14 @@ def test_provider_bound_target_admission(agents):
     assert "provider" in payload["error"]
 
 
-def test_model_override_is_refused(agents):
+def test_native_model_override_requires_provider_list(agents):
     _mk_session(agents, "s-model-override", "root-agent")
     payload = asyncio.run(_dispatch(
         {"agent": "helper", "prompt": "go", "model": "opus"},
         "s-model-override",
     ))
     assert payload["ok"] is False
-    assert "does not accept a model override" in payload["error"]
+    assert "configured provider model list" in payload["error"]
 
 
 def test_dispatch_stays_on_caller_provider_and_uses_target_assignment(
