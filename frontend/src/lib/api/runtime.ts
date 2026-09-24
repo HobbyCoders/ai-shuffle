@@ -128,12 +128,12 @@ export function requestCredentials(): RequestCredentials {
 
 /**
  * Apply the auth policy to a `fetch` init: credentials always, the Bearer
- * header only when bundled. On the web UI the returned object is exactly
- * `{ ...init, credentials: 'include' }` so existing call sites (and the tests
- * that assert on them) are unchanged.
+ * header only when bundled. Authenticated worker requests never follow a
+ * redirect, even if a caller asks to: a registry or intermediary must not
+ * transfer a paired request to a different endpoint (or change its method).
  */
 export function withAuth(init: RequestInit = {}): RequestInit {
-	const out: RequestInit = { ...init, credentials: requestCredentials() };
+	const out: RequestInit = { ...init, credentials: requestCredentials(), redirect: 'error' };
 	const extra = authHeaders();
 	if (Object.keys(extra).length === 0) return out;
 	if (init.headers instanceof Headers) {

@@ -131,7 +131,7 @@ describe('providers store — Anthropic API key integration', () => {
 		await providers.loadIntegrations();
 
 		expect(fetchMock).toHaveBeenCalledWith('/api/v1/settings/integrations', {
-			credentials: 'include'
+			redirect: 'error', credentials: 'include'
 		});
 		expect(providers.current.anthropicKeySet).toBe(true);
 		expect(providers.current.falKeySet).toBe(true);

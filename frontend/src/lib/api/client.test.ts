@@ -39,7 +39,7 @@ describe('ApiClient', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/test', {
 				method: 'GET',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: undefined
 			});
 			expect(result).toEqual(mockResponse);
@@ -74,7 +74,7 @@ describe('ApiClient', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify(requestBody)
 			});
 			expect(result).toEqual(mockResponse);
@@ -96,7 +96,7 @@ describe('ApiClient', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items/1', {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify(requestBody)
 			});
 			expect(result).toEqual(mockResponse);
@@ -118,7 +118,7 @@ describe('ApiClient', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items/1', {
 				method: 'PATCH',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify(requestBody)
 			});
 			expect(result).toEqual(mockResponse);
@@ -138,7 +138,7 @@ describe('ApiClient', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items/1', {
 				method: 'DELETE',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include'
+				redirect: 'error', credentials: 'include'
 			});
 			expect(result).toEqual({ deleted: true });
 		});
@@ -293,7 +293,7 @@ describe('ApiClient', () => {
 			expect(auth.current.status?.authenticated).toBe(false);
 			expect(window.location.assign).not.toHaveBeenCalled();
 			expect(fetchMock).toHaveBeenLastCalledWith('/api/v1/auth/status', expect.objectContaining({
-				credentials: 'include', cache: 'no-store'
+				redirect: 'error', credentials: 'include', cache: 'no-store'
 			}));
 		});
 

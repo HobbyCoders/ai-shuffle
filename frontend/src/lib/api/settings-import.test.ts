@@ -55,7 +55,7 @@ describe('provider settings import API', () => {
 		expect(fetchMock).toHaveBeenCalledWith('/api/settings/import/preview', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			credentials: 'include',
+			redirect: 'error', credentials: 'include',
 			body: JSON.stringify({ providers: ['codex', 'claude'] })
 		});
 		expect(result.providers).toEqual(['codex', 'claude']);
@@ -96,7 +96,7 @@ describe('provider settings import API', () => {
 		expect(fetchMock).toHaveBeenCalledWith('/api/settings/import/apply', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			credentials: 'include',
+			redirect: 'error', credentials: 'include',
 			body: JSON.stringify({
 				token: 'plan-1',
 				selected_item_ids: ['project:one'],
