@@ -1,4 +1,5 @@
 """Worker-side license leases: verification, storage, renewal and the run gate."""
+import asyncio
 import base64
 import json
 import time
@@ -358,3 +359,138 @@ async def test_post_refuses_plain_http_to_a_remote_host(store, monkeypatch, tran
     with pytest.raises(licensing.LicenseError) as err:
         await licensing._post("renew", {})
     assert err.value.status == 503 and transport[0] == []
+
+
+# ---------------------------------------------------------------------------
+# First-install key: the desktop's license-key.json, or LICENSE_KEY
+# ---------------------------------------------------------------------------
+
+KEY = "ASH-7K2QD-M4XRT-9PWZC-H3N8B"
+
+
+@pytest.fixture
+def first_key(store, monkeypatch, tmp_path):
+    monkeypatch.setattr(licensing, "_env_key", None)
+    monkeypatch.setattr(licensing, "_first_key_mark", lambda: "license_first_key:test")
+    monkeypatch.delenv(licensing.SOURCE_ROOT_ENV, raising=False)
+    return tmp_path
+
+
+def desktop_file(monkeypatch, root, key=KEY):
+    (root / licensing.DESKTOP_KEY_FILE).write_text(json.dumps({"key": key}))
+    monkeypatch.setenv(licensing.SOURCE_ROOT_ENV, str(root))
+
+
+def activating(server, keys):
+    server.answers["activate"] = lambda body: (200, {"lease": keys.lease(body["install_id"]), "install_token": "a" * 64})
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    sleeps = []
+
+    async def sleep(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr(licensing.asyncio, "sleep", sleep)
+    return sleeps
+
+
+def test_license_key_env_is_taken_out_of_the_environment(first_key):
+    env = {licensing.LICENSE_KEY_ENV: f"  {KEY} ", "OTHER": "1"}
+    assert licensing.capture_env_key(env) is True
+    assert env == {"OTHER": "1"}
+    assert licensing.first_install_key() == (KEY, "environment")
+    assert licensing.capture_env_key({licensing.LICENSE_KEY_ENV: "  "}) is False
+
+
+def test_agents_never_inherit_license_key():
+    from fluid.tools.child_env import is_host_secret
+    assert is_host_secret(licensing.LICENSE_KEY_ENV)
+
+
+async def test_desktop_key_is_activated_once_and_its_file_left_to_the_desktop(first_key, store, keys, server, monkeypatch):
+    desktop_file(monkeypatch, first_key)
+    activating(server, keys)
+    assert await licensing.activate_first_install_key() == "activated"
+    path, body = server.requests[0]
+    assert path == "activate" and body["key"] == KEY
+    assert licensing.status()["state"] == "active"
+    # The desktop deletes license-key.json itself once a lease opened its update feed.
+    assert (first_key / licensing.DESKTOP_KEY_FILE).exists()
+    assert await licensing.activate_first_install_key() == "licensed"
+    assert len(server.requests) == 1
+    assert KEY not in json.dumps(store), "the key itself is never stored"
+
+
+async def test_env_key_is_activated_then_forgotten(first_key, keys, server):
+    licensing.capture_env_key({licensing.LICENSE_KEY_ENV: KEY})
+    activating(server, keys)
+    assert await licensing.activate_first_install_key() == "activated"
+    assert licensing.first_install_key() is None
+
+
+async def test_a_refused_key_is_not_sent_again_and_says_why(first_key, server):
+    licensing.capture_env_key({licensing.LICENSE_KEY_ENV: KEY})
+    server.answers["activate"] = (404, {"error": "That license key does not exist."})
+    assert await licensing.activate_first_install_key() == "refused"
+    current = licensing.status()
+    assert current["state"] == "unlicensed"
+    assert current["last_error"] == "LICENSE_KEY was not accepted: That license key does not exist."
+    # The next start finds the same key in the container settings: not sent again.
+    licensing.capture_env_key({licensing.LICENSE_KEY_ENV: KEY.lower()})
+    assert await licensing.activate_first_install_key() == "used"
+    assert len(server.requests) == 1
+    # A different key is tried.
+    licensing.capture_env_key({licensing.LICENSE_KEY_ENV: "ASH-AAAAA-AAAAA-AAAAA-AAAAA"})
+    assert await licensing.activate_first_install_key() == "refused"
+    assert len(server.requests) == 2
+
+
+async def test_an_unreachable_server_is_tried_again(first_key, store, keys, server, monkeypatch, no_sleep):
+    desktop_file(monkeypatch, first_key)
+    server.answers["activate"] = licensing.LicenseError(503, "Could not reach the license server.")
+    assert await licensing.activate_first_install_key() == "unavailable"
+    assert "license_first_key:test" not in store, "an unanswered key is not marked as tried"
+    activating(server, keys)
+    await licensing._first_install_activation()
+    assert licensing.status()["state"] == "active" and no_sleep == []
+
+
+async def test_startup_retries_a_few_times_then_gives_up_quietly(first_key, server, monkeypatch, no_sleep):
+    desktop_file(monkeypatch, first_key)
+    server.answers["activate"] = licensing.LicenseError(503, "Could not reach the license server.")
+    await licensing._first_install_activation()
+    assert len(server.requests) == licensing.FIRST_KEY_ATTEMPTS == len(no_sleep)
+
+
+async def test_no_first_install_key_or_beta_does_nothing(first_key, server, monkeypatch):
+    assert await licensing.activate_first_install_key() == "none"
+    # A relative update folder is ignored; so is a malformed file.
+    monkeypatch.setenv(licensing.SOURCE_ROOT_ENV, "relative/path")
+    assert await licensing.activate_first_install_key() == "none"
+    (first_key / licensing.DESKTOP_KEY_FILE).write_text("not json")
+    monkeypatch.setenv(licensing.SOURCE_ROOT_ENV, str(first_key))
+    assert await licensing.activate_first_install_key() == "none"
+    desktop_file(monkeypatch, first_key)
+    monkeypatch.setattr(licensing.settings, "license_beta", True)
+    assert await licensing.activate_first_install_key() == "beta"
+    assert server.requests == []
+
+
+async def test_a_worker_with_a_license_ignores_the_first_install_key(first_key, store, keys, server, monkeypatch):
+    save(store, install_id="inst-1", install_token="t" * 64, lease=keys.lease("inst-1"))
+    desktop_file(monkeypatch, first_key)
+    assert await licensing.activate_first_install_key() == "licensed"
+    assert server.requests == []
+
+
+async def test_refresh_loop_starts_with_the_first_install_key(first_key, keys, server, monkeypatch):
+    desktop_file(monkeypatch, first_key)
+    activating(server, keys)
+
+    async def stop(delay):
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(licensing.asyncio, "sleep", stop)
+    with pytest.raises(asyncio.CancelledError):
+        await licensing.refresh_loop()
+    assert server.requests[0][0] == "activate"

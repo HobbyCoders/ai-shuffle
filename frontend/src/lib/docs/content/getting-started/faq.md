@@ -30,7 +30,7 @@ If you use remote access from your phone or another browser, that traffic travel
 
 ## What does AI Shuffle's own server see?
 
-Very little, and never your prompts. Your install checks for updates and, once licensing is live, checks its license: that sends the license key, a random install ID and the app version. If you link a phone or use remote access, the connection service keeps your account and device records. AI Shuffle has no analytics or tracking. The [privacy policy](https://hobbycoders.com/privacy) lists every address the app contacts and why.
+Very little, and never your prompts. Your install checks for updates and, once licensing is live, checks its license: activation sends the license key, a random install ID, a fingerprint made from that ID and the machine ID, the host name and the app version, and the daily check sends the install ID, the fingerprint and the app version. If you link a phone or use remote access, the connection service keeps your account and device records. AI Shuffle has no analytics or tracking. The [privacy policy](https://hobbycoders.com/privacy) lists every address the app contacts and why.
 
 ## What do I need to run it?
 

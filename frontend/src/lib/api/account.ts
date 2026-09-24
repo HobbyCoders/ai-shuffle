@@ -47,6 +47,32 @@ export interface AccountConnection {
 	signup_url?: string | null;
 	qr_svg: string | null;
 	error: string | null;
+	/**
+	 * The account service refused this worker a remote connection because the
+	 * account already uses all it may (`status` is then `limited`). The worker
+	 * keeps working locally. Absent on older workers.
+	 */
+	refusal?: TunnelLimitRefusal | null;
+}
+
+/** The hub's `tunnel_limit` answer, as the worker reports it. */
+export interface TunnelLimitRefusal {
+	code: 'tunnel_limit';
+	/** Remote connections this account may use. */
+	limit: number;
+	/** Remote connections its other workers use now. */
+	used: number;
+	/** Whether the account service counted the account as licensed. */
+	licensed: boolean;
+	/** What to tell the owner. */
+	message: string;
+}
+
+/** Asks an open Settings card to show one of its tabs, e.g. `license`. */
+export const OPEN_SETTINGS_TAB_EVENT = 'shuffle-open-settings-tab';
+
+export function openSettingsTab(tab: string) {
+	if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_TAB_EVENT, { detail: { tab } }));
 }
 
 export interface AccountWorker {

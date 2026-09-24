@@ -48,11 +48,16 @@ def test_compose_carries_the_runtime_settings_the_image_needs():
 
 def test_env_example_lists_only_what_a_buyer_sets():
     assert set(env_example()) == {"AI_SHUFFLE_PULL_TOKEN", "AI_SHUFFLE_VERSION", "BIND_HOST", "PORT",
-                                  "COOKIE_SECURE", "OWNER_PASSWORD", "WORKSPACE_DIR", "PUID", "PGID"}
+                                  "COOKIE_SECURE", "OWNER_PASSWORD", "LICENSE_KEY", "WORKSPACE_DIR", "PUID", "PGID"}
     assert env_example()["AI_SHUFFLE_PULL_TOKEN"] == ""
     # The owner password is optional and seeds the first start only.
     assert env_example()["OWNER_PASSWORD"] == ""
     assert service()["environment"]["OWNER_PASSWORD"] == "${OWNER_PASSWORD:-}"
+    # So is the license key (app.core.license.LICENSE_KEY_ENV), activated once.
+    from app.core.license import LICENSE_KEY_ENV
+    assert env_example()[LICENSE_KEY_ENV] == ""
+    assert service()["environment"][LICENSE_KEY_ENV] == "${LICENSE_KEY:-}"
+    assert "first start" in (COMPOSE / "env.example").read_text().split("LICENSE_KEY=")[0].rsplit("---", 1)[1]
     assert env_example()["BIND_HOST"] == "127.0.0.1"
     compose = (COMPOSE / "compose.yaml").read_text()
     for key in env_example():
@@ -112,6 +117,12 @@ def test_unraid_template_runtime_flags_paths_and_interface():
     owner = configs[PASSWORD_ENV]
     assert owner.get("Mask") == "true" and owner.get("Required") == "false" and owner.get("Default") == ""
     assert "first start only" in owner.get("Description")
+    # The license key (app.core.license.LICENSE_KEY_ENV): masked, optional, activated once.
+    from app.core.license import LICENSE_KEY_ENV
+    key = configs[LICENSE_KEY_ENV]
+    assert key.get("Type") == "Variable" and key.get("Display") == "always"
+    assert key.get("Mask") == "true" and key.get("Required") == "false" and key.get("Default") == ""
+    assert "first start" in key.get("Description") and "Settings, License" in key.get("Description")
     assert "CORS_ORIGINS" not in configs
 
 

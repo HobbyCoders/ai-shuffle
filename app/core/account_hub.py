@@ -214,6 +214,62 @@ class HubResponseError(HTTPException):
         self.retry_after = retry_after
 
 
+class TunnelLimitError(HubResponseError):
+    """The hub refused a new managed tunnel: the account is at its cap.
+
+    The hub answers 409 ``{"code": "tunnel_limit", "limit", "used",
+    "licensed"}`` on activate and connector calls (android/hub
+    src/tunnel-capacity.ts). Only those three numbers are kept; the hub's own
+    text is not echoed.
+    """
+
+    def __init__(self, limit, used, licensed, retry_after=None):
+        super().__init__('Account tunnel limit reached', 409, retry_after)
+        self.limit = limit
+        self.used = used
+        self.licensed = licensed
+
+
+# Calls that may make the hub build a managed tunnel. They carry the worker's
+# license lease (X-Shuffle-Lease) so a licensed account gets its larger cap.
+LEASE_SUFFIXES = ('activate', 'connector')
+
+
+def _lease_headers(suffix):
+    if suffix not in LEASE_SUFFIXES:
+        return {}
+    try:
+        from app.core import license as licensing
+        lease = licensing.lease_header()
+    except Exception:  # noqa: BLE001 - a license problem must never block the hub call
+        logger.warning('Could not read the license lease for the account hub', exc_info=True)
+        return {}
+    # A header value must be one printable line; the lease is base64url.
+    if not lease or len(lease) > 4096 or not re.fullmatch(r'[A-Za-z0-9_-]+', lease):
+        return {}
+    return {licensing.LEASE_HEADER: lease}
+
+
+def _tunnel_limit(response, retry):
+    """The hub's tunnel_limit refusal, or None for any other 409 body."""
+    try:
+        body = json.loads(response.read(4097)[:4096])
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(body, dict) or body.get('code') != 'tunnel_limit':
+        return None
+    count = lambda v: v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 1000 else None
+    limit, used = count(body.get('limit')), count(body.get('used'))
+    if limit is None or used is None:
+        return None
+    return TunnelLimitError(limit, used, body.get('licensed') is True, retry)
+
+
+def tunnel_limit(exc):
+    """The TunnelLimitError behind a failed hub call, or None."""
+    return exc if isinstance(exc, TunnelLimitError) else None
+
+
 def hub_status(exc):
     return getattr(exc, 'hub_status', None)
 
@@ -254,10 +310,13 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
         if timeout is None:
             timeout = 65 if suffix in ('activate', 'connector') else 4
         conn = _PinnedHTTPS(urlsplit(origin).hostname, timeout=timeout, context=ssl.create_default_context())
+        # The lease goes only here: to the administrator-selected hub origin,
+        # on the two calls that can build a tunnel.
         conn.request(method, f'/v1/servers/{server}/{suffix}',
                      body=json.dumps(body) if body is not None else None,
                      headers={'Authorization': 'Bearer ' + (credential if credential is not None else secret_for(binding)),
-                              'Content-Type': 'application/json', 'Accept': 'application/json'})
+                              'Content-Type': 'application/json', 'Accept': 'application/json',
+                              **_lease_headers(suffix)})
         response = conn.getresponse()
         if response.status != 200:
             status = response.status
@@ -267,6 +326,12 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
                 _paused_until[origin] = time.monotonic() + wait
             if response.status in (401, 403):
                 _recent_authorization.pop(_authorization_key(binding), None)
+            if response.status == 409 and suffix in LEASE_SUFFIXES:
+                refused = _tunnel_limit(response, wait)
+                if refused:
+                    logger.warning('Account hub refused a remote connection: tunnel limit %s of %s (licensed: %s)',
+                                   refused.used, refused.limit, refused.licensed)
+                    raise refused
             if suffix.startswith('browser-logins') and response.status in (401, 403):
                 raise HTTPException(response.status, 'Account sign-in expired or authorization was rejected.')
             if suffix.startswith('account/') and response.status in (401, 403, 404, 409):
