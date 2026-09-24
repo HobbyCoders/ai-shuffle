@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import pytest
-from claude_agent_sdk import fold_session_summary
+from app.core.cli_sessions import fold_session_summary
 
 import app.core.pg_session_store as pss
 

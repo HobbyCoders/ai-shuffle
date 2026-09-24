@@ -22,16 +22,16 @@ from app.mcp import builtin_tools as bt
 
 
 def _builtin_handlers(session_id="session-under-test"):
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as sdk
 
     captured = {}
-    real_create = sdk.create_sdk_mcp_server
+    real_create = sdk.create_tool_server
 
     def _spy(name, version, tools):
         captured["tools"] = tools
         return real_create(name=name, version=version, tools=tools)
 
-    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+    with patch.object(sdk, "create_tool_server", side_effect=_spy):
         bt.create_builtin_tools_server(session_id=session_id)
 
     return {tool.name: tool for tool in captured["tools"]}

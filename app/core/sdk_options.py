@@ -1,7 +1,7 @@
 """Single seam for building SDK options for a session spawn (v2 core, Phase 2).
 
 Every spawn path repeated the same pair of steps: turn a profile into
-``ClaudeAgentOptions`` via :func:`app.core.query_options.build_options_from_profile`,
+``AgentOptions`` via :func:`app.core.query_options.build_options_from_profile`,
 then (usually) wire plugin + DB hooks onto it via
 :func:`app.core.hook_service.attach_hooks_to_options` (the #567 seam). This
 module deduplicates that pair behind one call so the historical call sites — and
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
-from claude_agent_sdk import ClaudeAgentOptions
+from app.core.agent_types import AgentOptions
 
 from app.core.query_options import build_options_from_profile
 
@@ -37,8 +37,8 @@ def build_session_options(
     session_id: Optional[str] = None,
     hook_project_id: Any = _UNSET,
     stderr_callback: Any = None,
-) -> Tuple[ClaudeAgentOptions, Optional[Dict[str, Any]]]:
-    """Build ``ClaudeAgentOptions`` for a session, optionally attaching hooks.
+) -> Tuple[AgentOptions, Optional[Dict[str, Any]]]:
+    """Build ``AgentOptions`` for a session, optionally attaching hooks.
 
     Args:
         profile, project, overrides, resume_session_id, api_user_id, session_id:

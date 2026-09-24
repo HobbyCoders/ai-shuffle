@@ -481,24 +481,6 @@ def sample_project():
 
 
 # =============================================================================
-# Claude SDK Mocks
-# =============================================================================
-
-@pytest.fixture
-def mock_claude_sdk():
-    """
-    Mock the Claude Agent SDK for testing query execution.
-    """
-    with patch("claude_agent_sdk.query") as mock_query:
-        # Create an async generator that yields mock messages
-        async def mock_query_gen(*args, **kwargs):
-            yield {"type": "text", "content": "Mock response"}
-
-        mock_query.return_value = mock_query_gen()
-        yield mock_query
-
-
-# =============================================================================
 # Environment Fixtures
 # =============================================================================
 

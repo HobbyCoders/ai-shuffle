@@ -4809,7 +4809,7 @@ def test_delegated_task_tool_shares_provider_scoped_subagent_schema(monkeypatch)
     """The delegated bridge receives the same host-scoped Task contract."""
     from unittest.mock import patch as _patch
 
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as sdk
 
     import app.mcp.builtin_tools as bt
     import app.core.agent_provider_models as agent_models
@@ -4831,7 +4831,7 @@ def test_delegated_task_tool_shares_provider_scoped_subagent_schema(monkeypatch)
         captured["tools"] = tools
         return {"name": name, "version": version, "tools": tools}
 
-    with _patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+    with _patch.object(sdk, "create_tool_server", side_effect=_spy):
         bt.create_builtin_tools_server(
             session_id="s-policy", profile_id="p", provider_id="or-1",
             model="openai/gpt-5",

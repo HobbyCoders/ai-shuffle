@@ -2308,7 +2308,7 @@ async def test_web_fetch_spoken_approval_resolves_real_pending_request(mock_db, 
 
 async def test_web_fetch_does_not_bypass_voice_approval(mock_db, fake_sockets, monkeypatch):
     from app.core.permission_handler import permission_handler
-    from claude_agent_sdk.types import PermissionResultDeny
+    from app.core.agent_types import PermissionResultDeny
     from fluid.tools.builtins import web
 
     _mk_session()

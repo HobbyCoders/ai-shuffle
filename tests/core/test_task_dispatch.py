@@ -1140,7 +1140,7 @@ def test_dispatcher_reads_the_agent_registry_off_the_ctx(agents):
 
 def _builtin_task_tool(session_id, profile_id, cwd):
     """The real mcp__builtins__Task tool, captured without an MCP transport."""
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as sdk
     import app.mcp.builtin_tools as bt
 
     captured = {}
@@ -1149,7 +1149,7 @@ def _builtin_task_tool(session_id, profile_id, cwd):
         captured["tools"] = tools
         return {"name": name, "version": version, "tools": tools}
 
-    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+    with patch.object(sdk, "create_tool_server", side_effect=_spy):
         bt.create_builtin_tools_server(
             session_id=session_id, profile_id=profile_id, project_id=None, cwd=cwd,
         )

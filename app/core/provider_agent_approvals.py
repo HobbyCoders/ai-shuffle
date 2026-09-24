@@ -72,7 +72,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-from claude_agent_sdk.types import PermissionResultDeny
+from app.core.agent_types import PermissionResultDeny
 
 logger = logging.getLogger(__name__)
 

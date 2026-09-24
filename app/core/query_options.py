@@ -1,7 +1,7 @@
 """
 SDK option building for Claude queries.
 
-Contains functions that construct ClaudeAgentOptions, assemble system prompts,
+Contains functions that construct AgentOptions, assemble system prompts,
 configure MCP servers, build tool/permission configurations, and manage
 subagent definitions.
 
@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from claude_agent_sdk import ClaudeAgentOptions
+from app.core.agent_types import AgentOptions
 
 from app.db import database
 from app.core.config import settings
@@ -113,7 +113,7 @@ WORKER_DISALLOWED_TOOL = WORKER_DISALLOWED_TOOLS[0]
 #
 # Mechanism: a ``Skill(<name>)`` deny rule. Verified against the pinned
 # claude-agent-sdk (0.2.126) and its bundled CLI:
-#   - ``ClaudeAgentOptions.disallowed_tools`` → ``--disallowedTools`` (SDK
+#   - ``AgentOptions.disallowed_tools`` → ``--disallowedTools`` (SDK
 #     ``_internal/transport/subprocess_cli.py``);
 #   - ``--disallowedTools`` entries are parsed as ``ToolName(ruleContent)`` and
 #     land in the session's deny rules;
@@ -591,7 +591,7 @@ def _build_thinking_config(
     allow_profile_effort: bool = True,
 ) -> Dict[str, Any]:
     """
-    Build thinking/effort configuration for ClaudeAgentOptions.
+    Build thinking/effort configuration for AgentOptions.
 
     SDK 0.1.36+ decouples thinking and effort into independent fields:
     - thinking: ThinkingConfigAdaptive|ThinkingConfigEnabled|ThinkingConfigDisabled
@@ -614,7 +614,7 @@ def _build_thinking_config(
             default when neither spawn nor caller selected an effort.
 
     Returns:
-        Dict with thinking/effort configuration to spread into ClaudeAgentOptions
+        Dict with thinking/effort configuration to spread into AgentOptions
     """
     result: Dict[str, Any] = {}
     overrides = overrides or {}
@@ -677,13 +677,13 @@ def build_options_from_profile(
     hooks: Optional[Dict[str, list]] = None,
     api_user_id: Optional[str] = None,
     session_id: Optional[str] = None,
-) -> tuple[ClaudeAgentOptions, None]:
+) -> tuple[AgentOptions, None]:
     """
-    Convert a profile to ClaudeAgentOptions with all available options.
+    Convert a profile to AgentOptions with all available options.
 
     Returns:
-        Tuple of (ClaudeAgentOptions, agents_dict)
-        - ClaudeAgentOptions: SDK options with agents included for Docker/Linux, excluded for Windows
+        Tuple of (AgentOptions, agents_dict)
+        - AgentOptions: SDK options with agents included for Docker/Linux, excluded for Windows
         - agents_dict: Always None; agents are dispatched through the harness
 
     Args:
@@ -1462,7 +1462,7 @@ def build_options_from_profile(
 
     # Build AI tool environment (API keys + provider settings) ONCE, then pass to both:
     # 1. MCP server creation (so Node.js tool subprocesses get the keys)
-    # 2. ClaudeAgentOptions env (so the Claude CLI subprocess also gets them)
+    # 2. AgentOptions env (so the Claude CLI subprocess also gets them)
     full_env = _build_env_with_ai_tools(
         config.get("env"),
         _ai_tools_credential_config(ai_tools_config, ai_tool_names),
@@ -1611,10 +1611,10 @@ def build_options_from_profile(
         mcp_servers_dict = {name: server for name, server in mcp_servers_dict.items()
                             if name in {"builtins", "chat-access"}}
 
-    # Build options with all ClaudeAgentOptions fields
+    # Build options with all AgentOptions fields
     # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically
     # The SDK handles finding Claude properly on all platforms
-    options = ClaudeAgentOptions(
+    options = AgentOptions(
         # Core settings
         model=model_to_use,
         permission_mode=permission_mode,

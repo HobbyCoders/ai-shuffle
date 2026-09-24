@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Awaitable
 
-from claude_agent_sdk.types import (
+from app.core.agent_types import (
     HookInput, HookContext, HookMatcher, SyncHookJSONOutput,
     PreToolUseHookSpecificOutput, PostToolUseHookSpecificOutput,
 )
@@ -904,7 +904,7 @@ def build_hooks_config(
     """
     Build SDK hooks configuration from all sources.
 
-    This creates the hooks dict to pass to ClaudeAgentOptions, combining:
+    This creates the hooks dict to pass to AgentOptions, combining:
     1. Plugin hooks from hooks.json files
     2. Database hooks
 

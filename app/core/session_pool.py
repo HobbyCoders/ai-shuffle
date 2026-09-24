@@ -28,12 +28,9 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, Callable, Awaitable, TYPE_CHECKING
+from typing import Optional, Dict, Any, Callable, Awaitable
 
-from claude_agent_sdk import ClaudeAgentOptions
-
-if TYPE_CHECKING:
-    from claude_agent_sdk import ClaudeSDKClient
+from app.core.agent_types import AgentOptions
 
 from app.core.provider.protocol import ProviderAdapter
 from app.core.provider.types import mcp_servers_equivalent
@@ -182,7 +179,7 @@ class SessionState:
     - callback_refs: Mutable dict for indirect callback references (broadcast_func, etc.)
       These are updated at the start of each query so the can_use_tool callback
       (bound at connect() time) always references the current WebSocket.
-    - connect_options: The ClaudeAgentOptions used at connect() time, for detecting
+    - connect_options: The AgentOptions used at connect() time, for detecting
       whether a reconnect is needed when options change between queries.
     """
     adapter: ProviderAdapter
@@ -224,7 +221,7 @@ class SessionState:
     })
 
     # Options snapshot from connect() time — for reconnect detection
-    connect_options: Optional[ClaudeAgentOptions] = None
+    connect_options: Optional[AgentOptions] = None
 
     # Live capture list for this subprocess's stderr, shared with the wrapped
     # stderr callback registered at connect() time (see _wrap_stderr_capture).
@@ -249,7 +246,7 @@ class SessionState:
         return adapter_lane(self.adapter)
 
     @property
-    def client(self) -> Optional["ClaudeSDKClient"]:
+    def client(self) -> Optional[object]:
         """Backward-compatible access to the underlying SDK client.
 
         Legacy callers may inspect this optional client. HarnessAdapter has
@@ -1754,7 +1751,7 @@ def _agents_equivalent(old: Optional[Dict], new: Optional[Dict]) -> bool:
     return True
 
 
-def reconnect_option_names(state: SessionState, new_options: ClaudeAgentOptions) -> list[str]:
+def reconnect_option_names(state: SessionState, new_options: AgentOptions) -> list[str]:
     """Check if option changes between queries require a fresh subprocess.
 
     Some options (model, permission_mode) can be changed at runtime via SDK methods.
@@ -1871,7 +1868,7 @@ def reconnect_option_names(state: SessionState, new_options: ClaudeAgentOptions)
     # (model via client.set_model(), permission_mode via client.set_permission_mode())
     return changed
 
-def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> bool:
+def requires_reconnect(state: SessionState, new_options: AgentOptions) -> bool:
     return bool(reconnect_option_names(state, new_options))
 
 

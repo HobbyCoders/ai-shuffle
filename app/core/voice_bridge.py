@@ -1660,7 +1660,7 @@ class VoiceBridge:
         The voice approval tool answers this same session's durable interaction.
         """
         from app.core.permission_handler import permission_handler
-        from claude_agent_sdk.types import PermissionResultAllow
+        from app.core.agent_types import PermissionResultAllow
         from fluid.tools.builtins.web import fetch_handler
         from fluid.tools.registry import ToolCtx
 

@@ -142,7 +142,7 @@ async def handle(payload, peer_device_id):
 
 def install_history(sid, data, cwd):
     from psycopg2.extras import Json
-    from claude_agent_sdk._internal.sessions import project_key_for_directory
+    from app.core.cli_sessions import project_key_for_directory
     old_sdk = data.get("sdk_session_id")
     # New store identity prevents replacing another local session's native tree
     # and prevents a warm provider cache from reusing stale nodes.

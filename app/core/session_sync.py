@@ -4,9 +4,9 @@ Session Sync Service
 Discovers and imports Claude Code sessions from the filesystem into the AI Shuffle database.
 This keeps the database synchronized with sessions created directly in Claude Code.
 
-Uses the SDK's list_sessions() for efficient filesystem discovery with metadata
-extraction (title, first prompt, git branch, cwd) via stat + head/tail reads —
-no full JSONL parsing required for session discovery.
+Uses the app-owned local transcript helpers for filesystem discovery and metadata
+extraction (title, first prompt, git branch, cwd). JSONL records are streamed;
+no CLI process or credentials are accessed.
 
 Key features:
 - Discovers unimported sessions for a specific project via SDK list_sessions()
@@ -18,7 +18,7 @@ import logging
 import uuid
 from typing import Dict, List, Any, Optional
 
-from claude_agent_sdk import list_sessions, SDKSessionInfo
+from app.core.cli_sessions import list_sessions, SessionInfo
 
 from app.core.config import settings
 from app.core.project_utils import get_project_working_dir
@@ -40,7 +40,7 @@ class SessionSyncService:
         self,
         project_id: str,
         working_dir: str
-    ) -> List[SDKSessionInfo]:
+    ) -> List[SessionInfo]:
         """
         Discover Claude Code sessions that exist on disk but are not in the database.
 
@@ -53,7 +53,7 @@ class SessionSyncService:
             working_dir: The working directory path for the project
 
         Returns:
-            List of SDKSessionInfo objects for sessions not yet in the database,
+            List of SessionInfo objects for sessions not yet in the database,
             sorted by last_modified descending (newest first).
         """
         try:
@@ -85,7 +85,7 @@ class SessionSyncService:
 
     def import_session(
         self,
-        session_info: SDKSessionInfo,
+        session_info: SessionInfo,
         project_id: str,
         working_dir: str,
         profile_id: str = "default"
@@ -93,11 +93,11 @@ class SessionSyncService:
         """
         Import a single Claude Code session into the database.
 
-        Uses metadata from SDKSessionInfo (populated by SDK's list_sessions())
+        Uses metadata from SessionInfo (populated by SDK's list_sessions())
         for title and summary, avoiding redundant JSONL parsing.
 
         Args:
-            session_info: SDKSessionInfo from list_sessions() with metadata
+            session_info: SessionInfo from list_sessions() with metadata
             project_id: The AI Shuffle project ID to associate
             working_dir: The working directory for token usage parsing
             profile_id: The profile to associate (defaults to 'default')

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
     """Create automation management tools."""
-    from claude_agent_sdk import tool
+    from app.mcp.inproc import tool
     from app.db import database
     from app.db.async_database import run_sync
 

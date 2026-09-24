@@ -129,3 +129,25 @@ async def test_mixed_text_and_image():
     assert len(result) == 2
     assert isinstance(result[0], TextContent)
     assert isinstance(result[1], ImageContent)
+
+@pytest.mark.asyncio
+async def test_owned_factory_dispatch_preserves_images_errors_and_annotations():
+    from app.mcp.inproc import tool, create_tool_server
+    from app.core.provider.fluid_tool_bridge import register_recorded_sdk_servers
+    from fluid.tools.registry import ToolRegistry
+
+    @tool("capture", "fixture", {"screen": int}, annotations={"readOnlyHint": True})
+    async def capture(args):
+        return {"isError": True, "content": [
+            {"type": "text", "text": f"screen {args['screen']}"},
+            {"type": "image", "data": _PNG_B64, "mimeType": "image/png"},
+        ]}
+
+    config = patch_sdk_server(create_tool_server(name="fixture", tools=[capture]), [capture])
+    registry = ToolRegistry()
+    assert register_recorded_sdk_servers(registry, {"fixture": config}) == ["fixture"]
+    assert capture.annotations == {"readOnlyHint": True}
+    result = await registry.dispatch("mcp__fixture__capture", {"screen": 1})
+    assert result.is_error and result.text == "screen 1"
+    assert result.images[0].data == _PNG_B64
+    assert result.images[0].media_type == "image/png"

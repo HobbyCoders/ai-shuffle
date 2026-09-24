@@ -2,7 +2,7 @@
 AI Tools SDK MCP Server - Native tool registration for AI content generation.
 
 Registers AI tools as proper SDK MCP tools using the @tool decorator and
-create_sdk_mcp_server(). Each tool delegates to a persistent Node.js worker
+create_tool_server(). Each tool delegates to a persistent Node.js worker
 process that handles execution via stdin/stdout JSON-RPC.
 
 The worker is started lazily on first tool call and stays alive for the session,
@@ -13,7 +13,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from claude_agent_sdk import tool, create_sdk_mcp_server
+from app.mcp.inproc import tool, create_tool_server
 from mcp.types import ToolAnnotations
 
 from app.mcp.config_helpers import _json_default
@@ -460,7 +460,7 @@ def create_ai_tools_server(
             the API can serve them.
 
     Returns:
-        McpSdkServerConfig from create_sdk_mcp_server(), or None
+        McpSdkServerConfig from create_tool_server(), or None
     """
     if not ai_tools_config or not tools_dir:
         return None
@@ -534,7 +534,7 @@ def create_ai_tools_server(
 
     logger.info(f"Creating AI tools MCP server with {len(enabled_tools)} tools: {[t.name for t in enabled_tools]}")
 
-    return patch_sdk_server(create_sdk_mcp_server(
+    return patch_sdk_server(create_tool_server(
         name="ai-tools",
         version="1.0.0",
         tools=enabled_tools,

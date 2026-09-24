@@ -1,7 +1,7 @@
 """
 Generation call option builder.
 
-Builds a `ClaudeAgentOptions` for one-shot AI generation calls (commit
+Builds a `AgentOptions` for one-shot AI generation calls (commit
 messages, PR descriptions, branch names, profile / subagent generation, etc.)
 from the **text-generation setting** — one model + effort pair configured under
 Settings → Providers, shared by every internal generation call.
@@ -34,7 +34,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from claude_agent_sdk import ClaudeAgentOptions
+from app.core.agent_types import AgentOptions
 
 from app.core.model_registry import DEFAULT_MODEL
 
@@ -92,7 +92,7 @@ _THINKING_TOKEN_BUDGETS: Dict[str, int] = {
 
 
 # ---------------------------------------------------------------------------
-# Profile -> ClaudeAgentOptions
+# Profile -> AgentOptions
 # ---------------------------------------------------------------------------
 
 
@@ -141,7 +141,7 @@ def _resolve_thinking_and_effort(
     profile_config: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
-    Map profile's `thinking_mode` + `effort` to ClaudeAgentOptions kwargs.
+    Map profile's `thinking_mode` + `effort` to AgentOptions kwargs.
 
     Mirrors `app.core.query_options._build_thinking_config` so generation calls
     behave the same as chat sessions for extended-thinking / effort config.
@@ -294,9 +294,9 @@ def build_generation_options(
     model_override: Optional[str] = None,
     max_turns: Optional[int] = None,
     session_provider_id: Any = _UNSET_PROVIDER,
-) -> ClaudeAgentOptions:
+) -> AgentOptions:
     """
-    Build a `ClaudeAgentOptions` for a one-shot generation call.
+    Build a `AgentOptions` for a one-shot generation call.
 
     Honored from ``profile_config`` (callers pass ``text_generation_config()``):
     - `model` (unless `model_override` is supplied)
@@ -400,7 +400,7 @@ def build_generation_options(
     # persisted to the session store (would pollute the transcript history).
     kwargs["strict_mcp_config"] = False
 
-    options = ClaudeAgentOptions(**kwargs)
+    options = AgentOptions(**kwargs)
 
     # ── Provider binding stamp ───────────────────────────────────────────────
     # Mirrors `app.core.query_options` (the chat path): the HarnessAdapter reads

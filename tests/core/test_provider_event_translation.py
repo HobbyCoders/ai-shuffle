@@ -1,25 +1,13 @@
-"""Guards for the SDK-message → ProviderEvent mirror boundary.
+"""Provider-event compatibility seam preserves all host message fields.
 
-The streaming loops dispatch exclusively on the mirror classes in
-``app/core/provider/events.py``; ``to_provider_event`` (sdk_event_translation) is the
-single choke point that converts real claude_agent_sdk messages at every
-consumption boundary (adapter.receive_events(), the headless query() path,
-idle_reader). These tests pin two properties:
-
-1. Round-trip fidelity — every SDK message/block type converts to its mirror
-   with identical field values, preserving the SystemMessage subclass
-   hierarchy the loops' dispatch order depends on.
-2. Field-superset — each mirror declares every field its SDK counterpart
-   declares, so an SDK bump that adds fields fails HERE (update events.py +
-   the converter) instead of silently dropping data mid-stream.
+Actual CLI frames are mapped by Fluid and exercised in delegated producer and
+harness-adapter tests. The retired SDK is not a second message vocabulary.
 """
 
 from __future__ import annotations
 
-import dataclasses
-
-import claude_agent_sdk as sdk
-from claude_agent_sdk.types import (
+import app.core.provider.events as sdk
+from app.core.provider.events import (
     HookEventMessage,
     RateLimitEvent,
     RateLimitInfo,
@@ -155,34 +143,8 @@ def test_unknown_message_passes_through():
     assert to_provider_event(w) is w
 
 
-def test_mirror_fields_are_superset_of_sdk_fields():
-    """An SDK bump that adds message fields must fail here, loudly."""
-    pairs = [
-        (sdk.TextBlock, pe.TextBlock),
-        (sdk.ThinkingBlock, pe.ThinkingBlock),
-        (sdk.ToolUseBlock, pe.ToolUseBlock),
-        (sdk.ToolResultBlock, pe.ToolResultBlock),
-        (sdk.ServerToolUseBlock, pe.ServerToolUseBlock),
-        (sdk.ServerToolResultBlock, pe.ServerToolResultBlock),
-        (sdk.UserMessage, pe.UserMessage),
-        (sdk.AssistantMessage, pe.AssistantMessage),
-        (sdk.SystemMessage, pe.SystemMessage),
-        (sdk.ResultMessage, pe.ResultMessage),
-        (StreamEvent, pe.StreamEvent),
-        (TaskStartedMessage, pe.TaskStartedMessage),
-        (sdk.TaskProgressMessage, pe.TaskProgressMessage),
-        (TaskNotificationMessage, pe.TaskNotificationMessage),
-        (TaskUpdatedMessage, pe.TaskUpdatedMessage),
-        (HookEventMessage, pe.HookEventMessage),
-        (RateLimitInfo, pe.RateLimitInfo),
-        (RateLimitEvent, pe.RateLimitEvent),
-    ]
-    for sdk_cls, mirror_cls in pairs:
-        sdk_fields = {f.name for f in dataclasses.fields(sdk_cls)}
-        mirror_fields = {f.name for f in dataclasses.fields(mirror_cls)}
-        missing = sdk_fields - mirror_fields
-        assert not missing, (
-            f"{mirror_cls.__module__}.{mirror_cls.__name__} is missing SDK "
-            f"field(s) {sorted(missing)} — update events.py and "
-            f"to_provider_event for the new SDK version"
-        )
+def test_provider_event_passthrough_preserves_future_fields():
+    event = pe.ResultMessage(subtype="success", session_id="s", usage={"future": 7})
+    event.future_field = {"opaque": [1, 2]}
+    assert to_provider_event(event) is event
+    assert to_provider_event(event).future_field == {"opaque": [1, 2]}
