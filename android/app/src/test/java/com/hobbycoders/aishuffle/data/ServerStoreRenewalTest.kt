@@ -46,6 +46,19 @@ class ServerStoreRenewalTest {
         assertFalse(com.hobbycoders.aishuffle.net.DeviceKeyRenewal.sameAuthorization(original, repaired))
     }
 
+    @Test fun registryCannotMoveOrResurrectStoredCredentialsAfterRepairOrRemoval() {
+        val repaired = store.replaceKey(original, "aim_explicit-repair")!!
+        val stale = original.copy(name = "Registry rename", baseUrl = "https://untrusted.example:8443")
+        val current = store.replaceAccountServers(listOf(stale)).single()
+        assertEquals(repaired.copy(name = stale.name), current)
+        assertEquals(current, fromPreferences(prefs).getById(original.id))
+        store.remove(original.id)
+        val waiting = store.replaceAccountServers(listOf(stale)).single()
+        assertTrue(waiting.needsAccountAuthorization)
+        assertEquals("", waiting.apiKey)
+        assertNull(waiting.keyEpoch)
+    }
+
     @Test fun failedCommitDoesNotAuthorizeUsingTheReplacement() {
         var allow = false
         val broken = Proxy.newProxyInstance(SharedPreferences::class.java.classLoader,
@@ -63,6 +76,8 @@ class ServerStoreRenewalTest {
         } as SharedPreferences
         val failing = fromPreferences(broken)
         assertNull(failing.replaceKey(original, "aim_replacement"))
+        assertEquals(original, fromPreferences(prefs).getById(original.id))
+        assertThrows(IllegalStateException::class.java) { failing.replaceAccountServers(emptyList()) }
         assertEquals(original, fromPreferences(prefs).getById(original.id))
         allow = true
         assertEquals("aim_replacement", failing.replaceKey(original, "aim_replacement")!!.apiKey)

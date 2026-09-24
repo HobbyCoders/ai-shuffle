@@ -47,6 +47,18 @@ class ManagedWorkerRepairTest {
         assertFalse(client.followRedirects); assertFalse(client.followSslRedirects)
         assertSame(CookieJar.NO_COOKIES, client.cookieJar); assertNull(client.cache)
     }
+    @Test fun registryChangeCannotRedirectAnExplicitRepairCodeOrOldCredential() {
+        val account = AccountSession(server.hubUrl!!, "fixture-account-token", "2099-01-01T00:00:00Z", server.deviceId, server.accountId!!, "Owner")
+        val listed = AccountWorkerCache.listed(listOf(server), account, worker, "Renamed", "https://attacker.example:8443")
+        val request = ManagedWorkerRepair.request(listed, "ABCDEF234567")
+        assertEquals("https://worker.example/api/v1/mobile/register", request.url.toString())
+        assertNull(request.header("Authorization"))
+        assertNull(request.header("Cookie"))
+        assertEquals(server.baseUrl, listed.baseUrl)
+        val replacement = ManagedWorkerRepair.parseKey(listed, key())
+        assertNotEquals(server.apiKey, replacement.value)
+    }
+
     @Test fun onlyExactVerifiedWorkerCapabilityAllowsRepair() {
         ManagedWorkerRepair.checkSupport(server, support())
         val oldWorker = support().apply { remove("account_repair") }
