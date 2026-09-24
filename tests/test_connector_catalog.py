@@ -24,6 +24,12 @@ def test_every_catalog_digest_matches_the_connector_source():
     assert not stale, "Update catalog.json after editing these connectors:\n" + "\n".join(stale)
 
 
+def test_catalog_release_identity_covers_source_and_dependency_changes():
+    identity = {key: value for key, value in CATALOG.items() if key != "release"}
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    assert CATALOG["release"] == digest[:16], "Bump the release identity whenever the catalog changes"
+
+
 def test_catalog_pins_a_full_commit_revision():
     revision = CATALOG["revision"]
     assert len(revision) == 40 and all(c in "0123456789abcdef" for c in revision)

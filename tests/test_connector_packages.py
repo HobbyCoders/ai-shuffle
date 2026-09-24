@@ -138,6 +138,48 @@ def test_canonical_plugin_api_lists_installs_and_guards_accounts(local_package):
         assert client.post("/api/v1/plugins/webhook@shuffle-connectors/enable").status_code == 200
         assert client.delete("/api/v1/plugins/webhook@shuffle-connectors").status_code == 204
 
+@pytest.mark.parametrize("status", [200, 401, 403, 404])
+@pytest.mark.parametrize("tampered", [False, True])
+def test_remote_source_is_pinned_and_verified_before_install(monkeypatch, status, tampered):
+    import httpx
+    sources = Path(__file__).parents[1] / "app/core/connectors"
+    data = b"tampered" if tampered else (sources / "webhook_connector.py").read_bytes()
+    requests, private = [], []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(status, content=data)
+
+    client = httpx.Client
+    monkeypatch.setattr(packages.httpx, "Client", lambda **kw: client(transport=httpx.MockTransport(handle), **kw))
+    monkeypatch.setattr(packages, "_download_private", lambda name: private.append(name) or data)
+    monkeypatch.setattr(packages, "_prepare_environment", lambda *_: None)
+    monkeypatch.setattr(packages, "_validate_worker", lambda *_: None)
+    if tampered:
+        with pytest.raises(ValueError, match="integrity"):
+            packages.install("webhook")
+        assert packages.record("webhook") is None
+    else:
+        packages.install("webhook")
+        assert packages.record("webhook")["revision"] == packages.CATALOG["revision"]
+    assert str(requests[0].url) == (
+        "https://raw.githubusercontent.com/HobbyCoders/ai-shuffle/"
+        f"{packages.CATALOG['revision']}/app/core/connectors/webhook_connector.py"
+    )
+    assert private == ([] if status == 200 else ["webhook_connector.py"])
+
+
+@pytest.mark.parametrize("status", [302, 500])
+def test_source_redirects_and_server_errors_do_not_fall_back(monkeypatch, status):
+    import httpx
+    client = httpx.Client
+    transport = httpx.MockTransport(lambda _: httpx.Response(status, headers={"Location": "https://other.invalid/source"}))
+    monkeypatch.setattr(packages.httpx, "Client", lambda **kw: client(transport=transport, **kw))
+    monkeypatch.setattr(packages, "_download_private", lambda _: pytest.fail("unexpected fallback"))
+    with pytest.raises(httpx.HTTPStatusError):
+        packages._download("webhook_connector.py")
+
+
 def test_private_source_uses_existing_gh_auth_without_reading_token(monkeypatch):
     from app.core import auth
     from types import SimpleNamespace
