@@ -6,6 +6,8 @@ import android.content.Intent
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.Root
+import androidx.test.espresso.matcher.RootMatchers.withDecorView
 import androidx.test.espresso.action.ViewActions.*
 import androidx.test.espresso.assertion.ViewAssertions.*
 import androidx.test.espresso.matcher.ViewMatchers.*
@@ -23,6 +25,8 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.json.JSONArray
 import org.json.JSONObject
+import org.hamcrest.Matcher
+import org.hamcrest.Matchers.allOf
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.After
@@ -48,7 +52,7 @@ class AccountProfileSmokeTest {
         }
     }
     @After fun restorePresenceTransport() { presenceFixture?.close() }
-    private fun awaitText(text: String, timeoutMs: Long = 8_000) = kotlinx.coroutines.runBlocking {
+    private fun awaitText(text: String, timeoutMs: Long = 8_000, rootMatcher: Matcher<Root>? = null) = kotlinx.coroutines.runBlocking {
         val started = android.os.SystemClock.elapsedRealtime()
         val wallStarted = System.currentTimeMillis()
         var lastFailure: Throwable? = null
@@ -56,7 +60,9 @@ class AccountProfileSmokeTest {
             kotlinx.coroutines.withTimeout(timeoutMs) {
                 while (true) {
                     try {
-                        onView(withText(text)).check(matches(isDisplayed()))
+                        val view = onView(withText(text))
+                        if (rootMatcher != null) view.inRoot(rootMatcher)
+                        view.check(matches(isDisplayed()))
                         return@withTimeout
                     } catch (e: androidx.test.espresso.NoMatchingViewException) {
                         lastFailure = e
@@ -207,8 +213,12 @@ class AccountProfileSmokeTest {
                 else -> error("Unexpected fixture route")
             } }) {
                 ActivityScenario.launch<AccountActivity>(Intent(context, AccountActivity::class.java).putExtra("mode", "login")).use {
-                    awaitText("No workers yet")
-                    onView(withText("Save and continue")).check(doesNotExist())
+                    // OAuth finishes AccountActivity. Its detached decor can
+                    // linger in Espresso's roots while Workers is already shown;
+                    // select the displayed destination, not the dying login root.
+                    val workers = withDecorView(allOf(isDisplayed(), hasDescendant(withText("No workers yet"))))
+                    awaitText("No workers yet", rootMatcher = workers)
+                    onView(withText("Save and continue")).inRoot(workers).check(doesNotExist())
                     assertEquals(if (complete == null) 1 else 0, profileGets.get())
                     assertEquals(true, store.session()!!.profileComplete)
                 }
