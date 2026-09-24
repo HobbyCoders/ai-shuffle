@@ -29,6 +29,13 @@ def test_desktop_package_matches_backend_fallback():
     assert _package_version("desktop/package.json") == __version__
 
 
+@pytest.mark.parametrize("directory", ["frontend", "desktop"])
+def test_package_lock_versions_match_backend_fallback(directory):
+    lock = json.loads((ROOT / directory / "package-lock.json").read_text())
+    assert lock["version"] == __version__
+    assert lock["packages"][""]["version"] == __version__
+
+
 def test_android_fallback_matches_backend_fallback():
     gradle = (ROOT / "android/app/build.gradle.kts").read_text(encoding="utf-8")
     match = re.search(r'ANDROID_VERSION_NAME"\)\s*\?:\s*"([^"]+)"', gradle)

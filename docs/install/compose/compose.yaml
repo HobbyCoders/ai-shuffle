@@ -19,7 +19,7 @@ services:
   ai-shuffle:
     # A pinned release, pulled through your licensed registry path. The pull
     # token is read-only and is not your license key.
-    image: ${AI_SHUFFLE_REGISTRY:-registry.hobbycoders.com}/${AI_SHUFFLE_PULL_TOKEN:?Set AI_SHUFFLE_PULL_TOKEN in .env (see env.example)}/ai-shuffle:${AI_SHUFFLE_VERSION:-0.8.18}
+    image: ${AI_SHUFFLE_REGISTRY:-registry.hobbycoders.com}/${AI_SHUFFLE_PULL_TOKEN:?Set AI_SHUFFLE_PULL_TOKEN in .env (see env.example)}/ai-shuffle:${AI_SHUFFLE_VERSION:-0.8.19}
     container_name: ai-shuffle
     restart: unless-stopped
 
