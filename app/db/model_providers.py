@@ -7,7 +7,7 @@ session. The provider list is shared across installs on a shared database.
 
 ``auth_token`` stores an ``enc:``-prefixed Fernet blob of the gateway key and is
 NEVER returned on a normal read — it is fetched only when ``include_token=True``
-(mirroring ``claude_accounts.credentials`` / ``include_credentials``). The
+(secrets are never on a default read). The
 ``models_json`` (a curated ``[{id, label}]`` list) and ``extra_env_json`` (an
 extra-env map) columns are TEXT-encoded JSON, serialized/parsed via
 ``json.dumps`` / ``json.loads`` (same convention as ``db/profiles.py``).

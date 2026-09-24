@@ -25,7 +25,6 @@ _TABLES = (
     ('automations', ('triggers', 'trigger_config'), ('triggers', 'trigger_config')),
     ('connectors', ('config',), ('config',)),
     ('api_user_credentials', ('encrypted_value',), ()),
-    ('claude_accounts', ('credentials',), ()),
     ('model_providers', ('auth_token', 'codex_access_token', 'codex_refresh_token'), ()),
 )
 

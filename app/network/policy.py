@@ -77,7 +77,6 @@ _LOCAL_SETTING_PATTERNS = [
         r"^mobile_",
         r"^credential_key_state",
         r"^chat_connection:",
-        r"^claude_active_account(:|$)",
         r"^claude_cli_relogin_notice(:|$)",
         r"^encryption_salt$",
         r"^owner_preference_identity$",
@@ -110,7 +109,7 @@ def is_shared_setting_key(key: str) -> bool:
 
 def _looks_like_instance_suffix(key: str) -> bool:
     prefix = key.split(":", 1)[0]
-    return prefix in {"workspace_path", "claude_active_account", "cluster_advertise_url",
+    return prefix in {"workspace_path", "cluster_advertise_url",
                       "mobile_account_hub_secret", "mobile_managed_pending", "mobile_managed_credential"}
 
 
@@ -197,13 +196,6 @@ _register(Collection(
                   "openai_admin_key", "openai_billing_org_id", "openai_billing_instance_id"),
     resource="settings", priority=30,
     notes="API keys travel encrypted under the network key. Refresh leases and billing bindings stay local."))
-
-_register(Collection(
-    name="claude_accounts", table="claude_accounts", keys=("id",),
-    fields=("id", "name", "email", "subscription_type", "credentials", "credential_fingerprint",
-            "expires_at", "has_refresh_token", "sync_pending", "created_at", "updated_at"),
-    encrypted=("credentials",), resource="settings", priority=30,
-    notes="OAuth bundles. Whether a restored bundle is usable is decided at use time."))
 
 _register(Collection(
     name="api_users", table="api_users", keys=("id",),
@@ -349,6 +341,15 @@ _register(Collection(
     fields=("hash", "size", "mime", "filename", "created_by_session", "owner_device_id", "created_at"),
     local_fields=("runner_id",), resource="artifacts", priority=96,
     notes="Content-addressed; bytes fetched from any holder."))
+
+
+#: Collections this build no longer syncs but peers on older builds may still
+#: publish. Their ops are consumed without being stored or forwarded, their
+#: snapshot pages are skipped, and a publisher still serves an empty page for
+#: each so a joiner on an older build (which expects every collection it
+#: knows) completes its copy. ``claude_accounts`` held the retired in-app
+#: Claude sign-in's credentials.
+RETIRED_COLLECTIONS = frozenset({"claude_accounts"})
 
 
 def collection(name: str) -> Collection:

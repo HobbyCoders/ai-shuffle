@@ -290,7 +290,14 @@ def _savepoint(cursor, name: str):
 #     sync_conflicts, sync_peers, network_joins, ...) and nullable
 #     ``owner_device_id`` on sessions / automations / connectors / artifacts,
 #     ``blob_hash`` on note_attachments. All additive.
-SCHEMA_VERSION = 88
+# 89 (2026-09-24): retire the in-app Claude sign-in's storage. AI Shuffle no
+#     longer keeps Claude credentials: drop ``claude_accounts``, delete the
+#     ``claude_active_account:*`` pointers, purge ``claude_accounts`` envelopes
+#     from sync_ops / sync_pending / sync_records / sync_conflicts, and drop
+#     ``usage_snapshots.account_id/account_email/account_name``. When the old
+#     sign-in left rows or pointers, the one-time CLI re-login notice is
+#     recorded first (``_retire_claude_accounts``).
+SCHEMA_VERSION = 89
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -1134,36 +1141,14 @@ def _run_column_migrations(cursor):
         migrations_applied.append("installs")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_installs_last_seen ON installs(last_seen DESC)")
 
-    # claude_accounts (v52). Multiple Anthropic OAuth accounts + in-app switching.
-    # The account list is shared; the active pointer is per-install and lives in
-    # system_settings (key claude_active_account:{instance_id}), so no is_active
-    # column here. Idempotent so upgrades from any older version land the table
-    # without needing the SCHEMA_VERSION bump to fire the bootstrap path (same
-    # defensive pattern as the SessionStore / error_log / installs blocks above).
-    if not table_exists(cursor, "claude_accounts"):
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS claude_accounts (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                email TEXT,
-                subscription_type TEXT,
-                credentials TEXT,
-                credential_fingerprint TEXT,
-                expires_at BIGINT,
-                has_refresh_token BOOLEAN DEFAULT TRUE,
-                sync_pending BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                last_used_at TIMESTAMP WITH TIME ZONE
-            )
-        """)
-        migrations_applied.append("claude_accounts")
+    # claude_accounts (v52) is no longer created; v89 drops it (see
+    # _retire_claude_accounts below).
 
     # model_providers (v64). Admin-configured non-Anthropic model gateways
     # (OpenRouter / custom Anthropic-compatible endpoints). Idempotent so
     # upgrades from any older version land the table without needing the
     # SCHEMA_VERSION bump to fire the bootstrap path (same defensive pattern as
-    # the SessionStore / error_log / installs / claude_accounts blocks above).
+    # the SessionStore / error_log / installs blocks above).
     # The index is bootstrapped unconditionally (CREATE INDEX IF NOT EXISTS) so
     # it exists on both fresh installs and upgrades.
     if not table_exists(cursor, "model_providers"):
@@ -1323,9 +1308,9 @@ def _run_column_migrations(cursor):
         migrations_applied.append("automation_fires")
 
     # usage_snapshots (v53). Per-install Claude usage-limits snapshot keyed by
-    # instance_id. The 5-hour Claude usage window is per-account and two installs
-    # on a shared DB may run different accounts, so each install persists its own
-    # snapshot and the usage endpoint serves them all. Idempotent so upgrades
+    # instance_id: the windows that install's CLI reported, so the usage
+    # endpoint can serve every install's. The account_* columns it carried
+    # until v89 are dropped by _retire_claude_accounts. Idempotent so upgrades
     # from any older version land the table without needing the SCHEMA_VERSION
     # bump to fire the bootstrap path (same defensive pattern as the
     # automation_fires block above).
@@ -1337,9 +1322,6 @@ def _run_column_migrations(cursor):
                 available BOOLEAN DEFAULT FALSE,
                 generation BIGINT,
                 fetched_at BIGINT,
-                account_id TEXT,
-                account_email TEXT,
-                account_name TEXT,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
@@ -2337,6 +2319,8 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE note_attachments ADD COLUMN blob_hash TEXT")
         migrations_applied.append("note_attachments.blob_hash")
 
+    migrations_applied.extend(_retire_claude_accounts(cursor))
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -2379,6 +2363,107 @@ def _set_marker(cursor, key: str, value: str) -> None:
                updated_at = excluded.updated_at""",
         (key, value, now),
     )
+
+
+#: The retired in-app Claude sign-in's network collection and pointer prefix.
+RETIRED_CLAUDE_COLLECTION = "claude_accounts"
+RETIRED_CLAUDE_POINTER_PREFIX = "claude_active_account:"
+#: Per-worker one-time notice read by ``app.core.claude_relogin_notice``.
+CLAUDE_RELOGIN_NOTICE_PREFIX = "claude_cli_relogin_notice:"
+CLAUDE_RELOGIN_PENDING = "pending"
+#: Database-wide flag: the old sign-in's storage was found and removed here.
+#: A worker whose pointer was not in this database (a second install sharing
+#: it) records its own pending notice from this flag at startup.
+CLAUDE_RELOGIN_NEEDED_MARKER = "migration:claude_cli_relogin_needed"
+
+
+def _retire_claude_accounts(cursor) -> List[str]:
+    """v89: remove every trace of the in-app Claude sign-in. Idempotent.
+
+    AI Shuffle no longer stores Claude credentials; the Claude Code CLI owns
+    its own login. Before deleting anything, a database the old sign-in used
+    (account rows or active-account pointers) records the one-time
+    ``claude auth logout`` / ``claude auth login`` notice (decision D2) for
+    every worker that had a pointer and for this one, plus a database-wide
+    flag other workers sharing it read at startup. An existing notice
+    (pending or dismissed) is never overwritten.
+
+    Then: drop ``claude_accounts``; delete the pointers; purge the
+    collection's sealed envelopes and records from the sync tables (a peer
+    behind the purged ops gets a snapshot copy, as after ``prune_ops``); drop
+    the ``usage_snapshots.account_*`` columns. Returns what was applied.
+    """
+    applied: List[str] = []
+    has_settings = table_exists(cursor, "system_settings")
+    pointer_ids: List[str] = []
+    if has_settings:
+        cursor.execute(
+            "SELECT key FROM system_settings WHERE key LIKE %s",
+            (RETIRED_CLAUDE_POINTER_PREFIX + "%",),
+        )
+        for row in cursor.fetchall():
+            key = row["key"] if isinstance(row, dict) else row[0]
+            suffix = key[len(RETIRED_CLAUDE_POINTER_PREFIX):]
+            if suffix:
+                pointer_ids.append(suffix)
+    has_table = table_exists(cursor, RETIRED_CLAUDE_COLLECTION)
+    rows = 0
+    if has_table:
+        cursor.execute(f"SELECT COUNT(*) AS n FROM {RETIRED_CLAUDE_COLLECTION}")
+        row = cursor.fetchone()
+        rows = int((row["n"] if isinstance(row, dict) else row[0]) or 0)
+
+    if has_settings and (rows or pointer_ids):
+        now = datetime.now(timezone.utc).isoformat()
+        for instance_id in dict.fromkeys([*pointer_ids, settings.effective_instance_id]):
+            cursor.execute(
+                """INSERT INTO system_settings (key, value, updated_at) VALUES (%s, %s, %s)
+                   ON CONFLICT(key) DO NOTHING""",
+                (CLAUDE_RELOGIN_NOTICE_PREFIX + instance_id, CLAUDE_RELOGIN_PENDING, now),
+            )
+        _set_marker(cursor, CLAUDE_RELOGIN_NEEDED_MARKER, "1")
+        applied.append("claude_cli_relogin_notice")
+
+    if pointer_ids:
+        cursor.execute(
+            "DELETE FROM system_settings WHERE key LIKE %s",
+            (RETIRED_CLAUDE_POINTER_PREFIX + "%",),
+        )
+        applied.append(f"claude_active_account({len(pointer_ids)} pointers)")
+    if has_table:
+        cursor.execute(f"DROP TABLE IF EXISTS {RETIRED_CLAUDE_COLLECTION}")
+        applied.append(f"drop claude_accounts({rows} rows)")
+
+    for table in ("sync_ops", "sync_records", "sync_conflicts"):
+        if table_exists(cursor, table):
+            cursor.execute(f"DELETE FROM {table} WHERE collection = %s", (RETIRED_CLAUDE_COLLECTION,))
+            if cursor.rowcount:
+                applied.append(f"{table}.claude_accounts({cursor.rowcount})")
+    if table_exists(cursor, "sync_pending"):
+        # Held out-of-order envelopes carry the collection only inside the JSON.
+        cursor.execute("SELECT origin_device_id, incarnation, seq, envelope FROM sync_pending")
+        stale = []
+        for row in cursor.fetchall():
+            try:
+                envelope = _safe_json(row["envelope"])
+            except ValueError:
+                continue
+            if isinstance(envelope, dict) and envelope.get("collection") == RETIRED_CLAUDE_COLLECTION:
+                stale.append((row["origin_device_id"], row["incarnation"], row["seq"]))
+        for key in stale:
+            cursor.execute(
+                "DELETE FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
+                key,
+            )
+        if stale:
+            applied.append(f"sync_pending.claude_accounts({len(stale)})")
+
+    if table_exists(cursor, "usage_snapshots"):
+        for column in ("account_id", "account_email", "account_name"):
+            if column_exists(cursor, "usage_snapshots", column):
+                cursor.execute(f"ALTER TABLE usage_snapshots DROP COLUMN {column}")
+                applied.append(f"usage_snapshots.drop_{column}")
+    return applied
 
 
 def _backfill_sessions_is_worker(cursor) -> Optional[int]:

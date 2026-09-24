@@ -609,7 +609,8 @@ async def peer_snapshot(collection: Optional[str] = None, offset: int = 0,
     transport.note_contact(device_id)
     if collection is None:
         return await run_sync(engine.snapshot_manifest)
-    if collection not in policy.COLLECTIONS:
+    # Retired collections answer with an empty page for joiners on older builds.
+    if collection not in policy.COLLECTIONS and collection not in policy.RETIRED_COLLECTIONS:
         raise HTTPException(404, "Unknown collection")
     return await run_sync(engine.snapshot_chunk, collection, max(0, offset))
 

@@ -129,7 +129,10 @@ def test_logout_clears_the_relogin_notice(monkeypatch, cli_home, mock_db):
     from app.core import claude_relogin_notice as notice
     from app.core.auth import AuthService
     from app.db import database as db
+    from app.db.base import get_db
     db.set_system_setting("claude_active_account:old", "acct")
+    with get_db() as conn:
+        db._retire_claude_accounts(conn.cursor())
     assert notice.mark_if_needed() is True
     monkeypatch.setattr(cs, "probe", lambda resolver=None: _status(True))
     monkeypatch.setattr("app.core.auth.subprocess.run",

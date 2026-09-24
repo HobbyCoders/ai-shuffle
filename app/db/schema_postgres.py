@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 88
+SCHEMA_VERSION = 89
 
 
 def create_postgres_schema(cursor) -> None:
@@ -784,42 +784,17 @@ def create_postgres_schema(cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_installs_last_seen ON installs(last_seen DESC)"
     )
 
-    # ------------------------------------------------------------------
-    # 36b. Claude accounts (v52). Multiple Anthropic (Claude Code OAuth)
-    #      accounts with in-app switching. The account LIST is shared across
-    #      installs; the ACTIVE pointer is per-install and lives in
-    #      system_settings under key ``claude_active_account:{instance_id}``
-    #      (same pattern as ``workspace_path:{instance_id}``) — so there is
-    #      deliberately NO is_active column here. ``credentials`` holds an
-    #      ``enc:``-prefixed Fernet blob of the full claudeAiOauth JSON;
-    #      ``expires_at`` is a plaintext copy for display without decrypting.
-    # ------------------------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS claude_accounts (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            email TEXT,
-            subscription_type TEXT,
-            credentials TEXT,
-            credential_fingerprint TEXT,
-            expires_at BIGINT,
-            has_refresh_token BOOLEAN DEFAULT TRUE,
-            sync_pending BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            last_used_at TIMESTAMP WITH TIME ZONE
-        )
-    """)
+    # 36b. (retired) Claude accounts (v52). The in-app Claude sign-in and its
+    #      ``claude_accounts`` table were removed in v89; the Claude Code CLI
+    #      owns its own login and AI Shuffle stores no Claude credentials.
 
     # ------------------------------------------------------------------
     # 36c. Usage snapshots (v53). Per-install Claude usage-limits snapshot,
-    #      keyed by instance_id. The 5-hour Claude usage window is PER-ACCOUNT,
-    #      and on a shared database two installs may run different Claude
-    #      accounts — so each install persists its own snapshot here and the
-    #      usage endpoint serves every install's snapshot (joined to the
-    #      installs registry for device_name/online). ``windows`` is the
-    #      normalized window list; ``account_*`` records which Claude account
-    #      produced the reading (Nones in legacy single-account mode).
+    #      keyed by instance_id: the windows that install's Claude Code CLI
+    #      reported in its rate-limit events, so the usage endpoint can serve
+    #      every install's snapshot (joined to the installs registry for
+    #      device_name/online). No Claude account identity (the account_*
+    #      columns were dropped in v89).
     # ------------------------------------------------------------------
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS usage_snapshots (
@@ -828,9 +803,6 @@ def create_postgres_schema(cursor) -> None:
             available BOOLEAN DEFAULT FALSE,
             generation BIGINT,
             fetched_at BIGINT,
-            account_id TEXT,
-            account_email TEXT,
-            account_name TEXT,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
