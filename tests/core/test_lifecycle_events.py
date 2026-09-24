@@ -42,8 +42,12 @@ async def test_durable_failed_result_reaches_error_lifecycle(monkeypatch, mock_d
         recorder._owns_lease = False
         return recorder
     row = turns.enqueue_turn("failed-result", "user", prompt="fixture")
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": metadata}])):
-        monkeypatch.setattr(session_runtime.TurnRecorder, "create_for_run", create_recorder)
+    # Restore our factory override before _runtime_env restores the real class
+    # method. Function-scoped teardown would reinstall that helper's AsyncMock
+    # and silently disable recording in later tests on the same worker.
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": metadata}])), \
+            monkeypatch.context() as recorder_patch:
+        recorder_patch.setattr(session_runtime.TurnRecorder, "create_for_run", create_recorder)
         assert await session_runtime.SessionRuntime(row).execute() == "completed"
     event = lifecycle_events._payload("completed", "failed-result", row["id"], {})
     assert event[0] == "session.error"
