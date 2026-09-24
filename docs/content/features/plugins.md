@@ -26,6 +26,26 @@ Key concepts:
 - **Admin-only management:** Installing, uninstalling, and enabling/disabling plugins requires admin privileges
 - **Read-only hooks:** Plugin-contributed hooks are discoverable but not editable through the hooks UI
 
+## Official connector runtimes
+
+Official apps such as Webhook, Discord Bot and Gmail appear in the
+`shuffle-connectors` marketplace. Their source snapshots ship with AI Shuffle
+and its application updates; **no GitHub account or private-repository access
+is needed** to install them. The normal application access/licensing rules
+still apply. This does not change access to third-party git marketplaces.
+
+Installation checks each source against the shipped catalog's pinned SHA-256
+and a per-file size limit, then creates a separate Python environment. It needs
+access to PyPI for dependencies, even though it does not download connector
+source. These runtimes have the host's OS permissions; process isolation is
+not a security sandbox.
+
+Update AI Shuffle to receive a newer connector catalog, then update the runtime
+in Plugins. Pause dependent automations and disable connections first. Their
+IDs/settings are preserved. Missing, corrupt or oversized shipped files fail
+closed without replacing an existing runtime; repair/update AI Shuffle rather
+than signing into GitHub. A previous installed runtime can be rolled back.
+
 ## Plugin Capabilities
 
 A plugin can contribute any combination of:

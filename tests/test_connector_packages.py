@@ -9,9 +9,8 @@ from app.core.connectors.base import ConnectorStatus
 
 @pytest.fixture
 def local_package(monkeypatch):
-    sources = Path(__file__).parents[1] / "app" / "core" / "connectors"
-    monkeypatch.setattr(packages, "_download", lambda name: (sources / name).read_bytes().replace(b"\r\n", b"\n"))
-    # Offline unit tests; the live install check exercises actual pip/venv.
+    # Use the real bundled-source path. Only expensive runtime setup is stubbed;
+    # the clean-install acceptance check also exercises actual pip/venv.
     monkeypatch.setattr(packages, "_prepare_environment", lambda *_: None)
     monkeypatch.setattr(packages, "_validate_worker", lambda *_: None)
     return packages
@@ -35,11 +34,11 @@ def test_discord_bot_name_preserves_plugin_identity(local_package):
     assert packages.require_installed("discord") == installed.id
 
 
-def test_failed_download_is_not_published(local_package, monkeypatch):
-    monkeypatch.setattr(packages, "_download", lambda _: b"not trusted code")
+def test_bad_source_is_not_published(local_package, monkeypatch):
+    monkeypatch.setattr(packages, "_bundled_source", lambda _: b"not trusted code")
     with pytest.raises(ValueError, match="integrity"): packages.install("gmail")
     assert packages.record("gmail") is None
-    assert not list(packages.root().glob("download-*"))
+    assert not list(packages.root().glob("stage-*"))
 
 def test_tampering_fails_closed(local_package):
     packages.install("webhook")
@@ -138,62 +137,90 @@ def test_canonical_plugin_api_lists_installs_and_guards_accounts(local_package):
         assert client.post("/api/v1/plugins/webhook@shuffle-connectors/enable").status_code == 200
         assert client.delete("/api/v1/plugins/webhook@shuffle-connectors").status_code == 204
 
-@pytest.mark.parametrize("status", [200, 401, 403, 404])
-@pytest.mark.parametrize("tampered", [False, True])
-def test_remote_source_is_pinned_and_verified_before_install(monkeypatch, status, tampered):
+@pytest.fixture
+def buyer_without_github(monkeypatch, tmp_path):
     import httpx
-    sources = Path(__file__).parents[1] / "app/core/connectors"
-    data = b"tampered" if tampered else (sources / "webhook_connector.py").read_bytes()
-    requests, private = [], []
-
-    def handle(request):
-        requests.append(request)
-        return httpx.Response(status, content=data)
-
-    client = httpx.Client
-    monkeypatch.setattr(packages.httpx, "Client", lambda **kw: client(transport=httpx.MockTransport(handle), **kw))
-    monkeypatch.setattr(packages, "_download_private", lambda name: private.append(name) or data)
-    monkeypatch.setattr(packages, "_prepare_environment", lambda *_: None)
-    monkeypatch.setattr(packages, "_validate_worker", lambda *_: None)
-    if tampered:
-        with pytest.raises(ValueError, match="integrity"):
-            packages.install("webhook")
-        assert packages.record("webhook") is None
-    else:
-        packages.install("webhook")
-        assert packages.record("webhook")["revision"] == packages.CATALOG["revision"]
-    assert str(requests[0].url) == (
-        "https://raw.githubusercontent.com/HobbyCoders/ai-shuffle/"
-        f"{packages.CATALOG['revision']}/app/core/connectors/webhook_connector.py"
-    )
-    assert private == ([] if status == 200 else ["webhook_connector.py"])
-
-
-@pytest.mark.parametrize("status", [302, 500])
-def test_source_redirects_and_server_errors_do_not_fall_back(monkeypatch, status):
-    import httpx
-    client = httpx.Client
-    transport = httpx.MockTransport(lambda _: httpx.Response(status, headers={"Location": "https://other.invalid/source"}))
-    monkeypatch.setattr(packages.httpx, "Client", lambda **kw: client(transport=transport, **kw))
-    monkeypatch.setattr(packages, "_download_private", lambda _: pytest.fail("unexpected fallback"))
-    with pytest.raises(httpx.HTTPStatusError):
-        packages._download("webhook_connector.py")
-
-
-def test_private_source_uses_existing_gh_auth_without_reading_token(monkeypatch):
-    from app.core import auth
-    from types import SimpleNamespace
     import subprocess
-    calls = []
-    monkeypatch.setattr(auth, "find_gh_executable", lambda: "gh")
-    def run(args, **kwargs):
-        calls.append(args)
-        return SimpleNamespace(returncode=0, stdout=b"source")
-    monkeypatch.setattr(subprocess, "run", run)
-    assert packages._download_private("gmail.py") == b"source"
-    assert calls[0][1] == "api"
-    assert packages.CATALOG["revision"] in calls[0][4]
-    assert "token" not in calls[0]
+    from app.core.auth import auth_service
+
+    monkeypatch.setenv("HOME", str(tmp_path / "clean-home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "clean-home"))
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(httpx.Client, "send", lambda *_args, **_kwargs: pytest.fail("connector source must not use HTTP"))
+    monkeypatch.setattr(auth_service, "_github_env", lambda: pytest.fail("connector install must not access GitHub credentials"))
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: pytest.fail("source staging must not invoke gh"))
+
+
+def test_all_connectors_install_and_update_without_github(local_package, buyer_without_github, monkeypatch):
+    for kind in packages.CATALOG["packages"]:
+        packages.install(kind)
+        assert packages.record(kind)["revision"] == packages.CATALOG["revision"]
+    previous = {kind: packages.record(kind) for kind in packages.CATALOG["packages"]}
+    catalog = copy.deepcopy(packages.CATALOG)
+    catalog["release"] = "next-test-version"
+    monkeypatch.setattr(packages, "CATALOG", catalog)
+    for kind in catalog["packages"]:
+        packages.install(kind)
+        assert packages.record(kind)["release"] == catalog["release"]
+        assert packages.record(kind)["previous"]["release"] == previous[kind]["release"]
+        packages.rollback(kind)
+        assert packages.record(kind)["release"] == previous[kind]["release"]
+
+
+@pytest.mark.parametrize("updating", [False, True])
+@pytest.mark.parametrize("fault", ["digest", "oversized", "missing", "symlink", "crlf"])
+def test_damaged_bundle_fails_closed_without_replacing_runtime(local_package, buyer_without_github, monkeypatch, tmp_path, updating, fault):
+    import shutil
+    if updating:
+        packages.install("webhook")
+    previous = packages.record("webhook")
+    catalog = copy.deepcopy(packages.CATALOG)
+    catalog["release"] = "next-test-version"
+    monkeypatch.setattr(packages, "CATALOG", catalog)
+    bundled = tmp_path / "shipped-connectors"
+    shutil.copytree(packages._SOURCE_DIR, bundled)
+    monkeypatch.setattr(packages, "_SOURCE_DIR", bundled)
+    source = bundled / "webhook_connector.py"
+    expected = "integrity"
+    if fault == "digest":
+        source.write_bytes(b"tampered")
+    elif fault == "oversized":
+        source.write_bytes(b"x" * (packages._MAX_FILE_BYTES + 1))
+        expected = "size limit"
+    elif fault == "missing":
+        source.unlink()
+    elif fault == "symlink":
+        real = tmp_path / "other-source.py"
+        source.replace(real)
+        try:
+            source.symlink_to(real)
+        except OSError:
+            pytest.skip("symlinks unavailable on this host")
+    else:
+        source.write_bytes(source.read_bytes().replace(b"\n", b"\r\n"))
+    with pytest.raises(ValueError, match=expected):
+        packages.install("webhook")
+    assert packages.record("webhook") == previous
+    assert not list(packages.root().glob("stage-*"))
+    assert not (packages.root() / "webhook" / catalog["release"]).exists()
+    if previous:
+        assert packages.require_installed("webhook") == "webhook@shuffle-connectors"
+
+
+@pytest.mark.parametrize("name", ["../source.py", "/source.py", r"..\source.py", "", ".", ".."])
+def test_source_filenames_cannot_leave_bundle(name):
+    with pytest.raises(ValueError, match="filename"):
+        packages._bundled_source(name)
+
+
+def test_installed_sources_retain_size_limit(local_package):
+    packages.install("webhook")
+    source = packages.root() / "webhook" / packages.CATALOG["release"] / "webhook_connector.py"
+    source.write_bytes(b"x" * (packages._MAX_FILE_BYTES + 1))
+    with pytest.raises(ValueError, match="size limit"):
+        packages.require_installed("webhook")
+
 
 def test_worker_environment_does_not_inherit_other_credentials(monkeypatch):
     from app.core.connectors.package_proxy import worker_environment

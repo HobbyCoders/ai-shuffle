@@ -18,12 +18,12 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
-
 from app.core.plugin_models import _get_fluid_dir, AvailablePlugin, PluginInfo, PluginDetails
 
 MARKETPLACE = "shuffle-connectors"
-CATALOG = json.loads((Path(__file__).parent / "connectors" / "catalog.json").read_text())
+_SOURCE_DIR = Path(__file__).parent / "connectors"
+_MAX_FILE_BYTES = 2_000_000
+CATALOG = json.loads((_SOURCE_DIR / "catalog.json").read_text())
 _DISPLAY_NAMES = {"discord": "Discord Bot"}
 _LOCK = threading.RLock()
 
@@ -98,41 +98,31 @@ def _verify(path: Path, kind: str, spec: dict | None = None) -> None:
         if Path(filename).name != filename:
             raise ValueError("Invalid connector package filename")
         source = path / filename
-        if source.is_symlink() or not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest() != digest:
+        if hashlib.sha256(_read_package_file(source)).hexdigest() != digest:
             raise ValueError("Connector package integrity check failed. Stop its connections and restore or reinstall this version before restarting.")
 
 
-def _download(filename: str) -> bytes:
-    url = f"https://raw.githubusercontent.com/HobbyCoders/ai-shuffle/{CATALOG['revision']}/app/core/connectors/{filename}"
-    with httpx.Client(timeout=30, follow_redirects=False) as client:
-        with client.stream("GET", url) as response:
-            if response.status_code in (401, 403, 404):
-                return _download_private(filename)
-            response.raise_for_status()
-            data = bytearray()
-            for chunk in response.iter_bytes():
-                data.extend(chunk)
-                if len(data) > 2_000_000:
-                    raise ValueError("Connector package file exceeds size limit")
-    return bytes(data)
-
-
-def _download_private(filename: str) -> bytes:
-    """Use the existing GitHub sign-in without extracting or copying its token."""
-    import subprocess
-    from app.core.auth import auth_service, find_gh_executable
-    executable = find_gh_executable()
-    if not executable:
-        raise ValueError("This connector source is private. Sign in to GitHub in Settings with repository access, then retry.")
-    result = subprocess.run([executable, "api", "--hostname", "github.com",
-                             f"repos/HobbyCoders/ai-shuffle/contents/app/core/connectors/{filename}?ref={CATALOG['revision']}",
-                             "-H", "Accept: application/vnd.github.raw+json"],
-                            capture_output=True, timeout=40, env=auth_service._github_env())
-    if result.returncode:
-        raise ValueError("This connector source is private. Sign in to GitHub in Settings with repository access, then retry.")
-    if len(result.stdout) > 2_000_000:
+def _read_package_file(source: Path) -> bytes:
+    """Bound reads of both shipped sources and installed snapshots."""
+    if source.is_symlink() or not source.is_file():
+        raise ValueError("Connector package integrity check failed: missing or linked source file. Repair this AI Shuffle installation, then retry.")
+    with source.open("rb") as stream:
+        data = stream.read(_MAX_FILE_BYTES + 1)
+    if len(data) > _MAX_FILE_BYTES:
         raise ValueError("Connector package file exceeds size limit")
-    return result.stdout
+    return data
+
+
+def _bundled_source(filename: str) -> bytes:
+    """Use the snapshot already carried by the buyer's app/update artifact.
+
+    The catalog ships with the app, so discovering a newer connector version
+    already requires an app update. Never ask buyers for private-repository
+    access or fall back to a different source when the bundle is damaged.
+    """
+    if Path(filename).name != filename or "\\" in filename or filename in ("", ".", ".."):
+        raise ValueError("Invalid connector package filename")
+    return _read_package_file(_SOURCE_DIR / filename)
 
 
 def install(kind: str, scope: str = "user") -> PluginInfo:
@@ -146,12 +136,13 @@ def install(kind: str, scope: str = "user") -> PluginInfo:
             return info(kind)
         if existing:
             _require_stopped(kind)
-    # Download before taking the publication lock. No partially downloaded
-    # runtime can become visible, and a failed update leaves the old one intact.
-    with tempfile.TemporaryDirectory(prefix="download-", dir=root()) as scratch:
+    # Stage verified bundled sources before taking the publication lock. The
+    # previous runtime survives missing/corrupt sources or dependency failures.
+    with tempfile.TemporaryDirectory(prefix="stage-", dir=root()) as scratch:
         staged = Path(scratch)
         for filename in CATALOG["packages"][kind]["files"]:
-            (staged / filename).write_bytes(_download(filename))
+            data = _bundled_source(filename)
+            (staged / filename).write_bytes(data)
         _verify(staged, kind)
         try:
             _prepare_environment(staged, kind)
@@ -232,7 +223,7 @@ def available() -> list[AvailablePlugin]:
 
 
 def details(kind: str) -> PluginDetails:
-    return PluginDetails(**asdict(info(kind)), readme="First-party connector code, downloaded from a pinned AI Shuffle revision and SHA-256 verified. Runs in a separate process and dependency environment, with the host's OS permissions. Existing account IDs and automation bindings are preserved. Remove dependent connections before disabling or uninstalling. To update or roll back, pause automations and disable connections; their IDs and settings are retained.")
+    return PluginDetails(**asdict(info(kind)), readme="First-party connector code shipped with this AI Shuffle version and SHA-256 verified against its pinned catalog. No GitHub account or repository access is required. Updating AI Shuffle provides newer connector releases; Python dependencies are installed from PyPI. Runs in a separate process and dependency environment, with the host's OS permissions. Existing account IDs and automation bindings are preserved. Remove dependent connections before disabling or uninstalling. To update or roll back, pause automations and disable connections; their IDs and settings are retained.")
 
 
 def _prepare_environment(path: Path, kind: str) -> None:

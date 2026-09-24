@@ -108,3 +108,39 @@ def test_archive_refuses_a_revision_without_the_native_lock(repo, tmp_path):
     git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "drop native lock")
     with pytest.raises(ValueError, match="requirements-native.lock"):
         source_archive.build(git(repo, "rev-parse", "HEAD"), tmp_path / "a.zip", repo)
+
+def test_update_archive_supplies_every_verified_connector_without_repo_access(repo, tmp_path, monkeypatch):
+    """Exercise the release archive producer, not a hand-seeded consumer bundle."""
+    import json
+    import httpx
+    from app.core import connector_packages as packages
+
+    sources = packages._SOURCE_DIR
+    files = {name for spec in packages.CATALOG["packages"].values() for name in spec["files"]}
+    bundled = repo / "app/core/connectors"
+    bundled.mkdir(parents=True)
+    for name in files | {"catalog.json"}:
+        (bundled / name).write_bytes((sources / name).read_bytes())
+    git(repo, "add", "app/core/connectors")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "ship connector snapshots")
+    revision = git(repo, "rev-parse", "HEAD")
+    archive = tmp_path / "application-update.zip"
+    source_archive.build(revision, archive, repo)
+    unpacked = tmp_path / "buyer-install"
+    with zipfile.ZipFile(archive) as zipped:
+        zipped.extractall(unpacked)
+    shipped = unpacked / f"ai-shuffle-{revision}" / "app/core/connectors"
+    catalog = json.loads((shipped / "catalog.json").read_text())
+    monkeypatch.setattr(packages, "CATALOG", catalog)
+    monkeypatch.setattr(packages, "_SOURCE_DIR", shipped)
+    monkeypatch.setattr(packages, "_prepare_environment", lambda *_: None)
+    monkeypatch.setattr(packages, "_validate_worker", lambda *_: None)
+    monkeypatch.setattr(packages, "root", lambda: tmp_path / "buyer-runtimes")
+    monkeypatch.setattr(httpx.Client, "send", lambda *_a, **_k: pytest.fail("no source download allowed"))
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: pytest.fail("no GitHub CLI allowed"))
+    for variable in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        monkeypatch.delenv(variable, raising=False)
+    for kind in catalog["packages"]:
+        assert packages.install(kind).connector_type == kind
+        assert packages.require_installed(kind) == packages.package_id(kind)
+        assert packages.record(kind)["revision"] == catalog["revision"]

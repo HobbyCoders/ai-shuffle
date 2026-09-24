@@ -3,3 +3,5 @@
 # LF on checkout regardless of the user's core.autocrlf setting (Windows).
 *.sh text eol=lf
 entrypoint.sh text eol=lf
+# Connector catalog digests cover exact bytes, including in Windows bundles.
+app/core/connectors/*.py text eol=lf
