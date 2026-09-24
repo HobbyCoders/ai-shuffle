@@ -56,6 +56,8 @@ def enroll(client):
     result = client.post('/api/v1/mobile/hub/enroll', json={'ticket': 'one-use-ticket',
         'device_info': DeviceInfo(device_id=PHONE, device_name='Phone', platform='android', capabilities={}).model_dump()})
     assert result.status_code == 200, result.text
+    device = database.get_mobile_device_by_api_key_hash(hash_api_key(result.json()['api_key']))
+    store.confirm_device(store.ownership(device['device_id']), True)
     return result.json()['api_key']
 
 
@@ -180,6 +182,7 @@ def test_same_account_phone_coexists_with_legacy_unraid_authorization(client, mo
     identity = {'device_id': PHONE, 'server_id': FIRST, 'account_id': ACCOUNT, 'device_name': 'Phone'}
     store.enroll(identity, DeviceInfo(device_id=PHONE, device_name='Phone', platform='android', capabilities={}),
                  hash_api_key('aim_legacy'), datetime.now(timezone.utc) + timedelta(days=1), list(pairing.DEFAULT_MOBILE_SCOPES))
+    store.confirm_device(store.ownership(PHONE), True)
     monkeypatch.setattr(settings, 'instance_id', 'second')
     bind(SECOND)
     key = enroll(client)

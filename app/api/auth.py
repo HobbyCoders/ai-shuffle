@@ -181,6 +181,9 @@ def require_auth(request: Request) -> str:
             request.state.auth_token = f"api_key:{api_user['id']}"
             return f"api_key:{api_user['id']}"
 
+    if token or api_key:
+        raise HTTPException(401, 'Not authenticated')
+
     if owner_auth.local_access(request):
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):
             owner_auth.same_origin(request)
@@ -237,7 +240,8 @@ def require_admin(request: Request) -> str:
                 owner_auth.same_origin(request)
             request.state.is_admin = True
             request.state.api_user = None
-            return token
+            return candidate
+        raise HTTPException(403, 'Owner access required')
 
     if owner_auth.local_access(request):
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):

@@ -38,7 +38,8 @@ internal class WorkerRepairSnapshot(context: Context, val server: Server) {
     fun check() { if (!current()) throw WorkerRepairFailure("The account or worker changed. Open this worker again.") }
     fun save(key: RepairedWorkerKey) {
         check()
-        serverStore.update(server.copy(apiKey = key.value))
+        if (serverStore.replaceKey(server, key.value) == null)
+            throw WorkerRepairFailure("The worker changed or its key could not be saved. Retry reconnecting this worker.")
     }
 }
 

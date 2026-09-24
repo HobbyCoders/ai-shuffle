@@ -36,6 +36,18 @@ def create_schema(cursor):
         account_id TEXT NOT NULL, hub_device_id TEXT NOT NULL,
         server_id TEXT NOT NULL, UNIQUE(server_id, hub_device_id)
     )""")
+    # Never inferred from a hub verdict or grandfathered during an upgrade.
+    cursor.execute("""CREATE TABLE IF NOT EXISTS mobile_worker_confirmations (
+        server_id TEXT NOT NULL, device_id TEXT NOT NULL,
+        paired_client_id TEXT NOT NULL, decision TEXT NOT NULL,
+        mobile_record_id TEXT NOT NULL, decided_at TEXT NOT NULL,
+        PRIMARY KEY(server_id, device_id, paired_client_id)
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS mobile_key_renewals (
+        device_id TEXT PRIMARY KEY, mobile_record_id TEXT NOT NULL,
+        previous_hash TEXT NOT NULL UNIQUE, current_hash TEXT NOT NULL,
+        encrypted_key TEXT NOT NULL, previous_expires_at TEXT NOT NULL
+    )""")
 
 
 def secret_key():
@@ -182,3 +194,72 @@ def enroll(identity, info, key_hash, expires_at, scopes, *, session_token_hash=N
                 session_expires_at=%s WHERE id=%s''',
                 (session_token_hash, expires_at.isoformat(), client_id))
     return device_id
+
+
+def confirmation(owner):
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT c.decision, c.mobile_record_id, d.id AS current_record_id
+            FROM mobile_worker_confirmations c LEFT JOIN mobile_devices d ON d.device_id=c.device_id
+            WHERE c.server_id=%s AND c.device_id=%s AND c.paired_client_id=%s""",
+            (owner['server_id'], owner['device_id'], owner['paired_client_id']))
+        row = c.fetchone()
+        if row and (row['decision'] == 'denied' or row['mobile_record_id'] == row['current_record_id']):
+            return row['decision']
+        return 'pending'
+
+
+def confirm_device(owner, approved, *, mobile_record_id=None):
+    """Serialize with revocation/repair; denial is a durable tombstone.
+
+    A retry cannot resurrect a denied device. A new identity must be enrolled
+    and confirmed. Repairing a credential never carries approval to the new key.
+    """
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute('SELECT * FROM paired_clients WHERE id=%s FOR UPDATE', (owner['paired_client_id'],))
+        client = c.fetchone()
+        c.execute('SELECT * FROM mobile_devices WHERE device_id=%s FOR UPDATE', (owner['device_id'],))
+        device = c.fetchone()
+        if (not client or not device or client['revoked_at'] or device['revoked_at']
+                or device['paired_client_id'] != owner['paired_client_id']
+                or client['device_id'] != owner['device_id']
+                or (mobile_record_id is not None and device['id'] != mobile_record_id)):
+            raise ValueError('Device authorization changed')
+        if approved:
+            from app.core.device_keys import key_expiry
+            if key_expiry(dict(device)) <= datetime.now(timezone.utc):
+                raise ValueError('Device credential expired; pair this device again')
+        decision = 'approved' if approved else 'denied'
+        c.execute("""INSERT INTO mobile_worker_confirmations
+            (server_id, device_id, paired_client_id, decision, mobile_record_id, decided_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT(server_id, device_id, paired_client_id) DO UPDATE
+            SET decision=excluded.decision, mobile_record_id=excluded.mobile_record_id,
+                decided_at=excluded.decided_at
+            WHERE mobile_worker_confirmations.decision != 'denied'
+            RETURNING decision""", (owner['server_id'], owner['device_id'], owner['paired_client_id'],
+                                     decision, device['id'], datetime.now(timezone.utc).isoformat()))
+        row = c.fetchone()
+        if not row and approved:
+            raise ValueError('Device was denied; enroll a new identity')
+    return decision
+
+
+def list_confirmations():
+    binding = get_binding()
+    if not binding or not binding['active']:
+        return []
+    result = []
+    with get_db() as conn:
+        c = conn.cursor()
+        for table in ('mobile_worker_authorizations', 'mobile_hub_authorizations'):
+            c.execute(f"""SELECT a.*, p.device_name, p.platform, p.revoked_at,
+                d.id AS mobile_record_id, d.api_key_expires_at FROM {table} a
+                JOIN paired_clients p ON p.id=a.paired_client_id
+                JOIN mobile_devices d ON d.device_id=a.device_id
+                WHERE a.server_id=%s""", (binding['server_id'],))
+            result.extend(dict(row) for row in c.fetchall())
+    for item in result:
+        item['confirmation'] = confirmation(item)
+    return result

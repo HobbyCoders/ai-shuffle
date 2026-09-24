@@ -117,8 +117,8 @@ class TestExpiryConstants:
     """Test expiry constant values."""
 
     def test_api_key_expiry_days(self):
-        """API key expiry should be 365 days."""
-        assert MOBILE_API_KEY_EXPIRY_DAYS == 365
+        """New API keys expire after 90 days; legacy rows retain their deadline."""
+        assert MOBILE_API_KEY_EXPIRY_DAYS == 90
 
     def test_pending_action_expiry_minutes(self):
         """Pending action expiry should be 5 minutes."""

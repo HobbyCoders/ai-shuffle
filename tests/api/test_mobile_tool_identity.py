@@ -39,6 +39,7 @@ def world(monkeypatch):
     monkeypatch.setattr(identity.pairing, 'get_paired_client_by_session_hash', client_by_hash)
     monkeypatch.setattr(identity.pairing, 'get_paired_client', clients.get)
     monkeypatch.setattr(identity.mobile_hub, 'ownership', ownership)
+    monkeypatch.setattr(identity.mobile_hub, 'confirmation', lambda owner: 'approved')
     monkeypatch.setattr(identity.account_hub, 'require_active', active)
     monkeypatch.setattr(identity.account_hub, 'check_paired_client', lambda c: active(ownership(paired_client_id=c['id'])))
     monkeypatch.setattr(identity.mobile, 'get_mobile_devices', lambda: list(devices.values()))

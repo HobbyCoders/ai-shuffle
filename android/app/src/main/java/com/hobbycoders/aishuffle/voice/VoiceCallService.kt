@@ -165,8 +165,7 @@ class VoiceCallService : Service() {
 
     private fun authorized(srv: Server): Boolean = runCatching {
         val current = ServerStore.get(this).getById(srv.id) ?: return@runCatching false
-        if (current.baseUrl != srv.baseUrl || current.apiKey != srv.apiKey || current.deviceId != srv.deviceId ||
-            current.accountId != srv.accountId || current.hubUrl != srv.hubUrl || current.hubServerId != srv.hubServerId) return@runCatching false
+        if (!com.hobbycoders.aishuffle.net.DeviceKeyRenewal.sameAuthorization(srv, current)) return@runCatching false
         if (current.apiKey.isBlank()) return@runCatching false
         com.hobbycoders.aishuffle.account.PairingInput.origin(current.baseUrl)
         if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return@runCatching false

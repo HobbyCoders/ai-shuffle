@@ -44,8 +44,9 @@ router.include_router(hub_router)
 # Mobile API key prefix
 MOBILE_API_KEY_PREFIX = "aim_"
 
-# Default expiry for mobile API keys (365 days)
-MOBILE_API_KEY_EXPIRY_DAYS = 365
+from app.core.device_keys import KEY_LIFETIME_DAYS, key_expiry
+
+MOBILE_API_KEY_EXPIRY_DAYS = KEY_LIFETIME_DAYS
 
 # Default expiry for pending actions (5 minutes)
 PENDING_ACTION_EXPIRY_MINUTES = 5
@@ -100,24 +101,17 @@ def get_device_from_api_key(request: Request) -> dict:
             detail="Invalid mobile API key"
         )
 
+    return validate_mobile_device(device)
+
+
+def validate_mobile_device(device: dict) -> dict:
     if device.get("revoked_at"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Mobile device credential has been revoked",
         )
 
-    expires_at = device.get("api_key_expires_at")
-    if expires_at is None:
-        # Legacy rows predate stored expiry. Honor their original documented
-        # one-year lifetime instead of silently granting permanent access.
-        expires_at = device.get("created_at")
-        if expires_at is not None:
-            if isinstance(expires_at, str):
-                expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-            expires_at = expires_at + timedelta(days=MOBILE_API_KEY_EXPIRY_DAYS)
-    elif isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    if expires_at is None or expires_at <= datetime.now(timezone.utc):
+    if key_expiry(device) <= datetime.now(timezone.utc):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Mobile device credential has expired; pair this device again",
@@ -144,6 +138,33 @@ def get_device_with_scope(request: Request, required_scope: str) -> dict:
             detail=f"This device is missing the {required_scope} capability",
         )
     return device
+
+
+@router.post('/key/renew')
+def renew_device_key(request: Request):
+    from app.db.mobile import mobile_key_renewal_device, renew_mobile_key
+    key = get_api_key(request)
+    if not key or not key.startswith(MOBILE_API_KEY_PREFIX):
+        raise HTTPException(401, 'Valid mobile API key required')
+    key_hash = hash_api_key(key)
+    device = db.get_mobile_device_by_api_key_hash(key_hash) or mobile_key_renewal_device(key_hash)
+    if device is None:
+        raise HTTPException(401, 'Invalid or expired mobile API key; pair this device again')
+    validate_mobile_device(device)
+    client = db.ensure_paired_client_for_mobile(device)
+    if not client:
+        raise HTTPException(401, 'Device credential changed; pair this device again')
+    device['paired_client_id'] = client['id']
+    try:
+        replacement, expiry = renew_mobile_key(device, key_hash, generate_mobile_api_key())
+    except ValueError as exc:
+        raise HTTPException(401, str(exc)) from None
+    except RuntimeError:
+        raise HTTPException(503, 'Device key renewal unavailable; the existing key is unchanged') from None
+    from fastapi.responses import JSONResponse
+    return JSONResponse({'api_key': replacement or key, 'device_id': public_device_id(device),
+                         'expires_at': expiry.isoformat(), 'rotated': replacement is not None},
+                        headers={'Cache-Control': 'no-store'})
 
 
 @router.post("/register", response_model=MobileDeviceRegisterResponse)
@@ -566,7 +587,8 @@ async def create_web_session(
     if client is None:
         raise HTTPException(status_code=401, detail="Mobile device credential changed; pair this device again")
     token = pairing.generate_controller_session()
-    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days)
+    expires_at = min(datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days),
+                     key_expiry(device))
     from app.db.pairing import WebSessionReservationConflict
     try:
         stored = await run_sync(
@@ -591,7 +613,7 @@ async def create_web_session(
             httponly=True,
             secure=settings.cookie_secure,
             samesite="lax",
-            max_age=settings.session_expire_days * 24 * 60 * 60,
+            max_age=max(0, int((expires_at - datetime.now(timezone.utc)).total_seconds())),
         )
 
     return {

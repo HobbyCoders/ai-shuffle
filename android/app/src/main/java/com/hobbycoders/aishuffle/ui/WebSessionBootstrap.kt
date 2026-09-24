@@ -31,11 +31,8 @@ internal class ChatSessionOwner(context: Context, private val server: Server) {
 
     companion object {
         // A name or push-endpoint refresh does not change who may use this chat.
-        internal fun sameAuthorization(expected: Server, saved: Server?): Boolean = saved != null &&
-            saved.id == expected.id && saved.baseUrl == expected.baseUrl && saved.apiKey == expected.apiKey &&
-            saved.deviceId == expected.deviceId && saved.accountId == expected.accountId && saved.hubUrl == expected.hubUrl &&
-            saved.hubServerId == expected.hubServerId && saved.cfAccessClientId == expected.cfAccessClientId &&
-            saved.cfAccessClientSecret == expected.cfAccessClientSecret
+        internal fun sameAuthorization(expected: Server, saved: Server?): Boolean =
+            com.hobbycoders.aishuffle.net.DeviceKeyRenewal.sameAuthorization(expected, saved)
     }
 }
 
