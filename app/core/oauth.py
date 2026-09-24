@@ -345,6 +345,10 @@ class DirectOAuth:
             if os.name != 'nt':  # Not Windows
                 os.chmod(credentials_file, 0o600)
 
+            # Login, refresh and account switches replace the token on disk.
+            # Drop the previous validity result before a hook or status request
+            # can read it, including a cached False from before the login.
+            self.invalidate_credentials_cache()
             logger.debug(f"Wrote credentials to {credentials_file}")
 
             # Fire the optional post-write hook (multi-account sync-back). This

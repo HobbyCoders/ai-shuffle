@@ -473,6 +473,29 @@ class TestWriteCredentials:
         assert data["claudeAiOauth"]["expiresAt"] == 1234567890000
         assert data["claudeAiOauth"]["scopes"] == ["user:inference"]
 
+    @pytest.mark.parametrize("previous_valid", [False, True])
+    def test_write_invalidates_cache_before_hook(self, temp_dir, monkeypatch, previous_valid):
+        """Account writes must invalidate cached successes as well as failures."""
+        monkeypatch.setattr(time, "time", lambda: 1_800_000_000)
+        oauth = DirectOAuth(config_dir=temp_dir)
+
+        def credential(valid):
+            return {
+                "accessToken": "access",
+                "expiresAt": int((time.time() + (3600 if valid else -3600)) * 1000),
+            }
+
+        assert oauth.write_credentials_dict(credential(previous_valid))
+        assert oauth.has_valid_credentials() is previous_valid
+        observed = []
+        monkeypatch.setattr(
+            "app.core.oauth._post_write_hook",
+            lambda: observed.append(oauth.has_valid_credentials()),
+        )
+        assert oauth.write_credentials_dict(credential(not previous_valid))
+        assert observed == [not previous_valid]
+        assert oauth.has_valid_credentials() is not previous_valid
+
     def test_creates_config_directory(self, temp_dir):
         """Should create config directory if it doesn't exist."""
         config_dir = temp_dir / "new_dir" / ".claude"
@@ -607,9 +630,24 @@ class TestCompleteOAuthFlow:
     """Test complete OAuth flow."""
 
     @pytest.mark.asyncio
-    async def test_successful_flow(self, temp_dir):
-        """Should complete full OAuth flow successfully."""
+    @pytest.mark.parametrize("previous_credentials", ["missing", "expired"])
+    async def test_successful_flow(self, temp_dir, monkeypatch, previous_credentials):
+        """A successful login must replace the cached pre-login auth status."""
+        import app.core.auth as auth_mod
+
+        monkeypatch.setattr(time, "time", lambda: 1_800_000_000)
         oauth = DirectOAuth(config_dir=temp_dir)
+        monkeypatch.setattr(auth_mod, "direct_oauth", oauth)
+        svc = auth_mod.AuthService()
+        svc.config_dir = temp_dir
+        if previous_credentials == "expired":
+            assert oauth.write_credentials_dict({
+                "accessToken": "old_access",
+                "refreshToken": "old_refresh",
+                "expiresAt": int((time.time() - 3600) * 1000),
+            })
+        assert svc.get_claude_token_status()["token_valid"] is False
+
         flow = oauth.start_oauth_flow()
         state = flow["state"]
 
@@ -632,6 +670,10 @@ class TestCompleteOAuthFlow:
 
         assert result["success"] is True
         assert result["authenticated"] is True
+        status = svc.get_claude_token_status()
+        assert status["token_valid"] is True
+        assert status["expired"] is False
+        assert status["has_refresh_token"] is True
 
     @pytest.mark.asyncio
     async def test_flow_fails_on_token_exchange_error(self, temp_dir):
@@ -996,14 +1038,16 @@ class TestRefreshTokens:
         assert "Refresh error" in error
 
     @pytest.mark.asyncio
-    async def test_refresh_writes_new_credentials(self, temp_dir):
-        """Should write new credentials after refresh."""
+    async def test_refresh_writes_new_credentials(self, temp_dir, monkeypatch):
+        """Refresh must replace a cached expired status immediately."""
+        monkeypatch.setattr(time, "time", lambda: 1_800_000_000)
         temp_dir.mkdir(exist_ok=True)
         creds_file = temp_dir / ".credentials.json"
         creds_file.write_text(json.dumps({
             "claudeAiOauth": {
                 "accessToken": "old_access",
                 "refreshToken": "valid_refresh",
+                "expiresAt": int((time.time() - 3600) * 1000),
             }
         }))
 
@@ -1024,8 +1068,12 @@ class TestRefreshTokens:
             mock_instance.__aexit__ = AsyncMock(return_value=None)
             mock_client.return_value = mock_instance
 
-            await oauth.refresh_tokens()
+            assert oauth.has_valid_credentials() is False
+            tokens, error = await oauth.refresh_tokens()
 
+        assert error is None
+        assert tokens is not None
+        assert oauth.has_valid_credentials() is True
         # Verify credentials were updated
         data = json.loads(creds_file.read_text())
         assert data["claudeAiOauth"]["accessToken"] == "new_access"
