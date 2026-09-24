@@ -44,7 +44,7 @@ it('installs using the existing package id, not a connection id', async () => {
  expect(calls.install).toHaveBeenCalledWith('review@local');
 });
 it('explains bundled source and PyPI dependencies without requiring GitHub access', async () => {
- calls.connectors.mockResolvedValueOnce([{id:'g1',name:'Mail',connector_type:'gmail',enabled:false,status:'stopped',config:{}}]);
+ calls.getConnections.mockResolvedValueOnce([{id:'g1',name:'Mail',connector_type:'gmail',enabled:false,status:'stopped',config:{}}]);
  const page = render(PluginsHub);
  const manage = await page.findAllByRole('button', {name:'Manage Gmail'});
  await fireEvent.click(manage[0]);
