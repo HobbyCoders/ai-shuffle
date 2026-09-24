@@ -55,6 +55,10 @@ def _agent_credentials_ready_by_default(request, monkeypatch):
     credential gate would refuse every turn. Tests of the gate itself opt out
     with ``@pytest.mark.real_agent_gate``.
     """
+    # Each test starts from a fresh database, so no memoized setting (the
+    # Claude Code mode, the loop guard's limits) may carry over from the last.
+    from app.db.settings import invalidate_system_setting_memo
+    invalidate_system_setting_memo()
     if request.node.get_closest_marker("real_agent_gate"):
         yield
         return

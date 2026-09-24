@@ -24,6 +24,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/automations", tags=["Automations"])
 
 
+async def _with_notices(automation):
+    """Attach "use an API key for scheduled runs" when this automation would
+    run on the user's Claude subscription (see app.core.loop_guard)."""
+    if not isinstance(automation, dict):
+        return automation
+
+    def _notice():
+        from app.core import loop_guard
+        from app.core.profiles import get_profile
+
+        profile_id = automation.get("profile_id")
+        return loop_guard.scheduled_run_guidance(get_profile(profile_id) if profile_id else None)
+
+    try:
+        notice = await run_sync(_notice)
+    except Exception:  # noqa: BLE001 — advice never fails a save
+        logger.warning("Could not work out the scheduled-run notice", exc_info=True)
+        notice = None
+    return {**automation, "notices": [notice] if notice else []}
+
+
 # ---- CRUD ----
 
 @router.get("", response_model=List[Automation])
@@ -54,7 +75,7 @@ async def create_automation_endpoint(
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one trigger is required")
     try:
-        return await create_automation(
+        created = await create_automation(
             name=data.name,
             trigger_type=primary_type,
             trigger_config=primary_config,
@@ -76,6 +97,7 @@ async def create_automation_endpoint(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return await _with_notices(created)
 
 
 @router.get("/trigger-types")
@@ -178,7 +200,7 @@ async def update_automation_endpoint(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
-    return result
+    return await _with_notices(result)
 
 
 @router.delete("/{automation_id}", status_code=status.HTTP_204_NO_CONTENT)

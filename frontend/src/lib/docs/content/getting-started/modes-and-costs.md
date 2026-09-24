@@ -54,15 +54,13 @@ If you run much of this kind of work, API key mode is the safer choice. You can 
 
 ## The loop guard
 
-<!-- verify against wizard v2 -->
-
 In subscription mode, AI Shuffle protects your plan from runaway automation:
 
-- Turns that start without you (automations, wake-ups, connectors, background agents) count against an **unattended budget**. When a source reaches it, its next turn waits for you to confirm it in the app instead of starting on its own.
-- Background agents get a default **time limit**, so one that loops cannot run all night.
-- Creating an automation or a wake-up in subscription mode shows a reminder to use an API key for it.
+- Turns that start without you (automations, wake-ups, connectors, background agents) count against an **unattended budget**: by default 12 per session and 60 per worker in any rolling hour. Past either budget, the next such turn does not start on its own. The session shows why, and the turn waits under **Settings → Providers → Loop guard** until you choose **Confirm** (it runs now) or **Dismiss**.
+- Background agents on Claude get a default **time limit** of 60 minutes, so one that loops cannot run all night.
+- Creating an automation or arming a wake-up in subscription mode shows a reminder to use an API key for scheduled runs.
 
-The loop guard does not apply in API key mode, where your Console spend limit is the control. It never stops a turn you started yourself.
+You can change the budgets and the time limit, or turn the guard off, under **Settings → Providers → Loop guard**. The counts start again when the worker restarts. The loop guard does not apply in API key mode, where your Console spend limit is the control, or to agents on other providers. It never stops a turn you started yourself.
 
 ## Other providers
 

@@ -81,9 +81,9 @@ The message in the app says which of these it is.
 
 **Your plan's usage limit was reached** (subscription mode): agents pause until the limit resets. Wait, or switch to API key mode for heavy or unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
 
-<!-- verify against wizard v2 -->
+**An automation, wake-up, connector or background agent waits for confirmation** (subscription mode): the loop guard held it because unattended turns reached their hourly budget. Confirm or dismiss it under **Settings → Providers → Loop guard**, raise the budget there, or switch to API key mode for unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
 
-**An automation waits for confirmation** (subscription mode): the loop guard paused it because unattended turns reached their budget. Confirm it in the app, or switch to API key mode for unattended work.
+**A background agent stopped after an hour** (subscription mode): the loop guard's default time limit ended it. Change the limit under **Settings → Providers → Loop guard**, or use API key mode for long unattended work.
 
 **The API key is refused:** the key was deleted or the Console account has no credit or reached its spend limit. Check the Anthropic Console, then paste a new key in Settings.
 

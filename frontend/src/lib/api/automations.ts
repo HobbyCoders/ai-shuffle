@@ -105,6 +105,8 @@ export interface Automation {
 	requires_approval: boolean;
 	created_at: string;
 	updated_at: string;
+	/** Advice from create/update, e.g. use an API key for scheduled runs. */
+	notices?: string[];
 }
 
 export interface AutomationRun {

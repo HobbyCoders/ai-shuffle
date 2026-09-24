@@ -443,6 +443,60 @@ async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(r
 
 
 # ============================================================================
+# Subscription loop guard
+# ============================================================================
+
+class LoopGuardUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    session_turns_per_hour: Optional[int] = None
+    install_turns_per_hour: Optional[int] = None
+    worker_max_minutes: Optional[int] = None
+
+
+@router.get("/loop-guard")
+async def get_loop_guard(token: str = Depends(require_auth)):
+    """The subscription loop guard: settings, defaults, whether it applies
+    (enabled and Claude Code in subscription mode), this hour's unattended
+    turn count, and the turns it holds for confirmation."""
+    from app.core import loop_guard
+
+    return await run_sync(loop_guard.status_payload)
+
+
+@router.put("/loop-guard")
+async def set_loop_guard(request: LoopGuardUpdate, token: str = Depends(require_admin)):
+    """Change the loop guard settings (admin only)."""
+    from app.core import loop_guard
+
+    try:
+        await run_sync(lambda: loop_guard.update_config(**request.model_dump()))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await run_sync(loop_guard.status_payload)
+
+
+@router.post("/loop-guard/held/{held_id}/confirm")
+async def confirm_loop_guard_turn(held_id: str, token: str = Depends(require_admin)):
+    """Run a held turn now, past the budget (admin only)."""
+    from app.core import loop_guard
+
+    turn_id = await loop_guard.confirm_held(held_id)
+    if turn_id is None:
+        raise HTTPException(status_code=404, detail="That held turn is gone")
+    return {"success": True, "turn_id": turn_id}
+
+
+@router.post("/loop-guard/held/{held_id}/dismiss")
+async def dismiss_loop_guard_turn(held_id: str, token: str = Depends(require_admin)):
+    """Drop a held turn without running it (admin only)."""
+    from app.core import loop_guard
+
+    if await run_sync(loop_guard.take_held, held_id) is None:
+        raise HTTPException(status_code=404, detail="That held turn is gone")
+    return {"success": True}
+
+
+# ============================================================================
 # AI Tools Configuration (for Profile Management)
 # ============================================================================
 
