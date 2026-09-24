@@ -209,9 +209,7 @@ The first start downloads the image and installs the Claude Code CLI with Anthro
 
 ## 6. First launch
 
-<!-- verify against wizard v2 -->
-
-Open the address you chose (<http://localhost:8000> on the host itself) and follow [First run](/docs/getting-started/first-run).
+Open the address you chose (<http://localhost:8000> on the host itself) and follow [First run](/docs/getting-started/first-run). The welcome screen and the owner password come first; the rest of the wizard follows once the password is set.
 
 To sign in to the Claude Code CLI from the host's terminal instead of the in-app one:
 

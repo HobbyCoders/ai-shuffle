@@ -215,10 +215,10 @@
 	</div>
 {:else if !mobileApp && currentPath !== '/pair' && initialized && !$auth.loading && !$auth.error && $auth.status?.authenticated === false}
 	<!-- Sign in with the owner password, create the first one, or a notice. -->
-	<OwnerAccessGate status={ownerAccess.status} authenticated={false} onDone={refreshAuth} onRetry={() => void refreshAuth()} />
+	<OwnerAccessGate status={ownerAccess.status} authenticated={false} firstRun={$auth.status?.onboarding_complete === false} onDone={refreshAuth} onRetry={() => void refreshAuth()} />
 {:else if ownerPasswordBlocking && initialized && !$auth.loading}
 	<!-- The blocking "set an owner password" step. -->
-	<OwnerAccessGate status={ownerAccess.status} authenticated={true} onDone={refreshAuth} onRetry={() => void refreshAuth()} />
+	<OwnerAccessGate status={ownerAccess.status} authenticated={true} firstRun={$auth.status?.onboarding_complete === false} onDone={refreshAuth} onRetry={() => void refreshAuth()} />
 {:else if (mobileApp && !initialized) || (!mobileApp && currentPath !== '/pair' && (!initialized || authDestination || (currentPath !== '/setup' && !$isAuthenticated)))}
 	<div class="min-h-screen flex items-center justify-center">
 		<div class="text-center">

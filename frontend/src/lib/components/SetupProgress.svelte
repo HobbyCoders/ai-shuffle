@@ -30,4 +30,13 @@
 	li[aria-current] { color: var(--foreground); font-weight: 600; }
 	li[aria-current] .number { background: var(--primary); color: var(--primary-foreground); }
 	li.complete .number { background: var(--success); color: var(--success-foreground); }
+	/* Eight steps do not fit a phone with every label: show the current one,
+	   keep the others for screen readers. */
+	@media (max-width: 520px) {
+		li:not([aria-current]) .label {
+			position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+			overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+		}
+		li[aria-current] .label { white-space: nowrap; overflow: visible; }
+	}
 </style>
