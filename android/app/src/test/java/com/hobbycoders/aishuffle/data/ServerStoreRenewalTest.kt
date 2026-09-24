@@ -26,6 +26,35 @@ class ServerStoreRenewalTest {
             it.newInstance(preferences)
         }
 
+    @Test fun pendingFeedbackUsesTheSamePhoneIdAsTheEnrollmentPayloadNotTheErrorBody() {
+        val ownId = "30000000-0000-4000-8000-000000000001"
+        val unrelatedId = "90000000-0000-4000-8000-000000000009"
+        val account = com.hobbycoders.aishuffle.account.AccountSession("https://hub.example", "fixture-token", "2099-01-01T00:00:00Z", ownId, "account", "Owner")
+        // These are the actual registry-record and enrollment-payload producers
+        // used together by AccountRepository.sync(), not an ID parsed from an error.
+        val server = com.hobbycoders.aishuffle.account.AccountWorkerCache.listed(emptyList(), account,
+            "worker-identity", "Untrusted display name", "https://worker.example")
+        val deviceInfo = com.hobbycoders.aishuffle.account.HubClient.device(account.deviceId)
+        assertEquals(deviceInfo.getString("device_id"), server.deviceId)
+        val body = org.json.JSONObject().put("detail", "Confirm this device on the worker before connecting")
+            .put("device_id", unrelatedId).put("device_name", "Injected label").toString()
+        val renewal = com.hobbycoders.aishuffle.net.ApiClient.parseKeyRenewal(server, 403, "application/json", body)
+            as com.hobbycoders.aishuffle.net.ApiResult.Failure
+        val reservation = com.hobbycoders.aishuffle.net.ApiClient.parseWebReservation(403, "application/json", body, deviceId = server.deviceId)
+            as com.hobbycoders.aishuffle.net.ApiResult.Failure
+        for (message in listOf(renewal.message, reservation.message)) {
+            assertTrue(message.contains("Phone device ID: $ownId"))
+            assertTrue(message.contains("matching name is not proof"))
+            assertFalse(message.contains(unrelatedId))
+            assertFalse(message.contains("Injected label"))
+            assertFalse(message.contains(server.name))
+            assertFalse(message.contains(account.token))
+        }
+        val rawError = org.json.JSONObject().put("detail", "Approve $unrelatedId instead").toString()
+        assertFalse(com.hobbycoders.aishuffle.net.ApiClient.errorMessage(403, rawError, ownId).contains(unrelatedId))
+        assertFalse(com.hobbycoders.aishuffle.net.ApiClient.errorMessage(403, body, "injected\nID").contains("injected"))
+    }
+
     @Before fun setup() {
         prefs = RuntimeEnvironment.getApplication().getSharedPreferences("renewal-test", Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
