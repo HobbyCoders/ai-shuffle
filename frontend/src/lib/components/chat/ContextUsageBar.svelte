@@ -78,7 +78,6 @@
 		claudeUsageSource,
 		type UsageBucket,
 		type ProviderUsageBucket,
-		type ProviderUsageErrorKind,
 		type UsageSourceInfo,
 		type UsageWindow,
 	} from '$lib/stores/rate-limit';
@@ -403,18 +402,6 @@
 		return null;
 	}
 
-	const ATTEMPT_OUTCOME: Record<ProviderUsageErrorKind, string> = {
-		billing_access_denied: 'access refused',
-		unsupported: 'not supported',
-		missing_credentials: 'no credential',
-		timeout: 'timed out',
-		unavailable: 'failed',
-	};
-
-	function formatObservedAt(ms: number): string {
-		return new Date(ms).toLocaleString();
-	}
-
 	function creditsSummary(
 		credits: Record<string, unknown> | null,
 		providerType: string | null = null
@@ -650,44 +637,13 @@
 	</button>
 {/snippet}
 
-<!-- Where a reading comes from (backend usage-source registry). A failed
-     attempt after the last success is shown separately so a stale figure is
-     never presented as current. -->
-{#snippet sourceDetails(
-	info: UsageSourceInfo | null | undefined,
-	fallbackSource: string | null | undefined,
-	fallbackScope: string | null | undefined,
-	successAt: number | null | undefined,
-	attemptAt: number | null | undefined,
-	errorKind: ProviderUsageErrorKind | null | undefined,
-	showDashboard: boolean = true
-)}
-	{@const label = info?.label ?? fallbackSource}
-	{@const scopeLabel = info?.scope_label ?? fallbackScope}
-	{#if label}
+<!-- Expanded usage rows keep only the provider dashboard comparison link. -->
+{#snippet sourceDetails(info: UsageSourceInfo | null | undefined)}
+	{#if info?.dashboard_url}
 		<div class="usage-source">
-			<div class="row-reset">Source: {label}</div>
-			{#if info}
-				<div class="row-reset source-support" class:unofficial={info.support === 'unofficial_subscription'}>
-					{info.support_label}
-				</div>
-			{/if}
-			{#if scopeLabel}<div class="row-reset">{scopeLabel}</div>{/if}
-			{#if info}<div class="row-reset">Reports: {info.measure_label}</div>{/if}
-			{#if successAt}<div class="row-reset">Last successful update: {formatObservedAt(successAt)}</div>{/if}
-			{#if attemptAt && (!successAt || attemptAt > successAt)}
-				<div class="row-reset">
-					Last attempt: {formatObservedAt(attemptAt)}{errorKind ? ` (${ATTEMPT_OUTCOME[errorKind] ?? 'failed'})` : ''}
-				</div>
-			{/if}
-			{#if info?.unavailable?.length}
-				<div class="row-reset">Not reported by this source: {info.unavailable.join(', ')}</div>
-			{/if}
-			{#if showDashboard && info?.dashboard_url}
-				<a class="provider-dashboard-link" href={info.dashboard_url} target="_blank" rel="noopener noreferrer"
-					>Compare on the provider dashboard</a
-				>
-			{/if}
+			<a class="provider-dashboard-link" href={info.dashboard_url} target="_blank" rel="noopener noreferrer"
+				>Compare on the provider dashboard</a
+			>
 		</div>
 	{/if}
 {/snippet}
@@ -880,18 +836,6 @@
 						target="_blank"
 						rel="noopener noreferrer">See all usage on claude.ai</a
 					>
-					<!-- Last attempt/error describe only this install's own reading. -->
-					{#if $claudeUsageSource.source}
-						{@render sourceDetails(
-							$claudeUsageSource.source,
-							null,
-							null,
-							resolvedBucket?.fetchedAt,
-							isSelf ? $claudeUsageSource.attemptedAt : null,
-							isSelf ? $claudeUsageSource.lastErrorKind : null,
-							false
-						)}
-					{/if}
 				{/if}
 			{/if}
 
@@ -962,7 +906,7 @@
 					{/if}
 				</div>
 				{#if pbOpen}
-					{@render sourceDetails(pb.sourceInfo, pb.source, pb.scope, pb.fetchedAt, pb.lastAttemptAt, pb.lastErrorKind)}
+					{@render sourceDetails(pb.sourceInfo)}
 					{#each pbWindows as w (w.type)}
 						{@const display = providerWindowPercent(w, now, pbShowsRemaining)}
 						{@const countdown = formatCountdown(w.resets_at, now)}

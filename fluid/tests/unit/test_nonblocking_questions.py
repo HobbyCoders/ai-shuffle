@@ -71,6 +71,47 @@ async def test_post_continue_finish_then_answer_wakes_once():
     await loop.aclose()
 
 
+async def test_batch_is_one_durable_request_and_one_answer_after_reopen(tmp_path):
+    questions = QUESTIONS + [
+        {"question": "Extras?", "multiSelect": True,
+         "options": [{"label": "Logs"}, {"label": "Metrics"}]},
+        {"question": "Notes?"},
+    ]
+    provider = ScriptedProvider([
+        _tool("ask-call", "AskUser", json.dumps({"questions": questions})), _text("waiting"),
+    ])
+    store = JsonlStore(tmp_path)
+    loop = make_loop(provider, store)
+    await loop.submit(UserTurn(content="start"))
+    await asyncio.wait_for(loop.wait_turn(), 5)
+    question, = await loop.pending_questions()
+    assert question.schema == {"questions": questions}
+    assert all(q["question"] in question.message for q in questions)
+    result = next(e for e in loop.bus.log(loop.session_id)
+                  if isinstance(e, ToolResult) and e.name == "AskUser")
+    assert json.loads(result.output)["request_ids"] == [question.request_id]
+    sid = loop.session_id
+    await loop.aclose()
+
+    resumed = ScriptedProvider([_text("received")])
+    reopened = make_loop(resumed, JsonlStore(tmp_path), sid)
+    try:
+        pending, = await reopened.pending_questions()
+        assert pending.schema == {"questions": questions}
+        await reopened.submit(RespondQuestion(
+            request_id=pending.request_id,
+            answer="Region: eu-west; Extras: Logs, Metrics; Notes: custom text",
+            user_answered=True,
+        ))
+        await asyncio.wait_for(reopened.wait_turn(), 5)
+        assert resumed.calls == 1
+        assert "Region: eu-west; Extras: Logs, Metrics; Notes: custom text" in resumed.requests[-1].messages[-1].text()
+        assert not await reopened.pending_questions()
+        assert not await reopened.pending_question_answers()
+    finally:
+        await reopened.aclose()
+
+
 async def test_midturn_delivery_uses_persisted_tool_result_not_an_extra_turn():
     entered, release = asyncio.Event(), asyncio.Event()
     provider = ScriptedProvider([ask(), _tool("work", "Work", "{}"), _text("done")])

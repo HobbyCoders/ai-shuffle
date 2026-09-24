@@ -22,12 +22,56 @@ describe('UserQuestion — nonmodal answer form', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
 		expect(onRespond).toHaveBeenCalledWith({ request_id: 'q-1', tool_use_id: 'tool-1', answers: { 'Which database should we use?': 'Postgres' }, skipped: [] });
 	});
-	it('keeps free text when selecting an option and gives it precedence', async () => {
-		const onRespond = vi.fn(); render(UserQuestion, { data: data(), onRespond });
+	it.each([false, true])('clears choices and highlighting when typing (multiSelect=%s)', async (multiSelect) => {
+		const onRespond = vi.fn(); const view = render(UserQuestion, { data: data([question({ multiSelect })]), onRespond });
+		const options = screen.getAllByRole(multiSelect ? 'checkbox' : 'radio') as HTMLInputElement[];
+		for (const option of options) await fireEvent.click(option);
+		expect(options.some(option => option.checked)).toBe(true);
 		await fireEvent.input(screen.getByLabelText('Or write your own answer'), { target: { value: '  Another database  ' } });
-		await fireEvent.click(screen.getByLabelText('SQLite', { exact: false }));
+		expect(options.every(option => !option.checked)).toBe(true);
+		expect(view.container.querySelectorAll('.choices label.selected')).toHaveLength(0);
+		expect(screen.getByText('Your written answer will be sent.')).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
 		expect(onRespond.mock.calls[0][0].answers).toEqual({ 'Which database should we use?': 'Another database' });
+	});
+	it.each([false, true])('switches back to choices without hidden custom text (multiSelect=%s)', async (multiSelect) => {
+		const onRespond = vi.fn(); render(UserQuestion, { data: data([question({ multiSelect })]), onRespond });
+		const textarea = screen.getByLabelText('Or write your own answer') as HTMLTextAreaElement;
+		await fireEvent.input(textarea, { target: { value: 'Another database' } });
+		await fireEvent.click(screen.getByLabelText('SQLite', { exact: false }));
+		expect(textarea.value).toBe('');
+		await fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+		expect(onRespond.mock.calls[0][0].answers).toEqual({ 'Which database should we use?': 'SQLite' });
+	});
+	it.each([false, true])('never resurrects selections when custom text is erased (multiSelect=%s)', async (multiSelect) => {
+		const onRespond = vi.fn(); render(UserQuestion, { data: data([question({ multiSelect })]), onRespond });
+		const options = screen.getAllByRole(multiSelect ? 'checkbox' : 'radio') as HTMLInputElement[];
+		for (const option of options) await fireEvent.click(option);
+		const textarea = screen.getByLabelText('Or write your own answer');
+		for (const value of [' ', 'Custom answer', '']) {
+			await fireEvent.input(textarea, { target: { value } });
+			expect(options.every(option => !option.checked)).toBe(true);
+			expect((screen.getByRole('button', { name: 'Send answer' }) as HTMLButtonElement).disabled).toBe(!value.trim());
+		}
+		await fireEvent.submit(screen.getByRole('form'));
+		expect(onRespond).not.toHaveBeenCalled();
+	});
+	it('clears only the edited question and retains the state across tabs and hydration', async () => {
+		const onRespond = vi.fn();
+		const props = data([question(), question({ question: 'Which cache?', header: 'Cache', multiSelect: true })]);
+		const view = render(UserQuestion, { data: props, onRespond });
+		await fireEvent.click(screen.getByLabelText('Postgres', { exact: false }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Cache' }));
+		await fireEvent.click(screen.getByLabelText('SQLite', { exact: false }));
+		await fireEvent.input(screen.getByLabelText('Or write your own answer'), { target: { value: 'Redis' } });
+		await view.rerender({ data: { ...props, questions: [...props.questions] }, onRespond });
+		await fireEvent.click(screen.getByRole('button', { name: /Database/ }));
+		expect((screen.getByLabelText('Postgres', { exact: false }) as HTMLInputElement).checked).toBe(true);
+		await fireEvent.click(screen.getByRole('button', { name: /Cache/ }));
+		expect((screen.getByLabelText('SQLite', { exact: false }) as HTMLInputElement).checked).toBe(false);
+		expect((screen.getByLabelText('Or write your own answer') as HTMLTextAreaElement).value).toBe('Redis');
+		await fireEvent.click(screen.getByRole('button', { name: 'Send answers' }));
+		expect(onRespond.mock.calls[0][0].answers).toEqual({ 'Which database should we use?': 'Postgres', 'Which cache?': 'Redis' });
 	});
 	it('retains a draft across request-object hydration', async () => {
 		const props = data(); const view = render(UserQuestion, { data: props });

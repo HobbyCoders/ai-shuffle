@@ -280,6 +280,10 @@ def test_ask_user_description_requires_a_blocking_decision_round_trip():
     text = describe()
     assert "reversible default" in text
     assert "call AskUser and wait for the answer before dependent work" in text
+    assert "one form and one submitted response" in text
+    assert '"options": [{"label":' in text
+    assert '"multiSelect": false' in text
+    assert "Use selectable options whenever there are concrete choices" in text
     assert "does not grant permission" in text
 
 

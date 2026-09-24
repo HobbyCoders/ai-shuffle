@@ -42,11 +42,18 @@
 		return written[index]?.trim() || (selections[index] ?? []).join(', ');
 	}
 	function select(index: number, label: string) {
+		// The most recent input is the answer; never show two competing sources.
+		written[index] = '';
 		skipped[index] = false;
 		const values = selections[index] ?? [];
 		selections[index] = questions[index].multiSelect
 			? values.includes(label) ? values.filter(value => value !== label) : [...values, label]
 			: [label];
+	}
+	function writeAnswer(index: number, value: string) {
+		written[index] = value;
+		selections[index] = [];
+		skipped[index] = false;
 	}
 	function toggleSkip() {
 		skipped[active] = !skipped[active];
@@ -99,7 +106,7 @@
 			<div class="written-answer">
 				<label for={`${id}-written`}>{current.options?.length ? 'Or write your own answer' : 'Your answer'}</label>
 				<textarea id={`${id}-written`} rows="1" value={written[active] ?? ''} {disabled}
-					oninput={(event) => { written[active] = event.currentTarget.value; skipped[active] = false; }}
+					oninput={(event) => writeAnswer(active, event.currentTarget.value)}
 					placeholder="Your answer…"></textarea>
 			</div>
 			<button class="submit-btn" type="submit" disabled={disabled || !canSubmit}>
@@ -107,7 +114,7 @@
 			</button>
 		</div>
 		<div class="question-footer">
-			<span>{written[active]?.trim() && current.options?.length ? 'Your written answer replaces the selection.' : questions.length > 1 ? 'Answer or skip each question before sending.' : 'You can keep using the conversation.'}</span>
+			<span>{written[active]?.trim() && current.options?.length ? 'Your written answer will be sent.' : questions.length > 1 ? 'Answer or skip each question before sending.' : 'You can keep using the conversation.'}</span>
 			<button type="button" class="skip" aria-pressed={Boolean(skipped[active])} onclick={toggleSkip} {disabled}>
 				<SkipForward size={12} />{skipped[active] ? 'Skipped — undo' : 'Skip this question'}
 			</button>

@@ -29,7 +29,13 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "automatically during work or in a new turn; never poll or wait.\n"
         "Usage notes:\n"
         f"- Ask 1–{MAX_QUESTIONS} questions per call. Batch independent "
-        "questions into ONE call instead of a chain of single-question calls.\n"
+        "questions into ONE call instead of a chain of single-question calls. "
+        "All questions in the call share one form and one submitted response.\n"
+        '- Each question is {"question": "...", "header": "Topic", '
+        '"options": [{"label": "Choice A", "description": "What it means"}, '
+        '{"label": "Choice B"}], "multiSelect": false}. '
+        "Use selectable options whenever there are concrete choices, rather "
+        "than requiring the user to type one.\n"
         "- Put each choice ONLY in the options array — never enumerate the "
         "options inside the question text. The UI renders options as "
         "selectable rows, so options written into the question are dead "

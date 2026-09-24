@@ -1043,7 +1043,12 @@ async def test_real_native_askuser_posts_continues_and_consumes_host_answer_once
         if tool:
             block = {"index": 0, "block_type": "tool_use", "tool_name": "AskUser", "tool_use_id": "real-ask"}
             delta = StreamChunk("tool_args_delta", {"index": 0, "partial_json": json.dumps({
-                "questions": [{"question": "Color?", "options": [{"label": "blue"}, {"label": "red"}]}],
+                "questions": [
+                    {"question": "Color?", "header": "Color", "options": [{"label": "blue"}, {"label": "red"}]},
+                    {"question": "Extras?", "header": "Extras", "multiSelect": True,
+                     "options": [{"label": "logs"}, {"label": "metrics"}]},
+                    {"question": "Notes?", "header": "Notes"},
+                ],
             })})
         else:
             block = {"index": 0, "block_type": "text"}
@@ -1094,8 +1099,17 @@ async def test_real_native_askuser_posts_continues_and_consumes_host_answer_once
         question = pending[0]
         text = question["questions"][0]["question"]
         assert text == "Color?"  # Do not repeat Fluid's numbered terminal options in the tray.
-        assert await handler.respond(question["request_id"], "real-native", {text: "unique-blue-answer"})
+        assert [q["question"] for q in question["questions"]] == ["Color?", "Extras?", "Notes?"]
+        assert question["questions"][0]["options"] == [{"label": "blue"}, {"label": "red"}]
+        assert question["questions"][1]["multiSelect"] is True
+        native_question, = await loop.pending_questions()
+        assert native_question.schema["questions"] == question["questions"]
+        assert await handler.respond(question["request_id"], "real-native", {
+            text: "unique-blue-answer", "Extras?": ["logs", "metrics"], "Notes?": "my custom note",
+        })
         queued, = turns.get_queued_turns("real-native")
+        assert "Extras?\nlogs, metrics" in queued["prompt"]
+        assert "Notes?\nmy custom note" in queued["prompt"]
         await adapter.send_query(queued["prompt"])
         await asyncio.wait_for(_collect(adapter), 5)
         assert len(provider.requests) == 3
