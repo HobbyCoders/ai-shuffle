@@ -133,7 +133,7 @@ class TestUsageLimitsEndpoint:
             "provider_refreshing": False, "attempted_at": None, "last_error_kind": None,
             "claude_source": body["claude_source"],
         }
-        assert body["claude_source"]["support"] == "unofficial_subscription"
+        assert body["claude_source"]["support"] == "response_metadata"
         assert body["claude_source"]["dashboard_url"] == "https://claude.ai/settings/usage"
 
     def test_cluster_join_and_unknown_install_excluded(self):
@@ -174,7 +174,6 @@ class TestUsageLimitsEndpoint:
                 "worker-1",
                 windows=[{"type": "five_hour", "utilization": 88.0, "resets_at": "r"}],
                 available=True, generation=2, fetched_at=222,
-                account_id="acct-w", account_email="w@example.com", account_name="Worker Acct",
             )
             # An install with NO registry row → must be excluded.
             db.upsert_usage_snapshot(
@@ -205,11 +204,9 @@ class TestUsageLimitsEndpoint:
         worker = by_id["worker-1"]
         assert worker["device_name"] == "Worker"
         assert worker["online"] is True
-        assert worker["account_email"] == "w@example.com"
-        assert worker["account_name"] == "Worker Acct"
-        # No plan is joined from the retired account table: null, never missing.
-        assert worker["plan_type"] is None
-        assert by_id[iid]["plan_type"] is None
+        # No Claude account identity or plan travels with a snapshot.
+        for entry in (worker, by_id[iid]):
+            assert not {"account_id", "account_email", "account_name", "plan_type"} & entry.keys()
         assert worker["windows"][0]["utilization"] == 88.0
         # Unknown install (no registry row) excluded.
         assert "ghost-9" not in by_id
@@ -365,7 +362,9 @@ class TestUsageLimitsProviders:
         assert router["last_success_at"] == router["last_attempt_at"] == fetched
         assert router["source_info"]["measure"] == "reported_spend"
         assert router["source_info"]["scope"] == "api_key"
-        assert body["claude_source"]["id"] == "claude_oauth_usage"
+        assert body["claude_source"]["id"] == "claude_rate_limit_events"
+        assert body["claude_source"]["collection"] == "passive"
+        assert body["claude_source"]["dashboard_url"] == "https://claude.ai/settings/usage"
 
     def test_refresh_returns_cached_data_while_provider_work_is_pending(self, cached_provider_poll):
         cached_provider_poll.refreshing = True

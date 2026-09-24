@@ -34,7 +34,6 @@ dashboard link.
 | `openrouter_key` | `GET {provider host}/api/v1/key` | OpenRouter model key | API key | Provider-reported spend and limit of that key | Polled on demand, 300 s | Documented API | [Keys](https://openrouter.ai/settings/keys) |
 | `openrouter_credits` | `GET https://openrouter.ai/api/v1/credits` | Separate management key (local only) | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Credits](https://openrouter.ai/settings/credits) |
 | `fal_billing` | `GET https://api.fal.ai/v1/account/billing?expand=credits` | Separate fal Admin key (local only) | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Billing](https://fal.ai/dashboard/billing) |
-| `claude_oauth_usage` | `GET https://api.anthropic.com/api/oauth/usage` | Claude subscription sign-in of the active account | Subscription | Subscription allowance | Polled in the background, 300 s | Unofficial, subscription-specific | [Usage](https://claude.ai/settings/usage) |
 | `claude_rate_limit_events` | Rate-limit events from the running Claude Code session | None beyond the session | Subscription | Subscription allowance (one window at a time) | Passive | Response metadata | [Usage](https://claude.ai/settings/usage) |
 | `grok_subscription` | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` and `/v1/settings` | SuperGrok sign-in (Grok CLI OAuth) | Subscription | Subscription allowance and plan | Polled on demand, 300 s per endpoint | Unofficial, subscription-specific | [Grok](https://grok.com/) |
 
@@ -66,7 +65,7 @@ thing and never come from these sources. The Stats card labels them
 
 ### Subscription-specific endpoints
 
-`claude_oauth_usage`, `grok_subscription` and `codex_headers` are labeled
+`grok_subscription` and `codex_headers` are labeled
 "Unofficial, subscription-specific" in the registry, the API and the popover.
 They are used by the providers' own subscription clients and are not published
 as third-party APIs. The app reads them only for the account the owner signed
@@ -94,15 +93,16 @@ capability is cached per credential revision:
 The last successful reading is kept after a failure, and the API reports the
 failure time separately from the last success.
 
-## Claude subscription reads
+## Claude usage
 
-Ordinary reads of `/api/v1/usage/limits` never wait on the Claude endpoint. A
-stale read returns the cached snapshot and starts one shared background
-refresh; further stale reads within 60 seconds of an attempt do not start
-another. An explicit refresh uses the same task and the same budget, so it
-cannot bypass the 300-second minimum. Workers with the same Claude sign-in
-share one budget through the network founder, so simultaneous reads on several
-workers produce one upstream request.
+AI Shuffle never reads the Claude Code CLI's credentials, so it calls no
+Claude usage or profile endpoint. The only Claude source is
+`claude_rate_limit_events`: the rate-limit events the running CLI reports in
+its own output stream. Each event refines one window, so the popover shows
+only the windows the CLI has reported, and nothing before the first agent run.
+The popover links to the user's own usage page,
+[claude.ai/settings/usage](https://claude.ai/settings/usage), for the full
+picture. Snapshots carry no Claude account identity or plan.
 
 ## OpenRouter setup and account separation
 
@@ -144,9 +144,8 @@ inference key does not establish access to either administration API.
 
 The [Claude Code authentication guidance](https://code.claude.com/docs/en/legal-and-compliance)
 distinguishes an end user's login in the unmodified native client from collecting
-or intermediating subscription OAuth credentials in a third-party app. This
-review does not establish support for this app's direct OAuth usage reader.
-Likewise, xAI's [documented management billing API](https://docs.x.ai/developers/rest-api-reference/management/billing)
+or intermediating subscription OAuth credentials in a third-party app, which is
+why the app has no Claude usage reader of its own. xAI's [documented management billing API](https://docs.x.ai/developers/rest-api-reference/management/billing)
 does not establish support for the existing SuperGrok proxy endpoints. Those
 readers are labeled unofficial and subscription-specific; deciding their
 supported replacement or default behavior remains part of issue #1387.

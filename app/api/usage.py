@@ -1,9 +1,10 @@
 """
-Claude usage-limits API.
+Usage-limits API.
 
-Exposes the latest subscription usage snapshot (all rate-limit windows with
-their utilization % and reset times) so the frontend can render the usage pill
-+ popover on page load, before any live ``usage_snapshot`` WS event arrives.
+Exposes the latest Claude usage windows (those the Claude Code CLI reported in
+its own rate-limit events, with utilization % and reset times) and every
+provider's usage snapshot, so the frontend can render the usage pill + popover
+on page load, before any live ``usage_snapshot`` WS event arrives.
 """
 
 import logging
@@ -72,21 +73,15 @@ class UsageWindow(BaseModel):
 
 
 class InstallUsageSnapshot(BaseModel):
-    """One install's persisted per-account usage snapshot.
+    """One install's persisted Claude usage snapshot.
 
-    The 5-hour Claude window is per-account, so on a shared database each install
-    (which may run a different Claude account) publishes its own snapshot here,
-    joined to the installs registry for ``device_name``/``online``.
+    Each install's CLI may be signed in differently, so on a shared database
+    each install publishes the windows its own CLI reported, joined to the
+    installs registry for ``device_name``/``online``. No account identity.
     """
     instance_id: str
     device_name: Optional[str] = None
     online: bool = False
-    account_id: Optional[str] = None
-    account_email: Optional[str] = None
-    account_name: Optional[str] = None
-    # Subscription tier of THAT install's account ("max"/"pro"), joined from
-    # claude_accounts. Names the plan in the usage popover's Claude header.
-    plan_type: Optional[str] = None
     windows: List[UsageWindow] = []
     fetched_at: Optional[int] = None
     available: bool = False
@@ -161,7 +156,7 @@ class UsageSnapshot(BaseModel):
     """Latest usage snapshot across all windows.
 
     The top-level fields describe the LOCAL install and are kept unchanged for
-    old clients. ``snapshots`` carries every install's per-account snapshot and
+    old clients. ``snapshots`` carries every install's snapshot and
     ``self_instance_id`` identifies which one is this install. ``providers``
     carries every non-Claude provider's usage snapshot (additive; empty for old
     or provider-less installs).
@@ -171,15 +166,16 @@ class UsageSnapshot(BaseModel):
     available: bool = False
     # Monotonic tag; lets clients drop out-of-order snapshots after a switch.
     generation: Optional[int] = None
-    # Per-install cluster view (per-account usage). Absent from very old clients.
+    # Per-install cluster view. Absent from very old clients.
     snapshots: List[InstallUsageSnapshot] = []
     self_instance_id: Optional[str] = None
     # Non-Claude provider usage (Codex/ChatGPT, OpenRouter, OpenAI credits,
     # fal.ai credits, SuperGrok, ...). Additive.
     providers: List[ProviderUsageEntry] = []
     provider_refreshing: bool = False
-    # Local Claude subscription reading: last upstream attempt (epoch seconds,
-    # like ``fetched_at``), why it failed, and its registry source.
+    # Kept for older clients: nothing is polled for Claude, so both stay null.
+    # ``claude_source`` is the registry entry for the CLI's rate-limit events
+    # and carries the link to the user's usage page.
     attempted_at: float | None = None
     last_error_kind: ErrorKind | None = None
     claude_source: UsageSourceInfo | None = None
@@ -293,13 +289,12 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
 
 
 def _request_claude_refresh() -> None:
-    # Shares the monitor's single-flight task; the durable budget still
-    # decides whether an upstream request is allowed.
+    # Re-persists and re-broadcasts the CLI-reported windows; no request.
     usage_limits_monitor.request_refresh()
 
 
 def _claude_fields(snapshot: dict) -> dict:
-    return {**snapshot, "claude_source": _source_info(usage_sources.SOURCES["claude_oauth_usage"])}
+    return {**snapshot, "claude_source": _source_info(usage_sources.SOURCES["claude_rate_limit_events"])}
 
 
 @router.get("/limits", response_model=UsageSnapshot)
@@ -310,14 +305,14 @@ async def get_usage_limits(
 
     Serves cached snapshots while coalesced background refreshes update stale
     data; no read waits on an upstream usage endpoint. Pass ``refresh=true`` to
-    start a provider and Claude refresh; it cannot bypass the request budget.
-    Read again while ``provider_refreshing`` is true to receive progressive
-    results (it also covers the local Claude refresh). Returns ``available: false`` with empty
-    windows when there is no usable Claude OAuth credential (never errors). The
-    legacy top-level fields describe the LOCAL install; ``snapshots`` adds every
-    install's per-account data so offloaded sessions render the correct (owning
-    account's) reset time. ``providers`` adds every non-Claude provider's usage
-    snapshot (best-effort).
+    start a provider refresh; it cannot bypass the request budget. Read again
+    while ``provider_refreshing`` is true to receive progressive results.
+    Claude windows come only from the rate-limit events the Claude Code CLI
+    reports while it runs; ``available: false`` with empty windows means it has
+    reported none yet (never errors). The legacy top-level fields describe the
+    LOCAL install; ``snapshots`` adds every install's windows so offloaded
+    sessions render the owning install's reset time. ``providers`` adds every
+    non-Claude provider's usage snapshot (best-effort).
     """
     from app.core.provider_usage import provider_usage_monitor
 

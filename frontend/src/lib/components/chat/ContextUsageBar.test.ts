@@ -954,14 +954,12 @@ describe('ContextUsageBar — plan usage limits', () => {
 				{
 					instance_id: 'primary',
 					device_name: 'Studio',
-					account_email: 'a@example.com',
 					available: true,
 					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
 				},
 				{
 					instance_id: 'worker',
 					device_name: 'Worker',
-					account_email: 'b@example.com',
 					available: true,
 					windows: [{ type: 'five_hour', utilization: 88, resets_at: future() }],
 				},
@@ -991,8 +989,6 @@ describe('ContextUsageBar — plan usage limits', () => {
 				{
 					instance_id: 'primary',
 					device_name: 'Studio',
-					account_email: 'a@example.com',
-					account_name: 'Personal',
 					available: true,
 					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
 				},
@@ -1042,53 +1038,6 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.textContent).not.toContain('50%');
 	});
 
-	it('subtexts the Claude header with the resolved install snapshot plan', async () => {
-		rateLimit.applySnapshot({
-			available: true,
-			windows: [],
-			self_instance_id: 'primary',
-			snapshots: [
-				{
-					instance_id: 'primary',
-					device_name: 'Studio',
-					plan_type: 'max',
-					available: true,
-					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
-				},
-			],
-		});
-		const { container } = render(ContextUsageBar);
-		await openPopover(container);
-		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
-		// The plan WINS over the device-name fallback — it is the more useful
-		// disambiguator, and it is what the model dropdown shows too.
-		expect(container.querySelector('.section-account')?.textContent).toBe('max');
-	});
-
-	it("prefers the resolved install's snapshot plan over the local registry's", async () => {
-		// The snapshot is per-install (it can describe a remote worker on a
-		// different account); the registry block only ever describes self. When
-		// both carry a plan, the snapshot wins.
-		mocks.claudeAuth = { auth_kind: 'subscription', plan_type: 'pro' };
-		rateLimit.applySnapshot({
-			available: true,
-			windows: [],
-			self_instance_id: 'primary',
-			snapshots: [
-				{
-					instance_id: 'primary',
-					device_name: 'Studio',
-					plan_type: 'max',
-					available: true,
-					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
-				},
-			],
-		});
-		const { container } = render(ContextUsageBar);
-		await openPopover(container);
-		expect(container.querySelector('.section-account')?.textContent).toBe('max');
-	});
-
 	it('subtexts the self Claude header "API" when the registry reports API-key auth', async () => {
 		mocks.claudeAuth = { auth_kind: 'api', plan_type: null };
 		rateLimit.applySnapshot({
@@ -1111,7 +1060,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelector('.section-account')?.textContent).toBe('API');
 	});
 
-	it("subtexts the self Claude header with the registry's plan when no snapshot plan exists", async () => {
+	it("subtexts the self Claude header with the plan the CLI reports", async () => {
 		mocks.claudeAuth = { auth_kind: 'subscription', plan_type: 'pro' };
 		rateLimit.applySnapshot({
 			available: true,
@@ -1864,21 +1813,33 @@ describe('ContextUsageBar — usage source details', () => {
 		expect(container.textContent).not.toContain('Last attempt');
 	});
 
-	it('shows the Claude subscription source with its unofficial label', async () => {
+	it('shows the CLI rate-limit events as the Claude source and links the claude.ai usage page', async () => {
 		rateLimit.applySnapshot({
 			windows: [{ type: 'five_hour', utilization: 80, resets_at: future() }],
-			available: true, fetched_at: 100, attempted_at: 200, last_error_kind: 'billing_access_denied',
-			claude_source: { ...grokSource, id: 'claude_oauth_usage', label: 'Claude subscription usage endpoint',
-				scope_label: "Active Claude account's plan usage windows; not API credit",
+			available: true, fetched_at: 100, attempted_at: null, last_error_kind: null,
+			claude_source: { ...grokSource, id: 'claude_rate_limit_events', label: 'Claude Code rate-limit events',
+				scope_label: 'Single plan window refreshed from the running session', collection: 'passive',
+				support: 'response_metadata', support_label: 'Metadata on inference responses',
 				dashboard_url: 'https://claude.ai/settings/usage', unavailable: [] },
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(screen.getByText('Source: Claude subscription usage endpoint')).toBeTruthy();
-		expect(screen.getByText('Unofficial, subscription-specific endpoint')).toBeTruthy();
-		expect(screen.getByText(/Last attempt: .*\(access refused\)/)).toBeTruthy();
-		expect(screen.getByRole('link', { name: 'Compare on the provider dashboard' }).getAttribute('href'))
+		expect(screen.getByText('Source: Claude Code rate-limit events')).toBeTruthy();
+		expect(container.textContent).not.toContain('Unofficial');
+		expect(container.textContent).not.toContain('Last attempt');
+		expect(screen.getByRole('link', { name: 'See all usage on claude.ai' }).getAttribute('href'))
 			.toBe('https://claude.ai/settings/usage');
-		expect(container.textContent).not.toContain('Not reported by this source');
+		// One link to the usage page, not a second "compare" link for Claude.
+		expect(screen.queryByRole('link', { name: 'Compare on the provider dashboard' })).toBeNull();
+	});
+
+	it('links the claude.ai usage page even before the CLI has reported usage', async () => {
+		mocks.claudeAuth = { auth_kind: 'subscription', plan_type: null };
+		mocks.claudeAuthenticated = true;
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain('No usage data yet');
+		expect(screen.getByRole('link', { name: 'See all usage on claude.ai' }).getAttribute('href'))
+			.toBe('https://claude.ai/settings/usage');
 	});
 });

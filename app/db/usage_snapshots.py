@@ -1,14 +1,11 @@
 """Per-install Claude usage-snapshot database operations.
 
-The 5-hour Claude usage window is PER-ACCOUNT. On a shared database two installs
-(e.g. a primary + an offload worker) may each run a DIFFERENT Claude account, so
-a single in-memory usage singleton polled with the local credential shows the
-wrong account's reset time for sessions offloaded to the other install.
-
-Each install therefore persists its own snapshot here, keyed by ``instance_id``,
-and the usage endpoint serves EVERY install's snapshot (joined to the installs
-registry for ``device_name``/``online``). ``account_*`` records which Claude
-account produced the reading (Nones in legacy single-account / API-key mode).
+The Claude usage windows belong to whichever Claude login the CLI on an install
+uses. On a shared database two installs (e.g. a primary + an offload worker) may
+each be signed in differently, so each install persists the windows its own CLI
+reported here, keyed by ``instance_id``, and the usage endpoint serves EVERY
+install's snapshot (joined to the installs registry for
+``device_name``/``online``). No Claude account identity is stored.
 
 ``windows`` is stored as a JSON blob (JSONB in Postgres, TEXT via the test
 shim); reads parse it defensively — accepting a str or an already-decoded list —
@@ -44,9 +41,6 @@ def upsert_usage_snapshot(
     available: bool,
     generation: Optional[int],
     fetched_at: Optional[int],
-    account_id: Optional[str] = None,
-    account_email: Optional[str] = None,
-    account_name: Optional[str] = None,
 ) -> None:
     """Insert or replace this install's usage snapshot row."""
     now = datetime.now(timezone.utc).isoformat()
@@ -55,17 +49,13 @@ def upsert_usage_snapshot(
         cursor.execute(
             """
             INSERT INTO usage_snapshots
-                (instance_id, windows, available, generation, fetched_at,
-                 account_id, account_email, account_name, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (instance_id, windows, available, generation, fetched_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT(instance_id) DO UPDATE SET
                 windows = EXCLUDED.windows,
                 available = EXCLUDED.available,
                 generation = EXCLUDED.generation,
                 fetched_at = EXCLUDED.fetched_at,
-                account_id = EXCLUDED.account_id,
-                account_email = EXCLUDED.account_email,
-                account_name = EXCLUDED.account_name,
                 updated_at = EXCLUDED.updated_at
             """,
             (
@@ -74,9 +64,6 @@ def upsert_usage_snapshot(
                 available,
                 generation,
                 fetched_at,
-                account_id,
-                account_email,
-                account_name,
                 now,
             ),
         )
@@ -87,8 +74,8 @@ def get_all_usage_snapshots() -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT instance_id, windows, available, generation, fetched_at, "
-            "account_id, account_email, account_name FROM usage_snapshots"
+            "SELECT instance_id, windows, available, generation, fetched_at "
+            "FROM usage_snapshots"
         )
         rows = rows_to_list(cursor.fetchall())
     for row in rows:
