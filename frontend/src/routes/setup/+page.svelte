@@ -27,7 +27,7 @@
 	} from '$lib/api/auth';
 	import { getErrorMessage, type WorkspaceConfig } from '$lib/api/client';
 	import { createNetwork, getNetworkStatus, type NetworkStatus } from '$lib/api/network';
-	import { getClaudeAuthMode, type AuthModeState, type ClaudeAuthMode } from '$lib/api/agent-credentials';
+	import type { AgentCredentials, ClaudeAuthMode } from '$lib/api/agent-credentials';
 	import SetupProgress from '$lib/components/SetupProgress.svelte';
 	import GitHubConnection from '$lib/components/GitHubConnection.svelte';
 	import AccountPanel from '$lib/components/deck/cards/settings/AccountPanel.svelte';
@@ -87,12 +87,12 @@
 	function continueFromWelcome() { markWelcomeSeen(); complete('welcome'); }
 
 	// ── Mode and credential ─────────────────────────────────────────────────
-	let modeState = $state<AuthModeState>({ supported: false, mode: null });
+	// The mode step asks for an explicit choice every time: the worker always
+	// has a mode (startup records a default), but setup confirms it with the owner.
 	let chosenMode = $state<ClaudeAuthMode | null>(null);
 
-	function modeChosen(next: AuthModeState) {
-		modeState = next;
-		chosenMode = next.mode;
+	function modeChosen(stored: AgentCredentials) {
+		chosenMode = stored.mode;
 		complete('mode');
 	}
 
@@ -174,11 +174,10 @@
 
 	// ── Lifecycle ────────────────────────────────────────────────────────────
 	onMount(async () => {
-		const [workspace, network, owner, mode] = await Promise.allSettled([
+		const [workspace, network, owner] = await Promise.allSettled([
 			getWorkspaceConfig(),
 			getNetworkStatus(),
 			ownerAccess.status ? Promise.resolve(ownerAccess.status) : ownerAccess.refresh(),
-			getClaudeAuthMode(),
 		]);
 		if (workspace.status === 'fulfilled') {
 			workspaceConfig = workspace.value;
@@ -195,10 +194,6 @@
 		desktop = Boolean(ownerStatus?.desktop_handoff) || auth.current.status?.claude_cli?.login?.surface === 'desktop';
 		ownerStep = !desktop && hasOwnerStep(ownerStatus);
 		if (ownerStep) completedSteps.add('owner');
-		if (mode.status === 'fulfilled') {
-			modeState = mode.value;
-			chosenMode = mode.value.mode;
-		}
 		if (welcomeSeen()) {
 			completedSteps.add('welcome');
 			currentStep = 'license';
@@ -243,7 +238,7 @@
 				<ModeStep mode={chosenMode} onChosen={modeChosen} onBack={() => back('mode')} />
 
 			{:else if currentStep === 'credential' && chosenMode}
-				<CredentialStep mode={chosenMode} {modeState} isAdmin={$isAdmin}
+				<CredentialStep mode={chosenMode} isAdmin={$isAdmin}
 					onContinue={() => complete('credential')} onBack={() => back('credential')} onSwitchMode={switchMode} />
 
 			{:else if currentStep === 'workspace'}
@@ -252,7 +247,8 @@
 					onSave={saveWorkspaceAndContinue} onBack={() => back('workspace')} />
 
 			{:else if currentStep === 'first-run'}
-				<FirstRunStep mode={chosenMode} onContinue={() => complete('first-run')} onBack={() => back('first-run')} />
+				<FirstRunStep mode={chosenMode} onContinue={() => complete('first-run')} onBack={() => back('first-run')}
+					onFixCredential={() => goTo(chosenMode ? 'credential' : 'mode')} />
 
 			{:else if currentStep === 'extras'}
 				<div class="space-y-6" data-testid="setup-extras">

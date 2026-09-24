@@ -1,147 +1,102 @@
 /**
  * How Claude Code is paid for on this worker, and whether agents can start.
  *
- * The setup wizard and Settings talk to the backend only through this module,
- * so the pieces that are still landing on the backend stay behind one small
- * interface. Expected backend (plan items C9 and C10):
+ * The setup wizard reads all of it from one call, `GET /api/v1/settings/claude-auth`
+ * (the same summary Settings > Providers > Claude Code mode shows):
  *
- * - `GET  /api/v1/settings/claude-auth-mode` answers `{ mode }`, where `mode`
- *   is `'subscription'`, `'api_key'` or `null` (not chosen yet).
- * - `PUT  /api/v1/settings/claude-auth-mode` with `{ mode }` stores the choice
- *   (owner only) and answers `{ mode }`.
- * - `GET  /api/v1/auth/status` carries `agent_credentials`:
- *   `{ ready, mode, reason }`, the answer of `agent_credentials_ready()`.
+ * - `mode`: `'subscription'` or `'api_key'`, with `explicit` false only before
+ *   startup has recorded the worker's default.
+ * - `cli`: what `claude auth status` reports, with the account only when signed in.
+ * - `api_key`: whether a key is stored, and its last four characters.
+ * - `gate`: the worker's credential gate, the same answer that refuses turns
+ *   (`ready`, `reason`, `claude_credential_ready`, `license_allows_runs`).
  *
- * Until they exist, the calls fall back without failing: a 404 or 405 on the
- * mode route means "this worker has no mode setting yet" (`supported: false`),
- * and readiness is worked out here from what the worker already reports (the
- * CLI's own `claude auth status`, and whether an Anthropic API key is saved).
- * On such a worker a saved API key still takes precedence over the CLI's
- * login, which `keyOverridesSubscription` reports so the UI can say so.
+ * `PUT /api/v1/settings/claude-auth` with `{ mode }` stores the choice (owner
+ * only) and answers with the same summary. `POST /api/v1/settings/integrations/anthropic`
+ * saves a key; with `use_for_claude_code: true` it also switches Claude Code
+ * to API key mode in the same call. The worker never switches modes itself.
  */
-import { api, isApiError, type AuthStatus } from './client';
+import { api } from './client';
+import {
+	getClaudeAuth, setClaudeAuthMode as putClaudeAuthMode,
+	type ClaudeAuthMode, type ClaudeAuthSummary
+} from './claude-auth';
 
-export type ClaudeAuthMode = 'subscription' | 'api_key';
-
-export interface AuthModeState {
-	/** The worker stores the mode itself. False on a worker without the setting. */
-	supported: boolean;
-	/** The stored choice, or null when none has been made (or none can be stored). */
-	mode: ClaudeAuthMode | null;
-}
+export type { ClaudeAuthMode } from './claude-auth';
 
 export interface AgentCredentials {
-	/** A new agent run can start with the chosen mode's credential. */
+	/** The mode Claude Code runs in on this worker. */
+	mode: ClaudeAuthMode;
+	/** The mode's name as Settings shows it. */
+	modeLabel: string;
+	/** False only before the worker has recorded its default mode. */
+	explicit: boolean;
+	/** A new Claude agent run can start: the license allows it and the mode's credential exists. */
 	ready: boolean;
-	mode: ClaudeAuthMode | null;
-	/** What is missing, fit to show the user, when not ready. */
+	/** The active mode's credential exists (CLI signed in, or a key stored). */
+	credentialReady: boolean;
+	/** The license allows new agent runs. */
+	licenseAllowsRuns: boolean;
+	/** Why agents cannot start, fit to show the user; null when they can. */
 	reason: string | null;
-	/** `gate`: answered by the worker's own credential gate; `local`: worked out here. */
-	source: 'gate' | 'local';
+	cli: ClaudeAuthSummary['cli'];
+	apiKey: ClaudeAuthSummary['api_key'];
 }
-
-export interface AnthropicKeyState {
-	set: boolean;
-	/** Masked form for display, never the key. */
-	masked: string;
-}
-
-const MODE_PATH = '/settings/claude-auth-mode';
 
 export function isClaudeAuthMode(value: unknown): value is ClaudeAuthMode {
 	return value === 'subscription' || value === 'api_key';
 }
 
-function missingRoute(error: unknown): boolean {
-	return isApiError(error) && (error.status === 404 || error.status === 405);
-}
-
-/** The stored mode, or `supported: false` on a worker without the setting. */
-export async function getClaudeAuthMode(): Promise<AuthModeState> {
-	try {
-		const body = await api.get<{ mode?: unknown }>(MODE_PATH, { cache: 'no-store' });
-		return { supported: true, mode: isClaudeAuthMode(body?.mode) ? body.mode : null };
-	} catch (error) {
-		if (missingRoute(error)) return { supported: false, mode: null };
-		throw error;
-	}
-}
-
-/**
- * Store the mode. On a worker without the setting nothing is stored and the
- * answer says so; the wizard then keeps the choice for this visit only.
- */
-export async function setClaudeAuthMode(mode: ClaudeAuthMode): Promise<AuthModeState> {
-	try {
-		const body = await api.put<{ mode?: unknown }>(MODE_PATH, { mode });
-		return { supported: true, mode: isClaudeAuthMode(body?.mode) ? body.mode : mode };
-	} catch (error) {
-		if (missingRoute(error)) return { supported: false, mode };
-		throw error;
-	}
-}
-
-/** Whether an Anthropic API key is saved on this worker. */
-export async function getAnthropicKeyState(): Promise<AnthropicKeyState> {
-	const body = await api.get<{ anthropic_api_key_set?: boolean; anthropic_api_key_masked?: string }>(
-		'/settings/integrations', { cache: 'no-store' });
-	return { set: !!body?.anthropic_api_key_set, masked: body?.anthropic_api_key_masked || '' };
-}
-
-/**
- * Save the Anthropic API key on this worker (it stays on this worker). The
- * worker checks the key with Anthropic before storing it and refuses a key
- * Anthropic rejects.
- */
-export async function saveAnthropicApiKey(apiKey: string): Promise<AnthropicKeyState> {
-	const body = await api.post<{ success?: boolean; masked_key?: string }>(
-		'/settings/integrations/anthropic', { api_key: apiKey });
-	return { set: body?.success !== false, masked: body?.masked_key || '' };
-}
-
-interface GateAnswer { ready?: unknown; mode?: unknown; reason?: unknown }
-
-/** Read the worker's credential gate out of an `/auth/status` answer, if it has one. */
-export function gateFromStatus(status: (AuthStatus & { agent_credentials?: GateAnswer }) | null | undefined): AgentCredentials | null {
-	const gate = status?.agent_credentials;
-	if (!gate || typeof gate !== 'object' || typeof gate.ready !== 'boolean') return null;
+/** The wizard's view of the worker's `claude-auth` summary. */
+export function credentialsFromSummary(summary: ClaudeAuthSummary): AgentCredentials {
+	const mode: ClaudeAuthMode = isClaudeAuthMode(summary.mode) ? summary.mode : 'subscription';
+	const gate = summary.gate;
+	const credentialReady = gate
+		? gate.claude_credential_ready === true
+		: mode === 'subscription' ? summary.cli.signed_in : summary.api_key.set;
+	const licenseAllowsRuns = gate?.license_allows_runs !== false;
 	return {
-		ready: gate.ready,
-		mode: isClaudeAuthMode(gate.mode) ? gate.mode : null,
-		reason: typeof gate.reason === 'string' && gate.reason ? gate.reason : null,
-		source: 'gate',
+		mode,
+		modeLabel: summary.mode_label,
+		explicit: summary.explicit,
+		ready: gate ? gate.ready === true : credentialReady,
+		credentialReady,
+		licenseAllowsRuns,
+		reason: gate?.reason || null,
+		cli: summary.cli,
+		apiKey: summary.api_key,
 	};
 }
 
 /**
- * Whether agents can start with `mode`. Uses the worker's gate when it has one
- * and it answers for the same mode; otherwise asks what the worker reports.
+ * The mode, the CLI account, the key's last four and the gate, in one call.
+ * `refresh` re-runs `claude auth status` instead of using the worker's cache.
  */
-export async function getAgentCredentials(mode: ClaudeAuthMode): Promise<AgentCredentials> {
-	const status = await api.get<AuthStatus & { agent_credentials?: GateAnswer }>('/auth/status', { cache: 'no-store' });
-	const gate = gateFromStatus(status);
-	if (gate && (gate.mode === null || gate.mode === mode)) return { ...gate, mode };
-	return localReadiness(mode, status);
+export async function getAgentCredentials(refresh = false): Promise<AgentCredentials> {
+	return credentialsFromSummary(await getClaudeAuth(refresh));
 }
 
-async function localReadiness(mode: ClaudeAuthMode, status: AuthStatus): Promise<AgentCredentials> {
-	if (mode === 'subscription') {
-		const ready = status.claude_cli?.signed_in === true || status.claude_authenticated === true;
-		return {
-			ready, mode, source: 'local',
-			reason: ready ? null : status.claude_cli?.installed === false
-				? 'The Claude Code CLI is not installed on this worker yet.'
-				: 'The Claude Code CLI is not signed in.',
-		};
-	}
-	const key = await getAnthropicKeyState();
-	return { ready: key.set, mode, source: 'local', reason: key.set ? null : 'No Anthropic API key is saved on this worker.' };
+/** Store the mode (owner only). Takes effect for the next agent run. */
+export async function setClaudeAuthMode(mode: ClaudeAuthMode): Promise<AgentCredentials> {
+	return credentialsFromSummary(await putClaudeAuthMode(mode));
 }
 
 /**
- * On a worker without the mode setting, a saved API key is used instead of the
- * CLI's login. True when that applies to a subscription choice.
+ * Save the Anthropic API key on this worker (it stays on this worker). The
+ * worker checks the key with Anthropic first and refuses a key Anthropic
+ * rejects. `useForClaudeCode` also switches Claude Code to API key mode;
+ * without it, saving a key never changes the mode.
  */
-export function keyOverridesSubscription(modeState: AuthModeState, key: AnthropicKeyState | null): boolean {
-	return !modeState.supported && !!key?.set;
+export async function saveAnthropicApiKey(
+	apiKey: string, options: { useForClaudeCode?: boolean } = {}
+): Promise<{ masked: string }> {
+	const body = await api.post<{ success?: boolean; masked_key?: string }>(
+		'/settings/integrations/anthropic', { api_key: apiKey, use_for_claude_code: options.useForClaudeCode === true });
+	return { masked: body?.masked_key || '' };
+}
+
+/** "Key ending in abcd", as Settings > Providers shows it. */
+export function keyLabel(key: AgentCredentials['apiKey']): string {
+	if (!key.set) return 'No key stored';
+	return key.last4 ? `Key ending in ${key.last4}` : 'Key stored';
 }

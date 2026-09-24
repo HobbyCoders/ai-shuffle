@@ -3,18 +3,19 @@
 	 * Wizard step: how Claude Code is paid for on this worker. Subscription
 	 * (the stock Claude Code CLI, signed in by the owner) or an Anthropic API
 	 * key, with the advice to use a key for anything that runs unattended.
-	 * The choice is stored through `$lib/api/agent-credentials`; on a worker
-	 * without the mode setting it is kept for this visit only.
+	 * The choice is stored on the worker (`PUT /settings/claude-auth`), the same
+	 * setting as Settings > Providers > Claude Code mode, with the same names.
 	 */
 	import { untrack } from 'svelte';
 	import { ExternalLink, KeyRound, Loader2, SquareTerminal } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import { setClaudeAuthMode, type AuthModeState, type ClaudeAuthMode } from '$lib/api/agent-credentials';
+	import { setClaudeAuthMode, type AgentCredentials, type ClaudeAuthMode } from '$lib/api/agent-credentials';
 
 	interface Props {
 		/** The current choice, if any. */
 		mode: ClaudeAuthMode | null;
-		onChosen: (state: AuthModeState) => void;
+		/** Called with the worker's answer once the mode is stored. */
+		onChosen: (credentials: AgentCredentials) => void;
 		onBack?: () => void;
 	}
 	let { mode, onChosen, onBack }: Props = $props();
@@ -39,7 +40,7 @@
 </script>
 
 <div class="space-y-4" data-testid="setup-mode">
-	<div role="radiogroup" aria-label="How Claude Code is paid for" class="space-y-3">
+	<div role="radiogroup" aria-label="Claude Code mode" class="space-y-3">
 		<label class="option" class:selected={selected === 'subscription'}>
 			<input type="radio" name="claude-mode" value="subscription" bind:group={selected} class="sr-only" />
 			<SquareTerminal size={20} strokeWidth={1.75} class="shrink-0 text-primary mt-0.5" />
@@ -52,7 +53,7 @@
 			<input type="radio" name="claude-mode" value="api_key" bind:group={selected} class="sr-only" />
 			<KeyRound size={20} strokeWidth={1.75} class="shrink-0 text-primary mt-0.5" />
 			<span>
-				<span class="title">API key</span>
+				<span class="title">Anthropic API key</span>
 				<span class="body">Your own Anthropic Console key, billed per use by Anthropic. Best for scheduled jobs, overnight runs, connectors and many agents at once.</span>
 			</span>
 		</label>
@@ -66,7 +67,7 @@
 		</p>
 	</div>
 
-	<p class="text-xs text-muted-foreground">You can change the mode later in Settings. AI Shuffle never switches between them on its own, and never falls back to anyone else's account.</p>
+	<p class="text-xs text-muted-foreground">You can change this later in Settings > Providers > Claude Code mode. AI Shuffle never switches modes on its own, and never falls back to another credential.</p>
 
 	{#if error}<div role="alert" class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">{error}</div>{/if}
 

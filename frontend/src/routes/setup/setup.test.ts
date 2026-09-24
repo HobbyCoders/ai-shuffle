@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
 	githubStatus: vi.fn(), githubWeb: vi.fn(), githubToken: vi.fn(),
 	ownerStatus: null as Record<string, unknown> | null, ownerRefresh: vi.fn(),
 	authStatus: {} as Record<string, unknown>,
-	getMode: vi.fn(), setMode: vi.fn(), ready: vi.fn(), keyState: vi.fn(), saveKey: vi.fn(),
+	setMode: vi.fn(), creds: vi.fn(), saveKey: vi.fn(),
 	license: vi.fn(), agent: vi.fn(), run: vi.fn(),
 }));
 vi.mock('$app/navigation', () => ({ goto: mocks.goto }));
@@ -29,8 +29,7 @@ vi.mock('$lib/stores/auth.svelte', () => ({
 vi.mock('$lib/stores/owner-access.svelte', () => ({ ownerAccess: { get status() { return mocks.ownerStatus; }, refresh: mocks.ownerRefresh } }));
 vi.mock('$lib/api/agent-credentials', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/api/agent-credentials')>()),
-	getClaudeAuthMode: mocks.getMode, setClaudeAuthMode: mocks.setMode, getAgentCredentials: mocks.ready,
-	getAnthropicKeyState: mocks.keyState, saveAnthropicApiKey: mocks.saveKey,
+	setClaudeAuthMode: mocks.setMode, getAgentCredentials: mocks.creds, saveAnthropicApiKey: mocks.saveKey,
 }));
 vi.mock('$lib/api/license', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/api/license')>()), getLicense: mocks.license,
@@ -42,6 +41,7 @@ vi.mock('$lib/services/first-agent-run', async (importOriginal) => ({
 vi.mock('$lib/components/DirectoryBrowser.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/settings/ClaudeCliPanel.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 import Setup from './+page.svelte';
+import type { AgentCredentials, ClaudeAuthMode } from '$lib/api/agent-credentials';
 
 const fingerprint = 'abcd-1234-abcd-1234-abcd-1234-abcd-1234';
 const fresh = (): NetworkStatus => ({ device: { device_id: 'local-device', fingerprint }, enrolled: false, platform: 'linux', version: 'test', instance_id: 'local-install', enrollment: null, hub: { linked: false } });
@@ -58,28 +58,41 @@ const beta = { mode: 'beta', state: 'beta', allowed: true, reason: null, banner:
 	grace_until: null, last_refresh_at: null, next_refresh_at: null, last_error: null, server_status: null, server_configured: false };
 let status: NetworkStatus;
 let connection: Record<string, unknown>;
+let workerMode: ClaudeAuthMode;
+
+const NOT_SIGNED_IN = 'Agents cannot start: Claude Code is set to subscription mode and the Claude Code CLI is not signed in.';
+/** The wizard's view of `GET /settings/claude-auth` (see agent-credentials.ts). */
+function creds(over: Partial<AgentCredentials> = {}): AgentCredentials {
+	return {
+		mode: workerMode, modeLabel: workerMode === 'api_key' ? 'Anthropic API key' : 'Claude subscription', explicit: true,
+		ready: false, credentialReady: false, licenseAllowsRuns: true, reason: NOT_SIGNED_IN,
+		cli: { installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null },
+		apiKey: { set: false, last4: null },
+		...over,
+	};
+}
+const signedIn = () => creds({ ready: true, credentialReady: true, reason: null,
+	cli: { installed: true, signed_in: true, email: 'owner@example.com', org_name: null, plan: 'max', auth_method_label: null, error: null } });
 
 beforeEach(() => {
 	vi.resetAllMocks();
 	try { sessionStorage.clear(); } catch { /* not available */ }
-	status = fresh(); connection = disconnected;
+	status = fresh(); connection = disconnected; workerMode = 'subscription';
 	mocks.ownerStatus = dockerOwner;
-	mocks.authStatus = { setup_required: true, auth_mode: 'local', claude_cli: { installed: true, signed_in: false, email: 'owner@example.com', login: { surface: 'docker' } } };
+	mocks.authStatus = { setup_required: true, auth_mode: 'local', claude_cli: { installed: true, signed_in: false, login: { surface: 'docker' } } };
 	vi.spyOn(window, 'open').mockReturnValue(null);
 	mocks.getStatus.mockImplementation(async () => status);
 	mocks.create.mockImplementation(async () => { status = enrolled(); return { network: status.network }; });
 	mocks.workspace.mockResolvedValue({ workspace_path: '/workspace', default_path: '/workspace', is_local_mode: false, is_configured: false, exists: true });
 	mocks.saveWorkspace.mockResolvedValue({}); mocks.checkAuth.mockResolvedValue(undefined); mocks.complete.mockResolvedValue(undefined);
 	mocks.githubStatus.mockResolvedValue({ authenticated: false, user: null });
-	mocks.getMode.mockResolvedValue({ supported: true, mode: null });
-	mocks.setMode.mockImplementation(async (mode: string) => ({ supported: true, mode }));
-	mocks.ready.mockImplementation(async (mode: string) => ({ ready: false, mode, reason: 'The Claude Code CLI is not signed in.', source: 'gate' }));
-	mocks.keyState.mockResolvedValue({ set: false, masked: '' });
+	mocks.setMode.mockImplementation(async (mode: ClaudeAuthMode) => { workerMode = mode; return creds(); });
+	mocks.creds.mockImplementation(async () => creds());
 	mocks.license.mockResolvedValue(beta);
 	mocks.agent.mockResolvedValue({ id: 'assistant', name: 'Assistant' });
 	mocks.run.mockImplementation(({ onUpdate }: { onUpdate: (s: unknown) => void }) => {
-		onUpdate({ phase: 'streaming', text: 'Hello! I can help you', sessionId: 's1', error: null });
-		const final = { phase: 'done', text: 'Hello! I can help you write code.', sessionId: 's1', error: null };
+		onUpdate({ phase: 'streaming', text: 'Hello! I can help you', sessionId: 's1', error: null, code: null });
+		const final = { phase: 'done', text: 'Hello! I can help you write code.', sessionId: 's1', error: null, code: null };
 		onUpdate(final);
 		return { done: Promise.resolve(final), cancel: vi.fn() };
 	});
@@ -111,7 +124,7 @@ async function throughMode(mode: 'subscription' | 'api_key' = 'subscription') {
 }
 async function throughCredential() {
 	await throughMode();
-	mocks.ready.mockResolvedValue({ ready: true, mode: 'subscription', reason: null, source: 'gate' });
+	mocks.creds.mockImplementation(async () => signedIn());
 	await click(/Check again/);
 	await screen.findByTestId('setup-credential-ready');
 	await click('Continue');
@@ -175,10 +188,32 @@ describe('setup wizard v2', () => {
 		await screen.findByLabelText('Anthropic API key');
 	});
 
+	it('names the modes as Settings > Providers does and asks for an explicit choice', async () => {
+		await throughLicense();
+		const group = screen.getByRole('radiogroup', { name: 'Claude Code mode' });
+		expect(group.textContent).toContain('Claude subscription');
+		expect(group.textContent).toContain('Anthropic API key');
+		expect(screen.getByText(/Settings > Providers > Claude Code mode/)).toBeTruthy();
+		expect([...group.querySelectorAll('input')].some((i) => (i as HTMLInputElement).checked)).toBe(false);
+	});
+
+	it('saves the API key for Claude Code in API key mode', async () => {
+		mocks.saveKey.mockImplementation(async () => {
+			mocks.creds.mockImplementation(async () => creds({ ready: true, credentialReady: true, reason: null, apiKey: { set: true, last4: 'abcd' } }));
+			return { masked: 'sk-ant-...abcd' };
+		});
+		await throughMode('api_key');
+		await fireEvent.input(await screen.findByLabelText('Anthropic API key'), { target: { value: 'sk-ant-secret' } });
+		await click('Save');
+		expect(mocks.saveKey).toHaveBeenCalledWith('sk-ant-secret', { useForClaudeCode: true });
+		expect((await screen.findByTestId('setup-credential-ready')).textContent).toContain('ending in abcd');
+	});
+
 	it('blocks the credential step until the credential exists, with no way to finish without one', async () => {
 		await throughMode();
 		const missing = await screen.findByTestId('setup-credential-missing');
 		expect(missing.textContent).toContain('Agents cannot start yet');
+		expect(missing.textContent).toContain(NOT_SIGNED_IN);
 		expect((screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement).disabled).toBe(true);
 		expect(screen.queryByText(/without a provider/)).toBeNull();
 		expect(screen.queryByRole('button', { name: /Skip/ })).toBeNull();
@@ -222,7 +257,7 @@ describe('setup wizard v2', () => {
 
 	it('explains a failed first run and lets the owner retry or continue', async () => {
 		mocks.run.mockImplementation(({ onUpdate }: { onUpdate: (s: unknown) => void }) => {
-			const final = { phase: 'failed', text: '', sessionId: null, error: 'New agent runs are paused until you add a license key.' };
+			const final = { phase: 'failed', text: '', sessionId: null, error: 'The connection to the worker closed before the run started.', code: null };
 			onUpdate(final);
 			return { done: Promise.resolve(final), cancel: vi.fn() };
 		});
@@ -230,10 +265,46 @@ describe('setup wizard v2', () => {
 		await click('Continue');
 		await screen.findByTestId('setup-first-run');
 		await click(/Run it/);
-		expect((await screen.findByRole('alert')).textContent).toContain('New agent runs are paused');
+		const alert = await screen.findByTestId('setup-first-run-error');
+		expect(alert.textContent).toContain('The run did not finish');
+		expect(alert.textContent).toContain('closed before the run started');
 		expect(screen.getByRole('button', { name: /Try again/ })).toBeTruthy();
 		await click('Continue anyway');
 		await screen.findByTestId('setup-extras');
+	});
+
+	it('shows the credential gate refusal of the first run and leads back to Sign in', async () => {
+		mocks.run.mockImplementation(({ onUpdate }: { onUpdate: (s: unknown) => void }) => {
+			const final = { phase: 'failed', text: '', sessionId: 's1', error: NOT_SIGNED_IN, code: 'agent_setup_required' };
+			onUpdate(final);
+			return { done: Promise.resolve(final), cancel: vi.fn() };
+		});
+		await throughCredential();
+		await click('Continue');
+		await screen.findByTestId('setup-first-run');
+		await click(/Run it/);
+		const alert = await screen.findByTestId('setup-first-run-error');
+		expect(alert.textContent).toContain('Agents cannot start yet');
+		expect(alert.textContent).toContain(NOT_SIGNED_IN);
+		await click('Go back to Sign in');
+		await screen.findByTestId('setup-credential');
+	});
+
+	it('shows a loop guard hold of the first run', async () => {
+		const held = 'Loop guard: this automation turn is waiting for your confirmation. Confirm or dismiss it in Settings > Providers > Loop guard.';
+		mocks.run.mockImplementation(({ onUpdate }: { onUpdate: (s: unknown) => void }) => {
+			const final = { phase: 'failed', text: '', sessionId: 's1', error: held, code: 'loop_guard_confirm' };
+			onUpdate(final);
+			return { done: Promise.resolve(final), cancel: vi.fn() };
+		});
+		await throughCredential();
+		await click('Continue');
+		await screen.findByTestId('setup-first-run');
+		await click(/Run it/);
+		const alert = await screen.findByTestId('setup-first-run-error');
+		expect(alert.textContent).toContain('The run is waiting for your confirmation');
+		expect(alert.textContent).toContain(held);
+		expect(screen.queryByRole('button', { name: 'Go back to Sign in' })).toBeNull();
 	});
 
 	it('connects GitHub with a token in the last step', async () => {

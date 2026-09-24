@@ -6,7 +6,10 @@ vi.mock('$lib/api/client', async (importOriginal) => ({
 	api: { get: mocks.get, post: mocks.post },
 }));
 vi.mock('$lib/stores/session/v2/sse-feed', () => ({ createSseFeed: vi.fn() }));
-import { ensureStarterAgent, FIRST_RUN_PROMPT, startFirstAgentRun, type FirstRunState } from './first-agent-run';
+import {
+	ABORT_GRACE_MS, ensureStarterAgent, FIRST_RUN_PROMPT, LOOP_GUARD_CODE, SETUP_REQUIRED_CODE, startFirstAgentRun,
+	type FirstRunState
+} from './first-agent-run';
 
 class FakeSocket {
 	sent: Record<string, unknown>[] = [];
@@ -54,23 +57,57 @@ describe('first agent run', () => {
 		feedEvents!({ type: 'assistant.text_delta', text: ' there.' });
 		expect(updates.at(-1)).toMatchObject({ phase: 'streaming', text: 'Hello there.', sessionId: 's1' });
 		feedEvents!({ type: 'turn.completed' });
-		expect(await handle.done).toEqual({ phase: 'done', text: 'Hello there.', sessionId: 's1', error: null });
+		expect(await handle.done).toEqual({ phase: 'done', text: 'Hello there.', sessionId: 's1', error: null, code: null });
 		expect(socket.closed).toBe(true); expect(feedStopped).toBe(true);
 	});
 
-	it('reports a refused turn with the worker message', async () => {
+	it('reports an uncoded error frame with the worker message', async () => {
 		const { handle } = start();
 		socket.onopen?.();
-		socket.receive({ type: 'error', message: 'No credential is set up. Sign in to the Claude Code CLI or add an API key.' });
-		expect(await handle.done).toMatchObject({ phase: 'failed', error: 'No credential is set up. Sign in to the Claude Code CLI or add an API key.' });
+		socket.receive({ type: 'error', message: 'Empty prompt' });
+		expect(await handle.done).toMatchObject({ phase: 'failed', error: 'Empty prompt', code: null });
+	});
+
+	it('recognises a turn the credential gate refused', async () => {
+		// The frame app/core/credential_gate.py refusal_event() yields, tagged
+		// with the session by the runtime's broadcast.
+		const reason = 'Agents cannot start: Claude Code is set to API key mode and no Anthropic API key is stored on this worker.';
+		const { handle } = start();
+		socket.onopen?.();
+		socket.receive({ type: 'session_created', session_id: 's1', request_id: socket.sent[0].request_id });
+		socket.receive({ type: 'error', session_id: 's1', message: reason, code: SETUP_REQUIRED_CODE });
+		expect(await handle.done).toMatchObject({ phase: 'failed', error: reason, code: 'agent_setup_required' });
+	});
+
+	it('recognises a turn the loop guard held', async () => {
+		const reason = 'Loop guard: this automation turn is waiting for your confirmation.';
+		const { handle } = start();
+		socket.onopen?.();
+		socket.receive({ type: 'session_created', session_id: 's1', request_id: socket.sent[0].request_id });
+		socket.receive({ type: 'error', session_id: 's1', message: reason, code: LOOP_GUARD_CODE });
+		expect(await handle.done).toMatchObject({ phase: 'failed', error: reason, code: 'loop_guard_confirm' });
+	});
+
+	it('keeps the code when the feed reports the refusal first', async () => {
+		vi.useFakeTimers();
+		const reason = 'Agents cannot start: the Claude Code CLI is not installed on this worker.';
+		const { handle } = start();
+		socket.onopen?.();
+		socket.receive({ type: 'session_created', session_id: 's1', request_id: socket.sent[0].request_id });
+		feedEvents!({ type: 'turn.aborted', reason: 'error', message: reason });
+		vi.advanceTimersByTime(ABORT_GRACE_MS / 2);
+		socket.receive({ type: 'error', session_id: 's1', message: reason, code: SETUP_REQUIRED_CODE });
+		expect(await handle.done).toMatchObject({ phase: 'failed', error: reason, code: 'agent_setup_required' });
 	});
 
 	it('reports an aborted turn from the feed', async () => {
+		vi.useFakeTimers();
 		const { handle } = start();
 		socket.onopen?.();
 		socket.receive({ type: 'session_created', session_id: 's1', request_id: socket.sent[0].request_id });
 		feedEvents!({ type: 'turn.aborted', message: 'New agent runs are paused until you add a license key.' });
-		expect(await handle.done).toMatchObject({ phase: 'failed', error: 'New agent runs are paused until you add a license key.' });
+		vi.advanceTimersByTime(ABORT_GRACE_MS);
+		expect(await handle.done).toMatchObject({ phase: 'failed', error: 'New agent runs are paused until you add a license key.', code: null });
 	});
 
 	it('stops and says so when the agent asks for a decision', async () => {

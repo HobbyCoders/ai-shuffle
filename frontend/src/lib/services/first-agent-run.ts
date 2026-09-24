@@ -9,6 +9,16 @@
  * (`/api/v1/sessions/{id}/events`). The run goes through the worker's normal
  * turn start, so the credential and license gates apply to it exactly as to
  * any other run, and whatever they refuse comes back as the error.
+ *
+ * Two refusals carry a code on the chat WebSocket's `error` frame
+ * (`{ type: 'error', session_id, message, code }`):
+ * - `agent_setup_required`: the credential gate refused the turn (no license,
+ *   or no credential for the active Claude Code mode). `message` says what is
+ *   missing and where to fix it.
+ * - `loop_guard_confirm`: the subscription loop guard held an unattended turn
+ *   for the owner's confirmation. `message` says why and where to confirm it.
+ * The session's event feed reports the same refusal as `turn.aborted` without
+ * the code, often first, so an abort waits briefly for the coded frame.
  */
 import { api, getErrorMessage, type Profile } from '$lib/api/client';
 import { wsUrl } from '$lib/api/runtime';
@@ -19,6 +29,19 @@ export const FIRST_RUN_PROMPT = 'Say hello in one short sentence, then list thre
 /** How long to wait for the reply before giving up. */
 export const FIRST_RUN_TIMEOUT_MS = 180_000;
 
+/** How long an abort from the feed waits for the WebSocket's coded error frame. */
+export const ABORT_GRACE_MS = 1000;
+
+/** The credential gate refused the turn: setup is not finished. */
+export const SETUP_REQUIRED_CODE = 'agent_setup_required';
+/** The subscription loop guard held the turn for the owner's confirmation. */
+export const LOOP_GUARD_CODE = 'loop_guard_confirm';
+export type FirstRunErrorCode = typeof SETUP_REQUIRED_CODE | typeof LOOP_GUARD_CODE;
+
+function errorCode(value: unknown): FirstRunErrorCode | null {
+	return value === SETUP_REQUIRED_CODE || value === LOOP_GUARD_CODE ? value : null;
+}
+
 export type FirstRunPhase = 'starting' | 'waiting' | 'streaming' | 'done' | 'failed' | 'needs-input';
 
 export interface FirstRunState {
@@ -28,6 +51,8 @@ export interface FirstRunState {
 	sessionId: string | null;
 	/** Why the run failed or stopped, fit to show the user. */
 	error: string | null;
+	/** The worker's code for a refused or held turn, when it gave one. */
+	code: FirstRunErrorCode | null;
 }
 
 export interface FirstRunHandle {
@@ -76,13 +101,14 @@ interface StartOptions {
 export function startFirstAgentRun(options: StartOptions): FirstRunHandle {
 	const prompt = options.prompt ?? FIRST_RUN_PROMPT;
 	const requestId = randomId();
-	const state: FirstRunState = { phase: 'starting', text: '', sessionId: null, error: null };
+	const state: FirstRunState = { phase: 'starting', text: '', sessionId: null, error: null, code: null };
 	let socket: WebSocket | null = null;
 	let feed: Pick<SseFeed, 'stop'> | null = null;
 	let settled = false;
 	let sawDelta = false;
 	let timeout: ReturnType<typeof setTimeout> | undefined;
 	let doneGrace: ReturnType<typeof setTimeout> | undefined;
+	let abortGrace: ReturnType<typeof setTimeout> | undefined;
 	let resolveDone!: (value: FirstRunState) => void;
 	const done = new Promise<FirstRunState>((resolve) => { resolveDone = resolve; });
 
@@ -91,6 +117,7 @@ export function startFirstAgentRun(options: StartOptions): FirstRunHandle {
 	function teardown() {
 		clearTimeout(timeout);
 		clearTimeout(doneGrace);
+		clearTimeout(abortGrace);
 		try { feed?.stop(); } catch { /* already stopped */ }
 		feed = null;
 		if (socket) {
@@ -101,11 +128,12 @@ export function startFirstAgentRun(options: StartOptions): FirstRunHandle {
 		}
 	}
 
-	function finish(phase: 'done' | 'failed' | 'needs-input', error: string | null = null) {
+	function finish(phase: 'done' | 'failed' | 'needs-input', error: string | null = null, code: FirstRunErrorCode | null = null) {
 		if (settled) return;
 		settled = true;
 		state.phase = phase;
 		state.error = error;
+		state.code = code;
 		if (phase === 'done' && !state.text.trim()) {
 			state.phase = 'failed';
 			state.error = 'The agent finished without a reply. Open the session from the sidebar to see what happened.';
@@ -139,9 +167,15 @@ export function startFirstAgentRun(options: StartOptions): FirstRunHandle {
 			case 'turn.completed':
 				finish('done');
 				break;
-			case 'turn.aborted':
-				finish('failed', str(event.message) || 'The run stopped before the agent answered.');
+			case 'turn.aborted': {
+				// A refused turn is reported here without its code; the
+				// WebSocket's error frame carries it and settles the run first
+				// when it arrives within the grace.
+				const message = str(event.message) || 'The run stopped before the agent answered.';
+				clearTimeout(abortGrace);
+				abortGrace = setTimeout(() => finish('failed', message), ABORT_GRACE_MS);
 				break;
+			}
 			case 'error':
 				finish('failed', str(event.message) || 'The agent could not start.');
 				break;
@@ -171,7 +205,7 @@ export function startFirstAgentRun(options: StartOptions): FirstRunHandle {
 		const frameSession = str(frame.session_id);
 		if (frameSession && state.sessionId && frameSession !== state.sessionId) return;
 		if (type === 'error') {
-			finish('failed', str(frame.message) || 'The agent could not start.');
+			finish('failed', str(frame.message) || 'The agent could not start.', errorCode(frame.code));
 		} else if (type === 'permission_request' || type === 'user_question') {
 			finish('needs-input', 'The agent is asking for a decision. Open the session from the sidebar to answer it.');
 		} else if (type === 'done' && state.sessionId) {

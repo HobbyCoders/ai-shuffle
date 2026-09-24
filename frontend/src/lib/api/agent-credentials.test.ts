@@ -6,71 +6,89 @@ vi.mock('./client', async (importOriginal) => ({
 	api: { get: mocks.get, put: mocks.put, post: mocks.post },
 }));
 import {
-	getAgentCredentials, getClaudeAuthMode, keyOverridesSubscription, saveAnthropicApiKey, setClaudeAuthMode
+	credentialsFromSummary, getAgentCredentials, keyLabel, saveAnthropicApiKey, setClaudeAuthMode
 } from './agent-credentials';
+import type { ClaudeAuthSummary } from './claude-auth';
 
-const notFound = { status: 404, detail: 'Not Found' };
+const NOT_SIGNED_IN = 'Agents cannot start: Claude Code is set to subscription mode and the Claude Code CLI is not signed in.';
+
+/** What `GET /settings/claude-auth` answers (app/api/settings.py `claude_auth_payload`). */
+function summary(over: Partial<ClaudeAuthSummary> = {}): ClaudeAuthSummary {
+	return {
+		mode: 'subscription',
+		mode_label: 'Claude subscription',
+		explicit: true,
+		modes: [{ value: 'subscription', label: 'Claude subscription' }, { value: 'api_key', label: 'Anthropic API key' }],
+		cli: { installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null },
+		api_key: { set: false, last4: null },
+		gate: {
+			ready: false, reason: NOT_SIGNED_IN, mode: 'subscription', claude_credential_ready: false,
+			license_allows_runs: true, startup_state: 'setup_required',
+		},
+		...over,
+	};
+}
 
 beforeEach(() => vi.resetAllMocks());
 
-describe('Claude auth mode', () => {
-	it('reads and stores the mode where the worker has the setting', async () => {
-		mocks.get.mockResolvedValue({ mode: 'api_key' });
-		expect(await getClaudeAuthMode()).toEqual({ supported: true, mode: 'api_key' });
-		mocks.put.mockResolvedValue({ mode: 'subscription' });
-		expect(await setClaudeAuthMode('subscription')).toEqual({ supported: true, mode: 'subscription' });
-		expect(mocks.put).toHaveBeenCalledWith('/settings/claude-auth-mode', { mode: 'subscription' });
+describe('agent credentials', () => {
+	it('reads the mode, account, key and gate from one call', async () => {
+		mocks.get.mockResolvedValue(summary());
+		expect(await getAgentCredentials()).toEqual({
+			mode: 'subscription', modeLabel: 'Claude subscription', explicit: true,
+			ready: false, credentialReady: false, licenseAllowsRuns: true, reason: NOT_SIGNED_IN,
+			cli: summary().cli, apiKey: { set: false, last4: null },
+		});
+		expect(mocks.get).toHaveBeenCalledOnce();
+		expect(mocks.get).toHaveBeenCalledWith('/settings/claude-auth', { cache: 'no-store' });
 	});
 
-	it('falls back without failing on a worker without the setting', async () => {
-		mocks.get.mockRejectedValue(notFound);
-		expect(await getClaudeAuthMode()).toEqual({ supported: false, mode: null });
-		mocks.put.mockRejectedValue({ status: 405, detail: 'Method Not Allowed' });
-		expect(await setClaudeAuthMode('api_key')).toEqual({ supported: false, mode: 'api_key' });
+	it('asks the worker to re-run the CLI check on refresh', async () => {
+		mocks.get.mockResolvedValue(summary());
+		await getAgentCredentials(true);
+		expect(mocks.get).toHaveBeenCalledWith('/settings/claude-auth?refresh=true', { cache: 'no-store' });
 	});
 
-	it('passes other errors on', async () => {
+	it('reports a signed-in CLI account as ready', async () => {
+		mocks.get.mockResolvedValue(summary({
+			cli: { installed: true, signed_in: true, email: 'owner@example.com', org_name: null, plan: 'max', auth_method_label: null, error: null },
+			gate: { ready: true, reason: null, mode: 'subscription', claude_credential_ready: true, license_allows_runs: true, startup_state: 'ready' },
+		}));
+		expect(await getAgentCredentials()).toMatchObject({ ready: true, credentialReady: true, reason: null, cli: { email: 'owner@example.com' } });
+	});
+
+	it('keeps the credential and the license apart', () => {
+		const creds = credentialsFromSummary(summary({
+			gate: { ready: false, reason: 'New agent runs are paused until you add a license key.', mode: 'subscription',
+				claude_credential_ready: true, license_allows_runs: false, startup_state: 'setup_required' },
+		}));
+		expect(creds).toMatchObject({ ready: false, credentialReady: true, licenseAllowsRuns: false, reason: 'New agent runs are paused until you add a license key.' });
+	});
+
+	it('stores the mode and answers with the new summary', async () => {
+		mocks.put.mockResolvedValue(summary({ mode: 'api_key', mode_label: 'Anthropic API key' }));
+		expect(await setClaudeAuthMode('api_key')).toMatchObject({ mode: 'api_key', modeLabel: 'Anthropic API key' });
+		expect(mocks.put).toHaveBeenCalledWith('/settings/claude-auth', { mode: 'api_key' });
+	});
+
+	it('passes errors on', async () => {
 		mocks.put.mockRejectedValue({ status: 403, detail: 'Owner access required' });
 		await expect(setClaudeAuthMode('api_key')).rejects.toMatchObject({ status: 403 });
+		mocks.get.mockRejectedValue({ status: 404, detail: 'Not Found' });
+		await expect(getAgentCredentials()).rejects.toMatchObject({ status: 404 });
 	});
 
-	it('treats an unknown stored value as no choice', async () => {
-		mocks.get.mockResolvedValue({ mode: 'pooled' });
-		expect(await getClaudeAuthMode()).toEqual({ supported: true, mode: null });
-	});
-});
-
-describe('agent credentials', () => {
-	it('uses the worker gate when it answers for the chosen mode', async () => {
-		mocks.get.mockResolvedValue({ claude_authenticated: true, agent_credentials: { ready: false, mode: 'api_key', reason: 'No key' } });
-		expect(await getAgentCredentials('api_key')).toEqual({ ready: false, mode: 'api_key', reason: 'No key', source: 'gate' });
-		expect(mocks.get).toHaveBeenCalledOnce();
-	});
-
-	it('works it out from the CLI status on a worker without the gate', async () => {
-		mocks.get.mockResolvedValue({ claude_authenticated: false, claude_cli: { installed: true, signed_in: false } });
-		expect(await getAgentCredentials('subscription')).toMatchObject({ ready: false, source: 'local', reason: 'The Claude Code CLI is not signed in.' });
-		mocks.get.mockResolvedValue({ claude_authenticated: true, claude_cli: { installed: true, signed_in: true } });
-		expect(await getAgentCredentials('subscription')).toMatchObject({ ready: true, reason: null });
-	});
-
-	it('ignores a gate that answers for the other mode and checks the saved key', async () => {
-		mocks.get.mockImplementation(async (path: string) => path === '/auth/status'
-			? { claude_authenticated: true, agent_credentials: { ready: true, mode: 'subscription', reason: null } }
-			: { anthropic_api_key_set: true, anthropic_api_key_masked: 'sk-ant-...abcd' });
-		expect(await getAgentCredentials('api_key')).toEqual({ ready: true, mode: 'api_key', reason: null, source: 'local' });
-	});
-
-	it('saves a key through the integrations route', async () => {
+	it('saves a key for Claude Code only when asked to', async () => {
 		mocks.post.mockResolvedValue({ success: true, masked_key: 'sk-ant-...abcd' });
-		expect(await saveAnthropicApiKey('sk-ant-secret')).toEqual({ set: true, masked: 'sk-ant-...abcd' });
-		expect(mocks.post).toHaveBeenCalledWith('/settings/integrations/anthropic', { api_key: 'sk-ant-secret' });
+		expect(await saveAnthropicApiKey('sk-ant-secret', { useForClaudeCode: true })).toEqual({ masked: 'sk-ant-...abcd' });
+		expect(mocks.post).toHaveBeenCalledWith('/settings/integrations/anthropic', { api_key: 'sk-ant-secret', use_for_claude_code: true });
+		await saveAnthropicApiKey('sk-ant-secret');
+		expect(mocks.post).toHaveBeenLastCalledWith('/settings/integrations/anthropic', { api_key: 'sk-ant-secret', use_for_claude_code: false });
 	});
 
-	it('reports that a saved key wins over the CLI only where the mode setting is missing', () => {
-		const key = { set: true, masked: '' };
-		expect(keyOverridesSubscription({ supported: false, mode: 'subscription' }, key)).toBe(true);
-		expect(keyOverridesSubscription({ supported: true, mode: 'subscription' }, key)).toBe(false);
-		expect(keyOverridesSubscription({ supported: false, mode: 'subscription' }, { set: false, masked: '' })).toBe(false);
+	it('names a stored key by its last four, as Settings does', () => {
+		expect(keyLabel({ set: true, last4: 'abcd' })).toBe('Key ending in abcd');
+		expect(keyLabel({ set: true, last4: null })).toBe('Key stored');
+		expect(keyLabel({ set: false, last4: null })).toBe('No key stored');
 	});
 });

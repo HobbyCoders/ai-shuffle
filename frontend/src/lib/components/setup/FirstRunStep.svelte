@@ -3,28 +3,35 @@
 	 * Wizard step: the first agent run. One short prompt in a new chat session
 	 * (no project, no file tools), with the reply streamed in, so the owner
 	 * sees an agent answer before leaving setup. It names what pays for the
-	 * run: the CLI's account on a subscription, or the saved key.
+	 * run: the CLI's account on a subscription, or the saved key's last four,
+	 * both from the worker's `claude-auth` summary.
+	 *
+	 * A turn the credential gate refuses (`agent_setup_required`) or the loop
+	 * guard holds (`loop_guard_confirm`) shows the worker's own message, with
+	 * a way back to the sign-in step for the first.
 	 */
 	import { onDestroy, onMount } from 'svelte';
 	import { AlertTriangle, Check, Loader2, Play } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import { getAnthropicKeyState, type ClaudeAuthMode } from '$lib/api/agent-credentials';
-	import { auth } from '$lib/stores/auth.svelte';
+	import { getAgentCredentials, type AgentCredentials, type ClaudeAuthMode } from '$lib/api/agent-credentials';
 	import {
-		ensureStarterAgent, FIRST_RUN_PROMPT, startFirstAgentRun, type FirstRunHandle, type FirstRunState
+		ensureStarterAgent, FIRST_RUN_PROMPT, LOOP_GUARD_CODE, SETUP_REQUIRED_CODE, startFirstAgentRun,
+		type FirstRunHandle, type FirstRunState
 	} from '$lib/services/first-agent-run';
 
 	interface Props {
 		mode: ClaudeAuthMode | null;
 		onContinue: () => void;
 		onBack?: () => void;
+		/** Go to the sign-in step, after the worker refused the run for setup. */
+		onFixCredential?: () => void;
 	}
-	let { mode, onContinue, onBack }: Props = $props();
+	let { mode, onContinue, onBack, onFixCredential }: Props = $props();
 
 	let run = $state<FirstRunState | null>(null);
 	let starting = $state(false);
 	let startError = $state('');
-	let keyMasked = $state('');
+	let creds = $state<AgentCredentials | null>(null);
 	let handle: FirstRunHandle | null = null;
 	let outputEl = $state<HTMLDivElement | null>(null);
 
@@ -32,11 +39,16 @@
 	const finished = $derived(!!run && ['done', 'failed', 'needs-input'].includes(run.phase));
 	const succeeded = $derived(run?.phase === 'done');
 	const attempted = $derived(finished || !!startError);
-	const cliAccount = $derived(auth.current.status?.claude_cli?.email ?? null);
+	const cliAccount = $derived(creds?.cli.signed_in ? creds.cli.email : null);
+	const keyLast4 = $derived(creds?.apiKey.last4 ?? null);
+	const refused = $derived(finished && run?.code === SETUP_REQUIRED_CODE);
+	const held = $derived(finished && run?.code === LOOP_GUARD_CODE);
 
-	const payer = $derived(mode === 'api_key'
-		? `your Anthropic API key${keyMasked ? ` (${keyMasked})` : ''}, billed per use`
-		: mode === 'subscription'
+	// The worker's own mode when this visit has no choice yet (a reload past the mode step).
+	const payingMode = $derived(mode ?? creds?.mode ?? null);
+	const payer = $derived(payingMode === 'api_key'
+		? `your Anthropic API key${keyLast4 ? ` (ending in ${keyLast4})` : ''}, billed per use`
+		: payingMode === 'subscription'
 			? `your Claude plan${cliAccount ? ` (${cliAccount})` : ''}, through the Claude Code CLI`
 			: 'the credential you set up');
 
@@ -63,9 +75,7 @@
 	}
 
 	onMount(() => {
-		if (mode === 'api_key') {
-			getAnthropicKeyState().then((k) => { keyMasked = k.masked; }).catch(() => {});
-		}
+		getAgentCredentials().then((c) => { creds = c; }).catch(() => {});
 	});
 	onDestroy(() => { handle?.cancel(); });
 </script>
@@ -90,10 +100,17 @@
 			<Check size={16} strokeWidth={2} /><span>It works. The session is in your sidebar.</span>
 		</div>
 	{:else if (finished && run?.error) || startError}
-		<div role="alert" class="bg-destructive/10 border border-destructive/40 px-4 py-3 rounded-lg text-sm">
-			<p class="flex items-center gap-2 font-medium text-foreground"><AlertTriangle size={16} strokeWidth={2} class="text-destructive" /> The run did not finish</p>
+		<div role="alert" class="bg-destructive/10 border border-destructive/40 px-4 py-3 rounded-lg text-sm" data-testid="setup-first-run-error" data-code={run?.code ?? ''}>
+			<p class="flex items-center gap-2 font-medium text-foreground">
+				<AlertTriangle size={16} strokeWidth={2} class="text-destructive" />
+				{refused ? 'Agents cannot start yet' : held ? 'The run is waiting for your confirmation' : 'The run did not finish'}
+			</p>
 			<p class="text-muted-foreground mt-1">{startError || run?.error}</p>
-			<p class="text-muted-foreground mt-1">The Troubleshooting guide under Agents do not start lists the usual causes.</p>
+			{#if refused && onFixCredential}
+				<p class="text-muted-foreground mt-1"><button type="button" class="text-primary underline" onclick={onFixCredential}>Go back to Sign in</button> to finish setting up the credential, then try again.</p>
+			{:else if !refused && !held}
+				<p class="text-muted-foreground mt-1">The Troubleshooting guide under Agents do not start lists the usual causes.</p>
+			{/if}
 		</div>
 	{/if}
 
