@@ -179,9 +179,9 @@ def render() -> str:
         "## Python packages\n\n"
         "Installed into the Docker image and the desktop installer's Python runtime "
         "(`requirements.txt`, `requirements-dev.txt`, `requirements-native.txt` and the "
-        "fluid harness, with their dependencies). `claude-agent-sdk` also bundles the "
-        "Claude Code CLI binary, which is licensed by Anthropic under its own terms, "
-        "not under the package license shown here. Platform-specific dependencies "
+        "fluid harness, with their dependencies). No Claude Code CLI binary is bundled; "
+        "the user's separately installed stock CLI is licensed by Anthropic under its "
+        "own terms. Platform-specific dependencies "
         f"were resolved for {sys.platform}.\n\n" + _table(py_rows)
     )
     if missing:
