@@ -105,7 +105,11 @@ class ManagedWorkerRepairSmokeTest {
             val field = ApiClient::class.java.getDeclaredField("client\$delegate").apply { isAccessible = true }
             val original = field.get(null)
             field.set(null, lazyOf(OkHttpClient.Builder().addInterceptor { chain ->
-                check(chain.request().url.encodedPath == "/api/v1/mobile/web-session/reservations")
+                // Current workers reject a revoked key at renewal, before a
+                // web reservation. Keep the same 401 repair gate for both paths.
+                check(chain.request().url.encodedPath in setOf("/api/v1/mobile/key/renew", "/api/v1/mobile/web-session/reservations"))
+                check(chain.request().method == "POST" && chain.request().header("Authorization") == "Bearer ${server.apiKey}")
+                check(chain.request().header("Cookie") == null)
                 PresenceFixture.response(chain.request(), 401, "{\"detail\":\"Revoked fixture credential\"}")
             }.build()))
             try {

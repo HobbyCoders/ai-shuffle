@@ -2,7 +2,11 @@ package com.hobbycoders.aishuffle
 
 import com.hobbycoders.aishuffle.presence.WorkerPresenceProbe
 import com.hobbycoders.aishuffle.presence.WorkerPresenceMonitor
+import com.hobbycoders.aishuffle.model.Server
+import java.time.Instant
 import okhttp3.OkHttpClient
+import okio.Buffer
+import org.json.JSONObject
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
@@ -25,6 +29,19 @@ internal class PresenceFixture(validatedNetwork: Boolean? = null, handler: (Requ
     }
     override fun close() { field.set(null, previous); networkField.set(null, previousNetwork) }
     companion object {
+        // Model the real renewal endpoint at the HTTP boundary. The app must
+        // validate and durably persist this result itself before opening chat;
+        // do not seed its renewal cache or substitute its credential store.
+        fun renewDeviceKey(request: Request, server: Server): Response {
+            check(request.url.toString() == "${server.baseUrl}/api/v1/mobile/key/renew" && request.method == "POST")
+            check(request.header("Authorization") == "Bearer ${server.apiKey}" && request.header("Cookie") == null)
+            val body = Buffer().also { requireNotNull(request.body).writeTo(it) }.readUtf8()
+            check(JSONObject(body).length() == 0)
+            val receipt = JSONObject().put("device_id", server.deviceId).put("api_key", server.apiKey)
+                .put("rotated", false).put("expires_at", Instant.now().plusSeconds(3600).toString())
+            return response(request, 200, receipt.toString()).newBuilder().header("Content-Type", "application/json").build()
+        }
+
         fun response(request: Request, code: Int, body: String): Response = Response.Builder().request(request)
             .protocol(Protocol.HTTP_1_1).code(code).message("Synthetic presence fixture")
             .body(body.toResponseBody("application/json".toMediaType())).build()
