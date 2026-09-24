@@ -145,3 +145,90 @@ def test_cli_project_key_golden_vectors(path, expected, monkeypatch):
     from pathlib import Path
     monkeypatch.setattr(Path, "resolve", lambda self: self)
     assert cs.project_key_for_directory(path) == expected
+
+@pytest.mark.parametrize("damage", [
+    b'{"type":"assistant","message":{"content":"\xff"}}\n',
+    b'{"type":"assistant","message":{"content":"\xe2\x82',
+    b'{"type":"assistant","message":',
+])
+def test_damaged_utf8_or_torn_records_preserve_other_records_and_sessions(transcript, damage):
+    sid, path, records = transcript
+    valid = b"\n".join(json.dumps(e).encode() for e in records) + b"\n"
+    path.write_bytes(valid)
+    cs.rename_session(sid, "durable title")
+    cs.tag_session(sid, "durable tag")
+    good_sid = str(uuid.uuid4())
+    good = path.with_name(f"{good_sid}.jsonl")
+    good.write_bytes(valid)
+    with path.open("ab") as stream:
+        stream.write(damage)
+    info = cs.get_session_info(sid)
+    assert info.first_prompt == "Hello" and info.custom_title == "durable title"
+    assert info.tag == "durable tag"
+    assert {s.session_id for s in cs.list_sessions(include_worktrees=False)} == {sid, good_sid}
+    assert [m.uuid for m in cs.get_session_messages(sid)] == ["u", "a"]
+    # A later valid producer record still survives a damaged middle record.
+    cs.rename_session(sid, "after damage")
+    assert cs.get_session_info(sid).custom_title == "after damage"
+
+
+@pytest.mark.parametrize("body_bytes", [256 * 1024, 8 * 1024 * 1024])
+def test_discovery_reads_bounded_windows_not_the_large_middle(transcript, monkeypatch, body_bytes):
+    from pathlib import Path
+    sid, path, records = transcript
+    with path.open("wb") as stream:
+        stream.write(json.dumps(records[0]).encode() + b"\n")
+        stream.write(b'{"type":"assistant","message":{"content":"')
+        for _ in range(body_bytes // 1024):
+            stream.write(b"x" * 1024)
+        stream.write(b'"}}\n')
+    cs.rename_session(sid, "large transcript")
+    cs.tag_session(sid, "latest tag")
+    # Instrument real file I/O rather than seed an in-memory metadata cache.
+    original_open = Path.open
+    reads = []
+    class BoundedReader:
+        def __init__(self, stream): self.stream = stream
+        def __enter__(self): return self
+        def __exit__(self, *args): return self.stream.__exit__(*args)
+        def seek(self, *args): return self.stream.seek(*args)
+        def tell(self): return self.stream.tell()
+        def read(self, size=-1):
+            assert 0 <= size <= cs._METADATA_WINDOW_BYTES + 1
+            data = self.stream.read(size)
+            reads.append(len(data))
+            return data
+        def __iter__(self):
+            pytest.fail("discovery must not iterate complete histories")
+    def opened(self, *args, **kwargs):
+        stream = original_open(self, *args, **kwargs)
+        return BoundedReader(stream) if self == path else stream
+    monkeypatch.setattr(Path, "open", opened)
+    sessions = cs.list_sessions(include_worktrees=False)
+    assert len(sessions) == 1
+    assert sessions[0].first_prompt == "Hello"
+    assert sessions[0].custom_title == "large transcript"
+    assert sessions[0].tag == "latest tag"
+    assert sessions[0].file_size == path.stat().st_size
+    assert sum(reads) <= 2 * cs._METADATA_WINDOW_BYTES + 1
+
+
+@pytest.mark.parametrize("size", [32, 33, 64, 65])
+def test_metadata_window_boundaries_keep_only_complete_records(tmp_path, monkeypatch, size):
+    # Small windows make the overlapping/contiguous/separated boundary cases
+    # explicit without allocating a large fixture per boundary.
+    monkeypatch.setattr(cs, "_METADATA_WINDOW_BYTES", 32)
+    path = tmp_path / "boundary.jsonl"
+    first = b'{"n":1}\n'
+    last = b'{"n":2}'  # a complete final line doesn't require a newline
+    path.write_bytes(first + b"\n" * (size - len(first) - len(last)) + last)
+    assert list(cs._metadata_entries(path)) == [{"n": 1}, {"n": 2}]
+
+
+def test_metadata_windows_do_not_decode_fragments_as_records(tmp_path, monkeypatch):
+    monkeypatch.setattr(cs, "_METADATA_WINDOW_BYTES", 32)
+    path = tmp_path / "boundary.jsonl"
+    # Both window edges land inside multibyte text in an oversized record.
+    path.write_bytes(b'{"n":1}\n{"long":"' + "é".encode() * 100 + b'"}\n{"n":2}\n')
+    assert list(cs._metadata_entries(path)) == [{"n": 1}, {"n": 2}]
+    assert list(cs._entries(path))[1] == {"long": "é" * 100}

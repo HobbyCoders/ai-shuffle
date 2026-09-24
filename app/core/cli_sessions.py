@@ -100,14 +100,53 @@ def _session_path(session_id: str, directory: str | None = None) -> Path | None:
     return None
 
 
+def _parse_entry(line: bytes) -> dict[str, Any] | None:
+    try:
+        entry = json.loads(line.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        return None  # one damaged record must not hide the durable prefix
+    return entry if isinstance(entry, dict) else None
+
+
 def _entries(path: Path):
-    with path.open(encoding="utf-8") as stream:
+    # Decode inside the per-record guard. A text iterator can raise while
+    # filling its buffer, before yielding even the valid preceding lines.
+    with path.open("rb") as stream:
         for line in stream:
-            try:
-                entry = json.loads(line)
-            except (ValueError, UnicodeError):
-                continue  # a torn last line must not hide the durable prefix
-            if isinstance(entry, dict):
+            entry = _parse_entry(line)
+            if entry is not None:
+                yield entry
+
+
+_METADATA_WINDOW_BYTES = 64 * 1024
+
+
+def _metadata_entries(path: Path):
+    """Read at most two 64 KiB windows plus one boundary byte for discovery.
+
+    The CLI writes initial prompt/cwd metadata at the head and current
+    title/tag/summary metadata at the tail. Like the former bounded discovery
+    path, records wholly in the middle (or larger than a window) aren't used
+    for listing metadata. Full conversation reads still stream every record.
+    """
+    with path.open("rb") as stream:
+        head = stream.read(_METADATA_WINDOW_BYTES)
+        stream.seek(0, 2)
+        size = stream.tell()
+        if size <= 2 * _METADATA_WINDOW_BYTES:
+            stream.seek(len(head))
+            chunks = (head + stream.read(_METADATA_WINDOW_BYTES),)
+        else:
+            # Drop partial JSON/UTF-8 at both window boundaries. The extra
+            # byte keeps a complete tail record when it begins on a newline.
+            head = head[:head.rfind(b"\n") + 1]
+            stream.seek(size - _METADATA_WINDOW_BYTES - 1)
+            tail = stream.read(_METADATA_WINDOW_BYTES + 1).partition(b"\n")[2]
+            chunks = (head, tail)
+    for chunk in chunks:
+        for line in chunk.split(b"\n"):
+            entry = _parse_entry(line)
+            if entry is not None:
                 yield entry
 
 
@@ -153,7 +192,7 @@ def _info(path: Path) -> SessionInfo | None:
     stat = path.stat()
     key = {"project_key": path.parent.name, "session_id": path.stem}
     summary = None
-    for entry in _entries(path):
+    for entry in _metadata_entries(path):
         summary = fold_session_summary(summary, key, [entry])
     data = (summary or {}).get("data", {})
     if not data or data.get("is_sidechain"):
