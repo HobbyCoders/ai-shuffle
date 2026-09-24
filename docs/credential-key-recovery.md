@@ -18,7 +18,7 @@ database's credential key. Remote account sign-in does not unlock encryption.
    enter the original password at its private terminal prompt.
 3. Verify `python -m scripts.credential_keys status` reports `ready: true`.
    The migration checks every encrypted value in settings, both automation
-   columns, connectors, API-user credentials, Claude accounts, provider tokens,
+   columns, connectors, API-user credentials, provider tokens,
    and provider OAuth access/refresh tokens, including inactive/orphaned rows.
    New pending browser sign-in requests also participate in verification.
    No credential, login hash, provider metadata or ciphertext is rewritten.

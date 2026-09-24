@@ -88,10 +88,13 @@ def capture(recipient: str) -> dict:
                             "publisher": ctx.device_id, "recipient": recipient, "generation": ctx.generation,
                             "expires_at": int(time.time()) + TTL, "watermarks": store.local_watermarks(conn),
                             "keyring": keyring.for_recipient(ctx, member.encryption_public), "pages": []}
-                for coll in policy.ordered_collections():
+                # Retired collections go last as one empty page each: a recipient
+                # on an older build requires every collection it knows.
+                names = [c.name for c in policy.ordered_collections()] + sorted(policy.RETIRED_COLLECTIONS)
+                for name in names:
                     offset, limit = 0, 100
                     while True:
-                        chunk = engine.snapshot_chunk(coll.name, offset, ctx=ctx, limit=limit, _conn=conn)
+                        chunk = engine.snapshot_chunk(name, offset, ctx=ctx, limit=limit, _conn=conn)
                         raw = crypto.canonical_json(chunk)
                         if len(raw) > MAX_PAGE:
                             if limit == 1:
@@ -101,7 +104,7 @@ def capture(recipient: str) -> dict:
                         index = len(manifest["pages"])
                         (directory / f"{index}.json").write_bytes(raw)
                         manifest["pages"].append({"sha256": crypto.sha256_hex(raw), "bytes": len(raw),
-                                                  "collection": coll.name, "offset": offset,
+                                                  "collection": name, "offset": offset,
                                                   "count": chunk["count"], "more": chunk["more"]})
                         offset += chunk["count"]
                         if not chunk["more"]:
@@ -169,7 +172,9 @@ def apply(manifest: dict, directory: Path, publisher: str) -> int:
         offsets[collection] = body["offset"] + len(body["items"])
         if not body["more"]:
             finished.add(collection)
-    if finished != set(policy.COLLECTIONS):
+    # Pages for collections this build does not know (retired here, or newer)
+    # are verified above and applied as nothing.
+    if not set(policy.COLLECTIONS) <= finished:
         raise ValueError("Peer state does not include every collection")
     applied = 0
     with store.get_db() as conn:
@@ -185,5 +190,5 @@ def apply(manifest: dict, directory: Path, publisher: str) -> int:
             applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn)
         engine.adopt_watermarks(manifest["watermarks"], ctx=trusted, _conn=conn)
     engine.load_context()
-    engine._notify([(c, "", "upsert") for c in finished])
+    engine._notify([(c, "", "upsert") for c in finished if c in policy.COLLECTIONS])
     return applied

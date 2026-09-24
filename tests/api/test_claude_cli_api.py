@@ -67,9 +67,12 @@ def test_relogin_notice_is_shown_once_and_dismissed(authenticated_client, signed
 
     assert notice.mark_if_needed() is False  # fresh install: no notice
     assert authenticated_client.get("/api/v1/auth/claude/cli").json()["relogin_notice"] is None
+    # An upgrade: the old sign-in left a pointer for another install; the v89
+    # migration records the notice and removes the pointer.
     db.set_system_setting("claude_active_account:other-install", "acct-1")
     with get_db() as conn:
-        conn.cursor().execute("DELETE FROM system_settings WHERE key LIKE 'claude_cli_relogin_notice:%'")
+        db._retire_claude_accounts(conn.cursor())
+    assert db.get_system_setting("claude_active_account:other-install") is None
     assert notice.mark_if_needed() is True
     body = authenticated_client.get("/api/v1/auth/claude/cli").json()["relogin_notice"]
     assert body["logout_command"] == "claude auth logout"

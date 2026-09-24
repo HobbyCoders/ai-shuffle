@@ -604,7 +604,7 @@ class TestRegistryPayloadClaude:
         """Same contract as ``_providers_payload``: never 500 GET /api/models."""
 
         def _raise(*_args, **_kwargs):
-            raise Exception('relation "claude_accounts" does not exist')
+            raise Exception('relation "system_settings" does not exist')
 
         monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", _raise)
         payload = m.registry_payload()

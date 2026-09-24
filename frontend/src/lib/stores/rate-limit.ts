@@ -1,19 +1,19 @@
 /**
  * Usage-limits store — per-INSTALL buckets of Claude subscription usage.
  *
- * The 5-hour usage window is scoped to a Claude ACCOUNT, and in a clustered
- * deployment (primary + worker sharing one Postgres) each install is logged into
- * a DIFFERENT account. A session can be offloaded to the worker, so the usage a
- * viewer cares about is the usage of the install that actually RUNS the viewed
- * session — not necessarily the local install's account. This store therefore
+ * The usage windows belong to whichever Claude login an install's CLI uses, and
+ * in a clustered deployment (primary + worker sharing one Postgres) each install
+ * may be signed in differently. A session can be offloaded to the worker, so the
+ * usage a viewer cares about is the usage of the install that actually RUNS the
+ * viewed session — not necessarily the local install's. This store therefore
  * keeps one `UsageBucket` PER install (keyed by `instance_id`) rather than a
  * single global window set. The widget resolves which bucket to show from the
  * currently viewed/composed session (see `usage-target.ts`).
  *
  * Fed by BOTH:
- *   1. A polled snapshot (`usage_snapshot` WS event + the REST `/usage/limits`
- *      endpoint) — authoritative full sets of windows per install, from the
- *      backend usage poller. Utilization is already 0–100 percent. The modern
+ *   1. A snapshot (`usage_snapshot` WS event + the REST `/usage/limits`
+ *      endpoint) — the windows each install's CLI has reported so far, as the
+ *      backend persisted them. Utilization is already 0–100 percent. The modern
  *      payload carries a `snapshots` array (one entry per install) plus
  *      `self_instance_id`; a legacy payload carries only top-level windows for
  *      the LOCAL install, which we fold into a self bucket.
@@ -48,24 +48,15 @@ export interface UsageWindow {
 	source: 'poll' | 'live';
 }
 
-/**
- * One install's usage snapshot: its window set plus who/where it belongs to.
- * `accountId`/`accountEmail` identify the Claude account so the popover can
- * dedupe two installs that happen to share one account.
- */
+/** One install's usage snapshot: its window set plus where it belongs. */
 export interface UsageBucket {
 	/** Keyed by window type. */
 	windows: Record<string, UsageWindow>;
 	/** Epoch ms the backend last fetched this install's usage (staleness). */
 	fetchedAt: number | null;
-	/** Whether this install currently has a usable Claude credential. */
+	/** Whether this install's CLI has reported any usage window yet. */
 	available: boolean;
-	accountId?: string | null;
-	accountEmail?: string | null;
-	accountName?: string | null;
 	deviceName?: string | null;
-	/** Claude subscription tier of that install's account (e.g. `'max'`). */
-	planType?: string | null;
 	/** Owning install seen recently (heartbeat). null = unknown. */
 	online?: boolean | null;
 	/** Monotonic generation tag from the backend for THIS install (see below). */
@@ -179,15 +170,6 @@ export interface SnapshotInstance {
 	instance_id: string;
 	device_name?: string | null;
 	online?: boolean | null;
-	account_id?: string | null;
-	account_email?: string | null;
-	account_name?: string | null;
-	/**
-	 * Claude subscription tier for that install's account, joined from
-	 * `claude_accounts.subscription_type`. Null when the install has no account
-	 * row or its plan isn't known yet.
-	 */
-	plan_type?: string | null;
 	windows: SnapshotWindow[];
 	/** Epoch MILLISECONDS (the legacy top-level `fetched_at` is seconds). */
 	fetched_at?: number | null;
@@ -702,11 +684,7 @@ export const rateLimit = {
 					staleByInstance[key] = false;
 
 					const meta = {
-						accountId: entry.account_id ?? null,
-						accountEmail: entry.account_email ?? null,
-						accountName: entry.account_name ?? null,
 						deviceName: entry.device_name ?? null,
-						planType: entry.plan_type ?? null,
 						online: entry.online ?? null,
 						generation: gen ?? null,
 						fetchedAt: entry.fetched_at ?? null,

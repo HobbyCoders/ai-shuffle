@@ -5,8 +5,8 @@ The user-provided `anthropic_api_key` is stored encrypted in `system_settings`
 via `settings_crypto.set_encrypted_api_key`. It is an **authentication
 credential for Claude Code** — when set, it is injected as `ANTHROPIC_API_KEY`
 into every Claude Code subprocess (see
-`app.core.environment.inject_claude_code_auth`), overriding the connected
-Claude account / OAuth credentials. When unset, the OAuth account is used.
+`app.core.environment.inject_claude_code_auth`), overriding the Claude Code
+CLI's own login. When unset, the CLI uses its own login.
 
 This module only validates the key when the user sets it (the Settings
 endpoint calls `validate_api_key`). There is no longer a direct-HTTP

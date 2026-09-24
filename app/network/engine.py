@@ -989,6 +989,12 @@ def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, resu
 
 
 def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
+    if env.collection in policy.RETIRED_COLLECTIONS:
+        # A peer on an older build still publishes a collection this build
+        # retired: consume the op (the watermark moves) but never store,
+        # materialize or forward it.
+        store.observe_clock(cursor, env.clock)
+        return "applied"
     coll = policy.collection(env.collection) if env.collection in policy.COLLECTIONS else None
     if coll is None:
         # Unknown collection (newer peer): keep the op for forwarding, skip materialization.
@@ -1334,14 +1340,22 @@ def snapshot_manifest(*, ctx: Optional[NetworkContext] = None) -> dict:
 
 def snapshot_chunk(collection: str, offset: int = 0, *, ctx: Optional[NetworkContext] = None,
                    limit: int = SNAPSHOT_CHUNK, _conn=None) -> dict:
-    """One signed, encrypted page of a collection's current records."""
+    """One signed, encrypted page of a collection's current records.
+
+    A retired collection always yields one empty final page, for joiners on
+    older builds that still expect it.
+    """
     ctx = ctx or require_context()
-    coll = policy.collection(collection)
+    retired = collection in policy.RETIRED_COLLECTIONS
+    coll = None if retired else policy.collection(collection)
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sync_records WHERE collection = %s ORDER BY record_id LIMIT %s OFFSET %s",
-                       (collection, limit + 1, offset))
-        versions = [dict(r) for r in cursor.fetchall()]
+        if retired:
+            versions = []
+        else:
+            cursor.execute("SELECT * FROM sync_records WHERE collection = %s ORDER BY record_id LIMIT %s OFFSET %s",
+                           (collection, limit + 1, offset))
+            versions = [dict(r) for r in cursor.fetchall()]
         more = len(versions) > limit
         versions = versions[:limit]
         items = []
@@ -1392,9 +1406,15 @@ def open_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext) -> dic
 
 def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None = None,
                          _conn=None, validated_membership: bool = False) -> int:
-    """Apply a chunk: records newer than what we hold replace ours (LWW by clock)."""
+    """Apply a chunk: records newer than what we hold replace ours (LWW by clock).
+
+    A page for a collection this build does not know (retired here, or added
+    by a newer peer) is verified and skipped: it applies nothing.
+    """
     ctx = ctx or require_context()
     body = open_snapshot_chunk(chunk, ctx=ctx)
+    if body["collection"] not in policy.COLLECTIONS:
+        return 0
     coll = policy.collection(body["collection"])
     applied = 0
     touched: list[tuple[str, str, str]] = []

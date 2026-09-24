@@ -238,20 +238,21 @@ def is_encrypted(value: str) -> bool:
 # change requires re-encrypting EVERY ``enc:``-prefixed value under a key derived
 # from the new password, or those values become permanently undecryptable.
 #
-# The app Fernet-encrypts values in EIGHT storage locations (all sharing the same
+# The app Fernet-encrypts values in SEVEN storage locations (all sharing the same
 # admin-password-derived key and ``enc:`` prefix):
 #   1. ``system_settings.value``           — e.g. fal_api_key, anthropic_api_key
 #      (plus any orphaned/legacy keys such as cloud_install_api_key).
 #   2. ``automations.triggers`` / ``trigger_config`` (JSONB) — webhook secrets.
 #   3. ``connectors.config`` (JSONB)       — bot tokens / access tokens.
 #   4. ``api_user_credentials.encrypted_value``.
-#   5. (retired) ``claude_accounts.credentials`` — no longer re-keyed; the
-#      table is dropped by its schema cleanup.
-#   6. ``model_providers.auth_token``      — gateway key per model provider.
-#   7. ``model_providers.codex_access_token``  — Codex/ChatGPT OAuth access token.
-#   8. ``model_providers.codex_refresh_token`` — Codex/ChatGPT OAuth refresh token.
+#   5. ``model_providers.auth_token``      — gateway key per model provider.
+#   6. ``model_providers.codex_access_token``  — Codex/ChatGPT OAuth access token.
+#   7. ``model_providers.codex_refresh_token`` — Codex/ChatGPT OAuth refresh token.
 #
-# (7 and 8 are the phase-2 Codex OAuth bundle, stored 1:1 on the provider row —
+# No Claude credential is stored anywhere (the ``claude_accounts`` table was
+# dropped in schema v89).
+#
+# (6 and 7 are the phase-2 Codex OAuth bundle, stored 1:1 on the provider row —
 # plan amendment A1. Missing either from the re-key plan would brick stored Codex
 # tokens on a password change, exactly the failure class the auth_token entry
 # already guards against.)
@@ -265,10 +266,10 @@ class ReencryptPlanItem:
     """One value to re-encrypt, with enough context to write it back.
 
     ``kind`` is one of: ``"system_setting"``, ``"automation"``, ``"connector"``,
-    ``"credential"``, ``"claude_account"``, ``"model_provider"``,
+    ``"credential"``, ``"model_provider"``,
     ``"model_provider_codex_access"``, ``"model_provider_codex_refresh"``.
     ``ref`` identifies the row (setting key, automation id, connector id,
-    (api_user_id, credential_type) tuple, claude_account id, or
+    (api_user_id, credential_type) tuple, or
     model_provider id — the three model_provider kinds all key by
     model_provider id but each writes back a different token column). ``label``
     is a
@@ -519,10 +520,9 @@ def re_encrypt_all_secrets(old_password: str, new_password: str, db_module) -> b
     Re-encrypt ALL at-rest secrets under a new admin password.
     Called when the admin changes their password.
 
-    Discovers every ``enc:``-prefixed value across all eight storage locations
+    Discovers every ``enc:``-prefixed value across all seven storage locations
     (system_settings, automations triggers/trigger_config, connectors config,
-    api_user_credentials, claude_accounts credentials, model_providers
-    auth_token, and the model_providers Codex OAuth blobs codex_access_token /
+    api_user_credentials, model_providers auth_token, and the model_providers Codex OAuth blobs codex_access_token /
     codex_refresh_token) — see :func:`build_reencryption_plan` — rather than a
     hardcoded name list. FAILS CLOSED: if ANY discovered value cannot be
     decrypted with the old key, every failure is logged (by table+id, never the

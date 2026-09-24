@@ -123,7 +123,6 @@ describe('rateLimit.applySnapshot — modern (per-install snapshots)', () => {
 				{
 					instance_id: 'primary',
 					device_name: 'Studio',
-					account_email: 'a@example.com',
 					available: true,
 					fetched_at: Date.now(),
 					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
@@ -131,7 +130,6 @@ describe('rateLimit.applySnapshot — modern (per-install snapshots)', () => {
 				{
 					instance_id: 'worker',
 					device_name: 'Worker',
-					account_email: 'b@example.com',
 					available: true,
 					fetched_at: Date.now(),
 					windows: [{ type: 'five_hour', utilization: 88, resets_at: future() }],
@@ -299,14 +297,12 @@ describe('rateLimit.applySnapshot — non-destructive legacy fold on a modern st
 				{
 					instance_id: 'primary',
 					device_name: 'Studio',
-					account_email: 'a@example.com',
 					available: true,
 					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
 				},
 				{
 					instance_id: 'worker',
 					device_name: 'Worker',
-					account_email: 'b@example.com',
 					available: true,
 					windows: [{ type: 'five_hour', utilization: 88, resets_at: future() }],
 				},
@@ -328,7 +324,6 @@ describe('rateLimit.applySnapshot — non-destructive legacy fold on a modern st
 		const self = resolveBucket(rateLimit.current, null)!;
 		expect(self.windows.five_hour.utilization).toBe(7);
 		expect(self.deviceName).toBe('Studio');
-		expect(self.accountEmail).toBe('a@example.com');
 		expect(rateLimit.current.buckets['worker'].windows.five_hour.utilization).toBe(88);
 	});
 
@@ -769,9 +764,9 @@ describe('rateLimit.applySnapshot — usage source metadata', () => {
 		let state: ClaudeUsageSourceState | undefined;
 		const unsubscribe = claudeUsageSource.subscribe((value) => (state = value));
 		rateLimit.applySnapshot({ windows: [], available: true, attempted_at: 12.5, last_error_kind: 'timeout',
-			claude_source: { id: 'claude_oauth_usage', label: 'Claude', scope: 'subscription', scope_label: 's',
-				measure: 'subscription_allowance', measure_label: 'Subscription allowance', collection: 'polled',
-				support: 'unofficial_subscription', support_label: 'Unofficial', dashboard_url: 'https://claude.ai/' } });
+			claude_source: { id: 'claude_rate_limit_events', label: 'Claude', scope: 'subscription', scope_label: 's',
+				measure: 'subscription_allowance', measure_label: 'Subscription allowance', collection: 'passive',
+				support: 'response_metadata', support_label: 'Metadata', dashboard_url: 'https://claude.ai/' } });
 		expect(state?.attemptedAt).toBe(12_500);
 		expect(state?.lastErrorKind).toBe('timeout');
 		rateLimit.applySnapshot({ windows: [], available: true });

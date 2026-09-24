@@ -58,8 +58,10 @@ services:
       # Active Fluid settings. Kept separate from every provider import source so
       # preview/apply can remain copy-only and destination conflicts stay visible.
       - fluid-settings:/home/appuser/.fluid
-      # Preserve the historical named volume. Delegated Claude providers may still
-      # use its auth tokens; all other Claude settings here are legacy import input.
+      # The Claude Code CLI's own config directory (historical volume name). Run
+      # `claude auth login` in the AI Shuffle terminal (or
+      # `docker exec -it -u appuser <container> claude auth login`); the CLI keeps
+      # its login here. AI Shuffle never reads your Claude credentials.
       - claude-auth:/home/appuser/.claude
       # Optional external Claude/Codex home (Linux/macOS): mount it read-only with a
       # small override file, then enter /imports/provider-settings in the import dialog:
@@ -168,7 +170,7 @@ volumes:
   # Named volume for active Fluid settings and imported copies.
   fluid-settings:
     driver: local
-  # Historical volume retained for delegated Claude auth and legacy import data.
+  # The Claude Code CLI's config directory (its own login and settings).
   # Do not rename: existing Docker/Unraid installs depend on this volume identity.
   claude-auth:
     driver: local

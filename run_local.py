@@ -343,7 +343,7 @@ def check_claude_cli():
         print_status(f"Claude Code CLI found: {found}", "success")
         return True
     print_status("Claude Code CLI not found", "warning")
-    print_status("  Install it with Anthropic's installer, then sign in with `claude`:", "info")
+    print_status("  Install it with Anthropic's installer, then run `claude auth login`:", "info")
     if sys.platform == "win32":
         print_status("    irm https://claude.ai/install.ps1 | iex   (PowerShell)", "info")
     else:
@@ -365,7 +365,9 @@ def check_claude_auth():
         print_status("Claude Code CLI is signed in", "success")
         return True
     print_status("Claude Code CLI is not signed in", "warning")
-    print_status("  Run `claude auth login` in a terminal, or use an Anthropic API key in Settings", "info")
+    print_status("  Run `claude auth login` in the AI Shuffle terminal (Settings > Providers > Claude Code CLI)", "info")
+    print_status("  or any terminal on this machine, or add an Anthropic API key in Settings.", "info")
+    print_status("  AI Shuffle never reads your Claude credentials.", "info")
     return False
 
 

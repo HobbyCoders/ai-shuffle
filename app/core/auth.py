@@ -232,7 +232,8 @@ class AuthService:
                 "1. Sign in from Settings > Providers > Claude Code CLI, or open a terminal where AI Shuffle runs",
                 "2. Run: claude auth login (Docker: docker exec -it -u appuser <container> claude auth login)",
                 "3. Open the link it prints and sign in on Anthropic's page",
-                "4. Return here and check again"
+                "4. Return here and check again",
+                "AI Shuffle never reads your Claude credentials."
             ],
             "command": "claude auth login"
         }

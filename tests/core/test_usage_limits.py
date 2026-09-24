@@ -2,129 +2,20 @@
 Tests for the Claude usage-limits monitor (app/core/usage_limits.py).
 
 Covers:
-  * parse_usage_response — the real endpoint shape, the used → remaining flip
-    every reading goes through, the scoped-Fable window that only appears in the
-    ``limits`` array, overage from ``extra_usage``, and malformed/missing fields.
-  * UsageLimitsMonitor.fetch — happy path, missing credential (graceful empty),
-    HTTP error and network error (keep last snapshot, warn once).
+  * UsageLimitsMonitor.fetch — makes no request; keeps live windows.
   * apply_live_event — update an existing window vs append a new one, and the
     used → remaining flip that keeps live events on the snapshot's convention.
-  * get_snapshot — on-demand fetch when stale.
+  * get_snapshot — background refresh when stale.
 """
 
-import logging
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.core import usage_limits
 from app.core.config import settings
-from app.core.usage_limits import (
-    UsageLimitsMonitor,
-    parse_usage_response,
-)
-
-
-# Trimmed copy of a real ``GET /api/oauth/usage`` 200 response.
-REAL_RESPONSE = {
-    "five_hour": {"utilization": 12.0, "resets_at": "2026-07-09T05:00:00+00:00"},
-    "seven_day": {"utilization": 17.0, "resets_at": "2026-07-13T23:00:00+00:00"},
-    "seven_day_opus": None,
-    "seven_day_sonnet": None,
-    "seven_day_overage_included": None,
-    "extra_usage": {"is_enabled": False, "utilization": None},
-    "limits": [
-        {"kind": "session", "percent": 12, "resets_at": "2026-07-09T05:00:00+00:00", "scope": None},
-        {"kind": "weekly_all", "percent": 17, "resets_at": "2026-07-13T23:00:00+00:00", "scope": None},
-        {
-            "kind": "weekly_scoped",
-            "percent": 24,
-            "resets_at": "2026-07-13T23:00:00+00:00",
-            "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None},
-        },
-    ],
-}
-
-
-# ---------------------------------------------------------------------------
-# parse_usage_response
-# ---------------------------------------------------------------------------
-
-class TestParse:
-    def test_parses_top_level_and_scoped_fable(self):
-        windows = parse_usage_response(REAL_RESPONSE)
-        by_type = {w["type"]: w for w in windows}
-
-        # The endpoint reports percent USED; the snapshot carries REMAINING.
-        assert by_type["five_hour"]["utilization"] == 88.0  # 12% used
-        assert by_type["five_hour"]["resets_at"] == "2026-07-09T05:00:00+00:00"
-        assert by_type["seven_day"]["utilization"] == 83.0  # 17% used
-        # Fable weekly limit only exists in the limits[] array (weekly_scoped)
-        # and must be surfaced as seven_day_overage_included.
-        assert by_type["seven_day_overage_included"]["utilization"] == 76.0  # 24% used
-
-    def test_converts_used_percent_to_remaining(self):
-        # A window barely touched (1% used) must read as 99% LEFT, not 1% —
-        # the bug this conversion fixes (a window that had just reset showed 0).
-        windows = parse_usage_response({"five_hour": {"utilization": 1.0, "resets_at": None}})
-        assert windows[0]["utilization"] == 99.0
-
-        # A freshly reset window (0% used) is fully available.
-        assert parse_usage_response({"five_hour": {"utilization": 0.0}})[0]["utilization"] == 100.0
-        # An exhausted window has nothing left.
-        assert parse_usage_response({"five_hour": {"utilization": 100.0}})[0]["utilization"] == 0.0
-        # Out-of-range readings clamp instead of producing a negative remainder.
-        assert parse_usage_response({"five_hour": {"utilization": 140.0}})[0]["utilization"] == 0.0
-        assert parse_usage_response({"five_hour": {"utilization": -5.0}})[0]["utilization"] == 100.0
-
-    def test_limits_array_percent_is_also_converted(self):
-        data = {"limits": [{"kind": "session", "percent": 30, "resets_at": "y", "scope": None}]}
-        windows = parse_usage_response(data)
-        assert windows[0]["utilization"] == 70.0
-
-    def test_top_level_wins_over_limits_array(self):
-        data = {
-            "five_hour": {"utilization": 40.0, "resets_at": "x"},
-            "limits": [{"kind": "session", "percent": 5, "resets_at": "y", "scope": None}],
-        }
-        windows = parse_usage_response(data)
-        by_type = {w["type"]: w for w in windows}
-        assert by_type["five_hour"]["utilization"] == 60.0  # 40% used, not the limits[] 5
-
-    def test_overage_from_extra_usage_when_enabled(self):
-        data = {"extra_usage": {"is_enabled": True, "utilization": 8.0}}
-        windows = parse_usage_response(data)
-        by_type = {w["type"]: w for w in windows}
-        assert by_type["overage"]["utilization"] == 92.0  # 8% used
-
-    def test_extra_usage_disabled_is_omitted(self):
-        data = {"extra_usage": {"is_enabled": False, "utilization": None}}
-        assert parse_usage_response(data) == []
-
-    def test_null_and_missing_blocks_are_skipped(self):
-        data = {
-            "five_hour": None,
-            "seven_day": {"utilization": None, "resets_at": "z"},
-            "seven_day_opus": {"utilization": 3.0, "resets_at": "w"},
-        }
-        windows = parse_usage_response(data)
-        assert [w["type"] for w in windows] == ["seven_day_opus"]
-
-    def test_empty_and_malformed_do_not_raise(self):
-        assert parse_usage_response({}) == []
-        assert parse_usage_response({"limits": "not-a-list"}) == []
-        assert parse_usage_response({"limits": [None, 5, {"kind": "weird"}]}) == []
-        # A non-numeric utilization is dropped, not fatal.
-        assert parse_usage_response({"five_hour": {"utilization": "oops"}}) == []
-
-    def test_output_ordered_by_known_types(self):
-        data = {
-            "seven_day": {"utilization": 1.0},
-            "five_hour": {"utilization": 2.0},
-        }
-        windows = parse_usage_response(data)
-        # five_hour precedes seven_day per KNOWN_WINDOW_TYPES ordering.
-        assert [w["type"] for w in windows] == ["five_hour", "seven_day"]
+from app.core.usage_limits import UsageLimitsMonitor
 
 
 # ---------------------------------------------------------------------------
@@ -136,37 +27,22 @@ class TestFetchWithoutToken:
 
     @pytest.mark.asyncio
     async def test_refresh_makes_no_request_and_keeps_live_windows(self, monitor):
-        with patch("app.core.usage_limits.httpx.AsyncClient") as client:
-            monitor.apply_live_event("five_hour", 0.25, None)
-            snap = await monitor.fetch()
-        client.assert_not_called()
+        monitor.apply_live_event("five_hour", 0.25, None)
+        snap = await monitor.fetch()
         assert snap["available"] is True
         assert snap["windows"][0]["type"] == "five_hour"
 
     @pytest.mark.asyncio
     async def test_refresh_without_live_windows_is_unavailable(self, monitor):
-        with patch("app.core.usage_limits.httpx.AsyncClient") as client:
-            snap = await monitor.fetch()
-        client.assert_not_called()
+        snap = await monitor.fetch()
         assert snap["available"] is False and snap["windows"] == []
+        # Nothing was attempted upstream, so no attempt or error is reported.
+        assert snap["attempted_at"] is None and snap["last_error_kind"] is None
 
-def _fake_httpx(status_code=200, json_body=None, raise_exc=None):
-    """Build a patch target for httpx.AsyncClient used as an async ctx manager."""
-    resp = MagicMock()
-    resp.status_code = status_code
-    resp.json.return_value = json_body or {}
-
-    client = MagicMock()
-    if raise_exc is not None:
-        client.get = AsyncMock(side_effect=raise_exc)
-    else:
-        client.get = AsyncMock(return_value=resp)
-
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=client)
-    ctx.__aexit__ = AsyncMock(return_value=False)
-    return MagicMock(return_value=ctx)
-
+    def test_no_oauth_usage_endpoint_or_parser_remains(self):
+        for name in ("USAGE_ENDPOINT", "_OAUTH_BETA_HEADER", "parse_usage_response",
+                     "httpx", "schedule_usage_refresh"):
+            assert not hasattr(usage_limits, name), name
 
 @pytest.fixture
 def monitor():
@@ -193,17 +69,6 @@ class TestGenerationGuard:
         assert fresh.current_generation() >= int(time.time()) - 5
         # Strictly greater than any plausible pre-restart bump counter.
         assert fresh.current_generation() > 1_000_000
-
-    def test_bump_generation_strictly_increases(self, monitor):
-        g0 = monitor.current_generation()
-        g1 = monitor.bump_generation()
-        assert g1 > g0
-        assert monitor.current_generation() == g1
-        assert monitor._snapshot()["generation"] == g1
-        # Monotonic across repeated bumps and never behind the epoch clock.
-        g2 = monitor.bump_generation()
-        assert g2 > g1
-        assert g2 >= int(time.time()) - 5
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +131,8 @@ class TestPersistence:
         assert rows[0]["instance_id"] == settings.effective_instance_id
         assert rows[0]["available"] is False
         assert rows[0]["windows"] == []
-        # Legacy single-account/API-key mode → no account metadata.
-        assert rows[0]["account_id"] is None
+        # Snapshots carry no Claude account identity.
+        assert not any(k.startswith("account_") for k in rows[0])
 
     @pytest.mark.asyncio
     async def test_apply_live_event_and_broadcast_persists(self, monitor, mock_db):

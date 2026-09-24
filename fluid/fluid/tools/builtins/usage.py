@@ -87,10 +87,6 @@ def _payload(raw: Any) -> dict[str, Any]:
         accounts.append({
             "instance_id": account.get("instance_id"),
             "device_name": account.get("device_name"),
-            "account_id": account.get("account_id"),
-            "account_email": account.get("account_email"),
-            "account_name": account.get("account_name"),
-            "plan_type": account.get("plan_type"),
             "available": bool(account.get("available")),
             "source": "cached_host_snapshot",
             "freshness": _freshness(account_fetched_at, available=bool(account.get("available"))),

@@ -1,6 +1,6 @@
 """API tests for the model-provider registry router.
 
-Mirrors ``tests/api/test_claude_accounts.py``: unauthenticated rejection for
+Unauthenticated rejection for
 every route, then CRUD/behavior against ``authenticated_client``. Extra focus
 on the token-secrecy contract (Chunk 2 of docs/MULTI_PROVIDER_PLAN.md):
 ``auth_token`` must never appear in any response body, ``auth_token_set`` /
@@ -175,7 +175,7 @@ class TestCreate:
         assert resp.status_code in (400, 422), resp.text
 
     def test_create_token_without_encryption_ready_400(self, authenticated_client, mock_db):
-        # Encryption locked (mirrors test_claude_accounts's encryption_locked case) →
+        # Encryption locked →
         # storing a token must fail loudly rather than silently persisting plaintext.
         encryption.clear_encryption_key()
         resp = authenticated_client.post(ROOT, json={

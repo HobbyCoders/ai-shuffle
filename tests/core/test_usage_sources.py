@@ -85,7 +85,7 @@ def test_every_source_has_a_complete_capability_definition():
 
 
 def test_subscription_endpoints_are_labeled_unofficial():
-    for source_id in ("claude_oauth_usage", "grok_subscription", "codex_headers"):
+    for source_id in ("grok_subscription", "codex_headers"):
         source = usage_sources.SOURCES[source_id]
         assert source.subscription_specific
         assert source.public()["support_label"] == "Unofficial, subscription-specific endpoint"
@@ -99,7 +99,7 @@ def test_measures_distinguish_spend_credit_allowance_and_rate_limits():
     assert measure["openrouter_key"] == usage_sources.REPORTED_SPEND
     assert measure["openrouter_credits"] == usage_sources.MONETARY_CREDIT
     assert measure["fal_billing"] == usage_sources.MONETARY_CREDIT
-    assert measure["claude_oauth_usage"] == usage_sources.SUBSCRIPTION_ALLOWANCE
+    assert measure["claude_rate_limit_events"] == usage_sources.SUBSCRIPTION_ALLOWANCE
     assert measure["grok_subscription"] == usage_sources.SUBSCRIPTION_ALLOWANCE
     assert measure["openai_headers"] == usage_sources.RATE_LIMIT
     assert "prepaid credit balance" in usage_sources.SOURCES["openai_admin"].unavailable
@@ -324,7 +324,18 @@ async def test_passive_headers_are_labeled_by_the_row_source(provider_type, base
 def test_passive_snapshot_type_defaults():
     assert usage_sources.passive_snapshot_type(None, codex_backend=True) == "chatgpt"
     assert usage_sources.passive_snapshot_type(None, codex_backend=False) == "openai"
-    assert urlsplit(usage_sources.SOURCES["claude_oauth_usage"].endpoints[0].url).path == "/api/oauth/usage"
+
+
+def test_claude_usage_comes_only_from_the_cli_stream():
+    claude = [s for s in usage_sources.SOURCES.values() if s.snapshot_type == "claude"]
+    assert [s.id for s in claude] == ["claude_rate_limit_events"]
+    source = claude[0]
+    assert source.collection == usage_sources.PASSIVE and not source.endpoints and source.poller is None
+    assert source.dashboard_url == "https://claude.ai/settings/usage"
+    assert not hasattr(usage_sources, "CLAUDE_OAUTH_USAGE_URL")
+    for s in usage_sources.SOURCES.values():
+        for endpoint in s.endpoints:
+            assert "anthropic.com" not in (urlsplit(endpoint.url).hostname or "")
 
 
 def test_matrix_is_json_safe():

@@ -52,12 +52,6 @@ def seed():
         config={'bot_token': enc('connector-secret')}, events=[])
     db.create_api_user(user_id='u', name='u', api_key_hash='hash')
     db.set_user_credential('u', 'github_token', enc('integration-secret'))
-    # The retired claude_accounts table stays until its schema cleanup.
-    with db.get_db() as conn:
-        conn.cursor().execute(
-            "INSERT INTO claude_accounts (id, name, credentials, credential_fingerprint, expires_at,"
-            " has_refresh_token, sync_pending) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            ('claude', 'Claude', enc('claude-secret'), 'unchanged', 123, True, False))
     db.create_model_provider(provider_id='p', name='p', provider_type='custom',
         base_url='https://example.com', auth_token=enc('provider-secret'))
     db.set_codex_token_bundle('p', access_token=enc('oauth-access'), refresh_token=enc('oauth-refresh'),
@@ -86,7 +80,7 @@ def test_adopts_every_legacy_store_without_rewriting_ciphertext_or_metadata():
     before = stored_values()
     old_key = encryption._encryption_key
     provider = db.get_model_provider('p', include_token=True)
-    assert len(before) == 9  # eight locations; both automation columns
+    assert len(before) == 8  # seven locations; both automation columns
     assert encryption.initialize_server_key(db, PASSWORD)
     assert encryption._encryption_key == old_key
     assert stored_values() == before
@@ -96,7 +90,7 @@ def test_adopts_every_legacy_store_without_rewriting_ciphertext_or_metadata():
     assert encryption.initialize_server_key(db)
     assert {encryption.decrypt_value(value) for value in before} == {
         'settings-secret', 'old-trigger', 'new-trigger', 'connector-secret', 'integration-secret',
-        'claude-secret', 'provider-secret', 'oauth-access', 'oauth-refresh'}
+        'provider-secret', 'oauth-access', 'oauth-refresh'}
 
 
 def test_empty_encrypted_plaintext_is_valid_during_adoption_and_restart():
@@ -330,7 +324,7 @@ assert 'ADMIN_PASSWORD' not in os.environ
 assert encryption.initialize_server_key(database)
 with database.get_db() as conn:
     values=credential_keys._encrypted_values(conn.cursor())
-assert len(values)==9
+assert len(values)==8
 assert all(encryption.decrypt_value(v) for v in values)
 print('fresh-process-recovery-ok')
 '''

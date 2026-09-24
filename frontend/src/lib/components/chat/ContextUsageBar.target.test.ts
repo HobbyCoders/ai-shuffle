@@ -50,14 +50,12 @@ function twoInstallSnapshot() {
 			{
 				instance_id: 'primary',
 				device_name: 'Studio',
-				account_email: 'a@example.com',
 				available: true,
 				windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
 			},
 			{
 				instance_id: 'worker',
 				device_name: 'Worker',
-				account_email: 'b@example.com',
 				available: true,
 				windows: [{ type: 'five_hour', utilization: 88, resets_at: future() }],
 			},
@@ -152,14 +150,27 @@ describe('ContextUsageBar — resolved target', () => {
 		expect(container.textContent).not.toContain('88%');
 	});
 
-	it('keeps a configured remote account visible when usage is unavailable', async () => {
+	it('hides the Claude section for a remote install whose CLI has reported no usage', async () => {
+		// Snapshots carry no account identity, so an empty remote bucket is not
+		// proof that the worker is signed in to Claude.
 		rateLimit.applySnapshot({ available: false, windows: [], self_instance_id: 'primary', snapshots: [
-			{ instance_id: 'worker', account_id: 'claude-account', available: false, windows: [] },
+			{ instance_id: 'worker', available: false, windows: [] },
+		] });
+		setTarget('worker');
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.section-device')).toBeNull();
+		expect(container.textContent).not.toContain('No usage data yet');
+	});
+
+	it('shows a remote install once its CLI has reported a window', async () => {
+		rateLimit.applySnapshot({ available: false, windows: [], self_instance_id: 'primary', snapshots: [
+			{ instance_id: 'worker', available: true, windows: [{ type: 'five_hour', utilization: 40, resets_at: null }] },
 		] });
 		setTarget('worker');
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
-		expect(container.textContent).toContain('No usage data yet');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('40% left');
 	});
 });

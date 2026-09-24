@@ -48,7 +48,7 @@ def test_no_refresh_call_sites_remain():
         assert "ensure_fresh_credentials" not in text, rel
         assert "sync_back_active_account" not in text, rel
         assert "seed_from_credentials_file" not in text, rel
-    for rel in ("app/core/cli_bridge.py", "app/api/auth.py", "run_local.py"):
+    for rel in ("app/core/cli_bridge.py", "app/api/auth.py", "run_local.py", "entrypoint.sh", ".env.example"):
         assert ".credentials.json" not in (ROOT / rel).read_text(), rel
 
 
@@ -129,7 +129,10 @@ def test_logout_clears_the_relogin_notice(monkeypatch, cli_home, mock_db):
     from app.core import claude_relogin_notice as notice
     from app.core.auth import AuthService
     from app.db import database as db
+    from app.db.base import get_db
     db.set_system_setting("claude_active_account:old", "acct")
+    with get_db() as conn:
+        db._retire_claude_accounts(conn.cursor())
     assert notice.mark_if_needed() is True
     monkeypatch.setattr(cs, "probe", lambda resolver=None: _status(True))
     monkeypatch.setattr("app.core.auth.subprocess.run",

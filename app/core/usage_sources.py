@@ -183,7 +183,6 @@ def _is_openrouter_row(row: Mapping[str, Any] | None) -> bool:
 # The registry
 # ---------------------------------------------------------------------------
 
-CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
 OPENAI_ADMIN_BASE = "https://api.openai.com/v1/organization"
 FAL_BILLING_URL = "https://api.fal.ai/v1/account/billing?expand=credits"
@@ -316,20 +315,6 @@ _SOURCES: tuple[UsageSource, ...] = (
         endpoints=(Endpoint(FAL_BILLING_URL, 300),),
         poller="_poll_fal",
         global_source=True,
-    ),
-    UsageSource(
-        id="claude_oauth_usage",
-        snapshot_type="claude",
-        label="Claude subscription usage endpoint",
-        credential="Claude subscription sign-in (OAuth) of the active account",
-        scope="subscription",
-        scope_label="Active Claude account's plan usage windows; not API credit",
-        measure=SUBSCRIPTION_ALLOWANCE,
-        collection=POLLED,
-        support=UNOFFICIAL_SUBSCRIPTION,
-        dashboard_url="https://claude.ai/settings/usage",
-        endpoints=(Endpoint(CLAUDE_OAUTH_USAGE_URL, 300),),
-        unavailable=("Anthropic API spend", "Anthropic API credit balance"),
     ),
     UsageSource(
         id="claude_rate_limit_events",

@@ -1,29 +1,19 @@
 """
 Claude usage-limit monitor.
 
-Fetches authoritative subscription usage from the Claude OAuth usage endpoint
-(``GET https://api.anthropic.com/api/oauth/usage``) using the app's stored
-Claude OAuth credential, normalises every rate-limit window into a compact
-snapshot, caches it in memory, and lets callers broadcast it to connected
-clients as a ``usage_snapshot`` WebSocket event.
+AI Shuffle never reads the Claude Code CLI's credentials, so it does not poll
+any Claude usage endpoint. The only Claude usage source is the ``rate_limit``
+events the running CLI emits in its own stream (``claude_rate_limit_events``
+in ``app.core.usage_sources``): each one refines a single window, which this
+monitor keeps in memory, persists per install and broadcasts to connected
+clients as a ``usage_snapshot`` WebSocket event. The full picture lives on the
+user's own usage page (https://claude.ai/settings/usage), which the usage
+widget links to.
 
-Two data sources feed the frontend's per-window store (both are defined in
-``app.core.usage_sources``):
-  1. This poller's snapshot (all windows at once, at most every ~5 min). The
-     OAuth usage endpoint is an unofficial, subscription-specific endpoint.
-  2. Live SDK ``rate_limit`` events, which refine a single window as it changes.
-
-Ordinary reads never wait on the upstream endpoint: a stale read returns the
-cached snapshot and starts one shared background refresh. Every refresh goes
-through the durable, cross-worker request budget in ``usage_polling``, and a
-refused credential is not re-probed until the token changes.
-
-Both key on the same window-type strings (``five_hour``, ``seven_day``,
-``seven_day_opus``, ``seven_day_sonnet``, ``seven_day_overage_included``,
-``overage``) so they update the same slot.
-
-Security: the OAuth access token is used only as a Bearer header and is NEVER
-logged, printed, or included in the snapshot.
+Windows key on the CLI's ``rate_limit_type`` strings (``five_hour``,
+``seven_day``, ``seven_day_opus``, ``seven_day_sonnet``,
+``seven_day_overage_included``, ``overage``). Snapshot utilization is quota
+REMAINING, 0-100.
 """
 
 import asyncio
@@ -32,46 +22,15 @@ import math
 import time
 from typing import Any, Dict, List, Optional
 
-import httpx
-
-from app.core.usage_sources import CLAUDE_OAUTH_USAGE_URL
 from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
-USAGE_ENDPOINT = CLAUDE_OAUTH_USAGE_URL
-# The CLI sends this beta header; the endpoint answers with or without it, but
-# we mirror the CLI to stay forward-compatible.
-_OAUTH_BETA_HEADER = "oauth-2025-04-20"
-
-# Canonical window types, in the order we want them surfaced. These match both
-# the top-level keys in the usage response AND the SDK ``rate_limit`` event's
-# ``rate_limit_type`` values, so a live event updates the same slot.
-KNOWN_WINDOW_TYPES = (
-    "five_hour",
-    "seven_day",
-    "seven_day_opus",
-    "seven_day_sonnet",
-    "seven_day_overage_included",
-    "overage",
-)
-
-# Top-level typed keys carrying ``{utilization, resets_at, ...}`` blocks.
-_TOP_LEVEL_TYPES = (
-    "five_hour",
-    "seven_day",
-    "seven_day_opus",
-    "seven_day_sonnet",
-    "seven_day_overage_included",
-)
-
 # How long a cached snapshot is considered fresh for on-demand REST reads.
 _SNAPSHOT_TTL_SECONDS = 300
 
-# Minimum spacing between background refresh attempts started by ordinary
-# reads. The durable budget already bounds upstream requests; this bounds the
-# token-refresh check and the budget claim (a peer round trip on enrolled
-# workers) that every attempt costs.
+# Minimum spacing between background refreshes (a persist and a broadcast of
+# the in-memory windows) started by ordinary reads.
 _ATTEMPT_SPACING_SECONDS = 60
 
 # Short TTL for the assembled cluster view (peer snapshot rows + installs map).
@@ -81,119 +40,15 @@ _ATTEMPT_SPACING_SECONDS = 60
 _CLUSTER_CACHE_TTL_SECONDS = 4.0
 
 
-def _limit_entry_to_type(entry: Dict[str, Any]) -> Optional[str]:
-    """Map a normalised ``limits[]`` entry to a canonical window type.
-
-    The usage response also carries a UI-oriented ``limits`` array; some windows
-    (notably the scoped Fable weekly limit) only appear there, not as a
-    top-level typed key. We fold those in so nothing is dropped.
-    """
-    kind = entry.get("kind")
-    if kind == "session":
-        return "five_hour"
-    if kind == "weekly_all":
-        return "seven_day"
-    if kind == "weekly_scoped":
-        scope = entry.get("scope") or {}
-        model = ((scope.get("model") or {}).get("display_name") or "").lower()
-        if "opus" in model:
-            return "seven_day_opus"
-        if "sonnet" in model:
-            return "seven_day_sonnet"
-        if "fable" in model:
-            return "seven_day_overage_included"
-    return None
-
-
-def _used_to_remaining(value: Any) -> float:
-    """Convert a raw endpoint percentage into quota REMAINING (0-100).
-
-    ``GET /api/oauth/usage`` reports every window's ``utilization`` (and every
-    ``limits[].percent``) as percent USED — verified live: a weekly window that
-    had reset 34 minutes earlier reported 0. Our snapshot contract is percent
-    REMAINING (the same orientation ``apply_live_event`` flips SDK events into),
-    so flip it here, clamped to 0-100.
-
-    Raises TypeError/ValueError on a non-numeric input, which callers already
-    treat as "drop this window".
-    """
-    used = float(value)
-    return 100.0 - max(0.0, min(100.0, used))
-
-
-def parse_usage_response(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Normalise the raw usage payload into a list of window dicts.
-
-    Each window: ``{"type": str, "utilization": float, "resets_at": str|None}``.
-    ``utilization`` is a percentage (0-100) of quota REMAINING — the endpoint
-    reports percent USED, so every reading is flipped on the way in (see
-    ``_used_to_remaining``). Windows with no reading are omitted.
-    """
-    windows: Dict[str, Dict[str, Any]] = {}
-
-    # 1. Top-level typed keys (authoritative float utilization).
-    for wtype in _TOP_LEVEL_TYPES:
-        block = data.get(wtype)
-        if isinstance(block, dict) and block.get("utilization") is not None:
-            try:
-                windows[wtype] = {
-                    "type": wtype,
-                    "utilization": _used_to_remaining(block["utilization"]),
-                    "resets_at": block.get("resets_at"),
-                }
-            except (TypeError, ValueError):
-                continue
-
-    # 2. ``limits`` array — fills gaps (e.g. scoped Fable weekly limit).
-    for entry in data.get("limits") or []:
-        if not isinstance(entry, dict):
-            continue
-        wtype = _limit_entry_to_type(entry)
-        if not wtype or wtype in windows:
-            continue
-        pct = entry.get("percent")
-        if pct is None:
-            continue
-        try:
-            windows[wtype] = {
-                "type": wtype,
-                "utilization": _used_to_remaining(pct),
-                "resets_at": entry.get("resets_at"),
-            }
-        except (TypeError, ValueError):
-            continue
-
-    # 3. Overage / extra usage (only when actually enabled).
-    extra = data.get("extra_usage") or {}
-    if isinstance(extra, dict) and extra.get("is_enabled") and extra.get("utilization") is not None:
-        try:
-            windows["overage"] = {
-                "type": "overage",
-                "utilization": _used_to_remaining(extra["utilization"]),
-                "resets_at": None,
-            }
-        except (TypeError, ValueError):
-            pass
-
-    # Order windows by KNOWN_WINDOW_TYPES, then any extras alphabetically.
-    ordered = [windows[t] for t in KNOWN_WINDOW_TYPES if t in windows]
-    ordered += [w for k, w in sorted(windows.items()) if k not in KNOWN_WINDOW_TYPES]
-    return ordered
-
-
 class UsageLimitsMonitor:
-    """In-memory holder + fetcher for the latest Claude usage snapshot."""
+    """In-memory holder for the latest Claude usage windows the CLI reported."""
 
     def __init__(self) -> None:
         self._windows: List[Dict[str, Any]] = []
         self._fetched_at: float = 0.0
         self._available: bool = False
-        # Log endpoint failures at WARNING only once per failure streak.
-        self._warned: bool = False
-        # Monotonic tag on every snapshot. Bumped when the active account
-        # switches so an in-flight poll (started against the OLD account) can be
-        # detected and discarded instead of overwriting the new account's data,
-        # and so clients can drop out-of-order snapshots.
+        # Monotonic tag on every snapshot so clients can drop out-of-order
+        # snapshots.
         #
         # Seeded from the epoch clock (NOT 0) so that after a backend restart
         # the very first generation already exceeds anything the previous
@@ -204,36 +59,21 @@ class UsageLimitsMonitor:
         # Short-TTL cache of the assembled cluster view: (expires_at, snapshots).
         # Invalidated on our own persist so local changes are never masked.
         self._cluster_cache: Optional[tuple[float, List[Dict[str, Any]]]] = None
-        # Last upstream attempt (distinct from ``_fetched_at``, the last
-        # success) and why it failed, for the usage API.
+        # Last background refresh; spaces the refreshes ordinary reads start.
         self._attempted_at: float = 0.0
-        self._last_error: str | None = None
-        # Negative capability cache: digest of the token the endpoint refused.
-        self._denied_fingerprint: str | None = None
         self._refresh_task: asyncio.Task | None = None
 
     def current_generation(self) -> int:
-        return self._generation
-
-    def bump_generation(self) -> int:
-        """Invalidate any in-flight fetch and tag future snapshots.
-
-        Called synchronously on a successful account switch. A poll that began
-        before this bump will see its captured generation differ from the
-        current one at commit time and discard its (now-stale) result.
-
-        Strictly increases AND keeps pace with the epoch clock, so generations
-        stay monotonic even across a rapid restart-then-switch sequence.
-        """
-        self._generation = max(self._generation + 1, int(time.time()))
         return self._generation
 
     def _snapshot(self) -> Dict[str, Any]:
         return {
             "windows": list(self._windows),
             "fetched_at": self._fetched_at or None,
-            "attempted_at": self._attempted_at or None,
-            "last_error_kind": self._last_error,
+            # Kept for older clients. Nothing is polled, so there is no
+            # upstream attempt or error to report.
+            "attempted_at": None,
+            "last_error_kind": None,
             "available": self._available,
             "generation": self._generation,
         }
@@ -258,36 +98,17 @@ class UsageLimitsMonitor:
         except Exception:  # noqa: BLE001 — background refresh is best-effort
             logger.debug("Claude usage refresh failed")
 
-    def _resolve_account_meta(self) -> Dict[str, Optional[str]]:
-        """Best-effort {account_id, account_email, account_name} for this install.
-
-        Resolved through ``claude_accounts.resolve_active_account_row()``, which
-        repairs an active pointer left dangling by a cross-install delete. All
-        three fields come back None when there is no account row to name — a
-        legacy single-account / API-key install (no pointer), or a dangle we
-        could not repair. Deliberately all-or-nothing: stamping a snapshot with
-        an account_id that resolves to no email/name only produces unattributable
-        rows in the cluster usage view. Never raises — callers persist Nones on
-        any error.
-        """
-        meta: Dict[str, Optional[str]] = {
-            "account_id": None, "account_email": None, "account_name": None,
-        }
-        # The account table is retired; snapshots carry no account identity.
-        return meta
-
     def _persist_snapshot(self) -> None:
         """Persist this install's snapshot row to the shared DB (best-effort).
 
         Keyed by ``effective_instance_id`` so peers can serve every install's
-        per-account usage. Wrapped so a DB hiccup never breaks the poll or a
+        usage. Wrapped so a DB hiccup never breaks the poll or a
         live-event application. Synchronous psycopg2 — async callers MUST run
         this through ``run_sync`` so it never blocks the event loop.
         """
         try:
             from app.core.config import settings
             from app.db import database as db
-            meta = self._resolve_account_meta()
             fetched_ms = int(self._fetched_at * 1000) if self._fetched_at else None
             db.upsert_usage_snapshot(
                 settings.effective_instance_id,
@@ -295,9 +116,6 @@ class UsageLimitsMonitor:
                 self._available,
                 self._generation,
                 fetched_ms,
-                account_id=meta["account_id"],
-                account_email=meta["account_email"],
-                account_name=meta["account_name"],
             )
             # Our own row changed — drop the cluster cache so the next assembly
             # re-reads and reflects it immediately.
@@ -306,25 +124,21 @@ class UsageLimitsMonitor:
             logger.debug("Usage-snapshot persist skipped: %s", e)
 
     async def fetch(self) -> Dict[str, Any]:
-        """Record a refresh and return the snapshot. Never raises.
+        """Persist the current windows and return the snapshot. Never raises.
 
-        AI Shuffle does not read the Claude CLI's OAuth token, so it no longer
-        calls the OAuth usage endpoint. The Claude windows come only from the
-        rate-limit events the CLI reports in its own stream
-        (``apply_live_event``); a refresh keeps them as they are.
+        Makes no request: the Claude windows come only from the rate-limit
+        events the CLI reports in its own stream (``apply_live_event``).
         """
         self._attempted_at = time.time()
         if not self._windows:
             self._available = False
-            self._last_error = "missing_credentials"
         await run_sync(self._persist_snapshot)
         return self._snapshot()
 
     async def get_snapshot(self, max_age: float = _SNAPSHOT_TTL_SECONDS) -> Dict[str, Any]:
         """Return the cached snapshot; start a background refresh when stale.
 
-        Never waits on the upstream endpoint. Concurrent stale reads share one
-        refresh task, and attempts are spaced by ``_ATTEMPT_SPACING_SECONDS``.
+        Concurrent stale reads share one refresh task, and attempts are spaced by ``_ATTEMPT_SPACING_SECONDS``.
         """
         now = time.time()
         stale = not self._fetched_at or (now - self._fetched_at) > max_age
@@ -344,9 +158,8 @@ class UsageLimitsMonitor:
         clients, and adds:
 
           * ``snapshots`` — one entry per install (self always included), each
-            ``{instance_id, device_name, online, account_id, account_email,
-            account_name, plan_type, windows, fetched_at, available,
-            generation}``.
+            ``{instance_id, device_name, online, windows, fetched_at,
+            available, generation}``.
           * ``self_instance_id`` — this install's ``effective_instance_id``.
 
         Rows whose ``instance_id`` is not in the installs registry are skipped
@@ -390,8 +203,6 @@ class UsageLimitsMonitor:
             logger.debug("Usage cluster snapshot read skipped: %s", e)
             return None
 
-        plans: Dict[Any, Optional[str]] = {}
-
         snapshots: List[Dict[str, Any]] = []
         for row in rows:
             iid = row.get("instance_id")
@@ -403,12 +214,6 @@ class UsageLimitsMonitor:
                 "instance_id": iid,
                 "device_name": install.get("device_name") if install else None,
                 "online": bool(install.get("online")) if install else False,
-                "account_id": row.get("account_id"),
-                "account_email": row.get("account_email"),
-                "account_name": row.get("account_name"),
-                # Subscription tier of THAT install's account (None when the
-                # row carries no account, or its plan isn't known yet).
-                "plan_type": plans.get(row.get("account_id")),
                 "windows": row.get("windows") or [],
                 "fetched_at": row.get("fetched_at"),
                 "available": bool(row.get("available")),
@@ -447,7 +252,7 @@ class UsageLimitsMonitor:
         utilization: Optional[float],
         resets_at: Optional[str],
     ) -> Optional[Dict[str, Any]]:
-        """Refine a single window from a live SDK ``rate_limit`` event (in-memory).
+        """Refine a single window from a live CLI ``rate_limit`` event (in-memory).
 
         Returns the updated snapshot when the reading MATERIALLY changed (i.e.
         needs persist + broadcast), else None — an identical repeat (same type,
@@ -464,13 +269,11 @@ class UsageLimitsMonitor:
             return None
         if not math.isfinite(util):
             return None
-        # SDK rate_limit events report utilization as a 0.0-1.0 fraction, while
-        # the usage endpoint (and thus our snapshot) uses 0-100 percent. Normalise
-        # so every window in the snapshot is on the same 0-100 scale.
+        # CLI rate_limit events report utilization as a 0.0-1.0 fraction; the
+        # snapshot uses 0-100 percent.
         if util <= 1:
             util *= 100
-        # Polled snapshot windows carry quota REMAINING; SDK events carry quota
-        # USED — flip so the persisted/broadcast snapshot stays consistent.
+        # Events carry quota USED; the snapshot carries quota REMAINING.
         util = 100.0 - util
 
         updated = {"type": rate_limit_type, "utilization": util, "resets_at": resets_at}
@@ -489,6 +292,7 @@ class UsageLimitsMonitor:
         self._available = True
         if not changed:
             return None
+        self._fetched_at = time.time()
         return self._snapshot()
 
     async def _broadcast(self, snapshot: Dict[str, Any]) -> None:
@@ -500,10 +304,9 @@ class UsageLimitsMonitor:
             logger.debug("Usage-snapshot broadcast skipped: %s", e)
 
     async def refresh_and_broadcast(self) -> Dict[str, Any]:
-        """Poller entry point: fetch the latest snapshot and broadcast it.
+        """Persist the latest snapshot and broadcast it.
 
-        Broadcasts the enriched CLUSTER snapshot (every install's per-account
-        data), not just this install's, so all clients render the correct reset
+        Broadcasts the enriched CLUSTER snapshot (every install's data), not just this install's, so all clients render the correct reset
         time for offloaded sessions.
         """
         await self.fetch()
@@ -536,28 +339,3 @@ class UsageLimitsMonitor:
 # Global singleton.
 usage_limits_monitor = UsageLimitsMonitor()
 
-
-# Fire-and-forget usage re-poll tasks are retained here until they complete so
-# the event loop doesn't garbage-collect a still-pending task ("Task was
-# destroyed but it is pending!").
-_pending_refresh_tasks: "set[asyncio.Task]" = set()
-
-
-def schedule_usage_refresh() -> None:
-    """Fire-and-forget an immediate usage re-poll + broadcast (best-effort).
-
-    Used after an account switch (manual activate or auto-failover): the active
-    account just changed, so the cached usage snapshot belongs to the old
-    account. Kick off a fresh poll without blocking the caller on the network
-    fetch. The created task is retained in a module-level set until it finishes
-    (discarded via a done-callback) so it is not GC'd mid-flight. Never raises.
-    """
-    try:
-        task = usage_limits_monitor.request_refresh()
-    except Exception as e:  # noqa: BLE001
-        logger.debug(f"Could not schedule usage refresh: {e}")
-        return
-    if task is None:
-        return  # no running event loop (e.g. sync test context)
-    _pending_refresh_tasks.add(task)
-    task.add_done_callback(_pending_refresh_tasks.discard)

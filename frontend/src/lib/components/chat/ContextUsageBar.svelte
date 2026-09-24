@@ -87,6 +87,9 @@
 
 	const usageNumber = createUsageNumberAnimation();
 
+	/** The user's own usage page; AI Shuffle never fetches it. */
+	const CLAUDE_USAGE_URL = 'https://claude.ai/settings/usage';
+
 	interface Props {
 		onOpenChange?: (open: boolean) => void;
 	}
@@ -482,29 +485,25 @@
 	// agents-UI picker can never drift apart.
 	//
 	// Claude: "Claude" + its subscription plan ("max"/"pro"), or "API" on
-	// API-key auth. Two sources feed that, in this order:
+	// API-key auth, from the local registry's `claude` block (which reads what
+	// the Claude Code CLI reports about its own sign-in). It describes THIS
+	// install only, so it is consulted just for the self install; usage
+	// snapshots carry no account or plan.
 	//
-	//   1. the RESOLVED INSTALL's own usage snapshot (`planType`, joined from
-	//      that install's `claude_accounts` row) — authoritative for any
-	//      install, including a remote worker on a different account;
-	//   2. the local registry's `claude` block — it describes THIS install only,
-	//      so it is consulted just for the self install (it is also the only
-	//      carrier of API-key auth, which snapshots never report).
-	//
-	// With neither known the subtext falls back to the resolved install's device
+	// Without it the subtext falls back to the resolved install's device
 	// name / "Other device" hint rather than dropping that disambiguation.
 	const isSelf = $derived(target == null || target === $rateLimit.selfInstanceId ||
 		(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit)));
 	// Empty usage buckets also exist on installs without Claude. Subscription
-	// display metadata defaults to "subscription", so it is not proof of an account.
+	// display metadata defaults to "subscription", so it is not proof of a login.
 	const hasClaude = $derived(Boolean(
-		resolvedBucket?.available || resolvedBucket?.accountId || resolvedBucket?.accountEmail ||
+		resolvedBucket?.available ||
 		(isSelf && ($claudeAuthenticated || getClaudeAuth().auth_kind === 'api'))
 	));
 	const deviceLabel = $derived(resolvedBucket?.deviceName ?? null);
 	const claudeDisplay = $derived<ProviderDisplay>(
 		getClaudeDisplay({
-			planType: resolvedBucket?.planType ?? (isSelf ? getClaudeAuth().plan_type : null),
+			planType: isSelf ? getClaudeAuth().plan_type : null,
 			authKind: isSelf ? getClaudeAuth().auth_kind : null
 		})
 	);
@@ -660,7 +659,8 @@
 	fallbackScope: string | null | undefined,
 	successAt: number | null | undefined,
 	attemptAt: number | null | undefined,
-	errorKind: ProviderUsageErrorKind | null | undefined
+	errorKind: ProviderUsageErrorKind | null | undefined,
+	showDashboard: boolean = true
 )}
 	{@const label = info?.label ?? fallbackSource}
 	{@const scopeLabel = info?.scope_label ?? fallbackScope}
@@ -683,7 +683,7 @@
 			{#if info?.unavailable?.length}
 				<div class="row-reset">Not reported by this source: {info.unavailable.join(', ')}</div>
 			{/if}
-			{#if info?.dashboard_url}
+			{#if showDashboard && info?.dashboard_url}
 				<a class="provider-dashboard-link" href={info.dashboard_url} target="_blank" rel="noopener noreferrer"
 					>Compare on the provider dashboard</a
 				>
@@ -870,9 +870,17 @@
 							</div>
 						{/each}
 					{:else}
-						<div class="row-reset no-data">No usage data yet</div>
+						<div class="row-reset no-data">No usage data yet. Claude Code reports it while an agent runs.</div>
 					{/if}
-					<!-- Last attempt/error describe only this install's own poller. -->
+					<!-- AI Shuffle only sees the windows the CLI reports during a run;
+					     the full picture is on the user's own claude.ai usage page. -->
+					<a
+						class="provider-dashboard-link claude-usage-link"
+						href={CLAUDE_USAGE_URL}
+						target="_blank"
+						rel="noopener noreferrer">See all usage on claude.ai</a
+					>
+					<!-- Last attempt/error describe only this install's own reading. -->
 					{#if $claudeUsageSource.source}
 						{@render sourceDetails(
 							$claudeUsageSource.source,
@@ -880,7 +888,8 @@
 							null,
 							resolvedBucket?.fetchedAt,
 							isSelf ? $claudeUsageSource.attemptedAt : null,
-							isSelf ? $claudeUsageSource.lastErrorKind : null
+							isSelf ? $claudeUsageSource.lastErrorKind : null,
+							false
 						)}
 					{/if}
 				{/if}
@@ -1420,6 +1429,10 @@
 		color: var(--muted-foreground);
 		text-decoration: underline;
 		text-underline-offset: 2px;
+	}
+	.claude-usage-link {
+		display: inline-block;
+		margin-top: 2px;
 	}
 	.provider-dashboard-link:focus-visible {
 		outline: 2px solid var(--ring, var(--primary));

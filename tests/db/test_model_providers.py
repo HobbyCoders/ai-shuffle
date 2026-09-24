@@ -1,8 +1,8 @@
 """Tests for the model-provider registry DB helpers (app/db/model_providers.py).
 
 Covers CRUD round-trip, ``include_token`` gating (public reads never carry the
-``auth_token`` key — matching the claude_accounts ``include_credentials``
-precedent), the TEXT-encoded JSON columns (``models_json`` / ``extra_env_json``)
+``auth_token`` key), the TEXT-encoded JSON columns
+(``models_json`` / ``extra_env_json``)
 round-tripping through the pg_shim, the enabled filter, and that a partial
 update leaves the stored token intact. Runs on the in-memory SQLite shim via the
 autouse DB-routing fixture (documented by depending on ``mock_db``).
