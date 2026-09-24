@@ -32,11 +32,15 @@ def _auto_db_shim():
 def pg(monkeypatch, tmp_path):
     expected = {
         "TESTING": "1", "ALLOW_REAL_PG": "1",
-        "MOBILE_PG_HOST": "127.0.0.1", "MOBILE_PG_PORT": "5432",
+        "MOBILE_PG_HOST": "127.0.0.1",
         "MOBILE_PG_DATABASE": "shuffle_mobile_test",
         "MOBILE_PG_USER": "shuffle_mobile_test",
         "MOBILE_PG_PASSWORD": "mobile-test-only",
     }
+    port_text = os.environ.get("MOBILE_PG_PORT", "")
+    if not port_text.isascii() or not port_text.isdecimal() or not 1024 <= int(port_text) <= 65535:
+        pytest.fail("Refusing PostgreSQL: explicit unprivileged loopback test port required")
+    port = int(port_text)
     if any(os.environ.get(key) != value for key, value in expected.items()):
         pytest.fail("Refusing PostgreSQL: dedicated localhost test environment required")
 
@@ -47,7 +51,7 @@ def pg(monkeypatch, tmp_path):
 
     # Even if invoked outside the dedicated workflow, do not read any .env.
     monkeypatch.setattr(DotEnvSettingsSource, "_read_env_files", lambda self: {})
-    from app.db import mobile_hub as hub, mobile_tools as queue, pairing
+    from app.db import mobile, mobile_hub as hub, mobile_tools as queue, pairing
     from app.core import config
 
     # Isolate the filesystem as well as SQL, but do NOT pin/warm the identity:
@@ -59,12 +63,12 @@ def pg(monkeypatch, tmp_path):
     schema = "mobile_test_" + uuid.uuid4().hex
 
     def connect():
-        # All connection fields are literals, never DATABASE_URL/POSTGRES_*.
+        # Only the explicit test port varies; never consult app DB configuration.
         return psycopg2.connect(
-            host="127.0.0.1", hostaddr="127.0.0.1", port=5432,
+            host="127.0.0.1", hostaddr="127.0.0.1", port=port,
             dbname="shuffle_mobile_test", user="shuffle_mobile_test",
             password="mobile-test-only", connect_timeout=5, sslmode="disable",
-            options="-c statement_timeout=10000 -c lock_timeout=5000 "
+            options="-c statement_timeout=10000 -c lock_timeout=5000 -c timezone=America/New_York "
                     "-c idle_in_transaction_session_timeout=15000 "
                     f"-c search_path={schema}",
             cursor_factory=RealDictCursor,
@@ -87,6 +91,7 @@ def pg(monkeypatch, tmp_path):
             conn.close()
 
     monkeypatch.setattr(hub, "get_db", transaction)
+    monkeypatch.setattr(mobile, "get_db", transaction)
     monkeypatch.setattr(queue, "get_db", transaction)
     monkeypatch.setattr(pairing, "get_db", transaction)
     with transaction() as conn:
@@ -154,7 +159,7 @@ def pg(monkeypatch, tmp_path):
         return [value for _, value in results]
 
     # Leave only our UUID schema behind; the disposable service owns cleanup.
-    return SimpleNamespace(hub=hub, queue=queue, pairing=pairing, transaction=transaction,
+    return SimpleNamespace(hub=hub, mobile=mobile, queue=queue, pairing=pairing, transaction=transaction,
                            rows=rows, race=race, integrity_error=psycopg2.IntegrityError,
                            config=config, id_file=tmp_path / ".instance_id")
 
@@ -426,3 +431,159 @@ def test_account_enrollment_and_direct_exchange_serialize_before_identity_checks
         assert auth == []
         assert clients[0]['client_type'] == kind
         assert pg.rows('pairing_grants')[0]['consumed_at'] is not None
+
+@pytest.fixture
+def renewal(pg, monkeypatch):
+    import hashlib
+    from app.core import encryption
+
+    monkeypatch.setattr(encryption, '_encryption_key', encryption.Fernet.generate_key())
+    old_hash = hashlib.sha256(b'aim-original-fixture').hexdigest()
+    enroll(pg, key=old_hash)
+    device = pg.rows('mobile_devices')[0]
+    owner = pg.hub.ownership(device['device_id'])
+    assert pg.hub.confirmation(owner) == 'pending'
+    pg.hub.confirm_device(owner, True, mobile_record_id=device['id'])
+    return SimpleNamespace(device=device, owner=owner, old_hash=old_hash)
+
+
+def test_concurrent_renewals_recover_exactly_one_replacement(pg, renewal):
+    import hashlib
+
+    outputs = pg.race(*(lambda key=key: pg.mobile.renew_mobile_key(renewal.device, renewal.old_hash, key)
+                       for key in ('aim-candidate-a', 'aim-candidate-b', 'aim-candidate-c', 'aim-candidate-d')))
+    assert all(value == outputs[0] for value in outputs)
+    key, expiry = outputs[0]
+    assert len(pg.rows('mobile_key_renewals')) == 1
+    assert pg.rows('mobile_devices')[0]['api_key_hash'] == hashlib.sha256(key.encode()).hexdigest()
+    assert timedelta(days=89) < expiry - datetime.now(timezone.utc) <= timedelta(days=90)
+    assert pg.mobile.renew_mobile_key(renewal.device, renewal.old_hash, 'aim-retry') == outputs[0]
+    recovered = pg.mobile.mobile_key_renewal_device(renewal.old_hash)
+    assert recovered and recovered['id'] == renewal.device['id']
+    assert pg.hub.confirmation(renewal.owner) == 'approved'
+
+
+@pytest.mark.parametrize('stop', ['deny', 'revoke'])
+@pytest.mark.parametrize('first', ['renew', 'stop'])
+def test_renewal_and_worker_denial_or_revocation_share_real_row_lock(pg, renewal, monkeypatch, first, stop):
+    held, attempted, acquired_second, release = (threading.Event() for _ in range(4))
+    local = threading.local()
+    pids = {}
+
+    class Cursor:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def __getattr__(self, name):
+            return getattr(self.cursor, name)
+
+        def execute(self, query, args=None):
+            normalized = ' '.join(query.upper().split())
+            client_lock = ('FROM PAIRED_CLIENTS' in normalized and 'FOR UPDATE' in normalized) or normalized.startswith('UPDATE PAIRED_CLIENTS SET REVOKED_AT')
+            role = getattr(local, 'role', None)
+            if client_lock and role and role != first:
+                attempted.set()
+            result = self.cursor.execute(query, args)
+            if client_lock and role:
+                if role == first:
+                    held.set()
+                    assert release.wait(timeout=10)
+                else:
+                    acquired_second.set()
+            return result
+
+    @contextmanager
+    def controlled():
+        with pg.transaction() as conn:
+            role = getattr(local, 'role', None)
+            if role:
+                pids[role] = conn.get_backend_pid()
+            yield SimpleNamespace(cursor=lambda: Cursor(conn.cursor()))
+
+    for module in (pg.mobile, pg.hub, pg.pairing):
+        monkeypatch.setattr(module, 'get_db', controlled)
+
+    def run(role):
+        local.role = role
+        try:
+            if role == 'renew':
+                return pg.mobile.renew_mobile_key(renewal.device, renewal.old_hash, 'aim-replacement')
+            if stop == 'deny':
+                return pg.hub.confirm_device(renewal.owner, False, mobile_record_id=renewal.device['id'])
+            return pg.pairing.revoke_paired_client(renewal.owner['paired_client_id'])
+        except ValueError:
+            return 'rejected'
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winner = executor.submit(run, first)
+        try:
+            assert held.wait(timeout=5)
+            second = 'stop' if first == 'renew' else 'renew'
+            loser = executor.submit(run, second)
+            assert attempted.wait(timeout=5)
+            assert not acquired_second.wait(timeout=0.2)
+        finally:
+            release.set()
+        results = {first: winner.result(timeout=10), second: loser.result(timeout=10)}
+    assert len(set(pids.values())) == 2
+    assert acquired_second.is_set()
+    assert results['stop'] == ('denied' if stop == 'deny' else True)
+    if first == 'stop':
+        assert results['renew'] == 'rejected'
+        assert pg.rows('mobile_key_renewals') == []
+    else:
+        assert results['renew'][0] == 'aim-replacement'
+        assert len(pg.rows('mobile_key_renewals')) == 1
+    # A retry cannot restore authority, whichever transaction won the race.
+    current = pg.rows('mobile_devices')[0]
+    for key_hash in (renewal.old_hash, current['api_key_hash']):
+        with pytest.raises(ValueError):
+            pg.mobile.renew_mobile_key(current, key_hash, 'aim-after-revocation')
+    if stop == 'deny':
+        assert pg.hub.confirmation(renewal.owner) == 'denied'
+        with pytest.raises(ValueError):
+            pg.hub.confirm_device(renewal.owner, True, mobile_record_id=renewal.device['id'])
+    else:
+        assert current['revoked_at'] is not None
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_existing_key_migration_and_repair_never_infer_approval(pg, monkeypatch, legacy):
+    from app.core import encryption
+    from app.core.device_keys import key_expiry
+
+    monkeypatch.setattr(encryption, '_encryption_key', encryption.Fernet.generate_key())
+    enroll(pg)
+    created = datetime.now(timezone.utc) - timedelta(days=100)
+    expiry = created + timedelta(days=365)
+    with pg.transaction() as conn:
+        c = conn.cursor()
+        c.execute('UPDATE mobile_devices SET created_at=%s, api_key_expires_at=%s',
+                  (created, None if legacy else expiry))
+        pg.hub.create_schema(c)
+        pg.hub.create_schema(c)
+    device = pg.rows('mobile_devices')[0]
+    owner = pg.hub.ownership(device['device_id'])
+    assert key_expiry(device) == expiry
+    assert pg.hub.confirmation(owner) == 'pending'
+    pg.hub.confirm_device(owner, True, mobile_record_id=device['id'])
+    assert pg.mobile.renew_mobile_key(device, device['api_key_hash'], 'aim-unused') == (None, expiry)
+    # The repair producing path replaces this record; its prior decision must
+    # not transfer, and an in-flight UI decision naming the old row must fail.
+    with pg.transaction() as conn:
+        conn.cursor().execute('UPDATE mobile_devices SET id=%s, api_key_hash=%s', ('repaired-record', 'repaired-key'))
+    assert pg.hub.confirmation(owner) == 'pending'
+    with pytest.raises(ValueError):
+        pg.hub.confirm_device(owner, True, mobile_record_id=device['id'])
+    pg.hub.confirm_device(owner, True, mobile_record_id='repaired-record')
+    assert pg.hub.confirmation(owner) == 'approved'
+
+
+def test_expired_previous_key_receipt_never_extends_deadline(pg, renewal):
+    result = pg.mobile.renew_mobile_key(renewal.device, renewal.old_hash, 'aim-replacement')
+    with pg.transaction() as conn:
+        conn.cursor().execute("UPDATE mobile_key_renewals SET previous_expires_at='2000-01-01T00:00:00+00:00'")
+    assert pg.mobile.mobile_key_renewal_device(renewal.old_hash) is None
+    with pytest.raises(ValueError):
+        pg.mobile.renew_mobile_key(renewal.device, renewal.old_hash, 'aim-expired-retry')
+    assert pg.rows('mobile_devices')[0]['api_key_expires_at'] == result[1]
