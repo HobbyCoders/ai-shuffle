@@ -18,6 +18,7 @@
 	 */
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import { auth, isAdmin } from '$lib/stores/auth.svelte';
 	import { ownerAccess } from '$lib/stores/owner-access.svelte';
 	import {
@@ -49,7 +50,8 @@
 	let desktop = $state(false);
 	const steps = $derived(setupSteps({ ownerStep }));
 	let currentStep = $state<SetupStepId>('welcome');
-	let completedSteps = $state(new Set<SetupStepId>());
+	// A reactive set: adding a step must redraw its checkmark in the progress bar.
+	const completedSteps = new SvelteSet<SetupStepId>();
 
 	const SUBTITLES: Record<SetupStepId, string> = {
 		welcome: 'A few steps to set up this worker. It takes about five minutes.',

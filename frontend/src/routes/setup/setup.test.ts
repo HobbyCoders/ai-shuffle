@@ -158,6 +158,13 @@ describe('setup wizard v2', () => {
 		expect(screen.queryByTestId('setup-welcome')).toBeNull();
 	});
 
+	it('marks each finished step done in the progress bar', async () => {
+		await throughLicense();
+		const items = screen.getByRole('navigation', { name: 'Setup progress' }).querySelectorAll('li');
+		expect([...items].slice(0, 4).map((li) => li.className.includes('complete'))).toEqual([true, true, true, false]);
+		expect(items[3].getAttribute('aria-current')).toBe('step');
+	});
+
 	it('stores the mode, with the API key advice for unattended runs', async () => {
 		await throughLicense();
 		expect(screen.getByTestId('setup-mode-guidance').textContent).toContain('Use an API key for scheduled and unattended runs');
