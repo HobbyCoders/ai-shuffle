@@ -184,6 +184,9 @@ async def test_both_legs_get_the_adapters_hook_bus(monkeypatch, tmp_path):
     async def _client(kind, options):
         return object(), None
 
+    # This test inspects engine wiring, not host CLI discovery. The SDK-free
+    # resolver intentionally has no bundled fallback on a clean test runner.
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
     monkeypatch.setattr(ha, "DelegatedLoop", _KwargsLoop)
     delegated = ha.HarnessAdapter()
     await delegated.connect(_preset_options(tmp_path))
