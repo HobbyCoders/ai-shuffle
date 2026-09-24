@@ -100,18 +100,20 @@
 {/if}
 
 <style>
-	.worker-confirmations { display: grid; gap: 0.75rem; padding: 1rem; border: 1px solid var(--border-color, #454550); border-radius: 0.75rem; }
+	.worker-confirmations { display: grid; gap: 0.75rem; padding: 1rem; border: 1px solid var(--border); border-radius: 0.75rem; }
 	.heading, .device-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; }
 	h4, p { margin: 0; }
 	p, dl, span { font-size: 0.875rem; line-height: 1.5; }
-	.warning, [role='alert'] { padding: 0.75rem; border-left: 3px solid var(--warning-color, #d5a04a); background: var(--bg-tertiary, #24242c); }
+	.warning, [role='alert'] { padding: 0.75rem; border-left: 3px solid var(--warning, orange); background: color-mix(in oklch, var(--warning, orange) 8%, var(--card)); }
 	[role='alert'] { overflow-wrap: anywhere; }
-	article { display: grid; gap: 0.75rem; border-top: 1px solid var(--border-color, #454550); padding-top: 0.75rem; min-width: 0; }
+	article { display: grid; gap: 0.75rem; border-top: 1px solid var(--border); padding-top: 0.75rem; min-width: 0; }
 	dl { display: grid; gap: 0.25rem; margin: 0; }
 	dl div { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 	dt { font-weight: 600; } dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 	.actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-	button { padding: 0.5rem 0.75rem; border: 1px solid var(--border-color, #454550); border-radius: 0.375rem; background: var(--bg-secondary, #30303a); color: inherit; cursor: pointer; }
+	button { padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 0.375rem; background: var(--secondary); color: var(--foreground); cursor: pointer; min-height: 40px; }
+	button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	button:hover:not(:disabled) { background: var(--muted); }
 	button:disabled { opacity: 0.55; cursor: not-allowed; }
 	.decision { display: grid; gap: 0.5rem; }
 </style>
