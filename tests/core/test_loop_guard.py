@@ -183,7 +183,7 @@ async def _run_turn(tmp_path, sid, source, payload=None):
 async def test_turn_start_holds_an_automation_past_its_budget(mock_db, tmp_path):
     _subscription()
     loop_guard.update_config(session_turns_per_hour=1)
-    database.create_profile("guard-profile", "Guard", None, {"model": "sonnet", "cwd": str(tmp_path)})
+    database.create_profile("guard-profile", "Guard", None, {"cwd": str(tmp_path)})
     database.create_session(session_id="guard-s", profile_id="guard-profile", title="t")
 
     # The first unattended turn passes the guard and reaches the spawn seam.

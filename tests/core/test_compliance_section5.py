@@ -175,7 +175,7 @@ def _cli_status(signed_in: bool):
 def _seed(tmp_path, sid: str) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
-    database.create_profile("c14-profile", "C14", None, {"model": "sonnet", "cwd": str(workspace)})
+    database.create_profile("c14-profile", "C14", None, {"cwd": str(workspace)})
     database.create_session(session_id=sid, profile_id="c14-profile", title="c14")
 
 

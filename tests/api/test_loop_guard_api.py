@@ -36,7 +36,7 @@ def test_confirm_and_dismiss_held_turns(authenticated_client):
 
 
 def _automation(client):
-    db.create_profile(profile_id="auto-profile", name="Auto", description=None, config={"model": "sonnet"})
+    db.create_profile(profile_id="auto-profile", name="Auto", description=None, config={})
     return client.post("/api/v1/automations", json={
         "name": "Nightly", "trigger_type": "webhook", "trigger_config": {},
         "prompt": "summarize", "profile_id": "auto-profile",

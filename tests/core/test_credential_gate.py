@@ -164,7 +164,7 @@ def _real_pump_env():
 
 
 def _seed(tmp_path, sid):
-    database.create_profile("gate-profile", "Gate", None, {"model": "sonnet", "cwd": str(tmp_path)})
+    database.create_profile("gate-profile", "Gate", None, {"cwd": str(tmp_path)})
     database.create_session(session_id=sid, profile_id="gate-profile", title="t")
 
 
@@ -188,7 +188,7 @@ async def test_fresh_install_refuses_the_rest_query_paths(mock_db, tmp_path):
     from app.core import query_engine
     from fastapi import HTTPException
 
-    database.create_profile("gate-profile", "Gate", None, {"model": "sonnet", "cwd": str(tmp_path)})
+    database.create_profile("gate-profile", "Gate", None, {"cwd": str(tmp_path)})
     with pytest.raises(HTTPException) as exc:
         await require_claude_auth()
     assert exc.value.status_code == 503 and exc.value.detail == credential_gate.NO_CLI_MESSAGE
