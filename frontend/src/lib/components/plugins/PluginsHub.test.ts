@@ -15,7 +15,8 @@ vi.mock('$lib/api/connectors', () => ({
 vi.mock('$lib/api/plugins', () => ({
  getInstalledPlugins: vi.fn(async () => [{id:'writer@local',name:'Writer',description:'Writing skills',enabled:true}]),
  getAvailablePlugins: vi.fn(async () => [{id:'writer@local',name:'Writer',description:'Duplicate'}, {id:'review@local',name:'Review',description:'Code review'}]),
- getPluginDetails: vi.fn(), installPlugin: calls.install
+ getPluginDetails: vi.fn(), installPlugin: calls.install,
+ enablePlugin: vi.fn(), disablePlugin: vi.fn(), uninstallPlugin: vi.fn()
 }));
 import PluginsHub from './PluginsHub.svelte';
 afterEach(cleanup);
