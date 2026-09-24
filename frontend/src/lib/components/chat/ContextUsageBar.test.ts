@@ -1408,7 +1408,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		expect(container.querySelectorAll('.popover-section').length).toBe(3);
 	});
 
-	it('shows the account source, scope and successful observation time separately from the key row', async () => {
+	it('keeps account and key rows separate without source detail text', async () => {
         rateLimit.applySnapshot({ available: false, windows: [], providers: [
             { provider_id: 'or-key', provider_type: 'openrouter', provider_name: 'OpenRouter',
               credits: { usage: 3, limit: 10 }, source: 'OpenRouter key API', scope: 'This model key spend', fetched_at: 1000 },
@@ -1418,9 +1418,9 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
         const { container } = render(ContextUsageBar);
         await openPopover(container);
         expect(screen.getByRole('button', { name: 'OpenRouter account usage — collapse' })).toBeTruthy();
-        expect(screen.getByText('Source: OpenRouter management API')).toBeTruthy();
-        expect(screen.getByText('Account credit ledger (USD)')).toBeTruthy();
-        expect(screen.getAllByText(/Last successful update:/)).toHaveLength(2);
+        expect(container.textContent).not.toContain('Source:');
+        expect(container.textContent).not.toContain('Account credit ledger (USD)');
+        expect(container.textContent).not.toContain('Last successful update:');
         expect(screen.getByRole('button', { name: 'OpenRouter usage — collapse' })).toBeTruthy();
     });
 
@@ -1830,7 +1830,7 @@ describe('ContextUsageBar — usage source details', () => {
 		unavailable: ['xAI API spend'],
 	};
 
-	it('labels the source, measure and a failed attempt after the last success', async () => {
+	it('keeps only the dashboard link below usage, preserving provider status', async () => {
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
 			{ provider_id: 'grok', provider_type: 'grok', provider_name: 'SuperGrok', status: 'stale',
 				last_error_kind: 'unsupported', windows: [{ type: 'seven_day', utilization: 30, resets_at: null }],
@@ -1839,12 +1839,11 @@ describe('ContextUsageBar — usage source details', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(screen.getByText(`Source: ${grokSource.label}`)).toBeTruthy();
-		expect(screen.getByText('Unofficial, subscription-specific endpoint')).toBeTruthy();
-		expect(screen.getByText('Reports: Subscription allowance')).toBeTruthy();
-		expect(screen.getByText(/Last successful update:/)).toBeTruthy();
-		expect(screen.getByText(/Last attempt: .*\(not supported\)/)).toBeTruthy();
-		expect(screen.getByText('Not reported by this source: xAI API spend')).toBeTruthy();
+		expect(container.querySelector('.usage-source')?.textContent?.trim())
+			.toBe('Compare on the provider dashboard');
+		expect(container.textContent).not.toMatch(/Source:|Reports:|Last successful update:|Last attempt:|Not reported by this source:/);
+		expect(container.textContent).not.toContain(grokSource.support_label);
+		expect(container.textContent).not.toContain(grokSource.scope_label);
 		expect(container.querySelector('.provider-status')?.textContent)
 			.toBe('Not supported for this credential; polling paused');
 		const link = screen.getByRole('link', { name: 'Compare on the provider dashboard' });
@@ -1852,19 +1851,19 @@ describe('ContextUsageBar — usage source details', () => {
 		expect(link.getAttribute('rel')).toContain('noopener');
 	});
 
-	it('omits the attempt line when the last attempt succeeded', async () => {
+	it('omits the footer when no dashboard URL is available', async () => {
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
-			{ provider_id: 'grok', provider_type: 'grok', status: 'fresh', source_info: grokSource,
+			{ provider_id: 'grok', provider_type: 'grok', status: 'fresh', source_info: { ...grokSource, dashboard_url: '' },
 				windows: [{ type: 'seven_day', utilization: 30, resets_at: null }],
 				fetched_at: 5_000, last_success_at: 5_000, last_attempt_at: 5_000 },
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(screen.getByText(/Last successful update:/)).toBeTruthy();
+		expect(container.querySelector('.usage-source')).toBeNull();
 		expect(container.textContent).not.toContain('Last attempt');
 	});
 
-	it('shows the Claude subscription source with its unofficial label', async () => {
+	it('keeps only the Claude dashboard link below subscription usage', async () => {
 		rateLimit.applySnapshot({
 			windows: [{ type: 'five_hour', utilization: 80, resets_at: future() }],
 			available: true, fetched_at: 100, attempted_at: 200, last_error_kind: 'billing_access_denied',
@@ -1874,9 +1873,9 @@ describe('ContextUsageBar — usage source details', () => {
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(screen.getByText('Source: Claude subscription usage endpoint')).toBeTruthy();
-		expect(screen.getByText('Unofficial, subscription-specific endpoint')).toBeTruthy();
-		expect(screen.getByText(/Last attempt: .*\(access refused\)/)).toBeTruthy();
+		expect(container.querySelector('.usage-source')?.textContent?.trim())
+			.toBe('Compare on the provider dashboard');
+		expect(container.textContent).not.toMatch(/Source:|Unofficial|Last attempt:|Reports:|Last successful update:/);
 		expect(screen.getByRole('link', { name: 'Compare on the provider dashboard' }).getAttribute('href'))
 			.toBe('https://claude.ai/settings/usage');
 		expect(container.textContent).not.toContain('Not reported by this source');
