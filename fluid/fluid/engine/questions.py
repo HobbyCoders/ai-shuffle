@@ -66,17 +66,18 @@ class QuestionLifecycleMixin:
             if self._background_closed or self._interrupted.is_set():
                 raise RuntimeError("session stopped; questions were not posted")
             batch = tool_use_id or self.ctx.extra.get("tool_use_id") or new_id("ask")
-            ids = []
-            for question in questions:
-                event = QuestionRequest(
-                    session_id=self.session_id, turn_id=self._active_turn_id,
-                    request_id=new_id("q"), tool_use_id=batch, name="AskUser",
-                    message=_render_message(question), schema=question, nonblocking=True,
-                )
-                await self._emit(event)
-                self._question_requests[event.request_id] = event
-                ids.append(event.request_id)
-            return ids
+            # One tool call is one durable interaction and one user response.
+            # Keep the legacy single-question schema for terminal numeric picks.
+            schema = questions[0] if len(questions) == 1 else {"questions": questions}
+            event = QuestionRequest(
+                session_id=self.session_id, turn_id=self._active_turn_id,
+                request_id=new_id("q"), tool_use_id=batch, name="AskUser",
+                message="\n\n".join(_render_message(q) for q in questions),
+                schema=schema, nonblocking=True,
+            )
+            await self._emit(event)
+            self._question_requests[event.request_id] = event
+            return [event.request_id]
 
     async def _answer_question(self, op: RespondQuestion) -> bool:
         async with self._question_lock:

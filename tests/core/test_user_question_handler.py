@@ -1255,6 +1255,20 @@ class TestFluidQuestionShape:
         qs = [{"question": "Pick?", "header": "H", "options": []}]
         assert questions_from_tool_input({"questions": qs}) == qs
 
+    def test_fluid_batch_preserves_questions_and_selectable_options(self):
+        from app.core.user_question_handler import questions_from_tool_input
+
+        questions = [
+            {"question": "Color?", "options": [{"label": "Blue"}, {"label": "Red"}]},
+            {"question": "Extras?", "multiSelect": True,
+             "options": [{"label": "Logs"}, {"label": "Metrics"}]},
+            {"question": "Notes?"},
+        ]
+        assert questions_from_tool_input({
+            "question": "Terminal text including numbered choices",
+            "schema": {"questions": questions}, "_nonblocking": True,
+        }) == questions
+
     def test_fluid_schema_becomes_one_question(self):
         from app.core.user_question_handler import questions_from_tool_input
 

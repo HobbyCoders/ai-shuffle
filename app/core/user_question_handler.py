@@ -97,9 +97,9 @@ def questions_from_tool_input(tool_input: Any) -> List[Dict[str, Any]]:
     """Build the UserQuestion payload from either SDK or fluid tool input.
 
     SDK AskUserQuestion already carries questions: [...]. Fluid
-    QuestionRequest arrives as {question: <message>, schema: <q dict>};
-    the schema is the structured question, and question is the plain-text
-    rendering.
+    QuestionRequest carries a single question dict or {questions: [...]} in
+    schema. Preserve that structure, including choices; question is only the
+    terminal's plain-text rendering, not the UI question text.
     """
     if not isinstance(tool_input, dict):
         return []
@@ -107,6 +107,8 @@ def questions_from_tool_input(tool_input: Any) -> List[Dict[str, Any]]:
     if isinstance(questions, list) and questions:
         return [q for q in questions if isinstance(q, dict)]
     schema = tool_input.get("schema")
+    if isinstance(schema, dict) and isinstance(schema.get("questions"), list):
+        return [q for q in schema["questions"] if isinstance(q, dict)]
     if isinstance(schema, dict) and str(schema.get("question") or "").strip():
         q = dict(schema)
         message = str(tool_input.get("question") or "").strip()
