@@ -46,7 +46,11 @@ class AccountRepository(private val context: Context) {
         // an offline/reconnecting worker can issue this phone a new key right now.
         servers.replaceAccountServers(listed)
         val candidates = listed.filter { onlyServerId == null || it.hubServerId == onlyServerId }
-        AccountWorkerSync.authorizePending(candidates, { store.matches(session) }, { servers.update(it) }) { pending ->
+        AccountWorkerSync.authorizePending(candidates, { store.matches(session) }, { authorized ->
+            check(servers.replaceKey(authorized.copy(apiKey = ""), authorized.apiKey) != null) {
+                "This worker changed or its credential could not be saved. Sync again."
+            }
+        }) { pending ->
             val id = requireNotNull(pending.hubServerId)
             val ticket = HubClient.call(session.hub, "/v1/servers/$id/tickets", "POST", token = session.token).getString("ticket")
             // This request has NO account Authorization header. Only a one-use ticket crosses origins.
@@ -71,7 +75,13 @@ class AccountRepository(private val context: Context) {
                 store.savePendingLink(server.id, session, it)
             }
         val id = HubClient.segment(registered.getString("id"))
-        HubClient.call(server.baseUrl, "/api/v1/mobile/hub/link", "POST", JSONObject().put("hub_url", session.hub).put("server_id", id).put("server_secret", registered.getString("server_secret")), server.apiKey)
+        val current = when (val result = com.hobbycoders.aishuffle.net.ApiClient.currentServer(server)) {
+            is com.hobbycoders.aishuffle.net.ApiResult.Success -> result.data
+            is com.hobbycoders.aishuffle.net.ApiResult.Failure -> throw IllegalStateException(result.message)
+            com.hobbycoders.aishuffle.net.ApiResult.NeedsCfAccess -> throw IllegalStateException("Cloudflare Access credentials are required for this worker.")
+        }
+        check(store.matches(session)) { "Account changed. Sign in again." }
+        HubClient.call(current.baseUrl, "/api/v1/mobile/hub/link", "POST", JSONObject().put("hub_url", session.hub).put("server_id", id).put("server_secret", registered.getString("server_secret")), current.apiKey)
         store.clearPendingLink(server.id)
     }
     suspend fun lookupWorker(code: String): JSONObject {

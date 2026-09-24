@@ -53,6 +53,67 @@ object ApiClient {
 
     private const val JSON_MEDIA = "application/json; charset=utf-8"
 
+    @Volatile private var deviceKeys: DeviceKeyRenewal? = null
+
+    internal fun installCredentialStore(read: (String) -> Server?, replace: (Server, String) -> Server?) {
+        deviceKeys = DeviceKeyRenewal(read, replace, ::renewDeviceKey)
+    }
+
+    /** All saved-device producers use this, including tools and native voice. */
+    internal suspend fun currentServer(server: Server): ApiResult<Server> = deviceKeys?.prepare(server)
+        ?: ApiResult.Failure("Open the app to unlock its saved worker credentials.")
+
+    private suspend fun <T> withCurrentServer(server: Server, call: suspend (Server) -> ApiResult<T>): ApiResult<T> =
+        when (val current = currentServer(server)) {
+            is ApiResult.Success -> call(current.data)
+            is ApiResult.Failure -> current
+            ApiResult.NeedsCfAccess -> ApiResult.NeedsCfAccess
+        }
+
+    internal fun keyRenewalRequest(server: Server): Request {
+        require(PairingInput.origin(server.baseUrl) == server.baseUrl)
+        return Request.Builder().url("${server.baseUrl}/api/v1/mobile/key/renew")
+            .header("Authorization", "Bearer ${server.apiKey}")
+            .header("Accept", "application/json").header("Cache-Control", "no-store")
+            .cfAccess(server.cfAccessClientId, server.cfAccessClientSecret)
+            .post("{}".toRequestBody(JSON_MEDIA.toMediaType())).build()
+    }
+
+    internal fun parseKeyRenewal(server: Server, code: Int, contentType: String?, raw: String): ApiResult<RenewedDeviceKey> {
+        if (raw.toByteArray(Charsets.UTF_8).size > 8192)
+            return ApiResult.Failure("The worker returned an invalid key renewal.", code)
+        val json = if (contentType?.substringBefore(';')?.trim()?.equals("application/json", true) == true)
+            runCatching { JSONObject(raw) }.getOrNull() else null
+        // Compatibility is positively identified, never inferred from HTML,
+        // authorization failure, an outage, or a redirect to an untrusted origin.
+        if ((code == 404 && json?.opt("detail") == "Not Found") ||
+            (code == 405 && json?.opt("detail") == "Method Not Allowed"))
+            return ApiResult.Success(RenewedDeviceKey(server.apiKey))
+        if (code != 200) return ApiResult.Failure(errorMessage(code, raw), code)
+        return try {
+            require(json != null && json.opt("device_id") == server.deviceId)
+            val key = json.opt("api_key") as? String ?: error("Missing key")
+            val rotated = json.opt("rotated") as? Boolean ?: error("Missing rotation status")
+            require(if (rotated) Regex("aim_[A-Za-z0-9_-]{43}").matches(key) else key == server.apiKey)
+            Instant.parse(json.opt("expires_at") as? String ?: error("Missing expiry"))
+            ApiResult.Success(RenewedDeviceKey(key))
+        } catch (_: Exception) { ApiResult.Failure("The worker returned an invalid key renewal.", code) }
+    }
+
+    private suspend fun renewDeviceKey(server: Server): ApiResult<RenewedDeviceKey> = withContext(Dispatchers.IO) {
+        try {
+            client.newCall(keyRenewalRequest(server)).execute().use { response ->
+                if (isCfAccessChallenge(response)) return@withContext ApiResult.NeedsCfAccess
+                val source = response.body?.source()
+                    ?: return@withContext ApiResult.Failure("The worker returned an invalid key renewal.", response.code)
+                source.request(8193)
+                if (source.buffer.size > 8192) return@withContext ApiResult.Failure("The worker returned an invalid key renewal.", response.code)
+                parseKeyRenewal(server, response.code, response.header("Content-Type"), source.buffer.readUtf8())
+            }
+        } catch (_: IOException) { ApiResult.Failure("Cannot renew this worker's credential while it is unreachable. Your saved credential was kept; retry connecting.") }
+        catch (_: Exception) { ApiResult.Failure("The worker returned an invalid key renewal.") }
+    }
+
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
@@ -161,10 +222,10 @@ object ApiClient {
         } catch (_: Exception) { ApiResult.Failure("The worker returned an invalid session reservation.", code) }
     }
 
-    internal suspend fun reserveWebSession(server: Server): ApiResult<WebSessionReservation> = withContext(Dispatchers.IO) {
+    internal suspend fun reserveWebSession(server: Server): ApiResult<WebSessionReservation> = withCurrentServer(server) { current -> withContext(Dispatchers.IO) {
         val startedAt = monotonicMillis()
         try {
-            client.newCall(webReservationRequest(server)).execute().use { response ->
+            client.newCall(webReservationRequest(current)).execute().use { response ->
                 if (isCfAccessChallenge(response)) return@withContext ApiResult.NeedsCfAccess
                 val source = response.body?.source() ?: return@withContext ApiResult.Failure("The worker returned an invalid session reservation.", response.code)
                 source.request(8193)
@@ -173,20 +234,18 @@ object ApiClient {
             }
         } catch (_: IOException) { ApiResult.Failure("Cannot reach this server. Check your HTTPS address and connection, then retry.") }
         catch (_: Exception) { ApiResult.Failure("The worker returned an invalid session reservation.") }
-    }
+    } }
 
-    internal suspend fun commitWebSession(server: Server, reservation: WebSessionReservation.Ready): ApiResult<String> = withContext(Dispatchers.IO) {
-        execute(webSessionRequest(server, SessionPurpose.WEB, reservation.token), hasCfCreds = server.hasCfAccess) { it.getString("session_token") }
-    }
+    internal suspend fun commitWebSession(server: Server, reservation: WebSessionReservation.Ready): ApiResult<String> = withCurrentServer(server) { current -> withContext(Dispatchers.IO) {
+        execute(webSessionRequest(current, SessionPurpose.WEB, reservation.token), hasCfCreds = current.hasCfAccess) { it.getString("session_token") }
+    } }
 
     suspend fun createWebSession(server: Server, purpose: SessionPurpose = SessionPurpose.WEB): ApiResult<String> =
-        withContext(Dispatchers.IO) {
-            val request = webSessionRequest(server, purpose)
-
-            execute(request, hasCfCreds = server.hasCfAccess) { json ->
+        withCurrentServer(server) { current -> withContext(Dispatchers.IO) {
+            execute(webSessionRequest(current, purpose), hasCfCreds = current.hasCfAccess) { json ->
                 json.getString("session_token")
             }
-        }
+        } }
 
     /**
      * POST {base}/api/v1/mobile/push/unifiedpush — associates a push endpoint
@@ -195,20 +254,20 @@ object ApiClient {
     suspend fun registerUnifiedPush(
         server: Server,
         endpoint: String,
-    ): ApiResult<Unit> = withContext(Dispatchers.IO) {
+    ): ApiResult<Unit> = withCurrentServer(server) { current -> withContext(Dispatchers.IO) {
         val body = JSONObject().apply {
-            put("device_id", server.deviceId)
+            put("device_id", current.deviceId)
             put("endpoint", endpoint)
         }
         val request = Request.Builder()
-            .url("${server.baseUrl}/api/v1/mobile/push/unifiedpush")
-            .header("Authorization", "Bearer ${server.apiKey}")
-            .cfAccess(server.cfAccessClientId, server.cfAccessClientSecret)
+            .url("${current.baseUrl}/api/v1/mobile/push/unifiedpush")
+            .header("Authorization", "Bearer ${current.apiKey}")
+            .cfAccess(current.cfAccessClientId, current.cfAccessClientSecret)
             .post(body.toString().toRequestBody(JSON_MEDIA.toMediaType()))
             .build()
 
-        execute(request, hasCfCreds = server.hasCfAccess) { }
-    }
+        execute(request, hasCfCreds = current.hasCfAccess) { }
+    } }
 
     /**
      * Exchanges the server's Cloudflare Access service token for a
@@ -305,7 +364,12 @@ object ApiClient {
         }
     }
 
-    private fun errorMessage(code: Int, raw: String): String {
+    internal fun errorMessage(code: Int, raw: String): String {
+        val reason = runCatching { JSONObject(raw).optString("detail") }.getOrNull()
+        if (code == 403 && reason == "Confirm this device on the worker before connecting")
+            return "Waiting for worker confirmation. Ask the owner to approve this phone on the worker, then retry. Your saved credential has been kept."
+        if (code == 403 && reason == "This device was denied by the worker owner")
+            return "The worker owner denied this phone. Contact the owner before enrolling a new device identity."
         return when (code) {
             401 -> "Authorization expired or was revoked. Pair this phone again."
             403 -> "Pairing was refused. Check the code and this device’s access."

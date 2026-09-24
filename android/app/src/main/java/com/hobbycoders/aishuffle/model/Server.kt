@@ -28,8 +28,14 @@ data class Server(
     val accountId: String? = null,
     val hubUrl: String? = null,
     val hubServerId: String? = null,
+    // Set only by successful device-authenticated renewal, never by repair.
+    val keyEpoch: String? = null,
 ) {
     override fun toString(): String = "Server(id=$id, name=$name, host=$host, accountId=$accountId)"
+
+    internal val authorizationEpoch: String
+        get() = keyEpoch ?: java.security.MessageDigest.getInstance("SHA-256")
+            .digest(apiKey.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 
     /** Host portion of [baseUrl], used as a compact subtitle in lists. */
     val host: String
@@ -53,6 +59,7 @@ data class Server(
         put("name", name)
         put("baseUrl", baseUrl)
         put("apiKey", apiKey)
+        put("keyEpoch", keyEpoch ?: JSONObject.NULL)
         put("deviceId", deviceId)
         put("unifiedPushEndpoint", unifiedPushEndpoint ?: JSONObject.NULL)
         put("cfAccessClientId", cfAccessClientId ?: JSONObject.NULL)
@@ -68,6 +75,7 @@ data class Server(
             name = obj.getString("name"),
             baseUrl = obj.getString("baseUrl"),
             apiKey = obj.getString("apiKey"),
+            keyEpoch = obj.optString("keyEpoch").takeIf { it.matches(Regex("[a-f0-9]{64}")) },
             deviceId = obj.getString("deviceId"),
             unifiedPushEndpoint = obj.optString("unifiedPushEndpoint", "")
                 .takeIf { !obj.isNull("unifiedPushEndpoint") && it.isNotBlank() },

@@ -484,8 +484,12 @@ def mobile_hub_ownership(device):
 
 
 def require_worker_confirmation(owner):
-    if owner is not None and store.confirmation(owner) != 'approved':
-        raise HTTPException(status_code=403, detail='Confirm this device on the worker before connecting')
+    if owner is not None:
+        decision = store.confirmation(owner)
+        if decision == 'denied':
+            raise HTTPException(status_code=403, detail='This device was denied by the worker owner')
+        if decision != 'approved':
+            raise HTTPException(status_code=403, detail='Confirm this device on the worker before connecting')
 
 
 def check_paired_client(client):

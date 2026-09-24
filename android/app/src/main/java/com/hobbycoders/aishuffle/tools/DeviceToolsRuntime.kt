@@ -124,7 +124,7 @@ object DeviceToolsRuntime {
 
     private fun authorizedTarget(app: Context, target: Server): Boolean = runCatching {
         val saved = com.hobbycoders.aishuffle.data.ServerStore.get(app).getById(target.id)
-        if (saved != target) return@runCatching false
+        if (!com.hobbycoders.aishuffle.net.DeviceKeyRenewal.sameAuthorization(target, saved)) return@runCatching false
         if (target.accountId == null) return@runCatching true
         val session = com.hobbycoders.aishuffle.account.AccountStore(app).session()
         session != null && session.accountId == target.accountId && session.hub == target.hubUrl

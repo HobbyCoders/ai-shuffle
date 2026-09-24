@@ -152,7 +152,9 @@ def test_hub_ticket_is_pending_until_worker_confirms(owner_app, monkeypatch):
     monkeypatch.setattr(settings, 'shuffle_local_access', True)
     body, local_id = enroll_from_hub(owner_app, monkeypatch)
     remote = worker_client(owner_app, remote=True)
-    assert mobile_session(remote, body['api_key']).status_code == 403
+    pending = mobile_session(remote, body['api_key'])
+    assert pending.status_code == 403
+    assert pending.json()['detail'] == 'Confirm this device on the worker before connecting'
     assert remote.post('/api/v1/mobile/key/renew', headers={'Authorization': 'Bearer ' + body['api_key']}).status_code == 403
     assert hub_store.confirmation(hub_store.ownership(local_id)) == 'pending'
     local = worker_client(owner_app)
@@ -171,7 +173,9 @@ def test_hub_ticket_is_pending_until_worker_confirms(owner_app, monkeypatch):
     assert change_voice(remote).status_code == 403
     assert decide(local, local_id).status_code == 409
     assert decide(local, local_id, False).status_code == 200
-    assert mobile_session(worker_client(owner_app, remote=True), body['api_key']).status_code == 403
+    denied = mobile_session(worker_client(owner_app, remote=True), body['api_key'])
+    assert denied.status_code == 403
+    assert denied.json()['detail'] == 'This device was denied by the worker owner'
 
 
 @pytest.mark.parametrize('credential', ['pending-key', 'pending-session', 'forged', 'none', 'hub-assertion'])

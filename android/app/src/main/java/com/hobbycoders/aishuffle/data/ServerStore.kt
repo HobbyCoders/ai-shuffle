@@ -18,6 +18,7 @@ import org.json.JSONArray
 class ServerStore private constructor(private val prefs: SharedPreferences) {
 
     /** Returns all saved servers, in insertion order. */
+    @Synchronized
     fun getAll(): List<Server> {
         val raw = prefs.getString(KEY_SERVERS, null) ?: return emptyList()
         return runCatching {
@@ -46,34 +47,61 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
     fun selectedToolsServer(): Server? = selectedToolsServerId?.let(::getById)?.takeUnless { it.needsAccountAuthorization }
 
     /** Adds a server (or replaces one with the same id). */
+    @Synchronized
     fun add(server: Server) {
         val updated = getAll().filterNot { it.id == server.id } + server
         save(updated)
     }
 
     /** Replaces an existing server (matched by id). No-op if not present. */
+    @Synchronized
     fun update(server: Server) {
         val current = getAll()
         if (current.none { it.id == server.id }) return
         save(current.map { if (it.id == server.id) server else it })
     }
 
+    @Synchronized
     fun remove(id: String) {
         save(getAll().filterNot { it.id == id })
         if (lastUsedServerId == id) lastUsedServerId = null
         if (selectedToolsServerId == id) selectedToolsServerId = null
     }
 
+    @Synchronized
     fun removeAccountServers() { save(com.hobbycoders.aishuffle.account.AccountBoundary.directOnly(getAll())) }
 
+    @Synchronized
     fun replaceAccountServers(servers: List<Server>) {
-        save(com.hobbycoders.aishuffle.account.AccountBoundary.directOnly(getAll()) + servers)
+        val saved = getAll()
+        // Registry requests may have started before a renewal. Metadata from
+        // that stale snapshot must not overwrite a durably rotated key.
+        val current = servers.map { listed ->
+            val existing = saved.firstOrNull { com.hobbycoders.aishuffle.net.DeviceKeyRenewal.sameIdentity(it, listed) }
+            if (existing != null && existing.apiKey.isNotBlank()) listed.copy(apiKey = existing.apiKey, keyEpoch = existing.keyEpoch) else listed
+        }
+        save(com.hobbycoders.aishuffle.account.AccountBoundary.directOnly(saved) + current)
     }
 
-    private fun save(servers: List<Server>) {
+    @Synchronized
+    internal fun replaceKey(expected: Server, key: String, renewal: Boolean = false): Server? {
+        val saved = getAll()
+        val current = saved.firstOrNull { it.id == expected.id } ?: return null
+        if (!com.hobbycoders.aishuffle.net.DeviceKeyRenewal.sameIdentity(current, expected) || current.apiKey != expected.apiKey)
+            return null
+        val epoch = if (!renewal) null else if (key == current.apiKey) current.keyEpoch else current.authorizationEpoch
+        val replacement = current.copy(apiKey = key, keyEpoch = epoch)
+        if (save(saved.map { if (it.id == current.id) replacement else it })) return replacement
+        // SharedPreferences updates memory even when disk commit fails. Restore
+        // the previous snapshot so a retry does not treat that key as durable.
+        save(saved)
+        return null
+    }
+
+    private fun save(servers: List<Server>): Boolean {
         val arr = JSONArray()
         servers.forEach { arr.put(it.toJson()) }
-        prefs.edit().putString(KEY_SERVERS, arr.toString()).commit()
+        return prefs.edit().putString(KEY_SERVERS, arr.toString()).commit()
     }
 
     /** The last UnifiedPush endpoint the distributor handed us, if any. */
@@ -111,7 +139,11 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
             )
-            return ServerStore(prefs)
+            return ServerStore(prefs).also { store ->
+                com.hobbycoders.aishuffle.net.ApiClient.installCredentialStore(store::getById) { expected, key ->
+                    store.replaceKey(expected, key, renewal = true)
+                }
+            }
         }
     }
 }
