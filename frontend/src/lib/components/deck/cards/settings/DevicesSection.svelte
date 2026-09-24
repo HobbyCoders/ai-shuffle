@@ -5,9 +5,9 @@
 	 * One place for everything that connects to this worker: the Shuffle
 	 * account it belongs to, the other workers in its network, the phones and
 	 * browsers paired with it, and how to add more. Invites and pairing codes
-	 * admit a device on their own; a device that signs in to the same account
-	 * is admitted by whichever worker is online. Nothing waits for approval,
-	 * and the account always wins: a worker that signs in after a clean
+	 * admit a device on their own; account-enrolled admin devices additionally
+	 * require an independent confirmation on each worker. Settings sync still
+	 * follows the account: a worker that signs in after a clean
 	 * install switches to the account's settings by itself.
 	 */
 	import { onMount } from 'svelte';
@@ -27,6 +27,7 @@
 	import { NETWORK_STATE_HINTS, NETWORK_STATE_LABELS, deriveNetworkState, relativeTime } from '$lib/api/network-status';
 	import AccountPanel from './AccountPanel.svelte';
 	import AddDevicePanel from './AddDevicePanel.svelte';
+	import WorkerDeviceConfirmations from './WorkerDeviceConfirmations.svelte';
 	import JoinNetworkPanel from './JoinNetworkPanel.svelte';
 
 	const STATUS_MS = 5000;
@@ -318,6 +319,7 @@
 	</header>
 
 	<AccountPanel bind:this={accountPanel} {workerName} bind:profile={accountProfile} bind:inventoryReady={accountInventoryReady} />
+	<WorkerDeviceConfirmations />
 
 	<div id="device-enrollment" hidden={!showAdd}>{#if addMounted}<AddDevicePanel {enrolled} allowLegacyRunner={workersLoaded && !enrolled && installs.length > 0} />{/if}</div>
 

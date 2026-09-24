@@ -38,6 +38,7 @@ function reads(path: string): unknown {
 	if (path === '/cluster/advertise') return advertise;
 	if (path === '/pairing/endpoints') return { endpoints: [{ url: 'http://10.0.0.5:8000', kind: 'lan', label: 'Local network', secure: false, loopback: false, qr_eligible: true, source: 'advertised' }] };
 	if (path === '/mobile/hub/connection') return disconnected;
+	if (path === '/mobile/hub/devices/confirmations') return [];
 	if (path === '/network/conflicts') return { conflicts: [] };
 	throw new Error('Unexpected GET ' + path);
 }
