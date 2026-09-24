@@ -44,6 +44,7 @@ it('installs using the existing package id, not a connection id', async () => {
  expect(calls.install).toHaveBeenCalledWith('review@local');
 });
 it('explains bundled source and PyPI dependencies without requiring GitHub access', async () => {
+ calls.connectors.mockResolvedValueOnce([{id:'g1',name:'Mail',connector_type:'gmail',enabled:false,status:'stopped',config:{}}]);
  const page = render(PluginsHub);
  const manage = await page.findAllByRole('button', {name:'Manage Gmail'});
  await fireEvent.click(manage[0]);
@@ -51,5 +52,5 @@ it('explains bundled source and PyPI dependencies without requiring GitHub acces
  expect(page.getByText(/access to PyPI for Python dependencies/)).toBeTruthy();
  expect(page.queryByText(/sign in to GitHub in Settings/i)).toBeNull();
  await fireEvent.click(page.getByRole('button', {name:'Install Gmail'}));
- expect(calls.install).toHaveBeenCalledWith('gmail@shuffle-connectors');
+ await waitFor(() => expect(calls.install).toHaveBeenCalledWith('gmail@shuffle-connectors'));
 });
