@@ -24,9 +24,7 @@ Check the [requirements](/docs/getting-started/requirements) first: the image ru
 
 ## After installing
 
-<!-- verify against wizard v2 -->
-
-Open the address in a browser and follow [First run](/docs/getting-started/first-run): set your owner password, choose how Claude Code is paid for, sign in or add your key, pick a workspace and run your first agent.
+Open the address in a browser and follow [First run](/docs/getting-started/first-run): read the welcome screen, set your owner password, enter your license key (or continue on the beta), choose how Claude Code is paid for, sign in or add your key, pick a workspace and run your first agent.
 
 ## More than one worker
 

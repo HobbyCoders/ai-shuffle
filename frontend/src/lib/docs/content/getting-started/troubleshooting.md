@@ -65,13 +65,11 @@ Changing **Owner password** in the Unraid template (or `OWNER_PASSWORD` in `.env
 
 The message in the app says which of these it is.
 
-**No credential is set up.** AI Shuffle never falls back to another account. Follow [First run](/docs/getting-started/first-run) to sign in to the Claude Code CLI or add an API key.
+**No credential is set up.** AI Shuffle never falls back to another account. Sign in to the Claude Code CLI or add an API key in **Settings → Providers** (the setup wizard does the same; see [First run](/docs/getting-started/first-run)).
 
 **The Claude Code CLI is not signed in** (subscription mode):
 
-<!-- verify against wizard v2 -->
-
-- Sign in again from the in-app terminal, or from the host: `docker exec -it -u appuser ai-shuffle claude auth login`.
+- Sign in again from the in-app terminal (**Settings → Providers → Claude Code CLI → Sign in**), or from the host: `docker exec -it -u appuser ai-shuffle claude auth login`.
 - Check whose account it uses: `docker exec -u appuser ai-shuffle claude auth status`.
 - The login is kept in the Claude Code folder (`/home/appuser/.claude`). If that volume or appdata folder was removed or not mapped, the login is lost on every update; check the mapping.
 

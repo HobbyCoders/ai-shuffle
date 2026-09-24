@@ -68,9 +68,7 @@ Choose **Apply**. Unraid downloads the image and starts the container. The first
 
 ## 7. First launch
 
-<!-- verify against wizard v2 -->
-
-Open `http://<server address>:8000` (or click the icon, then **WebUI**) and follow [First run](/docs/getting-started/first-run).
+Open `http://<server address>:8000` (or click the icon, then **WebUI**) and follow [First run](/docs/getting-started/first-run). The welcome screen and the owner password come first; the rest of the wizard follows once the password is set.
 
 To sign in to the Claude Code CLI from Unraid's own terminal instead of the in-app one, open **>_ Terminal** at the top of the Unraid web interface and run:
 
