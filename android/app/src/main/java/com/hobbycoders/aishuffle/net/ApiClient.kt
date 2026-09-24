@@ -89,7 +89,7 @@ object ApiClient {
         if ((code == 404 && json?.opt("detail") == "Not Found") ||
             (code == 405 && json?.opt("detail") == "Method Not Allowed"))
             return ApiResult.Success(RenewedDeviceKey(server.apiKey))
-        if (code != 200) return ApiResult.Failure(errorMessage(code, raw), code)
+        if (code != 200) return ApiResult.Failure(errorMessage(code, raw, server.deviceId), code)
         return try {
             require(json != null && json.opt("device_id") == server.deviceId)
             val key = json.opt("api_key") as? String ?: error("Missing key")
@@ -204,13 +204,13 @@ object ApiClient {
     internal fun monotonicMillis(): Long = TimeUnit.NANOSECONDS.toMillis(System.nanoTime())
 
     internal fun parseWebReservation(code: Int, contentType: String?, raw: String,
-        startedAt: Long = monotonicMillis(), receivedAt: Long = monotonicMillis()): ApiResult<WebSessionReservation> {
+        startedAt: Long = monotonicMillis(), receivedAt: Long = monotonicMillis(), deviceId: String? = null): ApiResult<WebSessionReservation> {
         if (raw.toByteArray(Charsets.UTF_8).size > 8192) return ApiResult.Failure("The worker returned an invalid session reservation.", code)
         val json = if (contentType?.substringBefore(';')?.trim()?.equals("application/json", true) == true)
             runCatching { JSONObject(raw) }.getOrNull() else null
         if ((code == 404 && json?.opt("detail") == "Not Found") ||
             (code == 405 && json?.opt("detail") == "Method Not Allowed")) return ApiResult.Success(WebSessionReservation.Unsupported)
-        if (code != 200) return ApiResult.Failure(errorMessage(code, raw), code)
+        if (code != 200) return ApiResult.Failure(errorMessage(code, raw, deviceId), code)
         return try {
             val token = json?.opt("reservation") as? String ?: error("Missing reservation")
             val expiry = Instant.parse(json.opt("expires_at") as? String ?: error("Missing expiry"))
@@ -230,19 +230,19 @@ object ApiClient {
                 val source = response.body?.source() ?: return@withContext ApiResult.Failure("The worker returned an invalid session reservation.", response.code)
                 source.request(8193)
                 if (source.buffer.size > 8192) return@withContext ApiResult.Failure("The worker returned an invalid session reservation.", response.code)
-                parseWebReservation(response.code, response.header("Content-Type"), source.buffer.readUtf8(), startedAt)
+                parseWebReservation(response.code, response.header("Content-Type"), source.buffer.readUtf8(), startedAt, deviceId = current.deviceId)
             }
         } catch (_: IOException) { ApiResult.Failure("Cannot reach this server. Check your HTTPS address and connection, then retry.") }
         catch (_: Exception) { ApiResult.Failure("The worker returned an invalid session reservation.") }
     } }
 
     internal suspend fun commitWebSession(server: Server, reservation: WebSessionReservation.Ready): ApiResult<String> = withCurrentServer(server) { current -> withContext(Dispatchers.IO) {
-        execute(webSessionRequest(current, SessionPurpose.WEB, reservation.token), hasCfCreds = current.hasCfAccess) { it.getString("session_token") }
+        execute(webSessionRequest(current, SessionPurpose.WEB, reservation.token), hasCfCreds = current.hasCfAccess, deviceId = current.deviceId) { it.getString("session_token") }
     } }
 
     suspend fun createWebSession(server: Server, purpose: SessionPurpose = SessionPurpose.WEB): ApiResult<String> =
         withCurrentServer(server) { current -> withContext(Dispatchers.IO) {
-            execute(webSessionRequest(current, purpose), hasCfCreds = current.hasCfAccess) { json ->
+            execute(webSessionRequest(current, purpose), hasCfCreds = current.hasCfAccess, deviceId = current.deviceId) { json ->
                 json.getString("session_token")
             }
         } }
@@ -266,7 +266,7 @@ object ApiClient {
             .post(body.toString().toRequestBody(JSON_MEDIA.toMediaType()))
             .build()
 
-        execute(request, hasCfCreds = current.hasCfAccess) { }
+        execute(request, hasCfCreds = current.hasCfAccess, deviceId = current.deviceId) { }
     } }
 
     /**
@@ -326,6 +326,7 @@ object ApiClient {
     private inline fun <T> execute(
         request: Request,
         hasCfCreds: Boolean,
+        deviceId: String? = null,
         parse: (JSONObject) -> T,
     ): ApiResult<T> {
         return try {
@@ -345,7 +346,7 @@ object ApiClient {
 
                 val raw = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    return ApiResult.Failure(errorMessage(response.code, raw), response.code)
+                    return ApiResult.Failure(errorMessage(response.code, raw, deviceId), response.code)
                 }
                 // A 200 carrying HTML means a proxy/login page slipped through.
                 if (raw.trimStart().startsWith("<")) {
@@ -364,10 +365,15 @@ object ApiClient {
         }
     }
 
-    internal fun errorMessage(code: Int, raw: String): String {
+    internal fun errorMessage(code: Int, raw: String, deviceId: String? = null): String {
         val reason = runCatching { JSONObject(raw).optString("detail") }.getOrNull()
-        if (code == 403 && reason == "Confirm this device on the worker before connecting")
-            return "Waiting for worker confirmation. Ask the owner to approve this phone on the worker, then retry. Your saved credential has been kept."
+        if (code == 403 && reason == "Confirm this device on the worker before connecting") {
+            // This is our saved enrollment identity, never an ID or label echoed
+            // by the hub/worker error body. Account enrollment IDs are UUIDs.
+            val ownId = deviceId?.takeIf { it.matches(Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) }
+            if (ownId == null) return "Waiting for worker confirmation. This phone's saved device ID is unavailable; do not approve by name. Reopen this worker and retry."
+            return "Waiting for worker confirmation. Phone device ID: $ownId. Compare this exact ID on the worker before approving; a matching name is not proof. Ask the owner to approve this phone on the worker, then retry. Your saved credential has been kept."
+        }
         if (code == 403 && reason == "This device was denied by the worker owner")
             return "The worker owner denied this phone. Contact the owner before enrolling a new device identity."
         return when (code) {
