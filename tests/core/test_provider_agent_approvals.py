@@ -25,7 +25,7 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock
 
-from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
+from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
 
 from app.core import interaction_wait, provider_agent_approvals as approvals
 from app.core.permission_handler import PermissionHandler

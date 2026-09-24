@@ -61,14 +61,14 @@ import time
 from contextlib import nullcontext
 from typing import Any
 
-from claude_agent_sdk.types import (
+from app.core.cli_sessions import (
     SessionKey,
     SessionListSubkeysKey,
     SessionStoreEntry,
     SessionStoreListEntry,
     SessionSummaryEntry,
 )
-from claude_agent_sdk import fold_session_summary
+from app.core.cli_sessions import fold_session_summary
 from psycopg2.extras import Json
 
 from app.db.base import get_db, transaction
@@ -1242,17 +1242,16 @@ async def main_transcript_is_empty(session_id: str) -> bool:
 
 
 class PgSessionStore:
-    """Postgres-backed :class:`claude_agent_sdk.SessionStore` implementation.
+    """Postgres-backed app-owned CLI transcript store implementation.
 
     See module docstring for the full design. Implements all four optional
     methods (``list_sessions``, ``list_session_summaries``, ``delete``,
-    ``list_subkeys``) so the SDK can use the fast-path resume + summary APIs
-    without falling back to per-session ``load()``.
+    ``list_subkeys``) for fast-path resume and summary reads without falling
+    back to per-session ``load()``.
 
     All methods are coroutines wrapping synchronous psycopg2 work via
-    ``asyncio.to_thread``. Exceptions raised by ``append`` are logged but
-    re-raised per the Protocol contract so the SDK's own error handling
-    (swallow + continue subprocess) applies.
+    ``asyncio.to_thread``. Exceptions raised by ``append`` are logged and
+    re-raised to the caller; persistence failures are never silently accepted.
     """
 
     async def append(

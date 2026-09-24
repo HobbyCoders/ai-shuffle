@@ -306,7 +306,7 @@ class TestCreatePluginHookHandler:
         the handler must return a PostToolUseHookSpecificOutput with
         updatedToolOutput == "REWRITTEN".
         """
-        from claude_agent_sdk.types import PostToolUseHookSpecificOutput
+        from app.core.agent_types import PostToolUseHookSpecificOutput
 
         async def mock_execute(*args, **kwargs):
             return {"updated_output": "REWRITTEN"}

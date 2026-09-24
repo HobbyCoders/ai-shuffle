@@ -3,19 +3,19 @@
 AI-Shuffle's ~10 in-process tool modules under ``app/mcp/`` all follow the
 Claude Agent SDK pattern:
 
-    from claude_agent_sdk import tool, create_sdk_mcp_server
+    from app.mcp.inproc import tool, create_tool_server
 
     @tool("Name", "description", {json-schema})
     async def handler(args: dict) -> dict:            # -> {"content": [{"type":"text",...}]}
         ...
 
-    server = create_sdk_mcp_server(name="builtins", version="1.0.0", tools=[handler, ...])
+    server = create_tool_server(name="builtins", version="1.0.0", tools=[handler, ...])
 
 fluid's ``fluid.tools.inproc`` mirrors that surface deliberately, and its
 ``ToolRegistry._normalize`` already accepts the SDK envelope
 (``{"content":[{"type":"text","text":...}]}``) as a handler return. So porting a
 module is *mechanical*: hand this bridge the same list of ``@tool``-decorated
-objects the module already passes to ``create_sdk_mcp_server`` and it produces a
+objects the module already passes to ``create_tool_server`` and it produces a
 fluid ``InprocServer`` that ``ToolRegistry.register_inproc`` accepts.
 
 This module ships the generic converters used to port every module, plus a
@@ -26,7 +26,7 @@ worked example (``bridge_builtins_tools``) proving the pattern for
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable, List, Mapping, Optional, is_typeddict
+from typing import Any, Iterable, List, Mapping, Optional
 
 from fluid.tools.inproc import InprocServer, InprocTool, create_inproc_server
 from fluid.tools.registry import ToolRegistry
@@ -35,19 +35,8 @@ logger = logging.getLogger(__name__)
 
 
 def _input_schema(schema: Any) -> dict:
-    # The pinned SDK accepts both JSON Schema and Python annotation shorthand.
-    # Its server normalizes the latter for list_tools, but recorded @tool
-    # objects retain the raw types. Match that conversion at this bridge too.
-    from claude_agent_sdk import _python_type_to_json_schema
-
-    if isinstance(schema, dict):
-        if isinstance(schema.get("type"), str):
-            return schema
-        properties = {name: _python_type_to_json_schema(value) for name, value in schema.items()}
-        return {"type": "object", "properties": properties, "required": list(properties)}
-    if is_typeddict(schema):
-        return _python_type_to_json_schema(schema)
-    return {"type": "object"}
+    from fluid.tools.inproc import input_schema
+    return input_schema(schema)
 
 
 def sdk_tool_to_inproc(sdk_tool: Any, *, risk: str = "safe") -> InprocTool:

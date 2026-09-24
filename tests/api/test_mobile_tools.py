@@ -269,13 +269,13 @@ def test_claim_rechecks_requesting_account(client, isolated, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_runtime_registration_discovery(monkeypatch):
-    import claude_agent_sdk
+    import app.mcp.inproc as inproc
     from app.mcp import builtin_tools
     captured = []
     def server(**kwargs):
         captured.extend(kwargs['tools'])
         return {'name': kwargs['name']}
-    monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', server)
+    monkeypatch.setattr(inproc, 'create_tool_server', server)
     assert builtin_tools.create_builtin_tools_server(session_id='sa', is_admin=False)
     tools = {t.name: t for t in captured}
     assert {'AndroidDevices', 'AndroidAction'} <= tools.keys()

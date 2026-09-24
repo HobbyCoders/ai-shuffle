@@ -163,15 +163,15 @@ def _extract_connection_error(
         if stderr_msg:
             return stderr_msg
 
-    # 2. Check ProcessError.stderr attribute from the SDK
-    from claude_agent_sdk._errors import ProcessError
-    if isinstance(exc, ProcessError) and exc.stderr:
+    # 2. Check stderr retained by a failed subprocess invocation
+    from subprocess import CalledProcessError
+    if isinstance(exc, CalledProcessError) and exc.stderr:
         # Skip the SDK's useless placeholder
         if exc.stderr != "Check stderr output for details":
-            return f"Connection failed (exit code {exc.exit_code}): {exc.stderr}"
+            return f"Connection failed (exit code {exc.returncode}): {exc.stderr}"
         # Placeholder stderr — build message from exit code alone
-        if exc.exit_code is not None:
-            return f"Connection failed: CLI process exited with code {exc.exit_code}"
+        if exc.returncode is not None:
+            return f"Connection failed: CLI process exited with code {exc.returncode}"
 
     # 3. Fall back to raw exception message
     return f"Connection failed: {exc}"

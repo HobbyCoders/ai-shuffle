@@ -2475,7 +2475,7 @@ class TestApiErrorStatusFrame:
             usage: Optional[dict] = None
             uuid: str = "fake-uuid"
 
-        from claude_agent_sdk import ResultMessage
+        from app.core.provider.events import ResultMessage
 
         # Build a real ResultMessage with api_error_status=503 if the SDK supports it;
         # otherwise fall back to our fake to verify the getattr path.

@@ -27,7 +27,7 @@ import asyncio
 from typing import Optional, Dict, Any, AsyncGenerator, Callable, List
 from datetime import datetime, timezone
 
-from claude_agent_sdk import ClaudeAgentOptions
+from app.core.agent_types import AgentOptions
 # Provider-agnostic mirrors of the SDK streaming message vocabulary (identical
 # class/attribute names — see app/core/provider/events.py). Every stream this
 # module consumes is translated at its boundary (adapter.receive_events()), so
@@ -45,7 +45,7 @@ from app.core.provider.events import (
 )
 _SERVER_TOOL_TYPES: tuple = (ServerToolUseBlock,)
 _SERVER_TOOL_RESULT_TYPES: tuple = (ServerToolResultBlock,)
-from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
+from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
 from fluid.engine.delegated import ClaudeCliMissingError
 
 from app.db import database
@@ -944,7 +944,7 @@ async def execute_query(
     # app/core/provider/factory.py); the fluid HarnessAdapter is the only
     # backend. This headless path used to consume the SDK's one-shot query()
     # directly, which bypassed the seam entirely: it was handed a fluid session
-    # id (ses_...) as ClaudeAgentOptions.resume, which the legacy SDK cannot
+    # id (ses_...) as AgentOptions.resume, which the legacy SDK cannot
     # resume — every wake turn (idle watchdog, ScheduleWakeup, automations,
     # connectors, POST /api/v1/query) ran with no context. Routing through
     # make_adapter() keeps this path on the same backend as every other spawn
@@ -2660,7 +2660,7 @@ async def _stream_to_websocket_impl(
                     if isinstance(result, _DeferSentinel):
                         # SDK 0.1.81 — return PreToolUseHookSpecificOutput with defer
                         try:
-                            from claude_agent_sdk.types import PreToolUseHookSpecificOutput
+                            from app.core.agent_types import PreToolUseHookSpecificOutput
                             return PreToolUseHookSpecificOutput(
                                 hookEventName="PreToolUse",
                                 permissionDecision="defer",

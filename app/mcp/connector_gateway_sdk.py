@@ -147,9 +147,9 @@ def build_gateway_tools(session_id: Optional[str]) -> List[Any]:
     """Build the gateway ``@tool`` pairs for every gateway-enabled connector
     type linked to ``session_id``. Returns [] when none apply."""
     try:
-        from claude_agent_sdk import tool
+        from app.mcp.inproc import tool
     except ImportError:  # pragma: no cover - SDK always present in app runtime
-        logger.debug("claude_agent_sdk not available — gateway tools disabled")
+        logger.debug("Fluid tool helpers not available — gateway tools disabled")
         return []
 
     if not session_id:

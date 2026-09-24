@@ -1,9 +1,8 @@
 """
 Conformance tests for :class:`app.core.pg_session_store.PgSessionStore`.
 
-Uses the SDK's shared ``run_session_store_conformance`` harness to assert all
-14 behavioral contracts every :class:`claude_agent_sdk.SessionStore` adapter
-must satisfy.
+Exercises the owned append/load/list/delete transcript-store contract, including
+subagent isolation, summary folding, ordering and idempotent cleanup.
 
 A real PostgreSQL instance is required — the store writes JSONB and uses
 partial indexes that SQLite can't emulate. The test initializes the
@@ -118,13 +117,38 @@ def _truncate() -> None:
 
 @pytest.mark.asyncio
 async def test_pg_session_store_conformance():
-    """Run all 14 SDK SessionStore contracts against PgSessionStore."""
-    from claude_agent_sdk.testing import run_session_store_conformance
-
+    """Exercise the app's durable transcript contract on a disposable Postgres."""
     from app.core.pg_session_store import PgSessionStore
 
-    def make_store() -> PgSessionStore:
-        _truncate()
-        return PgSessionStore()
-
-    await run_session_store_conformance(make_store)
+    _truncate()
+    store = PgSessionStore()
+    key = {"project_key": "project", "session_id": "test-session"}
+    sub = {**key, "subpath": "subagents/agent-1"}
+    other = {"project_key": "other", "session_id": "other-session"}
+    assert await store.load(key) is None
+    await store.append(key, [])
+    a = {"type": "user", "uuid": "u", "message": {"content": "hello"}}
+    b = {"type": "assistant", "uuid": "a", "message": {"content": "world"}}
+    await store.append(key, [a])
+    await store.append(key, [b])
+    await store.append(sub, [b])
+    await store.append(other, [a])
+    # A fresh adapter sees committed order and isolates subagent transcripts.
+    assert await PgSessionStore().load(key) == [a, b]
+    assert await store.load(sub) == [b]
+    assert await store.list_subkeys(key) == ["subagents/agent-1"]
+    assert [e["session_id"] for e in await store.list_sessions("project")] == [key["session_id"]]
+    summaries = await store.list_session_summaries("project")
+    assert summaries[0]["data"]["first_prompt"] == "hello"
+    await store.delete(sub)
+    assert await store.load(sub) is None
+    assert await store.load(key) == [a, b]
+    await store.append(sub, [b])
+    await store.delete(key)
+    assert await store.load(key) is None
+    assert await store.load(sub) is None
+    assert await store.list_subkeys(key) == []
+    assert await store.list_sessions("project") == []
+    assert await store.list_session_summaries("project") == []
+    assert await store.load(other) == [a]
+    await store.delete(key)  # idempotent cleanup

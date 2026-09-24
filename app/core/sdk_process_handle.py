@@ -17,10 +17,7 @@ Both reach the same anyio.abc.Process instance.
 
 import asyncio
 import logging
-from typing import Optional, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from claude_agent_sdk import ClaudeSDKClient
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +26,7 @@ logger = logging.getLogger(__name__)
 _SDK_VERSION_VERIFIED = "0.1.50"
 
 
-def _extract_process(client: "ClaudeSDKClient") -> Optional[object]:
+def _extract_process(client: object) -> Optional[object]:
     """Extract the underlying anyio.abc.Process from an SDK client.
 
     Tries two known attribute chains and returns the first that succeeds.
@@ -74,7 +71,7 @@ class SdkProcessHandle:
 
     __slots__ = ("_process",)
 
-    def __init__(self, client: "ClaudeSDKClient") -> None:
+    def __init__(self, client: object) -> None:
         self._process = _extract_process(client)
 
     @property

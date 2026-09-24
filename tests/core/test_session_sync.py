@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from claude_agent_sdk import SDKSessionInfo
+from app.core.cli_sessions import SessionInfo as SDKSessionInfo
 
 
 # =============================================================================

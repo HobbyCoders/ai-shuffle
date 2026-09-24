@@ -84,7 +84,7 @@ is at the end of this file.
 
 ## Python packages
 
-Installed into the Docker image and the desktop installer's Python runtime (`requirements.txt`, `requirements-dev.txt`, `requirements-native.txt` and the fluid harness, with their dependencies). `claude-agent-sdk` also bundles the Claude Code CLI binary, which is licensed by Anthropic under its own terms, not under the package license shown here. Platform-specific dependencies were resolved for win32.
+Installed into the Docker image and the desktop installer's Python runtime (`requirements.txt`, `requirements-dev.txt`, `requirements-native.txt` and the fluid harness, with their dependencies). No Claude Code CLI binary is bundled; the user's separately installed stock CLI is licensed by Anthropic under its own terms. Platform-specific dependencies were resolved for win32.
 
 | Package | Version | License | URL |
 | --- | --- | --- | --- |
@@ -104,7 +104,6 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | certifi | 2026.7.22 | Mozilla Public License 2.0 (MPL 2.0) | https://github.com/certifi/python-certifi |
 | cffi | 2.1.1 | MIT-0 | https://github.com/python-cffi/cffi |
 | charset-normalizer | 3.5.1 | MIT | https://github.com/jawah/charset_normalizer |
-| claude-agent-sdk | 0.2.126 | MIT License | https://github.com/anthropics/claude-agent-sdk-python |
 | click | 8.5.0 | BSD-3-Clause | https://github.com/pallets/click/ |
 | colorama | 0.4.6 | BSD License | https://github.com/tartley/colorama |
 | coverage | 7.16.1 | Apache-2.0 | https://github.com/coveragepy/coveragepy |

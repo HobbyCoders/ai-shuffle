@@ -1209,21 +1209,21 @@ class TestRecentTerminalRetention:
 def _build_task_list_handler(session_id):
     """Build the builtins MCP server and return the TaskList tool's async handler.
 
-    Captures the tools list passed to create_sdk_mcp_server so we can invoke the
+    Captures the tools list passed to create_tool_server so we can invoke the
     real handler directly without standing up an MCP transport. create_builtin_tools_server
-    imports create_sdk_mcp_server lazily from claude_agent_sdk, so we patch it there.
+    imports create_tool_server lazily from app.mcp.inproc, so we patch it there.
     """
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as sdk
     import app.mcp.builtin_tools as bt
 
     captured = {}
-    real_create = sdk.create_sdk_mcp_server
+    real_create = sdk.create_tool_server
 
     def _spy(name, version, tools):
         captured["tools"] = tools
         return real_create(name=name, version=version, tools=tools)
 
-    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+    with patch.object(sdk, "create_tool_server", side_effect=_spy):
         bt.create_builtin_tools_server(session_id=session_id, profile_id="p", project_id=None)
 
     tools = {t.name: t for t in captured["tools"]}
@@ -1401,17 +1401,17 @@ class TestGetTask:
 
 def _build_builtin_handlers(session_id):
     """Build the builtins server and return {tool_name: async handler}."""
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as sdk
     import app.mcp.builtin_tools as bt
 
     captured = {}
-    real_create = sdk.create_sdk_mcp_server
+    real_create = sdk.create_tool_server
 
     def _spy(name, version, tools):
         captured["tools"] = tools
         return real_create(name=name, version=version, tools=tools)
 
-    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+    with patch.object(sdk, "create_tool_server", side_effect=_spy):
         bt.create_builtin_tools_server(
             session_id=session_id, profile_id="p", project_id=None
         )

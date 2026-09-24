@@ -216,7 +216,7 @@ async function installPython() {
 	run(py, [...pip, '--require-hashes', '-r', path.join(repoDir, 'requirements.lock')], { env, cwd: repoDir });
 	run(py, [...pip, '--require-hashes', '-r', path.join(repoDir, 'requirements-native.lock')], { env, cwd: repoDir });
 	run(py, [...pip, '--no-deps', '--no-build-isolation', path.join(repoDir, 'fluid')], { env, cwd: repoDir });
-	run(py, ['-c', 'import fluid, claude_agent_sdk, psycopg2, pygit2, fastapi; print("python deps ok")'], { env });
+	run(py, ['-c', 'import importlib.util; import fluid, mcp, psycopg2, pygit2, fastapi; assert importlib.util.find_spec("claude_agent_sdk") is None; print("python deps ok (no agent SDK)")'], { env });
 	return { version: PYTHON_VERSION, build: PYTHON_BUILD, triple };
 }
 

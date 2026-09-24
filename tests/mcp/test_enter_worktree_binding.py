@@ -25,18 +25,18 @@ CHECKOUT = "/checkouts/ai-shuffle/fix-voice-transcription-settle"
 
 
 def _handlers(session_id=SESSION, project_id="proj-1"):
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as sdk
 
     from app.mcp import builtin_tools
 
     captured = {}
-    real_create = sdk.create_sdk_mcp_server
+    real_create = sdk.create_tool_server
 
     def _spy(name, version, tools):
         captured["tools"] = tools
         return real_create(name=name, version=version, tools=tools)
 
-    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+    with patch.object(sdk, "create_tool_server", side_effect=_spy):
         builtin_tools.create_builtin_tools_server(
             session_id=session_id, project_id=project_id
         )

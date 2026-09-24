@@ -184,20 +184,20 @@ def _build_schedule_wakeup_handler(session_id, profile_id, model):
     """Return the real ScheduleWakeup handler from a built builtins server.
 
     Mirrors ``tests/core/test_task_registry.py::_build_task_list_handler``:
-    spy on the lazily-imported ``create_sdk_mcp_server`` to capture the tool
+    spy on the lazily-imported ``create_tool_server`` to capture the tool
     objects so the handler can be invoked without an MCP transport.
     """
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as sdk
     import app.mcp.builtin_tools as bt
 
     captured = {}
-    real_create = sdk.create_sdk_mcp_server
+    real_create = sdk.create_tool_server
 
     def _spy(name, version, tools):
         captured["tools"] = tools
         return real_create(name=name, version=version, tools=tools)
 
-    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+    with patch.object(sdk, "create_tool_server", side_effect=_spy):
         bt.create_builtin_tools_server(
             session_id=session_id, profile_id=profile_id, project_id=None,
             model=model,

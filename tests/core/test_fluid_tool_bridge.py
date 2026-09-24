@@ -248,7 +248,7 @@ def test_every_static_risk_map_tool_name_is_current(monkeypatch):
         if server == "builtins":
             from app.core.config import settings
             from app.mcp.builtin_tools import _build_memory_bridge_tools
-            from claude_agent_sdk import tool
+            from fluid.tools.inproc import tool
 
             # Building these tool objects does not execute their handlers or
             # open a store. Conversation-history registration is covered by

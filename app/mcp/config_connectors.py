@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 def _create_connector_tools(is_admin: bool) -> list:
     """Create connector status tools."""
-    from claude_agent_sdk import tool
+    from app.mcp.inproc import tool
     from app.db import database
     from app.db.async_database import run_sync
 

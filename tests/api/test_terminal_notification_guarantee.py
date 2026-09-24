@@ -53,7 +53,7 @@ from app.core.task_registry import (
 )
 from app.db import database
 from app.db.async_database import run_sync
-from claude_agent_sdk import TaskUpdatedMessage
+from app.core.provider.events import TaskUpdatedMessage
 
 
 SESSION = "sess-guarantee"

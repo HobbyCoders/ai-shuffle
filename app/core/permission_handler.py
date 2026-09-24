@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 
-from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
+from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
 
 from app.db import database
 from app.db.async_database import run_sync

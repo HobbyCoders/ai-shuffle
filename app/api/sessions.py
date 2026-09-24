@@ -16,32 +16,32 @@ from typing import List, Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, Response, status, Request
 
 try:
-    from claude_agent_sdk import get_session_messages as sdk_get_session_messages
+    from app.core.cli_sessions import get_session_messages as sdk_get_session_messages
 except ImportError:
     sdk_get_session_messages = None
 
 try:
-    from claude_agent_sdk import rename_session as sdk_rename_session
+    from app.core.cli_sessions import rename_session as sdk_rename_session
 except ImportError:
     sdk_rename_session = None
 
 try:
-    from claude_agent_sdk import tag_session as sdk_tag_session
+    from app.core.cli_sessions import tag_session as sdk_tag_session
 except ImportError:
     sdk_tag_session = None
 
 try:
-    from claude_agent_sdk import get_session_info as sdk_get_session_info
+    from app.core.cli_sessions import get_session_info as sdk_get_session_info
 except ImportError:
     sdk_get_session_info = None
 
 try:
-    from claude_agent_sdk import delete_session as sdk_delete_session
+    from app.core.cli_sessions import delete_session as sdk_delete_session
 except ImportError:
     sdk_delete_session = None
 
 try:
-    from claude_agent_sdk import (
+    from app.core.cli_sessions import (
         list_subagents as sdk_list_subagents,
         get_subagent_messages as sdk_get_subagent_messages,
     )

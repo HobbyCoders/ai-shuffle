@@ -159,7 +159,7 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 # Its dependencies and build backend already came from the locked install
 # above, so nothing unpinned is fetched here.
 COPY fluid/ /opt/fluid/
-RUN pip install --no-cache-dir --no-deps --no-build-isolation /opt/fluid && python -c "import fluid"
+RUN pip install --no-cache-dir --no-deps --no-build-isolation /opt/fluid && python -c "import fluid, importlib.util; assert importlib.util.find_spec('claude_agent_sdk') is None"
 
 # ── Backend code ──
 COPY --chown=appuser:appuser app/ ./app/

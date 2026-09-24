@@ -1288,9 +1288,9 @@ def create_builtin_tools_server(
         SDK MCP server config, or ``None`` if the SDK is unavailable.
     """
     try:
-        from claude_agent_sdk import tool, create_sdk_mcp_server
+        from app.mcp.inproc import tool, create_tool_server
     except ImportError:
-        logger.debug("claude_agent_sdk not available — builtin tools disabled")
+        logger.debug("Fluid tool helpers not available — builtin tools disabled")
         return None
 
     from app.mcp.sdk_compat import patch_sdk_server
@@ -2572,7 +2572,7 @@ def create_builtin_tools_server(
         len(all_tools), session_id, project_id, is_admin,
     )
     return patch_sdk_server(
-        create_sdk_mcp_server(name="builtins", version="1.0.0", tools=all_tools),
+        create_tool_server(name="builtins", version="1.0.0", tools=all_tools),
         all_tools,
     )
 

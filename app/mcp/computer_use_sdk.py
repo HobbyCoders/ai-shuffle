@@ -111,7 +111,7 @@ def create_computer_use_server(
         logger.info("computer-use disabled (%s) — server not created", reason)
         return None
     try:
-        from claude_agent_sdk import tool, create_sdk_mcp_server
+        from app.mcp.inproc import tool, create_tool_server
         from mcp.types import ToolAnnotations
     except ImportError:
         return None
@@ -725,7 +725,7 @@ def create_computer_use_server(
         len(tools), session_id, permission_mode, mgr.selected_index,
     )
     return patch_sdk_server(
-        create_sdk_mcp_server(name="computer-use", version="2.0.0", tools=tools),
+        create_tool_server(name="computer-use", version="2.0.0", tools=tools),
         tools,
     )
 

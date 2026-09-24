@@ -6,7 +6,7 @@ session — killing the between-turns idle drain and the per-task stop path.
 It now degrades to None and callers handle that.
 """
 
-from claude_agent_sdk import ClaudeAgentOptions
+from app.core.agent_types import AgentOptions
 
 from app.core.session_pool import SessionState
 
@@ -29,7 +29,7 @@ class _AdapterWithSdkClient:
 def _state(adapter) -> SessionState:
     return SessionState(
         adapter=adapter,
-        connect_options=ClaudeAgentOptions(model="claude-sonnet-4-5"),
+        connect_options=AgentOptions(model="claude-sonnet-4-5"),
     )
 
 

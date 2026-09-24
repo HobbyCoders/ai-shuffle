@@ -1,14 +1,7 @@
-"""
-Compatibility shim for claude_agent_sdk + mcp >=1.12.
+"""Host-owned tool assembly and optional MCP content adapter.
 
-MCP 1.12 changed how @server.call_tool() processes handler return values.
-The SDK's handler returns a CallToolResult pydantic model, but MCP 1.12's
-wrapper checks `hasattr(results, "__iter__")` — which is True for pydantic
-models — and iterates it, yielding (field_name, value) tuples instead of
-content objects.  This causes 20 validation errors per tool call.
-
-Fix: re-register the call_tool handler on the server instance so tool
-functions return a raw content list instead of CallToolResult.
+Fluid InprocServer instances carry their tools directly. Older plugins may
+supply an MCP Server; keep its text/image conversion without any agent SDK.
 """
 
 import json
@@ -26,8 +19,8 @@ def patch_sdk_server(server_cfg: dict, tools: list) -> dict:
     model (which MCP 1.12 incorrectly iterates).
 
     Args:
-        server_cfg: The dict returned by create_sdk_mcp_server().
-        tools: The same tools list passed to create_sdk_mcp_server().
+        server_cfg: The dict returned by create_tool_server().
+        tools: The same tools list passed to create_tool_server().
 
     Returns:
         The same dict, patched in-place.
@@ -45,7 +38,7 @@ def patch_sdk_server(server_cfg: dict, tools: list) -> dict:
         from mcp.types import TextContent, ImageContent
 
         instance = server_cfg.get("instance")
-        if instance is None:
+        if instance is None or not hasattr(instance, "call_tool"):
             return server_cfg
 
         tool_map = {t.name: t for t in tools}
