@@ -1,7 +1,8 @@
 """ProviderAgent — cross-provider worker sessions (multi-provider phase 3, P3-A).
 
 Option C of ``docs/MULTI_PROVIDER_PHASE3_PLAN.md`` §2: keep the Claude main
-FULLY native (subscription OAuth, direct to Anthropic — ruling P1/F1) and
+FULLY native (the stock Claude Code CLI on its own login, direct to Anthropic —
+ruling P1/F1) and
 provide other-provider workers not as CLI-native
 Task-tool subagents but as an ai-shuffle-provided tool that dispatches a brief
 to a SEPARATE session bound to a different provider and returns its report.

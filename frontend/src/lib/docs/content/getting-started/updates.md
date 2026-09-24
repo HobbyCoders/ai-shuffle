@@ -44,6 +44,10 @@ Updating the image is always safe even when an in-app update would have worked, 
 
 The Claude Code CLI inside the container is installed with Anthropic's installer on first start and keeps itself up to date, as it does on any computer. It is stored in its own volume or appdata folder, so image updates do not reinstall it, and AI Shuffle never modifies it.
 
+## Upgrading from a version that signed in to Claude for you
+
+Earlier versions ran their own Claude sign-in. That is gone: the Claude Code CLI now owns its login, and the upgrade deletes every Claude account record AI Shuffle kept. The CLI's existing login keeps working, but once after the upgrade the owner sees a notice asking you to sign out and in again so the login comes from the CLI's own sign-in: run `claude auth logout`, then `claude auth login`, in the AI Shuffle terminal (or `docker exec -it -u appuser <container> claude auth login`). AI Shuffle never reads your Claude credentials. The Claude usage bars now show only what the CLI reports while an agent runs; the full picture is on [claude.ai/settings/usage](https://claude.ai/settings/usage).
+
 ## What the update check sends
 
 - **What:** a plain `GET https://hobbycoders.com/v1/desktop/manifest`. No cookies, no account token, no license key, no device or install ID, and nothing about your projects, sessions or settings. Like any web request, it reveals your IP address and a generic HTTP client name.

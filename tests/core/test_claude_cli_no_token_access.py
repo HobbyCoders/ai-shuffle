@@ -48,7 +48,7 @@ def test_no_refresh_call_sites_remain():
         assert "ensure_fresh_credentials" not in text, rel
         assert "sync_back_active_account" not in text, rel
         assert "seed_from_credentials_file" not in text, rel
-    for rel in ("app/core/cli_bridge.py", "app/api/auth.py", "run_local.py"):
+    for rel in ("app/core/cli_bridge.py", "app/api/auth.py", "run_local.py", "entrypoint.sh", ".env.example"):
         assert ".credentials.json" not in (ROOT / rel).read_text(), rel
 
 

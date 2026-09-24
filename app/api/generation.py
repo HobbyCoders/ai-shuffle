@@ -222,8 +222,8 @@ async def generate_with_claude(
 
     Auth follows the bound provider: a native leg resolves the provider row's
     decrypted credentials; the delegated leg authenticates like every other
-    Claude Code session (stored `ANTHROPIC_API_KEY`, else the connected OAuth
-    account). There is NO direct-HTTP path here.
+    Claude Code session (stored `ANTHROPIC_API_KEY`, else the CLI's own
+    login). There is NO direct-HTTP path here.
 
     Args:
         prompt: The prompt to send.

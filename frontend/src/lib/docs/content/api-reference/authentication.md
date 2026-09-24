@@ -66,7 +66,9 @@ curl http://localhost:8000/api/v1/auth/status
 
 ## Claude Code CLI
 
-AI Shuffle never signs in to Claude itself and never reads the CLI's credentials. The stock Claude Code CLI owns its login; these endpoints report what `claude auth status` says and run the CLI's own `claude auth login` and `claude auth logout`.
+Run `claude auth login` in the AI Shuffle terminal (or `docker exec -it -u appuser <container> claude auth login`). AI Shuffle never reads your Claude credentials. The stock Claude Code CLI owns its login; these endpoints report what `claude auth status` says and run the CLI's own `claude auth login` and `claude auth logout`.
+
+The old in-app sign-in endpoints (`/api/v1/auth/claude/login`, `/login/poll`, `/complete`, `/validate` and `/api/v1/auth/claude/accounts*`) no longer exist and return 404.
 
 ### GET /api/v1/auth/claude/cli
 

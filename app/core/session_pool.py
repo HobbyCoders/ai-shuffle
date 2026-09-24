@@ -1863,10 +1863,9 @@ def reconnect_option_names(state: SessionState, new_options: ClaudeAgentOptions)
     ):
         changed.append("disallowed_tools")
 
-    # NOTE: on-disk OAuth credential rotation is deliberately NOT a reconnect
+    # NOTE: the CLI refreshing its own login is deliberately NOT a reconnect
     # reason. Respawning kills every background task/sub-agent parented to the
-    # subprocess, and the delegated CLI re-reads credentials from its config dir
-    # when it needs to re-auth — so a rotation on disk is picked up in place.
+    # subprocess, and the delegated CLI handles its own re-auth in place.
 
     # These can be changed at runtime — no reconnect needed
     # (model via client.set_model(), permission_mode via client.set_permission_mode())
