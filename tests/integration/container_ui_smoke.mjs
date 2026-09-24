@@ -1,6 +1,7 @@
 // Actual bundled UI and credential gate, with no credentials or model calls.
 // The exported checks also run in the installed Windows preview acceptance test.
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 export async function workerJson(page, url, method = 'GET', body) {
@@ -14,12 +15,29 @@ export async function workerJson(page, url, method = 'GET', body) {
   }, { url, method, body });
 }
 
-export async function verifyOfflineSetup(page) {
-  // Welcome is remembered only for this browser visit. A reload resumes at
-  // License, not Workspace; do not seed session storage or onboarding flags.
+export async function verifyOfflineSetup(page, { ownerPassword } = {}) {
+  // A container creates its own owner password between Welcome and License.
+  // Desktop uses its native handoff. Reloads resume at License, not Workspace;
+  // never seed session storage, trust the LAN or write onboarding flags.
   await page.locator('[data-testid="setup-welcome"], [data-testid="setup-license"]').waitFor();
   const welcome = page.getByTestId('setup-welcome');
   if (await welcome.isVisible()) await welcome.getByRole('button', { name: 'Continue', exact: true }).click();
+  const owner = await workerJson(page, '/api/v1/owner/status');
+  if (owner.required && !owner.password_set) {
+    assert.equal(owner.setup_allowed, true, 'Fresh owner creation must be allowed from this local browser');
+    assert(ownerPassword, 'The container needs its own disposable owner password; never bypass the owner gate');
+    const form = page.getByRole('form', { name: 'Set an owner password', exact: true });
+    await form.getByLabel(/^New password/).fill(ownerPassword);
+    await form.getByLabel('Repeat it', { exact: true }).fill(ownerPassword);
+    const [created] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/owner/password' && response.request().method() === 'POST'),
+      form.getByRole('button', { name: 'Save password', exact: true }).click(),
+    ]);
+    assert.equal(created.status(), 200, 'The real owner-password producer rejected the fixture');
+    const savedOwner = await workerJson(page, '/api/v1/owner/status');
+    assert.equal(savedOwner.password_set, true);
+    assert.equal(savedOwner.trusted_lan, false, 'Owner creation must not enable login-free LAN access');
+  }
   const license = page.getByTestId('setup-license');
   await license.waitFor();
   const status = await workerJson(page, '/api/v1/license');
@@ -90,7 +108,12 @@ async function main() {
   });
   try {
     await page.goto('http://127.0.0.1:8000/setup', { waitUntil: 'domcontentloaded' });
-    await verifyOfflineSetup(page);
+    const owner = await workerJson(page, '/api/v1/owner/status');
+    assert.equal(owner.password_set, false, 'The container fixture must start with no owner password');
+    assert.equal(owner.required, true, 'A fresh container browser must not bypass owner setup');
+    assert.equal(owner.trusted_lan, false);
+    const ownerPassword = randomBytes(32).toString('base64url');
+    await verifyOfflineSetup(page, { ownerPassword });
     await configurePersistenceFixture(page, '/workspace/container-onboarding-check');
     await page.reload({ waitUntil: 'domcontentloaded' });
     await verifyOfflineSetup(page);
