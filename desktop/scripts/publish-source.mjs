@@ -23,10 +23,10 @@ const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
 const releaseTag = process.env.RELEASE_TAG ?? '';
 let revision, version, notes = '';
 if (channel === 'stable') {
- if (!/^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$/.test(releaseTag)) throw new Error('RELEASE_TAG must be vX.Y.Z for a stable publish');
+ if (!/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(releaseTag)) throw new Error('RELEASE_TAG must be a final vX.Y.Z for a stable publish');
  revision = git('rev-parse', `refs/tags/${releaseTag}^{commit}`);
  // Only a release cut from the protected branch is signed for customers.
- git('fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main');
+ git('fetch', '--quiet', '--tags', 'origin', '+refs/heads/main:refs/remotes/origin/main');
  try { git('merge-base', '--is-ancestor', revision, 'refs/remotes/origin/main'); }
  catch { throw new Error(`${releaseTag} (${revision}) is not on main; refusing to sign it as a stable release`); }
  version = releaseTag.slice(1);
@@ -54,12 +54,22 @@ async function api(route, options = {}) {
 }
 // Edge follows main: a superseded push publishes nothing. Stable is pinned to its tag.
 async function current() {
- if (channel === 'stable') return true;
+ if (channel === 'stable') {
+  // Ignore legacy milestone tags, and never make an older final look like a
+  // new update merely because this signing job ran later (sequence is time).
+  const parts = tag => tag.slice(1).split('.').map(BigInt);
+  const wanted = parts(releaseTag);
+  return git('tag', '--list').split('\n').filter(tag => /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(tag)).every(tag => {
+   const candidate = parts(tag);
+   for (let i = 0; i < 3; i++) if (wanted[i] !== candidate[i]) return wanted[i] > candidate[i];
+   return true;
+  });
+ }
  const r = await api('commits/main');
  if (!r.ok) throw new Error(`Main lookup failed (${r.status})`);
  return (await r.json()).sha === revision;
 }
-if (!(await current())) { console.log('Main moved ahead; skipping obsolete source pointer.'); process.exit(0); }
+if (!(await current())) { console.log('A newer source is available; skipping obsolete source pointer.'); process.exit(0); }
 let releaseResponse = await api('releases/tags/desktop-sources');
 if (releaseResponse.status === 404) {
  releaseResponse = await api('releases', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({

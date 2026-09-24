@@ -137,7 +137,7 @@ jobs:
         run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance -o addopts="" -q -p no:cacheprovider --timeout=120 -n "$PYTEST_WORKERS"
 
       - name: Packaging and backup regression checks
-        run: python -m pytest tests/test_packaging_audit.py tests/test_run_local_supervisor.py tests/test_chrome_supervisor.py -o addopts="" -q --timeout=120
+        run: python -m pytest tests/test_packaging_audit.py tests/test_run_local_supervisor.py tests/test_chrome_supervisor.py tests/test_connector_catalog.py tests/test_connector_packages.py tests/test_buyer_docs.py tests/scripts/test_release_preflight.py -o addopts="" -q --timeout=120
 
       - name: Start the runner's PostgreSQL
         # The Ubuntu runner image ships PostgreSQL preinstalled and stopped;

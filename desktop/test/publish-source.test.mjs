@@ -8,17 +8,20 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 const script=fileURLToPath(new URL('../scripts/publish-source.mjs',import.meta.url));
 const preload=new URL('./helpers/publish-source-preload.mjs',import.meta.url).href;
-const stable=scenario=>scenario==='stable'||scenario==='offmain';
-for(const scenario of ['new','reuse','moved','corrupt','stable','offmain'])test(`publisher ${scenario}: immutable runtime archive and signed D1 publication`,async t=>{
+const stable=scenario=>['stable','offmain','older','prerelease'].includes(scenario);
+for(const scenario of ['new','reuse','moved','corrupt','stable','offmain','older','prerelease'])test(`publisher ${scenario}: immutable runtime archive and signed D1 publication`,async t=>{
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-publish-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
  const env={...process.env,RUNNER_TEMP:root,GITHUB_SHA:'a'.repeat(40),GH_TOKEN:'fixture',ACCOUNT_HUB_DATABASE_ID:'11111111-1111-1111-1111-111111111111',PUBLISH_TEST_CASE:scenario};
  if(stable(scenario))Object.assign(env,{SOURCE_CHANNEL:'stable',RELEASE_TAG:'v1.2.3',GITHUB_SHA:'f'.repeat(40)});
+ if(scenario==='prerelease')env.RELEASE_TAG='v1.2.3-rc.1';
  const result=spawnSync(process.execPath,['--import',preload,script],{encoding:'utf8',env});
- const fails=scenario==='corrupt'||scenario==='offmain';
+ const fails=['corrupt','offmain','prerelease'].includes(scenario);
  assert.equal(result.status,fails?1:0,result.stderr);
  const events=JSON.parse(await fs.readFile(path.join(root,'events.json'),'utf8'));
  if(scenario==='offmain')assert.match(result.stderr,/is not on main/);
- if(scenario==='moved'||fails){
+ if(scenario==='prerelease')assert.match(result.stderr,/must be a final/);
+ if(scenario==='older')assert(!events.includes('archive')&&!events.some(url=>String(url).startsWith('https://')));
+ if(scenario==='moved'||scenario==='older'||fails){
   assert(!events.includes('publish'));await assert.rejects(fs.stat(path.join(root,'record.json')),{code:'ENOENT'});
  }else{
   const row=JSON.parse(await fs.readFile(path.join(root,'record.json'),'utf8')),signed=JSON.parse(row.manifest);

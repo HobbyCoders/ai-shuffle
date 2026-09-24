@@ -25,6 +25,7 @@ cp.execFileSync=(exe,args)=>{
   if(args[0]==='fetch'){events.push('fetch-main');return '';}
   if(args[0]==='merge-base'){events.push('on-main');if(scenario==='offmain')throw Error('not an ancestor');return '';}
   if(args[0]==='cat-file')return 'tag\n';
+  if(args[0]==='tag'&&args[1]==='--list')return 'v1.2.3\nv6-phase2\nv1.2.4-rc.1\n'+(scenario==='older'?'v1.2.4\n':'');
   if(args[0]==='tag'&&args[2]==='--format=%(contents:body)')return 'Faster startup.\n-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----\n';
   throw Error('Unexpected git command '+args.join(' '));
  }
