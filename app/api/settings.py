@@ -113,11 +113,13 @@ class IntegrationSettingsResponse(BaseModel):
     # Code uses the connected account / OAuth credentials.
     anthropic_api_key_set: bool = False
     anthropic_api_key_masked: str = ""
-    # Which auth method Claude Code is currently using:
-    #   "api_key"  — an anthropic_api_key is set (overrides the account)
-    #   "account"  — no key set; the connected Claude OAuth account is used
-    # Lets the UI surface the active method without a silent billing switch.
+    # Which credential Claude Code runs on, from the explicit auth mode
+    # (``claude_auth_mode``; see GET /settings/claude-auth):
+    #   "api_key"  — api_key mode: the stored key is injected
+    #   "account"  — subscription mode: the CLI's own sign-in is used
+    # Kept for older clients; ``claude_auth_mode`` carries the mode itself.
     claude_code_auth_method: str = "account"
+    claude_auth_mode: str = "subscription"
     # Model selections (all fal.ai model IDs)
     image_model: Optional[str] = None
     image_edit_model: Optional[str] = None
@@ -178,6 +180,9 @@ async def remove_fal_billing_key(token: str = Depends(require_admin)):
 class AnthropicKeyRequest(BaseModel):
     """Request to set Anthropic API key"""
     api_key: str
+    # True also switches Claude Code to API-key mode in the same call. Saving a
+    # key never changes the mode by itself.
+    use_for_claude_code: bool = False
 
 
 class AnthropicKeyResponse(BaseModel):
@@ -202,6 +207,8 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         """
         fal_key = get_decrypted_api_key("fal_api_key")
         anthropic_key = get_decrypted_api_key("anthropic_api_key")
+        from app.core import claude_auth_mode
+        auth_mode = claude_auth_mode.current_mode()
         image_model = database.get_system_setting("image_model")
         image_edit_model = database.get_system_setting("image_edit_model")
         video_model = database.get_system_setting("video_model")
@@ -231,9 +238,9 @@ async def get_integration_settings(token: str = Depends(require_auth)):
             fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
             anthropic_api_key_set=bool(anthropic_key),
             anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
-            # Key set → Claude Code authenticates with the API key (overrides the
-            # connected account). Key absent → connected OAuth account is used.
-            claude_code_auth_method="api_key" if anthropic_key else "account",
+            # The explicit mode decides, never the key's mere presence.
+            claude_code_auth_method="api_key" if auth_mode == "api_key" else "account",
+            claude_auth_mode=auth_mode,
             image_model=image_model,
             image_edit_model=image_edit_model,
             video_model=video_model,
@@ -320,11 +327,11 @@ async def set_anthropic_api_key(
     """
     Set the Anthropic API key (admin only).
 
-    This key is a Claude Code AUTHENTICATION credential. When set, it is
-    injected as ANTHROPIC_API_KEY into every Claude Code subprocess and
-    OVERRIDES the connected Claude account (API-key login wins, matching
-    claude.exe's native precedence). When unset, Claude Code uses the connected
-    account / OAuth credentials. Validated here before storage.
+    The key is a Claude Code credential used only in ``api_key`` auth mode,
+    where it is injected as ANTHROPIC_API_KEY into the CLI processes this
+    worker starts. Saving it does not change the mode unless
+    ``use_for_claude_code`` is true. It is stored encrypted on this worker
+    only. Validated here before storage.
 
     Get your API key from: https://console.anthropic.com/settings/keys
     """
@@ -365,6 +372,9 @@ async def set_anthropic_api_key(
     # Save to database (encrypted if encryption is ready). One hop: the
     # Anthropic validation above is a real network await.
     await run_sync(set_encrypted_api_key, "anthropic_api_key", api_key)
+    if request.use_for_claude_code:
+        from app.core import claude_auth_mode
+        await run_sync(claude_auth_mode.set_mode, claude_auth_mode.MODE_API_KEY)
 
     return AnthropicKeyResponse(
         success=True,
@@ -377,10 +387,112 @@ async def remove_anthropic_api_key(token: str = Depends(require_admin)):
     """
     Remove the Anthropic API key (admin only).
 
-    Reverts Claude Code authentication to the connected Claude account /
-    OAuth credentials. No effect on the OAuth login flow itself.
+    The auth mode is left as it is: in ``api_key`` mode new agent runs then
+    wait for a key (or for the user to choose subscription mode) instead of
+    falling back to the CLI's sign-in.
     """
     await run_sync(database.delete_system_setting, "anthropic_api_key")
+    return {"success": True}
+
+
+# ============================================================================
+# Claude Code auth mode (subscription or API key)
+# ============================================================================
+
+class ClaudeAuthModeRequest(BaseModel):
+    mode: str = Field(..., description="'subscription' or 'api_key'")
+
+
+async def claude_auth_payload(refresh: bool = False) -> dict:
+    """The mode, the CLI account from the probe, the key's last four, and the
+    credential gate (whether new agent runs can start, and why not)."""
+    from app.core import claude_auth_mode, claude_cli_status, credential_gate
+
+    status = await claude_cli_status.get_status_async(refresh)
+    cli = status.to_dict()
+
+    def _load() -> dict:
+        return {**claude_auth_mode.summary(cli), "gate": credential_gate.status_payload(cli)}
+
+    return await run_sync(_load)
+
+
+@router.get("/claude-auth")
+async def get_claude_auth(refresh: bool = False, token: str = Depends(require_auth)):
+    """Which credential Claude Code runs on.
+
+    ``mode`` is ``subscription`` or ``api_key``; ``explicit`` is false only
+    before startup has recorded the default. ``cli`` is what `claude auth
+    status` reports (account shown only when signed in); ``api_key`` says
+    whether a key is stored and its last four characters; ``gate`` is the
+    credential gate (``ready``, ``reason``, ``license_allows_runs``...).
+    """
+    return await claude_auth_payload(refresh)
+
+
+@router.put("/claude-auth")
+async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(require_admin)):
+    """Choose the mode (admin only). Takes effect for the next agent run."""
+    from app.core import claude_auth_mode
+
+    try:
+        await run_sync(claude_auth_mode.set_mode, request.mode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await claude_auth_payload()
+
+
+# ============================================================================
+# Subscription loop guard
+# ============================================================================
+
+class LoopGuardUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    session_turns_per_hour: Optional[int] = None
+    install_turns_per_hour: Optional[int] = None
+    worker_max_minutes: Optional[int] = None
+
+
+@router.get("/loop-guard")
+async def get_loop_guard(token: str = Depends(require_auth)):
+    """The subscription loop guard: settings, defaults, whether it applies
+    (enabled and Claude Code in subscription mode), this hour's unattended
+    turn count, and the turns it holds for confirmation."""
+    from app.core import loop_guard
+
+    return await run_sync(loop_guard.status_payload)
+
+
+@router.put("/loop-guard")
+async def set_loop_guard(request: LoopGuardUpdate, token: str = Depends(require_admin)):
+    """Change the loop guard settings (admin only)."""
+    from app.core import loop_guard
+
+    try:
+        await run_sync(lambda: loop_guard.update_config(**request.model_dump()))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await run_sync(loop_guard.status_payload)
+
+
+@router.post("/loop-guard/held/{held_id}/confirm")
+async def confirm_loop_guard_turn(held_id: str, token: str = Depends(require_admin)):
+    """Run a held turn now, past the budget (admin only)."""
+    from app.core import loop_guard
+
+    turn_id = await loop_guard.confirm_held(held_id)
+    if turn_id is None:
+        raise HTTPException(status_code=404, detail="That held turn is gone")
+    return {"success": True, "turn_id": turn_id}
+
+
+@router.post("/loop-guard/held/{held_id}/dismiss")
+async def dismiss_loop_guard_turn(held_id: str, token: str = Depends(require_admin)):
+    """Drop a held turn without running it (admin only)."""
+    from app.core import loop_guard
+
+    if await run_sync(loop_guard.take_held, held_id) is None:
+        raise HTTPException(status_code=404, detail="That held turn is gone")
     return {"success": True}
 
 

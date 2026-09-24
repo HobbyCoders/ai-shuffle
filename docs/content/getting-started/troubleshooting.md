@@ -67,6 +67,8 @@ The message in the app says which of these it is.
 
 **No credential is set up.** AI Shuffle never falls back to another account. Sign in to the Claude Code CLI or add an API key in **Settings → Providers** (the setup wizard does the same; see [First run](/docs/getting-started/first-run)).
 
+**API key mode, but no key is stored.** The mode you chose has no credential, so AI Shuffle waits instead of using the CLI's sign-in. Add your key in **Settings → Providers**, or switch **Claude Code mode** to subscription.
+
 **The Claude Code CLI is not signed in** (subscription mode):
 
 - Sign in again from the in-app terminal (**Settings → Providers → Claude Code CLI → Sign in**), or from the host: `docker exec -it -u appuser ai-shuffle claude auth login`.
@@ -77,9 +79,9 @@ The message in the app says which of these it is.
 
 **Your plan's usage limit was reached** (subscription mode): agents pause until the limit resets. Wait, or switch to API key mode for heavy or unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
 
-<!-- verify against wizard v2 -->
+**An automation, wake-up, connector or background agent waits for confirmation** (subscription mode): the loop guard held it because unattended turns reached their hourly budget. Confirm or dismiss it under **Settings → Providers → Loop guard**, raise the budget there, or switch to API key mode for unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
 
-**An automation waits for confirmation** (subscription mode): the loop guard paused it because unattended turns reached their budget. Confirm it in the app, or switch to API key mode for unattended work.
+**A background agent stopped after an hour** (subscription mode): the loop guard's default time limit ended it. Change the limit under **Settings → Providers → Loop guard**, or use API key mode for long unattended work.
 
 **The API key is refused:** the key was deleted or the Console account has no credit or reached its spend limit. Check the Anthropic Console, then paste a new key in Settings.
 

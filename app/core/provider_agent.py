@@ -979,6 +979,7 @@ def _worker_deadlines(
     background: bool,
     first_frame_seconds: Optional[float],
     max_wall_seconds: Optional[float],
+    provider_id: Optional[str] = None,
 ) -> Tuple[float, float]:
     """``(first_frame_seconds, max_wall_seconds)`` for one dispatch; 0 = off.
 
@@ -987,6 +988,12 @@ def _worker_deadlines(
     either), but only the SYNCHRONOUS lane gets a hard wall-clock cap, because
     only it is holding a parent turn hostage while it waits. A background
     parent has parked and can be woken; a sync parent can do nothing at all.
+
+    Exception: a worker on the Claude CLI (no ``provider_id``) while Claude Code
+    runs on the user's subscription gets the loop guard's default cap
+    (``loop_guard.worker_max_seconds``, 60 minutes unless changed in Settings)
+    whenever the lane default would leave it uncapped, so one looping worker
+    cannot spend a plan all night.
     """
     from app.core.config import settings
 
@@ -1000,7 +1007,15 @@ def _worker_deadlines(
             if background
             else float(getattr(settings, "task_worker_sync_max_seconds", 0.0) or 0.0)
         )
-    return max(0.0, float(first_frame_seconds)), max(0.0, float(max_wall_seconds))
+    max_wall_seconds = max(0.0, float(max_wall_seconds))
+    if max_wall_seconds == 0.0:
+        try:
+            from app.core import loop_guard
+
+            max_wall_seconds = loop_guard.worker_max_seconds(provider_id)
+        except Exception:  # noqa: BLE001 — a settings hiccup keeps the lane default
+            logger.warning("Loop guard worker cap unavailable", exc_info=True)
+    return max(0.0, float(first_frame_seconds)), max_wall_seconds
 
 
 def _no_first_frame_error(worker_session_id: str, seconds: float) -> str:
@@ -1766,8 +1781,8 @@ async def dispatch_worker(
     # ``parent_session_id`` is the ROOT (card routing only).
     owner_session_id = context_session_id or parent_session_id
     nested = bool(owner_session_id) and owner_session_id != parent_session_id
-    first_frame_seconds, max_wall_seconds = _worker_deadlines(
-        background, first_frame_seconds, max_wall_seconds
+    first_frame_seconds, max_wall_seconds = await asyncio.to_thread(
+        _worker_deadlines, background, first_frame_seconds, max_wall_seconds, provider_id
     )
 
     def _prepare_worker_blocking() -> Tuple[

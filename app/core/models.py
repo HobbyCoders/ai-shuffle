@@ -1760,6 +1760,9 @@ class Automation(BaseModel):
     requires_approval: bool = False
     created_at: datetime
     updated_at: datetime
+    # Advice returned by create/update, e.g. "use an API key for scheduled
+    # runs" while Claude Code runs on the user's subscription.
+    notices: List[str] = Field(default_factory=list)
 
 
 class AutomationRun(BaseModel):

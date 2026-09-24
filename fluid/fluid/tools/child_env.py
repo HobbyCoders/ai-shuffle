@@ -19,6 +19,12 @@ import re
 from collections.abc import Mapping
 
 PASSTHROUGH_ENV = "FLUID_CHILD_ENV_PASSTHROUGH"
+# Set by a caller in the environment it hands over (never in the host's own):
+# comma-separated names to drop from what the child INHERITS, for a variable
+# that is allowed in general but must not reach this particular child (an
+# Anthropic key the operator set on the container, while the user chose to run
+# Claude Code on their subscription). The marker itself never reaches the child.
+UNSET_ENV = "FLUID_CHILD_ENV_UNSET"
 
 # Host-only secrets, dropped by exact name (case-insensitive).
 _DENY_NAMES = frozenset({
@@ -68,3 +74,19 @@ def scrub_child_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     source = os.environ if environ is None else environ
     keep = _passthrough(source)
     return {k: v for k, v in source.items() if not is_host_secret(k, keep)}
+
+
+def _names(raw: str | None) -> list[str]:
+    return [p.strip() for p in (raw or "").split(",") if p.strip()]
+
+
+def child_env_with_overlay(overlay: Mapping[str, str] | None,
+                           environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The inherited environment (scrubbed), minus the names the overlay's
+    ``FLUID_CHILD_ENV_UNSET`` lists, with the overlay on top."""
+    env = scrub_child_env(environ)
+    extra = dict(overlay or {})
+    for name in _names(extra.pop(UNSET_ENV, None)):
+        env.pop(name, None)
+    env.update(extra)
+    return env

@@ -916,6 +916,15 @@ async def execute_query(
         hook_project_id=project_id,
     )
 
+    # Credential gate (see _stream_to_websocket_impl): refuse with the setup
+    # message rather than spawn a CLI that has no credential.
+    from app.core import credential_gate
+
+    _refusal = await credential_gate.refusal_for_options_async(options)
+    if _refusal:
+        logger.warning(f"[Query] Turn refused for session {session_id}: {_refusal}")
+        raise credential_gate.AgentSetupRequired(_refusal)
+
     # Resolve virtual @Notes/note-id references to actual content
     prompt = resolve_note_references(prompt)
 
@@ -1379,6 +1388,15 @@ async def stream_query(
         # error instead of an opaque subprocess spawn failure.
         logger.error(f"[Query] Cannot build session options for {session_id}: {e}")
         yield {"type": "error", "message": str(e)}
+        return
+
+    # Credential gate (see _stream_to_websocket_impl).
+    from app.core import credential_gate
+
+    _refusal = await credential_gate.refusal_for_options_async(options)
+    if _refusal:
+        logger.warning(f"[Query] Turn refused for session {session_id}: {_refusal}")
+        yield credential_gate.refusal_event(_refusal)
         return
 
     # Wire plugin + DB hooks (incl. blocking PreToolUse guards) into this
@@ -1994,6 +2012,8 @@ async def _stream_to_websocket_impl(
     user_id: Optional[str] = None,
     upload_blob_ids: Optional[List[str]] = None,
     resume: bool = False,
+    turn_source: Optional[str] = None,
+    loop_guard_turn: Optional[Dict[str, Any]] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
@@ -2027,6 +2047,11 @@ async def _stream_to_websocket_impl(
         resume: Re-run the engine loop from the session head instead of sending
             a prompt. ``prompt`` is empty and nothing derived from it applies,
             so every step that reads or rewrites it is skipped.
+        turn_source: The turn row's ``source`` (``user``, ``automation``,
+            ``wakeup``...). Unattended sources count against the subscription
+            loop guard (``app.core.loop_guard``).
+        loop_guard_turn: The turn row itself, kept by the loop guard when it
+            holds the turn for confirmation.
     """
     # Get profile. Log at ERROR: consumers may have no surface for this yield
     # (headless path has no 'error' dispatch handler and force-cleans the live
@@ -2144,6 +2169,33 @@ async def _stream_to_websocket_impl(
     _build_opts_elapsed = time.monotonic() - _build_opts_start
     if _build_opts_elapsed > 0.5:
         logger.warning(f"[WS] build_options_from_profile took {_build_opts_elapsed:.2f}s for session {session_id}")
+
+    # Credential gate: every turn starts here whatever its source (chat,
+    # connector, automation, wake-up, worker, a turn handed over from another
+    # device). No license or no credential for the active Claude Code mode
+    # refuses the turn with a setup message; nothing falls back.
+    from app.core import credential_gate, loop_guard
+
+    _leg = await asyncio.to_thread(credential_gate.leg_for_options, options)
+    _refusal = await credential_gate.turn_refusal_async(_leg)
+    if _refusal:
+        logger.warning(f"[WS] Turn refused for session {session_id}: {_refusal}")
+        yield credential_gate.refusal_event(_refusal)
+        return
+
+    # Subscription loop guard: an unattended turn (automation, wake-up,
+    # background worker, connector) on the Claude CLI in subscription mode past
+    # its hourly budget waits for the owner's confirmation instead of starting.
+    if turn_source in loop_guard.UNATTENDED_SOURCES:
+        _confirmed = bool(((loop_guard_turn or {}).get("payload") or {}).get(loop_guard.CONFIRMED_FLAG))
+        _held = await asyncio.to_thread(
+            loop_guard.check, session_id, turn_source, _leg, confirmed=_confirmed
+        )
+        if _held:
+            if loop_guard_turn:
+                await asyncio.to_thread(loop_guard.hold, loop_guard_turn, _held)
+            yield {"type": "error", "message": _held, "code": loop_guard.HOLD_CODE}
+            return
 
     # Cross-install uploads (D8): the turn's blobs were lifted on the SENDING
     # install; write them into the now-resolved working dir and rewrite the

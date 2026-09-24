@@ -1409,14 +1409,28 @@ def create_builtin_tools_server(
             model=model,
             source="schedule_wakeup",
         )
-        return _ok({
+        result = {
             "scheduled": True,
             "delay_seconds": delay,
             "fire_at_unix": row.get("fire_at"),
             "wakeup_id": row.get("id"),
             "reason": reason,
             "model": model,
-        })
+        }
+        # Subscription mode: the wake runs on the user's Claude plan while
+        # they may be away. Say so where the user sees the wake being armed.
+        try:
+            from app.core import loop_guard
+            from app.core.profiles import get_profile
+
+            notice = await asyncio.to_thread(
+                lambda: loop_guard.scheduled_run_guidance(get_profile(profile_id) if profile_id else None)
+            )
+        except Exception:  # noqa: BLE001 — advice never fails the tool
+            notice = None
+        if notice:
+            result["notice"] = notice
+        return _ok(result)
 
     all_tools.append(schedule_wakeup)
 

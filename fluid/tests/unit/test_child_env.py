@@ -7,7 +7,7 @@ import pytest
 
 from fluid.engine.delegated import DelegatedLoop
 from fluid.tools.builtins.bash import handler as bash_handler
-from fluid.tools.child_env import PASSTHROUGH_ENV, scrub_child_env
+from fluid.tools.child_env import PASSTHROUGH_ENV, UNSET_ENV, child_env_with_overlay, scrub_child_env
 from fluid.tools.registry import ToolCtx
 
 HOST = {
@@ -60,3 +60,23 @@ async def test_bash_child_does_not_see_host_secrets(monkeypatch, tmp_path) -> No
     assert "hunter2" not in out.text
     assert "life-token" not in out.text
     assert "DEPLOY_TOKEN=handed-over" in out.text
+
+
+def test_delegated_child_drops_inherited_names_the_caller_unsets(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "host-key")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "host-token")
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.env = {UNSET_ENV: "ANTHROPIC_API_KEY,ANTHROPIC_AUTH_TOKEN", "FOO": "bar"}
+    env = loop._child_env()
+    assert "ANTHROPIC_API_KEY" not in env and "ANTHROPIC_AUTH_TOKEN" not in env
+    assert UNSET_ENV not in env
+    assert env["FOO"] == "bar"
+
+
+def test_unset_never_removes_what_the_caller_hands_over() -> None:
+    env = child_env_with_overlay(
+        {UNSET_ENV: "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY": "user-key"},
+        {"ANTHROPIC_API_KEY": "host-key", "PATH": "/bin"},
+    )
+    assert env["ANTHROPIC_API_KEY"] == "user-key"
+    assert env["PATH"] == "/bin"

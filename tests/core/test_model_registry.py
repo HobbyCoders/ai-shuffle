@@ -555,16 +555,23 @@ class TestRegistryPayloadClaude:
         assert "claude" in payload
         assert set(payload["claude"]) == {"auth_kind", "plan_type"}
 
-    def test_api_key_install_reports_api_auth_and_no_plan(self, mock_db, monkeypatch):
-        """A stored Anthropic key wins over the CLI's login (see
-        ``environment.inject_claude_code_auth``) → API auth, no plan."""
+    def test_api_key_mode_reports_api_auth_and_no_plan(self, mock_db, monkeypatch):
+        """API-key mode with a stored key → API auth, no plan, even while the
+        CLI is signed in (the explicit mode decides)."""
+        from app.core import claude_auth_mode
         from app.core import claude_cli_status as cs
         monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
-        monkeypatch.setattr(
-            settings_crypto, "get_decrypted_api_key",
-            lambda name: "sk-ant-key" if name == "anthropic_api_key" else None,
-        )
+        monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-key")
+        claude_auth_mode.set_mode("api_key")
         assert m.registry_payload()["claude"] == {"auth_kind": "api", "plan_type": None}
+
+    def test_stored_key_does_not_override_subscription_mode(self, mock_db, monkeypatch):
+        from app.core import claude_auth_mode
+        from app.core import claude_cli_status as cs
+        monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
+        monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-key")
+        claude_auth_mode.set_mode("subscription")
+        assert m.registry_payload()["claude"] == {"auth_kind": "subscription", "plan_type": "max"}
 
     def test_cli_login_reports_subscription_and_the_plan_it_prints(self, mock_db, monkeypatch):
         from app.core import claude_cli_status as cs

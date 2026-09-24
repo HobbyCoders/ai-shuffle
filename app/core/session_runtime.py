@@ -1277,6 +1277,10 @@ class SessionRuntime:
                 upload_blob_ids=(self.turn.get("payload") or {}).get(
                     "upload_blob_ids"
                 ),
+                # The subscription loop guard counts unattended sources and
+                # keeps the row when it holds the turn for confirmation.
+                turn_source=self.source,
+                loop_guard_turn=self.turn,
             ):
                 etype = event.get("type") if isinstance(event, dict) else None
                 # ANY frame is proof the engine is still moving — a tool result,

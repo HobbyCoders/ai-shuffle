@@ -51,29 +51,27 @@ class TestQueryModuleImports:
 class TestRequireClaudeAuth:
     """Tests for the require_claude_auth dependency."""
 
-    def test_require_claude_auth_passes_when_authenticated(self):
-        """Should not raise when Claude is authenticated."""
+    async def test_require_claude_auth_passes_when_ready(self):
+        """Should not raise when the credential gate reports ready."""
         from app.api.query import require_claude_auth
+        from app.core import credential_gate
 
-        with patch("app.api.query.auth_service") as mock_auth:
-            mock_auth.is_claude_authenticated.return_value = True
-            # Should not raise
-            result = require_claude_auth()
-            assert result is None
+        with patch.object(credential_gate, "agent_credentials_ready", return_value=(True, None)):
+            assert await require_claude_auth() is None
 
-    def test_require_claude_auth_raises_when_not_authenticated(self):
-        """Should raise 401 when Claude is not authenticated."""
+    async def test_require_claude_auth_raises_with_the_setup_message(self):
+        """Should raise 503 with the gate's setup message when not ready."""
         from fastapi import HTTPException
         from app.api.query import require_claude_auth
+        from app.core import credential_gate
 
-        with patch("app.api.query.auth_service") as mock_auth:
-            mock_auth.is_claude_authenticated.return_value = False
-
+        with patch.object(credential_gate, "agent_credentials_ready",
+                          return_value=(False, credential_gate.NOT_SIGNED_IN_MESSAGE)):
             with pytest.raises(HTTPException) as exc_info:
-                require_claude_auth()
+                await require_claude_auth()
 
-            assert exc_info.value.status_code == 401
-            assert "Claude CLI not authenticated" in str(exc_info.value.detail)
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == credential_gate.NOT_SIGNED_IN_MESSAGE
 
 
 # =============================================================================

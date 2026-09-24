@@ -513,12 +513,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # The CLI child runs the model's Bash and tools, so it inherits the
         # host environment minus host secrets. ``self.env`` is what the caller
         # hands over on purpose (provider keys, fal.ai key) and goes on top.
-        from fluid.tools.child_env import scrub_child_env
+        # A caller may also name inherited variables this child must not see
+        # (``FLUID_CHILD_ENV_UNSET``), e.g. a host Anthropic key while the
+        # user chose to run the CLI on their subscription.
+        from fluid.tools.child_env import child_env_with_overlay
 
-        env = scrub_child_env(os.environ)
-        if self.env:
-            env.update(self.env)
-        return env
+        return child_env_with_overlay(self.env, os.environ)
 
     async def _stop_process(self, *, grace: float = 5.0) -> None:
         """End the CLI process and everything it spawned.

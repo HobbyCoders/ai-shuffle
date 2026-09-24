@@ -250,3 +250,23 @@ async def test_schedule_wakeup_tool_without_model(mock_db, monkeypatch):
     await handler({"delaySeconds": 120, "prompt": "continue"})
 
     assert captured and captured[0]["model"] is None
+
+
+@pytest.mark.parametrize("mode,expect_notice", [("subscription", True), ("api_key", False)])
+async def test_schedule_wakeup_tool_recommends_an_api_key_in_subscription_mode(
+    mock_db, monkeypatch, mode, expect_notice
+):
+    from app.core import claude_auth_mode, loop_guard, wakeup_service
+
+    async def _fake_schedule(**kwargs):
+        return {"id": "wake-z", "fire_at": 123.0}
+
+    monkeypatch.setattr(wakeup_service, "schedule", _fake_schedule)
+    claude_auth_mode.set_mode(mode)
+    handler = _build_schedule_wakeup_handler("s1", "pr", None)
+    payload = _parse_envelope(await handler({"delaySeconds": 120, "prompt": "continue"}))
+    assert payload["success"] is True
+    if expect_notice:
+        assert payload["notice"] == loop_guard.SCHEDULED_RUN_GUIDANCE
+    else:
+        assert "notice" not in payload
