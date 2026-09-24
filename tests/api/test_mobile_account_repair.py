@@ -40,6 +40,7 @@ def repair(monkeypatch):
             info, hash_api_key(key), datetime.now(timezone.utc) + timedelta(days=1),
             list(pairing.DEFAULT_MOBILE_SCOPES), scoped=True))
     owner = hub_store.ownership(ids[0])
+    hub_store.confirm_device(owner, True)
     database.set_paired_client_session(owner['paired_client_id'], 'old-session-hash', datetime.now(timezone.utc) + timedelta(days=1))
     database.revoke_paired_client(owner['paired_client_id'])
     app = FastAPI()
@@ -98,6 +99,9 @@ def test_repair_issues_new_key_preserves_owner_and_other_worker(repair, test_db)
     assert database.get_mobile_device_by_api_key_hash(hash_api_key(OLD_KEY)) is None
     assert database.get_paired_client_by_session_hash('old-session-hash') is None
     assert client.post('/api/v1/mobile/web-session', headers={'Authorization': 'Bearer ' + OLD_KEY}, json={'purpose': 'web'}).status_code == 401
+    assert client.post('/api/v1/mobile/web-session', headers={'Authorization': 'Bearer ' + body['api_key']}, json={'purpose': 'web'}).status_code == 403
+    assert hub_store.confirmation(owner) == 'pending'
+    hub_store.confirm_device(owner, True)
     assert client.post('/api/v1/mobile/web-session', headers={'Authorization': 'Bearer ' + body['api_key']}, json={'purpose': 'web'}).status_code == 200
     assert client.post('/api/v1/mobile/register', json=payload(device)).status_code == 400
     assert test_db.execute('SELECT consumed_at FROM pairing_grants').fetchone()[0] is not None
@@ -266,6 +270,8 @@ def test_old_key_request_cannot_mint_across_repair(repair, test_db, monkeypatch,
     assert database.get_paired_client(owner['paired_client_id'])['session_token_hash'] is None
     assert test_db.execute('SELECT * FROM paired_client_native_sessions').fetchall() == []
     monkeypatch.setattr(database, name, operation)
+    assert client.post('/api/v1/mobile/web-session', headers={'Authorization': 'Bearer ' + fresh_keys[0]}, json={'purpose': purpose}).status_code == 403
+    hub_store.confirm_device(owner, True)
     assert client.post('/api/v1/mobile/web-session', headers={'Authorization': 'Bearer ' + fresh_keys[0]}, json={'purpose': purpose}).status_code == 200
     assert database.get_mobile_device(other) == untouched
 
@@ -285,6 +291,8 @@ def test_repair_retires_old_reservation_and_new_key_can_reserve(repair, test_db)
     result = client.post('/api/v1/mobile/register', json=payload(device))
     assert result.status_code == 200
     fresh = result.json()['api_key']
+    assert hub_store.confirmation(owner) == 'pending'
+    hub_store.confirm_device(owner, True)
     headers = {'Authorization': 'Bearer ' + fresh, 'X-Shuffle-Web-Session-Reservation': reservation}
     rejected = client.post('/api/v1/mobile/web-session', headers=headers)
     assert rejected.status_code == 409 and 'set-cookie' not in rejected.headers

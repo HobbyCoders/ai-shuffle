@@ -478,22 +478,41 @@ def require_active(owner):
 def mobile_hub_ownership(device):
     """Live-checked ownership dict or None for direct pairing. device is DB row."""
     owner = store.ownership(device['device_id'])
+    require_worker_confirmation(owner)
     require_active(owner)
     return owner
+
+
+def require_worker_confirmation(owner):
+    if owner is not None and store.confirmation(owner) != 'approved':
+        raise HTTPException(status_code=403, detail='Confirm this device on the worker before connecting')
 
 
 def check_paired_client(client):
     """Validate the device live and derive this installation owner's authority.
 
-    Only administrator-started managed connections delegate administration to
-    the hub's single owner account. Direct/controller-linked connections do not.
-    The result is request-local evidence, never a stored or caller-selected role.
+    The hub may veto a device, but cannot approve one. Both a worker-local
+    confirmation and a live managed binding are required. Direct/controller-linked
+    connections do not delegate administration.
     """
+    from datetime import datetime, timezone
+
+    from app.core.device_keys import key_expiry
+    from app.db.mobile import get_mobile_device
+
     owner = store.ownership(paired_client_id=client['id'])
     if owner is None:
+        # Direct-paired phones cannot keep using a derived web/native session
+        # after the originating key expires or its mobile record is removed.
+        device = get_mobile_device(client.get('device_id'))
+        if device:
+            if (device.get('revoked_at') or device.get('paired_client_id') != client['id']
+                    or key_expiry(device) <= datetime.now(timezone.utc)):
+                raise HTTPException(status_code=401, detail='Mobile authorization expired or revoked')
+        elif client.get('client_type') == 'mobile':
+            raise HTTPException(status_code=401, detail='Mobile authorization revoked')
         return False
-    from app.db.mobile import get_mobile_device
-    from datetime import datetime, timezone
+    require_worker_confirmation(owner)
     device = get_mobile_device(owner['device_id'])
     if (not device or device.get('revoked_at') or device.get('paired_client_id') != client['id']
             or owner['paired_client_id'] != client['id']
@@ -501,10 +520,7 @@ def check_paired_client(client):
             or owner['device_id'] != client.get('device_id')
             or not store.valid_device_identity(owner)):
         raise HTTPException(status_code=401, detail='Mobile authorization revoked')
-    expires = device.get('api_key_expires_at')
-    if isinstance(expires, str):
-        expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
-    if not expires or expires <= datetime.now(timezone.utc):
+    if key_expiry(device) <= datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail='Mobile authorization expired')
     binding = require_active(owner)
     from app.core.config import settings

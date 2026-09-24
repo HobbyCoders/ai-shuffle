@@ -42,7 +42,9 @@ def info(device_id=DEVICE):
 
 
 def insert(key='aim_test'):
-    return store.enroll(identity(), info(), hash_api_key(key), datetime.now(timezone.utc) + timedelta(days=1), list(pairing.DEFAULT_MOBILE_SCOPES))
+    device_id = store.enroll(identity(), info(), hash_api_key(key), datetime.now(timezone.utc) + timedelta(days=1), list(pairing.DEFAULT_MOBILE_SCOPES))
+    store.confirm_device(store.ownership(device_id), True)
+    return device_id
 
 
 def active(*args, **kwargs):

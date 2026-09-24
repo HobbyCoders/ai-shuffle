@@ -18,6 +18,302 @@ ACCOUNT = '22222222-2222-2222-2222-222222222222'
 DEVICE = '33333333-3333-3333-3333-333333333333'
 OTHER = '44444444-4444-4444-4444-444444444444'
 
+def test_direct_pairing_lifetime_and_derived_session_are_bounded(owner_app, monkeypatch):
+    from freezegun import freeze_time
+
+    from app.api import pairing as pairing_api
+    monkeypatch.setattr(settings, 'shuffle_local_access', True)
+    owner_app.include_router(pairing_api.router)
+    with freeze_time('2030-01-01T00:00:00Z') as clock:
+        local = worker_client(owner_app)
+        grant = local.post('/api/v1/pairing/grants', json={'endpoint_url': 'http://127.0.0.1:8000'})
+        assert grant.status_code == 201, grant.text
+        phone = worker_client(owner_app, remote=True)
+        response = phone.post('/api/v1/mobile/register', json={
+            'pairing_code': grant.json()['code'], 'device_info': {
+                'device_id': DEVICE, 'device_name': 'Direct phone', 'platform': 'android', 'capabilities': {}}})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert datetime.fromisoformat(body['expires_at']) - datetime.now(timezone.utc) == timedelta(days=90)
+        assert hub_store.ownership(DEVICE) is None
+        clock.tick(timedelta(days=89))
+        session = mobile_session(phone, body['api_key'])
+        assert session.status_code == 200, session.text
+        assert datetime.fromisoformat(session.json()['expires_at']) == datetime.fromisoformat(body['expires_at'])
+        token = session.json()['session_token']
+        assert auth.get_paired_client_from_token(token) is not None
+        clock.tick(timedelta(days=1))
+        assert auth.get_paired_client_from_token(token) is None
+        assert phone.post('/api/v1/mobile/key/renew', headers={'Authorization': 'Bearer ' + body['api_key']}).status_code == 401
+
+
+@pytest.mark.parametrize('stop', ['denied', 'expired', 'revoked', 'hub-revoked', 'disconnected'])
+def test_rotation_receipt_never_revives_access(owner_app, monkeypatch, test_db, stop):
+    monkeypatch.setattr(settings, 'shuffle_local_access', True)
+    body, local_id = enroll_from_hub(owner_app, monkeypatch)
+    assert decide(worker_client(owner_app), local_id).status_code == 200
+    test_db.execute('UPDATE mobile_devices SET api_key_expires_at=?',
+                    ((datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),))
+    test_db.commit()
+    remote = worker_client(owner_app, remote=True)
+    headers = {'Authorization': 'Bearer ' + body['api_key']}
+    response = remote.post('/api/v1/mobile/key/renew', headers=headers)
+    assert response.status_code == 200
+    replacement = response.json()['api_key']
+    if stop == 'denied':
+        assert decide(worker_client(owner_app), local_id, False).status_code == 200
+    elif stop == 'expired':
+        test_db.execute("UPDATE mobile_devices SET api_key_expires_at='2020-01-01T00:00:00+00:00'")
+        test_db.commit()
+    elif stop == 'revoked':
+        database.revoke_paired_client(hub_store.ownership(local_id)['paired_client_id'])
+    elif stop == 'hub-revoked':
+        monkeypatch.setattr(account_hub, 'call', lambda *a, **k: {'active': False})
+    else:
+        hub_store.disconnect()
+    for key in (body['api_key'], replacement):
+        assert remote.post('/api/v1/mobile/key/renew', headers={'Authorization': 'Bearer ' + key}).status_code in (401, 403)
+        assert mobile_session(remote, key).status_code in (401, 403)
+
+
+def test_failed_rotation_preserves_key_and_expiry(owner_app, monkeypatch, test_db):
+    monkeypatch.setattr(settings, 'shuffle_local_access', True)
+    body, local_id = enroll_from_hub(owner_app, monkeypatch)
+    assert decide(worker_client(owner_app), local_id).status_code == 200
+    expiry = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    test_db.execute('UPDATE mobile_devices SET api_key_expires_at=?', (expiry,))
+    test_db.commit()
+    monkeypatch.setattr(encryption, '_encryption_key', None)
+    remote = worker_client(owner_app, remote=True)
+    response = remote.post('/api/v1/mobile/key/renew', headers={'Authorization': 'Bearer ' + body['api_key']})
+    assert response.status_code == 503
+    device = database.get_mobile_device(local_id)
+    assert device['api_key_hash'] == auth.hash_api_key(body['api_key'])
+    assert device['api_key_expires_at'] == expiry
+    assert mobile_session(remote, body['api_key']).status_code == 200
+
+
+def test_confirmation_rejects_stale_identity_and_cross_origin(owner_app, monkeypatch):
+    monkeypatch.setattr(settings, 'shuffle_local_access', True)
+    _, local_id = enroll_from_hub(owner_app, monkeypatch)
+    local = worker_client(owner_app)
+    assert local.post(f'/api/v1/mobile/hub/devices/{local_id}/confirmation', json={
+        'paired_client_id': 'pcl_stale', 'mobile_record_id': 'stale', 'approved': True}).status_code == 409
+    assert local.post(f'/api/v1/mobile/hub/devices/{local_id}/confirmation', json={
+        'paired_client_id': hub_store.ownership(local_id)['paired_client_id'],
+        'mobile_record_id': 'stale', 'approved': True}).status_code == 409
+    local.headers['Origin'] = 'https://attacker.example'
+    assert decide(local, local_id).status_code == 403
+    assert hub_store.confirmation(hub_store.ownership(local_id)) == 'pending'
+
+
+# S9: exercise ticket exchange -> pending storage -> worker decision -> real auth.
+def worker_client(app, *, lan=False, remote=False, headers=None):
+    from app.serve import IngressApplication
+    host = '192.168.1.20' if lan else '127.0.0.1'
+    port = 8001 if remote else 8000
+    base = f'http://{host}:{port}'
+    return TestClient(IngressApplication(app, 8000), base_url=base,
+                      client=('192.168.1.50' if lan else '127.0.0.1', 12345),
+                      headers={'Origin': base, **(headers or {})})
+
+
+def enroll_from_hub(app, monkeypatch, device_id=DEVICE):
+    if not hub_store.get_binding():
+        hub_store.bind(HUB, SERVER, encryption.encrypt_value('a' * 64), 'managed:owner-test-install')
+        hub_store.activate()
+    def hub(binding, method, suffix, body=None):
+        if suffix == 'exchange':
+            # A compromised hub's extra authority assertions must be ignored.
+            return {'account_id': ACCOUNT, 'device_id': device_id, 'device_name': 'Phone',
+                    'approved': True, 'account_owner_admin': True, 'confirmation': 'approved'}
+        return {'active': True, 'account_id': ACCOUNT, 'device_id': suffix.rsplit('/', 1)[-1]}
+    monkeypatch.setattr(account_hub, 'call', hub)
+    response = worker_client(app, remote=True).post('/api/v1/mobile/hub/enroll', json={
+        'ticket': 'hub-only-ticket', 'device_info': {
+            'device_id': device_id, 'device_name': 'Phone', 'platform': 'android', 'capabilities': {}}})
+    assert response.status_code == 200, response.text
+    assert response.json()['confirmation'] == 'pending'
+    return response.json(), hub_store.local_device_id(SERVER, device_id)
+
+
+def decide(client, local_id, approved=True):
+    owner = hub_store.ownership(local_id)
+    return client.post(f'/api/v1/mobile/hub/devices/{local_id}/confirmation', json={
+        'paired_client_id': owner['paired_client_id'],
+        'mobile_record_id': database.get_mobile_device(local_id)['id'], 'approved': approved})
+
+
+def mobile_session(client, key):
+    return client.post('/api/v1/mobile/web-session', headers={'Authorization': 'Bearer ' + key})
+
+
+def test_hub_ticket_is_pending_until_worker_confirms(owner_app, monkeypatch):
+    monkeypatch.setattr(settings, 'shuffle_local_access', True)
+    body, local_id = enroll_from_hub(owner_app, monkeypatch)
+    remote = worker_client(owner_app, remote=True)
+    assert mobile_session(remote, body['api_key']).status_code == 403
+    assert remote.post('/api/v1/mobile/key/renew', headers={'Authorization': 'Bearer ' + body['api_key']}).status_code == 403
+    assert hub_store.confirmation(hub_store.ownership(local_id)) == 'pending'
+    local = worker_client(owner_app)
+    inventory = local.get('/api/v1/mobile/hub/devices/confirmations')
+    assert inventory.status_code == 200
+    assert inventory.json()[0]['confirmation'] == 'pending'
+    assert body['api_key'] not in inventory.text
+    assert decide(local, local_id).json() == {'confirmation': 'approved'}
+    assert decide(local, local_id).status_code == 200  # lost-response retry
+    session = mobile_session(remote, body['api_key'])
+    assert session.status_code == 200, session.text
+    remote.headers['Authorization'] = 'Bearer ' + session.json()['session_token']
+    assert change_voice(remote).status_code == 200
+    # Fresh requests re-read approval, not just the hub cache or the cookie.
+    assert decide(local, local_id, False).status_code == 200
+    assert change_voice(remote).status_code == 403
+    assert decide(local, local_id).status_code == 409
+    assert decide(local, local_id, False).status_code == 200
+    assert mobile_session(worker_client(owner_app, remote=True), body['api_key']).status_code == 403
+
+
+@pytest.mark.parametrize('credential', ['pending-key', 'pending-session', 'forged', 'none', 'hub-assertion'])
+def test_pending_device_lan_trust_and_hub_cannot_confirm(owner_app, monkeypatch, credential):
+    from app.core import owner_auth
+    monkeypatch.setattr(settings, 'shuffle_local_access', True)
+    owner_auth.set_trusted_lan(True)
+    body, local_id = enroll_from_hub(owner_app, monkeypatch)
+    headers = {}
+    if credential == 'pending-key':
+        headers['Authorization'] = 'Bearer ' + body['api_key']
+    elif credential == 'pending-session':
+        # An old saved session from before upgrade does not grandfather approval.
+        token = pairing.generate_controller_session()
+        database.set_paired_client_session(hub_store.ownership(local_id)['paired_client_id'],
+            pairing.hash_controller_session(token), datetime.now(timezone.utc) + timedelta(days=1))
+        headers['Cookie'] = 'session=' + token
+    elif credential == 'forged':
+        headers['Authorization'] = 'Bearer shc_not-a-worker-credential'
+    elif credential == 'hub-assertion':
+        headers['X-Account-Owner'] = ACCOUNT
+        headers['X-Worker-Approved'] = 'true'
+    client = worker_client(owner_app, lan=True, headers=headers)
+    assert decide(client, local_id).status_code == 403
+    assert client.get('/api/v1/mobile/hub/devices/confirmations').status_code == 403
+    if credential in ('pending-key', 'pending-session', 'forged'):
+        # Even loopback must not upgrade an invalid presented device credential.
+        assert decide(worker_client(owner_app, headers=headers), local_id).status_code == 403
+    assert hub_store.confirmation(hub_store.ownership(local_id)) == 'pending'
+
+
+def test_worker_password_and_confirmed_device_can_confirm_next_phone(owner_app, monkeypatch):
+    from app.core import owner_auth
+    monkeypatch.setattr(settings, 'shuffle_local_access', True)
+    body, local_id = enroll_from_hub(owner_app, monkeypatch)
+    # An actual locally issued owner session is valid on LAN, but never remote.
+    token, _ = owner_auth.issue_session()
+    owner = worker_client(owner_app, lan=True, headers={'Authorization': 'Bearer ' + token})
+    assert decide(worker_client(owner_app, remote=True, headers={'Authorization': 'Bearer ' + token}), local_id).status_code == 403
+    assert decide(owner, local_id).status_code == 200
+    remote = worker_client(owner_app, remote=True)
+    session = mobile_session(remote, body['api_key']).json()['session_token']
+    next_body, next_id = enroll_from_hub(owner_app, monkeypatch, OTHER)
+    remote.headers['Authorization'] = 'Bearer ' + session
+    assert decide(remote, next_id).status_code == 200
+    assert mobile_session(worker_client(owner_app, remote=True), next_body['api_key']).status_code == 200
+
+
+@pytest.mark.parametrize('blocked', ['expired', 'revoked', 'hub-revoked'])
+def test_confirmation_cannot_revive_unusable_device(owner_app, monkeypatch, test_db, blocked):
+    monkeypatch.setattr(settings, 'shuffle_local_access', True)
+    body, local_id = enroll_from_hub(owner_app, monkeypatch)
+    if blocked == 'expired':
+        test_db.execute("UPDATE mobile_devices SET api_key_expires_at='2020-01-01T00:00:00+00:00'")
+        test_db.commit()
+    elif blocked == 'revoked':
+        database.revoke_paired_client(hub_store.ownership(local_id)['paired_client_id'])
+    else:
+        monkeypatch.setattr(account_hub, 'call', lambda *a, **k: {'active': False})
+    response = decide(worker_client(owner_app), local_id)
+    assert response.status_code == (401 if blocked == 'hub-revoked' else 409)
+    assert hub_store.confirmation(hub_store.ownership(local_id)) == 'pending'
+    assert mobile_session(worker_client(owner_app, remote=True), body['api_key']).status_code in (401, 403)
+
+
+def test_confirmed_device_cannot_approve_after_its_own_revocation(owner_app, monkeypatch):
+    monkeypatch.setattr(settings, 'shuffle_local_access', True)
+    body, local_id = enroll_from_hub(owner_app, monkeypatch)
+    assert decide(worker_client(owner_app), local_id).status_code == 200
+    remote = worker_client(owner_app, remote=True)
+    token = mobile_session(remote, body['api_key']).json()['session_token']
+    _, next_id = enroll_from_hub(owner_app, monkeypatch, OTHER)
+    database.revoke_paired_client(hub_store.ownership(local_id)['paired_client_id'])
+    remote.headers['Authorization'] = 'Bearer ' + token
+    assert decide(remote, next_id).status_code == 403
+    assert hub_store.confirmation(hub_store.ownership(next_id)) == 'pending'
+
+
+def test_ninety_day_rotation_retry_expiry_and_revocation(owner_app, monkeypatch):
+    from freezegun import freeze_time
+    monkeypatch.setattr(settings, 'shuffle_local_access', True)
+    with freeze_time('2030-01-01T00:00:00Z') as clock:
+        body, local_id = enroll_from_hub(owner_app, monkeypatch)
+        assert datetime.fromisoformat(body['expires_at']) - datetime.now(timezone.utc) == timedelta(days=90)
+        assert decide(worker_client(owner_app), local_id).status_code == 200
+        remote = worker_client(owner_app, remote=True)
+        def renew(key):
+            return remote.post('/api/v1/mobile/key/renew', headers={'Authorization': 'Bearer ' + key})
+        early = renew(body['api_key'])
+        assert early.status_code == 200, early.text
+        assert early.json()['api_key'] == body['api_key']
+        assert early.json()['rotated'] is False
+        clock.tick(timedelta(days=61))
+        renewed = renew(body['api_key'])
+        assert renewed.status_code == 200, renewed.text
+        replacement = renewed.json()['api_key']
+        assert replacement != body['api_key']
+        assert datetime.fromisoformat(renewed.json()['expires_at']) - datetime.now(timezone.utc) == timedelta(days=90)
+        assert renewed.headers['cache-control'] == 'no-store'
+        # Lost responses retry the same key/deadline, not a second rotation.
+        assert renew(body['api_key']).json() == renewed.json()
+        assert mobile_session(remote, body['api_key']).status_code == 401
+        assert mobile_session(remote, replacement).status_code == 200
+        remote.cookies.clear()
+        clock.tick(timedelta(days=29))  # exact old-key expiry boundary
+        assert renew(body['api_key']).status_code == 401
+        assert renew(replacement).status_code == 200
+        database.revoke_paired_client(hub_store.ownership(local_id)['paired_client_id'])
+        assert renew(replacement).status_code == 401
+        assert mobile_session(remote, replacement).status_code == 401
+
+
+@pytest.mark.parametrize('stored_expiry', [True, False])
+def test_upgrade_preserves_existing_key_deadline_but_never_approval(owner_app, monkeypatch, test_db, stored_expiry):
+    from freezegun import freeze_time
+    monkeypatch.setattr(settings, 'shuffle_local_access', True)
+    with freeze_time('2030-01-01T00:00:00Z') as clock:
+        # Legacy producer before worker confirmation existed.
+        bind_and_enroll(monkeypatch)
+        test_db.execute('DELETE FROM mobile_worker_confirmations')
+        original_expiry = datetime.now(timezone.utc) + timedelta(days=365)
+        test_db.execute('UPDATE mobile_devices SET api_key_expires_at=?',
+                        (original_expiry.isoformat() if stored_expiry else None,))
+        test_db.commit()
+        with database.get_db() as conn:
+            hub_store.create_schema(conn.cursor())
+            hub_store.create_schema(conn.cursor())  # restart/upgrade is idempotent
+        remote = worker_client(owner_app, remote=True)
+        assert mobile_session(remote, 'aim_owner-test').status_code == 403
+        clock.tick(timedelta(days=200))
+        assert decide(worker_client(owner_app), DEVICE).status_code == 200
+        assert mobile_session(remote, 'aim_owner-test').status_code == 200
+        remote.cookies.clear()
+        early = remote.post('/api/v1/mobile/key/renew', headers={'Authorization': 'Bearer aim_owner-test'})
+        assert early.status_code == 200
+        assert datetime.fromisoformat(early.json()['expires_at']) == original_expiry
+        clock.tick(timedelta(days=145))
+        renewed = remote.post('/api/v1/mobile/key/renew', headers={'Authorization': 'Bearer aim_owner-test'})
+        assert renewed.status_code == 200, renewed.text
+        assert datetime.fromisoformat(renewed.json()['expires_at']) - datetime.now(timezone.utc) == timedelta(days=90)
+
+
 
 @pytest.fixture
 def owner_app(monkeypatch):
@@ -52,6 +348,7 @@ def bind_and_enroll(monkeypatch, linked_by='managed:owner-test-install'):
         DeviceInfo(device_id=DEVICE, device_name='Owner phone', platform='android', capabilities={}),
         auth.hash_api_key('aim_owner-test'), datetime.now(timezone.utc) + timedelta(days=1),
         list(pairing.DEFAULT_MOBILE_SCOPES))
+    hub_store.confirm_device(hub_store.ownership(DEVICE), True)
     backchannel = Mock(return_value={'active': True, 'account_id': ACCOUNT, 'device_id': DEVICE})
     monkeypatch.setattr(account_hub, 'call', backchannel)
     return backchannel

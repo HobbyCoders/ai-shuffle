@@ -161,6 +161,7 @@ def paired_browser(app, monkeypatch):
                       owner_auth.digest(secrets.token_hex(32)), owner_auth.now() + timedelta(days=7),
                       ['controller', 'web:session'], session_token_hash=pairing.hash_controller_session(token),
                       scoped=True)
+    mobile_hub.confirm_device(mobile_hub.ownership(mobile_hub.local_device_id(SERVER, DEVICE)), True)
     c = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
     c.cookies.set('session', token)
     return c
@@ -375,6 +376,8 @@ def test_owner_browser_can_authorize_only_same_account_native_targets(app, monke
     monkeypatch.setattr(account_hub, 'call', lambda binding, method, suffix, body=None:
                         {'active': True, 'account_id': ACCOUNT, 'device_id': suffix.split('/')[-1]})
     phone = mobile_hub.local_device_id(SERVER, OTHER)
+    assert identity.authorized_device_ids('browser-chat') == []
+    mobile_hub.confirm_device(mobile_hub.ownership(phone), True)
     assert identity.authorized_device_ids('browser-chat') == [phone]
     # Browser never becomes a native target itself.
     assert browser['device_id'] not in identity.authorized_device_ids('browser-chat')
