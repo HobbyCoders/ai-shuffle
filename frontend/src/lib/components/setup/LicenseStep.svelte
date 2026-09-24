@@ -45,7 +45,7 @@
 		try {
 			const result = await activateLicense(value);
 			if (!result.activated) {
-				error = `${result.detail} Free a seat on your account page at hobbycoders.com, or in Settings, License on the worker you no longer use, then activate again.`;
+				error = `${result.detail} Free a seat on your account page at hobbycoders.com, or in Settings > License on the worker you no longer use, then activate again.`;
 				return;
 			}
 			const { activated: _, ...next } = result;
@@ -67,13 +67,13 @@
 		<p class="text-sm text-muted-foreground flex items-center gap-2" role="status"><Loader2 size={16} class="animate-spin" /> Reading the license status…</p>
 	{:else if loadError}
 		<div role="alert" class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">{loadError}</div>
-		<p class="text-sm text-muted-foreground">You can continue and add your license later in Settings, License.</p>
+		<p class="text-sm text-muted-foreground">You can continue and add your license later in Settings > License.</p>
 	{:else if status?.mode === 'beta'}
 		<div class="bg-success/10 border border-success/30 rounded-lg p-4 flex items-start gap-3" role="status">
 			<BadgeCheck size={20} strokeWidth={1.75} class="text-success shrink-0 mt-0.5" />
 			<div>
 				<h2 class="text-sm font-semibold text-foreground mb-1">Beta: no license needed</h2>
-				<p class="text-sm text-muted-foreground">This build is part of the beta, and every feature works without a key. When licensing starts, you add your key in Settings, License.</p>
+				<p class="text-sm text-muted-foreground">This build is part of the beta, and every feature works without a key. When licensing starts, you add your key in Settings > License.</p>
 			</div>
 		</div>
 	{:else if licensed && status}
@@ -102,7 +102,7 @@
 			<button type="submit" class="btn btn-primary w-full py-3" disabled={busy || !key.trim()}>
 				{#if busy}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Activate
 			</button>
-			<p class="text-xs text-muted-foreground">No key yet? You can add it later in Settings, License. Until a license is active, agents do not start new runs; nothing else is affected.</p>
+			<p class="text-xs text-muted-foreground">No key yet? You can add it later in Settings > License. Until a license is active, agents do not start new runs; nothing else is affected.</p>
 		</form>
 	{/if}
 

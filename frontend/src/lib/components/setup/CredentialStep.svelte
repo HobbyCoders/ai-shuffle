@@ -102,7 +102,7 @@
 		</div>
 		{#if keyWins}
 			<div role="status" class="bg-warning/10 border border-warning/30 text-foreground px-3 py-2 rounded-lg text-sm">
-				An Anthropic API key is saved on this worker. This version of AI Shuffle uses a saved key instead of the CLI's sign-in, so runs are billed to the key. Remove it in Settings, Providers to use your subscription.
+				An Anthropic API key is saved on this worker. This version of AI Shuffle uses a saved key instead of the CLI's sign-in, so runs are billed to the key. Remove it in Settings > Providers to use your subscription.
 			</div>
 		{/if}
 	{:else}
@@ -166,5 +166,5 @@
 		{/if}
 		<button type="button" onclick={onContinue} class="btn btn-primary flex-1 py-3" disabled={!ready}>Continue</button>
 	</div>
-	<p class="text-xs text-muted-foreground text-center">OpenAI, xAI, OpenRouter and fal.ai can be added in Settings, Providers after setup.</p>
+	<p class="text-xs text-muted-foreground text-center">OpenAI, xAI, OpenRouter and fal.ai can be added in Settings > Providers after setup.</p>
 </div>
