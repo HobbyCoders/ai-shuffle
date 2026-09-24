@@ -64,6 +64,19 @@ class AccountWorkerSyncTest {
         assertEquals("aim_cached", cached.apiKey)
     }
 
+    @Test fun `registry endpoint movement never reenrolls or forwards a cached credential`() = runBlocking {
+        val cached = pending("pinned").copy(apiKey = "aim_existing")
+        val registry = AccountWorkerCache.listed(listOf(cached), session, "pinned", "New name", "https://untrusted.example")
+        val current = AccountWorkerCache.reconcile(listOf(cached), listOf(registry))
+        AccountWorkerSync.authorizePending(current, { true }, { fail("No new credential should be saved") }) {
+            fail("The registry cannot trigger enrollment at its new endpoint")
+            it
+        }
+        val request = com.hobbycoders.aishuffle.net.ApiClient.webSessionRequest(current.single())
+        assertEquals("pinned.example", request.url.host)
+        assertEquals("Bearer ${cached.apiKey}", request.header("Authorization"))
+    }
+
     @Test fun `account rejection and cancellation retain their original meaning`() = runBlocking {
         for (failure in listOf(HubFailure(401, "Expired"), CancellationException("Paused"))) {
             var attempts = 0

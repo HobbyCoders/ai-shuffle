@@ -44,8 +44,8 @@ class AccountRepository(private val context: Context) {
         check(store.matches(session)) { "Account changed. Sign in again." }
         // The authenticated registry proves membership, independently of whether
         // an offline/reconnecting worker can issue this phone a new key right now.
-        servers.replaceAccountServers(listed)
-        val candidates = listed.filter { onlyServerId == null || it.hubServerId == onlyServerId }
+        val current = servers.replaceAccountServers(listed)
+        val candidates = current.filter { onlyServerId == null || it.hubServerId == onlyServerId }
         AccountWorkerSync.authorizePending(candidates, { store.matches(session) }, { authorized ->
             check(servers.replaceKey(authorized.copy(apiKey = ""), authorized.apiKey) != null) {
                 "This worker changed or its credential could not be saved. Sync again."

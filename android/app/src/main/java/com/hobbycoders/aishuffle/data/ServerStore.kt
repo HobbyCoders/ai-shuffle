@@ -72,15 +72,14 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
     fun removeAccountServers() { save(com.hobbycoders.aishuffle.account.AccountBoundary.directOnly(getAll())) }
 
     @Synchronized
-    fun replaceAccountServers(servers: List<Server>) {
+    fun replaceAccountServers(servers: List<Server>): List<Server> {
         val saved = getAll()
-        // Registry requests may have started before a renewal. Metadata from
-        // that stale snapshot must not overwrite a durably rotated key.
-        val current = servers.map { listed ->
-            val existing = saved.firstOrNull { com.hobbycoders.aishuffle.net.DeviceKeyRenewal.sameIdentity(it, listed) }
-            if (existing != null && existing.apiKey.isNotBlank()) listed.copy(apiKey = existing.apiKey, keyEpoch = existing.keyEpoch) else listed
+        val current = com.hobbycoders.aishuffle.account.AccountWorkerCache.reconcile(saved, servers)
+        if (!save(com.hobbycoders.aishuffle.account.AccountBoundary.directOnly(saved) + current)) {
+            save(saved)
+            error("Could not save the worker list. Your saved connections have been kept; retry syncing.")
         }
-        save(com.hobbycoders.aishuffle.account.AccountBoundary.directOnly(saved) + current)
+        return current
     }
 
     @Synchronized
