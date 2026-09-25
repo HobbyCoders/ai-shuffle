@@ -9,35 +9,42 @@ cannot be removed once installed, and the interpreter raises an audit event at
 every one of the operations listed in the deny tuples below no matter which
 Python object the call went through.
 
-Enforcement model (hardened after review passes 2 and 8)
---------------------------------------------------------
-Once a cell begins running, the hook denies a listed event **in any frame** —
-not only frames compiled under ``<cell>`` — for the whole duration of the
-"active" region the runner opens around every stretch of code that runs a
-model-controlled hook:
-
-* the cell body itself (``exec``/``eval``) **and the ``repr()`` of its result**,
-* the per-variable ``pickle.dump`` of a checkpoint (a cell object's
-  ``__reduce__``/``__getstate__`` runs there),
-* the ``pickle.loads`` of a restore (a crafted reconstructor runs there).
+Enforcement model (hardened after review passes 2, 8 and 9)
+------------------------------------------------------------
+The hook denies a listed event **in any frame** — not only frames compiled
+under ``<cell>`` — once the process is *armed*. The runner arms it the first
+time it hands control to model-controlled code (entering
+:class:`attributed_region` around a cell, a checkpoint's pickling or a
+restore's unpickling), and **it never disarms**: leaving the region does not
+lower it. From then on everything the runner does is covered — the cell body
+and the ``repr()`` of its result, the traceback, hint and "never attempted"
+rendering of a failed cell (an exception's ``__str__``, ``__notes__``,
+``__cause__``/``__context__`` chain), the stdout finishing, the checkpoint's
+namespace walk and ``pickle.dump``, the restore's ``pickle.loads``, stub
+re-import and ref adoption, and any ``__del__``/weakref finalizer a garbage
+collection runs at an arbitrary point in the runner.
 
 This closes the frame-attribution bypass: a cell object whose
-``__repr__``/``__getstate__``/``__reduce__`` is a C callable
+``__repr__``/``__str__``/``__getstate__``/``__reduce__`` is a C callable
 (``functools.partial(exec, …)``) executes with no ``<cell>`` frame on the
-stack, so attributing by frame alone would let it reach ``os.system``. Those
-hooks always fire inside an active region, so they are denied regardless of the
-frame. Outside an active region the hook still falls back to frame attribution
-(cell frame, skill frame, or a non-main thread) as a second line.
+stack, so attributing by frame alone would let it reach ``os.system``. Review
+pass 9 (R9-2) found the region closing before a failed cell's error was
+rendered, so an exception's ``__str__`` ran unguarded; a latch that never
+closes leaves no such gap. The runner performs no denied operation of its own
+after boot (pipe reads and writes raise no audit event; imports fall under the
+import carve-out below), so it needs no exit. Before the process is armed —
+boot, and a fresh kernel's first ``set_vfs`` — the hook falls back to frame
+attribution (cell frame, skill frame, or a non-main thread).
 
-The active region is **not** a trusted/allow region: the runner never wraps a
-model-controlled hook in anything that would re-permit a denied event. The
-runner's own plumbing (the framing-pipe writes, the host-call RPC) performs no
-denied event at all, so it needs no carve-out.
+Arming is **not** a trusted/allow region: nothing re-permits a denied event.
+The runner's own plumbing (the framing-pipe writes, the host-call RPC) performs
+no denied event at all, so it needs no carve-out. A cell that reaches this
+module and calls the arming closure only denies more; there is no disarm.
 
 Un-neuterability (SE-1)
 -----------------------
 The guard holds no mutable enforcement state on any object a cell can reach:
-the deny sets, the re-entrancy flag and the active-region depth live only in
+the deny sets, the re-entrancy flag and the armed latch live only in
 closure cells of the installed hook. There is no ``_INSTALLED`` module
 attribute, and after install the runner drops this module from ``sys.modules``.
 The hook denies ``gc.get_objects``/``gc.get_referrers``/``gc.get_referents``
@@ -270,60 +277,59 @@ class AuditGuard:
 
 
 # Module-level flag ONLY (a bool, never the live guard): a cell that reaches
-# this module finds no object carrying enforcement state. The active-region
-# controls are closures set by ``install``; ``attributed_region`` calls them.
+# this module finds no object carrying enforcement state. The arming control is
+# a closure set by ``install``; ``attributed_region`` calls it.
 _installed = False
-_enter_active = None
-_exit_active = None
+_arm = None
 
 
 class attributed_region:
-    """Run a model-controlled hook under the "active" deny-any-frame region.
+    """Mark code that runs model-controlled hooks; arms deny-any-frame for good.
 
-    Used by the runner around the cell body + its ``repr``, around checkpoint
-    ``pickle.dump`` and around restore ``pickle.loads`` — every place a cell's
-    own ``__repr__``/``__reduce__``/``__getstate__`` runs. Inside it, a listed
-    audit event is denied regardless of which frame raised it, so a C-callable
-    hook with no ``<cell>`` frame on the stack (``functools.partial(exec, …)``)
-    is refused exactly as a live cell's ``os.system`` is. A no-op if no guard
-    is installed (host-side unit tests that never boot a child).
+    The runner opens it around a cell (body, result ``repr``, error rendering,
+    stdout finishing), a checkpoint and a restore's unpickling — every place a
+    cell's own ``__repr__``/``__str__``/``__reduce__``/``__getstate__`` runs.
+    Entering it arms the installed hook: from then on a listed audit event is
+    denied regardless of which frame raised it, so a C-callable hook with no
+    ``<cell>`` frame on the stack (``functools.partial(exec, …)``) is refused
+    exactly as a live cell's ``os.system`` is. Leaving it does NOT disarm (see
+    the module docstring: a region that closed let an exception's ``__str__``
+    run unguarded, R9-2). A no-op if no guard is installed (host-side unit
+    tests that never boot a child).
 
     This is deliberately NOT a trusted/allow region: it never re-permits a
     denied event; it only widens denial from cell frames to all frames.
     """
 
     def __enter__(self):
-        if _enter_active is not None:
-            _enter_active()
+        if _arm is not None:
+            _arm()
         return self
 
     def __exit__(self, *exc):
-        if _exit_active is not None:
-            _exit_active()
         return False
 
 
 def install(*, allow_fs=False, allow_network=False):
     """Register the guard with the interpreter (idempotent per process).
 
-    The enforcement state (deny sets, re-entrancy flag, active-region depth,
+    The enforcement state (deny sets, re-entrancy flag, armed latch,
     main-thread id, import roots) lives only in the closure of the ``hook``
     below. Nothing here stores the hook, its state, or a guard object on a
     module attribute or any other cell-reachable place; ``_runner`` additionally
     drops this module from ``sys.modules`` after calling us.
     """
-    global _installed, _enter_active, _exit_active
+    global _installed, _arm
     if _installed:
         return None
 
     guard = AuditGuard(allow_fs=allow_fs, allow_network=allow_network)
     # Mutable enforcement state, held ONLY in this closure. ``busy`` is the
-    # re-entrancy flag; ``active`` is the depth of the deny-any-frame region.
-    # A cell cannot reach these cells: the hook object is unreachable (no
-    # module attribute, gc enumeration denied), and even if it were, driving
-    # ``active`` up only denies more, while driving it to 0 falls back to
-    # frame attribution — which still catches a running cell's own frames.
-    state = {"busy": False, "active": 0}
+    # re-entrancy flag; ``armed`` is the one-way deny-any-frame latch. A cell
+    # cannot reach these cells: the hook object is unreachable (no module
+    # attribute, gc enumeration denied), and the only control handed out
+    # (``arm``) sets the latch — nothing clears it.
+    state = {"busy": False, "armed": False}
 
     def hook(event, args):
         if state["busy"] or not guard.denied_event(event):
@@ -334,7 +340,7 @@ def install(*, allow_fs=False, allow_network=False):
                 frame = sys._getframe(1)
             except ValueError:  # pragma: no cover - no caller frame
                 return
-            if state["active"] <= 0 and not guard.from_cell(frame):
+            if not state["armed"] and not guard.from_cell(frame):
                 return
             if guard.import_exempt(event, args, frame):
                 return
@@ -344,15 +350,10 @@ def install(*, allow_fs=False, allow_network=False):
             f"{event} is blocked in the code-mode kernel; {_advice(event)}"
         )
 
-    def enter_active():
-        state["active"] += 1
-
-    def exit_active():
-        if state["active"] > 0:
-            state["active"] -= 1
+    def arm():
+        state["armed"] = True
 
     sys.addaudithook(hook)
     _installed = True
-    _enter_active = enter_active
-    _exit_active = exit_active
+    _arm = arm
     return None
