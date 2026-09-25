@@ -44,6 +44,7 @@
 	let projects: Project[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+	const LOAD_ERROR = 'Failed to load data';
 
 	// UI
 	let showCreateForm = $state(false);
@@ -89,8 +90,11 @@
 			apiUsers = usersData;
 			profiles = profilesData;
 			projects = projectsData;
+			// A later successful reload clears a stale load failure (but not an
+			// action's error, which the user dismisses).
+			if (error === LOAD_ERROR) error = '';
 		} catch (e) {
-			error = 'Failed to load data';
+			error = LOAD_ERROR;
 		}
 	}
 
@@ -338,9 +342,12 @@
 <div class="space-y-4">
 	{#if loading}
 		<div class="text-center py-4 text-muted-foreground">Loading API users...</div>
-	{:else if error}
-		<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
 	{:else}
+		<!-- Errors sit above the list; the list and its actions stay usable. -->
+		{#if error}
+			<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
+		{/if}
+
 		<!-- Header -->
 		<div class="flex items-center justify-between">
 			<div>

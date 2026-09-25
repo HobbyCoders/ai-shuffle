@@ -1,5 +1,5 @@
 /**
- * API users (Settings → API): load states, create / edit payloads (including
+ * API users (Settings → API): load states, errors shown above a still-usable list, create / edit payloads (including
  * clearing a field), one-time key reveal + copy, rotate, confirm-before-delete,
  * and opening a connector session from the Sessions list.
  */
@@ -68,6 +68,29 @@ describe('ApiUserManager list', () => {
 		apiUsers.getApiUsers.mockRejectedValue(new Error('offline'));
 		render(ApiUserManager);
 		expect(await screen.findByText('Failed to load data')).toBeTruthy();
+		// The (empty) list and its create action stay rendered under the banner.
+		expect(screen.getByRole('button', { name: 'Add API User' })).toBeTruthy();
+	});
+
+	it('shows an action error above the list and keeps the list and its actions usable', async () => {
+		apiUsers.rotateApiUserKey.mockRejectedValueOnce({ detail: 'Key store locked' });
+		await mount();
+		await fireEvent.click(screen.getByRole('button', { name: 'Rotate API key for Discord Bot' }));
+		const alert = await screen.findByRole('alert');
+		expect(alert.textContent).toContain('Key store locked');
+		// The list is still rendered, after the banner, and its actions still work.
+		const row = screen.getByText('Discord Bot');
+		expect(alert.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		const rotate = screen.getByRole('button', { name: 'Rotate API key for Discord Bot' }) as HTMLButtonElement;
+		expect(rotate.disabled).toBe(false);
+		expect((screen.getByRole('button', { name: 'Add API User' }) as HTMLButtonElement).disabled).toBe(false);
+		await fireEvent.click(rotate);
+		expect(await screen.findByText('sk-rotated')).toBeTruthy();
+		expect(apiUsers.rotateApiUserKey).toHaveBeenCalledTimes(2);
+		expect(screen.getByRole('alert').textContent).toContain('Key store locked');
+		await fireEvent.click(within(screen.getByRole('alert')).getByRole('button', { name: 'Dismiss' }));
+		expect(screen.queryByText('Key store locked')).toBeNull();
+		expect(screen.getByText('Discord Bot')).toBeTruthy();
 	});
 
 	it('shows the project name and agent count on a row', async () => {

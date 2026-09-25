@@ -44,21 +44,24 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 function mount(selectedProject: string | null = 'p1', selectedProjectV2Id: string | null = null) {
 	return render(WorkspaceSelector, { props: { selectedProject, selectedProjectV2Id, onSelectProject } });
 }
-const trigger = () => document.querySelector('.picker-trigger') as HTMLButtonElement;
-const menu = () => document.querySelector('.picker-dropdown') as HTMLElement | null;
+const trigger = () => screen.getByRole('button', { name: /^(Switch project, current: |Choose a project$)/ }) as HTMLButtonElement;
+// The dropdown is the element the trigger says it controls (absent while closed).
+const menu = () => document.getElementById(trigger().getAttribute('aria-controls') ?? '');
 
 describe('WorkspaceSelector', () => {
-	it('names the selected project, or falls back when none is chosen', () => {
+	it('names the switcher by its purpose and the selected project, or falls back when none is chosen', () => {
 		mount('p2');
-		expect(trigger().textContent?.trim()).toBe('API');
+		const named = screen.getByRole('button', { name: 'Switch project, current: API' });
+		expect(named.textContent?.trim()).toBe('API');
 		cleanup();
 		mount(null);
-		expect(trigger().textContent?.trim()).toBe('your project');
+		const unnamed = screen.getByRole('button', { name: 'Choose a project' });
+		expect(unnamed.textContent?.trim()).toBe('your project');
 	});
 
 	it('names a selected remote-only project by its catalog id', () => {
 		mount(null, 'v2-infra');
-		expect(trigger().textContent?.trim()).toBe('Infra');
+		expect(screen.getByRole('button', { name: 'Switch project, current: Infra' }).textContent?.trim()).toBe('Infra');
 	});
 
 	it('opens the picker, refreshes the catalog and selects a local project', async () => {

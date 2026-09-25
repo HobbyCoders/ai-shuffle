@@ -28,6 +28,7 @@
 	import type { AvailablePlugin, PluginInfo, PluginUpdateInfo, AutoUpdateSettings } from '$lib/api/plugins';
 	import PluginDetails from '$lib/components/plugins/PluginDetails.svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import {
 		Package, Puzzle, Search, Plus, RefreshCw, ArrowUpCircle, ToggleLeft, ToggleRight,
 		Trash2, Download, Loader2, AlertCircle, X, Database, Settings, Clock
@@ -50,6 +51,14 @@
 
 	// Sources delete confirm
 	let confirmDeleteSource = $state<string | null>(null);
+
+	// Uninstall confirm (plugin awaiting confirmation, or null)
+	let pendingUninstall = $state<PluginInfo | null>(null);
+	function confirmUninstall() {
+		const p = pendingUninstall;
+		pendingUninstall = null;
+		if (p) quiet(plugins.uninstallPlugin(p.id));
+	}
 
 	// Touch/narrow only: which row (installed or source) has its collapsed ⋮ action
 	// tray expanded. One open at a time; desktop keeps the always-inline rail.
@@ -343,7 +352,7 @@
 											{#if $pluginUpdating[p.id]}<Loader2 size={15} class="bpl-spin" />{:else}<ArrowUpCircle size={15} strokeWidth={1.7} />{/if}
 										</button>
 									{/if}
-									<button class="bpl-act bpl-act--danger" title="Uninstall" aria-label="Uninstall {p.name}" onclick={() => { actionsOpenId = null; quiet(plugins.uninstallPlugin(p.id)); }}>
+									<button class="bpl-act bpl-act--danger" title="Uninstall" aria-label="Uninstall {p.name}" onclick={() => { actionsOpenId = null; pendingUninstall = p; }}>
 										<Trash2 size={15} strokeWidth={1.7} />
 									</button>
 								</RowActionMenu>
@@ -488,6 +497,16 @@
 		</div>
 	</div>
 {/if}
+
+<ConfirmDialog
+	open={pendingUninstall !== null}
+	title="Uninstall plugin"
+	message={`Uninstall "${pendingUninstall?.name ?? ''}"? Its commands, agents, skills and hooks will no longer be available.`}
+	confirmLabel="Uninstall"
+	danger
+	onConfirm={confirmUninstall}
+	onCancel={() => (pendingUninstall = null)}
+/>
 
 <style>
 	.bpl { display: flex; flex-direction: column; gap: 14px; }

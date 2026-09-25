@@ -1,11 +1,11 @@
 /**
  * Build → Plugins: tab states, search, per-row actions (toggle / update /
- * uninstall / install / batch install), details navigation, sources with
+ * confirm-before-uninstall / install / batch install), details navigation, sources with
  * confirm-before-remove and add-source, and failures surfacing in the error
  * strip without unhandled rejections.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 
 const api = vi.hoisted(() => ({
 	getMarketplaces: vi.fn(), getAvailablePlugins: vi.fn(), getInstalledPlugins: vi.fn(), getFileBasedAgents: vi.fn(),
@@ -114,14 +114,27 @@ describe('installed tab', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Disable Writer' }));
 		expect(await screen.findByText('plugin locked')).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Uninstall Linter' }));
+		await fireEvent.click(within(screen.getByRole('dialog', { name: 'Uninstall plugin' })).getByRole('button', { name: 'Uninstall' }));
 		expect(await screen.findByText('files in use')).toBeTruthy();
 		expect(screen.getByText('Lint rules')).toBeTruthy();
 	});
 
-	it('uninstalls a plugin by id', async () => {
+	it('asks before uninstalling: cancel keeps the plugin, confirm uninstalls it by id', async () => {
 		await mount();
 		await fireEvent.click(screen.getByRole('button', { name: 'Uninstall Linter' }));
+		const dialog = screen.getByRole('dialog', { name: 'Uninstall plugin' });
+		expect(dialog.textContent).toContain('Linter');
+		// (the backdrop is also named Cancel; press the visible button)
+		await fireEvent.click(within(dialog).getByText('Cancel', { selector: 'button' }));
+		expect(screen.queryByRole('dialog', { name: 'Uninstall plugin' })).toBeNull();
+		expect(api.uninstallPlugin).not.toHaveBeenCalled();
+		expect(screen.getByText('Lint rules')).toBeTruthy();
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Uninstall Linter' }));
+		await fireEvent.click(within(screen.getByRole('dialog', { name: 'Uninstall plugin' })).getByRole('button', { name: 'Uninstall' }));
 		await waitFor(() => expect(api.uninstallPlugin).toHaveBeenCalledWith('lint@local'));
+		expect(api.uninstallPlugin).toHaveBeenCalledTimes(1);
+		expect(screen.queryByRole('dialog', { name: 'Uninstall plugin' })).toBeNull();
 		await waitFor(() => expect(screen.queryByText('Lint rules')).toBeNull());
 	});
 
