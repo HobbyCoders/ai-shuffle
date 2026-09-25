@@ -135,7 +135,7 @@ def test_register_recorded_sdk_servers_applies_risk_maps():
     cron_delete = registry.get("mcp__builtins__CronDelete")
     gateway = registry.get("mcp__builtins__gateway_slack_send")
     assert monitor is not None and cron_delete is not None and gateway is not None
-    assert monitor.risk == "safe"
+    assert monitor.risk == "write"
     assert cron_delete.risk == "destructive"  # from BUILTINS_RISK_MAP
     assert gateway.risk == "write"  # dynamic gateway tool → server default
 
