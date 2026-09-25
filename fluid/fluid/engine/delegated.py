@@ -451,6 +451,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._proc: asyncio.subprocess.Process | None = None
         self._req_counter = 0
         self._interrupted = asyncio.Event()
+        # Set (and replaced by a fresh one) on every Interrupt: a wait that
+        # captured it wakes on a Stop that lands during the wait, never on one
+        # left over from an earlier turn (``_interrupted`` stays set until the
+        # next UserTurn clears it).
+        self._stop_pulse = asyncio.Event()
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
         # Loop-issued control_requests awaiting their control_response, by
@@ -585,6 +590,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             await self._deliver_steer(op)
         elif isinstance(op, Interrupt):
             self._interrupted.set()
+            pulse, self._stop_pulse = self._stop_pulse, asyncio.Event()
+            pulse.set()
             await self._send_interrupt()
         elif isinstance(op, RespondQuestion):
             if not await self._answer_question(op):
@@ -1238,12 +1245,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         the user's place, so once one shows a frame the drain waits (bounded)
         for its result. Requests it makes are answered, never dropped: the
         CLI blocks on each one, and an unanswered one wedges the next turn.
+
+        A Stop ends the drain at once, whatever it was waiting for: the turn
+        then ends as Interrupted without its message being sent, and whatever
+        the CLI still writes is the next turn's drain to read.
         """
         assert self._proc is not None and self._proc.stdout is not None
         loop = asyncio.get_running_loop()
         settle_until = (self._last_result_at or 0.0) + _WAKE_SETTLE
         wake_deadline: float | None = None
         for _ in range(1000):  # backstop against a continuously-spewing child
+            if self._interrupted.is_set():
+                return
             now = loop.time()
             if wake_deadline is not None:
                 timeout = wake_deadline - now
@@ -1252,9 +1265,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             try:
                 # Lines a parked permission wait read ahead come first.
                 line = self._stdout_backlog.pop(0) if self._stdout_backlog else (
-                    await asyncio.wait_for(
-                        self._proc.stdout.readline(), timeout=max(timeout, 0.0),
-                    )
+                    await self._readline_unless_stopped(max(timeout, 0.0))
                 )
             except TimeoutError:
                 if wake_deadline is not None:
@@ -1262,6 +1273,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         "claude CLI wake turn did not finish within %.0fs; "
                         "starting the turn anyway", _WAKE_DRAIN_TIMEOUT,
                     )
+                return
+            if line is None:  # stopped: the turn is not going to the CLI
                 return
             if not line:  # EOF — let the turn's reader surface the closed stream
                 return
@@ -1300,6 +1313,33 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if wake_deadline is None:
                 wake_deadline = loop.time() + _WAKE_DRAIN_TIMEOUT
         logger.warning("stale-frame drain hit its line cap; continuing turn anyway")
+
+    async def _readline_unless_stopped(self, timeout: float) -> bytes | None:
+        """One stdout line, or None once a Stop is requested; TimeoutError
+        when neither comes within ``timeout``.
+
+        A line already read wins over a Stop that lands at the same moment, so
+        a hook or permission request the CLI is blocked on is still answered.
+        The cancelled ``readline`` is awaited before returning: the stream
+        admits one waiter at a time, and cancelling it consumes nothing.
+        """
+        assert self._proc is not None and self._proc.stdout is not None
+        read = asyncio.ensure_future(self._proc.stdout.readline())
+        stop = asyncio.ensure_future(self._interrupted.wait())
+        try:
+            await asyncio.wait(
+                {read, stop}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            stop.cancel()
+            if not read.done():
+                read.cancel()
+            await asyncio.gather(read, stop, return_exceptions=True)
+        if not read.cancelled():
+            return read.result()  # a line (b"" at EOF), or the read's own error
+        if self._interrupted.is_set():
+            return None
+        raise TimeoutError
 
     async def _answer_stale_control_request(self, frame: dict[str, Any]) -> bool:
         """Deny a between-turn ``can_use_tool`` (True); refuse anything else."""
@@ -2225,8 +2265,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._proc is None or self._proc.returncode is not None:
             return
         subtype = request.get("subtype")
+        # A Stop landing while the switch is unanswered ends the wait at once
+        # (the old value stays, as for silence): the user asked for the loop to
+        # stop, not to sit out the acknowledgement deadline.
+        stop = asyncio.ensure_future(self._stop_pulse.wait())
+        roundtrip = asyncio.ensure_future(self._control_roundtrip(request, CONTROL_TIMEOUT))
         try:
-            reply = await self._control_roundtrip(request, CONTROL_TIMEOUT)
+            await asyncio.wait({roundtrip, stop}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stop.cancel()
+            if not roundtrip.done():
+                roundtrip.cancel()
+            await asyncio.gather(roundtrip, stop, return_exceptions=True)
+        if roundtrip.cancelled():
+            raise RuntimeError(f"stopped before the Claude CLI acknowledged {subtype}")
+        try:
+            reply = roundtrip.result()
         except TimeoutError:
             raise RuntimeError(
                 f"the Claude CLI did not acknowledge {subtype} within {CONTROL_TIMEOUT:.0f} s"

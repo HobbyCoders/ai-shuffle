@@ -31,7 +31,7 @@ from fluid.events import (
     UserTurn,
 )
 from fluid.events.model import Interrupted, RateLimit
-from fluid.events.ops import Interrupt, SetPermissionMode
+from fluid.events.ops import Interrupt, SetModel, SetPermissionMode
 from fluid.store.base import MemoryStore
 
 FAKE = Path(__file__).parent.parent / "fixtures" / "fake_claude_script.py"
@@ -621,5 +621,132 @@ async def test_rejected_rate_limit_without_utilization_reaches_the_bus(tmp_path)
         assert (limit.kind, limit.status, limit.utilization, limit.resets_at) == (
             "five_hour", "rejected", None, 1900000000,
         )
+    finally:
+        await run.aclose()
+
+
+# ─── Stop while the loop waits on the CLI ───────────────────────────────────
+
+
+def _user_texts(run: Scripted) -> list[str]:
+    return [f["message"]["content"][0]["text"] for f in run.stdin_frames("user")]
+
+
+async def _stop_after(run: Scripted, delay: float) -> None:
+    await asyncio.sleep(delay)
+    await run.loop.submit(Interrupt())
+
+
+async def test_stop_during_the_between_turn_drain_ends_the_turn_at_once(tmp_path) -> None:
+    """A wake turn in flight holds the next turn in the drain (up to 30 s). A
+    Stop must end that wait at once, with the turn Interrupted and its message
+    never sent, instead of sitting out the wake."""
+    wake_s = 2.0
+    first = [
+        {"op": "text", "text": "first answer"}, {"op": "result"},
+        # A turn the CLI starts on its own: its first frame arms the drain wait.
+        {"op": "sleep", "s": 0.05},
+        {"op": "text", "text": "WAKE started"},
+        {"op": "sleep", "s": wake_s},
+        {"op": "text", "text": "WAKE text"}, {"op": "result"},
+    ]
+    second = [{"op": "text", "text": "second answer"}, {"op": "result"}]
+    run = Scripted(tmp_path, {"turns": [first, second]})
+    try:
+        await run.turn("one")
+        await asyncio.sleep(0.3)  # the wake's first frame is out
+        clock = asyncio.get_running_loop()
+        started = clock.time()
+        stopper = asyncio.create_task(_stop_after(run, 0.1))
+        events = await run.turn("two")
+        elapsed = clock.time() - started
+        await stopper
+        assert isinstance(events[-1], Interrupted), events[-1]
+        assert elapsed < 1.0, elapsed
+        assert not _of(events, TextDelta)
+        # Let the wake finish; the next turn drains it and runs normally.
+        await asyncio.sleep(wake_s)
+        events = await run.turn("three")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert "".join(e.text for e in _of(events, TextDelta)) == "second answer"
+        assert _user_texts(run) == ["one", "three"]  # "two" never reached the CLI
+    finally:
+        await run.aclose()
+
+
+async def test_stop_during_a_setting_acknowledgement_wait_keeps_the_old_value(tmp_path) -> None:
+    """A switch the CLI has not acknowledged yet waits up to CONTROL_TIMEOUT
+    (5 s); a Stop ends that wait at once and the switch is not recorded. A
+    Stop left over from before does not cut the next switch short."""
+    run = Scripted(tmp_path, {"controls": {"set_model": "mute"}})
+    try:
+        await run.turn("hi")
+        clock = asyncio.get_running_loop()
+        started = clock.time()
+        stopper = asyncio.create_task(_stop_after(run, 0.1))
+        with pytest.raises(RuntimeError, match="stopped before .* set_model"):
+            await run.loop.submit(SetModel(model="claude-other"))
+        elapsed = clock.time() - started
+        await stopper
+        assert elapsed < 1.0, elapsed
+        assert run.loop.model == "claude-fake"
+        assert not run.loop._pending_controls
+        # The earlier Stop is spent: an acknowledged switch still records.
+        await run.loop.submit(SetPermissionMode(mode="acceptEdits"))
+        assert run.loop.permission_mode == "acceptEdits"
+        # And the session still takes turns.
+        events = await run.turn("again")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+    finally:
+        await run.aclose()
+
+
+async def test_stop_while_a_dead_cli_is_respawned_does_not_start_the_turn(tmp_path) -> None:
+    """R8-11 with a Stop: the CLI died between turns behind buffered lines, so
+    the next turn respawns it. A Stop landing during that respawn must keep
+    the turn off the new CLI; the turn after it runs there normally."""
+    script = {
+        "turns": [[{"op": "text", "text": "first"}, {"op": "result"},
+                   {"op": "raw", "line": "stray output after the result"},
+                   {"op": "exit", "code": 0}]],
+        "resume_turns": [[{"op": "text", "text": "resumed"}, {"op": "result"}]],
+    }
+    run = Scripted(tmp_path, script)
+    try:
+        events = await run.turn("one")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        proc = run.loop._proc
+        for _ in range(200):  # the stray line and EOF are both buffered
+            if proc.stdout._eof:
+                break
+            await asyncio.sleep(0.01)
+        run.loop._proc = _NotYetReaped(proc)
+
+        respawning = asyncio.Event()
+        original_guard = run.loop._version_guard
+
+        async def slow_guard() -> None:
+            respawning.set()
+            await asyncio.sleep(0.3)
+            await original_guard()
+
+        async def stop_on_respawn() -> None:
+            await respawning.wait()
+            await run.loop.submit(Interrupt())
+
+        run.loop._version_guard = slow_guard
+        stopper = asyncio.create_task(stop_on_respawn())
+        events = await run.turn("two")
+        await stopper
+        run.loop._version_guard = original_guard
+        assert isinstance(events[-1], Interrupted), events[-1]
+        assert not _of(events, TextDelta)
+
+        events = await run.turn("three")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert "".join(e.text for e in _of(events, TextDelta)) == "resumed"
+        starts = run.records("start")
+        assert len(starts) == 2 and "--resume" in starts[1]["argv"]
+        assert _user_texts(run) == ["one", "three"]  # "two" reached neither CLI
     finally:
         await run.aclose()
