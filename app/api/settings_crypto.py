@@ -44,8 +44,18 @@ def set_encrypted_api_key(setting_name: str, api_key: str) -> None:
     database.set_system_setting(setting_name, encrypted)
 
 
+# The mask shows the first 7 and last 4 characters. A key must keep at least
+# as many characters hidden as it shows, or the "mask" is most of the key (a
+# 10-character key used to come back whole).
+_MASK_HEAD, _MASK_TAIL = 7, 4
+_MASK_MIN_LENGTH = 2 * (_MASK_HEAD + _MASK_TAIL)
+
+
 def mask_api_key(key: str) -> str:
-    """Mask an API key for display, showing first 3 and last 4 characters"""
-    if not key or len(key) < 10:
+    """Mask an API key for display, showing its first 7 and last 4 characters.
+
+    Keys too short to hide at least as much as is shown mask to "".
+    """
+    if not key or len(key) < _MASK_MIN_LENGTH:
         return ""
-    return f"{key[:7]}...{key[-4:]}"
+    return f"{key[:_MASK_HEAD]}...{key[-_MASK_TAIL:]}"

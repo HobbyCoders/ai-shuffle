@@ -748,8 +748,11 @@ async def update_tts_settings(
             if model:
                 database.set_system_setting("tts_model", model)
 
-        if request.voice:
-            database.set_system_setting("tts_voice", request.voice.strip())
+        # A blank voice is ignored like a blank model; storing "" would drop
+        # the saved voice back to the default.
+        voice = (request.voice or "").strip()
+        if voice:
+            database.set_system_setting("tts_voice", voice)
 
         if request.speed is not None:
             if request.speed < 0.1 or request.speed > 5.0:

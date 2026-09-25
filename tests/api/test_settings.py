@@ -48,17 +48,18 @@ class TestMaskApiKey:
         result = mask_api_key(None)
         assert result == ""
 
-    def test_mask_api_key_exactly_10_chars(self):
-        """Should mask key exactly 10 characters."""
+    @pytest.mark.parametrize("key", ["1234567890", "12345678901", "a" * 21])
+    def test_mask_api_key_never_reveals_most_of_a_short_key(self, key):
+        """Regression: 7 + 4 shown characters used to return a 10- or 11-char
+        key whole. A key too short to hide as much as is shown masks to ""."""
         from app.api.settings import mask_api_key
-        result = mask_api_key("1234567890")
-        assert result == "1234567...7890"
+        assert mask_api_key(key) == ""
 
-    def test_mask_api_key_11_chars(self):
-        """Should mask key with 11 characters."""
+    def test_mask_api_key_hides_at_least_what_it_shows(self):
         from app.api.settings import mask_api_key
-        result = mask_api_key("12345678901")
-        assert result == "1234567...8901"
+        key = "k" * 7 + "SECRETSECRE" + "tail"
+        assert len(key) == 22
+        assert mask_api_key(key) == "kkkkkkk...tail"
 
     def test_mask_api_key_exactly_9_chars(self):
         """Should return empty for 9 character key."""
