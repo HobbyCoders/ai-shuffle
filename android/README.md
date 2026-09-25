@@ -24,7 +24,7 @@ The APK ships its own build of the mobile UI (`mobile/` at the repository root, 
 
 ## Build and test
 
-Use JDK 17 and the Android SDK. From this directory:
+Use JDK 21 (Robolectric needs it; app bytecode targets 17) and the Android SDK. From this directory:
 
 ```sh
 ./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest

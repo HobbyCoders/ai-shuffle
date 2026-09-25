@@ -10,6 +10,9 @@ import webConfig from '../frontend/vite.config.js';
 export default defineConfig({
 	cacheDir: '.svelte-kit/vite-cache',
 	plugins: [tailwindcss(), sveltekit()],
+	// Build-time constants the shared $lib reads (__APP_VERSION__ in Settings →
+	// General). scripts/check-build.mjs fails the build if one is left bare.
+	define: webConfig.define,
 	// Same chunking budget and vendor splits as the web build — it is the same $lib.
 	build: webConfig.build,
 	server: {

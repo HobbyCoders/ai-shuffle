@@ -11,9 +11,6 @@ import org.json.JSONArray
  * Persists the list of connected [Server]s in [EncryptedSharedPreferences],
  * backed by a Keystore master key. The list is serialized to a JSON array under
  * a single key.
- *
- * Also stores the globally-known UnifiedPush endpoint so that newly-added
- * servers can be registered with the same endpoint.
  */
 class ServerStore private constructor(private val prefs: SharedPreferences) {
 
@@ -103,19 +100,9 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
         return prefs.edit().putString(KEY_SERVERS, arr.toString()).commit()
     }
 
-    /** The last UnifiedPush endpoint the distributor handed us, if any. */
-    var unifiedPushEndpoint: String?
-        get() = prefs.getString(KEY_UP_ENDPOINT, null)
-        set(value) {
-            prefs.edit().apply {
-                if (value == null) remove(KEY_UP_ENDPOINT) else putString(KEY_UP_ENDPOINT, value)
-            }.apply()
-        }
-
     companion object {
         private const val PREFS_NAME = "ai_shuffle_secure_prefs"
         private const val KEY_SERVERS = "servers"
-        private const val KEY_UP_ENDPOINT = "unifiedpush_endpoint"
         private const val KEY_LAST_USED = "last_used_server"
 
         @Volatile

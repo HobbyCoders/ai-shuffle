@@ -23,16 +23,15 @@ import org.robolectric.shadows.ShadowLooper
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class VoiceLifecycleTest {
-    @Test fun deliberateStartDefaultsToChatAndCarriesSelectedServer() {
+    @Test fun deliberateStartCarriesSelectedServer() {
         val app: Application = RuntimeEnvironment.getApplication()
         VoiceCallService.start(app, "selected-server")
         val started = shadowOf(app).nextStartedService
-        assertEquals(VoiceCallService.MODE_CHAT, started.getStringExtra(VoiceCallService.EXTRA_MODE))
         assertEquals("selected-server", started.getStringExtra(VoiceCallService.EXTRA_SERVER_ID))
     }
     @Test fun handoffCarriesExactExistingSession() {
         val app: Application = RuntimeEnvironment.getApplication()
-        VoiceCallService.start(app, "selected-server", SessionMode.CHAT, "existing-session")
+        VoiceCallService.start(app, "selected-server", sessionId = "existing-session")
         val started = shadowOf(app).nextStartedService
         assertEquals("existing-session", started.getStringExtra(VoiceCallService.EXTRA_SESSION_ID))
         assertEquals("selected-server", started.getStringExtra(VoiceCallService.EXTRA_SERVER_ID))

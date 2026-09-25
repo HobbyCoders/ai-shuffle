@@ -25,7 +25,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.TimeoutCancellationException
@@ -49,13 +48,6 @@ class VoiceCallService : Service() {
     private var realtime: VoicePeer? = null
     private lateinit var tools: PhoneTools
 
-    /** How this session was started; COMMAND sessions end themselves. */
-    private var mode = SessionMode.CHAT
-
-    /** Last time anything happened on the call (speech either way, a tool). */
-    @Volatile
-    private var lastActivityMs = 0L
-    private var watchdog: Job? = null
     private var connectionJob: Job? = null
 
     /** Function calls already serviced (each arrives twice — see sideband notes). */
@@ -71,7 +63,7 @@ class VoiceCallService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_HANGUP -> {
-                endCall(userInitiated = true)
+                endCall()
                 return START_NOT_STICKY
             }
             ACTION_TOGGLE_MUTE -> {
@@ -105,11 +97,6 @@ class VoiceCallService : Service() {
 
         if (VoiceCallState.isActive) return START_NOT_STICKY // one call at a time
 
-        mode = if (intent?.getStringExtra(EXTRA_MODE) == MODE_COMMAND) {
-            SessionMode.COMMAND
-        } else {
-            SessionMode.CHAT
-        }
         // Claim synchronously so repeated taps cannot create duplicate calls.
         VoiceCallState.reset()
         val serverId = intent?.getStringExtra(EXTRA_SERVER_ID)
@@ -187,7 +174,6 @@ class VoiceCallService : Service() {
             ?: throw IllegalStateException(getString(R.string.voice_error_no_server))
         server = srv
         VoiceCallState.update { it.copy(serverName = srv.name, serverId = srv.id) }
-        val sessionMode = if (mode == SessionMode.COMMAND) "command" else "chat"
         var firstReady = true
         val backend = object : VoiceBackend {
             override suspend fun open(sessionId: String?): com.hobbycoders.aishuffle.net.VoiceSession {
@@ -196,13 +182,13 @@ class VoiceCallService : Service() {
                 val cookie = value(ApiClient.createWebSession(srv, ApiClient.SessionPurpose.NATIVE))
                 check(authorized(srv)) { "Access to this worker changed. Reconnect from Shuffle." }
                 sessionCookie = cookie
-                return if (sessionId == null) value(VoiceApi.createSession(srv, cookie, sessionMode))
+                return if (sessionId == null) value(VoiceApi.createSession(srv, cookie, SESSION_MODE))
                 else value(VoiceApi.refreshSession(srv, cookie, sessionId))
             }
             override suspend fun exchange(session: com.hobbycoders.aishuffle.net.VoiceSession, offer: String) =
                 value(VoiceApi.postSdpOffer(session.clientSecret, session.model, offer))
             override suspend fun attach(sessionId: String, callId: String) {
-                value(VoiceApi.attachCall(srv, checkNotNull(sessionCookie), sessionId, callId, tools.declarations(), sessionMode))
+                value(VoiceApi.attachCall(srv, checkNotNull(sessionCookie), sessionId, callId, tools.declarations(), SESSION_MODE))
             }
             override suspend fun checkAccess() {
                 check(authorized(srv)) { "Access to this worker changed. Reconnect from Shuffle." }
@@ -238,9 +224,7 @@ class VoiceCallService : Service() {
                 VoiceCallState.update { it.copy(status = status) }
                 if (status == CallStatus.LIVE && firstReady) {
                     firstReady = false
-                    lastActivityMs = System.currentTimeMillis()
                     playReadyTone()
-                    if (mode == SessionMode.COMMAND) startIdleWatchdog()
                 }
             },
         ).run(selectedSession)
@@ -263,31 +247,11 @@ class VoiceCallService : Service() {
         }
     }
 
-    /**
-     * COMMAND sessions must never linger: if nothing has happened for
-     * [IDLE_TIMEOUT_MS] (user silent, model idle), hang up. The model is also
-     * told to call end_session on silence — this is the belt to that suspender.
-     */
-    private fun startIdleWatchdog() {
-        watchdog?.cancel()
-        watchdog = scope.launch {
-            while (isActive && VoiceCallState.isActive) {
-                delay(5_000)
-                if (System.currentTimeMillis() - lastActivityMs > IDLE_TIMEOUT_MS) {
-                    Log.i(TAG, "Command session idle — hanging up")
-                    endCall(userInitiated = false)
-                    break
-                }
-            }
-        }
-    }
-
     // ------------------------------------------------------------------
     // Realtime events (data channel)
     // ------------------------------------------------------------------
 
     private fun handleRealtimeEvent(event: JSONObject) {
-        lastActivityMs = System.currentTimeMillis()
         when (event.optString("type")) {
             "conversation.item.input_audio_transcription.completed" -> {
                 val text = event.optString("transcript").trim()
@@ -358,7 +322,7 @@ class VoiceCallService : Service() {
             if (outcome.endSession) {
                 // Let the model speak its short wrap-up before hanging up.
                 delay(outcome.endDelayMs)
-                if (realtime === requestingPeer) endCall(userInitiated = true)
+                if (realtime === requestingPeer) endCall()
             }
         }
     }
@@ -374,13 +338,10 @@ class VoiceCallService : Service() {
         stopSelf()
     }
 
-    private fun endCall(userInitiated: Boolean) {
+    private fun endCall() {
         VoiceCallState.update { it.copy(status = CallStatus.ENDED) }
         cleanup()
         stopSelf()
-        if (!userInitiated) {
-            Log.i(TAG, "Voice call ended by transport")
-        }
     }
 
     /** Close the WebRTC leg and tell the server to drop the sideband. */
@@ -388,8 +349,6 @@ class VoiceCallService : Service() {
         scope.cancel()
         connectionJob?.cancel()
         connectionJob = null
-        watchdog?.cancel()
-        watchdog = null
         realtime?.close()
         realtime = null
         val srv = server
@@ -419,31 +378,24 @@ class VoiceCallService : Service() {
     companion object {
         private const val TAG = "VoiceCallService"
         private const val NOTIFICATION_ID = 2001
-        private const val IDLE_TIMEOUT_MS = 30_000L
+        /** The app only starts deliberate continuous calls; "command" is a backend-only mode. */
+        private const val SESSION_MODE = "chat"
 
         const val EXTRA_SERVER_ID = "server_id"
         const val EXTRA_SESSION_ID = "session_id"
-        const val EXTRA_MODE = "session_mode"
-        const val MODE_COMMAND = "command"
-        const val MODE_CHAT = "chat"
         const val ACTION_HANGUP = "com.hobbycoders.aishuffle.voice.HANGUP"
         const val ACTION_TOGGLE_MUTE = "com.hobbycoders.aishuffle.voice.TOGGLE_MUTE"
 
         /**
-         * Start a deliberate continuous call. CHAT remains connected until ended.
+         * Start a deliberate continuous call; it remains connected until ended.
          * A selected server and previously granted microphone access are required.
          */
         fun start(
             context: Context,
             serverId: String? = null,
-            mode: SessionMode = SessionMode.CHAT,
             sessionId: String? = null,
         ) {
             val intent = Intent(context, VoiceCallService::class.java)
-                .putExtra(
-                    EXTRA_MODE,
-                    if (mode == SessionMode.COMMAND) MODE_COMMAND else MODE_CHAT,
-                )
             serverId?.let { intent.putExtra(EXTRA_SERVER_ID, it) }
             sessionId?.let { intent.putExtra(EXTRA_SESSION_ID, it) }
             context.startForegroundService(intent)

@@ -2,9 +2,9 @@
 	/**
 	 * AppTopBar - compact mobile app bar + navigation drawer.
 	 *
-	 * Rendered only on the mobile shell (the Android app's WebView); AppLayout
-	 * owns that platform decision — never a viewport width, so a narrow desktop
-	 * browser keeps the desktop shell. The bar carries ☰ menu + current-page
+	 * Rendered by MobileAppLayout; the mobile shell is selected by build
+	 * (VITE_SHUFFLE_SHELL), never a viewport width, so a narrow desktop browser
+	 * keeps the desktop shell. The bar carries ☰ menu + current-page
 	 * title, and every navigation destination lives in the slide-in drawer,
 	 * which hosts the same Sidebar component the desktop shell shows beside the
 	 * main panel.
@@ -199,7 +199,7 @@
 
 	.tb-spacer { width: 40px; flex-shrink: 0; }
 
-	/* Title fills the space between the ☰ (left) and the notification bell
+	/* Title fills the space between the ☰ (left) and the balancing spacer
 	   (right), so it sits visually centered, and ellipsizes for long chat names. */
 	.tb-context-title {
 		flex: 1 1 auto;

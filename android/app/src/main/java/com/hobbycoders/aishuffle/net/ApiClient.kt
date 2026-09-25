@@ -248,28 +248,6 @@ object ApiClient {
         } }
 
     /**
-     * POST {base}/api/v1/mobile/push/unifiedpush — associates a push endpoint
-     * with this device on the given server.
-     */
-    suspend fun registerUnifiedPush(
-        server: Server,
-        endpoint: String,
-    ): ApiResult<Unit> = withCurrentServer(server) { current -> withContext(Dispatchers.IO) {
-        val body = JSONObject().apply {
-            put("device_id", current.deviceId)
-            put("endpoint", endpoint)
-        }
-        val request = Request.Builder()
-            .url("${current.baseUrl}/api/v1/mobile/push/unifiedpush")
-            .header("Authorization", "Bearer ${current.apiKey}")
-            .cfAccess(current.cfAccessClientId, current.cfAccessClientSecret)
-            .post(body.toString().toRequestBody(JSON_MEDIA.toMediaType()))
-            .build()
-
-        execute(request, hasCfCreds = current.hasCfAccess, deviceId = current.deviceId) { }
-    } }
-
-    /**
      * Exchanges the server's Cloudflare Access service token for a
      * `CF_Authorization` cookie so the WebView (and its WebSocket) can be
      * authorized against Access. Returns the raw `CF_Authorization=<jwt>` cookie

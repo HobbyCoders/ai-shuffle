@@ -1,14 +1,13 @@
-export interface MobileComposerCollapseState {
-	compact: boolean;
-	/** True on the mobile shell (`platform.isMobile`). `compact` is also true on desktop once a chat has messages. */
-	mobileViewport: boolean;
-	hasDraft: boolean;
-	expanded: boolean;
-	composerFocused: boolean;
-	controlsOpen: boolean;
-	commandAutocompleteOpen: boolean;
-	fileAutocompleteOpen: boolean;
-}
+import type {
+	MobileComposerCollapseState,
+	MobileComposerReconcileReason,
+	MobileComposerReconcileState,
+	MobileComposerToolbarPointerState
+} from '$lib/components/chat/composer-shell';
+
+// The state shapes live on the seam ($lib composer-shell) that these
+// implementations are registered into; re-exported for the tests here.
+export type { MobileComposerCollapseState, MobileComposerReconcileState };
 
 export function shouldCollapseMobileComposer(state: MobileComposerCollapseState): boolean {
 	return (
@@ -23,19 +22,6 @@ export function shouldCollapseMobileComposer(state: MobileComposerCollapseState)
 	);
 }
 
-export interface MobileComposerReconcileState {
-	compact: boolean;
-	hasDraft: boolean;
-	composerFocused: boolean;
-	controlsOpen: boolean;
-	commandAutocompleteOpen: boolean;
-	fileAutocompleteOpen: boolean;
-	/** Focus currently belongs to the island or a registered composer portal. */
-	activeElementOwned: boolean;
-	/** Last interaction belongs to the composer, even if a control lost focus. */
-	interactionOwned?: boolean;
-}
-
 /**
  * Resolve the expansion latch only after focus/pointer ownership has settled.
  * Successful send is the sole immediate-collapse transition; every other path
@@ -44,7 +30,7 @@ export interface MobileComposerReconcileState {
 export function reconcileMobileComposerExpanded(
 	currentExpanded: boolean,
 	state: MobileComposerReconcileState,
-	reason: 'deferred-focus' | 'successful-send' = 'deferred-focus'
+	reason: MobileComposerReconcileReason = 'deferred-focus'
 ): boolean {
 	if (reason === 'successful-send') return false;
 	if (!state.compact) return currentExpanded;
@@ -60,14 +46,6 @@ export function reconcileMobileComposerExpanded(
 		return true;
 	}
 	return false;
-}
-
-export interface MobileComposerToolbarPointerState {
-	collapsed: boolean;
-	/** True from the expanding pointerdown until after the following click. */
-	expandPointerActive: boolean;
-	/** Collapse/inert is a mobile-shell concern; desktop must keep the dock clickable. */
-	mobileViewport: boolean;
 }
 
 /**

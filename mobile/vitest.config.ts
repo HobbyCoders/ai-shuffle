@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { fileURLToPath } from 'node:url';
+import { appVersion } from '../frontend/app-version.js';
 
 // Tests here exercise the mobile shell: same build flag as `vite build`.
 process.env.VITE_SHUFFLE_SHELL = 'mobile';
@@ -11,6 +12,9 @@ const stubs = fileURLToPath(new URL('../frontend/src/lib/test-stubs', import.met
 export default defineConfig({
 	cacheDir: '.svelte-kit/vitest-cache',
 	plugins: [svelte({ hot: !process.env.VITEST })],
+	define: {
+		__APP_VERSION__: JSON.stringify(appVersion)
+	},
 	test: {
 		globals: true,
 		environment: 'jsdom',

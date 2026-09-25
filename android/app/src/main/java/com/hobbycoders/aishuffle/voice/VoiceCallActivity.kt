@@ -130,7 +130,7 @@ class VoiceCallActivity : AppCompatActivity() {
         }
         if (!VoiceCallState.isActive && !startIssued) {
             startIssued = true
-            VoiceCallService.start(this, serverId, SessionMode.CHAT, sessionId)
+            VoiceCallService.start(this, serverId, sessionId = sessionId)
         }
     }
 

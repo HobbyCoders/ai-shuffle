@@ -6,9 +6,6 @@ import com.hobbycoders.aishuffle.tools.ToolRegistry
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** CHAT is deliberate continuous voice; COMMAND remains a backend wire compatibility value. */
-enum class SessionMode { COMMAND, CHAT }
-
 data class ToolOutcome(val result: JSONObject, val endSession: Boolean = false, val endDelayMs: Long = 2500)
 
 /** Realtime adapter over the same Android executor used by authenticated queued commands. */

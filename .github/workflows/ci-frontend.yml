@@ -2,7 +2,8 @@ name: CI JavaScript
 run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '4' }} vCPU)"
 
 # One runner checks only the JavaScript packages changed by a PR. Scheduled
-# canaries check all three packages. A PR that changes only docs/content gets
+# canaries check all three packages. The mobile UI (mobile/) compiles
+# frontend/src/lib, so its own job runs for either package. A PR that changes only docs/content gets
 # the two cheap docs checks (the two docs copies match, and the website's
 # rendered docs.json is current) and nothing else.
 #
@@ -11,6 +12,7 @@ on:
   pull_request:
     paths:
       - 'frontend/**'
+      - 'mobile/**'
       - 'tools/**'
       - 'browser-mcp/**'
       - 'app/contract/schema/**'
@@ -172,3 +174,56 @@ jobs:
         if: github.event_name != 'pull_request' || steps.changes.outputs.docs == 'true'
         working-directory: android/site
         run: npm ci && node scripts/render-docs.mjs --check
+
+  # mobile/ is the UI bundled into the Android app. It compiles the same
+  # frontend/src/lib with its own shell, so a frontend change can break its
+  # type check, tests or build; android.yml does not start for frontend/**.
+  mobile:
+    name: Mobile UI checks
+    needs: canary-gate
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.canary-gate.outputs.changed == 'true') }}
+    timeout-minutes: 20
+    runs-on: ${{ inputs.runner_cpus == '2' && 'blacksmith-2vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    defaults:
+      run:
+        working-directory: mobile
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            mobile:
+              - 'mobile/**'
+              - 'frontend/**'
+              - '.github/workflows/ci-frontend.yml'
+
+      - name: Set up Node 22
+        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      # mobile/ has no lockfile of its own: it links ../frontend/node_modules.
+      - name: Install dependencies
+        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
+        run: (cd ../frontend && npm ci) && npm run deps
+
+      - name: Svelte type-check
+        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
+        run: npm run check
+
+      - name: Mobile tests
+        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
+        run: npx vitest run
+
+      # postbuild (scripts/check-build.mjs) fails if a build-time constant such
+      # as __APP_VERSION__ was left unreplaced in the bundle.
+      - name: Build
+        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
+        run: npm run build

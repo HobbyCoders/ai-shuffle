@@ -13,8 +13,8 @@
    * Author class names are untouched by Svelte scoping, which is why the
    * original selectors work unchanged from a global sheet.
    *
-   * Generated once by tools/scripts (extract-mobile-css) from the sources named
-   * in the section headers; edit by hand from here on.
+   * Extracted once from the sources named in the section headers; edit by
+   * hand from here on.
    */
 
 /* ── frontend/src/lib/components/CommandAutocomplete.svelte ────────────────── */

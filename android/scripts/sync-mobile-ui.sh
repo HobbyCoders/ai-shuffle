@@ -32,8 +32,10 @@ rm -rf "$DEST"
 mkdir -p "$DEST"
 cp -R "$MOBILE/build/." "$DEST/"
 
-# Provenance for bug reports: which UI is inside this APK.
-version="$(node -p "require('$MOBILE/package.json').version")"
+# Provenance for bug reports: which UI is inside this APK. Same source as the
+# bundle's __APP_VERSION__ (frontend/app-version.js: APP_VERSION, else
+# frontend/package.json, which tracks the release tag).
+version="$(node --input-type=module -e "const { pathToFileURL } = await import('node:url'); const { appVersion } = await import(pathToFileURL(process.argv[1]).href); console.log(appVersion)" "$FRONTEND/app-version.js")"
 commit="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 printf '{"version":"%s","commit":"%s","builtAt":"%s"}\n' "$version" "$commit" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DEST/version.json"
 

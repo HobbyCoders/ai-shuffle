@@ -1,5 +1,4 @@
 <resources>
-    <color name="ic_launcher_background">#245F87</color>
     <color name="surface">#F6F6F5</color>
     <color name="card">#FFFFFF</color>
     <color name="ink">#202221</color>

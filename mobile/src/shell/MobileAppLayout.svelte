@@ -19,11 +19,9 @@
 		isAdmin,
 		onNewSession,
 		onSettledOpenSession,
-		onNewSessionForProject,
 		onOpenSession,
 		onOpenFeature,
-		onOpenSpotlight,
-		onOpenPlugins
+		onOpenSpotlight
 	}: AppShellProps = $props();
 
 	// The drawer is always an overlay on the mobile shell (never persisted).
@@ -44,12 +42,12 @@
 	/>
 
 	<div class="app-body">
-		<MainPanel {onOpenSession} {onOpenPlugins} {onNewSession} {onNewSessionForProject}>
+		<MainPanel {onOpenSession}>
 			{#snippet header(ctx)}
 				<!-- Session views and non-embedded pages keep the PageHeader; feature
 				     panels draw their own StudioPageHeader. -->
 				{#if ctx.isSessionView || !ctx.embedded}
-					<PageHeader title={ctx.title} isMobile hideGlobalStt={ctx.isSessionView}>
+					<PageHeader hideGlobalStt={ctx.isSessionView}>
 						{#snippet leftActions()}
 							{@render ctx.downloadAction()}
 						{/snippet}
