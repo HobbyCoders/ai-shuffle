@@ -150,11 +150,13 @@ jobs:
         # suites above cannot. Needs the runner's preinstalled PostgreSQL 16
         # binaries (not the service, which is still stopped here);
         # BOOT_SMOKE_REQUIRED makes missing binaries fail instead of skip.
-        # Serial on purpose: the server binds real ports. ~15 s.
+        # Also runs the schema lifecycle's real-PostgreSQL concurrent start
+        # (several workers run init_core on one empty database at once).
+        # Serial on purpose: the server binds real ports. ~30 s.
         env:
           BOOT_SMOKE_REQUIRED: '1'
           SMOKE_PG_BIN: /usr/lib/postgresql/16/bin
-        run: python -m pytest tests/smoke -m boot_smoke -o addopts="" -q -rs -p no:cacheprovider --timeout=240
+        run: python -m pytest tests/smoke tests/db/test_schema_lifecycle.py -m boot_smoke -o addopts="" -q -rs -p no:cacheprovider --timeout=240
 
       - name: Start the runner's PostgreSQL
         # The Ubuntu runner image ships PostgreSQL preinstalled and stopped;

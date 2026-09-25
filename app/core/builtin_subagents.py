@@ -401,7 +401,10 @@ def seed_builtin_subagents() -> Dict[str, str]:
                 tools=definition.get("tools"),
                 model=definition.get("model"),
                 is_builtin=True,
-                store_defaults=True
+                store_defaults=True,
+                # Another worker booting on the same database may have just
+                # created it; keep that row rather than fail start-up.
+                if_absent=True,
             )
             logger.debug(f"Created built-in subagent: {subagent_id}")
             results[subagent_id] = "created"

@@ -2661,6 +2661,44 @@ SCHEMA_INIT_LOCK_KEY = int.from_bytes(
     hashlib.sha256(b"shuffle-schema-init").digest()[:8], "big", signed=True
 )
 
+#: ``pg_advisory_xact_lock`` key for :func:`boot_init_lock`. Deliberately not
+#: ``SCHEMA_INIT_LOCK_KEY``: the boot lock is held on its own connection while
+#: ``init_database`` takes that key on another one, and a process would wait
+#: on itself.
+BOOT_INIT_LOCK_KEY = int.from_bytes(
+    hashlib.sha256(b"shuffle-boot-init").digest()[:8], "big", signed=True
+)
+
+
+@contextmanager
+def boot_init_lock():
+    """Serialize a worker's whole database start-up against other workers.
+
+    ``init_database``'s lock ends with its transaction, but start-up goes on
+    to seed: ``run_migrations``, the mobile-tool tables (``CREATE TABLE IF
+    NOT EXISTS`` races on PostgreSQL), the built-in agents and templates
+    (check, then insert). Two workers booting together on one database raced
+    through those after the schema lock was released, and one of them could
+    fail to start on a duplicate key. The block under this lock runs one
+    worker at a time; the next one starts after the first committed
+    everything and finds the rows present.
+
+    A transaction-scoped lock on a dedicated connection, so any exit (an
+    exception, or the process dying) releases it.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", (BOOT_INIT_LOCK_KEY,))
+        # This connection idles in its transaction for the whole start-up; a
+        # server-wide idle_in_transaction_session_timeout would end it (and
+        # the lock) half way.
+        try:
+            with _savepoint(cursor, "sp_boot_lock_idle"):
+                cursor.execute("SET LOCAL idle_in_transaction_session_timeout = 0")
+        except Exception:  # noqa: BLE001 - best effort; the lock is what matters
+            pass
+        yield
+
 
 def init_database():
     """Initialize the PostgreSQL database with schema.

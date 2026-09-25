@@ -151,53 +151,56 @@ def init_core() -> None:
         max_conn=settings.db_pool_max,
     )
 
-    init_database()
-    run_migrations()
+    # One worker at a time from here to the end of seeding: two workers
+    # booting on one database would otherwise race the seeds below.
+    with database.boot_init_lock():
+        init_database()
+        run_migrations()
 
-    from app.db import mobile_tools, mobile_tool_identity
-    mobile_tools.init_schema()
-    mobile_tool_identity.init_schema()
+        from app.db import mobile_tools, mobile_tool_identity
+        mobile_tools.init_schema()
+        mobile_tool_identity.init_schema()
 
-    # Adopt orphaned projects/sessions from previous Docker containers.
-    # Before this fix, instance_id fell back to socket.gethostname() which
-    # returns the Docker container ID — a value that changes on every rebuild.
-    # This left projects and sessions invisible after a rebuild.
-    _adopt_orphaned_instance_data()
+        # Adopt orphaned projects/sessions from previous Docker containers.
+        # Before this fix, instance_id fell back to socket.gethostname() which
+        # returns the Docker container ID — a value that changes on every rebuild.
+        # This left projects and sessions invisible after a rebuild.
+        _adopt_orphaned_instance_data()
 
-    # Materialize notes as physical markdown files
-    from app.core.note_files import materialize_all_notes, get_notes_dir
-    notes_dir = get_notes_dir()
-    unmaterialized = database.get_notes_without_file_path()
-    if unmaterialized:
-        logger.info(f"Materializing {len(unmaterialized)} notes as markdown files...")
-        path_updates = materialize_all_notes(unmaterialized)
-        database.bulk_update_note_file_paths(path_updates)
-        logger.info(f"Materialized {len(path_updates)} note files to {notes_dir}")
+        # Materialize notes as physical markdown files
+        from app.core.note_files import materialize_all_notes, get_notes_dir
+        notes_dir = get_notes_dir()
+        unmaterialized = database.get_notes_without_file_path()
+        if unmaterialized:
+            logger.info(f"Materializing {len(unmaterialized)} notes as markdown files...")
+            path_updates = materialize_all_notes(unmaterialized)
+            database.bulk_update_note_file_paths(path_updates)
+            logger.info(f"Materialized {len(path_updates)} note files to {notes_dir}")
 
-    # Backfill attachment bytes into the shared database. Attachments uploaded
-    # before bytes were stored in the DB only exist on the machine that uploaded
-    # them; this pass copies any local file into the DB so installs sharing the
-    # database can serve it. Runs on every machine — whichever holds the file
-    # wins, and missing files are simply skipped.
-    _backfill_attachment_data()
+        # Backfill attachment bytes into the shared database. Attachments uploaded
+        # before bytes were stored in the DB only exist on the machine that uploaded
+        # them; this pass copies any local file into the DB so installs sharing the
+        # database can serve it. Runs on every machine — whichever holds the file
+        # wins, and missing files are simply skipped.
+        _backfill_attachment_data()
 
-    # Seed built-in subagents
-    from app.core.builtin_subagents import seed_builtin_subagents
-    seed_results = seed_builtin_subagents()
-    created = [k for k, v in seed_results.items() if v == "created"]
-    promoted = [k for k, v in seed_results.items() if v == "promoted"]
-    if created:
-        logger.info(f"Created built-in subagents: {', '.join(created)}")
-    if promoted:
-        logger.info(f"Promoted to built-in subagents: {', '.join(promoted)}")
+        # Seed built-in subagents
+        from app.core.builtin_subagents import seed_builtin_subagents
+        seed_results = seed_builtin_subagents()
+        created = [k for k, v in seed_results.items() if v == "created"]
+        promoted = [k for k, v in seed_results.items() if v == "promoted"]
+        if created:
+            logger.info(f"Created built-in subagents: {', '.join(created)}")
+        if promoted:
+            logger.info(f"Promoted to built-in subagents: {', '.join(promoted)}")
 
-    # Retire the chat-history-summarizer builtin (superseded by fluid's
-    # session-search tool). Seeding does not prune removed builtins, so
-    # drop the stale row explicitly — once; later boots find nothing.
-    from app.core.builtin_subagents import get_builtin_subagent_ids
-    if "chat-history-summarizer" not in get_builtin_subagent_ids():
-        if database.delete_subagent("chat-history-summarizer"):
-            logger.info("Removed retired built-in subagent: chat-history-summarizer")
+        # Retire the chat-history-summarizer builtin (superseded by fluid's
+        # session-search tool). Seeding does not prune removed builtins, so
+        # drop the stale row explicitly — once; later boots find nothing.
+        from app.core.builtin_subagents import get_builtin_subagent_ids
+        if "chat-history-summarizer" not in get_builtin_subagent_ids():
+            if database.delete_subagent("chat-history-summarizer"):
+                logger.info("Removed retired built-in subagent: chat-history-summarizer")
 
 
 def init_encryption_and_sessions() -> None:

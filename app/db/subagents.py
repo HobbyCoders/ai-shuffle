@@ -141,15 +141,18 @@ def create_subagent(
     mcp_servers: Optional[List[Any]] = None,
     is_builtin: bool = False,
     store_defaults: bool = False,
+    if_absent: bool = False,
 ) -> SubagentRow:
     """Create an agent row from subagent-shaped fields.
 
     ``store_defaults`` is accepted for signature compatibility and ignored —
     built-in defaults live in code (``BUILTIN_SUBAGENTS``) since v71.
+    ``if_absent`` keeps an existing row with this id (see ``create_profile``).
     """
     config = _subagent_config(prompt, tools, model, skills, memory, mcp_servers)
     _agents_db.create_profile(
-        subagent_id, name, description, config, is_builtin=is_builtin
+        subagent_id, name, description, config, is_builtin=is_builtin,
+        if_absent=if_absent,
     )
     return get_subagent(subagent_id)
 

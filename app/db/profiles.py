@@ -59,15 +59,21 @@ def create_profile(
     description: Optional[str],
     config: Dict[str, Any],
     is_builtin: bool = False,
-    mcp_tools: Optional[List[str]] = None
+    mcp_tools: Optional[List[str]] = None,
+    if_absent: bool = False,
 ) -> ProfileRow:
-    """Create a new profile"""
+    """Create a new profile.
+
+    ``if_absent`` (start-up seeding) leaves an existing row with this id alone
+    instead of raising on the duplicate key; the returned row is the stored one.
+    """
     now = datetime.now(timezone.utc).isoformat()
+    on_conflict = " ON CONFLICT (id) DO NOTHING" if if_absent else ""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO agents (id, name, description, config, is_builtin, mcp_tools, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""" + on_conflict,
             (profile_id, name, description, json.dumps(config), is_builtin, json.dumps(mcp_tools or []), now, now)
         )
     return get_profile(profile_id)

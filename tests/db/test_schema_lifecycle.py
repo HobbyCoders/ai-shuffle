@@ -12,9 +12,11 @@ when the stored fingerprint differs. There is no per-version step list, so
 created, then run today's entry point on it.
 
 Everything here runs hermetically on file-backed SQLite through the test shim
-(``tests/db/schema_lifecycle_helpers.py``). The old-schema fixtures are built
-from ``git show <commit>:app/db/...`` at test time; those tests skip when the
-checkout has no history for the commit (a shallow clone).
+(``tests/db/schema_lifecycle_helpers.py``), except the real-PostgreSQL
+concurrent-start test (marked ``boot_smoke``; see its docstring). The
+old-schema fixtures are built from ``git show <commit>:app/db/...`` at test
+time; those tests skip when the checkout has no history for the commit (a
+shallow clone).
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -438,7 +441,8 @@ def test_two_processes_initialising_one_file(tmp_path):
     SQLite's file lock already serializes writers, so this cannot reproduce
     the PostgreSQL race the schema lock closes (both boots see a column
     missing, both ALTER, the loser fails once the winner commits); the
-    ordering test above pins the lock itself."""
+    ordering test above pins the lock itself, and
+    ``test_workers_booting_together_on_one_postgres`` exercises it."""
     db_file = tmp_path / "shared.db"
     flag = tmp_path / "go"
     child = os.path.join(os.path.dirname(__file__), "schema_init_child.py")
@@ -463,6 +467,104 @@ def test_two_processes_initialising_one_file(tmp_path):
     assert _version(shared) == [database.SCHEMA_VERSION]
     # No seed or marker row was written twice.
     assert _stable_dump(shared, exact_revisions=False) == _stable_dump(single, exact_revisions=False)
+
+
+#: Workers per round and rounds (each on an emptied database) for the
+#: PostgreSQL variant. With the advisory locks removed, 3 workers on a fresh
+#: database fail most rounds on duplicate DDL (``pg_type_typname_nsp_index``).
+PG_WORKERS = 4
+PG_ROUNDS = 2
+
+
+@pytest.mark.boot_smoke
+@pytest.mark.timeout(300)
+def test_workers_booting_together_on_one_postgres(tmp_path):
+    """Several worker processes run the whole database start-up
+    (``init_core``: schema, migrations, mobile tables, built-in agents and
+    templates) against one EMPTY real PostgreSQL 16 database at the same
+    moment. Every one must start, and the seeds must exist exactly once.
+
+    This is the race the SQLite test above cannot show: PostgreSQL runs the
+    workers' DDL and check-then-insert seeds truly concurrently, so without
+    the advisory locks the losers fail on duplicate types, relations or keys.
+
+    Needs PostgreSQL 16 server binaries (as ``tests/smoke``: ``SMOKE_PG_BIN``,
+    PATH or ``/usr/lib/postgresql/16/bin``); skips without them unless
+    ``BOOT_SMOKE_REQUIRED=1``. Runs serially only (CI's boot smoke step): it
+    owns a real cluster and several processes, so it skips under xdist."""
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        pytest.skip("real-PostgreSQL start-up race: runs serially in the boot smoke step")
+    bindir = lifecycle.pg16_bindir()
+    if bindir is None:
+        message = ("PostgreSQL 16 server binaries not found (PATH, SMOKE_PG_BIN or "
+                   "/usr/lib/postgresql/16/bin)")
+        if os.environ.get("BOOT_SMOKE_REQUIRED") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
+
+    from app.core.builtin_subagents import BUILTIN_SUBAGENTS
+    from app.core.profiles import DEFAULT_TEMPLATES
+
+    data, workspace, home = tmp_path / "data", tmp_path / "workspace", tmp_path / "home"
+    for path in (workspace, home):
+        path.mkdir()
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("")
+    child = os.path.join(os.path.dirname(__file__), "schema_init_child.py")
+    # An allow-list, as the boot smoke test: the test process carries
+    # TESTING=1 and a DATA_DIR from tests/conftest.py.
+    inherited = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "LD_LIBRARY_PATH", "PYTHONPATH")
+    env = {k: v for k, v in os.environ.items() if k in inherited}
+    env.update({
+        "HOME": str(home), "DATA_DIR": str(data), "WORKSPACE_DIR": str(workspace),
+        "AI_SHUFFLE_ENV_FILE": str(env_file), "TESTING": "0", "PYTHONDONTWRITEBYTECODE": "1",
+    })
+
+    with lifecycle.private_postgres(bindir, data) as descriptor:
+        for round_no in range(PG_ROUNDS):
+            admin = lifecycle.pg_connect(descriptor)
+            try:
+                admin.cursor().execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+            finally:
+                admin.close()
+
+            flag = tmp_path / f"go-{round_no}"
+            procs = [
+                subprocess.Popen([sys.executable, child, "--postgres", str(flag)], env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for _ in range(PG_WORKERS)
+            ]
+            try:
+                deadline = time.monotonic() + 120
+                while len(list(tmp_path.glob(f"go-{round_no}.ready.*"))) < PG_WORKERS:
+                    if any(p.poll() is not None for p in procs) or time.monotonic() > deadline:
+                        break
+                    time.sleep(0.05)
+                flag.write_text("go")
+                results = [p.communicate(timeout=180) for p in procs]
+            finally:
+                for p in procs:
+                    if p.poll() is None:
+                        p.kill()
+            failures = [f"worker {i} exit {p.returncode}:\n{err[-3000:]}"
+                        for i, (p, (_out, err)) in enumerate(zip(procs, results))
+                        if p.returncode != 0]
+            assert not failures, f"round {round_no}: " + "\n\n".join(failures)
+
+            conn = lifecycle.pg_connect(descriptor)
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT version FROM schema_version")
+                assert [r["version"] for r in cur.fetchall()] == [database.SCHEMA_VERSION]
+                cur.execute("SELECT id FROM agents WHERE is_builtin ORDER BY id")
+                assert [r["id"] for r in cur.fetchall()] == sorted(d["id"] for d in BUILTIN_SUBAGENTS)
+                cur.execute("SELECT id FROM templates ORDER BY id")
+                assert [r["id"] for r in cur.fetchall()] == sorted(t["id"] for t in DEFAULT_TEMPLATES)
+                cur.execute("SELECT to_regclass('mobile_tool_commands') IS NOT NULL AS a, "
+                            "to_regclass('mobile_tool_identity') IS NOT NULL AS b")
+                assert dict(cur.fetchone()) == {"a": True, "b": True}
+            finally:
+                conn.close()
 
 
 # ---------------------------------------------------------------------------

@@ -71,15 +71,21 @@ def create_template(
     profile_id: Optional[str] = None,
     icon: Optional[str] = None,
     category: Optional[str] = None,
-    is_builtin: bool = False
+    is_builtin: bool = False,
+    if_absent: bool = False,
 ) -> TemplateRow:
-    """Create a new template"""
+    """Create a new template.
+
+    ``if_absent`` (start-up seeding) leaves an existing row with this id alone
+    instead of raising on the duplicate key.
+    """
     now = datetime.now(timezone.utc).isoformat()
+    on_conflict = " ON CONFLICT (id) DO NOTHING" if if_absent else ""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO templates (id, name, description, prompt, profile_id, icon, category, is_builtin, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""" + on_conflict,
             (template_id, name, description, prompt, profile_id, icon, category, is_builtin, now, now)
         )
     return get_template(template_id)

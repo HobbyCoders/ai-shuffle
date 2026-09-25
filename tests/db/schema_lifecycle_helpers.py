@@ -233,3 +233,56 @@ def dump(raw: sqlite3.Connection) -> dict:
         t: sorted(repr(tuple(r)) for r in raw.execute(f'SELECT * FROM "{t}"'))
         for t in tables
     }
+
+
+# ---------------------------------------------------------------------------
+# A private real PostgreSQL 16 cluster (for the concurrent-start test)
+# ---------------------------------------------------------------------------
+
+def pg16_bindir() -> str | None:
+    """PostgreSQL 16 server binaries, found as the boot smoke test finds them
+    (``SMOKE_PG_BIN``, ``initdb`` on PATH, ``/usr/lib/postgresql/16/bin``)."""
+    from tests.smoke.test_app_boot import _pg16_bindir
+
+    return _pg16_bindir()
+
+
+@contextmanager
+def private_postgres(bindir: str, data_dir: Path):
+    """Start a throwaway cluster the way the container supervisor does and
+    publish ``managed-postgres.json`` in ``data_dir`` (the app's ``DATA_DIR``).
+
+    Yields the descriptor (host, port, user, password, database)."""
+    import json
+    import os
+    import socket
+    from types import SimpleNamespace
+
+    from tests.smoke.test_app_boot import _load_container_runtime
+
+    runtime = _load_container_runtime()
+    runtime.STOP.clear()
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    db = runtime.Database(SimpleNamespace(effective_data_dir=data_dir), port=port)
+    try:
+        with patch.dict(os.environ, {"PATH": bindir + os.pathsep + os.environ.get("PATH", "")}):
+            db.open()
+        db.publish_descriptor()
+        yield json.loads((data_dir / "managed-postgres.json").read_text())
+    finally:
+        db.close()
+
+
+def pg_connect(descriptor: dict):
+    """A plain autocommit psycopg2 connection to the private cluster."""
+    import psycopg2
+    import psycopg2.extras
+
+    conn = psycopg2.connect(
+        host=descriptor.get("host", "127.0.0.1"), port=descriptor["port"],
+        user=descriptor["user"], password=descriptor["password"],
+        dbname=descriptor["database"], cursor_factory=psycopg2.extras.RealDictCursor)
+    conn.autocommit = True
+    return conn

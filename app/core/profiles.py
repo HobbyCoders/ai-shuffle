@@ -176,7 +176,8 @@ def _seed_default_templates():
             prompt=tmpl["prompt"],
             icon=tmpl.get("icon"),
             category=tmpl.get("category"),
-            is_builtin=True
+            is_builtin=True,
+            if_absent=True,
         )
 
 
