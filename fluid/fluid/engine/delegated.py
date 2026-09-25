@@ -66,6 +66,7 @@ import enum
 import json
 import logging
 import os
+import re
 import secrets
 import signal
 import socket
@@ -226,6 +227,67 @@ PERMISSION_TIMEOUT = 900.0
 # with a deny if the hooks have not decided by then.
 PRE_TOOL_USE_CLI_TIMEOUT = 600
 PRE_TOOL_USE_HOOK_BUDGET = 570.0
+
+# The CLI's spelling of a permission mode, by CLI version. 2.1.280's ``--help``
+# lists ``manual`` and no longer lists ``default``, but both the flag and the
+# ``set_permission_mode`` control request still accept ``default`` (``manual``
+# is an alias the CLI maps back to it), and older CLIs may not know ``manual``.
+# No CLI is known to reject ``default``, so every version is sent it: when one
+# does, set ``CLI_MANUAL_PERMISSION_MODE_SINCE`` to that version (a semver
+# string) and CLIs at or above it are sent ``manual``. ``permission_mode`` keeps
+# fluid's name; only what goes on the wire changes.
+CLI_MANUAL_PERMISSION_MODE_SINCE: str | None = None
+_CLI_PERMISSION_MODE_RENAMES = {"default": "manual"}
+
+# ``claude --version`` prints e.g. ``2.1.280 (Claude Code)``: the first
+# ``X.Y.Z[-pre][+build]`` in the text is the version.
+_SEMVER = re.compile(
+    r"(?<![\w.])v?(\d+)\.(\d+)\.(\d+)"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?"
+)
+
+
+def _version_key(text: str | None) -> tuple | None:
+    """A sort key for the first semver in ``text``, or None if there is none.
+
+    Semver precedence: a pre-release sorts below its release, and pre-release
+    identifiers compare numerically when numeric, below any alphanumeric one.
+    Build metadata is ignored.
+    """
+    match = _SEMVER.search(text or "")
+    if match is None:
+        return None
+    major, minor, patch, pre = match.groups()
+    if pre is None:
+        pre_key: tuple = (1,)
+    else:
+        pre_key = (0, tuple(
+            (0, int(part)) if part.isdigit() else (1, part) for part in pre.split(".")
+        ))
+    return (int(major), int(minor), int(patch), pre_key)
+
+
+def _version_at_least(version: str | None, minimum: str) -> bool:
+    """Whether ``version`` is ``minimum`` or newer; False if either is unparsable."""
+    have, need = _version_key(version), _version_key(minimum)
+    return have is not None and need is not None and have >= need
+
+
+def _cli_permission_mode(mode: str, cli_version: str | None) -> str:
+    """``mode`` as this CLI should be sent it (see ``CLI_MANUAL_PERMISSION_MODE_SINCE``).
+
+    An unknown or unparsable version keeps fluid's name, which every CLI to
+    date accepts.
+    """
+    renamed = _CLI_PERMISSION_MODE_RENAMES.get(mode)
+    since = CLI_MANUAL_PERMISSION_MODE_SINCE
+    if renamed is None or since is None or not _version_at_least(cli_version, since):
+        return mode
+    logger.info(
+        "claude CLI %s (>= %s): sending permission mode %r as %r",
+        cli_version, since, mode, renamed,
+    )
+    return renamed
 
 # Poll interval while another reader (a live turn) owns stdout and is expected
 # to deliver our reply. Also caps a single pump read, so the pump notices a turn
@@ -536,7 +598,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             await self._send_control({"subtype": "set_model", "model": op.model})
         elif isinstance(op, SetPermissionMode):
             self.permission_mode = "default" if op.mode == "plan" else op.mode
-            await self._send_control({"subtype": "set_permission_mode", "mode": self.permission_mode})
+            await self._send_control({
+                "subtype": "set_permission_mode",
+                "mode": _cli_permission_mode(self.permission_mode, self.cli_version),
+            })
         else:  # Fork / Rewind: unsupported under delegation (see EngineCaps)
             raise NotImplementedError(f"op not supported by DelegatedLoop: {type(op).__name__}")
 
@@ -740,7 +805,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self.model:
             argv += ["--model", self.model]
         if self.permission_mode:
-            argv += ["--permission-mode", self.permission_mode]
+            argv += [
+                "--permission-mode", _cli_permission_mode(self.permission_mode, self.cli_version),
+            ]
         # Route permission decisions to the harness: without this the headless
         # CLI never emits ``can_use_tool`` control_requests (it silently
         # auto-denies), so the PermissionBridge below would never fire.

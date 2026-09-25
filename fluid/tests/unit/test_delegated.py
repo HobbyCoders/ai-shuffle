@@ -21,7 +21,14 @@ from pathlib import Path
 import pytest
 
 from fluid.engine.base import EngineCaps
-from fluid.engine.delegated import CLAUDE_CLI_MISSING_MESSAGE, ClaudeCliMissingError, DelegatedLoop
+import fluid.engine.delegated as delegated_mod
+from fluid.engine.delegated import (
+    CLAUDE_CLI_MISSING_MESSAGE,
+    ClaudeCliMissingError,
+    DelegatedLoop,
+    _cli_permission_mode,
+    _version_at_least,
+)
 from fluid.engine.delegated_proto import StreamJsonMapper, stop_reason_from_subtype
 from fluid.events import (
     BlockStart,
@@ -41,7 +48,7 @@ from fluid.events import (
     UserTurn,
 )
 from fluid.events.model import event_from_dict, event_to_dict
-from fluid.events.ops import Interrupt, Steer
+from fluid.events.ops import Interrupt, SetPermissionMode, Steer
 from fluid.store.base import MemoryStore
 from fluid.store.jsonl import JsonlStore
 from fluid.tools.inproc import create_inproc_server, tool
@@ -71,6 +78,81 @@ def test_setting_sources_reaches_cli_even_when_empty(sources, expected):
         assert "--setting-sources" not in argv
     else:
         assert argv[argv.index("--setting-sources") + 1] == expected
+
+
+# ─── CLI version gates ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("version,minimum,expected", [
+    ("2.1.280 (Claude Code)", "2.1.280", True),
+    ("2.1.281 (Claude Code)", "2.1.280", True),
+    ("2.1.279 (Claude Code)", "2.1.280", False),
+    ("2.1.280", "2.1.99", True),  # numeric, not lexical
+    ("10.0.0", "9.9.9", True),
+    ("claude 2.0.0 (fake-fluid)", "2.0.0", True),
+    ("v2.2.0", "2.1.280", True),
+    ("2.1.280-beta.1", "2.1.280", False),  # a pre-release is below its release
+    ("2.1.280-beta.1", "2.1.279", True),
+    ("2.1.280-beta.2", "2.1.280-beta.1", True),
+    ("2.1.280-beta.10", "2.1.280-beta.2", True),  # numeric identifiers
+    ("2.1.280-beta", "2.1.280-beta.1", False),  # fewer identifiers sort first
+    ("2.1.280-rc.1", "2.1.280-beta.9", True),
+    ("2.1.280-1", "2.1.280-alpha", False),  # numeric below alphanumeric
+    ("2.1.280+build.5", "2.1.280", True),  # build metadata ignored
+    ("2.1.280", "2.1.280+build.5", True),
+    (None, "2.1.280", False),
+    ("", "2.1.280", False),
+    ("Claude Code", "2.1.280", False),
+    ("2.1", "2.1.0", False),
+    ("2.1.280", "not a version", False),
+])
+def test_version_at_least(version, minimum, expected) -> None:
+    assert _version_at_least(version, minimum) is expected
+
+
+def test_permission_mode_is_default_for_every_cli_until_the_threshold_is_set() -> None:
+    # No CLI is known to reject "default" yet: the switch ships off.
+    assert delegated_mod.CLI_MANUAL_PERMISSION_MODE_SINCE is None
+    for version in ("2.1.280 (Claude Code)", "99.0.0", None, "garbage"):
+        assert _cli_permission_mode("default", version) == "default"
+
+
+@pytest.mark.parametrize("version,expected", [
+    ("3.0.0 (Claude Code)", "manual"),  # at the threshold
+    ("3.0.1 (Claude Code)", "manual"),  # above
+    ("3.1.0-beta.1", "manual"),  # a pre-release of a later version
+    ("2.1.280 (Claude Code)", "default"),  # below
+    ("3.0.0-rc.1", "default"),  # a pre-release of the threshold is below it
+    (None, "default"),  # version unknown
+    ("Claude Code (dev build)", "default"),  # unparsable
+])
+def test_permission_mode_mapping_around_the_threshold(monkeypatch, caplog, version, expected) -> None:
+    monkeypatch.setattr(delegated_mod, "CLI_MANUAL_PERMISSION_MODE_SINCE", "3.0.0")
+    with caplog.at_level("INFO", logger=delegated_mod.logger.name):
+        assert _cli_permission_mode("default", version) == expected
+    assert ("sending permission mode 'default' as 'manual'" in caplog.text) is (expected == "manual")
+    # Only "default" is renamed; every other mode goes through as is.
+    for mode in ("acceptEdits", "bypassPermissions", "dontAsk", "auto"):
+        assert _cli_permission_mode(mode, version) == mode
+
+
+async def test_permission_mode_mapping_reaches_argv_and_control(monkeypatch) -> None:
+    monkeypatch.setattr(delegated_mod, "CLI_MANUAL_PERMISSION_MODE_SINCE", "3.0.0")
+    loop = DelegatedLoop(store=MemoryStore(), model="fake", permission_mode="plan")
+    sent: list[dict] = []
+
+    async def send_control(request: dict) -> None:
+        sent.append(request)
+
+    loop._send_control = send_control  # type: ignore[method-assign]
+    for version, wire in (("2.1.280 (Claude Code)", "default"), ("3.0.0 (Claude Code)", "manual")):
+        loop.cli_version = version
+        argv = loop._build_argv()
+        assert argv[argv.index("--permission-mode") + 1] == wire
+        await loop.submit(SetPermissionMode(mode="default"))
+        assert sent[-1] == {"subtype": "set_permission_mode", "mode": wire}
+        # The loop keeps fluid's name; only the wire spelling changes.
+        assert loop.permission_mode == "default"
 
 
 def _cmd() -> list[str]:
