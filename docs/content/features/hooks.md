@@ -18,7 +18,7 @@ A hook is a piece of logic -- a shell command, a webhook call, or a chat message
 - `Stop` runs bash and webhook hooks when the agent finishes its turn, and can keep it working.
 - The other seven events (`PostToolUse`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `SubagentStop`, `PreCompact`, `Notification`) run bash and webhook hooks in the background. They cannot block or change anything.
 - `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-wide hooks only).
-- **Limitation:** message hooks are never delivered, on any event.
+- Message hooks run on those seven events only. The message is added to the session as a user message; it does not start a new turn.
 - Hooks that plugins contribute through `hooks.json` are not affected by these limits; see [Plugin-Contributed Hooks](#plugin-contributed-hooks).
 
 Key concepts:
@@ -105,7 +105,7 @@ The body is JSON describing the event. On the background events it is `{"event":
 
 ### Message Hooks
 
-Message hooks are meant to post a prompt into the active chat session when the event fires. **Limitation:** message hooks are currently never delivered, on any event. You can save them, but nothing is posted.
+Message hooks post a message into the session where the event fired, on the seven background events (not on `PreToolUse` or `Stop`). The message is saved and shown as a user message; it does not start a new turn.
 
 | Field              | Type   | Description                                              |
 |--------------------|--------|----------------------------------------------------------|

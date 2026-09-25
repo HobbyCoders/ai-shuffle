@@ -849,16 +849,6 @@ select option {
 }
 
 /* ========================================
-   RESPONSIVE BREAKPOINTS & CSS CUSTOM PROPERTIES
-   Mobile: < 640px
-   Tablet: 640px - 1024px
-   Desktop: > 1024px
-   ======================================== */
-
-:root {
-}
-
-/* ========================================
    RESPONSIVE UTILITY CLASSES / MOBILE LAYOUT FALLBACKS — removed
    These width-keyed visibility helpers (.mobile-only, .desktop-only,
    .mobile-hidden, .desktop-hidden, .tablet-only, .tablet-hidden,

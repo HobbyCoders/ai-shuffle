@@ -15,7 +15,7 @@ Every endpoint on this page needs owner access. API-user keys (`aih_...`) get `4
 > - `Stop` — bash and webhook hooks. A hook can keep the agent working with `{"decision": "block"}`.
 > - `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `SubagentStop`, `PreCompact`, `Notification` — bash and webhook hooks run in the background. They cannot block or change anything.
 >
-> `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-level hooks). **Limitation:** message hooks are never delivered, on any event. Hooks contributed by plugins are not affected by these limits.
+> `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-level hooks). Message hooks run on those seven events only: the rendered message is added to the session as a user message and does not start a new turn. Hooks contributed by plugins are not affected by these limits.
 
 ## Discovery
 

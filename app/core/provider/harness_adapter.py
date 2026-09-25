@@ -51,9 +51,9 @@ Delegated leg:
     ``_answer_without_approver`` denies in ``default``/``plan`` and allows otherwise.
     PreToolUse applies ``_delegated_tool_policy`` in every mode.
 
-Ignored: ``tools``, ``include_hook_events``, ``task_budget``, ``session_store*``,
-``enable_file_checkpointing``, ``stderr``, ``max_buffer_size``, ``user``, and every
-``extra_args`` key except ``thinking-display``. Native discovery reads only fluid's
+Ignored: ``tools``, ``task_budget``, ``session_store*``,
+``enable_file_checkpointing``, ``stderr``, ``user``, and every ``extra_args`` key
+except ``thinking-display``. Native discovery reads only fluid's
 ``.fluid``/``.agents`` trees, never ``~/.claude``; fluid's settings.json stack and
 plugin MCP servers are not wired into NativeLoop.
 """
@@ -304,7 +304,7 @@ class HarnessAdapter(ProviderAdapter):
 
     @property
     def engine(self) -> Optional[Any]:
-        """Direct access to the underlying fluid engine (parallels sdk_client)."""
+        """Direct access to the underlying fluid engine."""
         return self._engine
 
     @property
@@ -868,13 +868,6 @@ class HarnessAdapter(ProviderAdapter):
             )
             if not prompt_has_agents_index:
                 self._engine.agents = []
-            # Defensive: the app connects its external servers itself
-            # (``_build_registry``), so an engine-level server of the same name
-            # would connect twice onto one registry. A no-op while the adapter
-            # passes no ``mcp_servers=`` to NativeLoop.
-            _prune_duplicate_plugin_mcp_servers(
-                self._engine, _external_mcp_servers(options.mcp_servers)
-            )
 
         # Prime the session so ``session_id`` and ``events()`` are usable
         # immediately (both engines lazily create it inside the first turn task,
@@ -1195,6 +1188,16 @@ class HarnessAdapter(ProviderAdapter):
 
     def is_connected(self) -> bool:
         return self._connected and self._engine is not None
+
+    def subprocess_pid(self) -> Optional[int]:
+        """PID of the delegated leg's claude CLI while it runs; None otherwise.
+
+        The native leg runs in-process and owns no child. The delegated CLI is
+        spawned by the first turn, so this is None until then.
+        """
+        if not self._is_delegated or self._engine is None:
+            return None
+        return getattr(self._engine, "pid", None)
 
     # ─── Query Execution ──────────────────────────────────────────────
 
@@ -3333,33 +3336,6 @@ def _external_mcp_servers(mcp_servers: Optional[Dict[str, Any]]) -> Dict[str, An
     return out
 
 
-def _prune_duplicate_plugin_mcp_servers(
-    engine: Any, app_servers: Optional[Dict[str, Any]]
-) -> list:
-    """Defensive: drop engine-level MCP servers whose names the app connects.
-
-    The adapter passes no ``mcp_servers=`` to ``NativeLoop`` and connects the
-    app's external servers itself (``_build_registry``), so this is a no-op
-    unless fluid starts merging plugin servers into the engine. The app wins a
-    name collision. Returns the dropped names.
-    """
-    if not app_servers:
-        return []
-    servers = getattr(engine, "_mcp_servers", None)
-    if not isinstance(servers, dict) or not servers:
-        return []
-    dropped = [name for name in servers if name in app_servers]
-    for name in dropped:
-        servers.pop(name, None)
-        logger.warning(
-            "[HarnessAdapter] a Claude Code plugin declares MCP server %r, which "
-            "this session already configures — keeping the app's server and "
-            "skipping the plugin's",
-            name,
-        )
-    return dropped
-
-
 def _normalize_mcp_config_for_fluid(name: str, config: Any) -> Optional[Dict[str, Any]]:
     """Translate an SDK-shaped external MCP config into fluid's client dialect.
 
@@ -3759,19 +3735,27 @@ def _delegated_allowed(options: SessionOptions) -> Optional[list]:
 
 
 def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
-    """The SDK permission allowlist's MCP entries, spelled as the CLI sees them.
+    """The SDK permission allowlist's in-proc MCP entries, spelled for the CLI.
 
-    An external server keeps its own name. Every other ``mcp__<server>`` is
-    an in-proc app server the bundled bridge serves, so the CLI calls its
-    tools ``mcp__fluid_bundled__mcp__<server>__<tool>``; a server-level entry
-    becomes a wildcard over that prefix. Bare CLI tool names are left out, so
-    Ask mode still prompts for the CLI's own tools. In ``allow`` mode only
-    entries on the surface are granted, as ``_delegated_allowed`` does.
+    Only the app's own in-proc servers (``type == "sdk"`` in
+    ``options.mcp_servers``) are granted. The bundled bridge serves them, so
+    the CLI calls their tools ``mcp__fluid_bundled__mcp__<server>__<tool>``;
+    a server-level entry becomes ``mcp__fluid_bundled__mcp__<server>__*``
+    (the CLI glob-matches the tool part of an MCP allow rule; verified against
+    claude 2.1.280). External servers (the browser server, user MCP servers)
+    are never granted, so Ask mode prompts for them as the native leg does,
+    where external tools default to ``write``. Bare CLI tool names are left
+    out, so Ask mode still prompts for the CLI's own tools. In ``allow`` mode
+    only entries on the surface are granted, as ``_delegated_allowed`` does.
     """
     from app.core.tool_access import tool_permitted
 
     surface = _tool_allowlist(options)
-    external = set(_external_mcp_servers(options.mcp_servers))
+    inproc = {
+        name
+        for name, cfg in (options.mcp_servers or {}).items()
+        if isinstance(cfg, dict) and cfg.get("type") == "sdk"
+    }
     grants: list = []
     for entry in options.allowed_tools or ():
         if not isinstance(entry, str) or not entry.startswith("mcp__"):
@@ -3779,9 +3763,9 @@ def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
         if surface and not tool_permitted(entry, surface, None):
             continue
         server, _, tool = entry[len("mcp__"):].partition("__")
-        if not server or server in external:
-            grants.append(entry)
-        elif tool:
+        if server not in inproc:
+            continue
+        if tool:
             grants.append(_BUNDLED_CLI_PREFIX + entry)
         else:
             grants.append(f"{_BUNDLED_CLI_PREFIX}{entry}__*")

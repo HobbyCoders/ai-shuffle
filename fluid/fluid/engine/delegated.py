@@ -197,9 +197,10 @@ _HOOK_CALLBACK_PREFIX = "fluid_"
 # until its result before the user frame goes in, or its frames and result
 # would be mapped as the user's turn. ``_STALE_QUIET`` of silence ends the
 # drain; right after a result it keeps watching for ``_WAKE_SETTLE`` seconds,
-# and a wake already in flight gets up to ``_WAKE_DRAIN_TIMEOUT`` to finish.
+# and a wake already in flight (one of ``_WAKE_FRAME_TYPES`` or a permission
+# request was seen) gets up to ``_WAKE_DRAIN_TIMEOUT`` to finish.
 _STALE_QUIET = 0.05
-_WAKE_SETTLE = 1.0
+_WAKE_SETTLE = 0.2
 _WAKE_DRAIN_TIMEOUT = 30.0
 _WAKE_FRAME_TYPES = frozenset({"assistant", "user", "stream_event"})
 _STALE_PERMISSION_DENIAL = (
@@ -417,6 +418,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     def session_id(self) -> str:
         assert self._session is not None, "no session yet — submit a turn first"
         return self._session.session_id
+
+    @property
+    def pid(self) -> int | None:
+        """PID of the running CLI process; None before the first turn spawns
+        it, after it exits, and after ``aclose``."""
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            return None
+        return proc.pid
 
     async def _emit(self, event: Event) -> Event:
         """Publish to the bus (assigns seq), then persist through the store.
@@ -1146,9 +1156,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 continue
             else:
                 logger.warning("discarding stale between-turn CLI frame: %.300s", text)
-                if kind not in _WAKE_FRAME_TYPES and not (
-                    kind == "system" and frame.get("subtype") == "task_notification"
-                ):
+                # A lone system frame (a task_notification, say) is no proof a
+                # wake turn is running; only a turn's own frames arm the wait.
+                if kind not in _WAKE_FRAME_TYPES:
                     continue
             if wake_deadline is None:
                 wake_deadline = loop.time() + _WAKE_DRAIN_TIMEOUT

@@ -1027,6 +1027,8 @@ class TestCronDayOfWeek:
         ("0 9 * * 5", ["Fri"] * 7),
         ("0 9 * * 0,6", ["Sat", "Sun", "Sat", "Sun", "Sat", "Sun", "Sat"]),
         ("0 9 * * mon-fri", ["Mon", "Tue", "Wed", "Thu", "Fri", "Mon", "Tue"]),
+        ("0 9 * * sun-thu", ["Sun", "Mon", "Tue", "Wed", "Thu", "Sun", "Mon"]),
+        ("0 9 * * fri-mon", ["Sat", "Sun", "Mon", "Fri", "Sat", "Sun", "Mon"]),
     ])
     async def test_weekday_numbering_is_crontab(self, manager, expression, expected):
         # 2026-09-26 is a Saturday.
@@ -1041,15 +1043,22 @@ class TestCronDayOfWeek:
         ("5-7", "fri,sat,sun"),
         ("*/2", "sun,tue,thu,sat"),
         ("1-5/2", "mon,wed,fri"),
-        ("mon-fri", "mon-fri"),
+        ("mon-fri", "mon,tue,wed,thu,fri"),
+        ("sun-thu", "sun,mon,tue,wed,thu"),
+        ("Sun-Tue", "sun,mon,tue"),
+        ("sat-sun", "sat,sun"),
+        ("fri-mon", "fri,sat,sun,mon"),
+        ("sun-sat/2", "sun,tue,thu,sat"),
+        ("mon", "mon"),
         ("sat,0", "sat,sun"),
     ])
     def test_crontab_day_of_week_translation(self, field, expected):
         assert crontab_day_of_week(field) == expected
 
-    def test_out_of_range_day_rejected(self):
+    @pytest.mark.parametrize("field", ["8", "5-1", "xyz", "mon-xyz"])
+    def test_out_of_range_day_rejected(self, field):
         with pytest.raises(ValueError):
-            crontab_day_of_week("8")
+            crontab_day_of_week(field)
 
 
 class TestExecuteRunProjectResolution:

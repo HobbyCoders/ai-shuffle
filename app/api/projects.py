@@ -495,6 +495,27 @@ def _resolve_in_project(project: dict, rel: str) -> tuple[Path, Path]:
     return full_path, base_path
 
 
+def _resolve_leaf_in_project(project: dict, rel: str) -> tuple[Path, Path]:
+    """``_resolve_in_project`` for delete and rename: a symlink is never followed.
+
+    The path must still resolve inside the project, but when its last component
+    is a symlink the returned path is the link itself (in its resolved parent
+    directory), so deleting or renaming ``alias -> real`` acts on ``alias``.
+    """
+    full_path, base_path = _resolve_in_project(project, rel)
+    rel = rel.lstrip("/\\")
+    lexical = base_path / rel
+    if not rel or lexical.name in ("", ".", "..") or not lexical.is_symlink():
+        return full_path, base_path
+    parent = lexical.parent.resolve()
+    if not is_path_safe(parent, base_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Path escapes project directory"
+        )
+    return parent / lexical.name, base_path
+
+
 @router.get("/{project_id}/files")
 async def list_project_files(
     request: Request,
@@ -905,8 +926,8 @@ async def rename_file_or_folder(
                 detail=f"Project not found: {project_id}"
             )
 
-        current_path, base_path = _resolve_in_project(project, path)
-        if not current_path.exists():
+        current_path, base_path = _resolve_leaf_in_project(project, path)
+        if not current_path.exists() and not current_path.is_symlink():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="File or folder not found"
@@ -969,8 +990,8 @@ async def delete_file_or_folder(
                 detail=f"Project not found: {project_id}"
             )
 
-        target_path, base_path = _resolve_in_project(project, path)
-        if not target_path.exists():
+        target_path, base_path = _resolve_leaf_in_project(project, path)
+        if not target_path.exists() and not target_path.is_symlink():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="File or folder not found"
@@ -990,7 +1011,9 @@ async def delete_file_or_folder(
     target_path = await run_sync(_resolve)
 
     def _remove():
-        if target_path.is_dir():
+        if target_path.is_symlink():  # the link itself, never its target
+            target_path.unlink()
+        elif target_path.is_dir():
             shutil.rmtree(target_path)
         else:
             target_path.unlink()

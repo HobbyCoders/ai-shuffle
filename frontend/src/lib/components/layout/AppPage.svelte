@@ -21,7 +21,7 @@
 	 * "switching lanes lands you on that lane's compose screen" behaviour. What
 	 * this page still owns is the reverse direction: any path that opens or
 	 * creates a session has to put the sidepanel in the matching lane, which is
-	 * what handleOpenSession and handleNewSessionForProject do below.
+	 * what handleOpenSession does.
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
@@ -80,27 +80,6 @@
 	 */
 	function handleNewSession() {
 		activeSession.newChat();
-
-		if ($sidebarOverlay && !$sidebarCollapsed) {
-			layout.setSidebarCollapsed(true);
-			requestAnimationFrame(() => layout.openChat(null));
-		} else {
-			layout.openChat(null);
-		}
-	}
-
-	/**
-	 * Create a new chat session with a specific project pre-selected.
-	 *
-	 * Only the projects panel calls this, and a project only means something in
-	 * the code lane — chat and voice sessions are projectless. So the lane is
-	 * forced first: picking a project out of a chat-lane sidepanel would
-	 * otherwise create a session the list beside it cannot show.
-	 */
-	function handleNewSessionForProject(projectId: string) {
-		appMode.set('code');
-		activeSession.newChat();
-		activeSession.setProject(projectId);
 
 		if ($sidebarOverlay && !$sidebarCollapsed) {
 			layout.setSidebarCollapsed(true);
@@ -443,11 +422,9 @@
 		isAdmin: $isAdmin,
 		onNewSession: handleNewSession,
 		onSettledOpenSession: handleNewSession,
-		onNewSessionForProject: handleNewSessionForProject,
 		onOpenSession: handleOpenSession,
 		onOpenFeature: handleOpenFeature,
-		onOpenSpotlight: () => { showSpotlight = true; },
-		onOpenPlugins: () => handleOpenFeature('plugins')
+		onOpenSpotlight: () => { showSpotlight = true; }
 	})}
 
 	<!-- ========================================== -->

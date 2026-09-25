@@ -138,6 +138,6 @@ WebSocket close codes:
 - `1000` — Normal closure
 - `1013` — Authorization temporarily unavailable; retry later
 - `4001` — Authentication failed
-- `4003` — Access denied (sync endpoint)
+- `4003` — Access denied: the session belongs to another project or agent (`/ws/sessions/{session_id}`)
 - `4004` — Session not found
 - `4005` — No CLI session to bridge (CLI bridge)

@@ -7,8 +7,9 @@ the SDK ``allowed_tools`` list; under the Agent SDK that became
 serves the in-proc app servers over fluid's bundled bridge, where the CLI calls
 them ``mcp__fluid_bundled__<registry name>``, so ``connect_with_sdk_options``
 carries the list and ``_delegated_permission_grants`` respells it for the CLI.
-Without that, Ask mode prompted for every Task, Remember, Recall,
-ScheduleWakeup and browser call. The CLI's own tools stay ungranted.
+Without that, Ask mode prompted for every Task, Remember, Recall and
+ScheduleWakeup call. External servers such as the browser server and the CLI's
+own tools stay ungranted, so Ask mode prompts for them as the native leg does.
 """
 
 from __future__ import annotations
@@ -52,19 +53,6 @@ class _KwargsLoop:
         pass
 
 
-def _cli_rule_allows(tool: str, rules) -> bool:
-    """Claude Code allow-rule matching for a bare tool name: an exact name,
-    a server-level ``mcp__<server>`` rule, or a ``mcp__<server>__*`` wildcard."""
-    for rule in rules or ():
-        if rule == tool:
-            return True
-        if rule.startswith("mcp__") and tool.startswith(rule + "__"):
-            return True
-        if rule.endswith("*") and tool.startswith(rule[:-1]):
-            return True
-    return False
-
-
 @pytest.mark.asyncio
 async def test_app_mcp_tools_keep_their_grant_on_the_delegated_leg(monkeypatch, tmp_path):
     monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
@@ -78,7 +66,10 @@ async def test_app_mcp_tools_keep_their_grant_on_the_delegated_leg(monkeypatch, 
         system_prompt={"type": "preset", "preset": "claude_code", "append": "APPEND"},
         cwd=str(tmp_path),
         permission_mode="default",
-        mcp_servers={"browser": {"type": "stdio", "command": "node", "args": ["index.js"]}},
+        mcp_servers={
+            "browser": {"type": "stdio", "command": "node", "args": ["index.js"]},
+            "builtins": {"type": "sdk", "name": "builtins", "instance": object()},
+        },
         allowed_tools=[
             "mcp__builtins__Remember",
             "mcp__builtins__Task",
@@ -91,22 +82,14 @@ async def test_app_mcp_tools_keep_their_grant_on_the_delegated_leg(monkeypatch, 
     adapter = ha.HarnessAdapter()
     await adapter.connect_with_sdk_options(sdk_options)
 
-    # The CLI's --allowed-tools: the surface grant plus the permission grants.
-    granted = [
-        *(_KwargsLoop.captured.get("allowed_tools") or ()),
-        *(_KwargsLoop.captured.get("permission_grants") or ()),
-    ]
-    # The names the claude CLI will actually ask about.
-    cli_names = [
+    # The exact rules the claude CLI receives: the bundled app tools in the
+    # CLI's spelling, and nothing for the external browser server, which
+    # keeps prompting in Ask mode as it does on the native leg.
+    assert _KwargsLoop.captured.get("permission_grants") == [
         "mcp__fluid_bundled__mcp__builtins__Remember",
         "mcp__fluid_bundled__mcp__builtins__Task",
-        "mcp__browser__browser_navigate",
     ]
-    missing = [name for name in cli_names if not _cli_rule_allows(name, granted)]
-    assert not missing, (
-        f"--allowed-tools={granted!r} leaves the app's own MCP tools ungranted, "
-        f"so the CLI prompts for every call to: {missing}"
-    )
+    assert _KwargsLoop.captured.get("allowed_tools") is None
 
 
 def _grant_options(tmp_path, allowed, *, surface=None):
@@ -125,17 +108,24 @@ def _grant_options(tmp_path, allowed, *, surface=None):
 
 
 def test_grants_are_spelled_the_way_the_cli_calls_the_tools(tmp_path):
-    grants = ha._delegated_permission_grants(_grant_options(tmp_path, [
-        "mcp__builtins__Task", "mcp__ai-tools", "mcp__browser", "Bash", "Read",
-    ]))
-    assert grants == [
+    options = _grant_options(tmp_path, [
+        "mcp__builtins__Task", "mcp__ai-tools", "mcp__browser", "mcp__browser__browser_click",
+        "mcp__unattached__Tool", "Bash", "Read",
+    ])
+    options.mcp_servers["ai-tools"] = {"type": "sdk", "name": "ai-tools", "instance": object()}
+    # A server-level entry for a bundled server becomes a glob over its tool
+    # part (claude 2.1.280 glob-matches it). External servers, servers that
+    # are not attached, and the CLI's own tools are never granted.
+    assert ha._delegated_permission_grants(options) == [
         "mcp__fluid_bundled__mcp__builtins__Task",
-        # A server-level entry for a bridged server grants its whole prefix.
         "mcp__fluid_bundled__mcp__ai-tools__*",
-        "mcp__browser",
     ]
-    # The CLI's own tools are never granted here: Ask mode still prompts.
-    assert not any(_cli_rule_allows(name, grants) for name in ("Bash", "Read", "Write"))
+
+
+def test_external_servers_are_never_granted(tmp_path):
+    assert ha._delegated_permission_grants(
+        _grant_options(tmp_path, ["mcp__browser", "mcp__browser__browser_navigate"])
+    ) is None
 
 
 def test_allow_mode_grants_only_what_is_on_the_surface(tmp_path):

@@ -29,13 +29,22 @@ logger = logging.getLogger(__name__)
 _CRON_DOW_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
 
 
+def _crontab_dow(token: str) -> Optional[int]:
+    """A day-of-week token as crontab's number (Sunday=0), or None."""
+    if token.isdigit():
+        return int(token)
+    name = token.lower()[:3]
+    return _CRON_DOW_NAMES.index(name) if len(token) >= 3 and name in _CRON_DOW_NAMES else None
+
+
 def crontab_day_of_week(field: str) -> str:
     """Translate a crontab day-of-week field into APScheduler's syntax.
 
-    Numeric values follow crontab semantics (0 and 7 = Sunday, ``1-5`` =
-    Monday to Friday) and are expanded into explicit weekday names, so the
-    result never depends on APScheduler's Monday=0 numbering. Name tokens
-    (``mon-fri``) and bare ``*`` pass through unchanged.
+    Values follow crontab semantics (0 and 7 = Sunday, ``1-5`` = Monday to
+    Friday) and are expanded into explicit weekday names, so the result never
+    depends on APScheduler's Monday=0 numbering. Name ranges are expanded the
+    same way (``sun-thu`` = Sunday to Thursday) and may wrap past Saturday
+    (``fri-mon``). Bare ``*`` passes through unchanged.
     """
     field = field.strip()
     if field == "*":
@@ -43,24 +52,26 @@ def crontab_day_of_week(field: str) -> str:
     out: List[str] = []
     for item in field.split(","):
         base, _, step_s = item.partition("/")
+        wraps = False
         if base == "*":
             lo, hi = 0, 6
         elif "-" in base:
             a, _, b = base.partition("-")
-            if not (a.isdigit() and b.isdigit()):
-                out.append(item)  # names (mon-fri): APScheduler handles these
-                continue
-            lo, hi = int(a), int(b)
-        elif base.isdigit():
-            lo = int(base)
-            hi = 7 if step_s else lo  # crontab: "N/S" means N-7/S
+            lo, hi = _crontab_dow(a), _crontab_dow(b)
+            if lo is None or hi is None:
+                raise ValueError(f"invalid day-of-week value: {item!r}")
+            wraps = not (a.isdigit() and b.isdigit())
         else:
-            out.append(item)
-            continue
+            lo = _crontab_dow(base)
+            if lo is None:
+                raise ValueError(f"invalid day-of-week value: {item!r}")
+            hi = 7 if step_s else lo  # crontab: "N/S" means N-7/S
         if step_s and not step_s.isdigit():
             raise ValueError(f"invalid day-of-week step: {item!r}")
         step = int(step_s) if step_s else 1
-        if not (0 <= lo <= 7 and 0 <= hi <= 7 and lo <= hi and step > 0):
+        if wraps and lo > hi:
+            hi += 7  # a named range past Saturday: fri-mon
+        if not (0 <= lo <= 7 and 0 <= hi <= 14 and lo <= hi and step > 0) or (hi > 7 and not wraps):
             raise ValueError(f"invalid day-of-week value: {item!r}")
         for n in range(lo, hi + 1, step):
             name = _CRON_DOW_NAMES[n % 7]

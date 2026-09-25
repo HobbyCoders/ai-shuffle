@@ -174,3 +174,79 @@ def test_project_less_sessions_register_app_level_observed_hooks(monkeypatch, tm
     ])
     config = hook_service.build_hooks_config(str(tmp_path), None)
     assert "SessionStart" in config
+
+
+@pytest.mark.asyncio
+async def test_a_message_hook_posts_into_the_app_session(monkeypatch, tmp_path):
+    """attach_hooks_to_options hands the app session id (options.aih_session_id)
+    to the observed-event handler, so a message hook posts its rendered
+    message into that session instead of failing with "No active session"."""
+    import asyncio
+
+    from app.core import hook_executor
+    from app.core.sync_engine import sync_engine
+
+    hook = {
+        "id": "h-msg", "name": "After tool", "hook_type": "message", "enabled": True,
+        "event": "PostToolUse", "tool_matcher": None,
+        "message_template": "{tool_name} ran in {session_id}",
+    }
+    monkeypatch.setattr(hook_service, "_project_has_db_pretooluse_hooks", lambda _p: False)
+    monkeypatch.setattr(hook_service.database, "get_all_hooks_for_project", lambda _p: [hook])
+    monkeypatch.setattr(hook_executor.database, "get_hooks_for_project_and_event",
+                        lambda _p, _e: [hook])
+    added: list[dict] = []
+    triggered: list[tuple] = []
+    broadcast: list[dict] = []
+    monkeypatch.setattr(hook_executor.database, "add_session_message",
+                        lambda **kw: added.append(kw))
+    monkeypatch.setattr(hook_executor.database, "update_hook_triggered",
+                        lambda hook_id, ok: triggered.append((hook_id, ok)))
+
+    async def _broadcast(**kw):
+        broadcast.append(kw)
+
+    monkeypatch.setattr(sync_engine, "broadcast_message_added", _broadcast)
+
+    options = SimpleNamespace(cwd=str(tmp_path), plugins=[], env={}, hooks=None,
+                              aih_session_id="app-session-1")
+    hook_service.attach_hooks_to_options(options, project_id="proj-1")
+
+    adapter = HarnessAdapter()
+    adapter._sdk_hook_bus = sdk_hooks_bus(options.hooks, str(tmp_path))
+    decision = await adapter.hooks.emit("PostToolUse", {
+        **_pre_tool_payload("Bash"), "output": {"stdout": "ok"},
+    })
+    await asyncio.gather(*list(hook_executor._active_hook_tasks))
+
+    assert decision.action != "deny"
+    assert [(a["session_id"], a["role"], a["content"]) for a in added] == [
+        ("app-session-1", "user", "Bash ran in app-session-1"),
+    ]
+    assert broadcast and broadcast[0]["session_id"] == "app-session-1"
+    assert triggered == [("h-msg", True)]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_observed_hook_never_blocks_the_turn(monkeypatch, tmp_path):
+    monkeypatch.setattr(hook_service, "_project_has_db_pretooluse_hooks", lambda _p: False)
+    monkeypatch.setattr(hook_service.database, "get_all_hooks_for_project", lambda _p: [
+        {"event": "PostToolUse", "enabled": True},
+    ])
+
+    async def _explode(*_a, **_kw):
+        raise RuntimeError("hook dispatch blew up")
+
+    monkeypatch.setattr(hook_service, "execute_hooks_for_event", _explode)
+    handler = hook_service.build_hooks_config(str(tmp_path), "proj-1")["PostToolUse"][0].hooks[0]
+
+    # The callback itself swallows the failure...
+    assert await handler({"hook_event_name": "PostToolUse", "tool_name": "Bash"}, None, None) == {}
+
+    # ...and the bus emit still lets the turn continue.
+    adapter = HarnessAdapter()
+    adapter._sdk_hook_bus = sdk_hooks_bus({"PostToolUse": [HookMatcher(hooks=[handler])]}, str(tmp_path))
+    decision = await adapter.hooks.emit("PostToolUse", {
+        **_pre_tool_payload("Bash"), "output": {"stdout": "ok"},
+    })
+    assert decision.action != "deny"

@@ -84,6 +84,10 @@ Rules:
   on their own in the sync loop, the account sign-in being the
   authorization) or it unlocks with the recovery key. Reply
   `{"status": "pending"}` (or `approved` once an approval waits for pickup).
+- The device is already `rejected` (a refused request or a revocation
+  notice): nothing is stored, even when the body names the account's network;
+  reply `{"status": "rejected"}`. The device can only return with a fresh
+  identity.
 - Body names a network that is not the account's: nothing is stored; reply
   `{"status": "conflict", "network_id": "<the account's network>"}`. The
   account always wins: the worker leaves its own network and registers again

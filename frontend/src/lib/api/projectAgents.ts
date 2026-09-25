@@ -2,7 +2,7 @@
  * Project Agent Management API Client
  *
  * Provides functions for managing file-based agents in project directories.
- * Agents are stored as .md files in <project>/.claude/agents/ with YAML frontmatter.
+ * Agents are stored as .md files in <project>/.fluid/agents/ with YAML frontmatter.
  */
 
 import { api } from './client';
@@ -46,7 +46,7 @@ export interface UpdateProjectAgentRequest {
 // ============================================================================
 
 /**
- * Get all agents in a project's .claude/agents/ directory
+ * Get all agents in a project's .fluid/agents/ directory
  */
 export async function getProjectAgents(projectId: string): Promise<ProjectAgent[]> {
 	return api.get(`/projects/${projectId}/agents`);

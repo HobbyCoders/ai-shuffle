@@ -13,9 +13,6 @@ Tests cover:
 """
 
 import pytest
-import tempfile
-import shutil
-from pathlib import Path
 from io import BytesIO
 from unittest.mock import patch, MagicMock
 
@@ -30,14 +27,6 @@ from app.api.auth import require_auth, require_admin
 # =============================================================================
 # Fixtures
 # =============================================================================
-
-@pytest.fixture
-def temp_dir():
-    """Create a temporary directory for tests."""
-    tmpdir = tempfile.mkdtemp()
-    yield Path(tmpdir)
-    shutil.rmtree(tmpdir, ignore_errors=True)
-
 
 @pytest.fixture
 def mock_settings(temp_dir):
@@ -1525,6 +1514,57 @@ class TestProjectFileRoutesStayInProject:
 
         assert response.status_code == 200
         assert not (project_dir / "sub" / "gone.txt").exists()
+
+    @pytest.fixture
+    def alias(self, layout):
+        """``real/keep.txt`` plus ``alias -> real`` and ``sub/link.txt -> ../real/keep.txt``."""
+        project_dir, _ = layout
+        real = project_dir / "real"
+        real.mkdir()
+        (real / "keep.txt").write_text("keep")
+        (project_dir / "alias").symlink_to(real, target_is_directory=True)
+        (project_dir / "sub" / "link.txt").symlink_to(real / "keep.txt")
+        return project_dir
+
+    @pytest.mark.parametrize("path", ["alias", "/alias", "sub/link.txt"])
+    def test_delete_removes_the_symlink_not_its_target(self, client, alias, path):
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": path})
+
+        assert response.status_code == 200
+        assert not (alias / path.lstrip("/")).is_symlink()
+        assert (alias / "real" / "keep.txt").read_text() == "keep"
+
+    def test_delete_removes_a_dangling_symlink(self, client, alias):
+        (alias / "real" / "keep.txt").unlink()
+
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": "sub/link.txt"})
+
+        assert response.status_code == 200
+        assert not (alias / "sub" / "link.txt").is_symlink()
+
+    @pytest.mark.parametrize("path, new_name", [("alias", "renamed"), ("sub/link.txt", "moved.txt")])
+    def test_rename_renames_the_symlink_not_its_target(self, client, alias, path, new_name):
+        response = client.put(
+            "/api/v1/projects/test-project/files/rename", params={"path": path}, json={"new_name": new_name}
+        )
+
+        assert response.status_code == 200
+        link = alias / path
+        renamed = link.parent / new_name
+        assert not link.is_symlink()
+        assert renamed.is_symlink()
+        assert response.json()["path"] == str(renamed.relative_to(alias))
+        assert (alias / "real" / "keep.txt").read_text() == "keep"
+        assert not (alias / "real" / new_name).exists()
+
+    def test_delete_through_a_symlinked_directory_stays_confined(self, client, layout, temp_dir):
+        project_dir, other = layout
+        (project_dir / "out").symlink_to(other, target_is_directory=True)
+
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": "out/secret.txt"})
+
+        assert response.status_code == 400
+        assert (other / "secret.txt").exists()
 
     def test_upload_rejects_session_from_another_project(self, client, mock_database, layout):
         mock_database.get_session.return_value = {"id": "s1", "project_id": "other-project"}

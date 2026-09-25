@@ -2,7 +2,7 @@
  * Project Agents Management Store
  *
  * Manages state for file-based agents in project directories:
- * - Agents stored as .md files in <project>/.claude/agents/
+ * - Agents stored as .md files in <project>/.fluid/agents/
  * - YAML frontmatter for metadata (description, model, tools)
  *
  * Migrated to Svelte 5 runes.

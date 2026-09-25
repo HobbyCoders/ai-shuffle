@@ -254,6 +254,18 @@ async def test_simple_text_turn() -> None:
         await loop.aclose()
 
 
+async def test_pid_tracks_the_live_cli_process() -> None:
+    loop = _make_loop("a")
+    try:
+        assert loop.pid is None  # spawned lazily by the first turn
+        await loop.submit(UserTurn(content="hi"))
+        await loop.wait_turn()
+        assert loop.pid is not None and loop.pid == loop._proc.pid
+    finally:
+        await loop.aclose()
+    assert loop.pid is None
+
+
 async def test_store_persistence_reloadable() -> None:
     store = MemoryStore()
     loop = _make_loop("a", store=store)

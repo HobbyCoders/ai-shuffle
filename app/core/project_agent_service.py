@@ -5,7 +5,8 @@ This service discovers, creates, updates, and deletes agent .md files
 in a project's .fluid/agents/ directory, where Fluid's agent discovery
 (``fluid.context.agents.discover_agents``) finds them for both the native and
 the delegated leg. Fluid never reads ``.claude/agents``; legacy definitions
-there are moved into ``.fluid/agents`` when the project's agents are listed.
+there are copied (never moved) into ``.fluid/agents`` the first time the
+project's agents are listed for its base path.
 
 Agent files use YAML frontmatter for metadata:
 ---
@@ -27,6 +28,9 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+# Written to .fluid/agents once the legacy .claude/agents copy has run.
+_LEGACY_MIGRATED_MARKER = ".legacy-claude-agents-copied"
 
 
 @dataclass
@@ -201,18 +205,28 @@ class ProjectAgentService:
         return bool(re.match(r'^[a-zA-Z][a-zA-Z0-9_-]*$', name))
 
     def _migrate_legacy_agents(self) -> None:
-        """Move legacy ``.claude/agents/*.md`` files into ``.fluid/agents``.
+        """Copy legacy ``.claude/agents/*.md`` files into ``.fluid/agents``.
 
-        A file whose name already exists in ``.fluid/agents`` stays where it
-        is: the existing definition wins and is never overwritten. Symlinks
-        are left alone, matching the settings import.
+        ``.claude/agents`` is Claude Code's own project-agents folder and is
+        often committed, so the source files are always kept. A file whose name
+        already exists in ``.fluid/agents`` is skipped: the existing definition
+        wins and is never overwritten. Symlinks are left alone, matching the
+        settings import. A marker in ``.fluid/agents`` makes this run once per
+        project, so an agent deleted from ``.fluid/agents`` is not copied back.
         """
         legacy_dir = self.legacy_agents_dir
         if legacy_dir is None or legacy_dir.is_symlink() or not legacy_dir.is_dir():
             return
+        marker = self.agents_dir / _LEGACY_MIGRATED_MARKER
+        if marker.exists():
+            return
+        found = failed = False
         for legacy_file in sorted(legacy_dir.glob("*.md")):
             target = self.agents_dir / legacy_file.name
-            if legacy_file.is_symlink() or not legacy_file.is_file() or target.exists():
+            if legacy_file.is_symlink() or not legacy_file.is_file():
+                continue
+            found = True
+            if target.exists():
                 continue
             created = False
             try:
@@ -222,27 +236,38 @@ class ProjectAgentService:
                     created = True
                     out.write(data)
                 shutil.copystat(legacy_file, target)
-                legacy_file.unlink()
             except FileExistsError:
                 continue
             except OSError as e:
                 if created:
                     target.unlink(missing_ok=True)
-                logger.warning(f"Failed to migrate legacy agent {legacy_file}: {e}")
+                logger.warning(f"Failed to copy legacy agent {legacy_file}: {e}")
+                failed = True
                 continue
-            logger.info(f"Migrated legacy project agent {legacy_file} to {target}")
+            logger.info(f"Copied legacy project agent {legacy_file} to {target}")
+        if not found or failed:  # nothing to remember, or retry next listing
+            return
+        try:
+            self._ensure_agents_dir()
+            marker.touch(exist_ok=True)
+        except OSError as e:
+            logger.warning(f"Failed to mark legacy agents copied in {self.agents_dir}: {e}")
 
-    def get_agents(self) -> List[ProjectAgent]:
+    def get_agents(self, migrate_legacy: bool = False) -> List[ProjectAgent]:
         """
         Discover all agents in the project's .fluid/agents/ directory.
 
-        Legacy ``.claude/agents`` definitions are migrated first.
+        Args:
+            migrate_legacy: Copy legacy ``.claude/agents`` definitions first.
+                Pass True only for the project's base path, never for a
+                session worktree, so listing never adds files to a worktree.
 
         Returns:
             List of ProjectAgent objects
         """
         agents = []
-        self._migrate_legacy_agents()
+        if migrate_legacy:
+            self._migrate_legacy_agents()
 
         if not self.agents_dir.exists():
             return agents
