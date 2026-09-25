@@ -27,6 +27,7 @@ export class Updater {
   private downloading = false;
   private installing = false;
   private beforeInstall: () => Promise<void> = async () => {};
+  private installFailed: (error: unknown) => Promise<void> = async () => {};
   private policy: () => Promise<boolean> = async () => true;
   private bridge: ((state: UpdateState) => Promise<Record<string, unknown>>) | null = null;
   private safeToRestart: () => Promise<boolean> = async () => false;
@@ -62,6 +63,8 @@ export class Updater {
     return false;
   }
   onBeforeInstall(action: () => Promise<void>): void { this.beforeInstall = action; }
+  /** Runs when an install fails after onBeforeInstall began, so the owner can restart what it stopped. */
+  onInstallFailed(action: (error: unknown) => Promise<void>): void { this.installFailed = action; }
   useApplications(applications: SourceUpdates, installedExecutable?: string, restartArgs: string[] = []): void {
     if (!this.releaseUpdates || process.env.SHUFFLE_DESKTOP_NO_UPDATES === '1') return;
     this.applications = applications;
@@ -138,8 +141,10 @@ export class Updater {
   async install(): Promise<void> {
     if (!this.applications || this.state.phase !== 'ready' || this.checking || this.downloading || this.installing) return;
     this.installing = true; this.set({ error: null, message: null });
+    let stopping = false;
     try {
       if (!await this.permitted()) { this.installing = false; return; }
+      stopping = true;
       await this.beforeInstall();
       await this.applications.prepareInstall?.();
       if (this.installedExecutable) {
@@ -166,7 +171,12 @@ export class Updater {
       app.quit();
     } catch (error) {
       try { await this.applications.cancelInstall?.(); } catch (failure) { error = failure; }
-      this.installing = false; this.set({ phase: 'ready', error: String(error), message: null });
+      this.set({ phase: 'ready', error: String(error), message: null });
+      if (stopping) {
+        try { await this.installFailed(error); }
+        catch (failure) { this.set({ error: `${String(error)}\nRestart failed: ${String(failure)}` }); }
+      }
+      this.installing = false;
     }
   }
 }

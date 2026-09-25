@@ -7,20 +7,21 @@ const code = readFileSync(new URL('../src/pages/worker.js', import.meta.url), 'u
 const html = readFileSync(new URL('../src/pages/worker.html', import.meta.url), 'utf8');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-function page({ state = { phase: 'starting', postgres: { phase: 'starting' } }, getState, restart, updates, search = '' } = {}) {
+function page({ state = { phase: 'starting', postgres: { phase: 'starting' } }, getState, restart, openUi, updates, search = '' } = {}) {
  const elements = new Map([...html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)].map(([tag, id]) => [id, {
   hidden: /\bhidden\b/.test(tag), disabled: false, open: false, textContent: '', dataset: {},
   scrollTop: 0, clientHeight: 100, scrollHeight: 100, listeners: {},
   addEventListener(name, listener) { this.listeners[name] = listener; }
  }]));
  const timers = new Map(); let nextTimer = 0; let onState; let onLog;
- const calls = { tail: 0, restart: 0, openLogs: 0 };
+ const calls = { tail: 0, restart: 0, openLogs: 0, openUi: 0 };
  const bridge = {
   getState: getState || (() => Promise.resolve(state)),
   onState: (callback) => { onState = callback; }, onLog: (callback) => { onLog = callback; },
   tail: async () => { calls.tail++; return ['test diagnostic entry']; },
   restart: async () => { calls.restart++; if (restart) await restart(); },
-  openLogs: () => { calls.openLogs++; }
+  openLogs: () => { calls.openLogs++; },
+  openUi: async () => { calls.openUi++; if (openUi) await openUi(); }
  };
  vm.runInNewContext(code, {
   window: { location: { search }, shuffleDesktop: { version: 'test', updates }, shuffleDesktopWorker: bridge },
@@ -120,4 +121,25 @@ test('unavailable status bridge is a visible error rather than an endless splash
  assert.equal(p.el('status').dataset.mode, 'failed');
  assert.equal(p.el('status-error').textContent, 'IPC unavailable');
  assert.equal(p.el('restart').hidden, false);
+});
+
+test('a status page opened while the worker runs offers the way back to it', async () => {
+ const p = page({ state: { phase: 'ready', postgres: { phase: 'ready' } } }); await tick();
+ assert.equal(p.el('status-heading').textContent, 'Ready when you are');
+ assert.equal(p.el('open-ui').hidden, false); assert.equal(p.el('actions').hidden, false);
+ assert.equal(p.el('restart').hidden, true);
+ p.el('open-ui').listeners.click(); await tick();
+ assert.equal(p.calls.openUi, 1);
+ p.emit({ phase: 'stopped', postgres: { phase: 'ready' } });
+ assert.equal(p.el('open-ui').hidden, true, 'only a ready worker can be opened');
+ p.emit({ phase: 'failed', postgres: { phase: 'ready' }, error: 'Worker exited' });
+ assert.equal(p.el('open-ui').hidden, true);
+});
+
+test('a failed open of the worker UI is shown with a way to try again', async () => {
+ const p = page({ state: { phase: 'ready', postgres: { phase: 'ready' } }, openUi: () => { throw new Error('not allowed from this page'); } }); await tick();
+ p.el('open-ui').listeners.click(); await tick();
+ assert.equal(p.el('status').dataset.mode, 'failed');
+ assert.equal(p.el('status-error').textContent, 'not allowed from this page');
+ assert.equal(p.el('open-ui').hidden, true); assert.equal(p.el('restart').hidden, false);
 });

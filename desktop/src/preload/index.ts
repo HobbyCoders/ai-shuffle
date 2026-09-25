@@ -4,8 +4,8 @@
  *
  * The preload runs for every document in the main window. The worker's web
  * UI gets the window, menu-command, update and worker-status surface.
- * The raw worker log is exposed only to the bundled status page (file://)
- * as `window.shuffleDesktopWorker`. No database configuration is exposed.
+ * The raw worker log and the way back to the worker UI are exposed only to
+ * the bundled status page (file://) as `window.shuffleDesktopWorker`. No database configuration is exposed.
  */
 import { contextBridge, ipcRenderer } from 'electron';
 
@@ -68,6 +68,8 @@ if (window.location.protocol === 'file:') {
 		onLog: (listener: Listener<string>) => subscribe('desktop:worker-log', listener),
 		tail: () => ipcRenderer.invoke('desktop:worker-tail') as Promise<string[]>,
 		restart: () => ipcRenderer.invoke('desktop:worker-restart'),
-		openLogs: () => void ipcRenderer.invoke('desktop:worker-open-logs')
+		openLogs: () => void ipcRenderer.invoke('desktop:worker-open-logs'),
+		/** Back to the worker UI once the worker is ready; a no-op otherwise. */
+		openUi: () => ipcRenderer.invoke('desktop:worker-open-ui') as Promise<void>
 	});
 }

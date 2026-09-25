@@ -148,6 +148,24 @@ test('IPC and preload contain no external database actions, even on bundled page
 	assert.deepEqual(Object.keys(exposed.shuffleDesktop.worker), ['getState']);
 });
 
+test('only the bundled status page in the main window can open the worker UI', async () => {
+	const handlers = new Map(); let opened = 0;
+	const { registerIpc } = loadMain('ipc', { electron: { ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} }, app: {} } });
+	registerIpc({ window: { isOwnSender: id => id === 7 }, updater: {}, worker: { openUi: async () => { opened++; } } });
+	const exposed = {}; let event;
+	vm.runInNewContext(readFileSync(new URL('../dist/preload/index.js', import.meta.url), 'utf8'), { exports: {}, process, window: { location: { protocol: 'file:' } }, require: () => ({
+		contextBridge: { exposeInMainWorld: (name, value) => { exposed[name] = value; } },
+		ipcRenderer: { sendSync: () => null, invoke: async channel => handlers.get(channel)(event) }
+	}) });
+	event = { sender: { id: 7 }, senderFrame: { url: 'file:///app/pages/worker.html' } };
+	await exposed.shuffleDesktopWorker.openUi(); assert.equal(opened, 1);
+	for (const denied of [{ sender: { id: 7 }, senderFrame: { url: 'http://127.0.0.1:8000/' } }, { sender: { id: 8 }, senderFrame: { url: 'file:///app/pages/worker.html' } }]) {
+		event = denied; await assert.rejects(exposed.shuffleDesktopWorker.openUi(), /not allowed/);
+	}
+	assert.equal(opened, 1);
+	assert.equal('openUi' in exposed.shuffleDesktop.worker, false, 'the web UI bridge is unchanged');
+});
+
 test('closing during private descriptor preparation cancels startup and joins cleanup before returning', async () => {
 	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-cancel-'));
 	let entered; const writing = new Promise((resolve) => { entered = resolve; });

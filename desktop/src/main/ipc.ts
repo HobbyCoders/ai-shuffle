@@ -2,8 +2,8 @@
  * IPC handlers behind the preload bridge.
  *
  * Every handler checks that the message comes from the main window. The
- * worker's raw log is additionally limited to the bundled status page
- * (file://). No renderer can read or change database credentials.
+ * worker's raw log and the way back to the worker UI are additionally
+ * limited to the bundled status page (file://). No renderer can read or change database credentials.
  */
 import { app, ipcMain, shell, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron';
 import type { PostgresPhase } from './postgres';
@@ -32,6 +32,8 @@ export interface WorkerControl {
 	/** The supervisor lines followed by the worker's, for the status page log. */
 	tail(): string[];
 	restart(): Promise<void>;
+	/** Leave the status page for the worker UI when the worker is ready; otherwise nothing. */
+	openUi(): Promise<void>;
 }
 
 interface Deps {
@@ -91,6 +93,7 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 
 	// Bundled status page only: raw logs. No database configuration IPC exists.
 	handle('desktop:worker-tail', fromBundledPage, () => worker.tail());
+	handle('desktop:worker-open-ui', fromBundledPage, () => worker.openUi());
 }
 
 function isTitleBarTheme(value: unknown): value is TitleBarTheme {

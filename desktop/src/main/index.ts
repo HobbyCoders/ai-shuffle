@@ -211,6 +211,14 @@ async function main(): Promise<void> {
 				throw error;
 			}
 			await startStack();
+		},
+		// "Worker Status…" can show the status page while the worker runs; its
+		// ready state never changes then, so the page asks to go back itself.
+		openUi: async () => {
+			const state = supervisor?.state;
+			if (state?.phase !== 'ready' || window.currentPage !== 'status') return;
+			loadRetries = 0;
+			await window.loadWorker(state.url);
 		}
 	};
 
@@ -340,6 +348,17 @@ async function main(): Promise<void> {
 			await supervisor.clearConnectionFile();
 		}
 		await postgres?.stop();
+	});
+	// An install that failed after the step above leaves the stack down: start it again.
+	updater.onInstallFailed(async (error) => {
+		const reason = error instanceof Error ? error.message : String(error);
+		try {
+			await startStack();
+		} catch (failure) {
+			dialog.showErrorBox('AI Shuffle could not restart', `The update could not be installed: ${reason}\n\nStarting AI Shuffle again also failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+			return;
+		}
+		dialog.showErrorBox('Update could not be installed', reason);
 	});
 
 	const quitGuard = new QuitGuard({

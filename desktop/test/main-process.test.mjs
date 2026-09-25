@@ -12,7 +12,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const URL_READY = 'http://127.0.0.1:8000';
 
 /** Runs dist/main/index.js against fakes of Electron and of every module with side effects. */
-async function launch({ stop = async () => {}, acknowledge = async () => true } = {}) {
+async function launch({ stop = async () => {}, acknowledge = async () => true, realUpdater = false, postgresStart = null } = {}) {
 	const file = path.join(desktopDir, 'dist/main/index.js');
 	const localRequire = createRequire(file);
 	const appEvents = new EventEmitter();
@@ -60,32 +60,29 @@ async function launch({ stop = async () => {}, acknowledge = async () => true } 
 		tail() { return []; }
 		async activeSessionCount() { return 0; }
 		async clearConnectionFile() {}
+		async updatesAllowed() { return true; }
 	}
 	class PostgresSupervisor extends EventEmitter {
 		constructor() { super(); this.state = { phase: 'idle', port: null, error: null, logPath: '' }; }
-		async start() { this.state = { ...this.state, phase: 'ready', port: 5432 }; return this.state; }
-		async stop() {}
+		async start() { if (postgresStart) await postgresStart(); this.state = { ...this.state, phase: 'ready', port: 5432 }; return this.state; }
+		async stop() { this.state = { ...this.state, phase: 'stopped' }; }
 		connection() { return {}; }
 		tail() { return []; }
 	}
-	class Updater {
-		setPolicy() {} setBridge() {} subscribe() { return () => {}; } onBeforeInstall() {} start() {} stop() {}
+	class FakeUpdater {
+		setPolicy() {} setBridge() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} start() {} stop() {}
 		async check() {}
 	}
+	let updater;
 	let menu;
+	let ipc;
 	const replacements = {
-		electron: {
-			app,
-			dialog: { showErrorBox: (title, message) => errors.push([title, message]), showMessageBox: async () => ({ response: 0 }) },
-			safeStorage: { isEncryptionAvailable: () => false },
-			session: { fromPartition: () => ({ setUserAgent() {}, getUserAgent: () => 'test' }) },
-			shell: { showItemInFolder() {}, openPath: async () => '' }
-		},
+		electron: electronFake(app, errors),
 		'./close-dialog': { showCloseDialog: async () => true },
 		'./managed-context': { managedContext: () => null },
 		'./installed-entry': { installedContext: () => null },
 		'./installed-host': { installedLaunchArgs: () => [] },
-		'./ipc': { registerIpc() {} },
+		'./ipc': { registerIpc: (deps) => { ipc = deps; } },
 		'./menu': { installMenu: (actions) => { menu = actions; } },
 		'./navigation': { installPermissionPolicy() {} },
 		'./listener': { installListenerHeader() {} },
@@ -93,7 +90,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true } 
 		'./postgres': { PostgresSupervisor, resolvePostgresBinaries: () => ({}) },
 		'./settings': { plainCipher: {}, SettingsStore: class { async load() {} postgres() { return null; } } },
 		'./tray': { installTray() {} },
-		'./updater': { Updater },
+		'./updater': { Updater: class extends (realUpdater ? loadUpdater(electronFake(app, errors)) : FakeUpdater) { constructor(...args) { super(...args); updater = this; } } },
 		'./installer-updates': { InstallerUpdates: class {}, installerPlatform: () => null },
 		'./window': { MainWindow, PARTITION: 'test' },
 		'./worker': { WorkerSupervisor, resolveRuntime: () => ({ mode: 'repo' }) }
@@ -106,7 +103,28 @@ async function launch({ stop = async () => {}, acknowledge = async () => true } 
 	}, { filename: file });
 	for (let i = 0; i < 20 && !(worker && worker.state.phase === 'ready'); i++) await tick();
 	await tick();
-	return { app, appEvents, pages, errors, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; } };
+	return { app, appEvents, pages, errors, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get ipc() { return ipc; }, get updater() { return updater; } };
+}
+
+function electronFake(app, errors) {
+	return {
+		app,
+		dialog: { showErrorBox: (title, message) => errors.push([title, message]), showMessageBox: async () => ({ response: 0 }) },
+		safeStorage: { isEncryptionAvailable: () => false },
+		session: { fromPartition: () => ({ setUserAgent() {}, getUserAgent: () => 'test' }) },
+		shell: { showItemInFolder() {}, openPath: async () => '' }
+	};
+}
+
+/** The real dist/main/updater.js, with its timers inert. */
+function loadUpdater(electron) {
+	const module = { exports: {} };
+	const inert = () => 0;
+	vm.runInNewContext(readFileSync(path.join(desktopDir, 'dist/main/updater.js'), 'utf8'), {
+		module, exports: module.exports, require: (id) => (id === 'electron' ? electron : createRequire(import.meta.url)(id)),
+		process: { env: {} }, setTimeout: inert, clearTimeout: inert, setInterval: inert, clearInterval: inert, Date, Error
+	});
+	return module.exports.Updater;
 }
 
 test('reopening the window while the worker still runs goes straight back to the worker UI', async () => {
@@ -143,4 +161,56 @@ test('a startup failure is shown and quits instead of leaving a windowless proce
 	assert.deepEqual(main.errors, [['AI Shuffle could not start', 'EACCES: agent-access.json']]);
 	assert.equal(main.app.quits, 1);
 	assert.deepEqual(main.pages, []);
+});
+
+test('Worker Status… while the worker runs offers a way back to the worker UI', async () => {
+	const main = await launch();
+	main.pages.length = 0;
+	main.menu.openWorkerStatus();
+	await tick();
+	assert.deepEqual(main.pages, ['status'], 'the ready worker emits no state change that would leave this page');
+	await main.ipc.worker.openUi();
+	assert.deepEqual(main.pages, ['status', URL_READY]);
+	// Only from the status page, and only while the worker is ready.
+	await main.ipc.worker.openUi();
+	main.worker.state = { ...main.worker.state, phase: 'stopped' };
+	await main.window.showPage('status');
+	await main.ipc.worker.openUi();
+	assert.deepEqual(main.pages, ['status', URL_READY, 'status']);
+});
+
+/** A staged source update whose install step fails after the pre-install stop. */
+function failingInstall(updater) {
+	updater.useApplications({
+		version: 'a'.repeat(40), pendingVersion: 'b'.repeat(40), options: { root: '/isolated/source' },
+		check: async () => ({ kind: 'ready' }), download: async () => ({ kind: 'ready' }),
+		prepareInstall: async () => { throw new Error('Could not stage the update'); }
+	});
+	assert.equal(updater.current.phase, 'ready');
+}
+
+test('a failed update install restarts the stack it stopped and reports why', async () => {
+	const main = await launch({ realUpdater: true });
+	failingInstall(main.updater);
+	main.pages.length = 0;
+	await main.updater.install();
+	assert.deepEqual(main.pages, ['status', URL_READY], 'stopped for the install, then back to the worker UI');
+	assert.equal(main.worker.state.phase, 'ready');
+	assert.deepEqual(main.errors, [['Update could not be installed', 'Could not stage the update']]);
+	assert.equal(main.updater.current.phase, 'ready', 'the staged update can be retried');
+	assert.match(main.updater.current.error, /Could not stage the update/);
+	assert.equal(main.app.quits, 0);
+});
+
+test('a failed restart after a failed update install is shown, not swallowed', async () => {
+	let starts = 0;
+	const main = await launch({ realUpdater: true, postgresStart: async () => { if (++starts > 1) throw new Error('pg_ctl: could not start server'); } });
+	failingInstall(main.updater);
+	main.pages.length = 0;
+	await main.updater.install();
+	assert.deepEqual(main.pages, ['status']);
+	assert.equal(main.errors.length, 1);
+	assert.equal(main.errors[0][0], 'AI Shuffle could not restart');
+	assert.match(main.errors[0][1], /Could not stage the update/);
+	assert.match(main.errors[0][1], /pg_ctl: could not start server/);
 });
