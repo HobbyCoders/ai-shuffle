@@ -39,7 +39,9 @@
  *
  * BROWSER_SSRF_DENY_PORTS names ports (the AI Shuffle worker's own listeners)
  * that stay blocked on every non-public address, even one the allow-list opens.
- * Loopback may be allowed for dev servers; the worker itself never is.
+ * Loopback may be allowed for dev servers; the worker itself never is. The
+ * browser's own DevTools port (CHROME_CDP_PORT, default 9221) is always added:
+ * a page must never read /json/list (every tab's URL) or drive /json/* verbs.
  */
 
 export interface ParsedIp {
@@ -156,15 +158,23 @@ export function parseIp(s: string): ParsedIp | null {
   return null;
 }
 
+/** NAT64 well-known prefix 64:ff9b::/96 (RFC 6052). */
+const NAT64_PREFIX = [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0];
+
 /**
- * If `p` is an IPv4-mapped IPv6 address (::ffff:a.b.c.d), return the equivalent
- * IPv4 ParsedIp so it classifies against the v4 ranges; otherwise return `p`.
+ * If `p` is an IPv6 address that carries an IPv4 destination — IPv4-mapped
+ * (::ffff:a.b.c.d) or NAT64 well-known (64:ff9b::a.b.c.d, which a NAT64
+ * gateway translates to that IPv4 host) — return the equivalent IPv4 ParsedIp
+ * so it classifies against the v4 ranges; otherwise return `p`.
  */
 function unmap(p: ParsedIp): ParsedIp {
   if (p.version !== 6) return p;
   const b = p.bytes;
   const firstTenZero = b.slice(0, 10).every((x) => x === 0);
   if (firstTenZero && b[10] === 0xff && b[11] === 0xff) {
+    return { version: 4, bytes: b.slice(12, 16) };
+  }
+  if (NAT64_PREFIX.every((x, i) => b[i] === x)) {
     return { version: 4, bytes: b.slice(12, 16) };
   }
   return p;
@@ -176,13 +186,33 @@ function unmap(p: ParsedIp): ParsedIp {
 
 /**
  * Normalize a URL host for comparison / literal detection: strip surrounding
- * brackets from an IPv6 literal, drop a zone id, lowercase, trim.
+ * brackets from an IPv6 literal, drop a zone id and a trailing root dot
+ * ("localhost." names the same host as "localhost"), lowercase, trim.
  */
 export function normalizeHost(host: string): string {
   let h = host.trim().toLowerCase();
   if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
   h = h.split("%")[0];
+  if (h.length > 1 && h.endsWith(".")) h = h.slice(0, -1);
   return h;
+}
+
+/**
+ * Cloud metadata host NAMES. They resolve to the always-blocked addresses on
+ * the clouds that serve them, but the name is refused outright as well: the
+ * guard's resolver and Chromium's are separate, so a name must not depend on
+ * our lookup agreeing with the browser's.
+ */
+const METADATA_HOSTNAMES = new Set([
+  "metadata.google.internal",
+  "metadata.goog",
+  "instance-data",
+  "instance-data.ec2.internal",
+]);
+
+/** True for a hostname that names a cloud metadata service. */
+export function isMetadataHostname(host: string): boolean {
+  return METADATA_HOSTNAMES.has(normalizeHost(host));
 }
 
 /**
@@ -270,6 +300,13 @@ function labeled(text: string, label: string): LabeledCidr {
 /** Cloud metadata — the credential-theft vector. Never overridable. */
 const ALWAYS_BLOCK: LabeledCidr[] = [
   labeled("169.254.0.0/16", "cloud metadata / IPv4 link-local (credential-theft vector)"),
+  // The IPv6 metadata endpoints sit inside fc00::/7, which an operator may
+  // allow for a LAN; these single hosts must stay closed regardless.
+  labeled("fd00:ec2::254/128", "cloud metadata (AWS IMDS IPv6, credential-theft vector)"),
+  labeled("fd20:ce::254/128", "cloud metadata (GCP IPv6, credential-theft vector)"),
+  // Inside 100.64.0.0/10, which a Tailscale user may allow.
+  labeled("100.100.100.200/32", "cloud metadata (Alibaba Cloud, credential-theft vector)"),
+  labeled("168.63.129.16/32", "cloud platform endpoint (Azure WireServer, credential-theft vector)"),
 ];
 
 /** Blocked by default; an explicit BROWSER_SSRF_ALLOW entry re-enables these. */
@@ -277,6 +314,8 @@ const DEFAULT_BLOCK: LabeledCidr[] = [
   labeled("127.0.0.0/8", "IPv4 loopback"),
   labeled("::1/128", "IPv6 loopback"),
   labeled("0.0.0.0/8", "unspecified / this-network"),
+  // A connect() to [::] reaches the local host on Linux, exactly like 0.0.0.0.
+  labeled("::/128", "IPv6 unspecified (reaches loopback)"),
   labeled("fe80::/10", "IPv6 link-local"),
 ];
 
@@ -307,8 +346,8 @@ const REMEDY_PRIVATE_BLOCK =
   "and starts a new session";
 
 const REMEDY_DENY_PORT =
-  "this is the AI Shuffle worker's own listener, which the agent's browser may " +
-  "never open; there is no configuration that permits it";
+  "this is the AI Shuffle worker's own listener (or the browser's DevTools port), " +
+  "which the agent's browser may never open; there is no configuration that permits it";
 
 const REMEDY_ALWAYS_BLOCK =
   "always blocked and NOT overridable — BROWSER_SSRF_ALLOW cannot re-enable it; " +
@@ -332,10 +371,16 @@ export function compilePolicy(env: NodeJS.ProcessEnv = process.env): SsrfPolicy 
     cidr,
     label: "BROWSER_SSRF_ALLOW",
   }));
-  const denyPorts = (env.BROWSER_SSRF_DENY_PORTS ?? "")
-    .split(/[\s,]+/)
-    .map((t) => Number(t))
-    .filter((n) => Number.isInteger(n) && n > 0 && n <= 65535);
+  // The DevTools port is always denied: CDP over HTTP answers /json/list (every
+  // tab's URL, including other sessions') and /json/activate|close to any page.
+  const denyPorts = [
+    ...new Set(
+      `${env.BROWSER_SSRF_DENY_PORTS ?? ""} ${env.CHROME_CDP_PORT ?? "9221"}`
+        .split(/[\s,]+/)
+        .map((t) => Number(t))
+        .filter((n) => Number.isInteger(n) && n > 0 && n <= 65535),
+    ),
+  ];
   return {
     alwaysBlock: ALWAYS_BLOCK,
     block,
@@ -370,14 +415,17 @@ export function classifyIp(ip: string, policy: SsrfPolicy, port?: number): Verdi
     };
   }
 
-  // 2b. The worker's own ports on any internal address. The allow-list cannot
-  // open them: loopback or LAN access to the worker is owner access.
-  if (internal && port !== undefined && (policy.denyPorts ?? []).includes(port)) {
-    return { blocked: true, reason: `port ${port} on ${internal.label}: ${REMEDY_DENY_PORT}` };
+  // 2b. The worker's own ports on any internal or allow-listed address (the
+  // app allow-lists this host's own routable address, which may be public).
+  // The allow-list cannot open them: local access to the worker is owner access.
+  const allowed = firstMatch(p, policy.allow);
+  const exposed = internal ?? allowed;
+  if (exposed && port !== undefined && (policy.denyPorts ?? []).includes(port)) {
+    return { blocked: true, reason: `port ${port} on ${exposed.label}: ${REMEDY_DENY_PORT}` };
   }
 
   // 3. Operator allow list — overrides the default-block set.
-  if (firstMatch(p, policy.allow)) return { blocked: false };
+  if (allowed) return { blocked: false };
 
   // 4. Default-block set.
   if (internal) {

@@ -66,6 +66,26 @@ function navigationFailure(session: Session, requested: string, err: unknown): E
   return err instanceof Error ? err : new Error(message);
 }
 
+/**
+ * Schemes browser_navigate opens. Browser-internal schemes (chrome:,
+ * chrome-untrusted:, devtools:, chrome-extension:, view-source:, javascript:,
+ * …) are refused: they expose the browser's own settings, command line and
+ * profile rather than a web page, and no agent task needs them.
+ */
+const NAVIGABLE_SCHEMES = new Set(["http:", "https:", "file:", "about:", "data:"]);
+
+/** Refusal message for a URL whose scheme browser_navigate will not open, else undefined. */
+export function refusedScheme(url: string): string | undefined {
+  let protocol: string;
+  try {
+    protocol = new URL(url).protocol.toLowerCase();
+  } catch {
+    return undefined; // let page.goto report the malformed URL itself
+  }
+  if (NAVIGABLE_SCHEMES.has(protocol)) return undefined;
+  return `refusing to open a ${protocol} URL: browser_navigate opens http(s), file, about and data URLs only`;
+}
+
 export function normalizeUrl(input: string): string {
   const trimmed = input.trim();
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) return trimmed;
@@ -78,8 +98,12 @@ export async function runNavigate(
   session: Session,
   input: { url: string },
 ): Promise<McpToolResult> {
-  const page = await session.ensurePage();
   const target = input.url.trim().toLowerCase();
+  if (target !== "back" && target !== "forward") {
+    const refused = refusedScheme(normalizeUrl(input.url));
+    if (refused) throw new Error(refused);
+  }
+  const page = await session.ensurePage();
 
   // A committed navigation invalidates all refs.
   session.notifyNavigation();

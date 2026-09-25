@@ -848,6 +848,91 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await guarded.cleanup().catch(() => {});
     }
   });
+  it("SSRF: a redirect hop to a blocked host is refused (navigation and fetch), and preflights reach the server", async () => {
+    // 127.0.0.2 stands in for an internal service: this manager allows only
+    // 127.0.0.1, so the redirect target is blocked while the origin is not.
+    const hits: string[] = [];
+    const internal = createHttpServer((req, res) => {
+      hits.push(`${req.method} ${req.url}`);
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<title>INTERNAL SECRET</title>");
+    });
+    await new Promise<void>((resolve) => internal.listen(0, "127.0.0.2", resolve));
+    const internalPort = (internal.address() as { port: number }).port;
+    const origin = createHttpServer((req, res) => {
+      if (req.url === "/hop") {
+        res.writeHead(302, { location: `http://127.0.0.2:${internalPort}/meta` });
+        res.end();
+        return;
+      }
+      hits.push(`origin ${req.method} ${req.url}`);
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<title>origin</title><p>origin page</p>");
+    });
+    await new Promise<void>((resolve) => origin.listen(0, "127.0.0.1", resolve));
+    const originUrl = `http://127.0.0.1:${(origin.address() as { port: number }).port}`;
+    const guarded = new BrowserManager({
+      endpoint: cdpEndpoint,
+      ssrfPolicy: compilePolicy({ BROWSER_SSRF_ALLOW: "127.0.0.1/32" } as NodeJS.ProcessEnv),
+    });
+    const guardedSession = new Session(guarded);
+    try {
+      const failure = await runNavigate(guardedSession, { url: `${originUrl}/hop` }).then(
+        () => undefined,
+        (err: Error) => err,
+      );
+      expect(failure?.message ?? "").toMatch(/127\.0\.0\.2/);
+      const page = await guardedSession.ensurePage();
+      // The blocked navigation commits Chromium's error page asynchronously;
+      // a goto racing it is "interrupted by another navigation".
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await page.goto(`${originUrl}/`);
+          break;
+        } catch (err) {
+          if (attempt >= 3) throw err;
+          await delay(200);
+        }
+      }
+      const fetched = await page.evaluate(
+        (url) => fetch(url).then((r) => `status ${r.status}`, (e) => `error ${e}`),
+        `${originUrl}/hop`,
+      );
+      expect(fetched).toMatch(/^error/);
+      expect(hits.filter((h) => !h.startsWith("origin"))).toEqual([]);
+
+      // A non-simple cross-origin request must be preceded by a real preflight
+      // at the server (Playwright's context.route used to fake a permissive one).
+      const crossOrigin = originUrl.replace("127.0.0.1", "localhost");
+      await page.evaluate(
+        (url) => fetch(url, { method: "PUT", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => null),
+        `${crossOrigin}/api/put`,
+      );
+      expect(hits).toContain("origin OPTIONS /api/put");
+      expect(hits).not.toContain("origin PUT /api/put");
+    } finally {
+      await guarded.cleanup().catch(() => {});
+      internal.closeAllConnections?.();
+      origin.closeAllConnections?.();
+      await new Promise<void>((resolve) => internal.close(() => resolve()));
+      await new Promise<void>((resolve) => origin.close(() => resolve()));
+    }
+  });
+
+  it("masks password field values in snapshots", async () => {
+    const page = await session.ensurePage();
+    await page.setContent('<label>User <input value="alice"></label><label>Pass <input type="password" id="pw"></label>');
+    await page.fill("#pw", "hunter2-integration");
+    const snap = await session.snapshot();
+    expect(snap.text).toContain("alice");
+    expect(snap.text).not.toContain("hunter2-integration");
+  });
+
   it("shared workspace: real tabs, viewport, CDP input, stale coordinates, waits and returned control", async () => {
     const ws = new BrowserWorkspace(session);
     let n = 0;

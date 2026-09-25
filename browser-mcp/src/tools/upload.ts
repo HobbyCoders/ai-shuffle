@@ -56,6 +56,9 @@ export function validatePaths(
   if (!uploadDir) {
     return { error: "uploads are disabled: BROWSER_UPLOAD_DIR is not set" };
   }
+  if (!Array.isArray(paths)) {
+    return { error: "`paths` must be an array of file paths" };
+  }
   if (paths.length === 0) {
     return { error: "`paths` must not be empty" };
   }
