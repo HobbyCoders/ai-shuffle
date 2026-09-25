@@ -77,7 +77,7 @@ def _provider_order(providers: Sequence[str] | None) -> tuple[str, ...]:
 
 def _project_path_for_row(row: dict[str, Any]) -> Path:
     path = Path(row["path"])
-    return path.resolve() if path.is_absolute() else (settings.workspace_dir / path).resolve()
+    return path.resolve() if path.is_absolute() else (settings.effective_workspace_dir / path).resolve()
 
 
 def _project_status(path: Path, existing: set[Path], claimed: set[Path]) -> tuple[str, str]:
@@ -86,7 +86,7 @@ def _project_status(path: Path, existing: set[Path], claimed: set[Path]) -> tupl
         return "diagnostic", "Configured project directory does not exist"
     if not is_local_mode():
         try:
-            resolved.relative_to(settings.workspace_dir.resolve())
+            resolved.relative_to(settings.effective_workspace_dir.resolve())
         except ValueError:
             return "diagnostic", "Project is outside the mounted Docker workspace"
     if resolved in existing:
@@ -270,7 +270,7 @@ def _register_project(path: Path) -> dict[str, Any]:
         db_path = str(resolved)
     else:
         try:
-            db_path = resolved.relative_to(settings.workspace_dir.resolve()).as_posix()
+            db_path = resolved.relative_to(settings.effective_workspace_dir.resolve()).as_posix()
         except ValueError:
             return {"path": str(resolved), "status": "skipped", "message": "outside workspace"}
     project_id = _project_slug(resolved)

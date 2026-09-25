@@ -202,7 +202,7 @@ class MessageResolver:
 def _default_working_dir() -> str:
     """Get the default working directory from settings."""
     from app.core.config import settings
-    return str(settings.workspace_dir)
+    return str(settings.effective_workspace_dir)
 
 
 def resolve_working_dir(session: Dict[str, Any]) -> str:

@@ -117,7 +117,7 @@ def resolve_config(session_id):
     cwd = resolve_cwd(row)
     if cwd is None and resolve_project_v2(row):
         raise RuntimeUnavailable("Session project is not checked out on this device")
-    cwd = cwd or config.get("cwd") or str(settings.workspace_dir)
+    cwd = cwd or config.get("cwd") or str(settings.effective_workspace_dir)
     provider = row.get("provider_id")
     # A worker row may carry no key of its own; it runs as its parent's.
     env = _build_env_with_ai_tools(

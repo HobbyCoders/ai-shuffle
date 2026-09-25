@@ -61,3 +61,15 @@ def test_resolver_error_degrades_to_workspace(monkeypatch):
         side_effect=RuntimeError("db boom"),
     ):
         assert resolve_working_dir(_session()) == "/default/workspace"
+
+
+def test_default_working_dir_is_effective_workspace(tmp_path, monkeypatch):
+    """The fallback is the workspace chosen during setup (runtime override),
+    not the start-up ``settings.workspace_dir``."""
+    from app.core import config as config_module
+
+    startup, chosen = tmp_path / "startup-workspace", tmp_path / "chosen-workspace"
+    monkeypatch.setattr(config_module.settings, "workspace_dir", startup)
+    monkeypatch.setitem(config_module._runtime_overrides, "workspace_dir", chosen)
+    with patch("app.core.project_resolver.resolve_existing_cwd", return_value=None):
+        assert resolve_working_dir(_session()) == str(chosen)

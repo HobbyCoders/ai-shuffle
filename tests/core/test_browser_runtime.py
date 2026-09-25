@@ -650,3 +650,27 @@ async def test_first_connect_env_sees_native_browser_behind_egress_proxy(fake, m
         supervisor.cancel()
     assert len(seen) == 1
     assert seen[0].get("BROWSER_EGRESS_PROXY") == "1"
+
+
+def test_cold_config_default_cwd_is_effective_workspace(monkeypatch, tmp_path):
+    """With no project cwd and no profile cwd the browser runtime runs in the
+    workspace chosen during setup, not the start-up ``settings.workspace_dir``."""
+    from app.core import config as config_module
+    from app.core import environment, mcp_config, profiles, project_resolver
+    from app.db import database
+    startup, chosen = tmp_path / "startup-workspace", tmp_path / "chosen-workspace"
+    startup.mkdir()
+    chosen.mkdir()
+    monkeypatch.setattr(config_module.settings, "workspace_dir", startup)
+    monkeypatch.setitem(config_module._runtime_overrides, "workspace_dir", chosen)
+    monkeypatch.setattr(database, "get_session", lambda sid: {"id": sid, "profile_id": "p"})
+    monkeypatch.setattr(profiles, "get_profile", lambda pid: {"config": {"env": {}, "ai_tools": {}}})
+    monkeypatch.setattr(project_resolver, "resolve_cwd", lambda session: None)
+    monkeypatch.setattr(project_resolver, "resolve_project_v2", lambda session: None)
+    monkeypatch.setattr(environment, "_build_env_with_ai_tools", lambda base, ai, user, provider: {})
+    seen = []
+    monkeypatch.setattr(mcp_config, "_build_mcp_servers_dict",
+                        lambda project, env, sid: seen.append(project) or {"browser": {"command": "node", "env": {}}})
+    result = runtime.resolve_config("orphan")
+    assert seen == [chosen]
+    assert result["cwd"] == str(chosen)

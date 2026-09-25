@@ -511,7 +511,7 @@ def _build_plugins_list(
             if path.is_absolute():
                 resolved_path = path
             else:
-                resolved_path = settings.workspace_dir / plugin_entry
+                resolved_path = settings.effective_workspace_dir / plugin_entry
 
         if resolved_path and str(resolved_path) not in seen_paths:
             # Verify the plugin directory exists (manifest path checked for existence)
