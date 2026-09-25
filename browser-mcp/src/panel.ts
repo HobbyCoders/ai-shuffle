@@ -12,6 +12,9 @@ import type { Page } from "playwright-core";
 /** Backoff between retries of the register POST, in order. */
 export const RETRY_DELAYS_MS = [250, 500, 1000];
 
+/** Per-attempt bound on the register POST; a hung endpoint counts as a failed attempt. */
+export const REGISTER_TIMEOUT_MS = 10_000;
+
 interface RegisterPayload {
   session_id: string;
   token: string;
@@ -38,8 +41,13 @@ async function buildPayload(
     return { session_id: sessionId, token, target_id: null, tab_id: null, url: null };
   }
   const cdp = await page.context().newCDPSession(page);
-  const info = (await cdp.send("Target.getTargetInfo")) as { targetInfo: { targetId: string } };
-  await cdp.detach();
+  let info: { targetInfo: { targetId: string } };
+  try {
+    info = (await cdp.send("Target.getTargetInfo")) as { targetInfo: { targetId: string } };
+  } finally {
+    // Release the session even when the send fails, or each retry leaks one.
+    await cdp.detach().catch(() => undefined);
+  }
   return {
     session_id: sessionId,
     token,
@@ -70,11 +78,22 @@ async function run(page: Page | null, tabId: string | undefined, gen: number): P
       // target — check again right before sending so a stale attempt never
       // races a fresher one onto the wire.
       if (gen !== generation) return;
-      const resp = await fetch(registerUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REGISTER_TIMEOUT_MS);
+      let resp: Response;
+      try {
+        resp = await fetch(registerUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        if (controller.signal.aborted) throw new Error(`timed out after ${REGISTER_TIMEOUT_MS} ms`);
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
       if (!resp.ok) throw new Error(`http ${resp.status}`);
       return;
     } catch (err) {
