@@ -201,8 +201,11 @@ The database lives in `<userData>/postgres/data` (for example
 `~/Library/Application Support/AI Shuffle/postgres/data` on macOS,
 `~/.config/AI Shuffle/postgres/data` on Linux) and the server log next to the
 worker's under `<userData>/logs/postgres.log`. The worker log is
-`<userData>/logs/worker.log` (the previous run's is `worker.prev.log`); Windows
-source-update builds log to `<userData>/updates/build.log`.
+`<userData>/logs/worker.log`. It moves to `worker.prev.log` at each start and
+whenever it passes 20 MB during a run, so `worker.prev.log` holds either the
+previous run's log or, after a mid-run move, this run's earlier output (the
+previous run's log is then gone). Windows source-update builds log to
+`<userData>/updates/build.log`.
 
 The worker's own data directory (`DATA_DIR`) holds its app data, the
 credential keys the database contents depend on, and the transient

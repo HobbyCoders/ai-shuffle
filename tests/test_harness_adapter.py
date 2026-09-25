@@ -7649,3 +7649,92 @@ async def test_build_provider_client_first_byte_timeout_reaches_chat_and_respons
             finally:
                 if http_client is not None:
                     await http_client.aclose()
+
+
+# ── A local server (Ollama, vLLM) gets the local first-byte bound, off by default ──
+
+_LOCAL_BASE_URLS = [
+    "http://localhost:11434",
+    "http://127.0.0.1:8000/v1",
+    "http://[::1]:8000",
+    "http://192.168.1.20:11434",
+    "http://10.0.0.5:8000/v1",
+    "http://172.17.0.1:11434",
+    "http://ollama.local:11434",
+    "http://host.docker.internal:11434",
+    "localhost:11434",
+]
+_REMOTE_BASE_URLS = ["https://api.x.ai", "https://openrouter.ai/api", "https://8.8.8.8", "https://local.example.com"]
+
+
+@pytest.mark.parametrize("base_url", _LOCAL_BASE_URLS, ids=_LOCAL_BASE_URLS)
+def test_is_local_base_url_true_for_local_servers(base_url):
+    import app.core.provider.harness_adapter as ha
+
+    assert ha._is_local_base_url(base_url) is True
+
+
+@pytest.mark.parametrize("base_url", _REMOTE_BASE_URLS + ["", None], ids=_REMOTE_BASE_URLS + ["empty", "none"])
+def test_is_local_base_url_false_for_hosted_or_missing(base_url):
+    import app.core.provider.harness_adapter as ha
+
+    assert ha._is_local_base_url(base_url) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,base_url",
+    [
+        ("openrouter", "http://localhost:11434"),
+        ("openrouter", "http://192.168.1.20:8000/v1"),
+        ("openai_responses", "http://127.0.0.1:8000"),
+        ("anthropic", "http://host.docker.internal:4000"),
+    ],
+    ids=["ollama-loopback", "vllm-lan", "responses-loopback", "anthropic-docker-host"],
+)
+async def test_local_server_row_has_no_first_byte_bound_by_default(monkeypatch, kind, base_url):
+    """Regression (R15-2): an OpenAI-format custom row on a local server got the
+    60 s first-byte bound, so a cold model load that holds the headers failed
+    the turn. It now follows PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL (0 = off), while
+    a hosted row keeps PROVIDER_FIRST_BYTE_TIMEOUT."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
+    from app.core.provider.fluid_credentials import ProviderCredentials
+
+    async def fake_resolve(_kind, _provider_id):
+        return ProviderCredentials(api_key="sk-test", base_url=base_url)
+
+    monkeypatch.setattr(ha, "resolve_provider_credentials", fake_resolve)
+    _patch_provider_timeouts(monkeypatch, 90.0, 300.0, 60.0)
+    options = SessionOptions(model="m", extra={"provider_id": "prov-1"})
+
+    for local_setting, expected in ((0.0, None), (240.0, 240.0)):
+        monkeypatch.setattr(settings, "provider_first_byte_timeout_local", local_setting)
+        client, http_client = await ha._build_provider_client(kind, options)
+        try:
+            assert client._first_byte_timeout == expected
+            # Only the first-byte bound differs for a local server.
+            assert client._timeout == 90.0
+            assert client._stream_deadline == 300.0
+        finally:
+            if http_client is not None:
+                await http_client.aclose()
+
+
+def test_provider_timeout_kwargs_hosted_row_keeps_the_global_bound(monkeypatch):
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
+
+    _patch_provider_timeouts(monkeypatch, 90.0, 300.0, 45.0)
+    monkeypatch.setattr(settings, "provider_first_byte_timeout_local", 0.0)
+    assert ha._provider_timeout_kwargs("https://api.x.ai")["first_byte_timeout"] == 45.0
+    assert ha._provider_timeout_kwargs(None)["first_byte_timeout"] == 45.0
+    assert ha._provider_timeout_kwargs("http://localhost:11434")["first_byte_timeout"] is None
+
+
+def test_local_first_byte_setting_defaults_to_off_and_reads_env(monkeypatch):
+    from app.core.config import Settings
+
+    assert Settings.model_fields["provider_first_byte_timeout_local"].default == 0.0
+    monkeypatch.setenv("PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL", "180")
+    assert Settings(_env_file=None).provider_first_byte_timeout_local == 180.0

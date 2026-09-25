@@ -89,6 +89,9 @@ def add_marketplace(svc, url: str, name: Optional[str] = None) -> MarketplaceInf
 
     install_location = str(svc.MARKETPLACES_DIR / name)
 
+    # Refuse (409) before cloning if the registry cannot be read back.
+    svc._check_files_replaceable(svc.MARKETPLACES_FILE)
+
     # Clone the repository
     if not Path(install_location).exists():
         try:
@@ -136,6 +139,9 @@ def remove_marketplace(svc, marketplace_id: str) -> bool:
     Returns:
         True if successful
     """
+    # Refuse (409) before removing anything if any file this writes cannot be
+    # read back; the entry, clone and cache stay for a retry.
+    svc._check_files_replaceable(svc.MARKETPLACES_FILE, svc.INSTALLED_FILE, svc.SETTINGS_FILE)
     data = svc._read_json_file(svc.MARKETPLACES_FILE, {})
 
     if marketplace_id not in data:
@@ -192,6 +198,8 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
     Returns:
         True if successful
     """
+    # Refuse (409) before re-cloning or pulling if the registry cannot be read back.
+    svc._check_files_replaceable(svc.MARKETPLACES_FILE)
     data = svc._read_json_file(svc.MARKETPLACES_FILE, {})
 
     if marketplace_id not in data:

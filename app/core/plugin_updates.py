@@ -328,6 +328,9 @@ def update_plugin(svc, plugin_id: str) -> PluginInfo:
     Returns:
         Updated PluginInfo
     """
+    # Refuse (409) before re-installing if a file this writes cannot be read
+    # back (a corrupt registry would otherwise read as "not installed").
+    svc._check_files_replaceable(svc.INSTALLED_FILE, svc.SETTINGS_FILE)
     installed_data = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}})
     if plugin_id not in installed_data.get("plugins", {}):
         raise ValueError(f"Plugin not installed: {plugin_id}")

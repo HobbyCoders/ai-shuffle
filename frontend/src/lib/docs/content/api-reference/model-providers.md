@@ -146,13 +146,14 @@ Returns `404` if the provider does not exist.
 
 ### Timeouts and provider errors
 
-Sessions on these providers call the provider directly. Three settings bound those calls; set them as environment variables or in `.env` and restart. They apply to every such session the app starts.
+Sessions on these providers call the provider directly. These settings bound those calls; set them as environment variables or in `.env` and restart. They apply to every such session the app starts.
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
 | `PROVIDER_READ_TIMEOUT` | `600` | Longest silence, in seconds, between two reads of a model response |
 | `PROVIDER_STREAM_DEADLINE` | `900` | Wall-clock limit, in seconds, for one whole model call; `0` disables it |
-| `PROVIDER_FIRST_BYTE_TIMEOUT` | `60` | Seconds to wait for a call's first byte, on every Anthropic-format provider (the Anthropic API and `custom` rows whose `api_dialect` is `anthropic`). The call is retried only when not even the response headers arrived; `0` disables it |
+| `PROVIDER_FIRST_BYTE_TIMEOUT` | `60` | Seconds to wait for a call's first byte (the response headers and the first event), on every provider these sessions call: Anthropic, OpenRouter, OpenAI (Responses) and `custom` rows in either `api_dialect`. The call is retried only when not even the response headers arrived; once the provider has answered, the turn ends as a reply cut off mid-stream instead of sending the request again. `0` disables it |
+| `PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL` | `0` | The same wait for a provider whose `base_url` is a server on this computer or the local network (a loopback, private or link-local address, `localhost`, a `.local` name or `host.docker.internal`), such as Ollama or vLLM. A local server can hold its headers while it loads a model, so `0` (the default) disables it; set it to bound local servers too |
 
 A provider error carries the HTTP status and the provider's own short message (`provider returned HTTP 429: ...`), and a `429` shows the rate-limited notice. Billing errors that providers send as `429` (for example `insufficient_quota`) are reported as `402` and are not retried. A reply cut off mid-stream keeps its partial text, marked interrupted; [Resume](/docs/api-reference/sessions#post-apiv1sessionssession_idresume) re-sends the turn. When no tool call finished before the error, it starts again from the user's message and the partial reply stays on a side branch; when one did, the partial reply and its tool calls stay on the re-sent path, and the model reads them and the calls' error results before it continues.
 

@@ -13,7 +13,7 @@ import stat
 import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import Optional, Dict, Any
 
 from app.core.plugin_models import (
     PluginInfo,
@@ -504,6 +504,10 @@ def install_plugin(svc, plugin_id: str, scope: str = "user") -> PluginInfo:
     _safe_path_component(plugin_name, "name")
     _safe_path_component(marketplace_id, "marketplace")
 
+    # Refuse (409) before copying anything if a file this install writes
+    # cannot be read back; otherwise the files land and the request fails.
+    svc._check_files_replaceable(svc.INSTALLED_FILE, svc.SETTINGS_FILE)
+
     # Find the plugin in marketplace
     marketplaces = svc._read_json_file(svc.MARKETPLACES_FILE, {})
     if marketplace_id not in marketplaces:
@@ -646,28 +650,6 @@ def install_plugin(svc, plugin_id: str, scope: str = "user") -> PluginInfo:
     return svc.get_installed_plugins()[-1]
 
 
-def install_plugins_batch(svc, plugin_ids: List[str], scope: str = "user") -> List[PluginInfo]:
-    """
-    Install multiple plugins in batch.
-
-    Args:
-        svc: PluginService instance
-        plugin_ids: List of plugin IDs to install
-        scope: Installation scope
-
-    Returns:
-        List of installed plugin info
-    """
-    results = []
-    for plugin_id in plugin_ids:
-        try:
-            result = svc.install_plugin(plugin_id, scope)
-            results.append(result)
-        except Exception as e:
-            logger.error(f"Failed to install plugin {plugin_id}: {e}")
-    return results
-
-
 def uninstall_plugin(svc, plugin_id: str) -> bool:
     """
     Uninstall a plugin.
@@ -679,6 +661,9 @@ def uninstall_plugin(svc, plugin_id: str) -> bool:
     Returns:
         True if successful
     """
+    # Refuse (409) before deleting anything, so a retry after fixing the
+    # file finds the plugin still installed.
+    svc._check_files_replaceable(svc.INSTALLED_FILE, svc.SETTINGS_FILE)
     installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}})
     file_version = installed.get("version", 1)
 
@@ -768,6 +753,10 @@ def install_plugin_to_project(svc, plugin_id: str, scope: PluginScope = PluginSc
         raise ValueError(f"Cannot get directory for scope: {scope}")
 
     target_path = target_dir / plugin_name
+
+    # Refuse (409) before replacing the plugin's files if the settings file
+    # that enables it cannot be read back.
+    svc._check_files_replaceable(svc._get_project_settings_file(scope))
 
     # Create target directory
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -864,6 +853,10 @@ def uninstall_project_plugin(svc, plugin_id: str) -> bool:
 
     if not plugin_path.exists():
         raise ValueError(f"Plugin not found: {plugin_name}")
+
+    # Refuse (409) before deleting the files if the settings file cannot be
+    # read back, so a retry after fixing it still finds the plugin.
+    svc._check_files_replaceable(svc._get_project_settings_file(scope))
 
     # Remove plugin directory
     shutil.rmtree(plugin_path)

@@ -20,7 +20,7 @@ import logging
 import re
 import threading
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, NoReturn, Optional, Dict, Any
 
 from app.core.mcp_service import McpConfigUnreadable
@@ -51,7 +51,7 @@ class PluginConfigUnreadable(McpConfigUnreadable):
 
     Same 409 and message as :class:`McpConfigUnreadable` (the plugins API
     lets it through like any HTTPException); when the bytes were readable,
-    the detail also names the ``.bak`` copy.
+    the detail also names the ``<name>.<timestamp>.bak`` copy.
     """
 
     def __init__(self, path: Path, backup: Optional[Path] = None):
@@ -170,23 +170,80 @@ class PluginService:
                 self._refuse_unreadable(path, e)
             return fallback
 
-    @staticmethod
-    def _keep_backup(path: Path, raw: bytes) -> Optional[Path]:
-        """Save ``raw`` (the bytes of a file that failed to parse) to ``<name>.bak``."""
-        backup = path.with_name(path.name + ".bak")
+    # Backups of refused files: <name>.<UTC timestamp>.bak, never overwritten,
+    # the newest few kept per file. A hand-made <name>.bak is never touched.
+    _BACKUP_KEEP = 5
+    _BACKUP_STAMP = re.compile(r"^(\d{8}T\d{12}Z)(?:-(\d+))?$")
+
+    @classmethod
+    def _backups_of(cls, path: Path) -> List[Path]:
+        """This module's backups of ``path``, oldest first."""
+        prefix, suffix = path.name + ".", ".bak"
+        found = []
         try:
-            backup.write_bytes(raw)
-            return backup
+            siblings = list(path.parent.iterdir())
+        except OSError:
+            return []
+        for sibling in siblings:
+            name = sibling.name
+            if name.startswith(prefix) and name.endswith(suffix):
+                match = cls._BACKUP_STAMP.match(name[len(prefix):-len(suffix)])
+                if match:
+                    found.append(((match.group(1), int(match.group(2) or 0)), sibling))
+        return [backup for _key, backup in sorted(found)]
+
+    @classmethod
+    def _keep_backup(cls, path: Path, raw: bytes) -> Optional[Path]:
+        """Save ``raw`` (the bytes of a file that failed to parse) beside ``path``.
+
+        Written to ``<name>.<UTC timestamp>.bak`` with exclusive create, so no
+        earlier backup (and no ``<name>.bak`` the owner made) is ever
+        overwritten. When a kept backup already holds these bytes, that one is
+        returned instead of a new copy, so repeated background refusals of the
+        same file do not rotate the original out. Only the newest
+        ``_BACKUP_KEEP`` backups of each file are kept.
+        """
+        existing = cls._backups_of(path)
+        for backup in reversed(existing):
+            try:
+                if backup.read_bytes() == raw:
+                    return backup
+            except OSError:
+                continue
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup = None
+        try:
+            for attempt in range(100):
+                candidate = path.with_name(
+                    f"{path.name}.{stamp}{'' if attempt == 0 else f'-{attempt}'}.bak"
+                )
+                try:
+                    with open(candidate, "xb") as f:
+                        f.write(raw)
+                except FileExistsError:
+                    continue
+                backup = candidate
+                break
         except OSError as e:
-            logger.error(f"Could not back up {path} to {backup}: {e}")
+            logger.error(f"Could not back up {path}: {e}")
             return None
+        if backup is None:
+            logger.error(f"Could not back up {path}: no free backup name")
+            return None
+        for old in cls._backups_of(path)[:-cls._BACKUP_KEEP]:
+            try:
+                old.unlink()
+            except OSError as e:
+                logger.warning(f"Could not remove old backup {old}: {e}")
+        return backup
 
     def _refuse_unreadable(self, path: Path, cause: BaseException) -> NoReturn:
         """Raise :class:`PluginConfigUnreadable` for ``path``, leaving it untouched.
 
         When the file's bytes can be read (it failed to parse rather than to
-        open), a copy is kept at ``<name>.bak`` so the owner can recover it
-        even after deleting or hand-editing the original.
+        open), a copy is kept at ``<name>.<timestamp>.bak`` (see
+        :meth:`_keep_backup`) so the owner can recover it even after deleting
+        or hand-editing the original.
         """
         try:
             raw: Optional[bytes] = path.read_bytes()
@@ -204,7 +261,7 @@ class PluginService:
 
         The auto-update settings file is the exception: it is always written
         as a whole record (never merged into), so one that fails to parse is
-        copied to ``.bak`` and replaced; otherwise it could never be fixed
+        backed up (see :meth:`_keep_backup`) and replaced; otherwise it could never be fixed
         from the app and every background run would fail. One that cannot be
         opened at all is still refused, since no copy can be kept.
         """
@@ -226,6 +283,19 @@ class PluginService:
             self._keep_backup(path, raw)
             return
         self._refuse_unreadable(path, cause)
+
+    def _check_files_replaceable(self, *paths: Optional[Path]) -> None:
+        """Run :meth:`_check_replaceable` on every file an operation will write.
+
+        Called at the top of each multi-step change (install, uninstall,
+        update, marketplace add/sync/remove, project install/uninstall) before
+        it deletes, clones or copies anything, so a 409 for one unreadable file
+        leaves the whole change unapplied and the request can be retried once
+        the file is fixed. ``None`` entries (no project directory) are skipped.
+        """
+        for path in paths:
+            if path is not None:
+                self._check_replaceable(path)
 
     def _write_json_file(self, path: Path, data: Any) -> bool:
         """Atomically write a JSON file.

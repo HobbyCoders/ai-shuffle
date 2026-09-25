@@ -111,3 +111,56 @@ def test_missing_settings_file_is_created_through_the_api(client, svc):
     resp = client.post("/api/v1/plugins/demo@market/enable")
     assert resp.status_code == 200, resp.text
     assert json.loads(svc.SETTINGS_FILE.read_text()) == {"enabledPlugins": {"demo@market": True}}
+
+
+def _local_marketplace(svc, name="market", plugins=("demo",)):
+    root = svc.MARKETPLACES_DIR / name
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "marketplace.json").write_text(json.dumps(
+        {"name": name, "plugins": [{"name": p, "source": f"./plugins/{p}"} for p in plugins]}
+    ))
+    for p in plugins:
+        src = root / "plugins" / p
+        (src / ".claude-plugin").mkdir(parents=True)
+        (src / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": p, "version": "1.0.0"}))
+        (src / "README.md").write_text(f"# {p}\n\n{p} plugin\n")
+    svc.MARKETPLACES_FILE.write_text(json.dumps(
+        {name: {"source": {"source": "git", "url": "u"}, "installLocation": str(root)}}
+    ))
+
+
+def test_uninstall_409_leaves_the_plugin_and_a_retry_succeeds(client, svc):
+    cache = svc.CACHE_DIR / "market" / "demo" / "1"
+    cache.mkdir(parents=True)
+    svc.INSTALLED_FILE.write_text(json.dumps(
+        {"version": 2, "plugins": {"demo@market": [{"scope": "user", "installPath": str(cache)}]}}
+    ))
+    installed_before = svc.INSTALLED_FILE.read_bytes()
+    svc.SETTINGS_FILE.write_text("{broken")
+    assert client.delete("/api/v1/plugins/demo@market").status_code == 409
+    assert cache.exists()
+    assert svc.INSTALLED_FILE.read_bytes() == installed_before
+    svc.SETTINGS_FILE.write_text("{}")
+    resp = client.delete("/api/v1/plugins/demo@market")
+    assert resp.status_code == 204, resp.text
+    assert not cache.exists()
+
+
+def test_batch_install_surfaces_the_409_and_copies_nothing(client, svc):
+    _local_marketplace(svc, plugins=("one", "two"))
+    svc.SETTINGS_FILE.write_text("{broken")
+    resp = client.post("/api/v1/plugins/install/batch", json={"plugin_ids": ["one@market", "two@market"]})
+    assert resp.status_code == 409, resp.text
+    assert str(svc.SETTINGS_FILE) in resp.json()["detail"]
+    assert not (svc.CACHE_DIR / "market").exists()
+    svc.SETTINGS_FILE.unlink()
+    resp = client.post("/api/v1/plugins/install/batch", json={"plugin_ids": ["one@market", "two@market"]})
+    assert resp.status_code == 201, resp.text
+    assert [p["id"] for p in resp.json()] == ["one@market", "two@market"]
+
+
+def test_batch_install_bad_id_is_400_like_the_single_route(client, svc):
+    _local_marketplace(svc, plugins=("one",))
+    resp = client.post("/api/v1/plugins/install/batch", json={"plugin_ids": ["one@market", "missing@market"]})
+    assert resp.status_code == 400, resp.text
+    assert "missing" in resp.json()["detail"]

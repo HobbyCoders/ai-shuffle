@@ -444,6 +444,12 @@ class Settings(BaseSettings):
     # Wait for a call's first byte (every native client: Anthropic, OpenRouter/OpenAI-format chat, Responses); 0 disables it. Retried only
     # when even the response headers never came; after a 200 the call is not re-sent.
     provider_first_byte_timeout: float = 60.0
+    # The first-byte bound for a row whose base_url is a local server (loopback,
+    # private or link-local address, localhost, *.local, host.docker.internal:
+    # Ollama, vLLM, LM Studio). Such a server may hold its headers while it loads
+    # a model, so the default 0 disables it, as fluid's LocalClient does.
+    # Env: PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL.
+    provider_first_byte_timeout_local: float = 0.0
 
     # Size limits
     max_tool_output_chars: int = 500_000  # ~500KB, well under 1MB WS buffer

@@ -611,9 +611,23 @@ async def install_plugins_batch(
     request: PluginBatchInstallRequest,
     token: str = Depends(require_admin)
 ):
-    """Install multiple plugins in batch - Admin only"""
+    """Install multiple plugins in batch - Admin only
+
+    Installs in order and stops at the first failure, answering like the
+    single install route: 400 for a bad ID/source, 500 for a clone or other
+    install failure, and the 409 of an unreadable settings/registry file
+    (refused before anything is copied). Plugins installed before the failing
+    one stay installed.
+    """
     service = get_plugin_service()
-    plugins = await run_sync(service.install_plugins_batch, request.plugin_ids, request.scope)
+    try:
+        plugins = await run_sync(service.install_plugins_batch, request.plugin_ids, request.scope)
+    except ValueError as e:
+        logger.warning(f"Batch plugin install failed: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except RuntimeError as e:
+        logger.exception("Batch plugin install error")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     return [
         PluginResponse(
             id=p.id,

@@ -10,6 +10,10 @@ Endpoints for the workspace-wide plugin library: git marketplaces, the plugins t
 
 Reads need any valid credential, including an API key (`aih_...`). Every endpoint that changes something needs owner access; API keys get `403`.
 
+### Unreadable settings files
+
+Plugin changes write `settings.json` (which plugins are enabled), `plugins/installed_plugins.json` and `plugins/known_marketplaces.json` in the Fluid home (`~/.fluid`, or `/home/appuser/.fluid` in Docker); project plugin changes write the project's `.fluid/settings.json` or `.fluid/settings.local.json`. When a file the change would write exists but cannot be read as a JSON object (damaged, not UTF-8, not an object, or permission denied), install, uninstall, enable, disable, update and the marketplace add, sync and remove routes return `409` and change nothing: the check runs before any file is deleted, copied or cloned, so the same request works once the file is fixed. `detail` names the file. When its bytes could be read, a copy is saved next to it as `<name>.<UTC time>.bak` and `detail` names the copy; a copy never overwrites an earlier one or a `.bak` of your own, identical content is saved once, and the five newest copies of each file are kept. Reads still work and show the file as empty. The automatic update settings file is the exception: [PUT /api/v1/plugins/auto-update/settings](#put-apiv1pluginsauto-updatesettings) copies a damaged one the same way and replaces it.
+
 ## Plugin IDs
 
 A plugin ID is `name@marketplace`, for example `code-review@my-marketplace`. The official connector plugins use the `shuffle-connectors` marketplace, for example `telegram@shuffle-connectors`. In the per-plugin paths below, `{plugin_id}` is the full ID and may contain `/`; URL-encode it (`@` becomes `%40`), as the web app does.
@@ -219,7 +223,7 @@ curl -X POST http://localhost:8000/api/v1/plugins/install/batch \
   -d '{"plugin_ids": ["code-review@my-marketplace", "docs-writer@my-marketplace"]}'
 ```
 
-The batch stops at the first plugin that fails and returns an error; plugins installed before it stay installed.
+The batch stops at the first plugin that fails and returns that plugin's error, with the same status as a single install (`400`, `409` or `500`); plugins installed before it stay installed. A `409` for an unreadable settings file comes before the first plugin is copied, so nothing is installed.
 
 ### DELETE /api/v1/plugins/{plugin_id}
 

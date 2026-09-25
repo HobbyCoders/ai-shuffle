@@ -1,7 +1,9 @@
 """Plugins: shared desired state, installed by each worker.
 
-The network carries what a plugin *should* be on every worker (id, enabled,
-config) in ``network_plugins_desired``; binaries are never a payload. A worker
+The network carries what a plugin *should* be on every worker (id and
+enabled state) in ``network_plugins_desired``; binaries are never a payload.
+The table's ``config`` column is written as ``{}`` for a new row, never
+updated, and not applied to any worker. A worker
 publishes only a plugin new to the table or a change to its enabled state; the
 stored version is informational (the last publisher's) and is never enforced.
 Each worker reconciles its user-scope installation against that table:

@@ -5375,15 +5375,53 @@ def _provider_read_timeout() -> float:
     return seconds if seconds > 0 else 600.0
 
 
-def _provider_timeout_kwargs(kind: str) -> Dict[str, Any]:
-    """Timeout keyword arguments for the fluid client of ``kind``.
+_LOCAL_HOST_NAMES = frozenset({"localhost", "host.docker.internal", "host.containers.internal"})
+
+
+def _is_local_base_url(base_url: Optional[str]) -> bool:
+    """True when ``base_url`` names a server on this machine or the local network.
+
+    Loopback, private and link-local addresses, ``localhost`` (and
+    ``*.localhost``), ``*.local`` mDNS names, and the Docker/Podman host
+    aliases a containerised app uses to reach a server on its host.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    if not base_url:
+        return False
+    text = base_url.strip()
+    try:
+        host = urlsplit(text if "//" in text else f"//{text}").hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    host = host.rstrip(".").lower()
+    if host in _LOCAL_HOST_NAMES or host.endswith((".localhost", ".local")):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
+
+
+def _provider_timeout_kwargs(base_url: Optional[str] = None) -> Dict[str, Any]:
+    """Timeout keyword arguments for a fluid provider client.
 
     ``timeout`` (per read), ``stream_deadline`` (whole call) and
     ``first_byte_timeout`` (headers plus first event) go to every client kind
-    the app builds (Anthropic, OpenRouter/OpenAI-format chat, Responses), so
-    the result does not depend on ``kind``. A deadline or first-byte value of
-    0 (or below) becomes ``None``, which fluid reads as "disabled". Env:
-    PROVIDER_READ_TIMEOUT, PROVIDER_STREAM_DEADLINE, PROVIDER_FIRST_BYTE_TIMEOUT.
+    the app builds (Anthropic, OpenRouter/OpenAI-format chat, Responses). A
+    deadline or first-byte value of 0 (or below) becomes ``None``, which fluid
+    reads as "disabled". Env: PROVIDER_READ_TIMEOUT, PROVIDER_STREAM_DEADLINE,
+    PROVIDER_FIRST_BYTE_TIMEOUT.
+
+    A row whose ``base_url`` is a local server (:func:`_is_local_base_url`:
+    Ollama, vLLM, LM Studio, a local proxy) takes its first-byte bound from
+    PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL instead, 0 (disabled) by default: such a
+    server may hold its headers while it loads a model, which is why fluid's
+    own LocalClient leaves the bound off.
     """
     from app.core.config import settings
 
@@ -5391,10 +5429,15 @@ def _provider_timeout_kwargs(kind: str) -> Dict[str, Any]:
         seconds = float(getattr(settings, name, default) or 0)
         return seconds if seconds > 0 else None
 
+    first_byte = (
+        _optional("provider_first_byte_timeout_local", 0.0)
+        if _is_local_base_url(base_url)
+        else _optional("provider_first_byte_timeout", 60.0)
+    )
     return {
         "timeout": _provider_read_timeout(),
         "stream_deadline": _optional("provider_stream_deadline", 900.0),
-        "first_byte_timeout": _optional("provider_first_byte_timeout", 60.0),
+        "first_byte_timeout": first_byte,
     }
 
 
@@ -5479,8 +5522,9 @@ async def _build_provider_client(
     if provider_id:
         creds = await resolve_provider_credentials(kind, str(provider_id))
     # Read timeout, whole-call deadline and first-byte bound from PROVIDER_*
-    # settings; provider rows carry no timeout override.
-    timeouts = _provider_timeout_kwargs(kind)
+    # settings; provider rows carry no timeout override, but a row on a local
+    # server gets the local first-byte bound (off by default).
+    timeouts = _provider_timeout_kwargs(creds.base_url if creds is not None else None)
 
     if kind == "openai_responses":
         if creds is not None:
