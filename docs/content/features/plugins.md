@@ -93,11 +93,11 @@ curl -X POST http://localhost:8000/api/v1/plugins/marketplaces \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://github.com/your-org/ai-shuffle-plugins.git",
-    "name": "My Team Plugins"
+    "name": "my-team-plugins"
   }'
 ```
 
-The repository is cloned locally. If `name` is omitted, it is derived from the URL.
+`url` can be an `http://` or `https://` git URL, a `git@host:path` SSH URL, or GitHub shorthand `owner/repo`. The repository is cloned locally. If `name` is omitted, it is derived from the URL; either way it may contain only letters, digits, `-` and `_`.
 
 ### Sync a Marketplace
 
@@ -110,7 +110,7 @@ curl -X POST http://localhost:8000/api/v1/plugins/marketplaces/{marketplace_id}/
 
 ### Remove a Marketplace
 
-Removes the marketplace and all its installed plugins:
+Removes the marketplace, all its installed plugins and their cached files:
 
 ```bash
 curl -X DELETE http://localhost:8000/api/v1/plugins/marketplaces/{marketplace_id} \
@@ -145,9 +145,26 @@ curl -X POST http://localhost:8000/api/v1/plugins/install \
   }'
 ```
 
-The `plugin_id` is in the format `name@marketplace`. The `scope` can be `"user"` (global) or `"project"` (project-specific).
+The `plugin_id` is in the format `name@marketplace`. `scope` defaults to `"user"`; the plugin is installed for the whole worker and enabled. To install a plugin into one project, use the [Project Plugins](/docs/api-reference/projects#project-plugins) endpoints.
 
-Installation only takes files from inside the plugin's source: symlinks that point outside the marketplace repository (or outside a cloned plugin) are skipped. A plugin or marketplace name or version that is not a single plain folder name (one containing a slash, or `.` or `..`) is rejected. External sources must use an `https://`, `http://`, `ssh://` or `git@` URL. An entry that pins a `sha` installs exactly that commit, and the install fails if that commit cannot be fetched.
+A marketplace entry's `source` can be:
+
+- a relative path starting with `./`, inside the marketplace repository;
+- `{"source": "github", "repo": "owner/repo"}`;
+- `{"source": "url", "url": "..."}`;
+- `{"source": "git-subdir", "url": "...", "path": "plugins/foo"}`, which takes one folder of the repository (`url` may be GitHub shorthand `owner/repo`).
+
+Git sources may add `ref` (a branch or tag) and `sha`. Other source types are rejected.
+
+Installation only takes files from inside the plugin's source:
+
+- A relative path that resolves outside the marketplace repository is not found, and a `git-subdir` path must stay inside the cloned repository.
+- Symlinks that point outside the marketplace repository (or outside a cloned plugin) are skipped.
+- A plugin or marketplace name or version that is not a single plain folder name (one containing `/` or `\`, or `.` or `..`) is rejected.
+- A `url` source must start with `https://`, `http://`, `ssh://` or `git@`. Anything else, such as `file://`, a local path or a string starting with `-`, is rejected. A `git-subdir` URL without one of these prefixes is read as GitHub `owner/repo`.
+- An entry that pins a `sha` (7 to 64 hex characters) installs exactly that commit, and the install fails if that commit cannot be fetched.
+
+Uninstalling deletes the plugin's files only inside the plugin cache.
 
 ### Batch Install
 

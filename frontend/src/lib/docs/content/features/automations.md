@@ -69,7 +69,7 @@ This example runs every 5 minutes.
 
 ### Webhook
 
-Triggered by a POST to `/api/v1/automations/{automation_id}/trigger`. That endpoint needs owner access (an owner token; API-user keys get 403) as well as the signature, so this is not an open public webhook. The automation generates a secret when you create it (unless you set one). It is stored encrypted; the edit form and the owner-only automation responses show it in plaintext. Once the automation is saved, its edit form also shows the webhook URL, built from the address you use to reach the app. Sign each request with it: compute the HMAC-SHA256 of the JSON body, keyed by the secret, and send it as `X-Webhook-Signature: sha256=<hex digest>`. The body is signed with its keys sorted and no whitespace, as `json.dumps(body, separators=(',', ':'), sort_keys=True)` produces in Python. A wrong signature is refused with 403. Without the header, the call counts as a manual trigger and no payload reaches the prompt.
+Triggered by a POST to `/api/v1/automations/{automation_id}/trigger`. That endpoint needs owner access (an owner token; API-user keys get 403) as well as the signature, so this is not an open public webhook. The automation generates a secret when you create it (unless you set one). It is stored encrypted; the edit form and the owner-only automation responses show it in plaintext. Once the automation is saved, its edit form also shows the webhook URL, built from the address you use to reach the app. Sign each request with it: compute the HMAC-SHA256 of the JSON body, keyed by the secret, and send it as `X-Webhook-Signature: sha256=<hex digest>`. The body is signed with its keys sorted and no whitespace, as `json.dumps(body, separators=(',', ':'), sort_keys=True)` produces in Python. A wrong signature is refused with 403, and so is a signed call to a disabled automation. Without the header, the call counts as a manual trigger and no payload reaches the prompt.
 
 **trigger_config:**
 
@@ -207,7 +207,7 @@ Control where automation results are sent.
 Two optional fields filter what gets delivered:
 
 - `suppress_pattern`: when the response is exactly this text (ignoring case and surrounding spaces), nothing is delivered. Useful for "nothing to report" replies.
-- `deduplicate_window_seconds`: when the response matches one delivered within this many seconds, it is not delivered again.
+- `deduplicate_window_seconds`: when the response matches one delivered within this many seconds, it is not delivered again. Only the automation's four most recent earlier runs are checked, and only the last 2,000 characters of each response are compared.
 
 ## Budget Controls
 
@@ -215,14 +215,18 @@ Prevent runaway costs with granular budget limits.
 
 | Field              | Type    | Description                                      |
 |--------------------|---------|--------------------------------------------------|
-| `max_cost_per_run` | float   | Maximum USD cost for a single run                 |
+| `max_cost_per_run` | float   | Expected USD cost of one run. Checked after the run: a run that costs more is logged but not stopped |
 | `max_cost_per_day` | float   | Maximum total USD cost across all runs in one day |
 | `max_cost_total`   | float   | Lifetime cost cap for this automation             |
 | `max_runs_per_day` | integer | Maximum number of executions per day              |
 | `max_turns`        | integer | Max conversation turns per run (default 1, null = unlimited) |
 | `timeout_seconds`  | integer | Execution timeout per run in seconds (default 300, null = unlimited) |
 
-When any limit is exceeded, the run is blocked and the automation reports the reason in its status.
+Before each run, the lifetime cap, the daily run count and the daily cost are checked. When one is already reached, the run is not started: it is recorded as `budget_exceeded` and the reason is stored in the automation's `last_error`.
+
+## One Run at a Time
+
+A worker never runs the same automation twice at once. A trigger that fires while a run is in progress is skipped, with no run record. An approved run is the exception: it waits for the run in progress to finish and then starts.
 
 ## Approval Workflow
 
@@ -276,7 +280,7 @@ Each run records:
 - **tokens_in / tokens_out** -- Token counts
 - **duration_ms** -- Execution time
 - **prompt_rendered** -- The prompt after template variable substitution
-- **response** -- Claude's output
+- **response** -- The last 2,000 characters of Claude's final reply. The full conversation is in the run's session (`session_id`)
 - **error** -- Error message if the run failed
 - **output_status** -- What happened to the output: `delivered`, `failed`, `suppressed` or `deduplicated`
 - **trigger_data** -- What started the run. Its `trigger` is `schedule`, `connector_event`, `connector_trigger`, `webhook` or `manual`, next to that trigger's data (for example the webhook `payload`). The run history shows it as Schedule, Event, Connector, Webhook or Manual

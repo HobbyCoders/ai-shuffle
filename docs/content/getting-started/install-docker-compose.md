@@ -217,6 +217,30 @@ To sign in to the Claude Code CLI from the host's terminal instead of the in-app
 docker exec -it -u appuser ai-shuffle claude auth login
 ```
 
+## The built-in browser's network access (optional)
+
+Agents can open public websites in the built-in browser. By default it cannot reach:
+
+- cloud metadata addresses such as `169.254.169.254` (this cannot be changed);
+- your private network: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (which includes Tailscale) and IPv6 `fc00::/7`;
+- AI Shuffle's own port and the browser's DevTools port, on any internal address (this cannot be changed either).
+
+`localhost` inside the container is allowed, so an agent can view a dev server it started. A page the agent visits can then reach other services listening inside the container too.
+
+To change this, add a line under `environment:` in `compose.yaml` (a line in `.env` alone does not reach the container), then run `docker compose up -d`:
+
+```yaml
+    environment:
+      # (keep the lines already there)
+      # Let the browser open one LAN service. This list replaces the localhost
+      # default, so keep the first two ranges to still allow localhost.
+      BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,192.168.1.20/32"
+```
+
+- `BROWSER_SSRF_ALLOW`: address ranges the browser may open, separated by commas.
+- `BROWSER_SSRF_ALLOW_LOOPBACK: "false"`: refuse `localhost` as well. Use it when people you do not trust can prompt agents on this install. It has no effect when `BROWSER_SSRF_ALLOW` is set.
+- `BROWSER_SSRF_BLOCK`: ranges to refuse even if `BROWSER_SSRF_ALLOW` lists them.
+
 ## Back up
 
 Stop the container (`docker compose stop`), then back up the Docker volumes whose names start with `ai-shuffle_` and your `WORKSPACE_DIR` folder. The `data` volume holds the database and the key that encrypts your saved credentials; always keep them together. Start again with `docker compose start`.

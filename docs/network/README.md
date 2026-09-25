@@ -104,7 +104,11 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
    published by the owner device only, events with their dense `seq` as
    `order_seq`. Mirrors are read-only; the UI drives the owner through
    `control`. Transcripts older than 30 days are published on demand
-   (`POST /api/v1/network/runners/{device}/sessions/{id}/hydrate`).
+   (`POST /api/v1/network/runners/{device}/sessions/{id}/hydrate`). A session
+   an API key places on another worker keeps that key's `api_user_id` on the
+   owner (API users replicate; a key the owner does not know is dropped), and
+   a mirrored copy that names no key never clears the one a worker holds, so
+   the key's scope applies on every device.
 7. **Blobs.** Artifacts and note attachments travel as records naming a hash;
    bytes are fetched in encrypted 2 MiB parts from any online holder at
    `/peer/blob/{hash}/parts/{index}` and stored locally after a content-hash
@@ -239,5 +243,10 @@ its own database, data directory and identity:
 | Join over HTTP with fingerprint check, then sync | `test_transport.py::test_enrollment_over_http_then_sync` |
 | Hub registration, founding the account network, device approve/reject | `test_hub.py` |
 | Session on A mirrored to B, driven from B, forked when offline | `test_control.py` |
+| Two claims on one session get one owner; control reaches only the owner; revoked device's late, buffered and new-incarnation ops refused | `test_ownership_revocation.py` |
+| Generation bumps invalidate tokens, stale snapshot pages, recovery wrap round trip, offline catch-up, leave/create/join transition lock | `test_membership_lifecycle.py` |
+| Malformed, forged, oversized and replayed peer batches | `test_peer_plane_errors.py` |
+| Certificate, revocation, key-wrap and device-token refusals (a challenge is spendable only by its device) | `test_verification_refusals.py` |
+| A session an API key places on another worker keeps its owner | `test_remote_session_api_owner.py` |
 | Facts, skills, plugins, blobs, owners | `test_collections.py` |
 | Shared-database cluster migration | `test_migrate.py` |

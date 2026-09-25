@@ -33,7 +33,7 @@ curl http://localhost:8000/api/v1/api-users
 ```json
 [
   {
-    "id": "usr_abc123",
+    "id": "3f9a1c2e",
     "name": "CI/CD Pipeline",
     "project_id": "proj_123",
     "profile_ids": ["your-agent-id"],
@@ -43,6 +43,8 @@ curl http://localhost:8000/api/v1/api-users
   }
 ]
 ```
+
+Each user also carries `description`, `model`, `effort` and `updated_at`. The key itself is never returned.
 
 ### POST /api/v1/api-users
 
@@ -64,13 +66,15 @@ curl -X POST http://localhost:8000/api/v1/api-users \
 **Response:**
 ```json
 {
-  "id": "usr_abc123",
+  "id": "3f9a1c2e",
   "name": "CI/CD Pipeline",
   "api_key": "aih_7x9k2m4n5p8q1r3s6t0u...",
   "project_id": "proj_123",
   "profile_ids": ["your-agent-id", "code-reviewer"]
 }
 ```
+
+Returns `201` with the new user's fields (as in the list) plus `api_key`.
 
 **Important:** Save the `api_key` immediately. It is only shown once.
 
@@ -87,7 +91,7 @@ curl -X POST http://localhost:8000/api/v1/api-users \
 
 ### GET /api/v1/api-users/{user_id}
 
-Get API user details (key is not included).
+Get API user details (key is not included). This and the routes below return `404` for an unknown id.
 
 **Auth:** Owner only
 
@@ -98,7 +102,7 @@ Update an API user. Takes the same fields as create, plus `is_active` (set `fals
 **Auth:** Owner only
 
 ```bash
-curl -X PATCH http://localhost:8000/api/v1/api-users/usr_abc123 \
+curl -X PATCH http://localhost:8000/api/v1/api-users/3f9a1c2e \
   -H "Origin: http://localhost:8000" \
   -H "Content-Type: application/json" \
   -d '{
@@ -122,14 +126,14 @@ Generate a new API key for the user, invalidating the old one.
 **Auth:** Owner only
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/api-users/usr_abc123/rotate-key \
+curl -X POST http://localhost:8000/api/v1/api-users/3f9a1c2e/rotate-key \
   -H "Origin: http://localhost:8000"
 ```
 
 **Response:**
 ```json
 {
-  "id": "usr_abc123",
+  "id": "3f9a1c2e",
   "api_key": "aih_new_key_here..."
 }
 ```
@@ -156,7 +160,15 @@ When neither is set, the API user has access to all projects and agents (but sti
 
 ### Own Sessions
 
-Every API key acts only on the sessions it started. It cannot read, continue, stop or answer prompts in the owner's sessions or another key's, even with the session id: REST session routes and the conversation endpoints return `403`, the chat WebSocket answers with an `error` frame, and `/ws/sessions/{session_id}` closes with `4003`. Worker sessions an agent starts belong to the session that started them. A permission answer from an API key never creates an agent-wide rule; `remember: "profile"` is kept to that session.
+Every API key acts only on the sessions it started. It cannot read, continue, stop or answer prompts in the owner's sessions or another key's, even with the session id:
+
+- Session lists and search return only the key's own sessions; the `admin_only`, `api_users_only` and `api_user_id` filters are ignored.
+- REST session routes (read, update, delete, resume and the rest) and the conversation endpoints return `403`. An id that does not exist gets `404` from the session routes.
+- The chat WebSocket answers with an `error` frame, and `load_session` answers `session_not_found`, the same reply as for an unknown id, so the socket does not reveal whether the session exists (see [WebSocket](/docs/api-reference/websocket)).
+- `/ws/sessions/{session_id}` closes with `4003` (`4004` for an unknown id).
+- Voice call routes return `403` (see [Voice](/docs/api-reference/voice#call-control)).
+
+Worker sessions an agent starts belong to whoever owns the session that started them. A permission answer from an API key never creates an agent-wide rule; `remember: "profile"` is kept to that session.
 
 ## Using API Keys
 

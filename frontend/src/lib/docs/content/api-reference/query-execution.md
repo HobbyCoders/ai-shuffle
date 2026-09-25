@@ -41,11 +41,14 @@ curl -X POST http://localhost:8000/api/v1/query \
 | Field | Type | Description |
 |-------|------|-------------|
 | `model` | string | Model override (e.g. `sonnet`, or a custom model id) |
-| `permission_mode` | string | `default`, `auto`, `acceptEdits`, `bypassPermissions` |
+| `permission_mode` | string | `default`, `auto`, `acceptEdits`, `bypassPermissions`. `plan` is accepted and runs as `default`; a chat session always runs as `default`. See [Tool permissions](#tool-permissions) |
 | `system_prompt_append` | string | Text appended to the agent's system prompt |
 | `max_turns` | integer | Maximum conversation turns |
 | `thinking_mode` | string | `default`, `disabled`, `adaptive`, `think`, `think_harder`, `ultra_think` |
 | `effort` | string | `low`, `medium`, `high`, `max`, `xhigh` |
+| `context_window` | integer | Context window for this turn. Ignored unless it is one of the windows the model offers |
+| `fast` | boolean | Fast mode for this turn. Omit to use the session's setting |
+| `workspace_project_ids` | string[] | Up to 50 other project ids whose folders the agent may also use. A key limited to one project cannot add others |
 
 **Response:**
 ```json
@@ -222,6 +225,12 @@ curl http://localhost:8000/api/v1/streaming/active \
 ### Project Context
 - If `project` is specified, the agent has access to that project's files
 - API users may be restricted to a specific project
+
+### Tool Permissions
+- `POST /api/v1/query`, `/query/stream`, `/conversation/stream` and `/conversation/start` have nobody to answer a permission prompt, so the permission mode decides alone
+- On the built-in Claude models (the Claude Code CLI), `default` denies a tool call that would prompt at once and the agent is told why; `auto`, `acceptEdits` and `bypassPermissions` allow it
+- On other providers, `acceptEdits` and `bypassPermissions` allow what they would allow in the app (`acceptEdits` still asks before screen control); a call that would prompt waits and is denied after 15 minutes. `auto` runs as `default` there
+- `POST /api/v1/conversation` runs like a session in the app: its prompts appear in the app and are denied if nobody answers within 5 minutes
 
 ### Cost Tracking
 - Non-streaming responses include cost and token data under `metadata`

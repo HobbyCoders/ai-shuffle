@@ -243,7 +243,7 @@ The `scope` query parameter accepts `local`, `project`, `installed`, or `user`.
 
 #### Toggle a Project Server
 
-Enable or disable a server for a specific project (written to the project's `disabledMcpServers` list in `~/.claude.json`):
+Enable or disable a server for a specific project (written to the project's `disabledMcpServers` list in `~/.claude.json`). Built-in servers have no per-project setting: toggling one here changes the global setting.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/projects/{project_id}/mcp/servers/{server_name}/toggle \

@@ -8,6 +8,8 @@ order: 2
 
 Endpoints for managing chat sessions — listing, searching, creating, updating, deleting, exporting, and importing.
 
+An API key sees and acts only on the sessions it started (see [Own Sessions](/docs/api-reference/api-users#own-sessions)). A route that takes a `session_id` returns `403` for the owner's session, another key's, or one outside the key's project or agents, and `404` for an id that does not exist. The owner can use every session.
+
 ## Read the Suggested Next Reply
 
 ### GET /api/v1/sessions/{session_id}/composer-suggestion
@@ -36,14 +38,17 @@ List sessions with optional filters.
 | `tag_id` | string | Filter by tag |
 | `admin_only` | boolean | Only owner sessions |
 | `api_users_only` | boolean | Only API user sessions |
+| `api_user_id` | string | Only the sessions of this API user |
 | `active_only` | boolean | Only active-group sessions |
-| `limit` | integer | Max results (default: 50) |
+| `limit` | integer | Max results (default: 50, max: 100) |
 | `offset` | integer | Pagination offset |
 
 ```bash
 curl "http://localhost:8000/api/v1/sessions?project_id=proj123&limit=10" \
   -H "Authorization: Bearer aih_your_key"
 ```
+
+For an API key the list holds only its own sessions: `admin_only`, `api_users_only` and `api_user_id` are ignored, `project_id` is replaced by the key's project when it has one, and a `profile_id` outside the key's agents returns `403`. Search applies the same limits.
 
 ### GET /api/v1/sessions/paginated
 
@@ -290,6 +295,8 @@ curl -X POST http://localhost:8000/api/v1/sessions/batch-delete \
   -H "Content-Type: application/json" \
   -d '{"session_ids": ["sess_abc123", "sess_def456"]}'
 ```
+
+Returns `{"deleted_count": 1, "total_requested": 2, "errors": [...]}` (`errors` is `null` when every session was deleted). A session that does not exist or that the caller may not delete is skipped and listed in `errors`.
 
 ### POST /api/v1/sessions/{session_id}/archive
 

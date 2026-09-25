@@ -43,7 +43,7 @@ curl http://localhost:8000/api/v1/settings/voice \
 }
 ```
 
-`model_details.voices` lists the voices you can pick. `voice_input_models` lists the transcription models for `voice_input_model`. `voice_app_tools_enabled` is always `true` and kept for older clients.
+`model_details.voices` lists the voices you can pick. `voice_input_models` lists the transcription models for `voice_input_model`, the model composer dictation uses through `POST /api/v1/settings/transcribe`. For which key pays for a fal.ai transcription model when an API key calls it, see [Speech and transcription](/docs/api-reference/miscellaneous#speech-and-transcription). `voice_app_tools_enabled` is always `true` and kept for older clients.
 
 ### PUT /api/v1/settings/voice
 
@@ -139,7 +139,9 @@ curl -X POST http://localhost:8000/api/v1/voice/sessions \
 
 These endpoints act on a session created by [POST /api/v1/voice/sessions](#post-apiv1voicesessions). They return `404` when the session does not exist or is not a voice session.
 
-An API key can only use them on voice sessions it started, and only while the session is inside the key's project and agent restrictions, as described in [Own Sessions](/docs/api-reference/api-users#own-sessions). Any other voice session, including one the owner started, returns `403`, so a key cannot get a client secret for, end, change or read another caller's call. The owner can use them on every voice session.
+An API key can only use them on voice sessions it started, and only while the session is inside the key's project and agent restrictions, as described in [Own Sessions](/docs/api-reference/api-users#own-sessions). Any other voice session, including one the owner started, returns `403`, so a key cannot get a client secret for, end, change or read another caller's call. The owner can use them on every voice session. The audio WebSocket applies the same check and closes with `4403` (`4404` for a session that does not exist or is not a voice session).
+
+On a Realtime call the voice agent gets the app configuration tools only when the owner attaches the call to one of the owner's sessions; a call attached with an API key, or on a session an API key started, never gets them.
 
 ### POST /api/v1/voice/sessions/{session_id}/secret
 

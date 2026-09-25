@@ -89,6 +89,12 @@ The message in the app says which of these it is.
 
 **The license banner says new agent runs are paused:** see [License](/docs/getting-started/license). Your data is not affected.
 
+## Tool calls are denied
+
+**"Permission request timed out":** in Ask mode a tool prompt that nobody answers within 5 minutes is denied, and the agent carries on without it. Answer prompts sooner, or pick another permission mode in the composer. See [Permission modes](/docs/features/profiles#permission-modes).
+
+**"Permission denied: this session has no one to approve tool calls":** one-shot and streaming API queries, `POST /api/v1/conversation/start` and automation **Send prompt** steps cannot show a prompt, so on Claude models Ask mode denies every call that would ask. Run them with a permission mode that allows the tools they need.
+
 ## Connectors
 
 **A chat connector refuses to start:** Telegram, Discord, WhatsApp and the other chat connectors need a **sender allowlist**, the accounts allowed to talk to your agent. Add your own account ID to the allowlist in the connector's settings, then start it again. Tool approvals for connector turns appear in the app, not in the chat.

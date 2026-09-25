@@ -75,6 +75,8 @@ A `PreToolUse` hook receives the tool call as JSON on stdin and runs in the sess
 
 A `Stop` bash hook gets the same variables, also with no stdin. `HOOK_DATA` holds the stop payload: `session_id`, `cwd`, `stop_hook_active`, `stop_reason`, the turn's final `text` (first 16,000 characters) and `project_id`.
 
+Only a `PreToolUse` hook runs in the session's working directory. `Stop` hooks and hooks on the other events run in the app's own working directory; the session's directory is the `cwd` field of `HOOK_DATA`.
+
 #### Size limits
 
 Each `HOOK_*` value is capped at 64 KiB. A longer `HOOK_<KEY>` value is cut and ends in `...[truncated]`. `HOOK_DATA` is always valid JSON: when it would be too long, its longest strings (for example a large `tool_input.content`) are shortened, each ending in `...[truncated]`, and `"truncated": true` is added at the top level.
@@ -83,7 +85,7 @@ A `PreToolUse` guard should read the tool call from stdin, which always carries 
 
 #### Environment
 
-Hook commands (bash hooks, `PreToolUse` guards and plugin hooks) do not inherit the app's secrets. Variables such as `DATABASE_URL`, `PG*`, `OWNER_PASSWORD`, `SECRET_KEY`, and names ending in `_TOKEN`, `_SECRET`, `_PASSWORD` or `_API_KEY` are removed. Model-provider keys (for example `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`), `FAL_KEY`, `GH_TOKEN` and `GITHUB_TOKEN` are kept. To pass another variable through, list it in `FLUID_CHILD_ENV_PASSTHROUGH` (comma separated) in the app's environment.
+Hook commands (bash hooks, `PreToolUse` guards and plugin hooks) do not inherit the app's secrets. Variables such as `DATABASE_*`, `PG*`, `POSTGRES_*`, `OWNER_PASSWORD`, `SECRET_KEY`, and names ending in `_TOKEN`, `_SECRET`, `_PASSWORD`, `_API_KEY`, `_PRIVATE_KEY`, `_ACCESS_KEY` or `_CREDENTIALS` are removed. Model-provider keys (for example `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`), `FAL_KEY`, `GH_TOKEN` and `GITHUB_TOKEN` are kept. To pass another variable through, list it in `FLUID_CHILD_ENV_PASSTHROUGH` (comma separated) in the app's environment.
 
 **Example bash hook command:**
 
@@ -126,7 +128,7 @@ Send an HTTP POST request to a URL when the event fires. Optionally sign the pay
 | `secret` | string | Optional HMAC-SHA256 signing secret                   |
 | `timeout`| integer| Timeout in milliseconds (1000-300000, default 30000)  |
 
-The body is JSON describing the event: `{"event": ..., "timestamp": ..., "data": {...}}`. A `Stop` hook also sends `working_dir` and `project_id`, and its `data` holds the same stop payload a bash hook gets in `HOOK_DATA`. A `Stop` webhook can keep the agent working through its response (see [Stop Hooks](#stop-hooks)); on other events the response is ignored. Every request carries `X-Hook-Event` and `X-Hook-Timestamp` headers. When a `secret` is set, it also carries `X-Hook-Signature: sha256=<hex>`, the HMAC-SHA256 of the raw body keyed by the secret, so the receiving server can check the request is authentic.
+The body is JSON describing the event: `{"event": ..., "timestamp": ..., "data": {...}}`. A `Stop` hook also sends `working_dir` and `project_id`, and its `data` holds the same stop payload a bash hook gets in `HOOK_DATA`. A `Stop` webhook can keep the agent working through its response (see [Stop Hooks](#stop-hooks)); on other events the response is ignored. Before sending, passwords in URLs anywhere in the body (for example `postgres://user:***@db/app`) are masked. Every request carries `X-Hook-Event` and `X-Hook-Timestamp` headers. When a `secret` is set, it also carries `X-Hook-Signature: sha256=<hex>`, the HMAC-SHA256 of the raw body keyed by the secret, so the receiving server can check the request is authentic.
 
 ### Message Hooks
 
@@ -164,6 +166,13 @@ If `tool_matcher` is not set or is empty, the hook fires for all tools.
 ## Plugin-Contributed Hooks
 
 Installed plugins can contribute hooks in their `hooks/hooks.json`, which are discovered automatically. Plugin hooks are **read-only** -- you cannot edit or delete them through the hooks UI (they appear on the **Plugin** tab). They are managed by the plugin itself.
+
+Plugin hooks follow the `hooks.json` format rather than the rules above:
+
+- A command hook gets the event as JSON on stdin, runs in the session's working directory, and finds its plugin folder in `CLAUDE_PLUGIN_ROOT`.
+- `timeout` is in seconds: 30 by default, 120 for `Stop` hooks.
+- A `matcher` is a case-insensitive regex matched at the start of the tool name, and `*` matches every tool. A matcher that is not a valid regex is compared as plain text (ignoring case) and a warning is logged once; the plugin's other hooks still run.
+- A plugin's `Stop` hooks run before the saved `Stop` hooks, and the first block wins.
 
 To view all plugin-contributed hooks:
 

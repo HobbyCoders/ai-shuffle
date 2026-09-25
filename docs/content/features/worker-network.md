@@ -32,11 +32,11 @@ The exact policy is available from `GET /api/v1/network/policy`.
 
 ## Running sessions on another worker
 
-The composer's runner chip lists every online worker in the network with its capabilities. Pick one and the session is born there. From any other worker the session is a live mirror: you can read it, send messages, answer permission prompts and stop it; the owner executes. If the owner is offline the mirror is read-only and offers **Fork here**, which starts a new session on the current worker with the transcript as context. The original is never changed.
+The composer's runner chip lists every online worker in the network with its capabilities. Pick one and the session is born there. From any other worker the session is a live mirror: you can read it, send messages, answer permission prompts and stop it; the owner executes. If the owner is offline the mirror is read-only and offers **Fork here**, which starts a new session on the current worker with the transcript as context. The original is never changed. A session started with an API key stays that key's session on every worker, so the key's scope applies wherever you view it.
 
 Git controls work from any worker too: Commit, Push, Pull, Create PR, Finish and Ship It use your saved options and run against the owning worker’s checkout. Finish and Ship It show progress here and continue on the owner if you reload the page. If the owner is unreachable, reconnect it and use Retry; Git actions never fall back to a checkout on the viewing device. Both workers need a version that supports remote Git actions.
 
-Automations and connectors have one owner device too. A definition restored on a new worker stays inactive until you assign it.
+Automations and connectors have one owner device too, and only the owner runs them. A definition with no owner is claimed by one online worker. A definition whose owner is another device, including a removed one, stays inactive on this worker until you assign it here with `POST /api/v1/network/owners` (see the [Devices & Network API](/docs/api-reference/devices#definition-owners)); Settings has no control for this yet.
 
 ## Conflicts
 
@@ -44,7 +44,7 @@ Two workers editing the same setting while disconnected both keep the higher wri
 
 ## Removing a device
 
-Remove a worker, phone or browser from Settings > Providers > Devices. A removed worker stops receiving your settings and its later writes are rejected; the remaining workers switch to a fresh network key on their own. Any secret the worker had already received should be treated as compromised; rotate provider keys from Settings > Providers.
+Remove a worker, phone or browser from Settings > Providers > Devices. A removed worker stops receiving your settings and its later writes are rejected; the remaining workers switch to a fresh network key on their own. Sessions the removed worker owned stay on the other workers as read-only copies: messages, permission answers and stops are no longer sent to it, and **Fork here** continues the conversation on the current worker. Any secret the worker had already received should be treated as compromised; rotate provider keys from Settings > Providers.
 
 ## The account always wins
 

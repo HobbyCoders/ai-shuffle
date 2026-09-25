@@ -57,10 +57,23 @@ Any other string is treated as a custom model ID and passed through unchanged (e
 
 | Mode                | In the composer | Description                                                 |
 |---------------------|-----------------|-------------------------------------------------------------|
-| `default`           | Ask             | Ask for permission on potentially destructive operations     |
+| `default`           | Ask             | Ask before tools that change something; read-only tools run without a prompt |
 | `auto`              | Auto            | Claude Code evaluates tool calls automatically (shown only where available) |
-| `acceptEdits`       | Accept Edits    | Automatically accept file edits, ask for other operations    |
-| `bypassPermissions` | Bypass          | Skip all permission prompts (use with caution)               |
+| `acceptEdits`       | Accept Edits    | Run tools without asking. Only a request to control the computer's screen still asks |
+| `bypassPermissions` | Bypass          | Skip all permission prompts, including screen control (use with caution) |
+
+The mode picker appears in code and voice sessions, not in chat sessions. Chat sessions always run in Ask. **Auto** is listed only for models that run on the Claude Code CLI, which are the built-in Claude models. A session on another provider that still has Auto saved runs in Ask. The retired `plan` value is treated as Ask.
+
+In Ask mode:
+
+- **Built-in Claude models (Claude Code CLI):** the app's own read-only tools run without a prompt. The app's tools that change something (for example Monitor, hooks, MCP server settings, scheduling, memory, starting agents, paid image or video generation and screen control) ask first, as do tools from your own MCP servers and the browser. Claude Code's built-in tools follow Claude Code's own rules.
+- **Other providers:** read-only tools, including read-only shell commands, run without a prompt; tools that write or run something ask first.
+
+A prompt appears in the app. If nobody answers it within 5 minutes, the call is denied and the agent carries on. Tick **Always do this for** *tool* before choosing Approve or Deny to save that answer as a rule for the agent: from then on, every call of that tool by that agent is allowed (or denied) without a prompt, in every session. Remembered rules are managed through the [permission rules API](/docs/api-reference/agents#remembered-permission-rules).
+
+Runs where nobody can answer a prompt (the one-shot and streaming REST endpoints, `POST /api/v1/conversation/start`, and automation **Send prompt** steps) decide from the mode alone. On the built-in Claude models, Ask denies the call at once and every other mode allows it. On other providers, Accept Edits and Bypass allow what they would allow in a session you are watching; a call that would still prompt (any such call in Ask, screen control in Accept Edits) waits and is denied after 15 minutes. Automation runs, connector messages and `POST /api/v1/conversation` put their prompts in the app like any other session.
+
+Screen control (computer use) runs only after the agent's access request was allowed. In a session you are watching, that request is a permission prompt in every mode except Bypass (or a remembered rule answers it); a request that nothing allowed is refused.
 
 #### Effort
 

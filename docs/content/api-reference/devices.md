@@ -93,6 +93,8 @@ Returns the updated member. `404` for an unknown device.
 
 Revoke a worker's access. The network key is rotated. The removed worker's copies of your provider API keys should be treated as compromised, so rotate those keys with each provider.
 
+Sessions the removed worker owned stay here as read-only mirrors: turns, permission answers and stops for them are no longer sent to it (the chat reports the owner as unreachable and offers **Fork here**; see [fork-here](#post-apiv1networksessionssession_idfork-here)). Automations and connectors it owned stay inactive until you give them a new owner with [`POST /api/v1/network/owners`](#definition-owners).
+
 **Auth:** Owner only
 
 ```bash
@@ -133,7 +135,7 @@ curl http://localhost:8000/api/v1/network/runners \
 
 ### POST /api/v1/network/sessions/{session_id}/fork-here
 
-Continue a session whose worker is offline: creates a new session on this worker with the synced transcript as context (the **Fork here** button in chat).
+Continue a session whose worker is offline or was removed from the network: creates a new session on this worker with the synced transcript as context (the **Fork here** button in chat). The original session is not changed.
 
 **Auth:** Required. API users can fork only sessions in their scope.
 
@@ -143,6 +145,40 @@ curl -X POST http://localhost:8000/api/v1/network/sessions/SESSION_ID/fork-here 
 ```
 
 **Response (`201`):** `{"session_id": "...", "parent_session_id": "...", "context_chars": 18234}`. `404` for an unknown session, `403` outside the API user's scope.
+
+### POST /api/v1/network/runners/{device_id}/sessions/{session_id}/hydrate
+
+Ask the worker that owns a session to publish a transcript older than 30 days, so this worker's mirror can show it.
+
+**Auth:** Required. API users can hydrate only sessions in their scope.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/network/runners/DEVICE_ID/sessions/SESSION_ID/hydrate \
+  -H "Authorization: Bearer aih_your_key"
+```
+
+**Response:** `{"published": 42}`. `503` when the owning worker is offline or was removed from the network, `409` when it refuses (for example, it does not own the session).
+
+## Definition owners
+
+Each automation and connector runs on one worker, its owner. A definition with no owner is claimed by one online worker; one owned by another device stays inactive on every other worker.
+
+### POST /api/v1/network/owners
+
+Give an automation or connector to a worker, or leave it with no owner.
+
+**Auth:** Owner only
+
+JSON body: `table` (`automations` or `connectors`), `id` (the definition's id), `device_id` (an active worker in the network, or `null`).
+
+```bash
+curl -X POST http://localhost:8000/api/v1/network/owners \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"table": "connectors", "id": "conn-1a2b3c4d", "device_id": "DEVICE_ID"}'
+```
+
+**Response:** `{"table": "connectors", "id": "conn-1a2b3c4d", "owner_device_id": "DEVICE_ID"}`. `400` when `device_id` is a phone or browser, `404` for an unknown definition or a device that is not an active member, `409` when this worker is not in a network.
 
 ## Recovery key
 

@@ -12,7 +12,7 @@ Endpoints for managing Model Context Protocol (MCP) servers — extending your a
 
 ### GET /api/v1/mcp/servers
 
-List global (user-scope) MCP servers.
+List global (user-scope) MCP servers, with the built-in servers (such as `browser`, `"builtin": true`) first.
 
 **Auth:** Required
 
@@ -74,15 +74,17 @@ curl -X POST http://localhost:8000/api/v1/mcp/servers \
 
 | Type | Required Fields | Description |
 |------|----------------|-------------|
-| `stdio` | `command`, `args` | Subprocess that communicates via stdin/stdout |
+| `stdio` | `command` (`args` optional) | Subprocess that communicates via stdin/stdout |
 | `sse` | `url` | Server-Sent Events endpoint |
 | `http` | `url` | HTTP API endpoint |
+
+`type` defaults to `stdio`. `name` is 1 to 64 characters: letters, digits, `-` and `_`. Returns `201` with the server, or `400` when a required field is missing, the name is invalid or a server with that name already exists.
 
 New servers start enabled. Use the toggle endpoint below to turn one off.
 
 ### PUT /api/v1/mcp/servers/{name}
 
-Update a global MCP server.
+Update a global MCP server. Send only the fields to change. Returns `404` if the server does not exist.
 
 **Auth:** Owner only
 
@@ -152,19 +154,19 @@ curl -X POST http://localhost:8000/api/v1/projects/proj123/mcp/servers \
 
 ### PUT /api/v1/projects/{project_id}/mcp/servers/{name}
 
-Update a project MCP server.
+Update a project MCP server. Pass `?scope=` (`local`, `project` or `installed`; default `local`). `scope=user` returns `400`; update global servers through `/api/v1/mcp/servers`.
 
 **Auth:** Owner only
 
 ### DELETE /api/v1/projects/{project_id}/mcp/servers/{name}
 
-Remove a project MCP server. Pass `?scope=` (`local`, `project` or `installed`; default `local`).
+Remove a project MCP server. Pass `?scope=` (`local`, `project` or `installed`; default `local`). `scope=user` removes the global server of that name.
 
 **Auth:** Owner only
 
 ### PATCH /api/v1/projects/{project_id}/mcp/servers/{name}/toggle
 
-Enable or disable a server for this project. Body: `{"enabled": true}` or `{"enabled": false}`.
+Enable or disable a server for this project. Body: `{"enabled": true}` or `{"enabled": false}`. A built-in server has no per-project setting, so toggling one here enables or disables it everywhere.
 
 **Auth:** Owner only
 
@@ -200,9 +202,14 @@ curl "http://localhost:8000/api/v1/mcp/tools?refresh=true" \
 
 ### GET /api/v1/mcp/stats
 
-Get MCP server count and status.
+Get the number of global (user-scope) MCP servers. Built-in servers are not counted.
 
 ```bash
 curl http://localhost:8000/api/v1/mcp/stats \
   -H "Authorization: Bearer aih_your_key"
+```
+
+**Response:**
+```json
+{ "global_server_count": 2 }
 ```

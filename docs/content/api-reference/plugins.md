@@ -52,7 +52,7 @@ JSON body:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `url` | string | Yes | `https://` git URL, `git@host:path` SSH URL, or GitHub shorthand `owner/repo`. GitHub URLs get `.git` appended if missing |
+| `url` | string | Yes | `https://` or `http://` git URL, `git@host:path` SSH URL, or GitHub shorthand `owner/repo`. GitHub URLs get `.git` appended if missing |
 | `name` | string | No | Marketplace ID. Letters, digits, `-` and `_` only. Defaults to the repository name |
 
 ```bash
@@ -66,7 +66,7 @@ Returns `400` for an invalid URL or name and `500` if the clone fails. If a mark
 
 ### DELETE /api/v1/plugins/marketplaces/{marketplace_id}
 
-Remove a marketplace, its local copy, and every plugin installed from it. Returns `204`, or `404` if the marketplace is not registered.
+Remove a marketplace, its local copy, and every plugin installed from it, including their cached files. Returns `204`, or `404` if the marketplace is not registered.
 
 **Auth:** Owner only
 
@@ -131,7 +131,7 @@ curl "http://localhost:8000/api/v1/plugins/available?marketplace=my-marketplace"
 ]
 ```
 
-`connector_type` is set only for connector plugins (for example `telegram`).
+`connector_type` is set only for connector plugins (for example `telegram`). A marketplace with no readable `marketplace.json` does not break the list: if the repository itself has skills, commands or agents, it is listed as one plugin, `<marketplace>@<marketplace>`; otherwise it is left out. An entry without a usable name (for example one containing `/`) is skipped.
 
 ### GET /api/v1/plugins/{plugin_id}
 
@@ -202,7 +202,7 @@ curl -X POST http://localhost:8000/api/v1/plugins/install \
   -d '{"plugin_id": "code-review@my-marketplace"}'
 ```
 
-Returns `400` when the ID is malformed, the marketplace or plugin is not found, or the plugin's source is missing, and `500` for other install failures. Installing a connector plugin sets up its own Python environment, so the host needs access to PyPI and the request can take a while.
+Returns `400` when the ID is malformed, the marketplace or plugin is not found, the plugin's source is missing or of an unsupported type, a name or version is not a single plain folder name, a source URL does not start with `https://`, `http://`, `ssh://` or `git@`, or a pinned `sha` is not 7 to 64 hex characters. Returns `500` when the git clone fails, when the pinned `sha` cannot be fetched, and for other install failures; `detail` carries the reason. See [Installing Plugins](/docs/features/plugins#install-a-plugin) for the source formats and the rules on symlinks and paths. Installing a connector plugin sets up its own Python environment, so the host needs access to PyPI and the request can take a while.
 
 ### POST /api/v1/plugins/install/batch
 
@@ -223,7 +223,7 @@ The batch stops at the first plugin that fails and returns an error; plugins ins
 
 ### DELETE /api/v1/plugins/{plugin_id}
 
-Uninstall a plugin and delete its installed files. Returns `204`.
+Uninstall a plugin and delete its installed files (only files inside the plugin cache are ever deleted). Returns `204`.
 
 **Auth:** Owner only
 

@@ -34,7 +34,7 @@ Decide which mode fits your integration:
 
 1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Webhook**.
 2. Click **Install Webhook** if prompted, then click **Connect account**.
-3. Fill in the fields for your mode (see the [Configuration Reference](#configuration-reference)). To get event notifications, open **Advanced settings** and tick the events under **Session notifications**.
+3. Fill in the fields for your mode (see the [Configuration Reference](#configuration-reference)). For `inbound` or `bidirectional` mode, choose the **Agent** that handles incoming payloads. To get event notifications, open **Advanced settings** and tick the events under **Session notifications**.
 4. Click **Create Connector**.
 
 An inbound connection runs your agent, so it needs an API user with an agent, or every request is refused. See [Common Setup Steps](/docs/connectors#common-setup-steps). To create the connector through the API instead, see [API Management](/docs/connectors#api-management). Example `config` objects for each mode:

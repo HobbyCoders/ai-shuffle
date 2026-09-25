@@ -131,6 +131,7 @@ curl http://localhost:8000/api/v1/connectors \
     "api_user_id": "a1b2c3d4",
     "plugin_id": "telegram@shuffle-connectors",
     "failure_count": 0,
+    "runner_id": "ai-shuffle-1a2b3c4d",
     "created_at": "2025-01-15T10:00:00Z",
     "updated_at": "2025-01-15T10:00:00Z"
   }
@@ -138,6 +139,8 @@ curl http://localhost:8000/api/v1/connectors \
 ```
 
 Note: Sensitive config fields (tokens, secrets, passwords) are stored encrypted and returned as `****`; no characters of the secret are shown.
+
+`runner_id` is the install that runs the connector's live client. When another install runs it, the responses of `PATCH` (with `is_active`), `activate`, `deactivate` and `restart` add `applies_on` with that install's id: the change is saved here, and that install applies it when it next restarts.
 
 ### POST /api/v1/connectors
 
@@ -183,6 +186,8 @@ Get connector details.
 
 Update a connector. Every field is optional: `name`, `config`, `events`, `is_active`. `config` is merged into the stored config: keys you leave out, such as a saved token, keep their stored values, and a masked value (starting with `****`) keeps the stored secret. If the config changes while the connector is active, it restarts with the merged config. Setting `is_active` also starts or stops the running connector, like `activate` and `deactivate`.
 
+Returns the updated connector. `400` for an unknown event type, or for `"is_active": false` while an enabled automation uses the connector; `404` for an unknown connector.
+
 **Auth:** Owner only
 
 ```bash
@@ -199,7 +204,7 @@ curl -X PATCH http://localhost:8000/api/v1/connectors/conn_abc123 \
 
 ### DELETE /api/v1/connectors/{connector_id}
 
-Delete a connector. An API user that was created for it is deleted too.
+Delete a connector. An API user that was created for it is deleted too. Returns `204`, `404` for an unknown connector, or `409` while an automation uses it (see [dependencies](#get-apiv1connectorsconnector_iddependencies)).
 
 **Auth:** Owner only
 
@@ -226,7 +231,9 @@ curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/test \
 
 ### POST /api/v1/connectors/{connector_id}/activate
 
-Enable and start the connector. Chat connectors need at least one allowed sender first; otherwise this returns `400` "Add at least one allowed sender before enabling this connector".
+Enable and start the connector. Chat connectors need at least one allowed sender first; otherwise this returns `400` "Add at least one allowed sender before enabling this connector". Any other start failure returns `500` with the connector's last error.
+
+Activating a connector that is already connected, or still connecting, leaves that connection alone, so repeating the call never starts a second copy. A connection that failed, or has been connecting for more than 2 minutes, is replaced.
 
 **Auth:** Owner only
 
@@ -237,7 +244,7 @@ curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/activate \
 
 ### POST /api/v1/connectors/{connector_id}/deactivate
 
-Stop and disable the connector.
+Stop and disable the connector. `409` while an enabled automation uses it.
 
 **Auth:** Owner only
 
@@ -456,6 +463,8 @@ curl -X PUT http://localhost:8000/api/v1/connectors/oauth/plaid/app \
 
 Start a bank connection. No body. Returns `{"flow_id": "...", "link_token": "..."}` and sets a cookie that ties the flow to this browser for 30 minutes. Open Plaid Link with `link_token`.
 
+`400` when Plaid is not set up, the redirect URI does not match, the app is not installed or Plaid refuses the request; `429` while 128 bank connections are already pending; `502` when Plaid answers without a link token (check the Plaid app settings and try again).
+
 **Auth:** Owner only
 
 ### POST /api/v1/connectors/oauth/plaid/exchange
@@ -505,7 +514,9 @@ Receive incoming WhatsApp messages. Requests are matched to a running WhatsApp c
 
 ### POST /api/v1/connectors/hooks/{webhook_slug}
 
-Generic inbound webhook endpoint. External services POST JSON here to trigger AI processing; the `webhook_slug` must match a webhook connector's configured `inbound_path`. Authenticated via a Bearer token (`Authorization` header or `X-Webhook-Token`) or an HMAC signature (`X-Webhook-Signature` header).
+Generic inbound webhook endpoint. External services POST JSON here to trigger AI processing; the `webhook_slug` must match the `inbound_path` of a running webhook connector in `inbound` or `bidirectional` mode. Any slug works, including ones such as `test` or `activate`. Authenticated via a Bearer token (`Authorization` header or `X-Webhook-Token`) or an HMAC signature (`X-Webhook-Signature` header).
+
+Returns `{"status": "ok", "message": "Webhook received and processing"}`. `400` for a body that is not JSON, `403` for a missing or wrong token or signature (or a connector with neither configured), `404` when no running connector matches the slug, `413` above the server's request size limit (50 MB by default), `500` when the connector fails to process it.
 
 **Auth:** None (public — verified via the connector's token or HMAC signature)
 

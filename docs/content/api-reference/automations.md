@@ -73,7 +73,7 @@ curl -X POST http://localhost:8000/api/v1/automations \
 | `profile_id` | string | Yes | Agent to run (an agent id from `GET /api/v1/agents`) |
 | `project_id` | string | No | Project context |
 | `output_config` | object | No | Where to send results |
-| `max_cost_per_run` | number | No | USD limit per run |
+| `max_cost_per_run` | number | No | Expected USD cost per run. Checked after the run: a costlier run is logged, not stopped |
 | `max_cost_per_day` | number | No | Daily budget |
 | `max_cost_total` | number | No | Lifetime budget |
 | `max_runs_per_day` | integer | No | Max executions per day |
@@ -81,6 +81,8 @@ curl -X POST http://localhost:8000/api/v1/automations \
 | `timeout_seconds` | integer | No | Timeout in seconds (default 300, null = unlimited) |
 | `requires_approval` | boolean | No | Require manual approval |
 | `enabled` | boolean | No | Enable on create (default: false) |
+
+Send `trigger_type` or `triggers`; one of them is required. Returns `201` with the automation. Returns `400` when there is no trigger, an interval is under 60 seconds, or the agent or project does not exist, and `422` for an unknown trigger type or a field out of range (`max_turns` below 1, `timeout_seconds` below 10).
 
 ### Trigger Configurations
 
@@ -144,7 +146,7 @@ Get automation details.
 
 ### PATCH /api/v1/automations/{automation_id}
 
-Update an automation.
+Update an automation. Send only the fields to change; `triggers` replaces the whole list. Returns `404` for an unknown automation and `400` for the same problems as create. A webhook trigger sent without a `secret` gets a new one, so send the current secret back to keep it.
 
 **Auth:** Owner only
 
@@ -174,7 +176,9 @@ Disable and unschedule the automation.
 Run the automation now, or deliver a webhook payload. Owner access is required either way.
 
 - **Without `X-Webhook-Signature`** this is a manual run. It returns `409` if the automation is disabled. Any body is ignored.
-- **With `X-Webhook-Signature`** (automations with a webhook trigger), the JSON body is the payload. Sign it with the trigger's `secret`: compute HMAC-SHA256 over the body re-serialized with sorted keys and no spaces (`json.dumps(body, separators=(",", ":"), sort_keys=True)`), and send `sha256=<hex digest>`. A wrong signature returns `403`.
+- **With `X-Webhook-Signature`** (automations with a webhook trigger), the JSON body is the payload. Sign it with the trigger's `secret`: compute HMAC-SHA256 over the body re-serialized with sorted keys and no spaces (`json.dumps(body, separators=(",", ":"), sort_keys=True)`), and send `sha256=<hex digest>`. A wrong signature returns `403`, and so does a signed call to a disabled automation.
+
+Either way the response is `{"automation_id": "...", "status": "triggered"}`, returned before the run starts; `404` if the automation does not exist. A worker runs only one run of an automation at a time: if one is already in progress there, the new one is skipped and no run record is created. A budget limit that is already reached records a `budget_exceeded` run instead.
 
 ```bash
 # Manual run
@@ -225,6 +229,8 @@ Get execution history.
 ]
 ```
 
+`response` holds the last 2,000 characters of the final reply; the full conversation is in the session named by `session_id`. `output_status` is `pending`, `delivered`, `failed`, `suppressed` or `deduplicated`.
+
 `trigger_data.trigger` says what started the run: `schedule` (cron or interval), `connector_event`, `connector_trigger`, `webhook` or `manual`. The rest of `trigger_data` is that trigger's data, such as the webhook `payload`.
 
 ### GET /api/v1/automations/{automation_id}/runs/{run_id}
@@ -246,11 +252,11 @@ curl http://localhost:8000/api/v1/automations/approvals/pending \
 
 ### POST /api/v1/automations/approvals/{approval_id}/approve
 
-Approve a pending run.
+Approve a pending run. Returns the approval. The run starts in the background; if another run of the same automation is in progress, it waits for that run to finish. Returns `404` for an unknown approval and `400` if it was already decided.
 
 ### POST /api/v1/automations/approvals/{approval_id}/deny
 
-Deny a pending run.
+Deny a pending run. Its run becomes `cancelled`. Returns the approval, `404` for an unknown approval, or `400` if it was already decided.
 
 ## Statistics
 

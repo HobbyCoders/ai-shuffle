@@ -45,6 +45,7 @@ ws.send(JSON.stringify({
 
 | Type | Description | Key Fields |
 |------|-------------|------------|
+| `user_streaming_sessions` | Sent once on connect: your sessions that are running a turn now (for an API key, its own sessions) | `sessions` (each with `session_id`, `project_id`, `worktree_id`, `worktree_branch`), `session_ids` |
 | `history` | Message history for a session (on `load_session`) | `session_id`, `session`, `messages`, `isStreaming` |
 | `session_created` | New session created for an omitted `session_id` | `session_id`, `title`, `request_id` (echoed if sent) |
 | `tool_use` | A tool call started (for tracking pending tools) | `session_id`, `id`, `name`, `input` (replaced by a truncation marker when over 4 KB) |
@@ -55,7 +56,7 @@ ws.send(JSON.stringify({
 | `interrupted` | Turn ended by an interrupt | `session_id`, `message` |
 | `interrupt_confirmed` / `interrupt_failed` | Reply to `interrupt_for_query` | `session_id`, `message` (on failure) |
 | `query_queued` | The `query` was queued behind a running turn (or handed to the device that runs the session) instead of starting now | `session_id` |
-| `session_not_found` | Reply to `load_session` for an unknown session | `session_id` |
+| `session_not_found` | Reply to `load_session` for an unknown session (and, for an API key, for another principal's session) | `session_id` |
 | `session_closed` | Reply to `close_session` | `session_id` (null when no session was selected) |
 | `permission_response_ack` | Reply to `permission_response`. `result` is `{"resolved": true, "auto_resolved_count", "auto_resolved_ids"}` on success (plus `"deferred": true` for a deferral), or `{"error": "Request not found"}` when the request is unknown or already answered | `session_id`, `request_id`, `result` |
 | `user_question_response_ack` | Reply to `user_question_response` | `session_id`, `request_id`, `success`, `reason` (`not_pending` when the question was already answered) |
@@ -92,11 +93,11 @@ Other devices watching the same session receive the same control frames. Content
 | `tabs_update` | Share this device's open tabs with your other devices, which receive `tabs_sync`; no reply | `tabs_data` (`tabs`, `activeTabId`) |
 | `pong` | Keep-alive response to a `ping` | — |
 
-Every client frame is a JSON object with a string `type`. A frame with an unknown or missing `type` is answered with an `error` frame, and so is a frame that is not a JSON object (invalid JSON, an array, a string, a binary frame). The connection stays open, but after 10 frames that are not JSON objects the server closes it with code `1007`. A frame may be at most 10 MiB; a larger one closes the connection (code `1009`).
+Every client frame is a JSON object with a string `type`. A frame with an unknown `type` is answered with an `error` frame (`Unknown message type: ...`), and so is one whose `type` is missing or not a string (`Missing message type`). A frame that is not a JSON object (invalid JSON, an array, a string, a binary frame) gets `Invalid message: expected a JSON object`. The connection stays open, but the 11th frame on a connection that is not a JSON object closes it with code `1007`. A frame may be at most 10 MiB; a larger one closes the connection (code `1009`).
 
 A connection may send 30 frames in any 10 seconds (`pong` does not count). A frame over the limit is not processed and is answered with `{"type": "error", "message": "Rate limited: too many messages. Please slow down."}`; the connection stays open.
 
-An API key acts only on its own sessions, the ones it started. Every frame that names a session (`query` or `queue_message` with a `session_id`, `watch_session`, `stop`, `interrupt_for_query`, `permission_response`, `requeue_deferred_permissions`, `user_question_response`, `remove_queued_message`, `clear_queued_messages`) is refused with an `error` frame when the session belongs to the owner or another key, or is outside the key's project or agents. `interrupt_for_query` replies `interrupt_failed` instead. The refusal carries `session_id` and `message` (`Access denied to this session`) and changes nothing; it is the WebSocket equivalent of the REST 403. A session id that does not exist gets the same refusal, and `load_session` answers another principal's session with `session_not_found`, as it does an unknown id, so neither reveals whether a session exists. The owner's connection is not limited this way.
+An API key acts only on its own sessions, the ones it started. Every frame that names a session (`query` or `queue_message` with a `session_id`, `watch_session`, `stop`, `interrupt_for_query`, `permission_response`, `requeue_deferred_permissions`, `user_question_response`, `remove_queued_message`, `clear_queued_messages`) is refused with an `error` frame when the session belongs to the owner or another key, or is outside the key's project or agents. `interrupt_for_query` replies `interrupt_failed` instead. The refusal carries `session_id` and `message` (`Access denied to this session`; for the key's own session whose agent is no longer one of its agents, the message names that agent instead) and changes nothing; it is the WebSocket equivalent of the REST 403. A session id that does not exist gets the same refusal, and `load_session` answers another principal's session with `session_not_found`, as it does an unknown id, so neither reveals whether a session exists. The owner's connection is not limited this way.
 
 For an API key with assigned agents, `query` and `queue_message` apply the same agent restriction as the REST endpoints. On `query`, a `profile` outside the key's agents, or an omitted one when the key has several, is refused with an `error` frame and nothing runs. On `queue_message` a named `profile` must be one of the key's agents; an omitted one keeps the session's agent, which must be one of them too.
 
@@ -159,6 +160,8 @@ A `query` sent while a turn is running is queued and answered with `query_queued
 
 Remove an entry with `{"type": "remove_queued_message", "message_id": "turn_789", "session_id": "sess_abc123"}`, or all of them with `clear_queued_messages`. A queued message the running turn has already read cannot be removed; the next `queue_updated` shows what is left.
 
+A `query` queued behind a running turn is also offered to that turn, which can read it at its next step instead of waiting for the turn to end. It stays in the queue until the turn reads it, and removing it before then takes it back. A message the running turn cannot take (one for a different agent, model, effort or permission mode, or any message on an agent backend that cannot accept messages mid-turn) runs as its own turn after the current one.
+
 ### Connection Lifecycle
 
 1. **Connect** — open the socket with a `token` query param or session cookie
@@ -192,13 +195,15 @@ Two additional endpoints power multi-device synchronization:
 
 | Parameter | Description |
 |-----------|-------------|
-| `token` | Query parameter — API key (e.g. `?token=aih_your_key`). Optional with cookie auth on `/ws/chat` and `/ws/global`; required on `/ws/sessions/{session_id}` |
+| `token` | Query parameter — API key (e.g. `?token=aih_your_key`) or owner token. Optional with cookie auth on `/ws/chat` and `/ws/global`; required on `/ws/sessions/{session_id}` |
 | `device_id` | Query parameter — unique device identifier for multi-device sync. Optional on `/ws/chat`; required on `/ws/sessions/{session_id}` and `/ws/global` |
 | `session_id` | Path parameter on the CLI and sync endpoints (not on `/ws/chat`) |
 
 Authentication is performed via:
 - Session cookie (for the owner's web UI)
-- API key in query string: `?token=aih_your_key`
+- API key or owner token in the query string: `?token=aih_your_key`
+
+A disabled API key fails authentication (`4001`).
 
 ## Error Handling
 

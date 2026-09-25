@@ -96,7 +96,17 @@ List the highest-usage sessions.
 
 ### GET /api/v1/usage/limits
 
-Get the latest usage readings: the Claude windows the Claude CLI reported while it ran, and a cached usage row for each other provider (Codex, OpenRouter, OpenAI, fal.ai, SuperGrok and others). A plain read never waits on a provider; rows that are due are refreshed in the background. Read again while `provider_refreshing` is `true` to get the new rows as they arrive.
+Get the latest usage readings: the Claude windows the Claude CLI reported while it ran, and the last saved reading for each other provider that has one. A plain read never waits on a provider; rows that are due are refreshed in the background. Read again while `provider_refreshing` is `true` to get the new rows as they arrive.
+
+Which providers get a row:
+
+- **ChatGPT (Codex) sign-in:** the subscription windows, read from the provider's own replies. Nothing extra is requested.
+- **OpenRouter:** the model key's spend and limit. With an [OpenRouter usage key](/docs/api-reference/model-providers#openrouter-usage-key), a second row (`<provider name> account`) shows the account credit balance.
+- **SuperGrok sign-in:** the subscription allowance.
+- **OpenAI API:** the month's spend, only with an [OpenAI usage key](/docs/api-reference/model-providers#openai-usage-key). Without one, the row reports `last_error_kind` `missing_credentials`.
+- **fal.ai:** the account credit balance, only with a [fal.ai billing key](#post-apiv1settingsintegrationsfal-billing). Your media key is never used for it.
+
+xAI API keys, other OpenAI-compatible hosts and the Anthropic API key get no row: they report only per-minute rate limits. Rows of a deleted provider are dropped.
 
 **Auth:** Required.
 
@@ -123,7 +133,9 @@ curl "http://localhost:8000/api/v1/usage/limits?refresh=true" \
 | Field | Description |
 |-------|-------------|
 | `windows[].observed_at` | Epoch ms when the Claude CLI last reported this window. Each window has its own, so an old window still shows its age after a newer event updates another one. The same field appears in `snapshots[].windows[]` |
-| `providers` | One row per configured provider. `null` when the cached rows could not be read; keep the rows you already show instead of clearing them |
+| `providers` | The provider rows described above. `null` when the cached rows could not be read; keep the rows you already show instead of clearing them |
+| `providers[].status` | `fresh` (read within the provider's interval), `stale` (older, or the last attempt failed), `unavailable` (failed with no reading yet) or `never_fetched` |
+| `providers[].last_error_kind` | Why the last attempt failed: `billing_access_denied`, `missing_credentials`, `timeout`, `unavailable` or `unsupported`; `null` after a success. After `billing_access_denied` or `unsupported` the provider is not asked again until its key changes |
 | `providers[].last_success_at` | Epoch ms of the last successful reading (same as `fetched_at`) |
 | `providers[].last_attempt_at` | Epoch ms of the last attempt. A failed attempt moves only this field |
 | `providers[].cooldown_until` | Epoch ms before which a refresh, forced or not, serves this cached row instead of asking the provider again. `null` when a refresh may ask now, and while a refused capability is paused (see `last_error_kind`) |
@@ -438,7 +450,7 @@ Run a workflow again. Returns `{"status": "ok", "message": "Workflow #123 re-run
 
 ### GET /api/v1/settings/integrations
 
-Get integration settings (API key status for various services).
+Get integration settings (API key status for various services). Keys are never returned: `fal_api_key_set`, `fal_billing_api_key_set` and `anthropic_api_key_set` say whether each is stored, and `fal_api_key_masked` and `anthropic_api_key_masked` show the key's first 7 and last 4 characters (`""` for a key under 22 characters). The response also carries `claude_auth_mode`, the media tool models and the media tool defaults.
 
 **Auth:** Required
 
@@ -455,15 +467,57 @@ curl -X POST http://localhost:8000/api/v1/settings/integrations/fal-ai \
   -d '{"api_key": "your_fal_key"}'
 ```
 
+The key is checked with fal.ai before it is saved. A key fal.ai rejects returns `400` and is not saved. Otherwise the key is saved and the response reports the check:
+
+```json
+{"success": true, "masked_key": "fal-012...cdef", "valid": true, "reason": null}
+```
+
+`valid` is `true` when fal.ai accepted the key and `null` when fal.ai could not be asked (timeout, network error, rate limit or a fal.ai error); `reason` then says why. `masked_key` is the key's first 7 and last 4 characters, or `""` for a key under 22 characters. When credential storage is locked the key is not saved and the response is `409` with recovery guidance. The same `409` applies to `POST /api/v1/settings/integrations/anthropic`.
+
+### Speech and transcription
+
+`POST /api/v1/settings/tts/stream` (JSON `text`, optional `model`, `voice`, `speed`, `output_format`, `params`) returns synthesized audio, and `POST /api/v1/settings/transcribe` (multipart `file`, up to 25 MB) returns `{"text": "...", "duration_seconds": null}`. Speech uses the request's `model`, else the text-to-speech model (`tts_model`). Transcription uses the voice input model (`voice_input_model` in [voice settings](/docs/api-reference/voice#get-apiv1settingsvoice)), not the transcription tool's `stt_model`.
+
+`GET /api/v1/settings/integrations/audio/models` lists the speech and transcription models (`tts_models`, `stt_models`, each with `id`, `name`, `description`, `price_display`, `provider`, `available` and `is_current`) plus `current_tts`, `current_stt`, `fal_configured` and `openai_configured`. For an API key, `available` and `fal_configured` reflect the fal.ai key that key may use under the policy below.
+
+**Auth:** Required
+
+For fal.ai models, the owner's requests use the owner's fal.ai key. A request made with an API key follows that key's fal.ai credential policy, the same one its agent sessions use:
+
+| Policy | Key used |
+|--------|----------|
+| `user_provided` (default) | The API user's own stored key. Without one the request returns `403`. |
+| `optional` | The API user's own key, else the owner's. |
+| `admin_provided` | The owner's key. |
+
+Models served by OpenAI use the owner's OpenAI provider key.
+
 ### DELETE /api/v1/settings/integrations/fal-ai
 
 Remove the fal.ai API key.
 
 **Auth:** Owner only
 
+### POST /api/v1/settings/integrations/fal-billing
+
+Save a separate fal.ai Admin API key used only to read the account credit balance for [usage limits](#usage-limits). The media key is never used for billing. Body: `api_key` (no whitespace, at most 4096 characters, `400` otherwise). Returns `{"success": true}`. Saving the key (or deleting it) also clears the saved fal.ai balance; the next usage refresh reads it again.
+
+**Auth:** Owner only
+
+**Errors:** `409` when credential storage is locked. `503` when the key was saved but usage polling could not resume yet; the detail says what to do, then save again.
+
+### DELETE /api/v1/settings/integrations/fal-billing
+
+Remove the fal.ai Admin API key and its saved balance. The media key is not changed.
+
+**Auth:** Owner only
+
 ### POST /api/v1/settings/integrations/anthropic
 
-Save the Anthropic API key used by Claude Code.
+Save the Anthropic API key used by Claude Code. Body: `api_key` and optional `use_for_claude_code` (default `false`); `true` also switches Claude Code to API-key mode (see [claude-auth](#get-apiv1settingsclaude-auth)). Saving a key never changes the mode otherwise.
+
+The key is checked with a one-token request to Anthropic first. A key Anthropic rejects returns `400` and is not saved; a rate-limited check returns `429`. If Anthropic cannot be reached, the key is saved anyway. Returns `{"success": true, "masked_key": "sk-ant-...wxyz"}`.
 
 **Auth:** Owner only
 
@@ -791,6 +845,23 @@ Drop a held turn without running it. Returns `{"success": true}`, or `404`.
 
 **Auth:** Owner only
 
+### Import Claude and Codex settings
+
+Copy instructions, skills, agents, hooks, enabled Claude Code plugins, MCP server definitions and configured projects from a Claude Code or Codex home folder into AI Shuffle. This is the **Import settings** button in **Settings → Providers**. The source folder is only read, and credentials and session history are never read. An existing destination file is never overwritten (it shows as a conflict instead), except that imported hooks are merged into an existing hooks file. Secret-looking MCP values are replaced by `${VAR}` placeholders. Anything that cannot be imported, such as a plugin name that is not a plain `name@marketplace`, is listed with a diagnostic and skipped.
+
+**Auth:** Owner only
+
+| Method | Path | Body |
+|--------|------|------|
+| `POST` | `/api/settings/import/preview` | `source_home` (optional), `providers` (`claude`, `codex`; default both) |
+| `POST` | `/api/settings/import/apply` | `token` from the preview, `selected_item_ids`, and the same `source_home` and `providers` |
+
+These paths are outside `/api/v1`. The preview returns a `token`, the source and destination folders, `categories` of items (each with `id`, `label`, `status` and `selectable`), `conflicts` and `diagnostics`. Only items with `status` `ready` can be imported. Apply returns `imported`, `skipped`, `conflicts`, `errors` and `imported_projects`; a selected project folder is registered as an AI Shuffle project.
+
+Without `source_home` the server's own home folder is read. In Docker, `source_home` must be that folder (`/home/appuser`) or `/imports/provider-settings`; to import from another machine's home, bind-mount it read-only at `/imports/provider-settings`.
+
+**Errors:** `400` for a missing source folder, a source Docker does not allow, an unknown provider, or a selection with items that were not `ready` in the preview. `409` when the source or destination changed after the preview; preview again.
+
 ## Media Model Catalog
 
 The image, video, audio and 3D models available through your fal.ai key (see `POST /api/v1/settings/integrations/fal-ai`). The list is cached for an hour.
@@ -801,7 +872,7 @@ The image, video, audio and 3D models available through your fal.ai key (see `PO
 
 | Query | Description |
 |-------|-------------|
-| `q` | Search name, description or model id |
+| `q` | Search name, description, model id or tags |
 | `category` | fal.ai category, such as `text-to-image` |
 | `tool_type` | Tool type, such as `image_generation` |
 | `output_type` | `image`, `video`, `3d` or `audio` |
@@ -813,9 +884,11 @@ curl "http://localhost:8000/api/v1/catalog/models?output_type=video&q=kling" \
 
 Returns `models`, `total` (matches) and `catalog_size`. Each model has `endpoint_id`, `display_name`, `category`, `description`, `status`, `thumbnail_url`, `tags`, `group_key`, `group_label`, `updated_at`, `tool_type` and `output_type`.
 
+`tool_type` is the media tool the model can be chosen for: `image_generation`, `image_editing`, `video_generation`, `image_to_video`, `text_to_3d`, `image_to_3d`, `tts`, `stt`, `audio_generation` or `audio_to_audio`. A model whose fal.ai category maps to none of them has `tool_type` `generic`; no media tool setting uses it, so the model browser in settings shows it greyed out with "No tool uses this model". `output_type` is `null` when the category does not say what the model produces.
+
 ### GET /api/v1/catalog/categories
 
-Returns `categories` (each `category`, `count`, `tool_type`) and `total_models`.
+Returns `categories` (each `category`, `count`, `tool_type`, which can be `generic`) and `total_models`.
 
 ### GET /api/v1/catalog/schema
 
@@ -823,7 +896,7 @@ The input parameters of one model. Query: `endpoint_id` (required) and `refresh`
 
 ### POST /api/v1/catalog/refresh
 
-Reload the catalog from fal.ai now. Returns `success`, `models_fetched` and `categories`.
+Reload the catalog from fal.ai now. Returns `success`, `models_fetched` and `categories`. If fal.ai cannot be read, the cached catalog is kept and the response is `502` with `success: false`, `error`, `cached_models` (the number of cached models still served), `categories` and a `detail` message.
 
 ## Computer Use
 

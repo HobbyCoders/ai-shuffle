@@ -14,7 +14,7 @@ Every endpoint on this page except `GET /api/v1/models` and `POST /api/v1/model-
 
 ### The provider object
 
-Every endpoint that returns a provider returns this shape. Stored secrets are never returned: `auth_token_set` and `auth_token_masked` show whether an API key is stored, and `codex_access_token_set` / `codex_refresh_token_set` show whether a ChatGPT or Grok sign-in is stored.
+Every endpoint that returns a provider returns this shape. Stored secrets are never returned: `auth_token_set` and `auth_token_masked` show whether an API key is stored (the mask is the key's first 7 and last 4 characters, or `""` for a key under 22 characters), and `codex_access_token_set` / `codex_refresh_token_set` show whether a ChatGPT or Grok sign-in is stored.
 
 ```json
 {
@@ -24,7 +24,7 @@ Every endpoint that returns a provider returns this shape. Stored secrets are ne
   "base_url": "https://openrouter.ai/api",
   "api_dialect": null,
   "auth_token_set": true,
-  "auth_token_masked": "sk-o...9f2c",
+  "auth_token_masked": "sk-or-v...9f2c",
   "models": [{ "id": "openai/gpt-5.6", "label": "GPT-5.6", "context_window": 400000 }],
   "default_model": "openai/gpt-5.6",
   "small_fast_model": null,
@@ -281,7 +281,7 @@ curl -X POST http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a6
 
 ## Usage tracking keys
 
-Optional admin keys that let the app read account spend for a provider. Each key is stored encrypted and never returned; the responses only say whether one is configured and show the latest reading.
+Optional admin keys that let the app read account spend for a provider. Each key is stored encrypted and never returned; the responses only say whether one is configured and show the latest reading. Readings appear in [usage limits](/docs/api-reference/miscellaneous#usage-limits). The fal.ai billing key is saved under [settings](/docs/api-reference/miscellaneous#post-apiv1settingsintegrationsfal-billing) instead.
 
 **Auth:** Owner only for every endpoint in this section.
 

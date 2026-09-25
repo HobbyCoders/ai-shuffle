@@ -39,12 +39,12 @@ curl http://localhost:8000/api/v1/hooks/events \
 [
   "PreToolUse",
   "PostToolUse",
+  "Stop",
   "SessionStart",
   "SessionEnd",
-  "Stop",
   "UserPromptSubmit",
-  "SubagentStop",
   "PreCompact",
+  "SubagentStop",
   "Notification"
 ]
 ```
@@ -132,6 +132,8 @@ curl -X POST http://localhost:8000/api/v1/hooks/project/proj_abc123 \
 | `enabled` | boolean | No | Whether hook is active (default: true) |
 | `tool_matcher` | string | No | Tool name or regex the whole tool name must match (`PreToolUse`, `PostToolUse`). A pattern that is not a valid regex is compared as plain text |
 
+Returns `201` with the hook. Errors: `400` for an unknown `event`, a bash hook without `command` or a webhook hook without `url`; `404` if the project does not exist; `422` for `hook_type: "message"` or a field out of range.
+
 ### GET /api/v1/hooks/{hook_id}
 
 Get hook details.
@@ -140,7 +142,7 @@ Get hook details.
 
 ### PATCH /api/v1/hooks/{hook_id}
 
-Update a hook. All fields are optional.
+Update a hook. All fields are optional. Returns `400` for an unknown `event`, `404` if the hook does not exist, and `422` when changing a hook to `hook_type: "message"`.
 
 **Auth:** Owner only
 
@@ -181,6 +183,8 @@ Get all hooks contributed by installed plugins. These are read-only.
 
 **Auth:** Owner only
 
+Each entry has `plugin_id`, `plugin_name`, `event`, `hook_type` (`command` or `prompt`), `description` and `tool_matcher`.
+
 ## Bash Hook Input
 
 A `PreToolUse` bash hook receives the tool call as a JSON object on stdin:
@@ -212,7 +216,8 @@ A `Stop` bash hook gets the same variables, also with no stdin. `HOOK_DATA` hold
 
 - Each `HOOK_*` value is capped at 64 KiB. A longer `HOOK_<KEY>` value is cut and ends in `...[truncated]`.
 - `HOOK_DATA` is always valid JSON. When it would be too long, its longest strings are shortened, each ending in `...[truncated]`, and `"truncated": true` is added at the top level. A guard that reads `HOOK_DATA` should block when `truncated` is `true`.
-- Hook commands (bash hooks, `PreToolUse` guards and plugin hooks) do not inherit the app's secrets: `DATABASE_URL`, `PG*`, `OWNER_PASSWORD`, `SECRET_KEY` and names ending in `_TOKEN`, `_SECRET`, `_PASSWORD` or `_API_KEY` are removed, except model-provider keys, `FAL_KEY`, `GH_TOKEN` and `GITHUB_TOKEN`. List extra names to keep in `FLUID_CHILD_ENV_PASSTHROUGH` (comma separated).
+- A `PreToolUse` bash hook runs in the session's working directory. `Stop` hooks and hooks on the background events run in the app's working directory; `cwd` in `HOOK_DATA` names the session's.
+- Hook commands (bash hooks, `PreToolUse` guards and plugin hooks) do not inherit the app's secrets: `DATABASE_*`, `PG*`, `POSTGRES_*`, `OWNER_PASSWORD`, `SECRET_KEY` and names ending in `_TOKEN`, `_SECRET`, `_PASSWORD`, `_API_KEY`, `_PRIVATE_KEY`, `_ACCESS_KEY` or `_CREDENTIALS` are removed, except model-provider keys, `FAL_KEY`, `GH_TOKEN` and `GITHUB_TOKEN`. List extra names to keep in `FLUID_CHILD_ENV_PASSTHROUGH` (comma separated).
 
 ## Blocking a tool call
 
@@ -265,6 +270,8 @@ X-Hook-Signature: sha256=<hmac_hex_digest>  (if secret configured)
   }
 }
 ```
+
+Passwords in URLs anywhere in the body (for example `postgres://user:pass@db/app`) are replaced with `***` before sending, and the signature covers the body as sent.
 
 A `Stop` webhook can answer with a 2xx status and the body `{"decision": "block", "reason": "..."}` to keep the agent working. Other responses are ignored.
 
