@@ -184,7 +184,11 @@ def _categories(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         "agents": ("Agents", "Provider agent definitions translated into Fluid-native agents"),
         "configured_projects": ("Configured projects", "Existing projects available to register"),
         "mcp_servers": ("MCP servers", "Sanitized server definitions with secret fields omitted"),
-        "settings_plugins_inventory": ("Settings and plugins", "Inventory only; unsupported behavior is not activated"),
+        "settings_plugins_inventory": (
+            "Settings and plugins",
+            "Hooks, enabled Claude plugins and Codex model/approval settings are copied; "
+            "other settings are listed only",
+        ),
     }
     grouped: dict[str, list[dict[str, Any]]] = {key: [] for key in metadata}
     for item in items:

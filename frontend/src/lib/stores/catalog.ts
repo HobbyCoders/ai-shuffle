@@ -9,7 +9,7 @@
  * evaluation issues with Svelte 5 runes.
  */
 
-import { api } from '$lib/api/client';
+import { api, getErrorMessage } from '$lib/api/client';
 import type { CatalogModel, CatalogCategory } from '$lib/types/ai-models';
 
 // ─── State ───
@@ -98,7 +98,7 @@ export const catalogStore = {
 			_catalogSize = modelsRes.catalog_size;
 			_loaded = true;
 		} catch (e: unknown) {
-			_error = e instanceof Error ? e.message : 'Failed to load catalog';
+			_error = getErrorMessage(e, 'Failed to load catalog');
 			console.error('Catalog load failed:', e);
 		} finally {
 			_loading = false;
@@ -129,7 +129,7 @@ export const catalogStore = {
 			_models = modelsRes.models;
 			_loaded = true;
 		} catch (e: unknown) {
-			_error = e instanceof Error ? e.message : 'Failed to refresh catalog';
+			_error = getErrorMessage(e, 'Failed to refresh catalog');
 		} finally {
 			_loading = false;
 			_notify();

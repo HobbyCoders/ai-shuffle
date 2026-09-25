@@ -191,3 +191,29 @@ def test_codex_and_claude_project_registries_deduplicate(import_homes, monkeypat
     assert len(created) == 1
     assert created[0]["path"] == str(project.resolve())
     assert result["imported_projects"][0]["status"] == "imported"
+
+
+def test_settings_category_describes_what_apply_copies(import_homes) -> None:
+    """The dialog shows this description verbatim; hooks (and enabled plugins)
+    in the category are copied on apply, so it must not claim inventory only."""
+    source, destination = import_homes
+    hooks = {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "true"}]}]}
+    _write(source / ".claude" / "settings.json", json.dumps({"hooks": hooks, "theme": "dark"}))
+
+    preview = service.preview_import(source_home=str(source), providers=["claude"])
+    category = next(c for c in preview["categories"] if c["id"] == "settings_plugins_inventory")
+    assert "inventory only" not in category["description"].lower()
+    assert "hooks" in category["description"].lower()
+    assert "plugins" in category["description"].lower()
+    hooks_item = next(entry for entry in category["items"] if entry["selectable"])
+
+    result = service.apply_import(
+        token=preview["token"],
+        selected_item_ids=[hooks_item["id"]],
+        source_home=str(source),
+        providers=["claude"],
+    )
+
+    assert [entry["item_id"] for entry in result["imported"]] == [hooks_item["id"]]
+    written = json.loads((destination / ".fluid" / "hooks.json").read_text(encoding="utf-8"))
+    assert written.get("hooks", written) == hooks

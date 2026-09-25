@@ -49,9 +49,19 @@ class McpServerResponse(BaseModel):
     cli_flag: Optional[str] = None
 
 
+# Checked by the create handlers (not the schema) so an over-long name gets
+# the same 400 as the other name rules instead of a schema 422.
+MAX_SERVER_NAME_LENGTH = 64
+
+
 class McpServerCreateRequest(BaseModel):
     """Request to create a new MCP server"""
-    name: str = Field(..., description="Unique server name", min_length=1, max_length=64)
+    name: str = Field(
+        ...,
+        description=(
+            f"Unique server name: 1 to {MAX_SERVER_NAME_LENGTH} letters, digits, hyphens or underscores"
+        ),
+    )
     type: Literal["stdio", "sse", "http"] = Field("stdio", description="Server type: stdio, sse, or http")
     command: Optional[str] = Field(None, description="Command to execute (stdio only)")
     args: Optional[List[str]] = Field(None, description="Command arguments (stdio only)")
@@ -121,6 +131,14 @@ def _server_to_response(server: McpServerConfig) -> McpServerResponse:
     )
 
 
+def _create_errors(service, config: McpServerConfig) -> List[str]:
+    """Validation errors for a new server: the service rules plus the name length."""
+    errors = list(service.validate_server_config(config))
+    if len(config.name) > MAX_SERVER_NAME_LENGTH:
+        errors.append(f"Server name must be at most {MAX_SERVER_NAME_LENGTH} characters")
+    return errors
+
+
 def _request_to_config(
     name: str,
     request: McpServerCreateRequest,
@@ -187,7 +205,7 @@ async def add_global_mcp_server(
             config = _request_to_config(request.name, request, "user")
 
             # Validate
-            errors = service.validate_server_config(config)
+            errors = _create_errors(service, config)
             if errors:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -371,7 +389,7 @@ async def add_project_mcp_server(
             config = _request_to_config(request.name, request, request.scope)
 
             # Validate
-            errors = service.validate_server_config(config)
+            errors = _create_errors(service, config)
             if errors:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
