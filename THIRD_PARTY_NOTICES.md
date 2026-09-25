@@ -30,7 +30,7 @@ build.
 | Electron | Desktop installer | MIT, plus the Chromium and Node.js licenses in the Electron `LICENSES.chromium.html` file | https://github.com/electron/electron |
 
 The Docker image is built on Debian. Every Debian package in it, including
-git, tini, gosu, libpq and the packages above, carries its copyright and
+git, tini, libpq and the packages above, carries its copyright and
 license file under `/usr/share/doc/<package>/copyright`.
 
 ### cloudflared NOTICE

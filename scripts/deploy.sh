@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 #
-# Docker-host deploy for AI Shuffle (Phase 4.5). Pull (or build) the image,
-# bring the stack up, then poll /health/ready until the app is ready.
+# Docker-host deploy for AI Shuffle. Build (or pull) the image, bring the
+# stack up, then poll /health/ready until the app is ready.
+#
+# docker-compose.yml builds from source and names no registry image, so the
+# default is --build. --pull only helps after you add an image: line there.
 #
 # The native-Windows equivalent is scripts/deploy.ps1.
 #
 # Usage:
-#   scripts/deploy.sh                 # pull latest image + up -d + wait for ready
-#   scripts/deploy.sh --build         # build locally instead of pulling
+#   scripts/deploy.sh                 # build locally + up -d + wait for ready
+#   scripts/deploy.sh --pull          # pull the compose file's image instead of building
 #   scripts/deploy.sh --port 8000     # port to poll for readiness (default 8000)
 #   scripts/deploy.sh --timeout 120   # readiness timeout seconds (default 90)
 #   scripts/deploy.sh --dry-run       # print the commands, run nothing
@@ -17,7 +20,7 @@
 #
 set -euo pipefail
 
-MODE="pull"          # pull | build
+MODE="build"         # build | pull
 PORT=8000
 TIMEOUT=90
 DRY_RUN=0
@@ -29,7 +32,7 @@ while [ "$#" -gt 0 ]; do
     --port)         PORT="$2"; shift ;;
     --timeout)      TIMEOUT="$2"; shift ;;
     --dry-run)      DRY_RUN=1 ;;
-    -h|--help)      sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
   shift

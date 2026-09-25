@@ -160,7 +160,7 @@ try {
   const build = JSON.parse(await fs.readFile(path.join(worker, 'preview-build.json'), 'utf8'));
   assert.equal(build.sourceCommit, report.sourceCommit, 'Installer revision differs from checked-out candidate');
   for (const required of ['python/python.exe', 'node/node.exe', 'server/app/main.py',
-    'server/app/static/index.html', 'server/tools/dist/index.js', 'server/browser-mcp/dist/index.js']) {
+    'server/app/static/index.html', 'server/tools/dist/worker.js', 'server/browser-mcp/dist/index.js']) {
     assert(await exists(path.join(worker, required)), `Missing bundled resource: ${required}`);
   }
   await exec(path.join(worker, 'python', 'python.exe'), ['--version'], { timeout: 30000 });

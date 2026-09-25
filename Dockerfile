@@ -64,7 +64,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# ── System deps (git, curl for health check, gosu for UID/GID, gh CLI) ──
+# ── System deps (git, curl for health check, gh CLI) ──
 # ripgrep is not optional comfort: the agent's Grep tool falls back to a pure
 # Python scan without it, which is slow enough to dominate a session.
 RUN apt-get update && \
@@ -73,7 +73,6 @@ RUN apt-get update && \
     ca-certificates \
     gnupg \
     git \
-    gosu \
     ripgrep \
     tini \
     libpq-dev \
@@ -123,7 +122,6 @@ RUN node --version && npm --version && gh --version
 # full Google Chrome because full Chrome was consuming ~5GB RAM for a single tab
 # in this headless single-tab setup; Chromium is far leaner and behaves
 # identically for the CDP automation used here.
-ARG TARGETARCH
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends \
         chromium; \
@@ -164,7 +162,7 @@ RUN pip install --no-cache-dir --no-deps --no-build-isolation /opt/fluid && pyth
 # ── Backend code ──
 COPY --chown=appuser:appuser app/ ./app/
 
-# ── Maintenance / migration scripts (e.g. session-store backfill) ──
+# ── Maintenance / migration scripts (e.g. credential_keys, backup, usage backfills) ──
 COPY --chown=appuser:appuser scripts/ ./scripts/
 
 # ── Copy pre-built frontend assets from builder stage ──

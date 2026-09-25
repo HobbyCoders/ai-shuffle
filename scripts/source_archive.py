@@ -65,6 +65,9 @@ EXCLUDED = (
     "browser-mcp/test",
     "tools/stub_upstream",
     "tools/benchmark_sdk_latency.py",
+    "tools/research",
+    "tools/backup-db.sh",
+    "tools/restore-db.sh",
     "tools/ws_*_probe.py",
 )
 

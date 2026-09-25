@@ -57,6 +57,3 @@
 export * as imageGeneration from './image-generation/index.js';
 export * as videoGeneration from './video-generation/index.js';
 export * as model3dGeneration from './model3d-generation/index.js';
-
-// Export the client utilities
-export { callTool, getTool, uploadTool, getApiBaseUrl } from './client.js';

@@ -11,7 +11,10 @@ Download the Windows installer at <https://hobbycoders.com/desktop> and run it.
 For an existing installation, keep the same installation location. Continue using
 your normal AI Shuffle shortcut. The installer includes a ready-to-run app,
 Python, Node and PostgreSQL; startup does not need to build or download code.
-No account is needed for downloads or updates.
+Downloading the installer needs no account. In-app updates need an active AI
+Shuffle license while the hub's license gate is on: the app sends its worker's
+license lease, or on a first install asks once for the license key
+(`src/main/source-updates.ts`).
 
 Stable milestones include an NSIS installer, built by `desktop-installer.yml`.
 Between installers, the installed app downloads and builds signed release code
@@ -38,7 +41,8 @@ it stores the runtime-only source archive as an immutable asset in the private
 version, release notes and tree digest. It uses a standard
 GitHub-hosted runner and performs no application or installer build. The existing
 account-hub D1 database holds signed metadata and the GitHub asset ID. No R2
-subscription is needed. Downloads and updates are public and require no account.
+subscription is needed. Installer downloads are public; the update feed answers
+402 without a license lease or key while the hub's license gate is on.
 The existing hub streams only CI-published archives using its `DESKTOP_GITHUB_TOKEN` Worker secret,
 scoped to Contents: read on this repository. Clients never receive that GitHub
 credential or an upstream signed URL. The publisher uses the `ACCOUNT_HUB_DATABASE_ID` GitHub environment
@@ -57,8 +61,8 @@ but does not automatically run old code over a potentially migrated database.
 PostgreSQL major-version upgrades still require a deliberate data migration; never
 change the pinned major version without adding and testing that migration.
 
-The repository stays private, but each published desktop source ZIP is available
-to anyone through the hub. `source-auth.ts` is now a credential-free transport;
+The repository stays private; the hub serves each published desktop source ZIP
+(behind the license gate when it is on). `source-auth.ts` carries no GitHub credential;
 signature verification and local building remain independent of hosting.
 
 Existing installer-based versions need this installer upgrade once to gain the
@@ -148,7 +152,8 @@ hosted public downloads or GitHub download permissions.
   on the right. Feature pages lend their header actions to the strip through
   `$lib/stores/page-header.svelte`.
 - Native menu with the usual accelerators, native notifications, window
-  placement that survives restarts, and signed source updates from `main`.
+  placement that survives restarts, and signed source updates from the
+  **stable** channel (tagged releases).
 - The sidebar update button checks, downloads and prepares updates, then offers
   Update and restart. Preview builds keep their updates disabled.
 
@@ -163,7 +168,7 @@ ships under `resources/worker`:
 
 | Path | Contents |
 | --- | --- |
-| `python/` | CPython 3.12 from python-build-standalone, with `requirements.txt`, `requirements-native.txt` and the `fluid` harness installed into its site-packages (that includes the bundled Claude CLI) |
+| `python/` | CPython 3.12 from python-build-standalone, with `requirements.txt`, `requirements-native.txt` and the `fluid` harness installed into its site-packages. No Claude CLI is bundled: agents use the user's own `claude` install |
 | `node/` | Node.js 22 for the AI tools and the browser MCP server |
 | `server/app/` | the backend, with the built frontend in `app/static` |
 | `server/tools/`, `server/browser-mcp/` | the two Node packages, built, with production dependencies |
@@ -185,8 +190,8 @@ The database lives in `<userData>/postgres/data` (for example
 `~/Library/Application Support/AI Shuffle/postgres/data` on macOS,
 `~/.config/AI Shuffle/postgres/data` on Linux) and the server log next to the
 worker's under `<userData>/logs/postgres.log`. To back up AI Shuffle, back up
-that data directory with the app closed (or use `pg_dump` from
-`resources/postgres/bin` against the connection in `<userData>/worker/.env`).
+that data directory with the app closed. The worker's `.env` carries no database
+credentials (see above), so it cannot be used for a manual `pg_dump`.
 Uninstalling the app leaves the data directory in place.
 
 Optional tools the worker looks for on PATH, as on any native install: the
@@ -260,5 +265,5 @@ assembles a real one on Linux.
 See [RELEASING.md](RELEASING.md): which workflow builds which installer,
 Windows Authenticode, macOS Developer ID signing and notarization, unsigned
 Linux packages with checksums, every GitHub secret involved, and how update
-checks work. Installed Windows apps update in place from signed `main` source
-(above); macOS and Linux installers are rebuilt and downloaded again.
+checks work. Installed Windows apps update in place from signed stable-channel
+source (above); macOS and Linux installers are rebuilt and downloaded again.

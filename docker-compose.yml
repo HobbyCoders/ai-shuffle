@@ -4,12 +4,9 @@
 # Requires Docker Compose >= 2.24 for the optional env_file.
 services:
   ai-shuffle:
-    # Use pre-built image from GitHub Container Registry
-    # Replace <your-username> with your GitHub username
-    # Or comment out 'image' and uncomment 'build' to build locally
-    # image: ghcr.io/<your-username>/ai-shuffle:latest
-
-    # Build locally (recommended for development)
+    # This file builds from source for development. Buyers use the compose file
+    # in docs/content/getting-started/install-docker-compose.md, which pulls the
+    # published image.
     build:
       context: .
       dockerfile: Dockerfile
@@ -29,11 +26,8 @@ services:
       # on a new install. See docs/network/migration.md.
       - INSTANCE_ID=${INSTANCE_ID:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
-      - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}
       - PUID=${PUID:-99}
       - PGID=${PGID:-100}
-      # Delegated Claude CLI stream-close timeout in ms.
-      - CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=${CLAUDE_CODE_STREAM_CLOSE_TIMEOUT:-120000}
       # Git identity used for commits made inside the container. Seeded into
       # appuser's global gitconfig at startup ONLY when it is unset, so an
       # identity you set yourself in the mounted config always wins.
