@@ -1981,6 +1981,15 @@ def _run_column_migrations(cursor):
         "CREATE INDEX IF NOT EXISTS idx_turns_session_state ON turns(session_id, state)"
     )
 
+    # Latest generated composer hint; retained even with no watching browser.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS composer_suggestions (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+            suggestion TEXT NOT NULL
+        )
+    """)
+
     # One-time seed: carry every existing queued_messages row into turns as a
     # source='queue' queued turn, preserving order via position. queued_messages
     # is left in place, frozen (dropped in a later deletion PR). Deterministic

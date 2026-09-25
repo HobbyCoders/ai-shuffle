@@ -1896,6 +1896,15 @@ def create_postgres_schema(cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_turns_session_state ON turns(session_id, state)"
     )
 
+    # Latest generated composer hint; retained even with no watching browser.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS composer_suggestions (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+            suggestion TEXT NOT NULL
+        )
+    """)
+
     # ------------------------------------------------------------------
     # 57. git_ops — the durable cross-install git-operation queue (D5).
     #

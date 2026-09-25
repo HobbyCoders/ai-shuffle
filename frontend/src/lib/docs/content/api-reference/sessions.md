@@ -8,6 +8,23 @@ order: 2
 
 Endpoints for managing chat sessions — listing, searching, creating, updating, deleting, exporting, and importing.
 
+## Read the Suggested Next Reply
+
+### GET /api/v1/sessions/{session_id}/composer-suggestion
+
+**Auth:** Required, with the same session access checks as session detail.
+
+Returns `{ "session_id": "…", "turn_id": "…", "suggestion": "…" }`, or `null`
+when no current eligible suggestion is available. This read never calls a model.
+
+With **Settings → Chat behavior → Suggest next reply** enabled, the latest generated
+hint is saved per code session, even if no browser is watching. The empty composer
+loads it on return/reconnect and after a turn completes. Switching sessions or
+reloading does not regenerate it. A newer turn, a cleared/rewound answer, or disabling
+the feature prevents the stale hint from being shown. An existing draft is never
+replaced. Clicking the gray hint or pressing Tab/Enter accepts it into the draft;
+it does not send the message. Escape dismisses it for that browser's current visit.
+
 ## List Sessions
 
 ### GET /api/v1/sessions
