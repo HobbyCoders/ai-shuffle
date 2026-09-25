@@ -677,6 +677,14 @@ class SessionRuntime:
         # ``_finalize`` so an undelivered steer is free to be tried again by
         # whatever turn comes next.
         self._steer_attempted: set = set()
+        # Set as ``_finalize`` starts: from then on nothing may be submitted into
+        # this turn. The runtime stays registered as live until ``execute``'s
+        # outer finally, so a send (or the start-window sweep) can still reach
+        # ``steer_pending`` after ``_steer_attempted`` was cleared — and would
+        # hand a still-queued row to an engine that is ending the turn (or has
+        # already started the next one on the same pooled client), or register
+        # a task notification after ``_strand_task_steers`` ran, losing it.
+        self._steering_closed = False
         # Queued rows this turn actually SWALLOWED: row id → (perf_counter absorb
         # time, the row as it was). Populated by ``_on_steer_delivered`` on the
         # transition that retires the row, read once by ``_finalize`` to decide
@@ -1514,6 +1522,8 @@ class SessionRuntime:
 
         Returns how many rows were submitted.
         """
+        if self._steering_closed:
+            return 0
         adapter = self._live_adapter()
         if adapter is None:
             return 0
@@ -1538,6 +1548,9 @@ class SessionRuntime:
 
         submitted = 0
         for row in rows:
+            if self._steering_closed:
+                # The turn began finalizing during an await above.
+                break
             if row.get("source") not in _STEERABLE_SOURCES:
                 continue
             if not self._steer_eligible(row):
@@ -1553,7 +1566,11 @@ class SessionRuntime:
                 await adapter.steer(prompt, id=row_id)
             except NotImplementedError:
                 # A backend with no mid-turn channel at all — stop asking for
-                # the rest of this turn.
+                # the rest of this turn. Nothing was sent, so the row is not
+                # "attempted": left in the set, ``cancel_steer`` would ask the
+                # engine to recall it, the inert default would say False, and
+                # the user's × would read as "delivered" and keep the chip.
+                self._steer_attempted.discard(row_id)
                 logger.debug(
                     "SessionRuntime: adapter cannot steer %s — leaving the "
                     "queue to the drain", self.session_id,
@@ -1615,6 +1632,10 @@ class SessionRuntime:
                 "SessionRuntime: %s is being interrupted — leaving the task "
                 "notification to the at-rest wake", self.session_id,
             )
+            return False
+        if self._steering_closed:
+            # ``_strand_task_steers`` already ran: registered now, the
+            # notification would never be handed back. The wake owns it.
             return False
         self._task_steers[notification_id] = {
             "frames": list(frames or []),
@@ -2102,6 +2123,7 @@ class SessionRuntime:
         # this runtime submitted but never saw receipted was dropped by the
         # engine at turn end; its row is still ``queued`` and the settle-drain
         # below runs it as an ordinary turn.
+        self._steering_closed = True
         self._steer_attempted.clear()
         # A task notification is the exception: it has no queue row behind it,
         # so an undelivered one has to be handed back to the scheduler or the
@@ -2255,6 +2277,13 @@ class SessionRuntime:
                     await record_parked(sid, task_ids)
                 except Exception:
                     logger.debug("SessionRuntime: record_parked failed for %s", sid, exc_info=True)
+            if self._terminal != "done":
+                # An interrupted or errored turn with background work parks
+                # instead of aborting, but it swallowed a steer just the same:
+                # put it back so it runs next (a queued turn starts while a
+                # prior one is parked) rather than sitting unanswered until
+                # the background work finishes.
+                await self._requeue_stranded_steers(sid)
             return "parked", parked is not None
 
         # A runner that lost its lease settles the row only while it is still
