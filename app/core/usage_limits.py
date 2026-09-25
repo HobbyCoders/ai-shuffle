@@ -56,6 +56,8 @@ class UsageLimitsMonitor:
         # Invalidated on our own persist so local changes are never masked.
         self._cluster_cache: Optional[tuple[float, List[Dict[str, Any]]]] = None
         self._refresh_task: asyncio.Task | None = None
+        # Monotonic start of the last refresh, for the forced-refresh cooldown.
+        self._refresh_started: float | None = None
 
     def current_generation(self) -> int:
         return self._generation
@@ -76,14 +78,23 @@ class UsageLimitsMonitor:
     def refreshing(self) -> bool:
         return self._refresh_task is not None and not self._refresh_task.done()
 
-    def request_refresh(self) -> asyncio.Task | None:
-        """Start (or join) the single background refresh + broadcast."""
+    def request_refresh(self, cooldown: float = 0.0) -> asyncio.Task | None:
+        """Start (or join) the single background refresh + broadcast.
+
+        Returns None without refreshing within ``cooldown`` seconds of the last
+        refresh: the windows only change through live events, which persist and
+        broadcast on their own.
+        """
         if self.refreshing:
             return self._refresh_task
+        now = time.monotonic()
+        if self._refresh_started is not None and now - self._refresh_started < cooldown:
+            return None
         try:
             self._refresh_task = asyncio.create_task(self._refresh_quietly())
         except RuntimeError:
             return None
+        self._refresh_started = now
         return self._refresh_task
 
     async def _refresh_quietly(self) -> None:
@@ -293,7 +304,11 @@ class UsageLimitsMonitor:
         # (above 1 when over the limit); the snapshot carries 0-100 REMAINING.
         util = 100.0 - min(100.0, max(0.0, util * 100))
 
-        updated = {"type": rate_limit_type, "utilization": util, "resets_at": resets_at}
+        now = time.time()
+        # Each event observes one window; ``observed_at`` (epoch ms) lets
+        # clients tell a fresh window from one last reported long ago.
+        updated = {"type": rate_limit_type, "utilization": util, "resets_at": resets_at,
+                   "observed_at": int(now * 1000)}
         replaced = False
         changed = True
         for i, w in enumerate(self._windows):
@@ -307,10 +322,10 @@ class UsageLimitsMonitor:
         if not replaced:
             self._windows.append(updated)
         self._available = True
-        self._fetched_at = time.time()
+        self._fetched_at = now
         if not changed:
             return None
-        self._generation = max(self._generation + 1, int(time.time()))
+        self._generation = max(self._generation + 1, int(now))
         return self._snapshot()
 
     async def _broadcast(self, snapshot: Dict[str, Any]) -> None:

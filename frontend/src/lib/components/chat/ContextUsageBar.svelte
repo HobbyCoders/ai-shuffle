@@ -73,6 +73,7 @@
 		remainingFromUsedPct,
 		formatCountdown,
 		formatAsOf,
+		bucketObservedAt,
 		isBucketStale,
 		parseResetMs,
 		resolveBucket,
@@ -838,7 +839,7 @@
 							</div>
 						{/each}
 						{#if resolvedBucket && isBucketStale(resolvedBucket, now)}
-							<div class="row-reset usage-as-of">Updated {formatAsOf(resolvedBucket.fetchedAt, now)}</div>
+							<div class="row-reset usage-as-of">Updated {formatAsOf(bucketObservedAt(resolvedBucket), now)}</div>
 						{/if}
 					{:else}
 						<div class="row-reset no-data">No usage data yet. Claude Code reports it while an agent runs.</div>
@@ -955,7 +956,8 @@
 						<div class="row-reset usage-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits`, text: credits }}></div>
 					{/if}
 					{#if pb.status === 'stale' && pb.fetchedAt != null}
-						<div class="row-reset usage-as-of">Updated {formatAsOf(pb.fetchedAt, now)}</div>
+						{@const nextCheck = pb.cooldownUntil != null ? formatCountdown(String(pb.cooldownUntil), now) : ''}
+						<div class="row-reset usage-as-of">Updated {formatAsOf(pb.fetchedAt, now)}{nextCheck ? ` · next check in ${nextCheck}` : ''}</div>
 					{/if}
 				{/if}
 			{/each}

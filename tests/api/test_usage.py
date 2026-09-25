@@ -64,6 +64,24 @@ class TestUsageLimitsEndpoint:
         # New cluster fields present.
         assert body["snapshots"] == []
         assert body["self_instance_id"] == "local-1"
+        # Windows persisted before per-window dating carry no observed_at.
+        assert body["windows"][0]["observed_at"] is None
+
+    def test_windows_carry_their_own_observation_time(self):
+        snapshot = {
+            "windows": [{"type": "five_hour", "utilization": 12.0, "observed_at": 1_700_000_000_000}],
+            "fetched_at": 1_700_000_100.0, "available": True, "generation": 1,
+            "snapshots": [{"instance_id": "local-1", "windows": [
+                {"type": "seven_day", "utilization": 50.0, "observed_at": 1_600_000_000_000}],
+                "fetched_at": 1_700_000_100_000, "available": True}],
+            "self_instance_id": "local-1",
+        }
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=snapshot)
+            body = _client().get("/api/v1/usage/limits").json()
+        assert body["windows"][0]["observed_at"] == 1_700_000_000_000
+        assert body["snapshots"][0]["windows"][0]["observed_at"] == 1_600_000_000_000
+
     def test_accepts_int_epoch_resets_at(self):
         """Newer Claude CLI usage payloads carry ``resets_at`` as int epoch
         seconds; cross-install rows persisted that way can't be retro-fixed, so
@@ -373,7 +391,7 @@ class TestUsageLimitsProviders:
             response = _client().get("/api/v1/usage/limits?refresh=true")
         assert response.status_code == 200
         assert response.json()["provider_refreshing"] is True
-        cached_provider_poll.request_refresh.assert_called_once_with(force=True)
+        cached_provider_poll.request_refresh.assert_called_once_with(force=True, cooldown=30)
         cached_provider_poll.poll_once.assert_not_called()
 
     @pytest.mark.parametrize("balance", [None, 0.0, 12.5])
@@ -684,9 +702,10 @@ class TestUsageLimitsProviders:
         providers = resp.json()["providers"]
         assert providers == []
 
-    def test_provider_load_exception_yields_empty_providers_with_200(self):
-        """A DB hiccup inside _load_provider_usage degrades to providers: [] and
-        must NOT turn the endpoint into an error or drop Claude fields."""
+    def test_provider_load_exception_yields_null_providers_with_200(self):
+        """A DB hiccup inside _load_provider_usage degrades to providers: null
+        (clients keep their last-good rows instead of blanking) and must NOT
+        turn the endpoint into an error or drop Claude fields."""
         with patch("app.api.usage.usage_limits_monitor") as mon, patch(
             "app.db.database.get_all_provider_usage_snapshots",
             side_effect=RuntimeError("db down"),
@@ -697,7 +716,7 @@ class TestUsageLimitsProviders:
         assert resp.status_code == 200
         body = resp.json()
         _assert_claude_fields_unchanged(body)
-        assert body["providers"] == []
+        assert body["providers"] is None
 
 
 class TestCachedUsageToolSnapshot:

@@ -1479,6 +1479,27 @@ describe('feedController usage ownership (W7)', () => {
 		};
 	}
 
+	it('keeps the output row a session total across per-call usage records', () => {
+		const deps = makeDeps({ totalTokensOut: 900 }); // seeded from /live
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		// Per-call records (partial while streaming) never replace the total.
+		hoisted.onEvent!(turnUsage(1, 100));
+		flushRaf();
+		expect(deps.state.totalTokensOut).toBe(900);
+		const completed = (seq: number, tokensOut: number) => ({
+			type: 'turn.completed', id: `evt-done-${seq}`, seq, session_id: 's1',
+			created_at: '2026-07-12T00:00:00.000Z', usage: { tokens_in: 10, tokens_out: tokensOut },
+		});
+		hoisted.onEvent!(completed(2, 400));
+		hoisted.onEvent!(turnUsage(3, 120));
+		hoisted.onEvent!(completed(4, 250));
+		flushRaf();
+		// The replayed log sums every completed turn (was: the last call's 1).
+		expect(deps.state.totalTokensOut).toBe(650);
+	});
+
 	it('claims the usage fields only once a turn.usage has been folded', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);

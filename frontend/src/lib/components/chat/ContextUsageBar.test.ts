@@ -935,6 +935,37 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Updated 2d ago');
 	});
 
+	it('keeps the as-of line when a live event refreshes only one window', async () => {
+		const twoDaysAgo = Date.now() - 2 * 86_400_000;
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [{ instance_id: 'self', available: true, fetched_at: twoDaysAgo,
+				windows: [
+					{ type: 'five_hour', utilization: 42, resets_at: future(), observed_at: twoDaysAgo },
+					{ type: 'seven_day', utilization: 60, resets_at: future(), observed_at: twoDaysAgo },
+				] }],
+		});
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.5, resets_at: future(), instance_id: 'self' });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		// The weekly window is still two days old.
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Updated 2d ago');
+	});
+
+	it('keeps a stale provider reading on screen with when it can next refresh', async () => {
+		const fetched = Date.now() - 10 * 60_000;
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'or', provider_type: 'openrouter', provider_name: 'Router', status: 'stale',
+				last_error_kind: 'unavailable', credits: { usage: 2, limit: 10 }, fetched_at: fetched,
+				cooldown_until: Date.now() + 125_000 },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.usage-as-of')?.textContent).toMatch(
+			/^Updated 10m ago · next check in 2m \d+s$/
+		);
+	});
+
 	it('lists all windows with humanised labels on open', async () => {
 		rateLimit.applySnapshot({
 			available: true,

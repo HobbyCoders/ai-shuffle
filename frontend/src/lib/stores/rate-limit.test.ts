@@ -26,6 +26,7 @@ import {
 	resolveBucketKey,
 	selfBucketKey,
 	isBucketStale,
+	bucketObservedAt,
 	BUCKET_STALE_MS,
 	windowLabel,
 	displayWindows,
@@ -50,6 +51,16 @@ it('retains provider freshness metadata and cached credit timestamps independent
 	expect(rateLimit.current.providerBuckets.api).toMatchObject({ status: 'stale', lastErrorKind: 'missing_credentials', fetchedAt: 123, credits: { balance_remaining: 42 } });
 	rateLimit.applySnapshot({ windows: [], available: false });
 	expect(rateLimit.current.providerBuckets.api.credits).toEqual({ balance_remaining: 42 });
+});
+
+it('keeps last-good provider rows while the backend cannot read them, with the cooldown', () => {
+	rateLimit.applySnapshot({ windows: [], available: false, providers: [
+		{ provider_id: 'or', status: 'fresh', fetched_at: 1_000, cooldown_until: 301_000, credits: { usage: 2 } },
+	] });
+	expect(rateLimit.current.providerBuckets.or).toMatchObject({ cooldownUntil: 301_000, credits: { usage: 2 } });
+	// A failed read reports null (not []): the panel must not blank.
+	rateLimit.applySnapshot({ windows: [], available: false, providers: null });
+	expect(rateLimit.current.providerBuckets.or.credits).toEqual({ usage: 2 });
 });
 
 function selfBucket() {
@@ -447,7 +458,7 @@ describe('rateLimit.applyLiveEvent — routing by instance_id', () => {
 		expect(selfBucket()!.windows.five_hour.utilization).toBe(0);
 	});
 
-	it('refreshes the bucket timestamp on every live event, even with unchanged values', () => {
+	it('dates the live window on every event, even with unchanged values', () => {
 		vi.useFakeTimers();
 		try {
 			const start = new Date('2026-01-01T00:00:00Z').getTime();
@@ -468,7 +479,61 @@ describe('rateLimit.applyLiveEvent — routing by instance_id', () => {
 			// Same reading as the snapshot (0.25 used → 75 left): still counts as fresh data.
 			rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.25, resets_at: resetsAt, instance_id: 'primary' });
 			expect(selfBucket()!.windows.five_hour.utilization).toBe(75);
-			expect(selfBucket()!.fetchedAt).toBe(later);
+			expect(selfBucket()!.windows.five_hour.received_at).toBe(later);
+			expect(isBucketStale(selfBucket()!, later)).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('keeps the other windows stale when a live event refreshes one of them', () => {
+		vi.useFakeTimers();
+		try {
+			const start = new Date('2026-01-01T00:00:00Z').getTime();
+			vi.setSystemTime(start);
+			rateLimit.applySnapshot({
+				available: true,
+				windows: [],
+				self_instance_id: 'primary',
+				snapshots: [
+					{
+						instance_id: 'primary', available: true, fetched_at: start,
+						windows: [
+							{ type: 'five_hour', utilization: 75, resets_at: future() },
+							{ type: 'seven_day', utilization: 40, resets_at: future() },
+						],
+					},
+				],
+			});
+			const later = start + BUCKET_STALE_MS + 60_000;
+			vi.setSystemTime(later);
+			rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.3, resets_at: future(), instance_id: 'primary' });
+			// Before: the event set the whole bucket's fetchedAt, hiding the week's age.
+			expect(selfBucket()!.fetchedAt).toBe(start);
+			expect(bucketObservedAt(selfBucket()!)).toBe(start);
+			expect(isBucketStale(selfBucket()!, later)).toBe(true);
+
+			// The backend's broadcast after the event dates each window itself, so
+			// the snapshot's newer fetched_at does not freshen the weekly window.
+			rateLimit.applySnapshot({
+				available: true,
+				windows: [],
+				self_instance_id: 'primary',
+				snapshots: [
+					{
+						instance_id: 'primary', available: true, fetched_at: later, generation: 99,
+						windows: [
+							{ type: 'five_hour', utilization: 70, resets_at: future(), observed_at: later },
+							{ type: 'seven_day', utilization: 40, resets_at: future(), observed_at: start },
+						],
+					},
+				],
+			});
+			expect(selfBucket()!.windows.seven_day.received_at).toBe(start);
+			expect(isBucketStale(selfBucket()!, later)).toBe(true);
+
+			// Once every window has been reported recently the bucket is fresh.
+			rateLimit.applyLiveEvent({ rate_limit_type: 'seven_day', utilization: 0.6, resets_at: future(), instance_id: 'primary' });
 			expect(isBucketStale(selfBucket()!, later)).toBe(false);
 		} finally {
 			vi.useRealTimers();

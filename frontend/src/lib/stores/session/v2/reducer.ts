@@ -67,6 +67,10 @@ export interface V2SessionState {
 	 *  refresh per model call instead of polling. Null until a snapshot
 	 *  arrives; a `turn.usage` without one leaves the previous value in place. */
 	contextUsage: Record<string, unknown> | null;
+	/** Session output tokens: the sum of every `turn.completed` usage
+	 *  `tokens_out`. `turn.usage` records are per model call, partial while
+	 *  streaming and coalesced, so they cannot be summed. */
+	outputTokensTotal: number;
 	lastSeq: number;
 	/** Deterministic bookkeeping: id of the currently-open streaming text /
 	 *  thinking message for the active turn (null = none open). Derived purely
@@ -155,6 +159,7 @@ export function initialState(): V2SessionState {
 		activeTaskSummaries: [],
 		usage: null,
 		contextUsage: null,
+		outputTokensTotal: 0,
 		lastSeq: 0,
 		openTextId: null,
 		openThinkingId: null,
@@ -662,6 +667,12 @@ function obj(v: unknown): Record<string, unknown> | undefined {
 	return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 }
 
+/** A completed turn's output tokens (`turn.completed` usage `tokens_out`), else 0. */
+function turnOutputTokens(usage: unknown): number {
+	const out = obj(usage)?.tokens_out;
+	return typeof out === 'number' && Number.isFinite(out) && out > 0 ? out : 0;
+}
+
 // ─── Task-notification parsing ────────────────────────────────────────────────
 // Background-task wake turns persist their synthesized prompt as a
 // `message.user` event whose body is one or more `<task-notification>` XML
@@ -923,6 +934,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					pendingPumpAck: null,
 					pumpAckBuffer: '',
 					usage: obj(event.usage) ?? state.usage,
+					outputTokensTotal: (state.outputTokensTotal ?? 0) + turnOutputTokens(event.usage),
 				})
 			);
 			// A retry card left mid-count is finished business now — the turn

@@ -964,6 +964,43 @@ def _allowlisted_fal_raw(payload: Mapping[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in raw.items() if k in _FAL_RAW_FIELDS}
 
 
+# A user-forced refresh (popover open, ``refresh=true``) starts at most one poll
+# pass per this many seconds, and a pass skips any snapshot another worker
+# refreshed or attempted within it. The per-credential request budget in
+# ``usage_polling`` remains the upstream limit; this bounds the work around it
+# (DB reads, decryption, budget claims and coordinator round trips).
+FORCED_REFRESH_COOLDOWN_SECONDS = 30
+_POLLED_SNAPSHOT_TYPES = frozenset(
+    s.snapshot_type for s in usage_sources.SOURCES.values() if s.poller and s.snapshot_type != "openai"
+)
+
+
+def last_touch_ms(snapshot: Mapping[str, Any]) -> int | None:
+    """Epoch ms of a snapshot's last polled success or failed attempt, if any.
+
+    OpenAI rows also take passive header captures, which move ``fetched_at``
+    on every inference; their polled reading is ``billing_fetched_at``.
+    """
+    raw = snapshot.get("raw") if isinstance(snapshot.get("raw"), dict) else {}
+    times = [raw.get("usage_attempted_at"), raw.get("billing_fetched_at")]
+    if snapshot.get("provider_type") in _POLLED_SNAPSHOT_TYPES:
+        times.append(snapshot.get("fetched_at"))
+    times = [t for t in times if isinstance(t, (int, float)) and not isinstance(t, bool)]
+    return int(max(times)) if times else None
+
+
+def _snapshot_id(source: usage_sources.UsageSource, row: Mapping[str, Any] | None) -> str | None:
+    """The ``provider_usage_snapshots`` row a source's poller writes."""
+    if source.id == "fal_billing":
+        return FAL_USAGE_PROVIDER_ID
+    provider_id = (row or {}).get("id")
+    if source.id == "openrouter_credits" and provider_id:
+        from app.core.openrouter_usage import SNAPSHOT_PREFIX
+
+        return SNAPSHOT_PREFIX + str(provider_id)
+    return provider_id
+
+
 class ProviderUsageMonitor:
     """Fetches provider usage through credential-scoped, persistent request budgets.
 
@@ -976,6 +1013,9 @@ class ProviderUsageMonitor:
     def __init__(self) -> None:
         self._poll_task: Optional[asyncio.Task] = None
         self._last_poll_finished: Optional[float] = None
+        # Seconds within which the running pass treats a snapshot as just
+        # refreshed (0 for credential saves, which must probe the new key).
+        self._recent_window: float = FORCED_REFRESH_COOLDOWN_SECONDS
 
     def start(self) -> None:
         # Account refreshes are demand-driven. Never launch billing browser tabs.
@@ -991,12 +1031,20 @@ class ProviderUsageMonitor:
     def refreshing(self) -> bool:
         return self._poll_task is not None and not self._poll_task.done()
 
-    def request_refresh(self, force: bool = False) -> Optional[asyncio.Task]:
+    def request_refresh(self, force: bool = False, *, cooldown: float = 0.0) -> Optional[asyncio.Task]:
+        """Start (or join) one poll pass.
+
+        Unforced reads start a pass at most every 300 s. A forced refresh skips
+        that spacing but still waits ``cooldown`` seconds after the last pass
+        (user-initiated refreshes pass ``FORCED_REFRESH_COOLDOWN_SECONDS``;
+        credential saves pass 0 so a new key is probed at once).
+        """
         if self.refreshing:
             return self._poll_task
-        if not force and self._last_poll_finished is not None:
-            if time.monotonic() - self._last_poll_finished < 300:
-                return None
+        spacing = cooldown if force else 300
+        if self._last_poll_finished is not None and time.monotonic() - self._last_poll_finished < spacing:
+            return None
+        self._recent_window = cooldown if force else FORCED_REFRESH_COOLDOWN_SECONDS
         self._poll_task = asyncio.create_task(self._run_poll())
         return self._poll_task
 
@@ -1024,6 +1072,16 @@ class ProviderUsageMonitor:
             logger.debug("Provider usage poll: provider read skipped")
             rows = []
 
+        # The snapshot timestamp is the cross-worker coordination point: a
+        # snapshot another worker (or an earlier pass) wrote or attempted within
+        # the cooldown is served as is, without a budget claim.
+        try:
+            snapshots = await run_sync(db.get_all_provider_usage_snapshots)
+        except Exception:  # noqa: BLE001 — an unreadable cache never blocks a poll
+            snapshots = []
+        cutoff = (time.time() - self._recent_window) * 1000
+        cooling = {s.get("provider_id") for s in snapshots or [] if (last_touch_ms(s) or 0) > cutoff}
+
         semaphore = asyncio.Semaphore(4)
 
         async def bounded(fn, *args):
@@ -1037,10 +1095,12 @@ class ProviderUsageMonitor:
         # The registry decides which sources apply to which rows; this loop
         # only schedules them. Rows no source applies to (xAI API keys, custom
         # hosts, Claude API keys) have no polled usage.
-        jobs = [bounded(getattr(self, source.poller)) for source in usage_sources.global_sources()]
+        jobs = [bounded(getattr(self, source.poller)) for source in usage_sources.global_sources()
+                if _snapshot_id(source, None) not in cooling]
         for row in rows or []:
             for source in usage_sources.polled_sources(row or {}):
-                jobs.append(bounded(getattr(self, source.poller), row))
+                if _snapshot_id(source, row) not in cooling:
+                    jobs.append(bounded(getattr(self, source.poller), row))
         await asyncio.gather(*jobs, return_exceptions=True)
 
     async def _poll_openrouter_account(self, row: Dict[str, Any]) -> None:
@@ -1368,6 +1428,24 @@ class ProviderUsageMonitor:
                                    expected_credential_generation=generation)
                 except Exception:
                     logger.debug("Could not persist fal.ai billing failure")
+
+
+async def note_banked_reset(provider_id: str, result: Any) -> None:
+    """Drop the exhausted windows a consumed banked reset refilled.
+
+    The consume response says how many windows were reset but not which, so
+    only windows already at 100% used are cleared; the next reading (Codex
+    headers on the next inference, the next budgeted SuperGrok poll) restores
+    the full set. Best-effort: never fails the consume request.
+    """
+    if not isinstance(result, Mapping) or result.get("outcome") != "reset":
+        return
+    from app.db.provider_usage_snapshots import clear_exhausted_provider_windows
+
+    try:
+        await run_sync(clear_exhausted_provider_windows, provider_id)
+    except Exception:  # noqa: BLE001 — the reset itself already succeeded
+        logger.debug("Could not clear reset usage windows for %s", provider_id)
 
 
 provider_usage_monitor = ProviderUsageMonitor()

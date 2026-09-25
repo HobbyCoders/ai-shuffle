@@ -101,6 +101,19 @@ class TestLiveEvents:
         snap = monitor.apply_live_event("five_hour", 1.05, "1900000000")
         assert snap["windows"][0]["utilization"] == 0.0
 
+    def test_event_dates_only_its_own_window(self, monitor):
+        # The snapshot's fetched_at moves with any window; observed_at does not.
+        old = int(time.time() * 1000) - 86_400_000
+        monitor._windows = [{"type": "seven_day", "utilization": 60.0, "resets_at": None,
+                             "observed_at": old}]
+        before = int(time.time() * 1000)
+        monitor.apply_live_event("five_hour", 0.5, None)
+        # An unchanged repeat is not persisted but still dates the window.
+        monitor.apply_live_event("five_hour", 0.5, None)
+        windows = {w["type"]: w for w in monitor._snapshot()["windows"]}
+        assert windows["seven_day"]["observed_at"] == old
+        assert windows["five_hour"]["observed_at"] >= before
+
     def test_ignores_incomplete_event(self, monitor):
         assert monitor.apply_live_event(None, 5.0, "x") is None
         assert monitor.apply_live_event("five_hour", None, "x") is None

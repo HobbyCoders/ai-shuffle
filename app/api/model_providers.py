@@ -1218,7 +1218,13 @@ async def codex_consume_rate_limit_reset_credit(
             client=client,
         )
 
-    return await _codex_reset_request_with_refresh(provider_id, _request)
+    result = await _codex_reset_request_with_refresh(provider_id, _request)
+    # Clear the exhausted window the reset refilled so the usage panel does
+    # not keep showing it until the next reading.
+    from app.core.provider_usage import note_banked_reset
+
+    await note_banked_reset(provider_id, result)
+    return result
 
 
 # ============================================================================
@@ -1384,7 +1390,13 @@ async def grok_consume_rate_limit_reset_credit(
             client=client,
         )
 
-    return await _grok_reset_request_with_refresh(provider_id, _request)
+    result = await _grok_reset_request_with_refresh(provider_id, _request)
+    # Clear the exhausted window the reset refilled so the usage panel does
+    # not keep showing it until the next reading.
+    from app.core.provider_usage import note_banked_reset
+
+    await note_banked_reset(provider_id, result)
+    return result
 
 
 # ============================================================================

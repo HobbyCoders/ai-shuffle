@@ -398,7 +398,6 @@ function deriveUsageFields(usage: Record<string, unknown> | null): Partial<Activ
 	const num = (k: string): number | undefined =>
 		typeof usage[k] === 'number' ? (usage[k] as number) : undefined;
 	const inTok = num('input_tokens');
-	const outTok = num('output_tokens');
 	const cacheCreate = num('cache_creation_input_tokens');
 	const cacheRead = num('cache_read_input_tokens');
 	// Best-effort context gauge: prefer an explicit field, else sum the input +
@@ -413,7 +412,6 @@ function deriveUsageFields(usage: Record<string, unknown> | null): Partial<Activ
 
 	const patch: Partial<ActiveSessionState> = {};
 	if (inTok != null) patch.totalTokensIn = inTok;
-	if (outTok != null) patch.totalTokensOut = outTok;
 	if (cacheCreate != null) patch.totalCacheCreationTokens = cacheCreate;
 	if (cacheRead != null) patch.totalCacheReadTokens = cacheRead;
 	if (contextUsed != null) patch.contextUsed = contextUsed;
@@ -447,6 +445,10 @@ function transcriptPatch(
 ): Partial<ActiveSessionState> {
 	const optimistic = optimisticStreaming || opts.appOptimistic;
 	const usagePatch = deriveUsageFields(rs.usage);
+	// The Output row is a session total: sum completed turns, never the latest
+	// per-call `turn.usage` output. Until a turn completes on this feed the
+	// value from `/live` (the stored session total) stays in place.
+	if ((rs.outputTokensTotal ?? 0) > 0) usagePatch.totalTokensOut = rs.outputTokensTotal;
 	return {
 		// Released: the array leaves the reducer here, so the next append copies
 		// instead of mutating what the view now holds (reducer.ts ownership).

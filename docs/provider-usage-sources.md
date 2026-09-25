@@ -18,8 +18,11 @@ the dashboard link.
 The usage API (`GET /api/v1/usage/limits`) returns the registry entry with each
 provider row (`source_info`) and with the local Claude reading
 (`claude_source`). Rows also carry `last_success_at` and `last_attempt_at`; a
-failed attempt moves only the second. The usage popover shows the dashboard
-link and, once a reading is stale, when it was last updated.
+failed attempt moves only the second. `cooldown_until` is the earliest time a
+refresh will request that provider again. The usage popover shows the dashboard
+link and, once a reading is stale, when it was last updated and when the next
+check can run. If the cached rows cannot be read, `providers` is null and the
+popover keeps the rows it already shows.
 
 ### Matrix
 
@@ -89,8 +92,43 @@ capability is cached per credential revision:
 - 404, 429, 5xx and timeouts are not negative-cached. They back off
   exponentially to one hour and honor `Retry-After`.
 
+A refusal is remembered for as long as the credential revision lasts, not for a
+fixed time. A timed expiry would re-probe a revoked key several times an hour.
+To retry after granting access, re-save the credential.
+
+### Refresh cooldown
+
+Opening the popover asks for a forced refresh (`refresh=true`). A forced
+refresh skips the monitor's 300 s spacing, but it cannot bypass any of these
+limits:
+
+- A worker starts at most one poll pass every 30 s. Inside that window the API
+  returns the cached rows with `cooldown_until`.
+- A pass skips any provider whose snapshot was written or attempted in the last
+  30 s. This applies to every worker that shares the database. It needs no
+  budget claim and no round trip to the coordinator. The snapshot timestamp is
+  the point where workers coordinate.
+- The per-credential request budget still limits upstream requests to one per
+  endpoint interval (300 s, or 900 s for OpenAI Admin). If several workers
+  claim at the same moment, one request is made and the others are deferred.
+- Refreshes started by saving a credential have no cooldown, so a new key is
+  probed at once.
+
+On the Claude side, `refresh=true` re-persists and re-broadcasts the in-memory
+windows at most once per 30 s. It never makes a request.
+
 The last successful reading is kept after a failure, and the API reports the
 failure time separately from the last success.
+
+### Banked resets
+
+When a Codex or SuperGrok banked reset is consumed with outcome `reset`, windows
+already at 100% used are removed from that provider's snapshot. The popover
+then stops showing the exhausted window on its next read. The consume response
+does not say which windows were reset, so windows below 100% keep their last
+reading until the next observation: Codex headers on the next inference, or the
+next budgeted SuperGrok poll. The reset does not shorten the SuperGrok request
+budget.
 
 ## Claude usage
 
@@ -99,6 +137,8 @@ Claude usage or profile endpoint. The only Claude source is
 `claude_rate_limit_events`: the rate-limit events the running CLI reports in
 its own output stream. Each event refines one window, so the popover shows
 only the windows the CLI has reported, and nothing before the first agent run.
+Each window carries its own `observed_at`. A window the CLI last reported long
+ago still counts as stale when a newer event has refreshed another window.
 The popover links to the user's own usage page,
 [claude.ai/settings/usage](https://claude.ai/settings/usage), for the full
 picture. Snapshots carry no Claude account identity or plan.

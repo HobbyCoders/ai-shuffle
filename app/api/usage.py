@@ -65,6 +65,9 @@ class UsageWindow(BaseModel):
     type: str
     utilization: float
     resets_at: Optional[str] = None
+    # Epoch ms of the CLI event that last reported THIS window. A snapshot's
+    # ``fetched_at`` moves with any window, so it cannot date the others.
+    observed_at: int | None = None
 
     @field_validator("resets_at", mode="before")
     @classmethod
@@ -150,6 +153,10 @@ class ProviderUsageEntry(BaseModel):
     # that failed moves only ``last_attempt_at``.
     last_success_at: int | None = None
     last_attempt_at: int | None = None
+    # Epoch ms before which a refresh (forced or not) serves this cached row
+    # instead of requesting the provider again. Null when a refresh may run
+    # now, and while a refused capability is paused (see last_error_kind).
+    cooldown_until: int | None = None
 
 
 class UsageSnapshot(BaseModel):
@@ -170,8 +177,9 @@ class UsageSnapshot(BaseModel):
     snapshots: List[InstallUsageSnapshot] = []
     self_instance_id: Optional[str] = None
     # Non-Claude provider usage (Codex/ChatGPT, OpenRouter, OpenAI credits,
-    # fal.ai credits, SuperGrok, ...). Additive.
-    providers: List[ProviderUsageEntry] = []
+    # fal.ai credits, SuperGrok, ...). Additive. Null when the cached rows could
+    # not be read, so clients keep their last-good rows instead of blanking.
+    providers: list[ProviderUsageEntry] | None = []
     provider_refreshing: bool = False
     # Kept for older clients: nothing is polled for Claude, so both stay null.
     # ``claude_source`` is the registry entry for the CLI's rate-limit events
@@ -181,12 +189,13 @@ class UsageSnapshot(BaseModel):
     claude_source: UsageSourceInfo | None = None
 
 
-async def _load_provider_usage() -> List[ProviderUsageEntry]:
+async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
     """Read persisted provider usage snapshots and join their display names.
 
-    Best-effort: any DB hiccup yields ``[]`` so the endpoint never errors or
-    drops the Claude fields. The snapshot row's ``raw`` (headers-only debug
-    blob) is intentionally never read into the response.
+    Best-effort: any DB hiccup yields ``None`` so the endpoint never errors or
+    drops the Claude fields, and clients keep the rows they already show. The
+    snapshot row's ``raw`` (headers-only debug blob) is intentionally never
+    read into the response.
     """
     try:
         from app.db import database as db
@@ -208,6 +217,7 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
         )
 
         entries: List[ProviderUsageEntry] = []
+        now_ms = time.time() * 1000
         for row in rows:
             # Usage history can outlive a provider (including an in-flight poll
             # finishing after deletion). Only configured accounts belong here;
@@ -256,6 +266,11 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
             attempted = attempted if isinstance(attempted, int) and not isinstance(attempted, bool) else None
             last_attempt = max((t for t in (fetched_at, attempted) if t), default=None)
             interval_ms = (source_def.min_interval if source_def and source_def.min_interval else 300) * 1000
+            cooldown_until = (last_attempt + interval_ms) if last_attempt else None
+            if (cooldown_until is not None and cooldown_until <= now_ms) or error in {
+                "billing_access_denied", "unsupported",
+            }:
+                cooldown_until = None
             name = names.get(row["provider_id"])
             if not name and row["provider_id"] == FAL_USAGE_PROVIDER_ID:
                 name = FAL_USAGE_PROVIDER_NAME
@@ -270,7 +285,7 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
                     fetched_at=fetched_at,
                     status=(
                         "stale" if fetched_at and (
-                            error or time.time() * 1000 - fetched_at > interval_ms
+                            error or now_ms - fetched_at > interval_ms
                         ) else "fresh" if fetched_at else
                         "unavailable" if error else "never_fetched"
                     ),
@@ -280,17 +295,22 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
                     source_info=_source_info(source_def),
                     last_success_at=fetched_at,
                     last_attempt_at=last_attempt,
+                    cooldown_until=cooldown_until,
                 )
             )
         return entries
     except Exception:
-        logger.debug("provider usage load failed; returning []", exc_info=True)
-        return []
+        logger.debug("provider usage load failed; keeping client rows", exc_info=True)
+        return None
 
 
 def _request_claude_refresh() -> None:
-    # Re-persists and re-broadcasts the CLI-reported windows; no request.
-    usage_limits_monitor.request_refresh()
+    # Re-persists and re-broadcasts the CLI-reported windows; no request. At
+    # most once per cooldown, so repeated popover opens do not fan an
+    # unchanged snapshot out to every client.
+    from app.core.provider_usage import FORCED_REFRESH_COOLDOWN_SECONDS
+
+    usage_limits_monitor.request_refresh(cooldown=FORCED_REFRESH_COOLDOWN_SECONDS)
 
 
 def _claude_fields(snapshot: dict) -> dict:
@@ -316,9 +336,14 @@ async def get_usage_limits(
     sessions render the owning install's reset time. ``providers`` adds every
     non-Claude provider's usage snapshot (best-effort).
     """
-    from app.core.provider_usage import provider_usage_monitor
+    from app.core.provider_usage import (
+        FORCED_REFRESH_COOLDOWN_SECONDS,
+        provider_usage_monitor,
+    )
 
-    provider_usage_monitor.request_refresh(force=refresh)
+    # A forced refresh inside the cooldown serves the cached rows (with
+    # ``cooldown_until``); the request budget still limits each credential.
+    provider_usage_monitor.request_refresh(force=refresh, cooldown=FORCED_REFRESH_COOLDOWN_SECONDS)
     if refresh:
         _request_claude_refresh()
     snapshot = await usage_limits_monitor.get_cluster_snapshot()

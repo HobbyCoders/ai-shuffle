@@ -43,7 +43,11 @@ export interface UsageWindow {
 	/** 0–100 percent. */
 	utilization: number;
 	resets_at: string | null;
-	/** Wall-clock (ms since epoch) when we last updated this window. */
+	/**
+	 * Epoch ms this window was last observed: the live event's arrival, or the
+	 * backend's per-window `observed_at` (falling back to the snapshot's
+	 * `fetched_at`). Staleness is per window, since one event dates one window.
+	 */
 	received_at: number;
 	source: 'poll' | 'live';
 }
@@ -112,6 +116,8 @@ export interface ProviderUsageBucket {
 	sourceInfo?: UsageSourceInfo | null;
 	/** Epoch ms of the last attempt; later than `fetchedAt` after a failure. */
 	lastAttemptAt?: number | null;
+	/** Epoch ms before which a refresh serves this cached reading. */
+	cooldownUntil?: number | null;
 	status?: ProviderUsageStatus;
 	lastErrorKind?: ProviderUsageErrorKind | null;
 	providerId: string;
@@ -163,6 +169,8 @@ export interface SnapshotWindow {
 	type: string;
 	utilization: number;
 	resets_at?: string | null;
+	/** Epoch ms the CLI last reported this window (Claude windows only). */
+	observed_at?: number | null;
 }
 
 /** One install's entry in the modern `snapshots` array. */
@@ -188,6 +196,7 @@ export interface ProviderUsageEntry {
 	source_info?: UsageSourceInfo | null;
 	last_success_at?: number | null;
 	last_attempt_at?: number | null;
+	cooldown_until?: number | null;
 	status?: ProviderUsageStatus;
 	last_error_kind?: ProviderUsageErrorKind | null;
 	provider_id: string;
@@ -228,8 +237,8 @@ export interface UsageSnapshot {
 	/** Non-Claude provider usage. Full-replaces `providerBuckets` when present;
 	 *  when the key is ABSENT the store leaves the existing map untouched (so a
 	 *  WS-only payload without providers can't wipe it). Additive; empty for old
-	 *  or provider-less installs. */
-	providers?: ProviderUsageEntry[];
+	 *  or provider-less installs; null when the backend could not read them. */
+	providers?: ProviderUsageEntry[] | null;
 }
 
 // Bumped to v3 when the backend started reporting Claude window utilization as
@@ -430,9 +439,22 @@ export function resolveBucketKey(state: RateLimitState, instanceId: string | nul
 	return state.buckets[key] ? key : null;
 }
 
-/** Whether a bucket's polled data has aged past `BUCKET_STALE_MS` (needs a refresh). */
+/**
+ * When the bucket's OLDEST window was last observed (epoch ms), or the bucket's
+ * `fetchedAt` when it has no windows. A live event dates only its own window,
+ * so the other windows keep their age.
+ */
+export function bucketObservedAt(bucket: UsageBucket): number | null {
+	const times = Object.values(bucket.windows ?? {})
+		.map((w) => w.received_at)
+		.filter((t) => typeof t === 'number' && Number.isFinite(t));
+	return times.length > 0 ? Math.min(...times) : bucket.fetchedAt;
+}
+
+/** Whether any of a bucket's windows has aged past `BUCKET_STALE_MS` (needs a refresh). */
 export function isBucketStale(bucket: UsageBucket, now: number): boolean {
-	return bucket.fetchedAt != null && now - bucket.fetchedAt > BUCKET_STALE_MS;
+	const observedAt = bucketObservedAt(bucket);
+	return observedAt != null && now - observedAt > BUCKET_STALE_MS;
 }
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
@@ -531,8 +553,15 @@ function _legacyFetchedMs(sec: number | null | undefined): number | null {
 	return Math.round(sec * 1000);
 }
 
-/** Build a window map from raw snapshot windows. */
-function _windowsFromSnapshot(raw: SnapshotWindow[] | undefined, now: number): Record<string, UsageWindow> {
+/**
+ * Build a window map from raw snapshot windows. Each window is dated by its own
+ * `observed_at`, else by the snapshot's `fetchedAt` (epoch ms), else `now`.
+ */
+function _windowsFromSnapshot(
+	raw: SnapshotWindow[] | undefined,
+	now: number,
+	fetchedAt: number | null | undefined = null
+): Record<string, UsageWindow> {
 	const windows: Record<string, UsageWindow> = {};
 	for (const w of raw ?? []) {
 		if (!w?.type || typeof w.utilization !== 'number') continue;
@@ -540,7 +569,7 @@ function _windowsFromSnapshot(raw: SnapshotWindow[] | undefined, now: number): R
 			type: w.type,
 			utilization: _clampPct(w.utilization),
 			resets_at: w.resets_at ?? null,
-			received_at: now,
+			received_at: w.observed_at ?? fetchedAt ?? now,
 			source: 'poll',
 		};
 	}
@@ -581,10 +610,9 @@ export const rateLimit = {
 			const bucket: UsageBucket = {
 				...(prev ?? { windows: {}, fetchedAt: null, available: true }),
 				windows: { ...(prev?.windows ?? {}), [rate_limit_type]: win },
+				// `received_at` dates this window only: an unchanged reading is still
+				// current, but the bucket's other windows keep their own age.
 				available: true,
-				// A live reading is current even when its values are unchanged, so
-				// the "Updated X ago" staleness line must not age past it.
-				fetchedAt: now,
 			};
 			const buckets = { ...s.buckets, [key]: bucket };
 			const next = { ...s, buckets };
@@ -640,12 +668,13 @@ export const rateLimit = {
 						scope: p.scope ?? null,
 						sourceInfo: p.source_info ?? null,
 						lastAttemptAt: p.last_attempt_at ?? p.fetched_at ?? null,
+						cooldownUntil: p.cooldown_until ?? null,
 						status: p.status,
 						lastErrorKind: p.last_error_kind ?? null,
 						providerName: p.provider_name ?? null,
 						providerType: p.provider_type ?? null,
 						planType: p.plan_type ?? null,
-						windows: _windowsFromSnapshot(p.windows, now),
+						windows: _windowsFromSnapshot(p.windows, now, p.fetched_at),
 						credits: p.credits ?? null,
 						fetchedAt: p.fetched_at ?? null,
 					};
@@ -705,7 +734,7 @@ export const rateLimit = {
 							available: false,
 						};
 					} else {
-						const windows = _windowsFromSnapshot(entry.windows, now);
+						const windows = _windowsFromSnapshot(entry.windows, now, entry.fetched_at);
 						// An unchanged generation means nothing changed server-side since
 						// the last snapshot, so a live window received since is newer.
 						if (sameGeneration) {
@@ -783,7 +812,7 @@ export const rateLimit = {
 				// data fields the legacy payload actually carries.
 				bucket = {
 					...(prev ?? {}),
-					windows: _windowsFromSnapshot(snapshot.windows, now),
+					windows: _windowsFromSnapshot(snapshot.windows, now, _legacyFetchedMs(snapshot.fetched_at)),
 					fetchedAt: _legacyFetchedMs(snapshot.fetched_at),
 					available: true,
 					generation: gen ?? null,

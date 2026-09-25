@@ -212,6 +212,36 @@ def _lock_usage_generation(cursor, provider_id, provider_type, expected: Optiona
     return bool(expected and row and row["revision"] == expected)
 
 
+def clear_exhausted_provider_windows(provider_id: str) -> int:
+    """Remove windows at 100% used (e.g. after a banked reset refilled them).
+
+    Keeps the other windows, credits and timestamps. Returns how many windows
+    were removed.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT windows FROM provider_usage_snapshots WHERE provider_id = %s FOR UPDATE",
+            (provider_id,),
+        )
+        rows = rows_to_list(cursor.fetchall())
+        if not rows:
+            return 0
+        windows = _parse_json_list(rows[0].get("windows"))
+        kept = [
+            w for w in windows
+            if not (isinstance(w, dict) and isinstance(w.get("utilization"), (int, float))
+                    and w["utilization"] >= 100)
+        ]
+        if len(kept) == len(windows):
+            return 0
+        cursor.execute(
+            "UPDATE provider_usage_snapshots SET windows = %s, updated_at = %s WHERE provider_id = %s",
+            (json.dumps(kept), datetime.now(timezone.utc).isoformat(), provider_id),
+        )
+        return len(windows) - len(kept)
+
+
 def get_provider_usage_raw(provider_id: str) -> dict[str, Any] | None:
     """The stored ``raw`` metadata for one snapshot (no credential fields)."""
     with get_db() as conn:
