@@ -858,9 +858,19 @@ describe('message-sender pending-bubble edges', () => {
 		// gets to run — a local row added on top of it is a second copy that no
 		// later frame is guaranteed to replace.
 		const { deps, getState, wsConn } = makeDeps(streamingState());
-		pendingQueue.noteAuthoritative('ses-1', [
-			{ id: 'turn-q', content: 'answer this too', queuedAt: 1 },
-		]);
+		// Deliver after sendMessage records dispatchedAt, while it reads state.
+		// Preloading before send only passed when both Date.now calls happened
+		// in the same millisecond; an older snapshot must not suppress a new send.
+		let delivered = false;
+		deps.getState = () => {
+			if (!delivered) {
+				delivered = true;
+				pendingQueue.noteAuthoritative('ses-1', [
+					{ id: 'turn-q', content: 'answer this too', queuedAt: 1 },
+				]);
+			}
+			return getState();
+		};
 		const sender = createMessageSender(deps);
 
 		const result = await sender.sendMessage('answer this too');
@@ -869,6 +879,23 @@ describe('message-sender pending-bubble edges', () => {
 		expect(getState().queuedMessages).toHaveLength(0);
 		// The send itself still goes out.
 		expect(wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query')).toHaveLength(1);
+	});
+
+	it('does not suppress a new send with an older authoritative snapshot', async () => {
+		const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+		try {
+			const { deps, getState } = makeDeps(streamingState());
+			pendingQueue.noteAuthoritative('ses-1', [
+				{ id: 'earlier-turn', content: 'older prompt', queuedAt: 1 },
+			]);
+			clock.mockReturnValue(1001);
+			const sender = createMessageSender(deps);
+			expect(await sender.sendMessage('answer this too')).toBe(true);
+			expect(getState().queuedMessages).toHaveLength(1);
+			expect(getState().queuedMessages[0].content).toBe('answer this too');
+		} finally {
+			clock.mockRestore();
+		}
 	});
 
 	it('unsends a server row by naming it', async () => {
