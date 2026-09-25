@@ -219,10 +219,13 @@ Get execution history.
     "cost_usd": 0.045,
     "tokens_in": 2000,
     "tokens_out": 1500,
-    "duration_ms": 150000
+    "duration_ms": 150000,
+    "trigger_data": {"trigger": "schedule", "fired_at": "2025-01-15T09:00:00+00:00"}
   }
 ]
 ```
+
+`trigger_data.trigger` says what started the run: `schedule` (cron or interval), `connector_event`, `connector_trigger`, `webhook` or `manual`. The rest of `trigger_data` is that trigger's data, such as the webhook `payload`.
 
 ### GET /api/v1/automations/{automation_id}/runs/{run_id}
 

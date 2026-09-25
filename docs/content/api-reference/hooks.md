@@ -17,7 +17,9 @@ Every endpoint on this page needs owner access. API-user keys (`aih_...`) get `4
 >
 > `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-level hooks). Message hooks (`hook_type: "message"`) are not supported: creating one, or changing a hook to one, returns `422`, and an existing one delivers nothing (each run is recorded as failed) but can still be disabled or deleted. Hooks contributed by plugins are not affected by these limits.
 >
-> `timeout` applies to each hook on its own. Hooks that match the same event run one after another, each with its full timeout.
+> `timeout` applies to each hook on its own. Hooks that match the same event run one after another, each with its full timeout. Together they have a deadline of the sum of their timeouts plus 5 s per hook (at least 60 s); `PreToolUse` hooks that pass it deny the call.
+>
+> `Notification` fires when the session stops to wait for the user, for example on a permission prompt, and `SessionEnd` fires once when the session closes. Both also fire on Claude subscription sessions.
 
 ## Discovery
 
@@ -220,7 +222,7 @@ A `PreToolUse` bash hook runs before the tool, and the tool waits for it. To blo
 { "permissionDecision": "deny", "permissionDecisionReason": "Deploys are frozen" }
 ```
 
-`permissionDecision` can be `allow`, `deny` or `ask`. `{"decision": "block", "reason": "..."}` also blocks. Exit code `0` with no JSON leaves the normal permission flow in charge. A timeout, a crash or another exit code does not block, but a hook that cannot start at all denies the call. Only bash hooks can block a tool.
+`permissionDecision` can be `allow`, `deny` or `ask`. `{"decision": "block", "reason": "..."}` also blocks. Exit code `0` with no JSON leaves the normal permission flow in charge. A timeout, a crash or another exit code from one hook does not block; that hook has no opinion. The call is denied (fail closed) when no answer comes at all: a hook that cannot start, `PreToolUse` hooks that together pass their deadline, or a failure of the hook runner itself. On Claude subscription sessions the `PreToolUse` hooks for one call must decide within 570 s, or the call is denied; the Claude CLI is given a 600 s hook timeout so it never proceeds without that answer. Only bash hooks can block a tool.
 
 A `Stop` hook keeps the agent going with `{"decision": "block", "reason": "..."}`: a bash hook prints it and exits `0`; a webhook returns it as the body of a 2xx response. Any other webhook response only notifies.
 

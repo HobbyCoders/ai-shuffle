@@ -40,7 +40,9 @@ Run a shell command when the event fires. For `PreToolUse` and `Stop`, AI Shuffl
 | `command` | string  | Shell command to execute                        |
 | `timeout` | integer | Timeout in milliseconds (1000-300000, default 30000) |
 
-The `timeout` applies to each hook on its own. When several hooks match one `PreToolUse` or `Stop` event, they run one after another and each gets its full timeout. A hook that runs out of time is stopped, with everything it started. A running session keeps the deadline it computed from these timeouts when it started, so a timeout raised mid-session can still be cut short (never below 60 seconds for the event's hooks together) until the next session.
+The `timeout` applies to each hook on its own. When several hooks match one `PreToolUse` or `Stop` event, they run one after another and each gets its full timeout. A hook that runs out of time is stopped, with everything it started.
+
+The event's hooks together also have a deadline: the sum of their timeouts plus 5 seconds per hook, never below 60 seconds. A running session keeps the deadline it computed when it started, so a timeout raised mid-session can still be cut short by the old deadline until the next session. When `PreToolUse` hooks pass that deadline, the tool call is denied (see [Blocking a Tool Call](#blocking-a-tool-call)). When `Stop` hooks pass it, the agent stops as usual.
 
 A `PreToolUse` hook receives the tool call as JSON on stdin and runs in the session's working directory:
 
@@ -97,7 +99,13 @@ A bash `PreToolUse` hook decides what happens to the tool call:
 - **JSON on stdout** such as `{"permissionDecision": "deny", "permissionDecisionReason": "..."}` denies it. `allow` and `ask` work the same way. `{"decision": "block", "reason": "..."}` also denies it.
 - **Exit code 0 with no output** has no opinion: the call goes through the normal permission flow.
 
-A hook that times out, crashes or exits with another code does not block. The exception is a hook that cannot start at all (for example the shell is missing): the call is denied, because the guard never checked it. Output that is not valid JSON is ignored, so a JSON decision with a typo does not block anything. When several hooks match, the first one that returns a decision wins. Only bash hooks can block a tool; webhook and message hooks on `PreToolUse` are skipped.
+A single hook that times out, crashes or exits with another code does not block: it has no opinion, and the next hook runs. The call is denied instead when the guard gave no answer at all:
+
+- a hook cannot start (for example the shell is missing);
+- the `PreToolUse` hooks together run past their deadline (see [Bash Hooks](#bash-hooks)), or the hook runner itself fails;
+- on Claude subscription sessions, where the Claude CLI runs the tools, the `PreToolUse` hooks for one call have not decided within 570 seconds. The CLI is told to wait 600 seconds for them, so it never runs the call on its own after giving up.
+
+The deny carries the reason, and the agent sees the call as denied. Output that is not valid JSON is ignored, so a JSON decision with a typo does not block anything. When several hooks match, the first one that returns a decision wins. Only bash hooks can block a tool; webhook and message hooks on `PreToolUse` are skipped.
 
 ### Stop Hooks
 
@@ -135,6 +143,8 @@ Message hooks are not supported, and new ones cannot be created (the API returns
 | `PreToolUse` | Bash hooks, before a tool. Can block it. Project sessions only. |
 | `Stop` | Bash and webhook hooks, when the agent finishes its turn. A bash hook's output or a webhook's JSON response can keep it working. Project sessions only. |
 | `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `SubagentStop`, `PreCompact`, `Notification` | Bash and webhook hooks, in the background. Cannot block or change anything. Also run in sessions with no project (app-wide hooks). |
+
+`Notification` fires when the session stops to wait for you, for example on a permission prompt. `SessionEnd` fires once, when the session closes. Both fire on Claude subscription sessions too.
 
 ## Tool Matcher
 

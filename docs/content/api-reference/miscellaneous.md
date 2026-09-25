@@ -71,6 +71,45 @@ Get usage trends over time.
 
 List the highest-usage sessions.
 
+## Usage Limits
+
+### GET /api/v1/usage/limits
+
+Get the latest usage readings: the Claude windows the Claude CLI reported while it ran, and a cached usage row for each other provider (Codex, OpenRouter, OpenAI, fal.ai, SuperGrok and others). A plain read never waits on a provider; rows that are due are refreshed in the background. Read again while `provider_refreshing` is `true` to get the new rows as they arrive.
+
+**Auth:** Required.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `refresh` | boolean | Ask for a refresh now (the usage popover sends this when it opens). Default `false` |
+
+```bash
+curl "http://localhost:8000/api/v1/usage/limits?refresh=true" \
+  -H "Authorization: Bearer aih_your_key"
+```
+
+`refresh=true` is limited:
+
+- Each server worker starts at most one refresh every 30 seconds. Inside that window the endpoint returns the cached rows.
+- A refresh skips a provider whose row was refreshed or attempted in the last 30 seconds, including by another worker that shares the database.
+- Each credential still makes at most one request per provider interval (300 seconds, or 900 seconds for OpenAI Admin).
+- On the Claude side nothing is requested: the stored windows are saved and sent to connected clients again, at most once every 30 seconds.
+
+**Response fields** (among others):
+
+| Field | Description |
+|-------|-------------|
+| `windows[].observed_at` | Epoch ms when the Claude CLI last reported this window. Each window has its own, so an old window still shows its age after a newer event updates another one. The same field appears in `snapshots[].windows[]` |
+| `providers` | One row per configured provider. `null` when the cached rows could not be read; keep the rows you already show instead of clearing them |
+| `providers[].last_success_at` | Epoch ms of the last successful reading (same as `fetched_at`) |
+| `providers[].last_attempt_at` | Epoch ms of the last attempt. A failed attempt moves only this field |
+| `providers[].cooldown_until` | Epoch ms before which a refresh, forced or not, serves this cached row instead of asking the provider again. `null` when a refresh may ask now, and while a refused capability is paused (see `last_error_kind`) |
+| `provider_refreshing` | `true` while a refresh is running |
+
+When a Codex or SuperGrok banked reset is used (`POST /api/v1/model-providers/{provider_id}/codex/rate-limit-reset-credits/consume`, or `.../grok/...`) and the outcome is `reset`, the provider's windows that were 100% used are removed from its row. The other windows keep their last reading until the provider next reports usage.
+
 ## Git Integration
 
 ### GET /api/v1/projects/{project_id}/git/status
