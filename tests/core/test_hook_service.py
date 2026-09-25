@@ -929,6 +929,35 @@ class TestToolMatcher:
         assert not tool_matcher_matches("[", "Bash")
         assert tool_matcher_matches("[", "[")
 
+    @pytest.mark.asyncio
+    async def test_an_invalid_plugin_matcher_does_not_skip_the_other_plugin_hooks(self, tmp_path):
+        ran: list[str] = []
+
+        async def _execute(hook_def, *_args, **_kwargs):
+            ran.append(hook_def["command"])
+            return None
+
+        hook_defs = [
+            {"command": "bad", "matcher": "Zap(", "plugin_path": str(tmp_path)},
+            {"command": "good", "matcher": "bash|Edit", "plugin_path": str(tmp_path)},
+            {"command": "star", "matcher": "*", "plugin_path": str(tmp_path)},
+            {"command": "other", "matcher": "Write", "plugin_path": str(tmp_path)},
+        ]
+        with patch("app.core.hook_service.execute_plugin_hook", _execute):
+            handler = create_plugin_hook_handler("PreToolUse", hook_defs, str(tmp_path))
+            await handler({"hook_event_name": "PreToolUse", "tool_name": "Bash"}, None, {})
+            await handler({"hook_event_name": "PreToolUse", "tool_name": "zap("}, None, {})
+
+        # "Zap(" is compared as plain text (case-insensitively, like plugin
+        # regexes); "*" matches every tool.
+        assert ran == ["good", "star", "bad", "star"]
+
+    def test_plugin_matcher_helper_keeps_the_hooks_json_rule(self):
+        from app.core.hook_executor import tool_matcher_matches
+        assert tool_matcher_matches("bash", "BashOutput", plugin=True)
+        assert not tool_matcher_matches("Edit", "MultiEdit", plugin=True)
+        assert tool_matcher_matches("Bash(", "bash(", plugin=True)
+
 
 class TestMatcherTimeouts:
     def test_db_pretooluse_and_stop_matchers_cover_each_hooks_timeout(self, monkeypatch, tmp_path):

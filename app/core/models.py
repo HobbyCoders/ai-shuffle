@@ -1062,6 +1062,10 @@ VALID_HOOK_EVENTS = [
     "Notification",
 ]
 
+# Message hooks are never delivered (hook_executor.execute_message_hook), so
+# new ones are refused; existing rows stay readable so they can be deleted.
+MESSAGE_HOOKS_NOT_CREATABLE = "Message hooks are not supported; use a webhook or bash hook"
+
 
 class HookBase(BaseModel):
     """Base hook fields"""

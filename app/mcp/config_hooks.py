@@ -9,6 +9,7 @@ import logging
 import secrets as _secrets
 from typing import Any, Dict, Optional
 
+from app.core.models import MESSAGE_HOOKS_NOT_CREATABLE
 from app.mcp.config_helpers import (
     VALID_HOOK_EVENTS,
     VALID_HOOK_TYPES,
@@ -106,7 +107,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
     @tool(
         "createHook",
         "Create a new hook that triggers on specific AI Shuffle events. "
-        "Hooks can run bash commands, send webhooks, or inject messages.",
+        "Hooks can run bash commands or send webhooks.",
         {
             "type": "object",
             "properties": {
@@ -119,7 +120,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 "hook_type": {
                     "type": "string",
                     "enum": VALID_HOOK_TYPES,
-                    "description": "How the hook executes: bash command, webhook POST, or message injection.",
+                    "description": "How the hook executes: bash command or webhook POST.",
                 },
                 "command": {
                     "type": "string",
@@ -127,10 +128,6 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
                     "For PreToolUse: must output JSON with 'decision' (allow/block) and optional 'reason'.",
                 },
                 "url": {"type": "string", "description": "Webhook URL (webhook type only)."},
-                "message_template": {
-                    "type": "string",
-                    "description": "Message template with {{variable}} substitution (message type only).",
-                },
                 "tool_matcher": {
                     "type": "string",
                     "description": "Regex matching tool names. Required for PreToolUse/PostToolUse events (e.g., 'Bash', 'Write|Edit').",
@@ -165,8 +162,9 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
             return _error("Bash hooks require a 'command' field.")
         if hook_type == "webhook" and not args.get("url"):
             return _error("Webhook hooks require a 'url' field.")
-        if hook_type == "message" and not args.get("message_template"):
-            return _error("Message hooks require a 'message_template' field.")
+        if hook_type not in VALID_HOOK_TYPES:
+            return _error(MESSAGE_HOOKS_NOT_CREATABLE if hook_type == "message"
+                          else f"Invalid hook_type '{hook_type}'. Valid: {VALID_HOOK_TYPES}")
 
         # PreToolUse/PostToolUse should have a tool_matcher
         if event in ("PreToolUse", "PostToolUse") and not args.get("tool_matcher"):
@@ -248,6 +246,8 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
             return _error("App configuration tools require admin access.")
 
         hook_id = args["hook_id"]
+        if args.get("hook_type") == "message":
+            return _error(MESSAGE_HOOKS_NOT_CREATABLE)
 
         def _read_validate_write():
             """READ-MODIFY-WRITE — must stay in ONE hop.

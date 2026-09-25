@@ -271,7 +271,7 @@
 								{#if detailText(hook)}<p class="bhl-desc" class:mono={hook.hook_type === 'bash'}>{detailText(hook)}</p>{/if}
 							</div>
 							<div class="bhl-meta">
-								<span class="bhl-tag">{hook.hook_type}</span>
+								<span class="bhl-tag" title={hook.hook_type === 'message' ? 'Message hooks are not supported and never run' : undefined}>{hook.hook_type === 'message' ? 'message · unsupported' : hook.hook_type}</span>
 							</div>
 							<div class="bhl-actions" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 								<RowActionMenu
@@ -332,7 +332,7 @@
 							{#if hook.description}<p class="bhl-desc">{hook.description}</p>{/if}
 						</div>
 						<div class="bhl-meta">
-							<span class="bhl-tag">{hook.hook_type}</span>
+							<span class="bhl-tag" title={hook.hook_type === 'message' ? 'Message hooks are not supported and never run' : undefined}>{hook.hook_type === 'message' ? 'message · unsupported' : hook.hook_type}</span>
 						</div>
 					</div>
 				{/each}

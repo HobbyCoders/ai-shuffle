@@ -20,7 +20,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -508,9 +507,9 @@ def create_plugin_hook_handler(
         for hook_def in hook_defs:
             matcher_pattern = hook_def.get("matcher")
 
-            # Skip if matcher doesn't match tool name
-            if matcher_pattern and tool_name:
-                if not re.match(matcher_pattern, tool_name, re.IGNORECASE):
+            # Skip if matcher doesn't match tool name ("*" means every tool)
+            if matcher_pattern and matcher_pattern != "*" and tool_name:
+                if not tool_matcher_matches(matcher_pattern, tool_name, plugin=True):
                     logger.debug(f"[HookService] Skipping - tool '{tool_name}' doesn't match pattern '{matcher_pattern}'")
                     continue
 

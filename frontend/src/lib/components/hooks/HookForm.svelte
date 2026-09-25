@@ -59,7 +59,9 @@
 		if (!name.trim()) return false;
 		if (hookType === 'bash' && !command.trim()) return false;
 		if (hookType === 'webhook' && !url.trim()) return false;
-		if (hookType === 'message' && !messageTemplate.trim()) return false;
+		// Message hooks never run and can no longer be saved (existing ones are
+		// shown read-only so they can be switched to another type or deleted).
+		if (hookType === 'message') return false;
 		return true;
 	}
 
@@ -79,7 +81,6 @@
 			url: hookType === 'webhook' ? url.trim() : undefined,
 			secret: hookType === 'webhook' && secret.trim() ? secret.trim() : undefined,
 			tool_matcher: isToolEvent && toolMatcher.trim() ? toolMatcher.trim() : undefined,
-			message_template: hookType === 'message' ? messageTemplate.trim() : undefined,
 			enabled
 		};
 
@@ -165,12 +166,11 @@
 <div class="set-group">
 	<div class="set-grouphead"><h3><Zap />Action</h3><p>What this hook does when it runs.</p></div>
 	<div class="set-row">
-		<div class="lab"><h4>Type</h4><p>Run a command, call a webhook, or post a message.</p></div>
+		<div class="lab"><h4>Type</h4><p>Run a command or call a webhook.</p></div>
 		<div class="ctl">
 			<div class="seg">
 				<button type="button" class:on={hookType === 'bash'} onclick={() => hookType = 'bash'}>Bash</button>
 				<button type="button" class:on={hookType === 'webhook'} onclick={() => hookType = 'webhook'}>Webhook</button>
-				<button type="button" class:on={hookType === 'message'} onclick={() => hookType = 'message'}>Message</button>
 			</div>
 		</div>
 	</div>
@@ -202,15 +202,9 @@
 		</div>
 	{:else if hookType === 'message'}
 		<div class="set-row stack">
-			<div class="lab"><h4>Message template <span class="req">*</span></h4><p>Prompt sent as a new user message in the active chat when this hook fires.</p></div>
+			<div class="lab"><h4>Message template (unsupported)</h4><p>Message hooks are not supported and never run. Switch this hook to Bash or Webhook, or delete it.</p></div>
 			<div class="ctl">
-				<textarea
-					bind:value={messageTemplate}
-					placeholder="e.g., Summarize the work done in this session and list any remaining tasks."
-					class="fld"
-					rows="4"
-				></textarea>
-				<p class="var-hint">Available variables: <code>{'{event}'}</code> <code>{'{tool_name}'}</code> <code>{'{timestamp}'}</code> <code>{'{session_id}'}</code></p>
+				<textarea value={messageTemplate} readonly class="fld" rows="4"></textarea>
 			</div>
 		</div>
 	{/if}
@@ -239,23 +233,5 @@
 	.req {
 		color: var(--destructive);
 		font-weight: 700;
-	}
-
-	.var-hint {
-		margin: 8px 0 0;
-		font-size: 11.5px;
-		color: var(--muted-foreground);
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 6px;
-	}
-	.var-hint code {
-		font-family: var(--font-mono, monospace);
-		font-size: 11px;
-		padding: 1px 5px;
-		background: var(--muted);
-		border-radius: 5px;
-		color: var(--foreground);
 	}
 </style>

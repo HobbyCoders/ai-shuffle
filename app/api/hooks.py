@@ -12,6 +12,7 @@ from app.core.models import (
     HookCreate,
     HookUpdate,
     HookTestResult,
+    MESSAGE_HOOKS_NOT_CREATABLE,
     PluginHookInfo,
     VALID_HOOK_EVENTS,
 )
@@ -33,6 +34,11 @@ def _validate_hook_data(hook_data: HookCreate | HookUpdate, is_create: bool = Fa
         )
 
     hook_type = getattr(hook_data, 'hook_type', None)
+    if hook_type == 'message':
+        raise HTTPException(
+            status_code=422,
+            detail=MESSAGE_HOOKS_NOT_CREATABLE,
+        )
     if is_create:
         # For create, validate that required fields are provided based on type
         if hook_type == 'bash' and not hook_data.command:
@@ -44,11 +50,6 @@ def _validate_hook_data(hook_data: HookCreate | HookUpdate, is_create: bool = Fa
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Webhook hooks must have a URL"
-            )
-        if hook_type == 'message' and not hook_data.message_template:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Message hooks must have a message template"
             )
 
 

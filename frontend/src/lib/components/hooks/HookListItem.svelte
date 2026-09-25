@@ -68,7 +68,7 @@
 			{/if}
 		</h4>
 		<p>
-			<span class="htype">{hook.hook_type}</span>{#if detailShort} · <span class="hcmd">{detailShort}</span>{/if}{#if hook.failure_count > 0} · <span class="hfail"><AlertCircle size={11} /> {hook.failure_count} failure{hook.failure_count > 1 ? 's' : ''}</span>{/if}
+			<span class="htype">{hook.hook_type === 'message' ? 'message (unsupported, never runs)' : hook.hook_type}</span>{#if detailShort} · <span class="hcmd">{detailShort}</span>{/if}{#if hook.failure_count > 0} · <span class="hfail"><AlertCircle size={11} /> {hook.failure_count} failure{hook.failure_count > 1 ? 's' : ''}</span>{/if}
 		</p>
 	</div>
 

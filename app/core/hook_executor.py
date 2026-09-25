@@ -520,13 +520,18 @@ async def execute_hook(
 _warned_tool_matchers: set = set()
 
 
-def tool_matcher_matches(pattern: str, tool_name: str) -> bool:
+def tool_matcher_matches(pattern: str, tool_name: str, *, plugin: bool = False) -> bool:
     """Whether ``tool_name`` fully matches a hook's ``tool_matcher`` regex.
+
+    ``plugin`` keeps the rule for a plugin ``hooks.json`` matcher instead: a
+    case-insensitive match at the start of the name.
 
     An invalid pattern is compared as plain text and logged once per pattern,
     so one bad hook cannot stop the event's other hooks from running.
     """
     try:
+        if plugin:
+            return re.match(pattern, tool_name, re.IGNORECASE) is not None
         return re.fullmatch(pattern, tool_name) is not None
     except re.error as e:
         if pattern not in _warned_tool_matchers:
@@ -535,6 +540,8 @@ def tool_matcher_matches(pattern: str, tool_name: str) -> bool:
                 "Hook tool_matcher %r is not a valid regex (%s); comparing it as plain text",
                 pattern, e,
             )
+        if plugin:
+            return pattern.casefold() == tool_name.casefold()
         return pattern == tool_name
 
 

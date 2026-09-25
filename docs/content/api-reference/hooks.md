@@ -15,7 +15,7 @@ Every endpoint on this page needs owner access. API-user keys (`aih_...`) get `4
 > - `Stop` — bash and webhook hooks. A bash hook's stdout or a webhook's 2xx JSON response body can keep the agent working with `{"decision": "block"}`.
 > - `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `SubagentStop`, `PreCompact`, `Notification` — bash and webhook hooks run in the background. They cannot block or change anything.
 >
-> `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-level hooks). Message hooks (`hook_type: "message"`) are not supported yet: they can be saved, but a run delivers nothing and is recorded as failed. Hooks contributed by plugins are not affected by these limits.
+> `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-level hooks). Message hooks (`hook_type: "message"`) are not supported: creating one, or changing a hook to one, returns `422`, and an existing one delivers nothing (each run is recorded as failed) but can still be disabled or deleted. Hooks contributed by plugins are not affected by these limits.
 >
 > `timeout` applies to each hook on its own. Hooks that match the same event run one after another, each with its full timeout.
 
@@ -121,7 +121,7 @@ curl -X POST http://localhost:8000/api/v1/hooks/project/proj_abc123 \
 |-------|------|----------|-------------|
 | `name` | string | Yes | Display name (1-100 chars) |
 | `event` | string | Yes | Hook event type |
-| `hook_type` | string | Yes | "bash", "webhook", or "message" |
+| `hook_type` | string | Yes | "bash" or "webhook" ("message" returns `422`) |
 | `command` | string | Bash only | Shell command to execute |
 | `url` | string | Webhook only | URL to POST to |
 | `secret` | string | Webhook only | HMAC-SHA256 signing secret |

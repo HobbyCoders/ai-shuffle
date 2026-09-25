@@ -18,13 +18,13 @@ A hook is a piece of logic -- a shell command or a webhook call -- that AI Shuff
 - `Stop` runs bash and webhook hooks when the agent finishes its turn. A bash hook's output or a webhook's JSON response can keep it working.
 - The other seven events (`PostToolUse`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `SubagentStop`, `PreCompact`, `Notification`) run bash and webhook hooks in the background. They cannot block or change anything.
 - `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-wide hooks only).
-- Message hooks are not supported yet. You can save one, but it delivers nothing: each run is recorded as failed. See [Message Hooks](#message-hooks).
+- Message hooks are not supported. New ones cannot be created, and an existing one delivers nothing: each run is recorded as failed. See [Message Hooks](#message-hooks).
 - Hooks that plugins contribute through `hooks.json` are not affected by these limits; see [Plugin-Contributed Hooks](#plugin-contributed-hooks).
 
 Key concepts:
 
 - **Project or app-wide:** A hook belongs to one project, or to the whole app (`/api/v1/hooks/app`) and runs for every project
-- **Types:** Bash (run a shell command) and Webhook (HTTP POST to a URL). A third type, Message, is not delivered yet
+- **Types:** Bash (run a shell command) and Webhook (HTTP POST to a URL). A third type, Message, cannot be created; existing message hooks are shown as unsupported
 - **Blocking:** Only a bash `PreToolUse` hook can block a tool. A bash or webhook `Stop` hook can keep the agent working. Hooks on every other event run in the background
 - **Tool matching:** Optionally filter tool events (`PreToolUse`, `PostToolUse`) by tool name pattern
 - **Plugin hooks:** Installed plugins can contribute read-only hooks
@@ -40,7 +40,7 @@ Run a shell command when the event fires. For `PreToolUse` and `Stop`, AI Shuffl
 | `command` | string  | Shell command to execute                        |
 | `timeout` | integer | Timeout in milliseconds (1000-300000, default 30000) |
 
-The `timeout` applies to each hook on its own. When several hooks match one `PreToolUse` or `Stop` event, they run one after another and each gets its full timeout. A hook that runs out of time is stopped, with everything it started.
+The `timeout` applies to each hook on its own. When several hooks match one `PreToolUse` or `Stop` event, they run one after another and each gets its full timeout. A hook that runs out of time is stopped, with everything it started. A running session keeps the deadline it computed from these timeouts when it started, so a timeout raised mid-session can still be cut short (never below 60 seconds for the event's hooks together) until the next session.
 
 A `PreToolUse` hook receives the tool call as JSON on stdin and runs in the session's working directory:
 
@@ -122,7 +122,7 @@ The body is JSON describing the event: `{"event": ..., "timestamp": ..., "data":
 
 ### Message Hooks
 
-Message hooks are not supported yet. A message hook can be saved, but no run delivers its message: it would not appear in the chat or reach the agent. Each run is recorded as failed, and testing one shows the rendered message together with that error. Use a webhook or bash hook instead.
+Message hooks are not supported, and new ones cannot be created (the API returns `422`). No run of an existing message hook delivers its message: it would not appear in the chat or reach the agent. Each run is recorded as failed, and testing one shows the rendered message together with that error. Delete it, or switch it to a webhook or bash hook.
 
 | Field              | Type   | Description                                              |
 |--------------------|--------|----------------------------------------------------------|
