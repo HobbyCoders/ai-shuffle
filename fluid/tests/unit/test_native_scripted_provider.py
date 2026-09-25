@@ -35,7 +35,7 @@ from fluid.events import (
     Usage,
     UserTurn,
 )
-from fluid.events.model import CacheMissAlert, Interrupted, ProviderRetry
+from fluid.events.model import CacheMissAlert, Interrupted, ProviderRetry, TurnStarted
 from fluid.events.ops import Interrupt
 from fluid.messages import ToolResultBlock, ToolUseBlock
 from fluid.permissions.engine import PermissionEngine
@@ -1211,3 +1211,205 @@ async def test_an_empty_reply_without_usage_is_still_retried_as_empty(server):
 
     assert [r.reason for r in _of(events, ProviderRetry)] == ["empty response from provider"]
     assert isinstance(_terminal(events), TurnComplete)
+
+
+# ─── OpenRouter's documented mid-stream error ───────────────────────────────
+
+
+def _openrouter_mid_stream_error(code: Any = "server_error") -> bytes:
+    """The chunk OpenRouter documents for a failure after streaming began: a
+    top-level ``error`` next to a choice whose ``finish_reason`` is "error"."""
+    return fps.sse({
+        "id": "gen-1", "object": "chat.completion.chunk", "provider": "openai",
+        "error": {"code": code, "message": "Provider disconnected unexpectedly"},
+        "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "error"}],
+    })
+
+
+async def test_openrouters_documented_mid_stream_error_is_an_error_not_an_answer(server):
+    """Regression (R10-3): the chunk carries ``choices``, so the error branch
+    skipped it, ``finish_reason: "error"`` read as end_turn and the cut-off
+    text was stored as a finished answer."""
+    server.script([Chat.chunk({"role": "assistant", "content": ""}),
+                   Chat.chunk({"content": "Half an ans"}),
+                   _openrouter_mid_stream_error(), Chat.DONE])
+    run = Harness(server, "openrouter")
+    try:
+        events = await run.turn()
+        stored = await run.stored()
+    finally:
+        await run.aclose()
+
+    error = _terminal(events)
+    assert isinstance(error, ErrorEvent)
+    assert (error.status, error.provider_message) == (500, "Provider disconnected unexpectedly")
+    assert _roles(stored) == ["user", "assistant"]
+    assert stored[1].text() == "Half an ans"
+    assert stored[1].provider_meta == {"interrupted": "provider_error"}
+    assert len(server.requests) == 1  # never replayed after content
+
+
+async def test_openrouters_mid_stream_error_before_content_is_retried_as_a_status(server):
+    """Before any content the same chunk is a refusal with a status, retried
+    by the client, not an "empty response" for the engine's ten retries."""
+    server.script([Chat.chunk({"role": "assistant", "content": ""}),
+                   _openrouter_mid_stream_error(), Chat.DONE],
+                  Chat.text("ok"))
+    run = Harness(server, "openrouter")
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    assert isinstance(_terminal(events), TurnComplete)
+    assert _of(events, ProviderRetry) == []
+    assert len(server.requests) == 2
+
+
+async def test_a_finish_reason_of_error_without_an_error_object_is_still_an_error(server):
+    server.script([*Chat.text("Half", finish=None, usage=False, done=False),
+                   Chat.chunk({}, "error"), Chat.DONE])
+    run = Harness(server, "openrouter")
+    try:
+        events = await run.turn()
+        stored = await run.stored()
+    finally:
+        await run.aclose()
+
+    error = _terminal(events)
+    assert isinstance(error, ErrorEvent) and "ended the stream with an error" in error.message
+    assert stored[-1].provider_meta == {"interrupted": "provider_error"}
+
+
+# ─── Resume after a reply cut off by a provider error ───────────────────────
+
+
+async def _resume(run: Harness) -> list:
+    from fluid.events.ops import Resume
+
+    before = len(run.loop.bus.log(run.loop.session_id))
+    await run.loop.submit(Resume())
+    await asyncio.wait_for(run.loop.wait_turn(), TURN_BUDGET)
+    return run.loop.bus.log(run.loop.session_id)[before:]
+
+
+@pytest.mark.parametrize("kind", ["anthropic", "openrouter"])
+async def test_resume_reruns_a_prompt_whose_reply_was_cut_off_by_a_provider_error(
+    server, kind
+):
+    """Regression (R10-11): keeping the partial text put an interrupted
+    assistant node at the head, and Resume refused with "nothing to resume"
+    although the error was retriable."""
+    if kind == "anthropic":
+        failed = [Messages.start(), *Messages.text_block(0, "Half an ans"),
+                  Messages.error("overloaded_error", "Overloaded")]
+    else:
+        failed = [Chat.chunk({"content": "Half an ans"}), _openrouter_mid_stream_error(),
+                  Chat.DONE]
+    server.script(failed, text_reply(kind, "The full answer"))
+    run = Harness(server, kind)
+    try:
+        first = _terminal(await run.turn("question"))
+        assert isinstance(first, ErrorEvent) and first.retriable
+        prompt_node = (await run.store.load_path(run.loop.session_id))[0]
+
+        events = await _resume(run)
+        stored = await run.stored()
+    finally:
+        await run.aclose()
+
+    assert isinstance(_terminal(events), TurnComplete)
+    # The retry answers the prompt itself: the cut-off reply is a dead branch,
+    # and the request is the one the failed call sent.
+    assert [(m.role, m.text()) for m in stored] == [
+        ("user", "question"), ("assistant", "The full answer")]
+    assert _of(events, TurnStarted)[0].node_id == prompt_node.node_id
+    assert len(server.requests) == 2
+    assert server.requests[1].body == server.requests[0].body
+
+
+async def test_resume_still_refuses_after_a_completed_reply(server):
+    server.script(Messages.text("done"))
+    run = Harness(server, "anthropic")
+    try:
+        await run.turn()
+        events = await _resume(run)
+    finally:
+        await run.aclose()
+
+    error = _terminal(events)
+    assert isinstance(error, ErrorEvent) and error.message.startswith("nothing to resume")
+    assert len(server.requests) == 1
+
+
+# ─── billing refusals are not rate limits ───────────────────────────────────
+
+
+_QUOTA_BODY = {"error": {
+    "message": "You exceeded your current quota, please check your plan and billing details.",
+    "type": "insufficient_quota", "code": "insufficient_quota"}}
+
+
+@pytest.mark.parametrize("kind", DIALECTS)
+@pytest.mark.parametrize("status,body", [
+    (429, _QUOTA_BODY),
+    (429, {"error": {"message": "Billing hard limit has been reached",
+                     "type": "invalid_request_error",
+                     "code": "billing_hard_limit_reached"}}),
+    (402, {"error": {"code": 402, "message": "Insufficient credits. Add more credits."}}),
+    (402, {"error": {"code": "insufficient_credits", "message": "Insufficient credits."}}),
+])
+async def test_a_billing_refusal_is_fatal_and_not_reported_as_a_rate_limit(
+    server, kind, status, body
+):
+    """Regression (R10-12): OpenAI sends ``insufficient_quota`` as HTTP 429.
+    It was retried three times and reported as 429, so the app told the user
+    to wait for a usage window that will never reset."""
+    server.script(*[fps.error_reply(status, body=body, retry_after="0") for _ in range(3)])
+    run = Harness(server, kind)
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    error = _terminal(events)
+    assert isinstance(error, ErrorEvent) and not error.retriable
+    assert error.status == 402
+    assert error.provider_message.startswith("Out of credit or quota")
+    assert body["error"]["message"] in error.provider_message
+    assert len(server.requests) == 1
+
+
+@pytest.mark.parametrize("kind", DIALECTS)
+async def test_a_true_rate_limit_is_still_retried_and_reported_as_429(server, kind):
+    rate = {"error": {"message": "Rate limit reached for requests",
+                      "type": "requests", "code": "rate_limit_exceeded"}}
+    server.script(fps.error_reply(429, body=rate, retry_after="0"), text_reply(kind, "ok"))
+    run = Harness(server, kind)
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    assert isinstance(_terminal(events), TurnComplete)
+    assert len(server.requests) == 2
+
+
+# ─── first-byte timeout is a provider setting ───────────────────────────────
+
+
+@pytest.mark.parametrize("value,expected", [(None, 60.0), (5, 5.0), (0, None)])
+def test_the_first_byte_timeout_comes_from_the_provider_config(value, expected):
+    """Regression (R10-15): the 60 s budget was fixed; a slow gateway that
+    sends its first byte only after the upstream's first token could not
+    raise it."""
+    from fluid.config.loader import _build_provider_client
+    from fluid.config.model import HarnessConfig
+
+    block: dict[str, Any] = {"kind": "anthropic", "api_key_env": "UNSET_TEST_KEY"}
+    if value is not None:
+        block["first_byte_timeout"] = value
+    config = HarnessConfig.from_dict({"providers": {"slow": block}})
+    client = _build_provider_client(config, "slow")
+    assert client._first_byte_timeout == expected
+    assert config.to_dict()["providers"]["slow"]["first_byte_timeout"] == value

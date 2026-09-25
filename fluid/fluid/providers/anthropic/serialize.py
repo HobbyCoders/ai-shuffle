@@ -22,7 +22,7 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from fluid.providers._transport import provider_error_summary
+from fluid.providers._transport import billing_summary, provider_error_summary
 from fluid.providers.base import ProviderRequest, StreamChunk
 from fluid.providers.anthropic.limits import resolve_max_tokens
 from fluid.providers.anthropic.thinking import clamp_effort, resolve_thinking
@@ -209,7 +209,10 @@ def sse_to_chunk(event_name: str, data: dict[str, Any]) -> StreamChunk | None:
         status = _STREAM_ERROR_STATUS.get(str(err.get("type") or ""))
         if status is not None:
             err.setdefault("status", status)
-        err.setdefault("provider_message", provider_error_summary(err.get("message")))
+        summary = provider_error_summary(err.get("message"))
+        if err.get("type") == "billing_error":
+            summary = billing_summary("billing_error", summary)
+        err.setdefault("provider_message", summary)
         return StreamChunk("error", err)
     return None
 

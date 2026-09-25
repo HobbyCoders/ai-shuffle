@@ -134,6 +134,7 @@ def _non_default_config_dict() -> dict:
                 "api_key_env": "K",
                 "tool_style": "text",
                 "stream_deadline": 12.5,
+                "first_byte_timeout": 90.0,
                 "extra": {"a": 1},
             },
         },

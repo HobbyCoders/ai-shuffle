@@ -31,12 +31,14 @@ result, whether the stream died on a dropped connection, an in-stream error or
 a body cut before its terminal event.
 
 A turn that ends on an ErrorEvent leaves the head on an unanswered user node —
-a text prompt, or the tool results the model never got to read. The Resume op
-picks the loop back up from exactly that node without appending anything, so
-the retry re-sends the same history the failed call saw. Resume on a head that
-is already an assistant reply has nothing to continue and ends the turn with an
-ErrorEvent saying so. Peer messages accepted during a failed call are retained
-as a new unanswered user-role node and included in an explicit later resume.
+a text prompt, or the tool results the model never got to read — or on the
+interrupted partial reply to one. The Resume op picks the loop back up from
+that user node without appending anything, so the retry re-sends the same
+history the failed call saw; a kept partial reply is left on a side branch.
+Resume on a head that is a completed assistant reply has nothing to continue
+and ends the turn with an ErrorEvent saying so. Peer messages accepted during a
+failed call are retained as a new unanswered user-role node and included in an
+explicit later resume.
 """
 
 from __future__ import annotations
@@ -2078,6 +2080,17 @@ class NativeLoop(BackgroundLifecycleMixin):
             # writing a node, so none of it applies here.
             path = await self.store.load_path(sid)
             head = path[-1] if path else None
+            if (
+                head is not None and len(path) > 1
+                and head.message.role == "assistant"
+                and (head.message.provider_meta or {}).get(INTERRUPTED_META_KEY)
+                and path[-2].message.role == "user"
+            ):
+                # A reply cut off by a provider error is not an answer: the
+                # prompt under it is still unanswered. Resume from that node,
+                # so the request is the one the failed call sent and the new
+                # reply branches beside the kept partial text.
+                head = path[-2]
             if head is None or head.message.role != "user":
                 await self._emit(TurnStarted(
                     session_id=sid, node_id=head.node_id if head else "",

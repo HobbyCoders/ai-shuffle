@@ -96,6 +96,13 @@ class ProviderConfig:
     # this bounds the call itself. Absent → the client's own generous default
     # (fluid.providers._transport.DEFAULT_STREAM_DEADLINE_S); 0 disables it.
     stream_deadline: float | None = None
+    # Seconds a call may wait for its first byte (the response headers, then
+    # the first SSE event) before it is abandoned and retried like a read
+    # timeout. Absent → the client's default
+    # (fluid.providers._transport.DEFAULT_FIRST_BYTE_TIMEOUT_S, 60 s); 0
+    # disables it. Honoured by the "anthropic" kind; raise it for a gateway
+    # that sends nothing until the upstream's first token.
+    first_byte_timeout: float | None = None
     # Standing server-specific request-body knobs, merged into every request
     # (llama.cpp cache_prompt/samplers, Ollama options, …). Currently honoured
     # by the "local" kind.
@@ -118,6 +125,7 @@ class ProviderConfig:
             api_key_env=d.get("api_key_env"),
             tool_style=tool_style,
             stream_deadline=_optional_seconds(d.get("stream_deadline")),
+            first_byte_timeout=_optional_seconds(d.get("first_byte_timeout")),
             extra=dict(d.get("extra") or {}),
         )
 
@@ -549,6 +557,7 @@ class HarnessConfig:
                     "api_key_env": pc.api_key_env,
                     "tool_style": pc.tool_style,
                     "stream_deadline": pc.stream_deadline,
+                    "first_byte_timeout": pc.first_byte_timeout,
                     "extra": dict(pc.extra),
                 }
                 for name, pc in self.providers.items()

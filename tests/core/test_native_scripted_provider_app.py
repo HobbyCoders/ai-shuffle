@@ -609,3 +609,71 @@ async def test_a_native_429_reaches_the_app_like_the_cli_legs_429(
     assert native_outcome["generic_notifications"] == 0  # the 429 notice owns it
     [notice] = native_outcome["rate_limited_notices"]
     assert notice.startswith("Usage limit reached")
+
+
+@pytest.mark.asyncio
+async def test_a_native_billing_429_is_not_a_usage_limit(monkeypatch, tmp_path, provider):
+    """Regression (R10-12): OpenAI's ``insufficient_quota`` arrives as HTTP 429.
+    It was retried three times and reached the app as a 429, which fired the
+    "Usage limit reached — wait for the window" notice for an account that is
+    simply out of credit."""
+    body = {"error": {"message": "You exceeded your current quota, please check your "
+                                 "plan and billing details.",
+                      "type": "insufficient_quota", "code": "insufficient_quota"}}
+    provider.script(*[fps.error_reply(429, body=body, retry_after="0") for _ in range(3)])
+    async with NativeRun(monkeypatch, tmp_path, provider, kind="openrouter") as run:
+        messages = await run.turn("hi")
+
+    native = messages[-1]
+    assert isinstance(native, ResultMessage) and native.is_error
+    assert native.api_error_status == 402
+    [error] = native.errors
+    assert error.startswith("provider returned HTTP 402: Out of credit or quota")
+    assert "You exceeded your current quota" in error
+    assert len(provider.requests) == 1  # not retried
+
+    outcome = await _chat_turn_outcome(tmp_path, native)
+    assert outcome["rate_limited_notices"] == []
+    assert outcome["api_error_status"] == 402
+
+
+async def _resume(run: NativeRun) -> list:
+    async def collect() -> list:
+        seen: list = []
+        await run.adapter.engine.wait_turn()  # the failed turn's task settles
+        await run.adapter.send_resume()
+        async for message in run.adapter.receive_events():
+            seen.append(message)
+            if isinstance(message, ResultMessage):
+                return seen
+        raise AssertionError("resume ended without a result")
+
+    return await asyncio.wait_for(collect(), TURN_BUDGET)
+
+
+@pytest.mark.asyncio
+async def test_retry_after_a_reply_cut_off_by_a_provider_error_answers_the_prompt(
+    monkeypatch, tmp_path, provider
+):
+    """Regression (R10-11): the partial reply kept after a retriable in-stream
+    error sat at the head, so the app's Retry (``send_resume``) ended at once
+    with "nothing to resume" instead of asking the provider again."""
+    provider.script(
+        [Messages.start(), *Messages.text_block(0, "Half an ans"),
+         Messages.error("overloaded_error", "Overloaded")],
+        Messages.text("The full answer"),
+    )
+    async with NativeRun(monkeypatch, tmp_path, provider) as run:
+        failed = await run.turn("question")
+        retried = await _resume(run)
+        stored = await run.stored()
+
+    assert failed[-1].is_error and failed[-1].api_error_status == 529
+    result = retried[-1]
+    assert isinstance(result, ResultMessage) and not result.is_error
+    assert _text(retried) == "The full answer"
+    assert [m.role for m in stored] == ["user", "assistant"]
+    assert stored[0].text().startswith("question")
+    assert stored[1].text() == "The full answer"
+    assert len(provider.requests) == 2
+    assert provider.requests[1].body == provider.requests[0].body

@@ -4,6 +4,16 @@ Subscription OAuth reuse is deliberately unsupported: Anthropic bans and
 technically blocks third-party use of Pro/Max OAuth tokens. Claude
 subscription traffic belongs to the delegated engine (official ``claude`` CLI
 subprocess), not this client.
+
+Timeouts: ``timeout`` (600 s) is per read; ``stream_deadline`` (900 s) bounds
+one whole call; ``first_byte_timeout`` (60 s,
+``fluid.providers._transport.DEFAULT_FIRST_BYTE_TIMEOUT_S``) bounds the wait
+for the headers plus the first SSE event, after which the call is abandoned
+and retried like a pre-content read timeout. The last two are per-provider
+settings (``[providers.<name>] stream_deadline`` / ``first_byte_timeout`` in
+config.toml, read by ``fluid.config.loader._build_provider_client``); ``0``
+disables either. Raise ``first_byte_timeout`` for a gateway that sends nothing
+until the upstream model's first token.
 """
 
 from __future__ import annotations
@@ -19,7 +29,7 @@ import httpx
 
 from fluid.providers._trace import trace_request
 
-from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
+from fluid.providers._retry import RetryPolicy
 from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
     DEFAULT_FIRST_BYTE_TIMEOUT_S,
@@ -30,7 +40,7 @@ from fluid.providers._transport import (
     is_closed_client_error,
     is_usable_client,
     open_stream,
-    provider_error_summary,
+    refusal_payload,
     truncated_stream_payload,
     with_deadline,
 )
@@ -135,18 +145,13 @@ class AnthropicClient:
                         diagnostics.received_headers(resp)
                         if resp.status_code != 200:
                             text = (await resp.aread()).decode(errors="replace")
-                            retriable = resp.status_code in RETRIABLE_STATUSES
-                            if retriable and attempt < self._retry.max_retries:
+                            refusal = refusal_payload(resp.status_code, text)
+                            if refusal["retriable"] and attempt < self._retry.max_retries:
                                 await asyncio.sleep(self._retry.delay(
                                     attempt, resp.headers.get("retry-after")))
                                 attempt += 1
                                 continue
-                            yield StreamChunk(
-                                "error",
-                                {"status": resp.status_code, "message": text[:2000],
-                                 "provider_message": provider_error_summary(text),
-                                 "retriable": retriable},
-                            )
+                            yield StreamChunk("error", refusal)
                             return
                         # message_start is held until the first chunk after
                         # it, so an overloaded_error sent in place of content

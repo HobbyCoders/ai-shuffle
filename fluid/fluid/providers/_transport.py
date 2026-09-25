@@ -28,6 +28,12 @@ from typing import Any, TypeVar
 
 import httpx
 
+from fluid.providers._retry import (
+    BILLING_STATUS,
+    RETRIABLE_STATUSES,
+    billing_error_code,
+)
+
 # Generous by design: this is a runaway guard, not a latency budget. A long
 # reasoning call on a slow provider must never trip it, so it sits far above
 # any plausible honest call.
@@ -212,6 +218,48 @@ def provider_error_summary(body: Any, limit: int = PROVIDER_MESSAGE_LIMIT) -> st
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "\u2026"
     return text
+
+
+def billing_summary(code: str | None, detail: str | None) -> str | None:
+    """The short explanation carried on a billing refusal (see
+    fluid.providers._retry.BILLING_ERROR_CODES): says it is about credit, not
+    load, then the provider's own words."""
+    label = f" ({code})" if code else ""
+    return provider_error_summary(
+        f"Out of credit or quota{label}: {detail or 'the provider gave no detail'}"
+    )
+
+
+def refusal_payload(status: int, text: str) -> dict[str, Any]:
+    """The ``error`` chunk payload for a non-200 response.
+
+    Whether it is retried follows the status, except for a billing refusal:
+    an ``insufficient_quota`` 429 (or any 402) is reported as 402 and is never
+    retried, because no wait clears it.
+    """
+    summary = provider_error_summary(text)
+    code = billing_error_code(text)
+    if code is None and status != BILLING_STATUS:
+        return {
+            "status": status,
+            "message": text[:2000],
+            "provider_message": summary,
+            "retriable": status in RETRIABLE_STATUSES,
+        }
+    payload: dict[str, Any] = {
+        "status": BILLING_STATUS,
+        "message": (
+            f"the provider refused the request with HTTP {status}: the account "
+            "is out of credit or quota, so it was not retried. " + text[:2000]
+        ),
+        "provider_message": billing_summary(code, summary),
+        "retriable": False,
+    }
+    if code is not None:
+        payload["code"] = code
+    if status != BILLING_STATUS:
+        payload["http_status"] = status
+    return payload
 
 
 class StreamDeadlineExceeded(Exception):

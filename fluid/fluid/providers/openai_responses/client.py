@@ -46,7 +46,7 @@ import httpx
 
 from fluid.providers._trace import trace_request
 
-from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
+from fluid.providers._retry import RetryPolicy
 from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
     DEFAULT_STREAM_DEADLINE_S,
@@ -55,7 +55,7 @@ from fluid.providers._transport import (
     deadline_error_payload,
     is_closed_client_error,
     is_usable_client,
-    provider_error_summary,
+    refusal_payload,
     truncated_stream_payload,
     with_deadline,
 )
@@ -453,21 +453,16 @@ class OpenAIResponsesClient:
                             await self._auth.on_401()
                             refreshed_401 = True
                             continue
-                        retriable = resp.status_code in RETRIABLE_STATUSES
-                        if retriable and not native_image and attempt < self._retry.max_retries:
+                        refusal = refusal_payload(resp.status_code, text)
+                        if (
+                            refusal["retriable"] and not native_image
+                            and attempt < self._retry.max_retries
+                        ):
                             await asyncio.sleep(self._retry.delay(
                                 attempt, resp.headers.get("retry-after")))
                             attempt += 1
                             continue
-                        yield StreamChunk(
-                            "error",
-                            {
-                                "status": resp.status_code,
-                                "message": text[:2000],
-                                "provider_message": provider_error_summary(text),
-                                "retriable": retriable,
-                            },
-                        )
+                        yield StreamChunk("error", refusal)
                         return
                 except StreamDeadlineExceeded as exc:
                     yield StreamChunk("error", deadline_error_payload(exc))

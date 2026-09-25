@@ -33,8 +33,9 @@ from fluid.messages import (
     UnknownBlock,
 )
 from fluid.providers._retry import (
-    RETRIABLE_STATUSES,
+    SYMBOLIC_CODE_STATUS,
     RetryPolicy,
+    billing_error_code,
     coerce_status,
     is_retriable_status,
 )
@@ -45,8 +46,10 @@ from fluid.providers._transport import (
     StreamDeadlineExceeded,
     deadline_error_payload,
     is_closed_client_error,
+    billing_summary,
     is_usable_client,
     provider_error_summary,
+    refusal_payload,
 )
 from fluid.providers.base import StreamChunk, flatten_system
 
@@ -300,53 +303,14 @@ class ChatCompletionsNormalizer:
             )
         ]
 
-    def consume(self, name: str, data: dict[str, Any]) -> list[StreamChunk]:
-        data = data or {}
-        for source, target in (
-            ("id", "generation_id"), ("model", "effective_model"),
-            ("provider", "effective_provider"),
-        ):
-            if isinstance(data.get(source), str) and data[source]:
-                self._response_meta[target] = data[source]
+    def _consume_choices(
+        self, choices: list[Any], *, failed: bool = False
+    ) -> list[StreamChunk]:
+        """Content deltas and finish state of one chunk's ``choices``. A
+        chunk that reports a failure still delivers the deltas it carries,
+        but its finish_reason ("error") does not finish the reply."""
         out: list[StreamChunk] = []
-        if not self._started:
-            self._started = True
-            out.append(StreamChunk("message_start", {"usage": {}, "message": {}}))
-
-        # OpenRouter (and some proxies) answer upstream failures and rate
-        # limits with HTTP 200 and a chunk carrying only ``{"error": ...}``.
-        # Without this the turn would end silently with zero usage.
-        err = data.get("error")
-        if err and not data.get("choices"):
-            if isinstance(err, dict):
-                message = str(err.get("message") or err)
-                code = err.get("code")
-                if coerce_status(code) is None and err.get("status") is not None:
-                    code = err["status"]
-            else:
-                message, code = str(err), None
-            self.errored = True
-            # The embedded code decides retriability, exactly as a non-200
-            # status would: a Cloudflare 520 from the upstream provider is a
-            # blip worth another attempt, an auth or validation failure is not.
-            status = coerce_status(code)
-            out.append(
-                StreamChunk(
-                    "error",
-                    {
-                        # A symbolic code ("rate_limit_exceeded") is kept for
-                        # logs; ``status`` is only ever an HTTP status.
-                        "status": status,
-                        "code": code,
-                        "message": message[:2000],
-                        "provider_message": provider_error_summary(message),
-                        "retriable": is_retriable_status(code),
-                    },
-                )
-            )
-            return out
-
-        for choice in data.get("choices") or []:
+        for choice in choices:
             delta = choice.get("delta") or {}
             content = delta.get("content")
             if content:
@@ -383,13 +347,79 @@ class ChatCompletionsNormalizer:
                             {"index": self._index_of[key], "partial_json": args},
                         )
                     )
-            if choice.get("finish_reason"):
+            if choice.get("finish_reason") and not failed:
                 self._finish_seen = True
                 self._stop_reason = map_stop_reason(choice["finish_reason"])
                 if choice["finish_reason"] == "content_filter":
                     self._content_filtered = True
             if choice.get("native_finish_reason"):
                 self.native_stop_reason = str(choice["native_finish_reason"])
+        return out
+
+    @staticmethod
+    def _error_payload(err: Any) -> dict[str, Any]:
+        """The ``error`` chunk for an in-stream error object (or none)."""
+        if isinstance(err, dict):
+            message = str(err.get("message") or err)
+            code = err.get("code")
+            if coerce_status(code) is None and err.get("status") is not None:
+                code = err["status"]
+        elif err:
+            message, code = str(err), None
+        else:
+            message, code = "the provider ended the stream with an error", None
+        # The embedded code decides retriability, exactly as a non-200 status
+        # would: a Cloudflare 520 from the upstream provider is a blip worth
+        # another attempt, an auth or validation failure is not. A symbolic
+        # code with an unambiguous HTTP twin ("server_error") reads as that
+        # status; a billing code is a 402 whatever status came with it.
+        status = coerce_status(code)
+        if status is None and isinstance(code, str):
+            status = SYMBOLIC_CODE_STATUS.get(code)
+        summary = provider_error_summary(message)
+        billing = billing_error_code(err)
+        if billing is not None:
+            status = 402
+            summary = billing_summary(billing, summary)
+        return {
+            # A symbolic code ("rate_limit_exceeded") is kept for logs;
+            # ``status`` is only ever an HTTP status.
+            "status": status,
+            "code": code,
+            "message": message[:2000],
+            "provider_message": summary,
+            "retriable": is_retriable_status(status),
+        }
+
+    def consume(self, name: str, data: dict[str, Any]) -> list[StreamChunk]:
+        data = data or {}
+        for source, target in (
+            ("id", "generation_id"), ("model", "effective_model"),
+            ("provider", "effective_provider"),
+        ):
+            if isinstance(data.get(source), str) and data[source]:
+                self._response_meta[target] = data[source]
+        out: list[StreamChunk] = []
+        if not self._started:
+            self._started = True
+            out.append(StreamChunk("message_start", {"usage": {}, "message": {}}))
+
+        # OpenRouter (and some proxies) answer upstream failures and rate
+        # limits with HTTP 200 and a chunk carrying ``{"error": ...}``. Before
+        # any content it comes alone; a failure after streaming began comes as
+        # OpenRouter documents it, next to ``choices`` whose finish_reason is
+        # "error". Either way the reply is not finished: without this the
+        # turn would end as a normal answer holding the cut-off text.
+        err = data.get("error")
+        choices = data.get("choices") or []
+        failed = bool(err) or any(
+            isinstance(c, dict) and c.get("finish_reason") == "error" for c in choices
+        )
+        out += self._consume_choices(choices, failed=failed)
+        if failed:
+            self.errored = True
+            out.append(StreamChunk("error", self._error_payload(err)))
+            return out
 
         # The terminal chunk (include_usage) carries usage with empty choices —
         # close every open block, then emit usage + message_stop.
@@ -580,22 +610,14 @@ async def stream_chat_completions(
                         )
                     if resp.status_code != 200:
                         text = (await resp.aread()).decode(errors="replace")
-                        retriable = resp.status_code in RETRIABLE_STATUSES
-                        if retriable and attempt < retry.max_retries:
+                        refusal = refusal_payload(resp.status_code, text)
+                        if refusal["retriable"] and attempt < retry.max_retries:
                             await asyncio.sleep(
                                 retry.delay(attempt, resp.headers.get("retry-after"))
                             )
                             attempt += 1
                             continue
-                        yield StreamChunk(
-                            "error",
-                            with_request_evidence({
-                                "status": resp.status_code,
-                                "message": text[:2000],
-                                "provider_message": provider_error_summary(text),
-                                "retriable": retriable,
-                            }),
-                        )
+                        yield StreamChunk("error", with_request_evidence(refusal))
                         return
                     normalizer = ChatCompletionsNormalizer()
                     # ``[DONE]`` is the server's own end-of-stream sentinel.

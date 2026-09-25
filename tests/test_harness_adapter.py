@@ -1447,6 +1447,66 @@ async def test_send_resume_carries_the_turn_source():
 
 
 @pytest.mark.asyncio
+async def test_send_resume_continues_after_a_reply_cut_off_by_a_provider_error():
+    """Regression (R10-11): a retriable in-stream error after text left the
+    kept partial reply at the head, and Retry (``send_resume``) over a real
+    NativeLoop ended with "nothing to resume" instead of re-running the
+    prompt. A completed reply still has nothing to resume."""
+    from fluid.engine.native import NativeLoop
+
+    def _text(text: str) -> list:
+        return [
+            StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
+            StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+            StreamChunk("text_delta", {"index": 0, "text": text}),
+        ]
+
+    calls = 0
+
+    class _FailsOnceMidReply:
+        name = "fake"
+        caps = ProviderCaps()
+
+        async def stream(self, request):
+            nonlocal calls
+            calls += 1
+            for chunk in _text("Half an ans" if calls == 1 else "The full answer"):
+                yield chunk
+            if calls == 1:
+                yield StreamChunk("error", {"message": "Overloaded", "retriable": True,
+                                            "status": 529})
+                return
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {"usage": {"output_tokens": 3},
+                                        "stop_reason": "end_turn"})
+
+    loop = NativeLoop(provider=_FailsOnceMidReply(), store=MemoryStore(), model="fake")
+    adapter = _adapter_with(loop)
+    await loop._ensure_session()
+
+    await adapter.send_query("question")
+    failed = await _collect(adapter)
+    assert isinstance(failed[-1], ResultMessage) and failed[-1].api_error_status == 529
+
+    await loop.wait_turn()
+    await adapter.send_resume()
+    retried = await _collect(adapter)
+    assert isinstance(retried[-1], ResultMessage) and not retried[-1].is_error
+    assert calls == 2
+    path = await loop.store.load_path(loop.session_id)
+    assert [n.message.role for n in path] == ["user", "assistant"]
+    assert path[-1].message.text() == "The full answer"
+
+    # The answer is complete now: another Retry has nothing to continue.
+    await loop.wait_turn()
+    await adapter.send_resume()
+    refused = await _collect(adapter)
+    assert refused[-1].is_error and "nothing to resume" in refused[-1].result
+    assert calls == 2
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_send_resume_without_an_engine_raises():
     adapter = HarnessAdapter()
     with pytest.raises(RuntimeError, match="Adapter not connected"):

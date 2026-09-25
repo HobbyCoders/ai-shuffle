@@ -46,9 +46,14 @@ from fluid.messages import (
     ToolUseBlock,
     UnknownBlock,
 )
-from fluid.providers._retry import coerce_status, is_retriable_status
+from fluid.providers._retry import (
+    BILLING_STATUS,
+    billing_error_code,
+    coerce_status,
+    is_retriable_status,
+)
 from fluid.providers._sse import KEEPALIVE_EVENT
-from fluid.providers._transport import provider_error_summary
+from fluid.providers._transport import billing_summary, provider_error_summary
 from fluid.providers.base import (
     INTERNAL_EXTRA_PREFIX,
     ErrorClass,
@@ -760,9 +765,16 @@ class ResponsesStreamNormalizer:
             status = coerce_status(status)
             if status is None and code in _CODE_STATUS:
                 status = _CODE_STATUS[code]
+            summary = provider_error_summary(err)
+            billing = billing_error_code(err)
+            if billing is not None:
+                # Out of credit, the same verdict the HTTP path gives an
+                # ``insufficient_quota`` 429: a 402, never a rate limit.
+                status = BILLING_STATUS
+                summary = billing_summary(billing, summary)
             if status is not None:
                 payload["status"] = status
-            payload["provider_message"] = provider_error_summary(err)
+            payload["provider_message"] = summary
             out.append(StreamChunk("error", payload))
             return out
 
