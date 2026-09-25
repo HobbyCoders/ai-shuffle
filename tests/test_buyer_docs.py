@@ -200,14 +200,16 @@ def test_every_in_app_link_opens_a_page_in_the_docs_panel():
 # property of `document` or of a <form>, so a heading with such an id loses it
 # and its table-of-contents entry scrolls nowhere ("## Remove" -> id "remove").
 # Lowercase single-word names only (heading ids are lowercase slugs); the
-# `on<event>` handler names are left out.
+# `on<event>` handler names are left out. Probed against the Chromium the app
+# ships (152); another engine may strip a few more.
 DOM_CLOBBER_IDS = frozenset("""
-action after anchors animate append applets attributes autocomplete autofocus before blur body
-charset children clear click close closest constructor contains cookie dataset dir doctype domain
-draggable elements embeds encoding enctype evaluate focus fonts forms head hidden id images
-implementation inert lang length links location matches method name nonce normalize open part
-plugins popover prefix prepend referrer remove reset role scripts scroll slot style submit target
-timeline title translate write writeln
+action after all anchors animate append applets attributes autocapitalize autocomplete autofocus
+before blur body charset children clear click close closest constructor contains cookie dataset
+dir doctype domain draggable elements embeds encoding enctype evaluate focus fonts forms
+fullscreen head hidden id images implementation inert lang length links location matches method
+name nonce normalize open part plugins popover prefix prepend prerendering pseudo referrer rel
+remove reset role scripts scroll slot spellcheck style submit target timeline title translate
+when write writeln
 """.split())
 
 

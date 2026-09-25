@@ -466,8 +466,9 @@ async def execute_message_hook(
     reads neither for a current session and the engine never saw the text, yet
     the hook reported success. Injecting into the event log or queueing a turn
     needs a design (a UserPromptSubmit message hook would start a turn that
-    fires it again), so until then the run fails honestly and the hook's
-    last-run status says why.
+    fires it again), so until then the run fails honestly: a live run only
+    bumps the hook's failure count (the reason is not stored), and **Test**
+    shows ``MESSAGE_HOOKS_UNSUPPORTED``.
     """
     return {
         "success": False,
