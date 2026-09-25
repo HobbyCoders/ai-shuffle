@@ -34,6 +34,18 @@ def _untracked_discard_target(
     return target
 
 
+def _push_branch_arg(branch: str) -> str:
+    """The refspec argv element for pushing *branch*.
+
+    ``git push`` parses a leading ``-`` as an option even in refspec position,
+    and a branch literally named ``--mirror`` (``git init --initial-branch``,
+    ``git update-ref``, or a cloned remote HEAD) or a caller-supplied
+    ``--receive-pack=<cmd>`` would otherwise reach git as a flag. The fully
+    qualified ref names the same branch and can never parse as an option.
+    """
+    return f"refs/heads/{branch}" if branch.startswith("-") else branch
+
+
 class GitCommitMixin:
     """Mixin providing commit/staging operations for GitService."""
 
@@ -248,6 +260,10 @@ class GitCommitMixin:
             Tuple of (success: bool, error_message: Optional[str])
         """
         try:
+            if remote.startswith("-"):
+                return False, f"Invalid remote name: {remote}"
+            if branch:
+                branch = _push_branch_arg(branch)
             if set_upstream and branch:
                 args = ["push", "--set-upstream", remote, branch]
             elif branch:

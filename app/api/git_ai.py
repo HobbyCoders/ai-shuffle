@@ -58,6 +58,10 @@ REFACTOR_KEYWORDS = {'refactor', 'restructure', 'reorganize', 'simplify', 'extra
 TEST_KEYWORDS = {'test', 'tests', 'testing', 'spec', 'coverage'}
 
 
+# A caller-forced branch prefix: a short slug, never option-like.
+_PREFIX_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$')
+
+
 def infer_prefix(msg: str) -> str:
     """Infer a conventional branch prefix from message keywords."""
     words = set(msg.lower().split())
@@ -97,6 +101,9 @@ def slugify_branch(msg: str, prefix: str) -> str:
 # server-side finish/ship orchestrator (app/api/git_operations.py) share a
 # single source of truth for prompts and output cleanup — no HTTP self-calls.
 
+# Untracked paths named in the commit-message prompt (beyond this, a count).
+_MAX_UNTRACKED_LISTED = 50
+
 
 async def generate_commit_message_for_dir(
     working_dir: str, include_unstaged: bool = True
@@ -119,6 +126,17 @@ async def generate_commit_message_for_dir(
     diff_text = await run_git(
         git_service.get_diff_text, working_dir, include_unstaged=include_unstaged
     )
+    # `git diff` never shows untracked files, yet include_unstaged commits
+    # them (stage "."). Name them so a tree of only new files still gets a
+    # message instead of a 400, and the message can mention them.
+    if include_unstaged:
+        status_data = await run_git(git_service.get_status, working_dir)
+        untracked = list((status_data or {}).get("untracked") or [])
+        if untracked:
+            listing = "\n".join(f"new file: {path}" for path in untracked[:_MAX_UNTRACKED_LISTED])
+            if len(untracked) > _MAX_UNTRACKED_LISTED:
+                listing += f"\n... and {len(untracked) - _MAX_UNTRACKED_LISTED} more new files"
+            diff_text = f"{diff_text}\n\n{listing}" if diff_text.strip() else listing
     t_diff_ms = (time.perf_counter() - t_diff_start) * 1000
     if not diff_text.strip():
         raise HTTPException(
@@ -296,12 +314,16 @@ async def generate_branch_name(
 
     check_project_access(request, project_id)
 
-    fallback_prefix = body.prefix if body.prefix else infer_prefix(body.message)
+    # The prefix is echoed into the prompt and the returned branch name, so an
+    # arbitrary one ("--force", "x\" ignore the rules") must not get through:
+    # anything but a plain slug is ignored and the prefix inferred instead.
+    forced_prefix = body.prefix if body.prefix and _PREFIX_RE.match(body.prefix) else None
+    fallback_prefix = forced_prefix or infer_prefix(body.message)
 
     try:
         prefix_instruction = (
-            f'Use the prefix "{body.prefix}/".'
-            if body.prefix
+            f'Use the prefix "{forced_prefix}/".'
+            if forced_prefix
             else 'Choose the most appropriate conventional prefix: feat/, fix/, refactor/, chore/, docs/, or test/.'
         )
 
@@ -345,8 +367,8 @@ Return ONLY the branch name, nothing else."""
             branch_name = slugify_branch(body.message, fallback_prefix)
 
         # If caller forced a prefix, ensure it's used
-        if body.prefix and not branch_name.startswith(f"{body.prefix}/"):
-            branch_name = f"{body.prefix}/{branch_name.split('/', 1)[-1] if '/' in branch_name else branch_name}"
+        if forced_prefix and not branch_name.startswith(f"{forced_prefix}/"):
+            branch_name = f"{forced_prefix}/{branch_name.split('/', 1)[-1] if '/' in branch_name else branch_name}"
 
         display_name = branch_name.split('/', 1)[-1].replace('-', ' ').title() if '/' in branch_name else branch_name
 

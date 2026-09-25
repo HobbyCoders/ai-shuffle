@@ -219,7 +219,10 @@ class InitRepoRequest(BaseModel):
     create_github_repo: bool = Field(default=False, description="Create a GitHub repository and add as remote")
     github_repo_name: Optional[str] = Field(default=None, max_length=100, description="GitHub repo name (if creating)")
     github_private: bool = Field(default=True, description="Make the GitHub repo private")
-    default_branch: str = Field(default="main", pattern=r'^[a-zA-Z0-9._/-]+$')
+    # No leading "-": the name is passed to `git init --initial-branch` and,
+    # with a GitHub repo, to `git push` as a refspec, where it would parse as
+    # an option ("--mirror", "--force").
+    default_branch: str = Field(default="main", pattern=r'^[a-zA-Z0-9_][a-zA-Z0-9._/-]*$')
 
 
 class InitRepoResponse(BaseModel):

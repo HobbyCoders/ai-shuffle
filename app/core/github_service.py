@@ -342,6 +342,11 @@ class GitHubService:
         Returns:
             Dict with name, full_name, url, clone_url keys, or None on failure
         """
+        # The name is a positional argv element: one starting with "-" would be
+        # parsed by gh as a flag (e.g. "--source=." or "--template=<repo>").
+        if not name or name.startswith('-'):
+            logger.error(f"Refusing GitHub repo name that looks like an option: {name[:50]!r}")
+            return None
         try:
             args = ['repo', 'create', name]
             args.append('--private' if private else '--public')

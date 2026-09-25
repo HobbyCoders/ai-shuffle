@@ -388,6 +388,13 @@ class GitDiffMixin:
         commit_log = ""
         diff_stat = ""
 
+        # "<base>..HEAD" sits in revision position, where git still parses a
+        # leading "-" as an option: a base of "--output=<path>" would make
+        # both commands below write a file. No real branch starts with "-".
+        if base_branch.startswith("-"):
+            logger.warning("Refusing option-like base branch: %s", base_branch[:50])
+            return (commit_log, diff_stat)
+
         # Get commit messages
         result = self._run_git(
             working_dir,
