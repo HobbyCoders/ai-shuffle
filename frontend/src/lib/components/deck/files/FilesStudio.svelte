@@ -347,6 +347,7 @@
 								<input
 									type="text"
 									bind:value={renameValue}
+									aria-label="New name for {item.name}"
 									autofocus
 									onkeydown={(e) => { if (e.key === 'Enter') confirmRename(); else if (e.key === 'Escape') cancelRename(); }}
 								/>

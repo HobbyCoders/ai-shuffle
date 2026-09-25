@@ -1,5 +1,6 @@
 <script lang="ts">
 	import PermissionRequest, { type PermissionRequestData } from './PermissionRequest.svelte';
+	import { focusTrap } from './ui/focus-trap';
 
 	interface Props {
 		requests: PermissionRequestData[];
@@ -95,7 +96,10 @@
 </script>
 
 {#if requests.length > 0}
-	<div class="permission-queue space-y-3">
+	<!-- The queue is shown as a blocking modal: focus moves onto the prompt so its
+	     Enter/Esc shortcuts and screen readers reach it, stays inside while it
+	     blocks, and returns to the composer once every request is answered. -->
+	<div class="permission-queue space-y-3" use:focusTrap={{ initial: '.permission-panel' }}>
 		<!-- Queue Header (when multiple requests) -->
 		{#if requests.length > 1}
 			<div class="queue-header rounded-xl border border-warning/30 bg-warning/5 p-3">

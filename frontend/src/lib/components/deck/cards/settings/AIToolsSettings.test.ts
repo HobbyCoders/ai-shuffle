@@ -38,7 +38,11 @@ describe('AIToolsSettings', () => {
 		// The saved image model (not the registry default) is what the Image card shows.
 		await waitFor(() => expect(currents()).toContain('Flux Dev'));
 		const browse = await screen.findByRole('button', { name: /Browse All \(2\)/ });
+		// The active view is exposed as a pressed state, not only as a colour.
+		expect(screen.getByRole('button', { name: 'Tools' }).getAttribute('aria-pressed')).toBe('true');
+		expect(browse.getAttribute('aria-pressed')).toBe('false');
 		await fireEvent.click(browse);
+		expect(browse.getAttribute('aria-pressed')).toBe('true');
 		const pick = await screen.findByTitle('fal-ai/new-image');
 		expect(pick.textContent).not.toContain('Default');
 		await fireEvent.click(pick);

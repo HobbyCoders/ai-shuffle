@@ -8,6 +8,7 @@
 	 */
 	import { FolderGit2, X, Github, Lock, Globe, Download } from 'lucide-svelte';
 	import { initRepository, cloneRepository } from '$lib/api/git';
+	import { focusTrap } from '$lib/components/ui/focus-trap';
 
 	interface Props {
 		open: boolean;
@@ -110,7 +111,10 @@
 			e.preventDefault();
 			onClose();
 		}
-		if (e.key === 'Enter' && !loading && canSubmit) {
+		// Enter on a focused button (Close, a mode or visibility choice) is that
+		// button's own activation, not a submit.
+		const onButton = e.target instanceof Element && !!e.target.closest('button');
+		if (e.key === 'Enter' && !onButton && !loading && canSubmit) {
 			e.preventDefault();
 			handleSubmit();
 		}
@@ -120,7 +124,7 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if open}
-	<div class="modal-backdrop" role="dialog" aria-modal="true">
+	<div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="init-repo-title" tabindex="-1" use:focusTrap={{ initial: 'input' }}>
 		<button class="modal-backdrop-close" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
 		<div class="modal">
 			<!-- Close button -->
@@ -138,7 +142,7 @@
 			</div>
 
 			<!-- Title & description -->
-			<h2 class="modal-title">Set up Git</h2>
+			<h2 id="init-repo-title" class="modal-title">Set up Git</h2>
 			<p class="modal-description">
 				{#if isCloneMode}
 					Clone an existing repository into this project.

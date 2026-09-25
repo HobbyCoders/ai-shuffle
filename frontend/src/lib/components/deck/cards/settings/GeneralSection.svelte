@@ -74,6 +74,7 @@
 		<div class="ctl">
 			<select
 				class="sel"
+				aria-label="Theme style"
 				value={$currentPresetId ?? ''}
 				onchange={(e) => theme.setPreset(e.currentTarget.value || null)}
 			>
@@ -136,6 +137,7 @@
 		<div class="ctl">
 			<select
 				class="sel"
+				aria-label="Timezone"
 				value={currentTimezone}
 				onchange={(e) => timezonePreference.setTimezone(e.currentTarget.value)}
 			>

@@ -103,3 +103,45 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 
 
 });
+
+describe('PermissionRequest — page-wide keyboard shortcuts', () => {
+	it('Enter with nothing focused approves and Escape denies', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+
+		await fireEvent.keyDown(document.body, { key: 'Enter' });
+		await fireEvent.keyDown(document.body, { key: 'Escape' });
+
+		expect(onRespond.mock.calls.map(([r]) => r.decision)).toEqual(['allow', 'deny']);
+	});
+
+	it('Enter on the focused Deny button does not approve', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+
+		const deny = screen.getByRole('button', { name: 'Deny' });
+		deny.focus();
+		const notPrevented = await fireEvent.keyDown(deny, { key: 'Enter' });
+
+		// The native button activation is left alone and nothing is approved.
+		expect(notPrevented).toBe(true);
+		expect(onRespond).not.toHaveBeenCalled();
+
+		// Escape has no meaning on a button, so it still denies from there.
+		await fireEvent.keyDown(deny, { key: 'Escape' });
+		expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ decision: 'deny' }));
+	});
+
+	it('Enter and Escape typed into a text field elsewhere on the page are ignored', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		const composer = document.createElement('textarea');
+		document.body.appendChild(composer);
+
+		await fireEvent.keyDown(composer, { key: 'Enter' });
+		await fireEvent.keyDown(composer, { key: 'Escape' });
+
+		expect(onRespond).not.toHaveBeenCalled();
+		composer.remove();
+	});
+});

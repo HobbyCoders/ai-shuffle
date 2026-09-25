@@ -258,7 +258,7 @@
 			<div class="set-row">
 				<div class="lab"><h4>Type</h4><p>Local subprocess or a remote endpoint.</p></div>
 				<div class="ctl">
-					<select bind:value={formType} class="sel">
+					<select bind:value={formType} class="sel" aria-label="Transport type">
 						<option value="stdio">Local Process (stdio)</option>
 						<option value="sse">SSE (Remote)</option>
 						<option value="http">HTTP (Remote)</option>

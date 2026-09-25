@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { apiBase, withAuth } from '$lib/api/runtime';
+	import { focusTrap } from '$lib/components/ui/focus-trap';
 	// Props
 	let { show = $bindable(false), onclose, onimported }: { show: boolean; onclose?: () => void; onimported?: (data: { sessionId: string; title: string; messageCount: number }) => void } = $props();
 
@@ -145,13 +146,25 @@
 	function triggerFileSelect() {
 		fileInput?.click();
 	}
+
+	function handleWindowKeydown(e: KeyboardEvent) {
+		if (show && e.key === 'Escape') {
+			e.preventDefault();
+			close();
+		}
+	}
 </script>
+
+<svelte:window onkeydown={handleWindowKeydown} />
 
 {#if show}
 	<div
 		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center p-4"
 		role="dialog"
 		aria-modal="true"
+		aria-labelledby="import-session-title"
+		tabindex="-1"
+		use:focusTrap
 	>
 		<button
 			class="absolute inset-0 w-full h-full bg-black/50 border-none p-0 cursor-default"
@@ -164,7 +177,7 @@
 		>
 			<!-- Header -->
 			<div class="px-4 py-3 border-b border-border flex items-center justify-between">
-				<h2 class="text-lg font-semibold text-foreground">Import Session</h2>
+				<h2 id="import-session-title" class="text-lg font-semibold text-foreground">Import Session</h2>
 				<button
 					class="import-modal-btn p-1.5 text-muted-foreground hover:text-foreground rounded-lg transition-colors"
 					onclick={close}
@@ -194,7 +207,12 @@
 						ondrop={handleDrop}
 						ondragover={handleDragOver}
 						ondragleave={handleDragLeave}
-						onkeydown={(e) => e.key === 'Enter' && triggerFileSelect()}
+						onkeydown={(e) => {
+							if (e.key === 'Enter' || e.key === ' ') {
+								e.preventDefault();
+								triggerFileSelect();
+							}
+						}}
 						role="button"
 						tabindex="0"
 					>

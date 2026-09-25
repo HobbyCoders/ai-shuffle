@@ -445,10 +445,10 @@
 			<span class="l1">
 				<span class="title">
 					{#if status === 'working'}
-						<span class="pip" aria-label="Working"></span>
+						<span class="pip" aria-hidden="true"></span>
 					{:else if attention}
-						<TriangleAlert size={12} strokeWidth={2.2} class="warn" />
-					{/if}{title}
+						<TriangleAlert size={12} strokeWidth={2.2} class="warn" aria-hidden="true" />
+					{/if}{#if compact && (status === 'working' || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}
 				</span>
 				<span class="timer" class:live>{timer}</span>
 			</span>

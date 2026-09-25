@@ -7,6 +7,7 @@
 	 */
 	import { GitBranch, X } from 'lucide-svelte';
 	import { git } from '$lib/stores/git.svelte';
+	import { focusTrap } from '$lib/components/ui/focus-trap';
 
 	interface Props {
 		open: boolean;
@@ -126,7 +127,7 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if open}
-	<div class="modal-backdrop" role="dialog" aria-modal="true">
+	<div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="create-branch-title" tabindex="-1" use:focusTrap={{ initial: 'input' }}>
 		<button class="modal-backdrop-close" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
 		<div class="modal">
 			<!-- Close button -->
@@ -140,7 +141,7 @@
 			</div>
 
 			<!-- Title & description -->
-			<h2 class="modal-title">Create a branch</h2>
+			<h2 id="create-branch-title" class="modal-title">Create a branch</h2>
 			<p class="modal-description">
 				This branch will be created from the current HEAD. Once created,
 				you can work on isolated changes without affecting the main branch.

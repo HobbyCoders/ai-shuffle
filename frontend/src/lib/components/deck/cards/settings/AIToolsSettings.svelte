@@ -165,6 +165,7 @@
 		<button
 			class="view-btn"
 			class:active={activeView === 'categories'}
+			aria-pressed={activeView === 'categories'}
 			onclick={() => (activeView = 'categories')}
 			type="button"
 		>
@@ -179,6 +180,7 @@
 		<button
 			class="view-btn"
 			class:active={activeView === 'browser'}
+			aria-pressed={activeView === 'browser'}
 			onclick={() => (activeView = 'browser')}
 			type="button"
 		>

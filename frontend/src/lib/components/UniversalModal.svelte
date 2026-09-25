@@ -10,6 +10,7 @@
 	 * - Footer with cancel/save actions
 	 */
 	import type { Snippet } from 'svelte';
+	import { focusTrap } from '$lib/components/ui/focus-trap';
 
 	interface Tab {
 		id: string;
@@ -83,11 +84,13 @@
 		aria-modal="true"
 		aria-labelledby="modal-title"
 		tabindex="-1"
+		use:focusTrap
 	>
 		<!-- Dark overlay backdrop -->
 		<button
 			class="absolute inset-0 bg-black/60 backdrop-blur-xs"
 			onclick={onClose}
+			tabindex="-1"
 			aria-label="Close modal"
 		></button>
 

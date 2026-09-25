@@ -100,7 +100,7 @@
 			class="search-input"
 		/>
 		{#if query}
-			<button class="search-clear" onclick={clear}>
+			<button class="search-clear" onclick={clear} aria-label="Clear search">
 				<X size={14} />
 			</button>
 		{/if}

@@ -1736,6 +1736,9 @@
 </script>
 
 <div class="transcript-shell" class:has-turn-nav={turnNavigationItems.length >= 2} class:has-long-turn-nav={turnNavigationItems.length > 30}>
+<!-- role="log" is a polite live region. aria-busy while a reply streams keeps
+     screen readers from announcing every streamed token; the settled turn is
+     read once the stream ends. -->
 <div
 	bind:this={containerRef}
 	onscroll={handleScroll}
@@ -1744,6 +1747,7 @@
 	ontouchmove={handleTouchMove}
 	role="log"
 	aria-label="Conversation messages"
+	aria-busy={$activeSession.isStreaming}
 	class="msg-scroll flex-1 overflow-y-auto overscroll-contain"
 >
 	{#if transcriptRender === 'skeleton'}

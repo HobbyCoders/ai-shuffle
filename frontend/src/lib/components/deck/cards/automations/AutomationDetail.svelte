@@ -56,7 +56,7 @@
 <div class="auto-detail" transition:fade={{ duration: 150 }}>
 	<!-- Detail header -->
 	<div class="auto-detail-header">
-		<button class="card-back-btn" onclick={onBack}>
+		<button class="card-back-btn" onclick={onBack} aria-label="Back to automations">
 			<ArrowLeft size={16} />
 		</button>
 		<div class="auto-detail-header-info">

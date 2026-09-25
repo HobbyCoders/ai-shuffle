@@ -161,10 +161,11 @@
 					type="text"
 					class="search-input"
 					placeholder="Search {catalogSize} models..."
+					aria-label="Search models"
 					bind:value={searchQuery}
 				/>
 				{#if searchQuery}
-					<button class="clear-search" onclick={() => searchQuery = ''}>✕</button>
+					<button class="clear-search" onclick={() => searchQuery = ''} aria-label="Clear search">✕</button>
 				{/if}
 			</div>
 			<button class="refresh-btn" onclick={refreshCatalog} disabled={loading} title="Refresh catalog from fal.ai">
@@ -182,6 +183,7 @@
 			<button
 				class="category-chip"
 				class:active={activeCategory === null}
+				aria-pressed={activeCategory === null}
 				onclick={() => activeCategory = null}
 			>
 				All ({catalogSize})
@@ -190,6 +192,7 @@
 				<button
 					class="category-chip"
 					class:active={activeCategory === cat.category}
+					aria-pressed={activeCategory === cat.category}
 					onclick={() => activeCategory = activeCategory === cat.category ? null : cat.category}
 				>
 					{getCategoryLabel(cat.category)} ({cat.count})
@@ -237,7 +240,7 @@
 						{#if model.thumbnail_url}
 							<img
 								src={model.thumbnail_url}
-								alt={model.display_name}
+								alt=""
 								loading="lazy"
 								referrerpolicy="no-referrer"
 								onerror={(e) => {

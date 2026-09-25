@@ -23,7 +23,7 @@ const categories = [
 	{ category: 'text-to-video', count: 1, tool_type: 'video_generation' }
 ];
 const cards = () => screen.queryAllByRole('button').filter(b => b.classList.contains('model-card')).map(b => b.title);
-const search = () => screen.getByPlaceholderText('Search 3 models...') as HTMLInputElement;
+const search = () => screen.getByRole('textbox', { name: 'Search models' }) as HTMLInputElement;
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -38,7 +38,10 @@ describe('ModelBrowser', () => {
 		await waitFor(() => expect(cards()).toHaveLength(3));
 		expect(screen.getByText('3 models')).toBeTruthy();
 		const video = screen.getByRole('button', { name: /Text → Video \(1\)/ });
+		expect(screen.getByRole('button', { name: /^All/ }).getAttribute('aria-pressed')).toBe('true');
+		expect(video.getAttribute('aria-pressed')).toBe('false');
 		await fireEvent.click(video);
+		expect(video.getAttribute('aria-pressed')).toBe('true');
 		expect(cards()).toEqual(['fal-ai/kling-video']);
 		expect(screen.getByText('(filtered)')).toBeTruthy();
 		await fireEvent.click(video);
@@ -49,7 +52,7 @@ describe('ModelBrowser', () => {
 		}
 		await fireEvent.input(search(), { target: { value: 'nothing-like-this' } });
 		expect(screen.getByText(/No models match your search/)).toBeTruthy();
-		await fireEvent.click(screen.getByRole('button', { name: '✕' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
 		expect(cards()).toHaveLength(3);
 	});
 

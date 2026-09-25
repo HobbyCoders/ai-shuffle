@@ -195,8 +195,23 @@
 		});
 	}
 
-	// Keyboard shortcuts
+	// Keyboard shortcuts. They are page-wide, so they must not steal keys a
+	// focused control owns: Enter on a focused Deny / Details button activates
+	// that button, and Enter / Escape while typing (the chat composer, a form
+	// field) stay with the field instead of approving or denying.
+	function isTextEntry(target: HTMLElement): boolean {
+		if (target.isContentEditable || target.closest('textarea, select, [contenteditable="true"], [role="textbox"]')) return true;
+		return target instanceof HTMLInputElement && !['checkbox', 'radio', 'button', 'submit', 'reset'].includes(target.type);
+	}
+
+	function ownsKey(target: EventTarget | null, key: string): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		if (isTextEntry(target)) return true;
+		return key === 'Enter' && !!target.closest('button, a[href], input');
+	}
+
 	function handleKeydown(e: KeyboardEvent) {
+		if (e.defaultPrevented || e.isComposing || ownsKey(e.target, e.key)) return;
 		if (e.key === 'Enter' && !e.shiftKey) {
 			e.preventDefault();
 			handleAllow();
@@ -244,6 +259,7 @@
 	"
 	role="dialog"
 	aria-labelledby="permission-title"
+	tabindex="-1"
 >
 	<!-- Compact Header -->
 	<div class="flex items-center gap-3 px-4 py-3 border-b border-border/40">
@@ -442,6 +458,10 @@
 </div>
 
 <style>
+	.permission-panel:focus {
+		outline: none;
+	}
+
 	.permission-panel {
 		animation: panel-enter 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 	}

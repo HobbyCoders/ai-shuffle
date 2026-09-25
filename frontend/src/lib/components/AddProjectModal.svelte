@@ -11,6 +11,7 @@
 	import { getWorkspaceConfig } from '$lib/api/auth';
 	import { onMount } from 'svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
+	import { focusTrap } from '$lib/components/ui/focus-trap';
 
 	interface Props {
 		open: boolean;
@@ -98,15 +99,24 @@
 			adding = false;
 		}
 	}
+
+	function handleWindowKeydown(e: KeyboardEvent) {
+		if (open && e.key === 'Escape' && !e.defaultPrevented) {
+			e.preventDefault();
+			onClose();
+		}
+	}
 </script>
 
+<svelte:window onkeydown={handleWindowKeydown} />
+
 {#if open}
-	<div class="create-modal-backdrop" role="dialog" aria-modal="true">
+	<div class="create-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="add-project-title" tabindex="-1" use:focusTrap>
 		<button class="create-modal-backdrop-btn" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
 		<div class="create-modal add-project-modal">
 			<div class="create-modal-header">
-				<h3 class="create-modal-title">Add Project</h3>
-				<button class="create-modal-close" onclick={onClose}>
+				<h3 id="add-project-title" class="create-modal-title">Add Project</h3>
+				<button class="create-modal-close" onclick={onClose} aria-label="Close">
 					<X size={16} strokeWidth={1.5} />
 				</button>
 			</div>

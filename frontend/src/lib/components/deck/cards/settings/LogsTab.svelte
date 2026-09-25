@@ -167,6 +167,7 @@
 		<div class="toolbar-filters">
 			<select
 				class="input compact level-select"
+				aria-label="Log level"
 				bind:value={selectedLevel}
 			>
 				<option value="">All Levels</option>

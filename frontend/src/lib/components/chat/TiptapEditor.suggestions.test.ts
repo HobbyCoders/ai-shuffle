@@ -37,3 +37,13 @@ describe('inline reply suggestion', () => {
 		expect(queryByRole('button')).toBeNull();
 	});
 });
+
+describe('composer accessibility', () => {
+	it('exposes the editor as a named multi-line text field', async () => {
+		const { getByRole } = render(TiptapEditor);
+		await tick();
+		const field = getByRole('textbox', { name: 'Message' });
+		expect(field.getAttribute('aria-multiline')).toBe('true');
+		expect(field.getAttribute('contenteditable')).toBe('true');
+	});
+});

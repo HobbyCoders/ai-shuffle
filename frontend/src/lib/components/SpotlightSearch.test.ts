@@ -58,6 +58,22 @@ describe('universal search', () => {
   await fireEvent.keyDown(window, { key: 'Enter' });
   expect(p.onSelectAgent).toHaveBeenCalledWith('agent');
  });
+ it('Enter on a Tab-focused result leaves activation to that button, not the arrow selection', async () => {
+  const p = props(); render(SpotlightSearch, { props: p }); await search('orchid');
+  const note = screen.getByText('Orchid note').closest('button')!;
+  note.focus();
+  const notPrevented = await fireEvent.keyDown(note, { key: 'Enter' });
+  expect(notPrevented).toBe(true);
+  expect(p.onSelectSession).not.toHaveBeenCalled();
+ });
+ it('returns focus to the opener when the palette closes', async () => {
+  const opener = document.createElement('button'); document.body.appendChild(opener); opener.focus();
+  const p = props(); const view = render(SpotlightSearch, { props: p }); await tick(); await Promise.resolve();
+  expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Search everything' }));
+  await view.rerender({ ...p, visible: false }); await tick();
+  expect(document.activeElement).toBe(opener);
+  opener.remove();
+ });
  it('opens the selected note and doc, not just their list', async () => {
   const p = props(); render(SpotlightSearch, { props: p }); await search('orchid');
   await fireEvent.click(screen.getByText('Orchid note'));

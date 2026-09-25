@@ -96,7 +96,13 @@ export function createChatEditor(options: EditorOptions): Editor {
 		editorProps: {
 			attributes: {
 				class: 'chat-editor-content',
-				'data-placeholder': placeholder
+				'data-placeholder': placeholder,
+				// The contenteditable is the composer's text field; without these a
+				// screen reader meets an unnamed editable region (the placeholder is
+				// CSS-only and not announced).
+				role: 'textbox',
+				'aria-multiline': 'true',
+				'aria-label': 'Message'
 			},
 			// Handle paste to strip formatting
 			handlePaste: (view, event) => {
