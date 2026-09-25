@@ -1959,6 +1959,15 @@ async def stream_query(
         }
 
 
+def pooled_client_lacks_approver(state: Any, broadcast_func: Any) -> bool:
+    """True when an interactive turn would reuse a client a headless path built.
+
+    Its adapter has no permission callback, and one cannot be added to a live
+    client, so the turn needs a fresh one or its prompts go unanswered.
+    """
+    return bool(broadcast_func) and not getattr(state.adapter, "has_permission_callback", True)
+
+
 async def stream_to_websocket(
     prompt: str,
     session_id: str,
@@ -2247,7 +2256,8 @@ async def _stream_to_websocket_impl(
             }
             return
         # Candidate for reuse — check if critical options changed
-        if not requires_reconnect(existing_state, options):
+        missing_approver = pooled_client_lacks_approver(existing_state, broadcast_func)
+        if not missing_approver and not requires_reconnect(existing_state, options):
             # REUSE: Subprocess is alive and options are compatible
             state = existing_state
             reusing_client = True
@@ -2340,8 +2350,11 @@ async def _stream_to_websocket_impl(
                 raise
         else:
             # Options changed — need fresh subprocess
+            reasons = reconnect_option_names(existing_state, options)
+            if missing_approver:
+                reasons.append("permission_callback")
             logger.info("[WS] Options changed for session %s (%s), creating fresh client",
-                        session_id, ",".join(reconnect_option_names(existing_state, options)))
+                        session_id, ",".join(reasons))
             await pool.remove(session_id, preserve_session=True)
             existing_state = None
     elif existing_state:

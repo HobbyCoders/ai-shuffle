@@ -80,3 +80,11 @@ def test_unset_never_removes_what_the_caller_hands_over() -> None:
     )
     assert env["ANTHROPIC_API_KEY"] == "user-key"
     assert env["PATH"] == "/bin"
+
+
+def test_delegated_child_env_disables_the_clis_background_tasks(monkeypatch) -> None:
+    """The loop cannot deliver the between-turn wakes a background job ends in."""
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "0")
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.env = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"}
+    assert loop._child_env()["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"

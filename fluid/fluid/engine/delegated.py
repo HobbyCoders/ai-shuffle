@@ -193,6 +193,24 @@ _POLICY_HOOK_EVENTS = ("PreToolUse", "SessionStart")
 # order surviving a respawn.
 _HOOK_CALLBACK_PREFIX = "fluid_"
 
+# The between-turn drain. A turn the CLI starts on its own (a wake) is read
+# until its result before the user frame goes in, or its frames and result
+# would be mapped as the user's turn. ``_STALE_QUIET`` of silence ends the
+# drain; right after a result it keeps watching for ``_WAKE_SETTLE`` seconds,
+# and a wake already in flight gets up to ``_WAKE_DRAIN_TIMEOUT`` to finish.
+_STALE_QUIET = 0.05
+_WAKE_SETTLE = 1.0
+_WAKE_DRAIN_TIMEOUT = 30.0
+_WAKE_FRAME_TYPES = frozenset({"assistant", "user", "stream_event"})
+_STALE_PERMISSION_DENIAL = (
+    "denied: the claude CLI asked for this permission between turns, when "
+    "no one could approve it"
+)
+
+# Longer than any host's own approval deadline (the app's is 300 s), so a
+# host that answers late still wins; past it the call is denied, not parked.
+PERMISSION_TIMEOUT = 900.0
+
 # Poll interval while another reader (a live turn) owns stdout and is expected
 # to deliver our reply. Also caps a single pump read, so the pump notices a turn
 # starting within one interval instead of sitting in ``readline`` until the
@@ -249,6 +267,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         add_dirs: list[str] | None = None,
         allowed_tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
+        permission_grants: list[str] | None = None,
         effort: str | None = None,
         settings: str | None = None,
         setting_sources: tuple[str, ...] | None = None,
@@ -282,6 +301,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.disallowed_tools = list(dict.fromkeys([
             *(disallowed_tools or ()), "EnterPlanMode", "ExitPlanMode",
         ]))
+        # Extra CLI permission rules (tools that run without a prompt), in the
+        # names the CLI calls them. Joined into --allowed-tools only: unlike
+        # ``allowed_tools`` they never narrow the bridge's surface.
+        self.permission_grants = list(permission_grants or ())
         # Gates for the bundled bridge only: the CLI owns its own tools, but a
         # registry tool served over the bridge is harness dispatch and gets the
         # native loop's hook + permission treatment. Optional; None skips.
@@ -318,6 +341,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # single frame on a resumed process means the handle is dead.
         self._spawn_resume: str | None = None
         self._proc_results = 0
+        # Loop time the last turn's result was read (see _discard_stale_stdout).
+        self._last_result_at: float | None = None
         # A hook on a bridge-served call answered ``continue: false``: the
         # reason, reported as the turn's ErrorEvent once the CLI's result
         # lands (the native loop ends its turn the same way).
@@ -570,7 +595,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # user chose to run the CLI on their subscription.
         from fluid.tools.child_env import child_env_with_overlay
 
-        return child_env_with_overlay(self.env, os.environ)
+        env = child_env_with_overlay(self.env, os.environ)
+        # The loop reads stdout only during its own turns, so the CLI's
+        # background jobs (run_in_background, auto-backgrounding, Monitor)
+        # would report into a between-turn wake no one reads. A no-op on a
+        # CLI that predates the switch.
+        env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+        return env
 
     async def _stop_process(self, *, grace: float = 5.0) -> None:
         """End the CLI process and everything it spawned.
@@ -699,8 +730,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             argv += ["--system-prompt", self.system]
         for d in self.add_dirs or ():
             argv += ["--add-dir", d]
-        if self.allowed_tools:
-            argv += ["--allowed-tools", ",".join(self.allowed_tools)]
+        granted = list(dict.fromkeys([*(self.allowed_tools or ()), *self.permission_grants]))
+        if granted:
+            argv += ["--allowed-tools", ",".join(granted)]
         if self.disallowed_tools:
             argv += ["--disallowed-tools", ",".join(self.disallowed_tools)]
         if self.effort:
@@ -1053,17 +1085,36 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         between turns (e.g. an unsolicited wake) sits buffered in the
         StreamReader and would be consumed by the next turn's reader under that
         turn's mapper — and a stale ``result`` frame would end the fresh turn
-        early. Draining here is race-free: the CLI cannot emit this turn's
-        frames until the user frame is written, so every line read before that
-        is stale by construction. ``wait_for`` cancelling ``readline`` on
-        timeout is safe — ``readuntil`` only consumes from the buffer when a
-        complete line is returned.
+        early. The CLI cannot emit this turn's frames until the user frame is
+        written, so every line read before that is stale by construction.
+        ``wait_for`` cancelling ``readline`` on timeout is safe — ``readuntil``
+        only consumes from the buffer when a complete line is returned.
+
+        A wake turn still running when the user frame goes in would answer in
+        the user's place, so once one shows a frame the drain waits (bounded)
+        for its result. Requests it makes are answered, never dropped: the
+        CLI blocks on each one, and an unanswered one wedges the next turn.
         """
         assert self._proc is not None and self._proc.stdout is not None
+        loop = asyncio.get_running_loop()
+        settle_until = (self._last_result_at or 0.0) + _WAKE_SETTLE
+        wake_deadline: float | None = None
         for _ in range(1000):  # backstop against a continuously-spewing child
+            now = loop.time()
+            if wake_deadline is not None:
+                timeout = wake_deadline - now
+            else:
+                timeout = max(_STALE_QUIET, settle_until - now)
             try:
-                line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=0.05)
+                line = await asyncio.wait_for(
+                    self._proc.stdout.readline(), timeout=max(timeout, 0.0),
+                )
             except TimeoutError:
+                if wake_deadline is not None:
+                    logger.warning(
+                        "claude CLI wake turn did not finish within %.0fs; "
+                        "starting the turn anyway", _WAKE_DRAIN_TIMEOUT,
+                    )
                 return
             if not line:  # EOF — let the turn's reader surface the closed stream
                 return
@@ -1078,8 +1129,62 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if await self._answer_hook_line(text):
                 # A hook the CLI is blocked on: never stale either.
                 continue
-            logger.warning("discarding stale between-turn CLI frame: %.300s", text)
+            try:
+                frame = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(frame, dict):
+                continue
+            kind = frame.get("type")
+            if kind == "control_request":
+                if not await self._answer_stale_control_request(frame):
+                    continue
+            elif kind == "result":
+                logger.warning("discarding stale between-turn CLI result: %.300s", text)
+                wake_deadline = None
+                settle_until = 0.0
+                continue
+            else:
+                logger.warning("discarding stale between-turn CLI frame: %.300s", text)
+                if kind not in _WAKE_FRAME_TYPES and not (
+                    kind == "system" and frame.get("subtype") == "task_notification"
+                ):
+                    continue
+            if wake_deadline is None:
+                wake_deadline = loop.time() + _WAKE_DRAIN_TIMEOUT
         logger.warning("stale-frame drain hit its line cap; continuing turn anyway")
+
+    async def _answer_stale_control_request(self, frame: dict[str, Any]) -> bool:
+        """Deny a between-turn ``can_use_tool`` (True); refuse anything else."""
+        request = frame.get("request") or {}
+        request_id = str(frame.get("request_id", ""))
+        if request.get("subtype") == "can_use_tool":
+            logger.warning(
+                "denying between-turn permission request for %s",
+                request.get("tool_name"),
+            )
+            try:
+                await self._write_control_response(
+                    request_id, False, request.get("input") or {},
+                    message=_STALE_PERMISSION_DENIAL,
+                )
+            except (OSError, RuntimeError):
+                logger.debug("could not answer a between-turn permission request", exc_info=True)
+            return True
+        await self._refuse_control_request(request_id, str(request.get("subtype") or ""))
+        return False
+
+    async def _refuse_control_request(self, request_id: str, subtype: str) -> None:
+        """Answer a control_request the loop has no handler for with the
+        error subtype, so the CLI does not wait on it forever."""
+        logger.warning("claude CLI sent an unsupported control_request %r", subtype)
+        try:
+            await self._write_frame({"type": "control_response", "response": {
+                "subtype": "error", "request_id": request_id,
+                "error": f"unsupported control request: {subtype or 'unknown'}",
+            }})
+        except (OSError, RuntimeError):
+            logger.debug("could not refuse the CLI's control_request", exc_info=True)
 
     async def _read_until_result(
         self, sid: str, turn_id: str, mapper: StreamJsonMapper, user_node: SessionNode,
@@ -1108,6 +1213,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # The CLI waits on this answer before it goes on, so it is
                 # given here, in stream order.
                 await self._answer_hook_request(mapped.hook_request)
+                continue
+            if mapped.unsupported_request is not None:
+                await self._refuse_control_request(*mapped.unsupported_request)
                 continue
             # Claude's native question tool is a posting operation, not a
             # permission decision. Never fabricate synchronous user answers.
@@ -1190,6 +1298,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 if not await self._emit_usage_snapshot(sid, turn_id, mapped.control_reply):
                     self._resolve_control(mapped.control_reply)
             if mapped.is_result:
+                self._last_result_at = asyncio.get_running_loop().time()
                 # Snapshots the CLI never got round to answering die with the
                 # turn — their Usage event already reported context_usage=None.
                 self._pending_usage_snapshots.clear()
@@ -1210,7 +1319,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         The wait also ends on an Interrupt. The turn's reader is what is
         parked here, holding stdout, so without that exit an interrupt could
         never be delivered: the CLI would sit on its unanswered request and
-        the reader would sit on the future, each waiting for the other.
+        the reader would sit on the future, each waiting for the other. It
+        also ends after ``PERMISSION_TIMEOUT``, denying the call, so a host
+        with nobody to answer cannot park the turn forever.
         """
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
@@ -1218,12 +1329,23 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         interrupt_wait = asyncio.create_task(self._interrupted.wait())
         try:
             done, _ = await asyncio.wait(
-                {fut, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+                {fut, interrupt_wait}, timeout=PERMISSION_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED,
             )
             if fut not in done:
+                if interrupt_wait in done:
+                    message = "interrupted while awaiting permission"
+                else:
+                    logger.warning(
+                        "no permission decision for %s within %.0fs; denying",
+                        bridge.tool_name, PERMISSION_TIMEOUT,
+                    )
+                    message = (
+                        f"permission request timed out after {PERMISSION_TIMEOUT:.0f}s "
+                        "with no decision; the call was denied"
+                    )
                 await self._write_control_response(
-                    bridge.cli_request_id, False, bridge.input,
-                    message="interrupted while awaiting permission",
+                    bridge.cli_request_id, False, bridge.input, message=message,
                 )
                 return
             resp: RespondPermission = fut.result()

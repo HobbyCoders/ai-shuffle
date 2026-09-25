@@ -1836,3 +1836,109 @@ async def test_missing_cli_turn_reports_setup_message() -> None:
         assert [e.message for e in errors] == [CLAUDE_CLI_MISSING_MESSAGE]
     finally:
         await loop.aclose()
+
+
+# ─── Requests the CLI blocks on are always answered ──────────────────────────
+
+
+def test_permission_grants_join_allowed_tools_without_narrowing_the_bridge() -> None:
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="fake",
+        permission_grants=["mcp__fluid_bundled__mcp__builtins__Task", "mcp__browser"],
+    )
+    argv = loop._build_argv()
+    assert argv[argv.index("--allowed-tools") + 1] == (
+        "mcp__fluid_bundled__mcp__builtins__Task,mcp__browser"
+    )
+    # A grant is not a surface: every bridge tool is still served.
+    assert loop._bridge_tool_permitted("mcp__builtins__Remember")
+
+    surfaced = DelegatedLoop(
+        store=MemoryStore(), model="fake", allowed_tools=["Read"], permission_grants=["mcp__browser"],
+    )
+    argv = surfaced._build_argv()
+    assert argv[argv.index("--allowed-tools") + 1] == "Read,mcp__browser"
+    assert not surfaced._bridge_tool_permitted("mcp__builtins__Remember")
+
+
+def test_an_unknown_control_request_is_mapped_for_an_answer() -> None:
+    mapped = _mapper().feed({
+        "type": "control_request", "request_id": "cli_9",
+        "request": {"subtype": "elicitation", "message": "?"},
+    })
+    assert mapped.unsupported_request == ("cli_9", "elicitation")
+    assert mapped.permission is None and not mapped.events
+
+
+async def test_an_unanswered_permission_prompt_is_denied_after_the_timeout(monkeypatch) -> None:
+    from fluid.engine import delegated
+
+    monkeypatch.setattr(delegated, "PERMISSION_TIMEOUT", 0.2)
+    loop = _make_loop("b")
+    frames = _spy_on_frames(loop)
+    try:
+        events = await asyncio.wait_for(_run_one_turn(loop, "weather in Paris?"), 10)
+        denial = next(
+            f["response"]["response"] for f in frames
+            if f.get("type") == "control_response" and f["response"]["request_id"] == "cli_req_1"
+        )
+        assert denial["behavior"] == "deny" and "timed out" in denial["message"]
+        assert next(e for e in events if isinstance(e, ToolResult)).is_error
+        assert isinstance(events[-1], TurnComplete)
+    finally:
+        await loop.aclose()
+
+
+_UNKNOWN_CONTROL_CLI = r'''
+import json, sys
+
+if "--version" in sys.argv:
+    print("claude 9.9.9 (fake unknown control)")
+    sys.exit(0)
+
+SID = "cli-unknown-1"
+USAGE = {"input_tokens": 1, "output_tokens": 1}
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line) if line.strip() else {}
+
+while True:
+    if read().get("type") != "user":
+        continue
+    emit({"type": "system", "subtype": "init", "session_id": SID, "model": "m",
+          "tools": [], "mcp_servers": []})
+    emit({"type": "control_request", "request_id": "cli_x",
+          "request": {"subtype": "elicitation", "message": "?"}})
+    while True:
+        reply = read()
+        if reply.get("type") == "control_response" and reply["response"].get("request_id") == "cli_x":
+            break
+    emit({"type": "assistant", "session_id": SID, "message": {
+        "id": "msg_1", "model": "m", "stop_reason": "end_turn", "usage": USAGE,
+        "content": [{"type": "text", "text": "answered " + reply["response"]["subtype"]}]}})
+    emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+          "session_id": SID, "total_cost_usd": 0.0, "usage": USAGE})
+'''
+
+
+async def test_an_unknown_control_request_is_answered_with_an_error(tmp_path) -> None:
+    """The CLI waits on every control_request; one the loop has no handler
+    for gets the error subtype rather than silence."""
+    script = tmp_path / "fake_unknown_control.py"
+    script.write_text(_UNKNOWN_CONTROL_CLI)
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=[sys.executable, str(script)],
+    )
+    try:
+        events = await asyncio.wait_for(_run_one_turn(loop), 10)
+        assert [e.text for e in events if isinstance(e, TextDelta)] == ["answered error"]
+        assert isinstance(events[-1], TurnComplete)
+    finally:
+        await loop.aclose()

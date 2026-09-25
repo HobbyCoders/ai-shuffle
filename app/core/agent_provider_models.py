@@ -648,7 +648,7 @@ def parent_subagent_guidance(
         "A change to rendered UI (anything under frontend/, a .svelte or .css "
         "file, a viewport meta) is verified in the browser at the affected "
         "viewport before you open the PR, not by unit tests alone. The browser "
-        "tools are available through search_tools / ToolSearch — "
-        "browser_navigate, browser_resize for viewport emulation, and "
-        "browser_screenshot."
+        "tools (browser_navigate, browser_resize for viewport emulation, and "
+        "browser_screenshot) may need loading first: use ToolSearch, or "
+        "search_tools in code mode, when they are not in your tool list."
     )

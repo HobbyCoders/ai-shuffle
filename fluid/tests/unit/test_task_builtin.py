@@ -130,6 +130,7 @@ def test_delegated_disallowed_tools_argv():
     loop.system = None
     loop.add_dirs = None
     loop.allowed_tools = None
+    loop.permission_grants = []
     loop.disallowed_tools = ["Task", "Agent", "Workflow"]
     loop.partial = False
     loop.settings = None
@@ -153,6 +154,7 @@ def test_delegated_effort_argv():
     loop.system = None
     loop.add_dirs = None
     loop.allowed_tools = None
+    loop.permission_grants = []
     loop.disallowed_tools = None
     loop.partial = False
     loop.settings = None

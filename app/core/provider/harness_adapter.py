@@ -398,7 +398,8 @@ class HarnessAdapter(ProviderAdapter):
         # App-side permission callback (ClaudeAgentOptions.can_use_tool). When
         # present, fluid PermissionRequests are bridged to it out-of-band (SDK
         # parity — the loops never see a permission event); when absent they
-        # surface in-stream as PermissionRequestEvent.
+        # surface in-stream as PermissionRequestEvent, except on the delegated
+        # leg, which answers them from the permission mode.
         self._can_use_tool: Optional[Any] = None
         self._perm_bridge_tasks: set = set()
         # httpx client injected into the native provider client purely to
@@ -614,6 +615,9 @@ class HarnessAdapter(ProviderAdapter):
                 # it (see _delegated_allowed): a bare grant here would approve
                 # the tool before the app's permission callback is consulted.
                 allowed_tools=_delegated_allowed(options),
+                # The app's MCP tools ran unprompted under the SDK's
+                # --allowedTools; the same grants, in the CLI's spelling.
+                permission_grants=_delegated_permission_grants(options),
                 claude_cmd=claude_cmd,
                 # The CLI's hooks, forwarded into the same bus the native leg
                 # emits into; PreToolUse also enforces the deny policy, so a
@@ -1117,6 +1121,9 @@ class HarnessAdapter(ProviderAdapter):
                 getattr(sdk_options, "include_partial_messages", False)
             ),
             add_dirs=getattr(sdk_options, "add_dirs", None),
+            # The SDK permission allowlist (the app's MCP tool names). Only the
+            # delegated leg reads it, as CLI grants (_delegated_permission_grants).
+            allowed_tools=getattr(sdk_options, "allowed_tools", None),
             disallowed_tools=getattr(sdk_options, "disallowed_tools", None),
             # CE12 tool-surface restriction, stamped by query_options as
             # ``aih_tool_allowlist``. NOT ``sdk_options.allowed_tools``: that is
@@ -1780,6 +1787,16 @@ class HarnessAdapter(ProviderAdapter):
                     self._perm_bridge_tasks.add(task)
                     task.add_done_callback(self._perm_bridge_tasks.discard)
                     continue
+                if (
+                    isinstance(translated, PermissionRequestEvent)
+                    and self._is_delegated
+                    and getattr(translated, "risk", None) != "question"
+                ):
+                    # No approver is wired on this path (REST, background,
+                    # execute_query, failover), and the claude CLI blocks on
+                    # every prompt until it is answered.
+                    await self._answer_without_approver(translated)
+                    continue
                 if isinstance(translated, ResultMessage) and not self._is_live(event):
                     # A terminal from before this turn was submitted: history
                     # being replayed, not this turn ending. Dropping it (rather
@@ -1943,6 +1960,31 @@ class HarnessAdapter(ProviderAdapter):
             if callable(seed):
                 seed(session_id, head)  # never moves numbering backwards
         self._event_cursor = max(self._event_cursor, head)
+
+    @property
+    def has_permission_callback(self) -> bool:
+        """True when permission prompts reach an app approver (the WS path)."""
+        return self._can_use_tool is not None
+
+    async def _answer_without_approver(self, ev: PermissionRequestEvent) -> None:
+        """Decide a delegated prompt from the session's permission mode: Ask
+        denies with the reason, the modes that approve on their own allow."""
+        mode = (self._options.permission_mode if self._options else None) or "default"
+        allow = mode not in ("default", "plan")
+        if not allow:
+            logger.info(
+                "[HarnessAdapter] denying %s: no interactive approver on this path",
+                ev.name,
+            )
+        try:
+            await self.respond_to_permission(
+                ev.tool_use_id, allow, message=None if allow else _NO_APPROVER_DENIAL,
+            )
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] failed to submit permission decision for %s",
+                ev.tool_use_id, exc_info=True,
+            )
 
     def _permission_tool_name(self, name: str) -> str:
         """Resolve a bundled CLI alias only through this engine's registry.
@@ -3725,9 +3767,11 @@ def _valid_effort(value: Any) -> Optional[str]:
 
 # Ruling A6: the CLI's native subagent tools are BANNED — the app's Task tool
 # (mcp__builtins__Task) is the one orchestration surface. The CLI's native
-# session-cron/wake tools are banned for the same reason: the CLI fires those
-# wake turns between queries, so the delegated client never reads them and they
-# vanish from app history and cost accounting.
+# session-cron/wake tools and background-job tools are banned for the same
+# reason: the CLI fires their wake turns between queries, so the delegated
+# client never reads them and they vanish from app history and cost
+# accounting. The bridged mcp__builtins__ copies (Monitor, TaskOutput,
+# TaskStop, ScheduleWakeup) stay; the app owns their wakes.
 DELEGATED_BANNED_TOOLS = frozenset({
     "Task",
     "Agent",
@@ -3736,7 +3780,19 @@ DELEGATED_BANNED_TOOLS = frozenset({
     "CronCreate",
     "CronDelete",
     "CronList",
+    "Monitor",
+    "TaskOutput",
+    "TaskStop",
 })
+
+# The denial a delegated prompt gets on a path with no approver wired.
+_NO_APPROVER_DENIAL = (
+    "Permission denied: this session has no one to approve tool calls "
+    "(it is running without an interactive approver)."
+)
+
+# How the delegated claude CLI names a tool served by fluid's bundled bridge.
+_BUNDLED_CLI_PREFIX = "mcp__fluid_bundled__"
 
 
 def _delegated_disallowed(options: SessionOptions) -> list:
@@ -3904,6 +3960,36 @@ def _delegated_allowed(options: SessionOptions) -> Optional[list]:
     # omits the flag entirely for a falsy list, and on this leg the surface wall
     # is ``--disallowed-tools``, which is built from the untouched surface.
     return granted or None
+
+
+def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
+    """The SDK permission allowlist's MCP entries, spelled as the CLI sees them.
+
+    An external server keeps its own name. Every other ``mcp__<server>`` is
+    an in-proc app server the bundled bridge serves, so the CLI calls its
+    tools ``mcp__fluid_bundled__mcp__<server>__<tool>``; a server-level entry
+    becomes a wildcard over that prefix. Bare CLI tool names are left out, so
+    Ask mode still prompts for the CLI's own tools. In ``allow`` mode only
+    entries on the surface are granted, as ``_delegated_allowed`` does.
+    """
+    from app.core.tool_access import tool_permitted
+
+    surface = _tool_allowlist(options)
+    external = set(_external_mcp_servers(options.mcp_servers))
+    grants: list = []
+    for entry in options.allowed_tools or ():
+        if not isinstance(entry, str) or not entry.startswith("mcp__"):
+            continue
+        if surface and not tool_permitted(entry, surface, None):
+            continue
+        server, _, tool = entry[len("mcp__"):].partition("__")
+        if not server or server in external:
+            grants.append(entry)
+        elif tool:
+            grants.append(_BUNDLED_CLI_PREFIX + entry)
+        else:
+            grants.append(f"{_BUNDLED_CLI_PREFIX}{entry}__*")
+    return list(dict.fromkeys(grants)) or None
 
 
 def _tool_allowlist(options: SessionOptions) -> Optional[list]:
@@ -4827,6 +4913,9 @@ def _with_agents_index(
 # bundled bridge. The CLI sees each one as ``mcp__fluid_bundled__`` + this.
 _DELEGATED_MEMORY_TOOLS = ("Remember", "Recall", "Forget")
 _DELEGATED_RECALL_TOOLS = ("SessionSearch", "SessionView")
+# The app's own Task and background tools; the CLI's tools of these names are
+# banned on this leg (DELEGATED_BANNED_TOOLS).
+_DELEGATED_TASK_TOOLS = ("Task", "Monitor", "TaskOutput", "TaskStop", "ScheduleWakeup")
 
 
 def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[str]:
@@ -4856,19 +4945,30 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
 
     recall = all(offered(t) for t in _DELEGATED_RECALL_TOOLS)
     memory = all(offered(t) for t in ("Remember", "Recall"))
+    tasks = [t for t in _DELEGATED_TASK_TOOLS if offered(t)]
     blocks: List[str] = []
+    notes: List[str] = []
     if recall or memory:
         shown = [
             t for t in (*_DELEGATED_MEMORY_TOOLS, *_DELEGATED_RECALL_TOOLS)
             if offered(t)
         ]
         suffixes = ", ".join(f"__{t}" for t in shown)
-        blocks.append(
-            "# App tools on this session\n"
+        notes.append(
             "The app's memory and recall tools reach you as MCP tools whose "
             f"names end in {suffixes}. The sections below call them by those "
             "short names."
         )
+    if tasks:
+        suffixes = ", ".join(f"__{t}" for t in tasks)
+        notes.append(
+            f"{', '.join(tasks)} in this prompt mean the app's MCP tools whose "
+            f"names end in {suffixes}. Claude Code's own tools of those names "
+            "are not available here, and Bash cannot run a command in the "
+            "background: hand long-running work to the app's Monitor or Task."
+        )
+    if notes:
+        blocks.append("# App tools on this session\n" + "\n".join(notes))
     if recall:
         blocks.append(RECALL_BLOCK)
     if memory:

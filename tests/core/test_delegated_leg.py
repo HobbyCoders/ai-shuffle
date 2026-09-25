@@ -103,6 +103,26 @@ def test_delegated_append_carries_the_app_guidance(tmp_path):
     assert ha.GITHUB_BLOCK in text
 
 
+def test_delegated_append_names_the_apps_task_and_background_tools(tmp_path):
+    """The prompt's Task and Monitor are the app's bridged tools on this leg;
+    the CLI's own tools of those names are banned there."""
+
+    async def handler(input, ctx):
+        return ToolOutcome(text="ok")
+
+    registry = ToolRegistry()
+    for tool in ("Task", "Monitor", "TaskStop"):
+        registry.register_builtin(
+            ToolSpec(name=f"mcp__builtins__{tool}", description=tool, input_schema={}),
+            handler,
+        )
+    text = ha._delegated_append_text("APPEND TEXT", _preset_options(tmp_path), registry)
+    assert "# App tools on this session" in text
+    assert "__Task, __Monitor, __TaskStop" in text
+    assert "__TaskOutput" not in text  # not registered, so not named
+    assert all(name in ha.DELEGATED_BANNED_TOOLS for name in ("Task", "Monitor", "TaskStop"))
+
+
 def test_delegated_append_drops_guidance_for_tools_off_the_surface(tmp_path):
     """Ruling T9 on this leg too: no block describes a tool the session
     cannot call."""

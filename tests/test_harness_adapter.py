@@ -5265,7 +5265,8 @@ async def test_connect_with_sdk_options_threads_aih_tool_allowlist(recording_ada
     """``aih_tool_allowlist`` is the surface channel through the projection
     shim. ``allowed_tools`` — the SDK's PERMISSION allowlist, full of MCP names
     and empty of builtins under a tools preset — must NOT become one: projecting
-    it would delete Read/Bash/Edit from every native session."""
+    it would delete Read/Bash/Edit from every native session. It rides as the
+    permission list, and in allow mode grants nothing off the surface."""
     from types import SimpleNamespace
 
     adapter, made = recording_adapter
@@ -5290,7 +5291,8 @@ async def test_connect_with_sdk_options_threads_aih_tool_allowlist(recording_ada
     await adapter.connect_with_sdk_options(sdk_options)
     assert made["delegated"]["allowed_tools"] == ["Read"]
     assert adapter._options.tool_allowlist == ["Read"]
-    assert adapter._options.allowed_tools is None
+    assert adapter._options.allowed_tools == ["mcp__builtins__Task", "mcp__ai-tools"]
+    assert made["delegated"]["permission_grants"] is None
 
 
 @pytest.mark.asyncio

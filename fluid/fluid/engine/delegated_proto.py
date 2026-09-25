@@ -295,6 +295,9 @@ class Mapped:
     permission: PermissionBridge | None = None
     control_reply: ControlReply | None = None
     hook_request: HookCallbackRequest | None = None
+    # A control_request the loop has no handler for: (request_id, subtype).
+    # The CLI blocks on every control_request, so it still gets an answer.
+    unsupported_request: tuple[str, str] | None = None
     is_result: bool = False
     # Set with ``is_result`` when the CLI reported the turn as failed.
     error: str | None = None
@@ -692,7 +695,9 @@ class StreamJsonMapper:
         if req.get("subtype") == "hook_callback":
             return Mapped(hook_request=parse_hook_callback(frame))
         if req.get("subtype") != "can_use_tool":
-            return Mapped()  # mcp_message / etc. are loop-internal
+            return Mapped(unsupported_request=(
+                str(frame.get("request_id", "")), str(req.get("subtype") or ""),
+            ))
         fluid_rid = new_id("perm")
         tool_name = req.get("tool_name", "")
         tid = req.get("tool_use_id") or ""
