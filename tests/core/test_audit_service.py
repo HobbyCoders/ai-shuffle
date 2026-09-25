@@ -6,7 +6,7 @@ Tests cover:
 - Client IP extraction from request headers
 - User-Agent extraction
 - log_event function with all code paths
-- All convenience logging functions
+- The log_logout convenience helper
 - Error handling when database fails
 """
 
@@ -18,14 +18,7 @@ from app.core.audit_service import (
     get_client_ip,
     get_user_agent,
     log_event,
-    log_login_success,
-    log_login_failure,
     log_logout,
-    log_password_changed,
-    log_password_change_failed,
-    log_api_key_created,
-    log_api_key_deleted,
-    log_admin_setup,
 )
 
 
@@ -334,60 +327,6 @@ class TestLogEvent:
 # Test Convenience Logging Functions
 # =============================================================================
 
-class TestLogLoginSuccess:
-    """Test log_login_success function."""
-
-    def test_log_login_success_basic(self, mock_request, mock_db_create_audit_log):
-        """Should log successful login."""
-        log_login_success(mock_request, "user-123")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.LOGIN_SUCCESS
-        assert call_kwargs["user_id"] == "user-123"
-        assert call_kwargs["user_type"] == "admin"
-        assert call_kwargs["details"]["method"] == "password"
-
-    def test_log_login_success_with_custom_method(self, mock_request, mock_db_create_audit_log):
-        """Should log login with custom method."""
-        log_login_success(mock_request, "user-123", method="api_key")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["details"]["method"] == "api_key"
-
-    def test_log_login_success_with_user_type(self, mock_request, mock_db_create_audit_log):
-        """Should log login with custom user type."""
-        log_login_success(mock_request, "user-123", user_type="api_user")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["user_type"] == "api_user"
-
-
-class TestLogLoginFailure:
-    """Test log_login_failure function."""
-
-    def test_log_login_failure_basic(self, mock_request, mock_db_create_audit_log):
-        """Should log failed login."""
-        log_login_failure(mock_request)
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.LOGIN_FAILURE
-        assert call_kwargs["details"]["reason"] == "invalid_credentials"
-
-    def test_log_login_failure_with_username(self, mock_request, mock_db_create_audit_log):
-        """Should log failed login with attempted username."""
-        log_login_failure(mock_request, username="baduser")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["user_id"] == "baduser"
-        assert call_kwargs["details"]["attempted_username"] == "baduser"
-
-    def test_log_login_failure_with_reason(self, mock_request, mock_db_create_audit_log):
-        """Should log failed login with custom reason."""
-        log_login_failure(mock_request, reason="account_locked")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["details"]["reason"] == "account_locked"
-
 
 class TestLogLogout:
     """Test log_logout function."""
@@ -407,72 +346,6 @@ class TestLogLogout:
 
         call_kwargs = mock_db_create_audit_log.call_args[1]
         assert call_kwargs["user_type"] == "api_user"
-
-
-class TestLogPasswordChanged:
-    """Test log_password_changed function."""
-
-    def test_log_password_changed(self, mock_request, mock_db_create_audit_log):
-        """Should log password change."""
-        log_password_changed(mock_request, "user-123")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.PASSWORD_CHANGED
-        assert call_kwargs["user_id"] == "user-123"
-
-
-class TestLogPasswordChangeFailed:
-    """Test log_password_change_failed function."""
-
-    def test_log_password_change_failed(self, mock_request, mock_db_create_audit_log):
-        """Should log failed password change."""
-        log_password_change_failed(mock_request, "user-123", reason="weak_password")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.PASSWORD_CHANGE_FAILED
-        assert call_kwargs["user_id"] == "user-123"
-        assert call_kwargs["details"]["reason"] == "weak_password"
-
-
-class TestLogApiKeyCreated:
-    """Test log_api_key_created function."""
-
-    def test_log_api_key_created(self, mock_request, mock_db_create_audit_log):
-        """Should log API key creation."""
-        log_api_key_created(mock_request, "user-123", "My API Key", "key-456")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.API_KEY_CREATED
-        assert call_kwargs["user_id"] == "user-123"
-        assert call_kwargs["details"]["api_key_name"] == "My API Key"
-        assert call_kwargs["details"]["api_key_id"] == "key-456"
-
-
-class TestLogApiKeyDeleted:
-    """Test log_api_key_deleted function."""
-
-    def test_log_api_key_deleted(self, mock_request, mock_db_create_audit_log):
-        """Should log API key deletion."""
-        log_api_key_deleted(mock_request, "user-123", "Old API Key", "key-789")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.API_KEY_DELETED
-        assert call_kwargs["user_id"] == "user-123"
-        assert call_kwargs["details"]["api_key_name"] == "Old API Key"
-        assert call_kwargs["details"]["api_key_id"] == "key-789"
-
-
-class TestLogAdminSetup:
-    """Test log_admin_setup function."""
-
-    def test_log_admin_setup(self, mock_request, mock_db_create_audit_log):
-        """Should log admin account setup."""
-        log_admin_setup(mock_request, "admin")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.ADMIN_SETUP
-        assert call_kwargs["user_id"] == "admin"
-        assert call_kwargs["details"]["action"] == "initial_setup"
 
 
 # =============================================================================

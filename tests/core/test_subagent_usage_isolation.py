@@ -94,7 +94,7 @@ async def _run(messages, tmp_path):
     events = []
     with ExitStack() as stack:
         persist = _engine_patches(stack, pool, str(tmp_path))
-        async for ev in qe.stream_to_websocket("hi", session_id, "default"):
+        async for ev in qe._stream_to_websocket_impl("hi", session_id, "default"):
             events.append(ev)
     return events, persist
 

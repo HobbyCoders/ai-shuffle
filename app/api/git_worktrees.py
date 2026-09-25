@@ -32,7 +32,6 @@ from app.api.schemas.git import (
     WorktreeGitStatus,
     WorktreeInfo,
     WorktreeListResponse,
-    WorktreeSyncResponse,
     WorktreeFileInfo,
     WorktreeFilesResponse,
     OperationResponse,
@@ -462,42 +461,6 @@ async def reopen_worktree(
             logger.debug(f"Evicted pooled session {sid} after worktree reopen")
 
     return _convert_worktree_to_info(updated)
-
-
-@router.post("/worktrees/sync", response_model=WorktreeSyncResponse)
-async def sync_worktrees(
-    request: Request,
-    project_id: str,
-    token: str = Depends(require_auth)
-):
-    """
-    Synchronize database worktree records with actual git worktrees.
-
-    This cleans up orphaned records and marks worktrees that no longer exist.
-    """
-    check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
-
-    if not await run_git(git_service.is_git_repo, working_dir):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Project is not a git repository"
-        )
-
-    result = await run_git(worktree_manager.sync_worktrees, project_id)
-
-    # Sync can add/remove/import worktrees — drop the cached fan-out status.
-    _invalidate_worktree_status_cache(project_id)
-    # Sync moves checkouts around, so memoized working dirs may be stale.
-    invalidate_working_dir_cache(project_id=project_id)
-
-    return WorktreeSyncResponse(
-        synced=result.get("synced", 0),
-        orphaned=result.get("orphaned", 0),
-        cleaned_up=result.get("cleaned_up", 0),
-        imported=result.get("imported", 0),
-        errors=result.get("errors", [])
-    )
 
 
 # =============================================================================

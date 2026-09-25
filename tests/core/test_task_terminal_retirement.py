@@ -523,31 +523,6 @@ class TestParkedWorkerIsNotComplete:
 # ===========================================================================
 
 class TestCancellationsDoNotWake:
-    def test_an_unattributed_stop_is_recognised(self):
-        reg = TaskRegistry()
-        reg.start_task("s1", "sh-1", "shell", "tail the log")
-        reg.complete_task("s1", "sh-1", "killed")
-        assert reg.is_unattributed_cancellation("s1", "sh-1") is True
-
-    def test_an_attributed_stop_is_not(self):
-        from app.core.task_registry import (
-            SERVER_SHUTDOWN_REASON, SERVER_SHUTDOWN_SUMMARY,
-        )
-
-        reg = TaskRegistry()
-        reg.start_task("s1", "sh-1", "shell", "tail the log")
-        reg.complete_task(
-            "s1", "sh-1", "killed",
-            summary=SERVER_SHUTDOWN_SUMMARY, reason=SERVER_SHUTDOWN_REASON,
-        )
-        assert reg.is_unattributed_cancellation("s1", "sh-1") is False
-
-    def test_a_clean_completion_is_not_a_cancellation(self):
-        reg = TaskRegistry()
-        reg.start_task("s1", "sh-1", "shell", "npm test")
-        reg.complete_task("s1", "sh-1", "completed")
-        assert reg.is_unattributed_cancellation("s1", "sh-1") is False
-
     @pytest.mark.asyncio
     async def test_an_unattributed_kill_queues_a_wake(self, mock_db):
         _user_turn("sess-1")

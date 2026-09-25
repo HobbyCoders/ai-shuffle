@@ -702,67 +702,6 @@ class TestChildOwnerLinkage:
         assert reg.owner_task_for_child("s1", "child-B") is None
 
 
-class TestOwnerActivity:
-    """B-prime item b: monotonic activity stamp used by the deferred-pump
-    quiescence discriminator."""
-
-    def test_unseen_owner_is_none(self, reg):
-        assert reg.owner_activity_ts("s1", "tu-A") is None
-
-    def test_note_then_read_is_monotonic(self, reg):
-        reg.note_owner_activity("s1", "tu-A")
-        first = reg.owner_activity_ts("s1", "tu-A")
-        assert first is not None
-        reg.note_owner_activity("s1", "tu-A")
-        assert reg.owner_activity_ts("s1", "tu-A") >= first
-
-    def test_blank_ids_never_record(self, reg):
-        reg.note_owner_activity("", "tu-A")
-        reg.note_owner_activity("s1", "")
-        assert reg.owner_activity_ts("s1", "tu-A") is None
-
-    def test_isolated_per_session_and_owner(self, reg):
-        reg.note_owner_activity("s1", "tu-A")
-        assert reg.owner_activity_ts("s2", "tu-A") is None
-        assert reg.owner_activity_ts("s1", "tu-B") is None
-
-    def test_cleared_by_clear_session(self, reg):
-        reg.note_owner_activity("s1", "tu-A")
-        reg.clear_session("s1")
-        assert reg.owner_activity_ts("s1", "tu-A") is None
-
-    def test_cleared_by_reset_all(self, reg):
-        reg.note_owner_activity("s1", "tu-A")
-        reg.reset_all()
-        assert reg.owner_activity_ts("s1", "tu-A") is None
-
-
-class TestPumpCleanupCallback:
-    """B-prime item f: the registry fires the scheduler's deferred-pump cleanup
-    on clear_session (with the id) and reset_all (with None)."""
-
-    def test_clear_session_fires_with_id(self, reg):
-        seen = []
-        reg.set_pump_cleanup_callback(lambda sid: seen.append(sid))
-        reg.clear_session("s1")
-        assert seen == ["s1"]
-
-    def test_reset_all_fires_with_none_then_deregisters(self, reg):
-        seen = []
-        reg.set_pump_cleanup_callback(lambda sid: seen.append(sid))
-        reg.reset_all()
-        assert seen == [None]
-        # Deregistered — a later clear does not re-invoke it.
-        reg.clear_session("s1")
-        assert seen == [None]
-
-    def test_raising_callback_is_swallowed(self, reg):
-        def _boom(_sid):
-            raise RuntimeError("nope")
-        reg.set_pump_cleanup_callback(_boom)
-        reg.clear_session("s1")  # must not raise
-
-
 class TestStartedThisTurn:
     """The per-turn scope set that suppresses spurious in-stream unparks.
 

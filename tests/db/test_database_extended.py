@@ -185,35 +185,6 @@ class TestGitRepositoryExtended:
 
 
 # =============================================================================
-# Worktree Extended Tests
-# =============================================================================
-
-
-class TestWorktreeExtended:
-    """Test extended worktree operations."""
-
-    @pytest.fixture
-    def setup_repository(self, mock_db, setup_project):
-        """Create a test repository."""
-        repo = db.create_git_repository("repo-1", setup_project)
-        return repo["id"]
-
-    def test_get_worktree_by_branch(self, mock_db, setup_repository):
-        """get_worktree_by_branch should find worktree by branch name."""
-        db.create_worktree("wt-1", setup_repository, "feature-branch", "/path")
-
-        result = db.get_worktree_by_branch(setup_repository, "feature-branch")
-
-        assert result is not None
-        assert result["branch_name"] == "feature-branch"
-
-    def test_get_worktree_by_branch_not_found(self, mock_db, setup_repository):
-        """get_worktree_by_branch should return None for non-existent branch."""
-        result = db.get_worktree_by_branch(setup_repository, "nonexistent")
-        assert result is None
-
-
-# =============================================================================
 # Template Extended Tests
 # =============================================================================
 
@@ -281,24 +252,6 @@ class TestSessionUpdateExtended:
 
 
 # =============================================================================
-# Message Extended Tests
-# =============================================================================
-
-
-class TestMessageExtended:
-    """Test extended message operations."""
-
-    def test_update_message_increments_version(self, mock_db, setup_profile):
-        """update_message_content should increment version."""
-        db.create_session("session-1", setup_profile)
-        msg = db.add_session_message("session-1", "assistant", "Original")
-
-        result = db.update_message_content(msg["id"], "Updated content")
-
-        assert result["version"] == 2
-
-
-# =============================================================================
 # Webhook Extended Tests
 # =============================================================================
 
@@ -322,11 +275,6 @@ class TestWebhookExtended:
         result = db.update_webhook("wh-1", secret="new_secret")
 
         assert result["secret"] == "new_secret"
-
-
-# =============================================================================
-# Cleanup Extended Tests
-# =============================================================================
 
 
 # =============================================================================

@@ -379,17 +379,12 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
 # Seeding Functions
 # ============================================================================
 
-def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
+def seed_builtin_subagents() -> Dict[str, str]:
     """
-    Create or update built-in subagents in the database.
-
-    Args:
-        force_update: If True, update existing built-in subagents to latest definitions
-                     (useful for upgrades). This updates the defaults but preserves
-                     any admin customizations.
+    Create missing built-in subagents and flag existing rows as built-in.
 
     Returns:
-        Dict mapping subagent ID to action taken ("created", "updated", "exists", "repaired")
+        Dict mapping subagent ID to action taken ("created", "promoted", "exists")
     """
     results = {}
 
@@ -411,14 +406,8 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
             logger.debug(f"Created built-in subagent: {subagent_id}")
             results[subagent_id] = "created"
 
-        elif force_update and existing.get("is_builtin"):
-            _update_builtin_defaults(subagent_id, definition)
-            logger.debug(f"Updated defaults for built-in subagent: {subagent_id}")
-            results[subagent_id] = "updated"
-
         elif not existing.get("is_builtin"):
             database.set_subagent_builtin(subagent_id, True)
-            _update_builtin_defaults(subagent_id, definition)
             logger.debug(f"Promoted to built-in subagent: {subagent_id}")
             results[subagent_id] = "promoted"
 
@@ -436,13 +425,6 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
     # simply lives on as an ordinary agent.
 
     return results
-
-
-def _update_builtin_defaults(subagent_id: str, definition: Dict[str, Any]) -> None:
-    """No-op: built-in defaults live in code (BUILTIN_SUBAGENTS), not in
-    snapshot columns. Revert and modified-detection read the code definitions
-    directly (app/db/subagents.py::_code_defaults)."""
-    return None
 
 
 # ============================================================================

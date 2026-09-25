@@ -115,17 +115,6 @@ def cancel_interaction(interaction_id: str) -> bool:
         return cursor.rowcount > 0
 
 
-def expire_due_interactions() -> int:
-    """Expire every pending interaction past its TTL. Returns the count."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE pending_interactions SET state='expired' "
-            "WHERE state='pending' AND expires_at < NOW()"
-        )
-        return cursor.rowcount
-
-
 def expire_due_interactions_detailed() -> List[Dict[str, Any]]:
     """Expire every pending interaction past its TTL, returning the swept rows
     (id, session_id, kind, parsed payload) so the sweeper can NOTIFY each

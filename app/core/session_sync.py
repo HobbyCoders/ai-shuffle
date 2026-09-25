@@ -254,65 +254,6 @@ class SessionSyncService:
 
         return result
 
-    def sync_all_projects(
-        self,
-        profile_id: str = "default",
-        limit_projects: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """
-        Sync Claude Code sessions across all known projects.
-
-        Iterates through all projects in the database and imports any
-        unimported Claude Code sessions for each. This is useful for
-        populating sessions in views that don't filter by project.
-
-        Args:
-            profile_id: The profile to use for imported sessions
-            limit_projects: Optional limit on number of projects to sync (for performance)
-
-        Returns:
-            Dict with: total_imported, total_skipped, projects_synced, errors
-        """
-        all_projects = database.get_all_projects()
-
-        if limit_projects:
-            all_projects = all_projects[:limit_projects]
-
-        total_imported = 0
-        total_skipped = 0
-        projects_synced = 0
-        all_errors = []
-
-        for project in all_projects:
-            try:
-                result = self.sync_project_sessions(
-                    project_id=project["id"],
-                    profile_id=profile_id
-                )
-                total_imported += result["imported_count"]
-                total_skipped += result["skipped_count"]
-                projects_synced += 1
-
-                if result["errors"]:
-                    all_errors.extend(result["errors"])
-
-            except Exception as e:
-                error_msg = f"Failed to sync project {project['id']}: {e}"
-                logger.error(error_msg)
-                all_errors.append(error_msg)
-
-        logger.debug(
-            f"Global session sync: {total_imported} imported across "
-            f"{projects_synced} projects, {len(all_errors)} errors"
-        )
-
-        return {
-            "total_imported": total_imported,
-            "total_skipped": total_skipped,
-            "projects_synced": projects_synced,
-            "errors": all_errors
-        }
-
 
 # Global service instance
 session_sync_service = SessionSyncService()

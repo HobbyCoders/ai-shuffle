@@ -32,27 +32,8 @@ class MobileDeviceRow(TypedDict):
     last_seen: Optional[str]
 
 
-class PendingActionRow(TypedDict):
-    """Full pending action row from SELECT * FROM pending_actions."""
-    id: str
-    device_id: str
-    action_type: str
-    params: Dict[str, Any]
-    security_level: str
-    created_at: str
-    expires_at: str
-    status: str
-
-
 def _parse_capabilities(raw: Any) -> Dict[str, Any]:
     """Parse capabilities field, handling both str and dict (JSONB)."""
-    if isinstance(raw, str):
-        return json.loads(raw)
-    return raw if raw else {}
-
-
-def _parse_params(raw: Any) -> Dict[str, Any]:
-    """Parse params field, handling both str and dict (JSONB)."""
     if isinstance(raw, str):
         return json.loads(raw)
     return raw if raw else {}
@@ -300,69 +281,6 @@ def delete_mobile_device(device_id: str) -> bool:
             (SELECT paired_client_id FROM mobile_devices WHERE device_id=%s)""", (device_id,))
         cursor.execute("DELETE FROM mobile_devices WHERE device_id = %s", (device_id,))
         return cursor.rowcount > 0
-
-
-# ============================================================================
-# Pending Action Operations
-# ============================================================================
-
-def get_pending_action(action_id: str) -> Optional[PendingActionRow]:
-    """Get a pending action by ID"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM pending_actions WHERE id = %s", (action_id,))
-        row = cursor.fetchone()
-        if row:
-            result = dict(row)
-            if result.get("params"):
-                result["params"] = _parse_params(result["params"])
-            return result
-        return None
-
-
-def get_pending_actions_for_device(device_id: str) -> List[PendingActionRow]:
-    """Get all pending actions for a device that haven't expired"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM pending_actions
-            WHERE device_id = %s AND status = 'pending' AND expires_at > %s
-            ORDER BY created_at DESC
-        """, (device_id, now))
-        rows = cursor.fetchall()
-        results = []
-        for row in rows:
-            result = dict(row)
-            if result.get("params"):
-                result["params"] = _parse_params(result["params"])
-            results.append(result)
-        return results
-
-
-def update_pending_action_status(action_id: str, status: str) -> Optional[PendingActionRow]:
-    """Update the status of a pending action"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE pending_actions SET status = %s WHERE id = %s",
-            (status, action_id)
-        )
-        if cursor.rowcount == 0:
-            return None
-    return get_pending_action(action_id)
-
-
-def cleanup_expired_actions() -> int:
-    """Mark expired pending actions as expired"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE pending_actions SET status = 'expired'
-            WHERE status = 'pending' AND expires_at <= %s
-        """, (now,))
-        return cursor.rowcount
 
 
 # ============================================================================

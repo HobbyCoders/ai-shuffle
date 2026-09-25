@@ -50,13 +50,6 @@ async def _collect_metrics() -> dict:
     metrics["browser_available_workspaces"] = sum(bool(b.state["available"]) for b in brokers)
     metrics["browser_tab_counts_are_last_reported"] = True
 
-    # --- WebSocket tracking dicts ---
-    try:
-        from app.api.websocket import _active_chat_sessions
-        metrics["ws_active_chat_sessions"] = len(_active_chat_sessions)
-    except Exception as e:
-        logger.debug(f"{_PREFIX} Failed to collect websocket metrics: {e}")
-
     # --- Session Pool ---
     try:
         from app.core.session_pool import get_session_pool, _session_pool, is_subprocess_alive
@@ -449,15 +442,6 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
                 # background-work guard, so without an explicit reap they
                 # strand: the subprocess keeps running and its reader leaks).
                 task_registry.clear_session(session_id)
-                # Drop the session's last-turn-recorder entry too — otherwise
-                # _last_turn_recorders grows one entry per dead session.
-                try:
-                    from app.core.turn_recorder import pop_last_turn_recorder
-                    pop_last_turn_recorder(session_id)
-                except Exception:
-                    logger.debug(
-                        f"{_PREFIX} last-turn-recorder pop failed", exc_info=True,
-                    )
                 try:
                     from app.mcp.builtin_tools import reap_session_background_shells
                     reap_session_background_shells(session_id)
@@ -496,18 +480,6 @@ async def _periodic_cleanup() -> dict:
     Returns a dict of cleanup actions taken (for logging).
     """
     cleaned = {}
-
-    # Clean up done tasks from _active_chat_sessions
-    try:
-        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
-        async with _active_sessions_lock:
-            done_ids = [sid for sid, task in _active_chat_sessions.items() if task.done()]
-            for sid in done_ids:
-                del _active_chat_sessions[sid]
-            if done_ids:
-                cleaned["done_chat_tasks"] = len(done_ids)
-    except Exception as e:
-        logger.debug(f"{_PREFIX} Failed to clean up done chat tasks: {e}")
 
     # Evict dead subprocesses from the session pool
     try:

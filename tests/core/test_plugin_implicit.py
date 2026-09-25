@@ -212,20 +212,6 @@ def test_available_details_lists_skills_before_install(svc):
     assert details.skills == ["foo"]
 
 
-def test_installed_implicit_plugin_skills_surface_in_discovery(svc, monkeypatch):
-    clone = _register_marketplace(svc, "remotion")
-    _write_skill(clone / ".claude" / "skills", "foo")
-    svc.install_plugin("remotion@remotion")
-
-    monkeypatch.setattr(
-        "app.core.plugin_service.get_plugin_service", lambda project_dir=None: svc
-    )
-    from app.core.slash_commands import discover_plugin_skills
-
-    skills = discover_plugin_skills()
-    assert any(s["name"] == "remotion:foo" for s in skills)
-
-
 def test_check_for_updates_skips_implicit_plugin(svc):
     clone = _register_marketplace(svc, "remotion")
     _write_skill(clone / ".claude" / "skills", "foo")

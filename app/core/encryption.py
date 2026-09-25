@@ -79,32 +79,6 @@ def require_legacy_key_mode(db_module) -> None:
         raise RuntimeError('Server-managed credential storage cannot be password-rekeyed')
 
 
-def init_encryption_from_env(db_module) -> bool:
-    """
-    Initialize encryption key from ADMIN_PASSWORD environment variable.
-    This allows headless operation without requiring admin login.
-
-    Call this at app startup to enable API key decryption.
-
-    Returns:
-        True if encryption was initialized, False if env var not set
-    """
-    admin_password = os.environ.get("ADMIN_PASSWORD")
-    # Also check settings (which loads from .env file)
-    if not admin_password:
-        try:
-            from app.core.config import settings
-            admin_password = settings.admin_password
-        except Exception:
-            pass
-    if not admin_password:
-        return False
-
-    set_encryption_key(admin_password, db_module)
-    logger.info("Encryption key initialized from ADMIN_PASSWORD environment variable")
-    return True
-
-
 def get_or_create_salt(db_module) -> bytes:
     """
     Get the salt from database or create a new one.
@@ -566,40 +540,3 @@ def re_encrypt_all_secrets(old_password: str, new_password: str, db_module) -> b
         len(plan),
     )
     return True
-
-
-def encrypt_existing_plaintext_keys(db_module) -> int:
-    """
-    Encrypt any existing plaintext API keys in the database.
-    Called during migration or when encryption is first enabled.
-
-    NOTE: this is a DIFFERENT concern from :func:`re_encrypt_all_secrets`. It is
-    an opportunistic one-time migration of legacy PLAINTEXT ``system_settings``
-    keys to encrypted form, and intentionally stays scoped to the fixed list
-    below — it does NOT walk automations/connectors/credentials JSONB.
-
-    Returns:
-        Number of keys encrypted
-    """
-    if not _encryption_key:
-        raise RuntimeError(credential_storage_error())
-
-    sensitive_settings = [
-        "openai_api_key",
-        "gemini_api_key",
-        "image_api_key",
-        "video_api_key",
-        "anthropic_api_key",
-    ]
-
-    count = 0
-    for setting_name in sensitive_settings:
-        value = db_module.get_system_setting(setting_name)
-        if value and not is_encrypted(value):
-            # This is a plaintext key, encrypt it
-            encrypted = encrypt_value(value)
-            db_module.set_system_setting(setting_name, encrypted)
-            logger.debug(f"Encrypted existing plaintext key: {setting_name}")
-            count += 1
-
-    return count

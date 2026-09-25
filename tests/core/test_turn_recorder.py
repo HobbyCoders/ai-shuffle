@@ -66,7 +66,6 @@ async def test_recording_failure_latches_without_retry(mock_db, monkeypatch, pha
         await rec.on_event({"type": "turn_usage", "usage": {"tokens_in": 20}})
     assert not await rec.record_steered_user_message("ignored")
     assert await rec.record_task_terminal([{"task_id": "task", "status": "completed"}]) == 0
-    await rec.record_empty_turn_discard()
     await rec.start("ignored")
     await rec.close()
     await rec.close()
@@ -1321,84 +1320,6 @@ async def test_on_event_with_garbage_input_does_not_raise(mock_db):
     await rec.on_event({"type": "tool_use"})  # missing every field
     assert "tool.use" in _types()  # defaults applied, still recorded
     await rec.close()
-
-
-# ---------------------------------------------------------------------------
-# first-seq memory + record_empty_turn_discard (transcript.rewound)
-# ---------------------------------------------------------------------------
-
-async def test_first_seq_captured_on_first_append(mock_db):
-    _mk_session()
-    # A prior turn already occupies seqs 1-2.
-    se.append_events(SID, [{"type": "turn.started"}, {"type": "turn.completed"}])
-    rec = await _recorder()
-    assert rec._first_seq is None
-    await rec.start("hello")
-    assert rec._first_seq == 3  # this turn's turn.started
-    await rec.on_event({"type": "chunk", "content": "x"})
-    assert rec._first_seq == 3  # sticky — never moves after the first append
-    await rec.close()
-
-
-async def test_record_empty_turn_discard_appends_rewound(mock_db):
-    _mk_session()
-    rec = await _recorder()
-    await rec.start("discard me")
-    first = rec._first_seq
-    await rec.close()
-    await rec.record_empty_turn_discard()
-    rows = _rows()
-    assert rows[-1]["event_type"] == "transcript.rewound"
-    assert rows[-1]["payload"]["from_seq"] == first
-    assert rows[-1]["run_id"] is None  # unfenced (lease already released)
-
-
-async def test_record_empty_turn_discard_noop_without_appends(mock_db):
-    _mk_session()
-    rec = await _recorder()
-    # No events ever appended for this turn -> nothing to erase.
-    await rec.close()
-    # close() appends the crash-path terminal, so reset to the no-append case:
-    rec2 = await _recorder()
-    rec2._first_seq = None
-    await rec2.record_empty_turn_discard()
-    assert "transcript.rewound" not in _types()
-    await rec2.close()
-
-
-async def test_record_empty_turn_discard_never_raises(mock_db, monkeypatch):
-    _mk_session()
-    rec = await _recorder()
-    await rec.start("hi")
-
-    def _boom(*args, **kwargs):
-        raise RuntimeError("db down")
-
-    monkeypatch.setattr(tr.session_events_db, "append_events", _boom)
-    await rec.record_empty_turn_discard()  # must not raise
-
-
-# ---------------------------------------------------------------------------
-# pop_last_turn_recorder — session teardown drops the last-recorder entry
-# ---------------------------------------------------------------------------
-
-async def test_pop_last_turn_recorder_removes_entry(mock_db):
-    _mk_session()
-    rec = await _recorder()
-    assert tr._last_turn_recorders.get(SID) is rec
-    await rec.close()
-    # close() intentionally leaves the entry (discard_empty_turn runs post-turn).
-    assert tr._last_turn_recorders.get(SID) is rec
-
-    tr.pop_last_turn_recorder(SID)
-    assert SID not in tr._last_turn_recorders
-    # discard after teardown is a clean no-op (no recorder to reach).
-    await tr.discard_empty_turn(SID)
-    assert "transcript.rewound" not in _types()
-
-
-def test_pop_last_turn_recorder_missing_session_never_raises():
-    tr.pop_last_turn_recorder("never-seen-session")  # must not raise
 
 
 # ---------------------------------------------------------------------------

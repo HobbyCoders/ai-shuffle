@@ -23,7 +23,6 @@ guard against missing keys so a stray update can never raise.
 """
 
 import logging
-import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -74,10 +73,6 @@ _COMPLETED_VISIBLE_WINDOW_SECONDS = 15.0
 # long retention window above (the user must SEE the failure); a clean
 # "completed" is retained only for the short hand-off window.
 _FAILURE_STATUSES = frozenset({"error", "killed"})
-
-# Terminal cancellation vocabulary. Intent needs separate reason/suppression
-# evidence: an unattributed kill can be a crash and must still reach the model.
-_CANCELLATION_STATUSES = frozenset({"killed", "cancelled", "stopped"})
 
 # Kill attribution for shutdown-origin reaps (lifecycle batch, item 4a): a
 # background task killed because the SERVER is restarting must say so instead
@@ -346,22 +341,6 @@ class TaskRegistry:
         # so a child step can be deferred against ITS owner's quiescence rather
         # than pumped blindly. Cleared with the session.
         self._child_owner: Dict[str, Dict[str, str]] = {}
-        # session_id -> {owner_launch_tuid -> monotonic ts} (B-prime item b). The
-        # last time a running sub-agent (an owner) emitted inner activity on the
-        # main session's between-turns drained stream (idle_reader inner-message
-        # dispatch calls ``note_owner_activity``). A parked/at-rest sub-agent is
-        # SILENT there; a still-running one continuously emits. The deferred-pump
-        # discriminator compares this against a child terminal's timestamp:
-        # activity AFTER the child terminal ⇒ owner still running (the CLI steered
-        # the child result to it for free) ⇒ suppress; silence ⇒ at rest ⇒ pump.
-        # Cleared with the session.
-        self._owner_activity_ts: Dict[str, Dict[str, float]] = {}
-        # Deferred-pump cleanup callback (B-prime item f). The scheduler registers
-        # ONE sync callback at install(); ``clear_session`` fires it with the
-        # session id and ``reset_all`` with ``None`` (clear-all) so the scheduler's
-        # per-owner deferred timers are cancelled with the session/registry rather
-        # than leaking. Fully defensive — a raising callback is swallowed.
-        self._pump_cleanup_callback: Optional[Any] = None
         # Guaranteed terminal notification (lifecycle batch, item 4b): a
         # callback the chat layer registers ONCE at startup. ``complete_task``
         # fires it exactly once per task (see ``mark_terminal_notified``) when
@@ -750,20 +729,6 @@ class TaskRegistry:
             return False
         return True
 
-    def is_unattributed_cancellation(self, session_id: str, task_id: str) -> bool:
-        """True when a cancellation has no recorded cause.
-
-        Missing attribution does not prove an intentional Stop; callers must not
-        suppress delivery on this predicate. Explicit Stop uses suppress_wake.
-        """
-        record = self.get_task(session_id, task_id)
-        if record is None:
-            return False
-        return (
-            record.get("status") in _CANCELLATION_STATUSES
-            and not record.get("reason")
-        )
-
     def link_child_to_owner(
         self, session_id: str, child_launch_tuid: str, owner_launch_tuid: str
     ) -> None:
@@ -813,44 +778,6 @@ class TaskRegistry:
         except Exception:  # noqa: BLE001 — a stray shape must never raise.
             return None
         return None
-
-    def note_owner_activity(self, session_id: str, owner_launch_tuid: str) -> None:
-        """Stamp the monotonic time a running sub-agent (owner) emitted inner
-        activity on the drained stream (B-prime item b). Called from the idle
-        reader's inner-message dispatch for every drained message whose
-        ``parent_tool_use_id`` is one of the parent's own background launches.
-        Defensive: missing ids are a no-op."""
-        if not session_id or not owner_launch_tuid:
-            return
-        self._owner_activity_ts.setdefault(session_id, {})[
-            owner_launch_tuid
-        ] = time.monotonic()
-
-    def owner_activity_ts(
-        self, session_id: str, owner_launch_tuid: str
-    ) -> Optional[float]:
-        """The monotonic ts of the owner's last inner activity, or ``None`` if the
-        owner has never been seen active. Defensive: missing ids return ``None``."""
-        if not session_id or not owner_launch_tuid:
-            return None
-        return self._owner_activity_ts.get(session_id, {}).get(owner_launch_tuid)
-
-    def set_pump_cleanup_callback(self, callback: Optional[Any]) -> None:
-        """Register the deferred-pump cleanup callback (scheduler, once at
-        install()). ``callback(session_id_or_None)`` — SYNC, fired from
-        ``clear_session`` (with the session id) and ``reset_all`` (with ``None``)
-        so the scheduler cancels the session's/all deferred-pump timers. ``None``
-        deregisters."""
-        self._pump_cleanup_callback = callback
-
-    def _fire_pump_cleanup(self, session_id: Optional[str]) -> None:
-        """Invoke the pump-cleanup callback defensively (never raises)."""
-        if self._pump_cleanup_callback is None:
-            return
-        try:
-            self._pump_cleanup_callback(session_id)
-        except Exception:  # noqa: BLE001 — cleanup must never break teardown.
-            logger.debug("pump cleanup callback failed", exc_info=True)
 
     def reset_started_this_turn(self, session_id: str) -> None:
         """Clear the "started this turn" set for a session.
@@ -1635,10 +1562,7 @@ class TaskRegistry:
         # ``_user_stopped`` is deliberately NOT cleared here: eviction/teardown
         # must not un-stop a session the user stopped (see mark_user_stopped).
         self._child_owner.pop(session_id, None)
-        self._owner_activity_ts.pop(session_id, None)
         self._terminal_notified.pop(session_id, None)
-        # Cancel the scheduler's deferred-pump timers for this session (item f).
-        self._fire_pump_cleanup(session_id)
         self._prune_recent_terminal(session_id)
 
     def reset_all(self) -> None:
@@ -1658,12 +1582,8 @@ class TaskRegistry:
         self._stop_generations.clear()
         self._stop_supervisors.clear()
         self._child_owner.clear()
-        self._owner_activity_ts.clear()
         self._terminal_notified.clear()
         self._terminal_notification_callback = None
-        # Cancel ALL deferred-pump timers, then deregister (item f).
-        self._fire_pump_cleanup(None)
-        self._pump_cleanup_callback = None
         self._recent_terminal.clear()
 
 

@@ -2747,36 +2747,6 @@ def get_session_cost_from_jsonl(
     }
 
 
-def list_available_sessions(working_dir: str = "/workspace") -> List[Dict[str, Any]]:
-    """
-    List all available session files for a project directory.
-
-    Returns list of dicts with: sdk_session_id, path, modified_at
-    """
-    claude_projects_dir = settings.get_claude_projects_dir
-    project_dir_name = get_project_dir_name(working_dir)
-    project_dir = claude_projects_dir / project_dir_name
-
-    sessions = []
-
-    if project_dir.exists():
-        for jsonl_file in project_dir.glob("*.jsonl"):
-            try:
-                stat = jsonl_file.stat()
-                sessions.append({
-                    "sdk_session_id": jsonl_file.stem,
-                    "path": str(jsonl_file),
-                    "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                    "size_bytes": stat.st_size
-                })
-            except Exception as e:
-                logger.warning(f"Failed to stat {jsonl_file}: {e}")
-
-    # Sort by modified time, newest first
-    sessions.sort(key=lambda x: x["modified_at"], reverse=True)
-    return sessions
-
-
 def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Optional[str], int]:
     """
     Extract session title (first user message) and preview from JSONL file.

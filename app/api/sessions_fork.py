@@ -240,7 +240,6 @@ async def fork_session(
     Returns:
         Information about the forked session
     """
-    import uuid
     import json
     from app.core.config import settings
     from app.core.jsonl_parser import get_session_jsonl_path, parse_jsonl_file

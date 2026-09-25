@@ -54,9 +54,6 @@ logger = logging.getLogger(__name__)
 # cleanly (None) either way.
 _INTEGRITY_ERRORS = (psycopg2.IntegrityError, sqlite3.IntegrityError)
 
-# States considered "live" — a turn actively owning the session's single runner
-# slot. The partial unique index is defined over exactly this set.
-LIVE_STATES = ("running", "interrupting", "draining")
 # Terminal states — settle/park are idempotent no-ops once a turn is here.
 TERMINAL_STATES = ("completed", "aborted", "parked")
 

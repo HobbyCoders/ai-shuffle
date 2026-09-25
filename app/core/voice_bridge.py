@@ -167,9 +167,6 @@ VOICE_INSTRUCTIONS = (
     "- Answer in the language the user speaks to you in."
 )
 
-#: Back-compat alias for the original name of the placeholder.
-VOICE_INSTRUCTIONS_V1 = VOICE_INSTRUCTIONS
-
 # Appended when the app-configuration tools are declared on the sideband —
 # the operating rules those tools need, condensed for a spoken channel.
 APP_TOOLS_INSTRUCTIONS = (
@@ -440,15 +437,6 @@ VOICE_WEB_TOOLS: List[Dict[str, Any]] = [
         }, "required": ["url"]},
     },
 ]
-
-# Turn-taking config sent on attach. Semantic VAD keeps the channel always-open
-# (no push-to-talk) and lets the user barge in.
-TURN_DETECTION_CONFIG: Dict[str, Any] = {
-    "type": "semantic_vad",
-    "eagerness": "medium",
-    "interrupt_response": True,
-    "create_response": True,
-}
 
 # Context retention, sent as its OWN ``session.update`` — see
 # ``_send_truncation_update``. Shape verified against the OpenAI realtime docs:
@@ -866,7 +854,6 @@ class VoiceBridge:
         self._announced_approvals: set = set()
         # Voice session's profile id, read lazily and cached (dispatch grants).
         self._profile_id: Optional[str] = None
-        self._provider_id: Optional[str] = None
         self._profile_loaded = False
 
         # -- client-serviced tools (native app integration) ----------------
@@ -1564,13 +1551,11 @@ class VoiceBridge:
         try:
             row = await run_sync(database.get_session, self.session_id)
             self._profile_id = (row or {}).get("profile_id")
-            self._provider_id = (row or {}).get("provider_id")
         except Exception:  # noqa: BLE001 — dispatch falls back to the row read
             logger.debug(
                 "Voice: could not read profile for %s", self.session_id, exc_info=True,
             )
             self._profile_id = None
-            self._provider_id = None
         self._profile_loaded = True
         return self._profile_id
 
@@ -1735,22 +1720,6 @@ class VoiceBridge:
     async def _voice_roster(self) -> tuple:
         """The agents this call may dispatch — the voice-assigned ones."""
         return await run_sync(_voice_roster_targets)
-
-    async def _default_agent_ref(self) -> Optional[str]:
-        """Agent to use when the model omits ``agent`` — DETERMINISTIC.
-
-        Three rules, in order: the agent the voice session was started with
-        (the user picked it on the new-chat screen, so "just get an agent on
-        it" means that one) when it is voice-assigned; else an agent whose id
-        or name is literally "default" (case-insensitive); else the
-        alphabetically first eligible agent by name.
-
-        Stability is the point: "just get an agent on it" must land on the same
-        worker every time, not on whatever the profile table happened to return
-        first. Returns None when there is nothing to pick.
-        """
-        rows = _roster_rows(await self._voice_roster())
-        return _pick_default_agent(rows, preferred=await self._caller_profile_id())
 
     async def _agent_roster(self) -> str:
         """The "Agents you can dispatch:" block appended to the instructions.
@@ -2772,10 +2741,6 @@ class VoiceCallRegistry:
             self._capped.pop(session_id, None)
             return None
         return minutes
-
-    def clear_capped(self, session_id: str) -> None:
-        """Forget the cap — the user hung up, so a new call is allowed."""
-        self._capped.pop(session_id, None)
 
     def state(self, session_id: str) -> Dict[str, Any]:
         """State payload for a session, live bridge or not."""

@@ -391,15 +391,6 @@ class WorktreeListResponse(BaseModel):
     total: int
 
 
-class WorktreeSyncResponse(BaseModel):
-    """Response for worktree sync endpoint"""
-    synced: int
-    orphaned: int
-    cleaned_up: int
-    imported: int = 0  # External worktrees imported into database
-    errors: List[str] = []
-
-
 # =============================================================================
 # Branch Name Generation Models
 # =============================================================================

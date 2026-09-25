@@ -654,7 +654,6 @@ class JQEvaluator:
             raise EvaluationError(str(msg) if msg else "error")
 
         if func_name == "debug":
-            import sys
             import json
             logger.debug("jq debug: %s", json.dumps(data))
             return data

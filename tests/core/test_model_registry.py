@@ -82,16 +82,6 @@ def test_the_suffix_helper_machinery_is_gone():
         assert not hasattr(m, name), name
 
 
-def test_preset_detection():
-    assert m.is_preset_model("opus") is True
-    assert m.is_preset_model("fable") is True
-    # Legacy ids (with and without the retired suffix) resolve to a preset.
-    assert m.is_preset_model("claude-opus-4-8") is True
-    assert m.is_preset_model("opus[1m]") is True
-    assert m.is_preset_model("totally-custom") is False
-    assert m.is_preset_model("") is False
-
-
 def test_openrouter_display_label_strips_author_prefix():
     assert m.display_provider_model_label(
         "Anthropic: Claude Fable 5.1", "openrouter"
@@ -120,10 +110,7 @@ def test_provider_slug_label_fallback(model_id, label, expected):
     assert m.display_provider_model_label(label, "custom", model_id) == expected
 
 
-def test_label_and_family_resolve_through_legacy_ids():
-    assert m.get_model_label("sonnet") == "Sonnet"
-    # No more " 1M" decoration — the window is not a variant any more.
-    assert m.get_model_label("sonnet[1m]") == "Sonnet"
+def test_family_resolves_through_legacy_ids():
     assert m.get_model_family("fable") == "fable"
     assert m.get_model_family("opus[1m]") == "opus"
 

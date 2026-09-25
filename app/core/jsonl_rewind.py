@@ -517,49 +517,6 @@ class JSONLRewindService:
                 error=str(e)
             )
 
-    def get_last_message_uuid(
-        self,
-        sdk_session_id: str,
-        working_dir: str = "/workspace"
-    ) -> Optional[str]:
-        """
-        Get the UUID of the last user message in the session.
-
-        Useful for creating checkpoints before starting a new turn.
-
-        Returns:
-            UUID of last user message, or None if not found
-        """
-        checkpoints = self.get_checkpoints(sdk_session_id, working_dir)
-        if checkpoints:
-            return checkpoints[-1].uuid
-        return None
-
-    def backup_jsonl(
-        self,
-        sdk_session_id: str,
-        working_dir: str = "/workspace"
-    ) -> Optional[Path]:
-        """
-        Create a backup of the JSONL file before rewind.
-
-        Returns:
-            Path to backup file, or None if backup failed
-        """
-        jsonl_path = self._get_jsonl_path(sdk_session_id, working_dir)
-        if not jsonl_path:
-            return None
-
-        backup_path = jsonl_path.with_suffix(f'.jsonl.backup.{datetime.now().strftime("%Y%m%d_%H%M%S")}')
-
-        try:
-            shutil.copy2(jsonl_path, backup_path)
-            logger.debug(f"Created JSONL backup at {backup_path}")
-            return backup_path
-        except Exception as e:
-            logger.error(f"Failed to create JSONL backup: {e}")
-            return None
-
 
 # Global service instance
 jsonl_rewind_service = JSONLRewindService()

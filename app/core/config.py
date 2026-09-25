@@ -84,54 +84,6 @@ def _parse_legacy_database_url(db_url: str) -> dict:
     }
 
 
-def normalize_database_url(db_url: str) -> str:
-    """Return ``db_url`` with its userinfo percent-encoded.
-
-    A password containing a reserved character — ``@`` above all — makes the
-    same connection string mean two different things depending on who reads it.
-    Python's ``urlsplit`` splits userinfo at the LAST ``@``, which is what
-    :func:`_parse_legacy_database_url` relies on. A client that splits at the
-    FIRST ``@`` can resolve the wrong host when given an unescaped DSN. The observed failure was a
-    worker container reporting that it could not translate a host name made of
-    the tail of the password plus the real host: libpq had taken part of the
-    password as the hostname, and that fragment went into the event log with
-    the error.
-
-    Explicit normalization makes the two readings agree. This pure helper is
-    not used to load application database settings; managed descriptors carry
-    separate credentials instead. Idempotent and never raises: an unparseable
-    string is returned untouched.
-    """
-    from urllib.parse import quote, unquote, urlsplit, urlunsplit
-
-    raw = (db_url or "").strip()
-    if not raw:
-        return raw
-    candidate = raw
-    if not candidate.startswith(("postgresql://", "postgres://")):
-        candidate = f"postgresql://{candidate}"
-    try:
-        parts = urlsplit(candidate)
-        raw_userinfo, sep, hostinfo = parts.netloc.rpartition("@")
-        if not sep:
-            return raw  # No credentials in the URL at all: nothing to encode.
-        # Split the credentials on the FIRST colon — a password may contain
-        # one, a username may not. ``unquote`` first so an already-encoded URL
-        # round-trips to itself instead of double-encoding.
-        raw_user, _, raw_password = raw_userinfo.partition(":")
-        userinfo = quote(unquote(raw_user), safe="")
-        if raw_password:
-            userinfo = f"{userinfo}:{quote(unquote(raw_password), safe='')}"
-        # ``hostinfo`` is copied verbatim: urlsplit would lowercase the host
-        # and re-render the port, which changes the string for no gain.
-        netloc = f"{userinfo}@{hostinfo}"
-        return urlunsplit(
-            (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
-        )
-    except Exception:  # noqa: BLE001 — a malformed URL must never block boot
-        return raw
-
-
 _cached_persisted_instance_id: Optional[str] = None
 _persisted_instance_id_lock = threading.Lock()
 
@@ -319,7 +271,6 @@ class Settings(BaseSettings):
     cluster_artifact_proxy: bool = True
 
     # Session
-    session_secret: Optional[str] = None
     session_expire_days: int = 30
 
     # fluid_session_events retention. The engine persists every bus event, so
@@ -461,8 +412,6 @@ class Settings(BaseSettings):
     fluid_external_call_timeout_seconds: int = 330
     fluid_turn_watchdog_seconds: int = 900
 
-    # Timeouts (milliseconds)
-    hook_timeout_ms: int = 30_000
     # Size limits
     max_tool_output_chars: int = 500_000  # ~500KB, well under 1MB WS buffer
     max_display_output_chars: int = 2_000  # What we show in the UI

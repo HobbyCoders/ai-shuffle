@@ -1010,55 +1010,6 @@ class TestGetSessionCostFromJsonl:
             assert result == {}
 
 
-class TestListAvailableSessions:
-    """Test session listing functionality."""
-
-    def test_list_sessions_in_project_dir(self):
-        """Should list all JSONL files in project directory."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            projects_dir = Path(tmpdir) / "projects"
-            project_dir = projects_dir / "-workspace"
-            project_dir.mkdir(parents=True)
-            (project_dir / "session-1.jsonl").write_text('{"test": 1}')
-            (project_dir / "session-2.jsonl").write_text('{"test": 2}')
-            (project_dir / "session-3.jsonl").write_text('{"test": 3}')
-            with patch('app.core.jsonl_parser.settings') as mock_settings:
-                mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.list_available_sessions("/workspace")
-                assert len(result) == 3
-                session_ids = [s["sdk_session_id"] for s in result]
-                assert "session-1" in session_ids
-                assert "session-2" in session_ids
-                assert "session-3" in session_ids
-
-    def test_returns_empty_for_nonexistent_dir(self):
-        """Should return empty list when project directory doesn't exist."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            projects_dir = Path(tmpdir) / "projects"
-            with patch('app.core.jsonl_parser.settings') as mock_settings:
-                mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.list_available_sessions("/workspace")
-                assert result == []
-
-    def test_includes_file_metadata(self):
-        """Should include path, modified_at, and size_bytes."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            projects_dir = Path(tmpdir) / "projects"
-            project_dir = projects_dir / "-workspace"
-            project_dir.mkdir(parents=True)
-            session_file = project_dir / "test-session.jsonl"
-            session_file.write_text('{"data": "test content here"}')
-            with patch('app.core.jsonl_parser.settings') as mock_settings:
-                mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.list_available_sessions("/workspace")
-                assert len(result) == 1
-                assert result[0]["sdk_session_id"] == "test-session"
-                assert "path" in result[0]
-                assert "modified_at" in result[0]
-                assert "size_bytes" in result[0]
-                assert result[0]["size_bytes"] > 0
-
-
 class TestSubagentTaskToolResult:
     """Test Task tool result handling for subagents."""
 

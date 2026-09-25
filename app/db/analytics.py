@@ -40,14 +40,6 @@ def _to_iso(value: Any) -> Any:
 # TypedDict definitions
 # ============================================================================
 
-class LastSessionUsage(TypedDict):
-    """Last usage entry for a session (renamed fields for API compat)."""
-    total_cost_usd: float
-    duration_ms: int
-    tokens_in: int
-    tokens_out: int
-    model: Optional[str]
-
 
 class SessionUsageEntry(TypedDict):
     """Per-turn usage entry with cumulative cost."""
@@ -190,38 +182,6 @@ def settle_turn_usage(
     from app.core.cost_utils import invalidate_usage_cache
     invalidate_usage_cache(session_id)
     return True
-
-
-def get_last_session_usage(session_id: str) -> Optional[LastSessionUsage]:
-    """Get the most recent usage entry for a session.
-
-    Returns cost and duration info for the last query turn in the session.
-    This is used to populate metadata for the last assistant message when
-    loading chat history (since JSONL files don't store cost/duration).
-
-    Returns:
-        Dict with cost_usd, duration_ms, tokens_in, tokens_out, model
-        or None if no usage found
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT cost_usd, duration_ms, tokens_in, tokens_out, model
-            FROM usage_log
-            WHERE session_id = %s
-            ORDER BY id DESC
-            LIMIT 1
-        """, (session_id,))
-        row = cursor.fetchone()
-        if row:
-            return {
-                "total_cost_usd": row["cost_usd"],
-                "duration_ms": row["duration_ms"],
-                "tokens_in": row["tokens_in"],
-                "tokens_out": row["tokens_out"],
-                "model": row["model"]
-            }
-        return None
 
 
 def get_all_session_usage(session_id: str) -> List[SessionUsageEntry]:

@@ -240,8 +240,7 @@ async def get_diagnostics(request: Request, token: str = Depends(require_auth), 
             "worker": "local", "cross_worker_activity_known": False,
             "whole_stack_idle_classified": False,
             "local_concurrent_activity": bool(
-                metrics.get("pool_streaming", 0) or metrics.get("ws_active_chat_sessions", 0)
-                or metrics.get("browser_active_calls", 0)
+                metrics.get("pool_streaming", 0) or metrics.get("browser_active_calls", 0)
             ),
             "local_streaming_sessions": metrics.get("pool_streaming", 0),
             "local_browser_viewers": metrics.get("browser_viewers", 0),

@@ -77,8 +77,6 @@ PROVIDER_OVERLAY_ENV_KEYS = (
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
     "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK",
 )
-# Kept as the union for existing importers/tests.
-PROVIDER_ENV_KEYS = PROVIDER_IDENTITY_ENV_KEYS + PROVIDER_OVERLAY_ENV_KEYS
 
 
 def provider_env_requires_reconnect(
@@ -1738,10 +1736,6 @@ class SessionPool:
         "dictionary changed size during iteration".
         """
         return list(self._pool.items())
-
-    def active_session_ids(self) -> list:
-        """Get list of session IDs with connected clients."""
-        return [sid for sid, s in list(self._pool.items()) if s.is_connected]
 
     def streaming_session_ids(self) -> list:
         """Get list of session IDs currently streaming."""

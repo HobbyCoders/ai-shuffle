@@ -6,9 +6,8 @@ no retry and no invisible account switch:
 * 429 ``api_error`` frames are held back and FLUSHED just before the terminal
   ``done`` frame; non-429 ``api_error`` frames pass through immediately.
 * on a usage-limit ``done`` the OC-1/OC-4 rate-limited notification is surfaced
-  via ``attempt_failover`` (which always returns ``retry=False`` — the call
-  exists only for its notification side effect), and no ``account_switched``
-  system frame is ever emitted.
+  via ``attempt_failover`` (a notification side effect only), and no
+  ``account_switched`` system frame is ever emitted.
 
 ``stream_query`` and ``attempt_failover`` are looked up as module attributes at
 call time (``app.api.query.stream_query`` and, via a call-time
@@ -16,7 +15,7 @@ call time (``app.api.query.stream_query`` and, via a call-time
 patch them where they're resolved.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import app.api.query as query_mod
 
@@ -49,10 +48,9 @@ async def test_usage_limit_done_notifies_and_flushes_429_without_switch():
         {"type": "done", "session_id": "s1", "metadata": {"api_error_status": 429}},
     ]
 
-    decision = MagicMock(retry=False, account_name=None)
     with patch.object(query_mod, "stream_query", new=_stream_factory(only)), \
          patch("app.core.account_failover.attempt_failover",
-               new=AsyncMock(return_value=decision)) as af_mock:
+               new=AsyncMock()) as af_mock:
         events = await _collect(query_mod._stream_query_with_failover(
             prompt="hi", profile_id="claude-code", session_id="s1",
         ))
@@ -80,10 +78,9 @@ async def test_give_up_flushes_held_429_before_done():
         {"type": "done", "session_id": "s1", "metadata": {"api_error_status": 429}},
     ]
 
-    decision = MagicMock(retry=False, account_name=None)
     with patch.object(query_mod, "stream_query", new=_stream_factory(only)), \
          patch("app.core.account_failover.attempt_failover",
-               new=AsyncMock(return_value=decision)):
+               new=AsyncMock()):
         events = await _collect(query_mod._stream_query_with_failover(
             prompt="hi", profile_id="claude-code", session_id="s1",
         ))

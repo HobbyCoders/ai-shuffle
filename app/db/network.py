@@ -492,15 +492,6 @@ def rename_member(device_id: str, name: str) -> Optional[dict]:
     return get_member(device_id)
 
 
-def delete_all_members(_conn=None) -> None:
-    sql = "DELETE FROM network_members"
-    if _conn is not None:
-        _conn.cursor().execute(sql)
-        return
-    with get_db() as conn:
-        conn.cursor().execute(sql)
-
-
 # ---------------------------------------------------------------------------
 # Membership records (the synced collection's local table)
 # ---------------------------------------------------------------------------

@@ -70,10 +70,6 @@ from app.db.base import get_db
 
 logger = logging.getLogger(__name__)
 
-# Payload key carrying the accumulated set of account ids a prompt has already
-# 429'd on across its failover retry chain (durable, in the turn payload).
-FAILOVER_ATTEMPTED_KEY = "failover_attempted"
-
 # Transport-context payload keys copied from a settled/parked turn onto a
 # scheduler-enqueued successor so the retry/continuation/wake runs with the
 # same attribution the original turn had.
@@ -421,9 +417,8 @@ async def _maybe_failover(
     terminal: Dict[str, Any],
 ) -> None:
     """Policy (1): usage-limit fail + not user-stopped → surface the
-    rate-limited state via ``attempt_failover``. Account rotation is retired:
-    ``attempt_failover`` always returns ``retry=False``, so no
-    ``source=failover`` retry is enqueued.
+    rate-limited state via ``attempt_failover``. Account rotation is retired,
+    so no ``source=failover`` retry is enqueued.
 
     "Not user-stopped" holds by construction: the usage-limit signal lives in a
     settled turn's terminal ``turn.completed`` payload, which a user stop
@@ -444,10 +439,7 @@ async def _maybe_failover(
         return
 
     payload = settled.get("payload") or {}
-    attempted: Set[str] = set(payload.get(FAILOVER_ATTEMPTED_KEY) or [])
-    await account_failover.attempt_failover(
-        session_id, payload.get("api_user_id"), attempted,
-    )
+    await account_failover.attempt_failover(session_id, payload.get("api_user_id"))
     logger.info(
         "turn_scheduler: usage limit for %s turn %s — no retry "
         "(account failover retired)",
@@ -801,13 +793,6 @@ def _session_has_parked_turn(session_id: str) -> bool:
             (session_id,),
         )
         return cursor.fetchone() is not None
-
-
-#: ``frame["origin"]`` stamped on the terminal frames of app-dispatched workers
-#: (:mod:`app.core.provider_agent`, Swarm, worker continuations). The app's own
-#: wake is the only delivery of every completion on every leg — no CLI turn
-#: carries one — so the scheduler treats marked and unmarked frames alike.
-PROVIDER_AGENT_ORIGIN = "provider_agent"
 
 
 # A frame is "richer" than a stored one when it POPULATES any content field

@@ -142,7 +142,7 @@ def test_task_contract_is_roster_bound_and_has_no_model_override(mock_db):
     assert "subagent" in contract.description.lower()
     assert "reviewer" in contract.description
     assert "sonnet" in contract.description
-    guidance = parent_subagent_guidance("caller", None)
+    guidance = parent_subagent_guidance()
     assert "# Subagent delegation" in guidance
     assert "current provider" in guidance
     assert "Never invent a subagent ID, model, or provider" in guidance
@@ -596,7 +596,7 @@ def test_disabled_target_provider_drops_only_that_agent(mock_db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_background_doctrine_is_its_own_top_level_block(mock_db):
-    guidance = parent_subagent_guidance("caller", None)
+    guidance = parent_subagent_guidance()
 
     assert "\n# Background work\n" in guidance
     background = guidance.split("# Background work", 1)[1]
@@ -612,7 +612,7 @@ def test_background_doctrine_is_its_own_top_level_block(mock_db):
 
 
 def test_monitor_is_named_as_the_trigger_for_long_commands(mock_db):
-    background = parent_subagent_guidance("caller", None).split(
+    background = parent_subagent_guidance().split(
         "# Background work", 1
     )[1]
 
@@ -621,7 +621,7 @@ def test_monitor_is_named_as_the_trigger_for_long_commands(mock_db):
 
 
 def test_ui_changes_are_verified_in_a_browser(mock_db):
-    guidance = parent_subagent_guidance("caller", None)
+    guidance = parent_subagent_guidance()
 
     assert "# Verifying a UI change" in guidance
     verification = guidance.split("# Verifying a UI change", 1)[1]

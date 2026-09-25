@@ -22,7 +22,6 @@ from app.core.auth import (
     set_github_auth_cached,
 )
 from app.core import audit_service
-from app.core import auth as _auth_module
 from app.db import database as db
 from app.db.async_database import run_sync
 
@@ -30,9 +29,6 @@ logger = logging.getLogger(__name__)
 
 # Unique server instance ID to help debug multi-instance issues
 _SERVER_INSTANCE_ID = _uuid.uuid4().hex[:8]
-
-# Share instance ID with auth service for consistent logging
-_auth_module.set_server_instance_id(_SERVER_INSTANCE_ID)
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 

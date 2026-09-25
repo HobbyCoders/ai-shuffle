@@ -52,7 +52,6 @@ def test_relative_path_uses_configured_workspace(monkeypatch, tmp_path, resolver
     )
 
     assert Path(resolver(project)) == configured / "ai-shuffle"
-    assert pu.get_project_parent_dir("ai-shuffle") == configured
 
 
 @pytest.mark.parametrize("path", ["/repos/project", "D:/repos/project", r"D:\repos\project"])

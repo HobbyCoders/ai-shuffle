@@ -101,7 +101,7 @@ async def _run(
             provider=provider,
             resolved_provider=resolved_provider,
         )
-        events = await collect(qe.stream_to_websocket("hi", session_id, "default"))
+        events = await collect(qe._stream_to_websocket_impl("hi", session_id, "default"))
     return [
         e for e in events
         if e.get("type") == "system" and e.get("subtype") == "model_info"

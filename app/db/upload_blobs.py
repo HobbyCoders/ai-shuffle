@@ -127,14 +127,6 @@ def clear_data(blob_id: str) -> None:
         )
 
 
-def delete_blob(blob_id: str) -> bool:
-    """Delete a blob row. Returns True when a row was removed."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM upload_blobs WHERE id = %s", (blob_id,))
-        return (cursor.rowcount or 0) > 0
-
-
 def purge_old(older_than_days: int = 7) -> int:
     """Delete blob rows older than ``older_than_days`` (the required sweeper —
     the bytes column means this table must never grow unboundedly). Returns the

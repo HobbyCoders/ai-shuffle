@@ -3,7 +3,7 @@
 Re-sources every "is this session busy/streaming?" read to the leased ``runs``
 table (`app.db.runs`): a session is busy iff it has an ``active`` run whose
 lease has not lapsed (``lease_expires_at >= NOW()`` — the same predicate
-``renew_run``/``expire_due_runs`` enforce; an expired-lease active row counts
+``renew_run`` enforces; an expired-lease active row counts
 as NOT busy). Because the runs table lives in the shared database, this is one
 truth across installs — no in-memory map to wipe on restart or fan out to
 peers.
@@ -55,8 +55,8 @@ GATEWAY_TICK_COOLDOWN_SECONDS = 1.0
 # Size at which the per-session throttle bookkeeping sheds its stale entries.
 _TICK_STATE_MAX = 512
 
-# The lease-validity predicate, verbatim from app/db/runs.py (renew_run /
-# expire_due_runs): an active run whose lease lapsed is NOT busy.
+# The lease-validity predicate, verbatim from app/db/runs.py (renew_run): an
+# active run whose lease lapsed is NOT busy.
 _LIVE_RUN_WHERE = "state='active' AND lease_expires_at >= NOW()"
 
 # session_id -> (checked_at_monotonic, busy). Guarded by _cache_lock because

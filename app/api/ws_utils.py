@@ -54,7 +54,6 @@ async def safe_ws_send(websocket: WebSocket, data: dict) -> None:
 
 async def ping_loop(
     websocket: WebSocket,
-    device_id: str,
     send_fn: Optional[Callable[[dict], Awaitable[bool]]] = None,
 ):
     """Send periodic pings to keep connection alive.

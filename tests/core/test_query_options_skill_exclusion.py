@@ -155,7 +155,7 @@ class TestNonClaudeProviderSessions:
 
         denied = _denied(opts)
         assert SKILL_RULE in denied
-        assert qo.WORKER_DISALLOWED_TOOL in denied
+        assert qo.WORKER_DISALLOWED_TOOLS[0] in denied
 
     def test_profile_disallowed_tools_are_preserved_and_not_duplicated(
         self, mock_db, tmp_path

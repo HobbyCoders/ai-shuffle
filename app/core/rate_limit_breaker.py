@@ -262,10 +262,6 @@ class ProviderCircuitBreaker:
 _BREAKER = ProviderCircuitBreaker()
 
 
-def get_breaker() -> ProviderCircuitBreaker:
-    return _BREAKER
-
-
 def record_rate_limited(
     provider_id: Optional[str],
     retry_after: Optional[str] = None,

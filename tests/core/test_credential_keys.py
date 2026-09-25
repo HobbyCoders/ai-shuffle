@@ -235,8 +235,7 @@ def test_legacy_key_changers_are_disabled_after_adoption(monkeypatch):
     assert encryption.initialize_server_key(db)
     monkeypatch.setenv('ADMIN_PASSWORD', 'unused-new-value')
     for call in (lambda: encryption.set_encryption_key('new', db),
-                 lambda: encryption.re_encrypt_all_secrets('old', 'new', db),
-                 lambda: encryption.init_encryption_from_env(db)):
+                 lambda: encryption.re_encrypt_all_secrets('old', 'new', db)):
         with pytest.raises(RuntimeError, match='cannot be password-rekeyed'):
             call()
     from scripts.rekey import rekey

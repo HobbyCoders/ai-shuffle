@@ -326,7 +326,6 @@ def owner_app(monkeypatch):
     monkeypatch.setattr(encryption, '_encryption_key', encryption.Fernet.generate_key())
     monkeypatch.setattr(auth, 'is_github_authenticated_cached', lambda *args: False)
     monkeypatch.setattr(auth.auth_service, 'is_claude_authenticated', lambda: False)
-    monkeypatch.setattr(auth.auth_service, 'get_claude_token_status', lambda: {'token_valid': False})
     monkeypatch.setattr(auth.auth_service, 'get_admin_username', lambda: 'Local owner')
     monkeypatch.setattr(auth.auth_service, 'is_setup_required', lambda: False)
     monkeypatch.setattr(auth.auth_service, 'is_onboarding_complete', lambda: True)

@@ -24,7 +24,6 @@ from app.core.config import settings
 # Re-exported here so existing ``from app.db.database import get_db`` still works.
 from app.db.base import (  # noqa: F401
     get_connection,
-    _close_connection,
     get_db,
     _validate_identifier,
     WorktreeStatus,
@@ -37,9 +36,6 @@ from app.db.base import (  # noqa: F401
 
 from app.db.compat import (  # noqa: F401
     ph,
-    sql_date,
-    sql_strftime,
-    sql_ilike,
 )
 
 # Database error type for catch blocks
@@ -2919,7 +2915,6 @@ from app.db.auth import (  # noqa: F401
     is_setup_required,
     get_admin,
     create_admin,
-    update_admin_password,
     create_audit_log,
     get_audit_logs,
     get_audit_log_count,
@@ -2928,12 +2923,6 @@ from app.db.auth import (  # noqa: F401
     delete_auth_session,
     clear_all_sessions,
     cleanup_expired_sessions,
-    record_login_attempt,
-    get_failed_attempts_count,
-    get_failed_attempts_for_username,
-    create_lockout,
-    is_ip_locked,
-    is_username_locked,
     get_api_key_session,
 )
 
@@ -2988,7 +2977,6 @@ from app.db.sessions import (  # noqa: F401
     list_sessions_by_pr_number,
     list_sessions_for_branch,
     session_has_forks,
-    get_session_forks,
     get_session_messages,
     add_session_message,
     add_session_messages_batch,
@@ -2997,7 +2985,6 @@ from app.db.sessions import (  # noqa: F401
     delete_orphan_user_turn,
     discard_orphan_first_turn,
     clear_session_conversation,
-    delete_session_messages_after,
     delete_session_messages_after_jsonl_uuid,
     set_message_jsonl_uuid,
     search_sessions,
@@ -3005,13 +2992,11 @@ from app.db.sessions import (  # noqa: F401
     add_sync_log,
     get_sync_logs,
     get_latest_sync_id,
-    update_message_content,
 )
 
 from app.db.analytics import (  # noqa: F401
     log_usage,
     settle_turn_usage,
-    get_last_session_usage,
     get_all_session_usage,
     get_usage_stats,
     get_analytics_usage_stats,
@@ -3040,7 +3025,6 @@ from app.db.api_users import (  # noqa: F401
     get_all_user_credentials,
     set_user_credential,
     delete_user_credential,
-    user_has_credential,
 )
 
 from app.core.resource_sync import install_database_mutations as _install_resource_sync
@@ -3092,7 +3076,6 @@ from app.db.tags import (  # noqa: F401
     add_session_tag,
     remove_session_tag,
     set_session_tags,
-    get_sessions_by_tag,
 )
 
 from app.db.templates import (  # noqa: F401
@@ -3131,7 +3114,6 @@ from app.db.connectors import (  # noqa: F401
     get_connector_event_log,
     create_connector_session,
     get_connector_session,
-    get_connector_session_by_id,
     get_connector_sessions_for_ai_session,
     update_connector_session_ai_session,
 )
@@ -3176,12 +3158,10 @@ from app.db.git import (  # noqa: F401
     create_git_repository,
     update_git_repository,
     update_git_repository_synced,
-    delete_git_repository,
     get_worktree,
     get_worktree_by_session,
     get_sessions_for_worktree,
     get_worktrees_with_sessions,
-    get_worktree_by_branch,
     get_worktrees_for_repository,
     get_active_worktrees_for_repository,
     create_worktree,
@@ -3232,10 +3212,6 @@ from app.db.mobile import (  # noqa: F401
     update_mobile_device_unifiedpush_endpoint,
     update_mobile_device_last_seen,
     delete_mobile_device,
-    get_pending_action,
-    get_pending_actions_for_device,
-    update_pending_action_status,
-    cleanup_expired_actions,
     get_mobile_devices,
 )
 
@@ -3284,7 +3260,6 @@ from app.db.installs import (  # noqa: F401
     get_installs,
     get_installs_map,
     delete_install,
-    ONLINE_WINDOW_SECONDS,
 )
 
 from app.db.automations import (  # noqa: F401
@@ -3309,9 +3284,4 @@ from app.db.automations import (  # noqa: F401
     claim_automation_fire,
     prune_automation_fires,
     record_automation_run_success,
-)
-
-from app.db.background_tasks import (  # noqa: F401
-    upsert_background_task,
-    mark_stale_background_tasks_killed,
 )

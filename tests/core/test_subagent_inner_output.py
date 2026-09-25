@@ -533,7 +533,7 @@ class TestLaunchAckArmsBackgroundGate:
 
         with _ExitStack() as stack:
             _ack_chat_patches(stack, pool)
-            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+            await _drain(_qe._stream_to_websocket_impl("prompt", session_id, "claude-code"))
 
         assert task_registry.was_background_launch(session_id, "toolu_bg") is True
 
@@ -553,7 +553,7 @@ class TestLaunchAckArmsBackgroundGate:
 
         with _ExitStack() as stack:
             _ack_chat_patches(stack, pool)
-            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+            await _drain(_qe._stream_to_websocket_impl("prompt", session_id, "claude-code"))
 
         assert task_registry.was_background_launch(session_id, "toolu_sync") is False
 
@@ -578,7 +578,7 @@ class TestLaunchAckArmsBackgroundGate:
 
         with _ExitStack() as stack:
             _ack_chat_patches(stack, pool)
-            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+            await _drain(_qe._stream_to_websocket_impl("prompt", session_id, "claude-code"))
 
         # The top-level parent IS armed (run_in_background flag path).
         assert task_registry.was_background_launch(session_id, parent_id) is True
@@ -604,7 +604,7 @@ class TestLaunchAckArmsBackgroundGate:
 
         with _ExitStack() as stack:
             _ack_chat_patches(stack, pool)
-            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+            await _drain(_qe._stream_to_websocket_impl("prompt", session_id, "claude-code"))
 
         assert task_registry.was_subagent_background_launch(session_id, grandchild_id) is True
         assert task_registry.was_background_launch(session_id, grandchild_id) is False
@@ -635,7 +635,7 @@ class TestLaunchAckArmsBackgroundGate:
 
         with _ExitStack() as stack:
             _ack_chat_patches(stack, pool)
-            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+            await _drain(_qe._stream_to_websocket_impl("prompt", session_id, "claude-code"))
 
         assert task_registry.was_subagent_background_launch(session_id, grandchild_id) is True
         # Parent gate untouched — no pin, no chip scope for the grandchild.
@@ -666,7 +666,7 @@ class TestLaunchAckArmsBackgroundGate:
 
         with _ExitStack() as stack:
             _ack_chat_patches(stack, pool)
-            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+            await _drain(_qe._stream_to_websocket_impl("prompt", session_id, "claude-code"))
 
         assert task_registry.was_subagent_background_launch(session_id, monitor_id) is True
         # Parent gate untouched — no pin, no chip scope (#470 preserved).
@@ -687,7 +687,7 @@ class TestLaunchAckArmsBackgroundGate:
 
         with _ExitStack() as stack:
             _ack_chat_patches(stack, pool)
-            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+            await _drain(_qe._stream_to_websocket_impl("prompt", session_id, "claude-code"))
 
         assert task_registry.was_background_launch(session_id, monitor_id) is False
         assert task_registry.was_subagent_background_launch(session_id, monitor_id) is False
@@ -767,7 +767,7 @@ class TestDeferDontTerminateStream:
         with _ExitStack() as stack:
             _ack_chat_patches(stack, pool)
             events = await _collect(
-                _qe.stream_to_websocket("prompt", session_id, "claude-code")
+                _qe._stream_to_websocket_impl("prompt", session_id, "claude-code")
             )
         assert [e for e in events if e.get("type") == "subagent_done"] == []
         # The TaskStarted frame still flows to the FE (settles via #617 join).
@@ -796,7 +796,7 @@ class TestDeferDontTerminateStream:
         with _ExitStack() as stack:
             _ack_chat_patches(stack, pool)
             events = await _collect(
-                _qe.stream_to_websocket("prompt", session_id, "claude-code")
+                _qe._stream_to_websocket_impl("prompt", session_id, "claude-code")
             )
         dones = [e for e in events if e.get("type") == "subagent_done"]
         assert len(dones) == 1
@@ -827,7 +827,7 @@ class TestDeferDontTerminateStream:
         with _ExitStack() as stack:
             _ack_chat_patches(stack, pool)
             events = await _collect(
-                _qe.stream_to_websocket("prompt", session_id, "claude-code")
+                _qe._stream_to_websocket_impl("prompt", session_id, "claude-code")
             )
         assert [e for e in events if e.get("type") == "subagent_done"] == []
 
@@ -848,6 +848,6 @@ class TestDeferDontTerminateStream:
         with _ExitStack() as stack:
             _ack_chat_patches(stack, pool)
             events = await _collect(
-                _qe.stream_to_websocket("prompt", session_id, "claude-code")
+                _qe._stream_to_websocket_impl("prompt", session_id, "claude-code")
             )
         assert [e for e in events if e.get("type") == "subagent_done"] == []

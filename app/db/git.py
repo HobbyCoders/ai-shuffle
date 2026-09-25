@@ -174,14 +174,6 @@ def update_git_repository_synced(repository_id: str) -> Optional[GitRepositoryRo
     return get_git_repository(repository_id)
 
 
-def delete_git_repository(repository_id: str) -> bool:
-    """Delete a git repository (worktrees will be cascade deleted)"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM git_repositories WHERE id = %s", (repository_id,))
-        return cursor.rowcount > 0
-
-
 # ============================================================================
 # Worktree Operations
 # ============================================================================
@@ -316,17 +308,6 @@ def get_worktrees_with_sessions(repository_id: str) -> List[WorktreeWithSessions
             rep["session_count"] = len(rep["sessions"])
 
         return list(by_path.values())
-
-
-def get_worktree_by_branch(repository_id: str, branch_name: str) -> Optional[WorktreeRow]:
-    """Get a worktree by repository and branch name"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM worktrees WHERE repository_id = %s AND branch_name = %s",
-            (repository_id, branch_name)
-        )
-        return row_to_dict(cursor.fetchone())
 
 
 def get_worktrees_for_repository(repository_id: str) -> List[WorktreeRow]:

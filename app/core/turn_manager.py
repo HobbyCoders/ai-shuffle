@@ -262,10 +262,10 @@ def submit(
     """Enqueue a new turn and kick the scheduler — the SYNCHRONOUS form.
 
     See :func:`_submit_blocking` for the full contract. This does the DB work on
-    the CALLING thread, so it is for sync callers only (the wakeup service, the
-    session-delete path, worker threads). **From a coroutine use
-    :func:`submit_async`** — three sync DB round trips on the event loop stall
-    every WebSocket, SSE stream and HTTP request on the worker.
+    the CALLING thread; every production caller is a coroutine and uses
+    :func:`submit_async` (three sync DB round trips on the event loop stall
+    every WebSocket, SSE stream and HTTP request on the worker). Tests use this
+    form to queue turns from synchronous code.
 
     ``no_kick=True`` skips the in-process kick entirely — used by the
     placement submit seam when the session is placed on ANOTHER

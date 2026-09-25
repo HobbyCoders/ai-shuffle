@@ -40,15 +40,6 @@ def test_cancel_pending(mock_db):
     assert ix.cancel_interaction(created["id"]) is False
 
 
-def test_expire_due_only_flips_overdue_pendings(mock_db):
-    live = ix.create_interaction("s1", "a", {}, 60)
-    overdue = ix.create_interaction("s1", "b", {}, -1)
-    count = ix.expire_due_interactions()
-    assert count == 1
-    assert ix.get_interaction(live["id"])["state"] == "pending"
-    assert ix.get_interaction(overdue["id"])["state"] == "expired"
-
-
 def test_get_interaction_missing_returns_none(mock_db):
     assert ix.get_interaction("nope") is None
 

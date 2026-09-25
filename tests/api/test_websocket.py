@@ -266,7 +266,7 @@ class TestPingLoop:
             mock_sleep.side_effect = [None, asyncio.CancelledError()]
 
             try:
-                await ping_loop(mock_ws, "test-device")
+                await ping_loop(mock_ws)
             except asyncio.CancelledError:
                 pass
 
@@ -290,7 +290,7 @@ class TestPingLoop:
         with patch("app.api.ws_utils.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             mock_sleep.return_value = None
 
-            await ping_loop(mock_ws, "test-device")
+            await ping_loop(mock_ws)
 
             # Should not have sent any pings
             assert not mock_ws.send_json.called
@@ -309,7 +309,7 @@ class TestPingLoop:
             mock_sleep.return_value = None
 
             # Should exit gracefully without raising
-            await ping_loop(mock_ws, "test-device")
+            await ping_loop(mock_ws)
 
 
 # =============================================================================
@@ -318,11 +318,6 @@ class TestPingLoop:
 
 class TestActiveChatSessions:
     """Tests for active chat session tracking."""
-
-    def test_active_sessions_dict_exists(self):
-        """Active chat sessions dict should exist."""
-        from app.api.websocket import _active_chat_sessions
-        assert isinstance(_active_chat_sessions, dict)
 
     def test_active_cli_bridges_dict_exists(self):
         """Active CLI bridges dict should exist."""
@@ -366,25 +361,6 @@ class TestChatWebSocketMessageTypes:
         # Simulate creating a new session ID
         session_id = str(uuid.uuid4())
         assert uuid.UUID(session_id)  # Valid UUID
-
-    @pytest.mark.asyncio
-    async def test_stop_message_interrupts_session(self):
-        """Stop message should interrupt active session."""
-        from app.api.websocket import _active_chat_sessions
-
-        # Create a mock task
-        mock_task = AsyncMock()
-        mock_task.done.return_value = False
-        mock_task.cancel = MagicMock()
-
-        session_id = "test-session-123"
-        _active_chat_sessions[session_id] = mock_task
-
-        # Verify task is tracked
-        assert session_id in _active_chat_sessions
-
-        # Clean up
-        del _active_chat_sessions[session_id]
 
 
 # =============================================================================
@@ -1282,17 +1258,6 @@ class TestStreamingState:
             buffer = mock_sync.get_streaming_buffer("session-123")
             assert len(buffer) == 1
 
-    @pytest.mark.asyncio
-    async def test_stale_streaming_state_cleanup(self):
-        """Should clean up stale streaming state."""
-        from app.api.websocket import _active_chat_sessions
-
-        # Simulate stale state: is_streaming=True but no active task
-        session_id = "stale-session"
-
-        # No task in _active_chat_sessions = stale state
-        assert session_id not in _active_chat_sessions
-
 
 # =============================================================================
 # Test Query Execution Flow
@@ -1384,15 +1349,6 @@ class TestConnectionCleanup:
             await mock_sync.unregister_device("device-1", "session-1", MagicMock())
 
             mock_sync.unregister_device.assert_called_once()
-
-    def test_query_task_continues_on_disconnect(self):
-        """Query task should continue for other devices on disconnect."""
-        # This is by design - query continues for multi-device sync
-        # The test verifies we DON'T cancel the task on disconnect
-        from app.api.websocket import _active_chat_sessions
-
-        # Task tracking is used but not cancelled on disconnect
-        assert isinstance(_active_chat_sessions, dict)
 
 
 # =============================================================================

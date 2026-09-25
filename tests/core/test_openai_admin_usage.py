@@ -47,7 +47,7 @@ def test_unsupported_capability_is_negative_cached_until_resume(test_db, status)
     polling.finish(key, 0, status)
     assert not polling.claim(key, 10_000_000)
 
-    polling.resume_authentication("https://example.test/unsupported", {})
+    polling.resume_identity(polling.identity("https://example.test/unsupported", {}))
     assert polling.claim(key, 10_000_000)
 
 
@@ -170,11 +170,11 @@ def test_explicit_resume_only_changes_auth_pauses(test_db):
     key = polling.identity(url, headers)
     assert polling.claim(key, 0)
     polling.finish(key, 0, 200)
-    polling.resume_authentication(url, headers)
+    polling.resume_identity(polling.identity(url, headers))
     assert not polling.claim(key, 1)
     polling.finish(key, 1, 403)
     assert not polling.claim(key, 10000)
-    polling.resume_authentication(url, headers)
+    polling.resume_identity(polling.identity(url, headers))
     assert polling.claim(key, 10000)
 
 

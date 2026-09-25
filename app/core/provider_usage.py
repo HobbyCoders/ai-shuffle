@@ -616,9 +616,6 @@ _GROK_PERIOD_FIELDS: Tuple[str, ...] = ("type", "start", "end")
 _GROK_PRODUCT_FIELDS: Tuple[str, ...] = ("product", "usagePercent")
 
 
-_is_grok_subscription_row = usage_sources.is_grok_subscription_row
-
-
 def _unwrap_val(value: Any) -> Any:
     """Accept a bare number or ``{"val": n}`` (Grok onDemand* shape)."""
     if isinstance(value, dict) and "val" in value:
@@ -893,7 +890,6 @@ async def _capability_denied(snapshot_id: str, fingerprint: str) -> bool:
 
 # Row classification lives in the source registry; these names stay importable.
 _is_openai_platform_row = usage_sources.is_openai_platform_row
-_is_chatgpt_subscription_row = usage_sources.is_chatgpt_subscription_row
 
 # Retained only to exclude persisted snapshots from the retired OAuth fallback.
 OPENAI_API_USAGE_PROVIDER_ID = "openai-api"

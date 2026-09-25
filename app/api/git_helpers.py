@@ -236,7 +236,7 @@ def _store_working_dir(key, value: str, resolved_from_checkout: bool) -> None:
     )
 
 
-def get_working_dir(
+async def get_working_dir_async(
     project_id: str,
     worktree_id: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -251,36 +251,9 @@ def get_working_dir(
     3. ``session_id`` — the session resolver's existing checkout.
     Otherwise returns the main project path.
 
-    Results are memoized for a few seconds (see :data:`_WORKING_DIR_TTL`).
-
-    This is the **synchronous** variant, kept for sync callers. Async handlers
-    should await :func:`get_working_dir_async`, which does the same thing but
-    hands the uncached resolution to a worker thread instead of blocking the
-    event loop.
-    """
-    if _worker_checkout_scope.get() is not None:
-        if worktree_id or session_id:
-            raise HTTPException(400, "Mixed worker and session checkout scope")
-        return get_project_path(project_id)
-    key = _working_dir_cache_key(project_id, worktree_id, session_id)
-    cached = _working_dir_cache.get_or_miss(key)
-    if cached is not CACHE_MISS:
-        return cached
-
-    value, from_checkout = _resolve_working_dir(project_id, worktree_id, session_id)
-    _store_working_dir(key, value, from_checkout)
-    return value
-
-
-async def get_working_dir_async(
-    project_id: str,
-    worktree_id: Optional[str] = None,
-    session_id: Optional[str] = None,
-) -> str:
-    """Non-blocking :func:`get_working_dir` for async handlers.
-
-    A cache hit never touches a thread; a miss resolves in a worker so the DB
-    round trip and the filesystem stat stay off the event loop.
+    Results are memoized (see :data:`_WORKING_DIR_TTL`). A cache hit never
+    touches a thread; a miss resolves in a worker so the DB round trip and the
+    filesystem stat stay off the event loop.
     """
     if _worker_checkout_scope.get() is not None:
         if worktree_id or session_id:

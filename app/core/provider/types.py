@@ -18,7 +18,7 @@ These dataclasses are the typed equivalent. The migration path is:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 
 # ─── Configuration ───────────────────────────────────────────────────────────
@@ -110,12 +110,6 @@ class SessionOptions:
 
     # Token budget management (SDK 0.1.51+)
     task_budget: Optional[int] = None
-
-    # Session store (SDK 0.1.65+) — PgSessionStore instance or None
-    session_store: Optional[object] = None
-
-    # Session store flush mode (SDK 0.1.65+) — "eager" | None
-    session_store_flush: Optional[str] = None
 
     # Arbitrary extra options (for forward-compatibility with new SDK fields)
     extra: Dict[str, Any] = field(default_factory=dict)

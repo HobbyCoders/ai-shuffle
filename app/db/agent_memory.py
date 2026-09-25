@@ -112,17 +112,3 @@ def tombstone_memory_file(
             """,
             (uuid.uuid4().hex, memory_key, relative_path, ts, updated_by),
         )
-
-
-def delete_memory_key(memory_key: str) -> int:
-    """Hard-delete every row for a memory_key. Returns the row count removed.
-
-    Not used by the sync path (which tombstones instead); provided for tests
-    and operational cleanup.
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM agent_memory_files WHERE memory_key = %s", (memory_key,)
-        )
-        return cursor.rowcount

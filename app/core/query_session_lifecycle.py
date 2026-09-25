@@ -8,7 +8,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from app.core.session_pool import SessionState, get_session_pool
+from app.core.session_pool import get_session_pool
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +17,6 @@ logger = logging.getLogger(__name__)
 # "Send now" handshake past the frontend's confirm window and loses the
 # user's message. Bounded so the caller can fall back to drain/force-cancel.
 _SDK_INTERRUPT_TIMEOUT_SECONDS = 5.0
-
-
-def get_session_state(session_id: str) -> Optional[SessionState]:
-    """Get the active session state for a session ID."""
-    return get_session_pool().peek(session_id)
 
 
 def _reap_task_killed(session_id: str, task_id: str) -> None:
@@ -658,11 +653,6 @@ async def stop_all_background_tasks(
                 "Stop: engine retirement failed for %s", session_id, exc_info=True,
             )
     return results
-
-
-def get_active_sessions() -> list:
-    """Get list of active session IDs (connected clients)"""
-    return get_session_pool().active_session_ids()
 
 
 def get_streaming_sessions() -> list:

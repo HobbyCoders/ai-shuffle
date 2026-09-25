@@ -88,12 +88,6 @@ class ImportResult(BaseModel):
     warnings: List[str] = []
 
 
-class ImportOptions(BaseModel):
-    """Options for import behavior"""
-    overwrite_existing: bool = Field(default=False, description="Overwrite existing items with same ID")
-    skip_existing: bool = Field(default=True, description="Skip items that already exist (ignored if overwrite_existing is True)")
-
-
 # ============================================================================
 # Export Endpoints
 # ============================================================================

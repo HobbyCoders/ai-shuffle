@@ -385,7 +385,7 @@ class ChatWebSocketHandler:
 
         # Outbound queue + writer task for THIS socket. Created lazily on
         # the first send so a handler built outside a running loop costs
-        # nothing, and never created at all on the headless path (no socket).
+        # nothing.
         # ``send_json`` is a synchronous enqueue, so sends from ping_loop, the
         # turn pump and the message handler are ordered by call order alone —
         # no send lock is needed (or possible to race), and no producer ever
@@ -422,15 +422,14 @@ class ChatWebSocketHandler:
     # send_json — non-blocking enqueue onto this socket's writer
     # ------------------------------------------------------------------
 
-    def _ensure_writer(self) -> Optional[ConnectionWriter]:
+    def _ensure_writer(self) -> ConnectionWriter:
         """This socket's writer, created on first use (``send_json`` starts it).
 
-        ``None`` on the headless path, where there is no socket to write to.
         Lazy so a handler constructed outside a running loop never leaves a task
         behind, and so ``run``'s teardown has nothing to close when nothing was
         ever sent.
         """
-        if self._writer is None and self.websocket is not None:
+        if self._writer is None:
             writer = ConnectionWriter(
                 self.websocket, label=f"chat device={self.device_id}"
             )
@@ -479,20 +478,13 @@ class ChatWebSocketHandler:
         if not self.connection_healthy:
             return False
 
-        # Headless path: no websocket attached (e.g. a server-side query kicked
-        # off by the /sessions/with-worktree REST endpoint). Silently "succeed"
-        # so run_query doesn't early-exit; state propagates via sync_engine
-        # broadcasts to any registered devices instead.
-        if self.websocket is None:
-            return True
-
         if self.websocket.client_state != WebSocketState.CONNECTED:
             self.connection_healthy = False
             logger.debug(f"WebSocket disconnected, cannot send message type: {data.get('type')}")
             return False
 
         writer = self._ensure_writer()
-        if writer is None or not writer.alive:
+        if not writer.alive:
             self.connection_healthy = False
             return False
 
@@ -560,7 +552,7 @@ class ChatWebSocketHandler:
 
         try:
             # Start ping task
-            ping_task = asyncio.create_task(ping_loop(self.websocket, "chat", send_fn=self.send_json))
+            ping_task = asyncio.create_task(ping_loop(self.websocket, send_fn=self.send_json))
 
             try:
                 while True:
@@ -940,10 +932,9 @@ class ChatWebSocketHandler:
         # queued turn (submitted with ``no_kick``) IS the whole hand-off; the
         # owning runner's turn_claim loop picks it up via the NOTIFY wake (or
         # its 5s poll) and rendering rides the shared SSE feed exactly like a
-        # local turn. No HTTP dispatch. Headless handlers do neither
-        # (websocket is None) — a headless query always runs locally.
+        # local turn. No HTTP dispatch.
         placed_remote = False
-        if session_id and self.websocket is not None:
+        if session_id:
             cloud_sess = await run_sync(database.get_session, session_id)
             # V2 placement: resolve via sessions.placement. A session placed on
             # ANOTHER runner still takes the LOCAL enqueue path below — the
@@ -1728,13 +1719,6 @@ class ChatWebSocketHandler:
         if not session_id:
             return
 
-        # Headless guard: a handler with no websocket must never
-        # register itself as a watcher — sync_engine registration keys on
-        # (device_id, websocket) and a None socket would pollute the watcher
-        # table with an unsendable connection.
-        if self.websocket is None:
-            return
-
         # Unregister from old session if switching
         if self.current_session_id and self.current_session_id != session_id:
             await sync_engine.unregister_device(self.device_id, self.current_session_id, self.websocket)
@@ -2042,34 +2026,33 @@ class ChatWebSocketHandler:
         # handle_query) — enqueue locally with no kick and wake the owner's
         # claim loop.
         placed_remote = False
-        if self.websocket is not None:
-            cloud_sess = await run_sync(database.get_session, session_id)
-            if cloud_sess:
-                from app.core import placement as placement_mod
-                decision = None
-                try:
-                    decision = await run_sync(
-                        placement_mod.resolve_placement, cloud_sess
-                    )
-                except Exception:  # noqa: BLE001 — resolver trouble ⇒ run local
-                    logger.warning(
-                        f"Placement resolution failed for {session_id} — "
-                        f"treating as local", exc_info=True,
-                    )
-                if decision is not None and decision.kind == "none":
-                    await self.send_json({
-                        "type": "error",
-                        "message": "No capable device online for this session "
-                                   "— its runner is offline or lacks the "
-                                   "required capabilities.",
-                    })
-                    return
-                if (
-                    decision is not None
-                    and decision.kind == "runner"
-                    and decision.runner_id != settings.effective_instance_id
-                ):
-                    placed_remote = True
+        cloud_sess = await run_sync(database.get_session, session_id)
+        if cloud_sess:
+            from app.core import placement as placement_mod
+            decision = None
+            try:
+                decision = await run_sync(
+                    placement_mod.resolve_placement, cloud_sess
+                )
+            except Exception:  # noqa: BLE001 — resolver trouble ⇒ run local
+                logger.warning(
+                    f"Placement resolution failed for {session_id} — "
+                    f"treating as local", exc_info=True,
+                )
+            if decision is not None and decision.kind == "none":
+                await self.send_json({
+                    "type": "error",
+                    "message": "No capable device online for this session "
+                               "— its runner is offline or lacks the "
+                               "required capabilities.",
+                })
+                return
+            if (
+                decision is not None
+                and decision.kind == "runner"
+                and decision.runner_id != settings.effective_instance_id
+            ):
+                placed_remote = True
 
         # v2 turns cutover: enqueue a durable ``source=queue`` turn instead of a
         # ``queued_messages`` row. ``submit`` kicks the scheduler, which starts it

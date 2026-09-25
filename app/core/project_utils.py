@@ -161,20 +161,3 @@ def resolve_existing_worktree_cwd(
         except Exception:  # noqa: BLE001 — a bad candidate must not mask the next one
             continue
     return None
-
-
-def get_project_parent_dir(project: Union[dict, str]) -> Path:
-    """
-    Get the parent directory of a project.
-
-    Used for placing worktrees as siblings of the project directory.
-
-    For workspace-relative projects: returns workspace_dir
-    For absolute-path projects: returns the project's parent directory
-    """
-    path = project["path"] if isinstance(project, dict) else project
-
-    if is_absolute_project_path(path):
-        return Path(path).parent
-
-    return settings.effective_workspace_dir

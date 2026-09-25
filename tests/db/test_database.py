@@ -150,16 +150,6 @@ class TestAdminOperations:
         """get_admin should return None when no admin exists."""
         assert db.get_admin() is None
 
-    def test_update_admin_password(self, mock_db):
-        """update_admin_password should update password hash."""
-        db.create_admin("admin", "old_hash")
-        result = db.update_admin_password("new_hash")
-
-        assert result is True
-        admin = db.get_admin()
-        assert admin["password_hash"] == "new_hash"
-
-
 
 # =============================================================================
 # Profile Operations Tests
@@ -531,16 +521,6 @@ class TestSessionOperations:
         db.create_session("session-2", setup_profile, parent_session_id="session-1")
         assert db.session_has_forks("session-1") is True
 
-    def test_get_session_forks(self, mock_db, setup_profile):
-        """get_session_forks should return forked sessions."""
-        db.create_session("session-1", setup_profile)
-        db.create_session("session-2", setup_profile, parent_session_id="session-1")
-
-        result = db.get_session_forks("session-1")
-
-        assert len(result) == 1
-        assert result[0]["id"] == "session-2"
-
     def test_clear_session_conversation(self, mock_db, setup_profile):
         """clear_session_conversation wipes transcript + message rows + usage
         counters and unlinks sdk_session_id, but KEEPS the session row — the
@@ -675,29 +655,6 @@ class TestSessionMessageOperations:
 
         assert result is True
         assert len(db.get_session_messages("session-1")) == 0
-
-    def test_delete_session_messages_after(self, mock_db, setup_profile):
-        """delete_session_messages_after should delete messages after given ID."""
-        db.create_session("session-1", setup_profile)
-        msg1 = db.add_session_message("session-1", "user", "First")
-        db.add_session_message("session-1", "assistant", "Second")
-        db.add_session_message("session-1", "user", "Third")
-
-        deleted = db.delete_session_messages_after("session-1", msg1["id"])
-
-        assert deleted == 2
-        msgs = db.get_session_messages("session-1")
-        assert len(msgs) == 1
-
-    def test_update_message_content(self, mock_db, setup_profile):
-        """update_message_content should update message content."""
-        db.create_session("session-1", setup_profile)
-        msg = db.add_session_message("session-1", "assistant", "Original")
-
-        result = db.update_message_content(msg["id"], "Updated", metadata={"streaming": False})
-
-        assert result["content"] == "Updated"
-        assert result["metadata"]["streaming"] is False
 
 
 class TestSearchSessions:
@@ -1301,37 +1258,6 @@ class TestUsageLogging:
         assert stats["total_tokens_out"] == 200
         assert stats["total_cost_usd"] == 0.03
 
-    def test_get_last_session_usage(self, mock_db, setup_profile):
-        """get_last_session_usage should return the most recent usage entry."""
-        db.create_session("session-1", setup_profile)
-        # Add two usage entries
-        db.log_usage("session-1", setup_profile, "model-1", 50, 100, 0.01, 500)
-        db.log_usage("session-1", setup_profile, "model-2", 75, 150, 0.025, 750)
-
-        result = db.get_last_session_usage("session-1")
-
-        assert result is not None
-        # Should return the most recent entry (model-2)
-        assert result["total_cost_usd"] == 0.025
-        assert result["duration_ms"] == 750
-        assert result["tokens_in"] == 75
-        assert result["tokens_out"] == 150
-        assert result["model"] == "model-2"
-
-    def test_get_last_session_usage_not_found(self, mock_db, setup_profile):
-        """get_last_session_usage should return None if no usage exists."""
-        db.create_session("session-1", setup_profile)
-
-        result = db.get_last_session_usage("session-1")
-
-        assert result is None
-
-    def test_get_last_session_usage_nonexistent_session(self, mock_db):
-        """get_last_session_usage should return None for nonexistent session."""
-        result = db.get_last_session_usage("nonexistent-session")
-
-        assert result is None
-
     def test_get_all_session_usage_empty(self, mock_db, setup_profile):
         """get_all_session_usage should return empty list if no usage exists."""
         db.create_session("session-1", setup_profile)
@@ -1384,67 +1310,6 @@ class TestUsageLogging:
         result = db.get_all_session_usage("nonexistent-session")
 
         assert result == []
-
-
-# =============================================================================
-# Login Attempts Tests
-# =============================================================================
-
-class TestLoginAttempts:
-    """Test login attempt tracking."""
-
-    def test_record_login_attempt_success(self, mock_db):
-        """record_login_attempt should record successful attempt."""
-        db.record_login_attempt("192.168.1.1", "admin", True)
-
-        # Should not count as failed
-        count = db.get_failed_attempts_count("192.168.1.1")
-        assert count == 0
-
-    def test_record_login_attempt_failure(self, mock_db):
-        """record_login_attempt should record failed attempt."""
-        db.record_login_attempt("192.168.1.1", "admin", False)
-
-        count = db.get_failed_attempts_count("192.168.1.1")
-        assert count == 1
-
-    def test_get_failed_attempts_for_username(self, mock_db):
-        """get_failed_attempts_for_username should count failures."""
-        db.record_login_attempt("192.168.1.1", "admin", False)
-        db.record_login_attempt("192.168.1.2", "admin", False)
-
-        count = db.get_failed_attempts_for_username("admin")
-        assert count == 2
-
-
-# =============================================================================
-# Account Lockout Tests
-# =============================================================================
-
-class TestAccountLockout:
-    """Test account lockout operations."""
-
-    def test_create_lockout(self, mock_db):
-        """create_lockout should create lockout entry."""
-        # duration_minutes is the 3rd argument (not a datetime)
-        db.create_lockout("192.168.1.1", None, 30, "Too many failed attempts")
-
-        lockout = db.is_ip_locked("192.168.1.1")
-        assert lockout is not None
-
-    def test_is_ip_locked(self, mock_db):
-        """is_ip_locked should detect locked IP."""
-        db.create_lockout("192.168.1.1", None, 30, "Too many attempts")
-
-        assert db.is_ip_locked("192.168.1.1") is not None
-        assert db.is_ip_locked("192.168.1.2") is None
-
-    def test_is_username_locked(self, mock_db):
-        """is_username_locked should detect locked username."""
-        db.create_lockout(None, "admin", 30, "Too many attempts")
-
-        assert db.is_username_locked("admin") is not None
-        assert db.is_username_locked("other") is None
 
 
 # =============================================================================
@@ -1670,15 +1535,6 @@ class TestGitRepositoryOperations:
         assert result is not None
         assert result["id"] == "repo-1"
 
-    def test_delete_git_repository(self, mock_db, setup_project):
-        """delete_git_repository should delete repository."""
-        db.create_git_repository("repo-1", setup_project)
-
-        result = db.delete_git_repository("repo-1")
-
-        assert result is True
-        assert db.get_git_repository("repo-1") is None
-
 
 # =============================================================================
 # Worktree Tests
@@ -1877,15 +1733,6 @@ class TestUserCredentials:
         assert result is True
         assert db.get_user_credential("user-1", "openai_api_key") is None
 
-    def test_user_has_credential(self, mock_db, setup_api_user):
-        """user_has_credential should check credential existence."""
-
-        assert db.user_has_credential("user-1", "openai_api_key") is False
-
-        db.set_user_credential("user-1", "openai_api_key", "enc:value")
-
-        assert db.user_has_credential("user-1", "openai_api_key") is True
-
 
 # =============================================================================
 # Webhook Update Tests
@@ -1994,23 +1841,3 @@ class TestSessionWorktreeRelations:
         result = db.get_sessions_for_worktree(setup_worktree)
 
         assert len(result) == 2
-
-
-# =============================================================================
-# Session by Tag Tests
-# =============================================================================
-
-class TestSessionsByTag:
-    """Test getting sessions by tag."""
-
-    def test_get_sessions_by_tag(self, mock_db, setup_profile):
-        """get_sessions_by_tag should return sessions with specific tag."""
-        db.create_session("session-1", setup_profile)
-        db.create_session("session-2", setup_profile)
-        db.create_tag("tag-1", "Important", "#ff0000")
-        db.add_session_tag("session-1", "tag-1")
-
-        result = db.get_sessions_by_tag("tag-1")
-
-        assert len(result) == 1
-        assert result[0]["id"] == "session-1"

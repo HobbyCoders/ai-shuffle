@@ -58,12 +58,9 @@ def test_is_authenticated_asks_the_cli(monkeypatch, cli_home):
     monkeypatch.setattr(cs, "probe", lambda resolver=None: _status(False))
     service = AuthService()
     assert service.is_claude_authenticated() is False
-    info = service.get_claude_auth_info()
-    assert info["authenticated"] is False and "credentials_file" not in info
     cs.invalidate()
     monkeypatch.setattr(cs, "probe", lambda resolver=None: _status(True))
     assert service.is_claude_authenticated() is True
-    assert service.get_claude_token_status()["token_valid"] is True
 
 
 def test_logout_runs_the_cli_and_never_unlinks(monkeypatch, cli_home):

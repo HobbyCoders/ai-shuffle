@@ -316,7 +316,7 @@ async def test_mid_turn_death_preserves_flushed_blocks_via_real_read_path(test_d
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
         events = await collect(
-            qe.stream_to_websocket("run the thing", session_id, "default")
+            qe._stream_to_websocket_impl("run the thing", session_id, "default")
         )
 
     # The crash surfaced as an error frame, with no misleading `done`.
@@ -358,7 +358,7 @@ async def test_mid_turn_death_before_any_flush_loses_only_that_turn(test_db, sto
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
-        events = await collect(qe.stream_to_websocket("hi", session_id, "default"))
+        events = await collect(qe._stream_to_websocket_impl("hi", session_id, "default"))
 
     assert any(e.get("type") == "error" for e in events), events
     assert database.get_session(session_id)["sdk_session_id"] == sdk_sid
@@ -408,7 +408,7 @@ async def test_normal_turn_end_no_dupes_and_aggregates(test_db, store_read, tmp_
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
-        events = await collect(qe.stream_to_websocket("do it", session_id, "default"))
+        events = await collect(qe._stream_to_websocket_impl("do it", session_id, "default"))
 
     assert any(e.get("type") == "done" for e in events), events
 
@@ -456,7 +456,7 @@ async def test_interrupt_mid_turn_no_dupes(test_db, store_read, tmp_path):
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
-        events = await collect(qe.stream_to_websocket("long task", session_id, "default"))
+        events = await collect(qe._stream_to_websocket_impl("long task", session_id, "default"))
 
     assert any(e.get("type") == "interrupted" for e in events), events
     assert _content_signature(store_read(sdk_sid)) == [

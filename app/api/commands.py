@@ -4,7 +4,6 @@ REST API for slash commands and rewind operations.
 Provides endpoints for:
 - Listing available commands (for autocomplete)
 - Getting command details
-- Executing non-interactive custom commands
 - Rewind operations (list checkpoints, execute rewind)
 
 Rewind uses persisted transcript/checkpoint services rather than terminal parsing.
@@ -13,7 +12,7 @@ Rewind uses persisted transcript/checkpoint services rather than terminal parsin
 import asyncio
 import logging
 from typing import Optional, List
-from fastapi import APIRouter, HTTPException, Query, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
 from app.db import database
@@ -23,9 +22,7 @@ from app.api.sessions import check_session_access
 from app.api.common import resolve_project_path
 from app.api.command_context import command_context, command_provider_kind, command_setting_sources
 from app.core.slash_commands import (
-    get_command_by_name, get_all_commands,
-    is_interactive_command, is_rest_api_command, get_rest_api_command_info,
-    parse_command_input, expand_command_prompt
+    get_command_by_name, get_all_commands, is_interactive_command,
 )
 # Legacy JSONL fallback and checkpoint-backed rewind services.
 from app.core.jsonl_rewind import jsonl_rewind_service
@@ -85,20 +82,6 @@ class CommandDetailResponse(BaseModel):
     namespace: Optional[str] = None
     allowed_tools: List[str] = []
     model: Optional[str] = None
-    is_interactive: bool = False
-
-
-class ExecuteCommandRequest(BaseModel):
-    """Request to execute a custom command"""
-    command: str  # Command with arguments, e.g., "/fix-issue 123 high"
-    session_id: str
-
-
-class ExecuteCommandResponse(BaseModel):
-    """Response from command execution"""
-    success: bool
-    message: str
-    expanded_prompt: Optional[str] = None
     is_interactive: bool = False
 
 
@@ -218,179 +201,6 @@ async def get_command(
         model=cmd.model,
         is_interactive=False
     )
-
-
-@router.post("/execute", response_model=ExecuteCommandResponse)
-async def execute_command(request: ExecuteCommandRequest, http_request: Request = None):
-    """
-    Execute a custom slash command.
-
-    For custom commands, this expands the prompt with arguments
-    and returns the expanded prompt for the client to send as a query.
-
-    For interactive commands (like /resume), this returns is_interactive=True
-    and the client should use the CLI WebSocket endpoint instead.
-
-    For REST API commands (like /rewind), this returns is_rest_api=True
-    and the client should use the dedicated REST API endpoints.
-    """
-    # Parse command input
-    command_name, arguments = parse_command_input(request.command)
-
-    if not command_name:
-        raise HTTPException(status_code=400, detail="Invalid command format")
-
-    working_dir, session = await run_sync(
-        command_context, http_request, None, None, request.session_id
-    )
-    kind = await run_sync(command_provider_kind, http_request, session, None, None, None)
-    sources = await run_sync(command_setting_sources, http_request, session, None)
-
-    # Check if it's an interactive command (like /resume)
-    if kind == "delegated" and is_interactive_command(command_name):
-        return ExecuteCommandResponse(
-            success=True,
-            message=f"Command /{command_name} requires interactive terminal",
-            is_interactive=True
-        )
-
-    # Check if it's a REST API command (like /rewind)
-    if is_rest_api_command(command_name):
-        info = get_rest_api_command_info(command_name)
-        api_endpoint = info.get("api_endpoint", "").replace("{session_id}", request.session_id)
-        return ExecuteCommandResponse(
-            success=True,
-            message=f"Command /{command_name} uses REST API - use {api_endpoint}",
-            is_interactive=False
-        )
-
-    cmd = await run_sync(
-        get_command_by_name, working_dir, command_name,
-        provider_kind=kind, setting_sources=sources,
-    )
-    if not cmd:
-        raise HTTPException(status_code=404, detail=f"Command not found: {command_name}")
-
-    # Check if arguments are required but not provided
-    if cmd.argument_hint and not arguments:
-        return ExecuteCommandResponse(
-            success=False,
-            message=f"Command requires arguments: {cmd.argument_hint}",
-            expanded_prompt=None
-        )
-
-    # Expand the prompt
-    expanded_prompt = expand_command_prompt(cmd, arguments)
-
-    return ExecuteCommandResponse(
-        success=True,
-        message="Command expanded successfully",
-        expanded_prompt=expanded_prompt,
-        is_interactive=False
-    )
-
-
-@router.post("/sync-after-rewind")
-async def sync_after_rewind(
-    session_id: str = Query(..., description="Session ID"),
-    checkpoint_message: str = Query(..., description="The user message text at the checkpoint"),
-    restore_option: int = Query(..., description="Restore option (1-4)"),
-    http_request: Request = None,
-):
-    """
-    Sync our chat database after a rewind operation completes.
-
-    This is called by the frontend after the user completes a /rewind
-    in the CLI terminal. It deletes messages after the selected checkpoint
-    to keep our chat in sync with Claude's context.
-
-    Options:
-    1 = Restore code and conversation - delete messages after checkpoint
-    2 = Restore conversation - delete messages after checkpoint
-    3 = Restore code - don't delete messages (code-only revert)
-    4 = Never mind - don't delete anything
-    """
-    if restore_option not in [1, 2, 3, 4]:
-        raise HTTPException(status_code=400, detail="Invalid restore option")
-
-    # Option 3 and 4 don't require chat sync
-    if restore_option in [3, 4]:
-        return {
-            "success": True,
-            "message": "No chat sync needed for this option",
-            "deleted_count": 0
-        }
-
-    def _sync():
-        """Load the transcript, locate the checkpoint and delete past it.
-
-        READ-DECIDE-WRITE, kept atomic in ONE hop: the message list read, the
-        checkpoint search over that exact list, and the N deletes derived from
-        its indices are a single logical operation. Splitting them across thread
-        hops would let a concurrent write land between the read and the deletes,
-        so the row ids computed from the stale snapshot would delete the wrong
-        tail — a race that does not exist today. It also collapses what was
-        2 + N blocking calls into one hop.
-
-        Returns the response body, or None when the checkpoint is not found.
-        """
-        # Get session
-        session = database.get_session(session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        if http_request is not None:
-            check_session_access(http_request, session)
-
-        # Get all messages for this session
-        messages = database.get_session_messages(session_id)
-
-        # Find the checkpoint message (user message matching the checkpoint text)
-        checkpoint_index = -1
-        for i, msg in enumerate(messages):
-            if msg["role"] == "user" and checkpoint_message in msg["content"]:
-                checkpoint_index = i
-                break
-
-        if checkpoint_index == -1:
-            # Try partial match
-            for i, msg in enumerate(messages):
-                if msg["role"] == "user" and (
-                    msg["content"].startswith(checkpoint_message[:50]) or
-                    checkpoint_message.startswith(msg["content"][:50])
-                ):
-                    checkpoint_index = i
-                    break
-
-        if checkpoint_index == -1:
-            logger.warning(f"Could not find checkpoint message: {checkpoint_message[:50]}...")
-            return {
-                "success": False,
-                "message": "Could not find checkpoint message in chat history",
-                "deleted_count": 0
-            }
-
-        # Delete all messages after the checkpoint
-        messages_to_delete = messages[checkpoint_index + 1:]
-        deleted_count = 0
-
-        for msg in messages_to_delete:
-            try:
-                database.delete_session_message(session_id, msg["id"])
-                deleted_count += 1
-            except Exception as e:
-                logger.error(f"Failed to delete message {msg['id']}: {e}")
-
-        logger.debug(f"Synced chat after rewind: deleted {deleted_count} messages after checkpoint")
-
-        return {
-            "success": True,
-            "message": f"Deleted {deleted_count} messages after checkpoint",
-            "deleted_count": deleted_count,
-            "checkpoint_index": checkpoint_index
-        }
-
-    return await run_sync(_sync)
 
 
 # =============================================================================

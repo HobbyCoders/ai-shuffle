@@ -5,6 +5,8 @@ pg_shim SQLite DB (matching tests/db conventions); ``checkout_manager`` is stubb
 where lazy materialization would otherwise touch git/disk.
 """
 
+import asyncio
+
 import pytest
 
 from app.core import project_resolver
@@ -483,7 +485,10 @@ def test_moved_checkout_resolves_existing_candidate(mock_db, monkeypatch, tmp_pa
         assert project_resolver.has_local_base_checkout(session)
     git_helpers.invalidate_working_dir_cache()
     try:
-        assert git_helpers.get_working_dir("legacy-project", session_id=session["id"]) == str(live_path)
+        resolved = asyncio.run(
+            git_helpers.get_working_dir_async("legacy-project", session_id=session["id"])
+        )
+        assert resolved == str(live_path)
     finally:
         git_helpers.invalidate_working_dir_cache()
     assert len(checkouts_db.list_checkouts(pv2["id"])) == 2

@@ -49,7 +49,6 @@ from fastapi.websockets import WebSocketState
 
 from app.api.auth import require_auth
 from app.api.ws_auth import authenticate_websocket
-from app.db import database
 from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)

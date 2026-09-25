@@ -1619,18 +1619,6 @@ def get_fork_info_for_sessions(session_ids: list[str]) -> dict[str, ForkInfo]:
     return result
 
 
-def get_session_forks(session_id: str) -> List[SessionRow]:
-    """Get all forked children of a session"""
-    with get_db() as conn:
-        cursor = get_cursor(conn)
-        cursor.execute(
-            f"""SELECT * FROM sessions WHERE parent_session_id = {ph()}
-               ORDER BY created_at DESC""",
-            (session_id,)
-        )
-        return rows_to_list(cursor.fetchall())
-
-
 # ============================================================================
 # Session Message Operations
 # ============================================================================
@@ -2127,18 +2115,6 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
             (datetime.now(timezone.utc).isoformat(), session_id),
         )
         return prev_sdk_sid
-
-
-def delete_session_messages_after(session_id: str, message_id: int) -> int:
-    """Delete all messages after a specific message ID (for rewind)"""
-    _ph = ph()
-    with get_db() as conn:
-        cursor = get_cursor(conn)
-        cursor.execute(
-            f"DELETE FROM session_messages WHERE session_id = {_ph} AND id > {_ph}",
-            (session_id, message_id)
-        )
-        return cursor.rowcount
 
 
 def set_message_jsonl_uuid(message_id: int, jsonl_uuid: str) -> bool:
@@ -2648,45 +2624,10 @@ def get_latest_sync_id(session_id: str) -> int:
         return max_id or 0
 
 
-def update_message_content(
-    message_id: int,
-    content: str,
-    metadata: Optional[Dict[str, Any]] = None
-) -> Optional[SessionMessageRow]:
-    """Update message content (used during streaming)"""
-    _ph = ph()
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = get_cursor(conn)
-
-        updates = [f"content = {_ph}", f"updated_at = {_ph}", "version = version + 1"]
-        values = [content, now]
-
-        if metadata is not None:
-            updates.append(f"metadata = {_ph}")
-            values.append(json.dumps(metadata))
-
-        values.append(message_id)
-
-        cursor.execute(
-            f"UPDATE session_messages SET {', '.join(updates)} WHERE id = {_ph}",
-            values
-        )
-
-        if cursor.rowcount > 0:
-            cursor.execute(f"SELECT * FROM session_messages WHERE id = {_ph}", (message_id,))
-            row = row_to_dict(cursor.fetchone())
-            if row and row.get("metadata"):
-                row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
-            return row
-
-    return None
-
-
 from app.core.resource_sync import install_database_mutations as _install_resource_sync
 
 _install_resource_sync(
     globals(), 'sessions',
-    'create_session create_session_with_stats update_session set_session_run_binding patch_voice_session_context adopt_session adopt_session_follow unpin_session pin_session_placement set_session_project set_session_branch resync_session_branch update_session_pr_state set_session_parked_task_kind set_working_set_ref delete_session set_session_active set_session_hidden clear_session_conversation delete_session_message delete_orphan_user_turn discard_orphan_first_turn delete_session_messages_after delete_session_messages_after_jsonl_uuid',
+    'create_session create_session_with_stats update_session set_session_run_binding patch_voice_session_context adopt_session adopt_session_follow unpin_session pin_session_placement set_session_project set_session_branch resync_session_branch update_session_pr_state set_session_parked_task_kind set_working_set_ref delete_session set_session_active set_session_hidden clear_session_conversation delete_session_message delete_orphan_user_turn discard_orphan_first_turn delete_session_messages_after_jsonl_uuid',
     scope='session',
 )

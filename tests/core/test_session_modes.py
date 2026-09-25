@@ -193,7 +193,6 @@ def test_chat_mode_allow_list_without_the_surface_denies_all():
     )
     assert access.allowed is None
     assert access.disallowed is not None and DENY_ALL in access.disallowed
-    assert access.restricted is True
     for name in ("Bash", "Read", "WebSearch", "WebFetch", "mcp__builtins__Monitor"):
         assert tool_permitted(name, access.allowed, access.disallowed) is False
 

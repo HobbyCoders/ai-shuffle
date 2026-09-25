@@ -83,10 +83,6 @@ class ToolAccess:
     allowed: Optional[List[str]] = None
     disallowed: Optional[List[str]] = None
 
-    @property
-    def restricted(self) -> bool:
-        return bool(self.allowed) or bool(self.disallowed)
-
 
 def infer_tool_selection_mode(config: Dict[str, Any]) -> str:
     """The mode an unstamped config was implicitly in, exactly as the old editor

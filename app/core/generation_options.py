@@ -19,8 +19,8 @@ Config honoring:
   in which case its model, permission_mode, setting_sources, thinking_mode,
   effort, max_thinking_tokens, system_prompt, env and extra_args are honored.
 - Always force-disabled for one-shot generation: tools, agents, MCP servers,
-  hooks, file checkpointing, partial messages, fork_session,
-  continue_conversation. These would add cold-start overhead without benefit.
+  hooks, file checkpointing, partial messages. These would add cold-start
+  overhead without benefit.
 
 Workspace override:
 - Every generation subprocess runs in the configured workspace directory
@@ -306,7 +306,7 @@ def build_generation_options(
 
     Always forced off for generation calls:
     - tools, agents, MCP servers, hooks, file checkpointing, partial
-      messages, fork_session, continue_conversation.
+      messages.
 
     `max_turns` is passed through verbatim; callers typically set 1 for
     single-prompt generation.
@@ -342,8 +342,6 @@ def build_generation_options(
         "env": _resolve_env(config, model, provider_id),
         "tools": [],  # Generation never uses tools.
         "include_partial_messages": False,
-        "continue_conversation": False,
-        "fork_session": False,
     }
 
     if max_turns is not None:

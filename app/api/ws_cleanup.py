@@ -1,6 +1,5 @@
 """WebSocket session cleanup and lifecycle management."""
 
-import asyncio
 import logging
 
 from app.core.permission_handler import permission_handler
@@ -8,9 +7,6 @@ from app.core.user_question_handler import user_question_handler
 
 logger = logging.getLogger(__name__)
 
-# Track active chat sessions for interruption
-_active_chat_sessions: dict[str, asyncio.Task] = {}
-_active_sessions_lock = asyncio.Lock()
 
 async def cleanup_session_handlers(session_id: str) -> None:
     """Clean up session-keyed data from global handler singletons.

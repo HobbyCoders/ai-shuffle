@@ -135,22 +135,9 @@ def normalize_model(value: Optional[str]) -> str:
     return value
 
 
-def is_preset_model(value: Optional[str]) -> bool:
-    """True when ``value`` maps to one of the selectable presets."""
-    return normalize_model(value) in _BY_VALUE
-
-
 def get_model(value: Optional[str]) -> Optional[ModelOption]:
     """Look up the ``ModelOption`` for a stored value, honouring legacy slugs."""
     return _BY_VALUE.get(normalize_model(value))
-
-
-def get_model_label(value: Optional[str]) -> str:
-    """Human-readable label; falls back to the raw value, then 'Default'."""
-    match = get_model(value)
-    if match is not None:
-        return match.label
-    return value if value else "Default"
 
 
 def display_provider_model_label(

@@ -6,14 +6,11 @@ Tests cover:
 - Encryption/decryption round-trip
 - Error handling for missing keys
 - Detection of encrypted values
-- Environment-based initialization
 - Re-encryption for password changes
-- Migration of plaintext keys
 """
 
 import pytest
 import base64
-import os
 from unittest.mock import MagicMock, patch
 from cryptography.fernet import Fernet
 
@@ -345,59 +342,6 @@ class TestSaltManagement:
             mock_log.assert_called_with("Generated new encryption salt")
 
 
-class TestInitEncryptionFromEnv:
-    """Test environment-based encryption initialization."""
-
-    @pytest.fixture(autouse=True)
-    def reset_state(self):
-        """Reset encryption state and env vars."""
-        encryption._encryption_key = None
-        encryption._key_salt = None
-        os.environ.pop("ADMIN_PASSWORD", None)
-        # init_encryption_from_env falls back to settings.admin_password, which
-        # the deployment env binds to a real value at import. Neutralize that
-        # fallback so the "unset" cases genuinely see no password from anywhere.
-        from app.core.config import settings
-        with patch.object(settings, "admin_password", None):
-            yield
-        encryption._encryption_key = None
-        encryption._key_salt = None
-        os.environ.pop("ADMIN_PASSWORD", None)
-
-    def test_init_from_env_returns_false_when_no_env_var(self):
-        """Should return False when ADMIN_PASSWORD is not set."""
-        mock_db = MagicMock()
-        result = encryption.init_encryption_from_env(mock_db)
-        assert result is False
-        assert encryption._encryption_key is None
-
-    def test_init_from_env_returns_true_and_sets_key(self):
-        """Should return True and set key when ADMIN_PASSWORD is set."""
-        os.environ["ADMIN_PASSWORD"] = "env_password_123"
-        mock_db = MagicMock()
-        mock_db.get_system_setting.return_value = None
-        result = encryption.init_encryption_from_env(mock_db)
-        assert result is True
-        assert encryption._encryption_key is not None
-
-    def test_init_from_env_logs_success(self):
-        """Should log when encryption is initialized from env."""
-        os.environ["ADMIN_PASSWORD"] = "env_password"
-        mock_db = MagicMock()
-        mock_db.get_system_setting.return_value = None
-        with patch.object(encryption.logger, "info") as mock_log:
-            encryption.init_encryption_from_env(mock_db)
-            calls = [str(c) for c in mock_log.call_args_list]
-            assert any("ADMIN_PASSWORD environment variable" in c for c in calls)
-
-    def test_init_from_env_empty_string_returns_false(self):
-        """Empty ADMIN_PASSWORD should be treated as unset."""
-        os.environ["ADMIN_PASSWORD"] = ""
-        mock_db = MagicMock()
-        result = encryption.init_encryption_from_env(mock_db)
-        assert result is False
-
-
 def _make_settings_mock_db(salt: bytes, settings: dict):
     """Build a MagicMock db exposing the discovery accessors.
 
@@ -503,122 +447,6 @@ class TestReEncryptAllSecrets:
             assert mock_log.called
             calls = [str(c) for c in mock_log.call_args_list]
             assert any("Cannot re-encrypt" in c for c in calls)
-
-
-class TestEncryptExistingPlaintextKeys:
-    """Test migration of plaintext API keys to encrypted."""
-
-    @pytest.fixture(autouse=True)
-    def setup_encryption(self):
-        """Set up encryption key."""
-        encryption._encryption_key = None
-        encryption._key_salt = None
-        mock_db = MagicMock()
-        mock_db.get_system_setting.return_value = None
-        encryption.set_encryption_key("test_password", mock_db)
-        yield
-        encryption._encryption_key = None
-        encryption._key_salt = None
-
-    def test_encrypt_existing_keys_without_encryption_key_raises(self):
-        """Should raise RuntimeError if encryption key not loaded."""
-        encryption.clear_encryption_key()
-        mock_db = MagicMock()
-        with pytest.raises(RuntimeError, match="Credential storage is locked"):
-            encryption.encrypt_existing_plaintext_keys(mock_db)
-
-    def test_encrypt_existing_keys_encrypts_plaintext(self):
-        """Should encrypt plaintext API keys."""
-        mock_db = MagicMock()
-
-        def mock_get_setting(key):
-            if key == "openai_api_key":
-                return "sk-plaintext-openai-key"
-            elif key == "gemini_api_key":
-                return "gemini-plaintext-key"
-            return None
-
-        mock_db.get_system_setting = mock_get_setting
-        mock_db.set_system_setting = MagicMock()
-        count = encryption.encrypt_existing_plaintext_keys(mock_db)
-        assert count == 2
-        assert mock_db.set_system_setting.call_count == 2
-        for call_args in mock_db.set_system_setting.call_args_list:
-            key, value = call_args[0]
-            assert value.startswith("enc:")
-
-    def test_encrypt_existing_keys_skips_already_encrypted(self):
-        """Should skip keys that are already encrypted."""
-        mock_db = MagicMock()
-
-        def mock_get_setting(key):
-            if key == "openai_api_key":
-                return "enc:already_encrypted_data"
-            elif key == "gemini_api_key":
-                return "plaintext-key"
-            return None
-
-        mock_db.get_system_setting = mock_get_setting
-        mock_db.set_system_setting = MagicMock()
-        count = encryption.encrypt_existing_plaintext_keys(mock_db)
-        assert count == 1
-        mock_db.set_system_setting.assert_called_once()
-        call_key, _ = mock_db.set_system_setting.call_args[0]
-        assert call_key == "gemini_api_key"
-
-    def test_encrypt_existing_keys_skips_empty_values(self):
-        """Should skip empty or None values."""
-        mock_db = MagicMock()
-
-        def mock_get_setting(key):
-            if key == "openai_api_key":
-                return ""
-            elif key == "gemini_api_key":
-                return None
-            return None
-
-        mock_db.get_system_setting = mock_get_setting
-        mock_db.set_system_setting = MagicMock()
-        count = encryption.encrypt_existing_plaintext_keys(mock_db)
-        assert count == 0
-        mock_db.set_system_setting.assert_not_called()
-
-    def test_encrypt_existing_keys_logs_each_encryption(self):
-        """Should log when encrypting each key."""
-        mock_db = MagicMock()
-
-        def mock_get_setting(key):
-            if key == "openai_api_key":
-                return "sk-key"
-            return None
-
-        mock_db.get_system_setting = mock_get_setting
-        mock_db.set_system_setting = MagicMock()
-        with patch.object(encryption.logger, "debug") as mock_log:
-            encryption.encrypt_existing_plaintext_keys(mock_db)
-            calls = [str(c) for c in mock_log.call_args_list]
-            assert any("Encrypted existing plaintext key" in c for c in calls)
-
-    def test_encrypt_existing_keys_all_sensitive_settings(self):
-        """Should check all sensitive settings."""
-        mock_db = MagicMock()
-        all_keys = {}
-
-        def mock_get_setting(key):
-            return all_keys.get(key)
-
-        mock_db.get_system_setting = mock_get_setting
-        mock_db.set_system_setting = MagicMock()
-        sensitive_settings = [
-            "openai_api_key",
-            "gemini_api_key",
-            "image_api_key",
-            "video_api_key",
-        ]
-        for setting in sensitive_settings:
-            all_keys[setting] = f"plaintext-{setting}"
-        count = encryption.encrypt_existing_plaintext_keys(mock_db)
-        assert count == 4
 
 
 class TestEncryptionIntegration:

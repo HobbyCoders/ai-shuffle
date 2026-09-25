@@ -4,11 +4,9 @@ Unit tests for CLI Bridge module.
 Tests cover:
 - Session ID validation (UUID format)
 - PTY availability checking
-- CLISession dataclass
 - CLIBridge class lifecycle
 - Input handling (send_input, send_key)
 - RewindParser output parsing
-- Session management functions
 - Error handling and edge cases
 
 Note: PTY functionality is Unix-only. Tests for Unix-only functionality
@@ -18,20 +16,14 @@ are skipped on Windows.
 import pytest
 import asyncio
 import sys
-from datetime import datetime
 from unittest.mock import patch, AsyncMock
-from dataclasses import fields
 
 from app.core.cli_bridge import (
     PTY_AVAILABLE,
     is_pty_available,
     validate_session_id,
-    CLISession,
     CLIBridge,
-    get_cli_session,
-    get_active_cli_sessions,
     RewindParser,
-    _cli_sessions,
     UUID_PATTERN,
 )
 
@@ -159,78 +151,6 @@ class TestIsPtyAvailable:
     def test_pty_not_available_on_windows(self):
         """PTY should not be available on Windows."""
         assert is_pty_available() is False
-
-
-# =============================================================================
-# Test CLISession Dataclass
-# =============================================================================
-
-class TestCLISession:
-    """Test CLISession dataclass."""
-
-    def test_cli_session_creation(self):
-        """Should create CLISession with required fields."""
-        session = CLISession(
-            session_id="test-session-id",
-            sdk_session_id="12345678-1234-1234-1234-123456789abc",
-            working_dir="/home/user/project",
-            pid=12345,
-            fd=3
-        )
-
-        assert session.session_id == "test-session-id"
-        assert session.sdk_session_id == "12345678-1234-1234-1234-123456789abc"
-        assert session.working_dir == "/home/user/project"
-        assert session.pid == 12345
-        assert session.fd == 3
-        assert session.is_active is True
-        assert session.command is None
-        assert session.output_buffer == ""
-
-    def test_cli_session_default_values(self):
-        """Should have correct default values."""
-        session = CLISession(
-            session_id="test",
-            sdk_session_id="12345678-1234-1234-1234-123456789abc",
-            working_dir="/tmp",
-            pid=1,
-            fd=0
-        )
-
-        assert session.is_active is True
-        assert isinstance(session.created_at, datetime)
-        assert session.command is None
-        assert session.output_buffer == ""
-
-    def test_cli_session_with_all_fields(self):
-        """Should accept all optional fields."""
-        now = datetime.now()
-        session = CLISession(
-            session_id="test",
-            sdk_session_id="12345678-1234-1234-1234-123456789abc",
-            working_dir="/tmp",
-            pid=1,
-            fd=0,
-            is_active=False,
-            created_at=now,
-            command="/rewind",
-            output_buffer="some output"
-        )
-
-        assert session.is_active is False
-        assert session.created_at == now
-        assert session.command == "/rewind"
-        assert session.output_buffer == "some output"
-
-    def test_cli_session_is_dataclass(self):
-        """CLISession should be a proper dataclass."""
-        field_names = [f.name for f in fields(CLISession)]
-        expected_fields = [
-            'session_id', 'sdk_session_id', 'working_dir', 'pid', 'fd',
-            'is_active', 'created_at', 'command', 'output_buffer'
-        ]
-        for field in expected_fields:
-            assert field in field_names
 
 
 # =============================================================================
@@ -667,13 +587,6 @@ class TestCLIBridgeStop:
 class TestCLIBridgeCleanup:
     """Test CLIBridge _cleanup method."""
 
-    @pytest.fixture(autouse=True)
-    def clear_sessions(self):
-        """Clear sessions before and after each test."""
-        _cli_sessions.clear()
-        yield
-        _cli_sessions.clear()
-
     @skip_on_windows
     @pytest.mark.asyncio
     async def test_cleanup_closes_fd(self):
@@ -693,33 +606,6 @@ class TestCLIBridgeCleanup:
 
                 mock_close.assert_called_once_with(5)
                 assert bridge._fd is None
-
-    @skip_on_windows
-    @pytest.mark.asyncio
-    async def test_cleanup_removes_from_sessions(self):
-        """_cleanup should remove session from global tracking."""
-        session_id = "12345678-1234-1234-1234-123456789abc"
-        bridge = CLIBridge(
-            session_id=session_id,
-            sdk_session_id="87654321-4321-4321-4321-cba987654321",
-            working_dir="/home/user/project"
-        )
-        bridge._pid = 12345
-
-        # Add session to tracking
-        _cli_sessions[session_id] = CLISession(
-            session_id=session_id,
-            sdk_session_id="87654321-4321-4321-4321-cba987654321",
-            working_dir="/home/user/project",
-            pid=12345,
-            fd=5
-        )
-
-        with patch('os.waitpid', return_value=(12345, 0)):
-            with patch('os.close'):
-                await bridge._cleanup()
-
-                assert session_id not in _cli_sessions
 
     @skip_on_windows
     @pytest.mark.asyncio
@@ -827,152 +713,8 @@ class TestCLIBridgeResize:
 
 
 # =============================================================================
-# Test Session Management Functions
-# =============================================================================
-
-class TestSessionManagement:
-    """Test session management functions."""
-
-    @pytest.fixture(autouse=True)
-    def clear_sessions(self):
-        """Clear sessions before and after each test."""
-        _cli_sessions.clear()
-        yield
-        _cli_sessions.clear()
-
-    def test_get_cli_session_existing(self):
-        """get_cli_session should return existing session."""
-        session = CLISession(
-            session_id="test-session",
-            sdk_session_id="12345678-1234-1234-1234-123456789abc",
-            working_dir="/tmp",
-            pid=123,
-            fd=5
-        )
-        _cli_sessions["test-session"] = session
-
-        result = get_cli_session("test-session")
-
-        assert result == session
-
-    def test_get_cli_session_nonexistent(self):
-        """get_cli_session should return None for nonexistent session."""
-        result = get_cli_session("nonexistent")
-
-        assert result is None
-
-    def test_get_active_cli_sessions_empty(self):
-        """get_active_cli_sessions should return empty list when no sessions."""
-        result = get_active_cli_sessions()
-
-        assert result == []
-
-    def test_get_active_cli_sessions_with_sessions(self):
-        """get_active_cli_sessions should return list of session IDs."""
-        _cli_sessions["session-1"] = CLISession(
-            session_id="session-1",
-            sdk_session_id="12345678-1234-1234-1234-123456789abc",
-            working_dir="/tmp",
-            pid=123,
-            fd=5
-        )
-        _cli_sessions["session-2"] = CLISession(
-            session_id="session-2",
-            sdk_session_id="87654321-4321-4321-4321-cba987654321",
-            working_dir="/tmp",
-            pid=456,
-            fd=6
-        )
-
-        result = get_active_cli_sessions()
-
-        assert len(result) == 2
-        assert "session-1" in result
-        assert "session-2" in result
-
-
-# =============================================================================
 # Test RewindParser
 # =============================================================================
-
-class TestRewindParserParseCheckpoints:
-    """Test RewindParser.parse_checkpoints method."""
-
-    def test_parse_empty_output(self):
-        """Should return empty list for empty output."""
-        result = RewindParser.parse_checkpoints("")
-
-        assert result == []
-
-    def test_parse_single_checkpoint(self):
-        """Should parse a single checkpoint."""
-        output = """
-        > create a hello world text file
-        """
-        result = RewindParser.parse_checkpoints(output)
-
-        assert len(result) == 1
-        assert result[0]["message"] == "create a hello world text file"
-        assert result[0]["selected"] is True
-
-    def test_parse_multiple_checkpoints(self):
-        """Should parse multiple checkpoints."""
-        output = """
-        create first file
-        update configuration
-        fix bug in module
-        """
-        result = RewindParser.parse_checkpoints(output)
-
-        assert len(result) == 3
-
-    def test_parse_checkpoint_with_current_marker(self):
-        """Should detect current checkpoint marker."""
-        output = """
-        > (current)
-        > first checkpoint
-        """
-        result = RewindParser.parse_checkpoints(output)
-
-        # Find the checkpoint marked as current
-        current_checkpoints = [cp for cp in result if cp.get("is_current")]
-        assert len(current_checkpoints) >= 0  # May vary based on parsing
-
-    def test_parse_checkpoint_with_changes(self):
-        """Should parse change information."""
-        output = """
-        > update config file
-        config.json +10 -5
-        """
-        result = RewindParser.parse_checkpoints(output)
-
-        assert len(result) >= 1
-        # Check if changes were parsed
-        if result[0].get("changes"):
-            assert "+10 -5" in result[0]["changes"] or "config.json" in result[0]["changes"]
-
-    def test_parse_ignores_rewind_header(self):
-        """Should ignore 'Rewind' header lines."""
-        output = """
-        Rewind to a previous state
-        first checkpoint
-        """
-        result = RewindParser.parse_checkpoints(output)
-
-        # Should not include "Rewind to a previous state"
-        messages = [cp["message"] for cp in result]
-        assert not any("Rewind" in m for m in messages)
-
-    def test_parse_ignores_restore_lines(self):
-        """Should ignore 'Restore' menu lines."""
-        output = """
-        first checkpoint
-        Restore code and conversation
-        """
-        result = RewindParser.parse_checkpoints(output)
-
-        messages = [cp["message"] for cp in result]
-        assert not any("Restore" in m for m in messages)
 
 
 class TestRewindParserParseSelectedOption:
@@ -1212,13 +954,6 @@ class TestCLIBridgeSetTerminalSize:
 class TestCLIBridgeReadOutput:
     """Test CLIBridge _read_output method."""
 
-    @pytest.fixture(autouse=True)
-    def clear_sessions(self):
-        """Clear sessions before and after each test."""
-        _cli_sessions.clear()
-        yield
-        _cli_sessions.clear()
-
     @skip_on_windows
     @pytest.mark.asyncio
     async def test_read_output_calls_callback(self):
@@ -1337,13 +1072,6 @@ class TestCLIBridgeReadOutput:
 
 class TestCLIBridgeEdgeCases:
     """Test edge cases and error handling."""
-
-    @pytest.fixture(autouse=True)
-    def clear_sessions(self):
-        """Clear sessions before and after each test."""
-        _cli_sessions.clear()
-        yield
-        _cli_sessions.clear()
 
     @skip_on_windows
     @pytest.mark.asyncio

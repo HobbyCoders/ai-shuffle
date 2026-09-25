@@ -23,7 +23,6 @@ import pytest
 
 from app.core import session_runtime, turn_manager, turn_scheduler
 from app.core.task_registry import task_registry
-from app.core.account_failover import FailoverDecision
 from app.core.compact_continue import AUTO_CONTINUE_PROMPT
 from app.db import session_events as se_db
 from app.db import turns as turns_db
@@ -216,7 +215,6 @@ async def test_continuations_keep_order_and_dedupe_each_completion(mock_db):
     with patch.object(turn_scheduler, "kick"), patch.object(turn_scheduler, "_kick_after_batch_window"):
         await turn_scheduler.on_task_terminal("owner", {
             "task_id": "child", "status": "completed", "summary": "original report",
-            "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
         })
         for report in ("first continuation", "second continuation"):
             turn_id = await turn_scheduler.on_agent_message("child", "owner", report, reply_to="owner")
@@ -434,12 +432,12 @@ async def test_failover_surfaces_then_queue_drains(mock_db):
         execute = stack.enter_context(_patch_execute())
         attempt = stack.enter_context(patch(
             "app.core.account_failover.attempt_failover",
-            new=AsyncMock(return_value=FailoverDecision(retry=False)),
+            new=AsyncMock(return_value=None),
         ))
         await turn_scheduler.on_turn_settled("f1", settled["id"], "completed")
         await _drain_kicks()
 
-    attempt.assert_awaited_once_with("f1", "u1", set())
+    attempt.assert_awaited_once_with("f1", "u1")
     assert _by_source("f1", "failover") == []
     execute.assert_awaited_once()
     assert execute.await_args.args[0]["id"] == queued["id"]
@@ -449,38 +447,16 @@ async def test_failover_surfaces_then_queue_drains(mock_db):
     assert types == ["turn.completed"]
 
 
-async def test_failover_cap_exhausted_no_retry(mock_db):
-    settled = _settled_turn(
-        "f3", prompt="retry me", api_error_status=429,
-        payload={"failover_attempted": ["acc-1", "acc-2"]},
-    )
-
-    with ExitStack() as stack:
-        execute = stack.enter_context(_patch_execute())
-        stack.enter_context(patch(
-            "app.core.account_failover.attempt_failover",
-            new=AsyncMock(return_value=FailoverDecision(retry=False)),
-        ))
-        await turn_scheduler.on_turn_settled("f3", settled["id"], "completed")
-        await _drain_kicks()
-
-    assert _by_source("f3", "failover") == []
-    execute.assert_not_awaited()  # nothing queued, nothing started
-
-
 async def test_chained_failover_exhaustion_terminates(mock_db):
-    # A source=failover RETRY turn itself settles with a 429; its accumulated
-    # payload.failover_attempted leaves attempt_failover no candidate
-    # (retry=False) → NO new enqueue, no crash — the chain terminates cleanly.
+    # A legacy source=failover turn itself settles with a 429: the
+    # rate-limited notification fires and NO new turn is enqueued.
     settled = _settled_turn(
         "f6", source="failover", prompt="retry me", api_error_status=429,
-        payload={"failover_attempted": ["acc-1", "acc-2"], "api_user_id": "u6"},
+        payload={"api_user_id": "u6"},
     )
 
-    async def fake_failover(session_id, api_user_id, attempted):
-        # Prior attempts derive from the retry turn's own payload.
-        assert attempted == {"acc-1", "acc-2"}
-        return FailoverDecision(retry=False)
+    async def fake_failover(session_id, api_user_id):
+        assert api_user_id == "u6"
 
     with ExitStack() as stack:
         execute = stack.enter_context(_patch_execute())
@@ -1187,7 +1163,6 @@ async def test_completed_provider_agent_worker_wakes_parked_parent(mock_db):
     frame = {
         "task_id": "worker-1", "status": "completed", "tool_use_id": "tu-pw1",
         "summary": "the worker's report",
-        "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
     }
 
     with ExitStack() as stack:
@@ -1218,7 +1193,6 @@ async def test_second_provider_agent_frame_does_not_double_wake(mock_db):
     frame = {
         "task_id": "worker-2", "status": "error", "tool_use_id": "tu-pw2",
         "summary": "worker failed: provider blew up",
-        "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
     }
 
     with ExitStack() as stack:

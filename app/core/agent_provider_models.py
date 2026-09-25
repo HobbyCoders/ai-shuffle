@@ -611,9 +611,7 @@ def file_subagent_targets(
     return tuple(targets)
 
 
-def parent_subagent_guidance(
-    caller_profile_id: str | None, provider_id: str | None
-) -> str:
+def parent_subagent_guidance() -> str:
     """Compact system-prompt guidance aligned with the dynamic Task schema."""
     # The park doctrine is fluid's canonical fragment (spliced verbatim into
     # Task's and Monitor's own descriptions) so the copies cannot drift.

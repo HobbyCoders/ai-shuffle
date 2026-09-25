@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -76,8 +76,6 @@ class PushNotificationService:
         self._initialized = False
         self._mock_mode = True
         self._firebase_app = None
-        self._notification_callbacks: List[Callable] = []
-        self._sent_notifications: List[Dict[str, Any]] = []  # For testing in mock mode
 
     def initialize(self) -> bool:
         """
@@ -125,23 +123,6 @@ class PushNotificationService:
             self._mock_mode = True
             self._initialized = True
             return False
-
-    @property
-    def is_mock_mode(self) -> bool:
-        """Check if running in mock mode."""
-        return self._mock_mode
-
-    def on_notification_sent(self, callback: Callable[[Dict[str, Any]], None]) -> None:
-        """Register callback for when notifications are sent (useful for testing)."""
-        self._notification_callbacks.append(callback)
-
-    def _notify_callbacks(self, notification_data: Dict[str, Any]) -> None:
-        """Notify all registered callbacks."""
-        for callback in self._notification_callbacks:
-            try:
-                callback(notification_data)
-            except Exception as e:
-                logger.error(f"Notification callback error: {e}")
 
     async def send_notification(
         self,
@@ -199,9 +180,6 @@ class PushNotificationService:
         mock_message_id = f"mock_{datetime.now(timezone.utc).timestamp()}"
         notification_data["message_id"] = mock_message_id
 
-        self._sent_notifications.append(notification_data)
-        self._notify_callbacks(notification_data)
-
         logger.debug(
             f"[MOCK] Push notification: {notification_data['title']} -> {notification_data['device_id'][:20]}..."
         )
@@ -244,7 +222,6 @@ class PushNotificationService:
 
             response = messaging.send(message)
             notification_data["message_id"] = response
-            self._notify_callbacks(notification_data)
 
             logger.debug(f"FCM notification sent: {response}")
             return NotificationResult(
@@ -311,7 +288,6 @@ class PushNotificationService:
             success = 200 <= resp.status_code < 300
             message_id = resp.headers.get("X-Message-ID") if success else None
             notification_data["message_id"] = message_id
-            self._notify_callbacks(notification_data)
 
             if not success:
                 logger.warning(
@@ -416,14 +392,6 @@ class PushNotificationService:
         logger.debug(f"Broadcast sent: {successful}/{len(results)} successful")
 
         return results
-
-    def get_mock_notifications(self) -> List[Dict[str, Any]]:
-        """Get list of sent notifications (only in mock mode, for testing)."""
-        return list(self._sent_notifications)
-
-    def clear_mock_notifications(self) -> None:
-        """Clear mock notification history."""
-        self._sent_notifications.clear()
 
 
 # Global service instance

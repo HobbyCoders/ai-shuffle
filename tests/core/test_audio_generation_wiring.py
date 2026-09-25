@@ -2,7 +2,7 @@
 
 from app.core.ai_tools import AI_TOOLS, AIToolsConfig
 from app.services.fal_catalog import resolve_tool_type, resolve_output_type
-from app.mcp.ai_tools_sdk import TOOL_CONFIG_MAP, _is_tool_enabled, get_enabled_tool_names
+from app.mcp.ai_tools_sdk import TOOL_CONFIG_MAP, _is_tool_enabled
 
 
 def test_audio_tools_registered():
@@ -36,11 +36,3 @@ def test_mcp_tools_mapped_and_enabled():
     # The generic executor + discovery turn on for an audio-only config too.
     assert _is_tool_enabled("runFalModel", {"audio_generation": True})
     assert _is_tool_enabled("searchModels", {"audio_to_audio": True})
-
-
-def test_enabled_tool_names_for_audio_only_config():
-    names = get_enabled_tool_names({"audio_generation": True})
-    assert "mcp__ai-tools__generateAudio" in names
-    assert "mcp__ai-tools__runFalModel" in names
-    # Image tools stay off.
-    assert "mcp__ai-tools__generateImage" not in names

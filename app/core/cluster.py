@@ -15,8 +15,8 @@ This module owns:
 
 - ``get_cluster_secret()`` — the shared bearer secret (env override or
   auto-generated once in system_settings).
-- ``require_cluster_auth`` — a FastAPI dependency that gates the peer-facing
-  ``/api/v1/cluster`` endpoints.
+- ``mint_artifact_token()`` / ``verify_artifact_token()`` — sign and check the
+  legacy cross-install artifact-download redirect.
 - ``advertise_url()`` / ``register_self()`` — how this install publishes its
   identity + peer-reachable URL into the registry, plus a heartbeat helper.
 
@@ -35,7 +35,7 @@ import socket
 import time
 from typing import Optional
 
-from fastapi import HTTPException, Request, status
+from fastapi import Request
 
 from app.core.config import settings
 from app.db import database
@@ -125,33 +125,6 @@ def verify_artifact_token(hash: str, exp: str, sig: str) -> bool:
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(sig, expected)
-
-
-def require_cluster_auth(request: Request) -> str:
-    """FastAPI dependency: authenticate a peer install via the cluster secret.
-
-    Distinct from ``require_auth`` (per-API-user): peer endpoints are
-    install-to-install, authenticated by the single shared secret. Returns the
-    calling install's instance_id (from the ``X-Install-Id`` header) when known,
-    for logging/diagnostics; access does not depend on it.
-    """
-    from app.api.auth import get_api_key
-
-    presented = get_api_key(request)
-    if not verify_cluster_secret(presented):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing cluster secret.",
-        )
-    return request.headers.get("X-Install-Id", "")
-
-
-def cluster_headers() -> dict:
-    """Auth headers an install presents when calling a peer's cluster API."""
-    return {
-        "Authorization": f"Bearer {get_cluster_secret()}",
-        "X-Install-Id": settings.effective_instance_id,
-    }
 
 
 def _primary_lan_ip() -> Optional[str]:

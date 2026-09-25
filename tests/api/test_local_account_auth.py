@@ -44,7 +44,6 @@ def app(monkeypatch):
     monkeypatch.setattr(encryption, '_encryption_key', encryption.Fernet.generate_key())
     monkeypatch.setattr(auth, 'is_github_authenticated_cached', lambda *args: False)
     monkeypatch.setattr(auth.auth_service, 'is_claude_authenticated', lambda: False)
-    monkeypatch.setattr(auth.auth_service, 'get_claude_token_status', lambda: {'token_valid': False})
     from app.api.mobile_hub import _limiter
     _limiter.reset()
     result = FastAPI()
@@ -294,7 +293,6 @@ def test_passwords_legacy_sessions_and_login_endpoints_are_gone(app):
     for path in ('login', 'change-password', 'account/start', 'account/poll', 'recovery'):
         assert c.post('/api/v1/auth/' + path, json={}).status_code == 404
     assert database.get_auth_session('legacy-token') is None
-    assert auth.auth_service.login('old-owner', 'anything') is None
 
 
 def test_preference_identity_preserves_legacy_history_and_is_stable(app):

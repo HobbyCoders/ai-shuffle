@@ -23,7 +23,6 @@ from app.api.import_export import (
     ExportedProfile,
     ExportedSubagent,
     ImportResult,
-    ImportOptions,
     SYSTEM_FIELDS,
     _export_profile,
     _export_subagent,
@@ -1128,12 +1127,6 @@ class TestPydanticModels:
         assert result.subagents_updated == 0
         assert result.errors == []
         assert result.warnings == []
-
-    def test_import_options_defaults(self):
-        """ImportOptions should have sensible defaults."""
-        options = ImportOptions()
-        assert options.overwrite_existing is False
-        assert options.skip_existing is True
 
 
 # =============================================================================

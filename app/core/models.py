@@ -1183,24 +1183,6 @@ class MobileDevice(BaseModel):
     last_seen: Optional[datetime] = None
 
 
-class PendingAction(BaseModel):
-    """A pending action waiting for mobile confirmation"""
-    id: str
-    device_id: str
-    action_type: str
-    params: Dict[str, Any] = Field(default_factory=dict)
-    security_level: str = "normal"  # normal, high, critical
-    created_at: datetime
-    expires_at: datetime
-    status: str = "pending"
-
-
-class ActionConfirmRequest(BaseModel):
-    """Request to confirm or reject an action"""
-    approved: bool
-    biometric_verified: bool = False
-
-
 class PushTokenRequest(BaseModel):
     """Request to register FCM push token"""
     device_id: str

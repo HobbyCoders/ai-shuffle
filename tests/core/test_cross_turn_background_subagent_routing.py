@@ -155,7 +155,7 @@ class TestCrossTurnBackgroundSubagentRouting:
         with ExitStack() as stack:
             _chat_patches(stack, pool)
             events = await collect(
-                qe.stream_to_websocket("follow-up prompt", session_id, "claude-code")
+                qe._stream_to_websocket_impl("follow-up prompt", session_id, "claude-code")
             )
 
         types = [e.get("type") for e in events]
@@ -233,7 +233,7 @@ class TestUnknownParentNeverLeaksToMainLane:
         with ExitStack() as stack:
             _chat_patches(stack, pool)
             events = await collect(
-                qe.stream_to_websocket("prompt", session_id, "claude-code")
+                qe._stream_to_websocket_impl("prompt", session_id, "claude-code")
             )
 
         # The parent's own (parent=None) text still flows on the main lane.
@@ -277,7 +277,7 @@ class TestUnknownParentNeverLeaksToMainLane:
         with ExitStack() as stack:
             _chat_patches(stack, pool)
             events = await collect(
-                qe.stream_to_websocket("prompt", session_id, "claude-code")
+                qe._stream_to_websocket_impl("prompt", session_id, "claude-code")
             )
 
         assert not any(
@@ -348,7 +348,7 @@ class TestSeedFromActiveBackgroundWork:
         with ExitStack() as stack:
             _chat_patches(stack, pool)
             events = await collect(
-                qe.stream_to_websocket("prompt", session_id, "claude-code")
+                qe._stream_to_websocket_impl("prompt", session_id, "claude-code")
             )
 
         # Seeded as run_in_background=True → recognised as a running launch: no

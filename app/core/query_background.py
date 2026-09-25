@@ -80,11 +80,11 @@ async def _run_background_query(
 ):
     """Recording tap around ``_run_background_query_impl``.
 
-    Mirrors ``query_engine.stream_to_websocket``: a ``TurnRecorder`` records
-    the initial user message and every pump-shaped event the impl produces into
-    the typed session event log; ``close()`` runs in the ``finally`` so the
-    crash/abandonment path still records a terminal ``turn.aborted``. When no
-    recorder is available this wrapper is a pure passthrough.
+    A ``TurnRecorder`` records the initial user message and every pump-shaped
+    event the impl produces into the typed session event log; ``close()`` runs
+    in the ``finally`` so the crash/abandonment path still records a terminal
+    ``turn.aborted``. When no recorder is available this wrapper is a pure
+    passthrough.
     """
     from app.core.turn_recorder import TurnRecorder
 
@@ -366,9 +366,6 @@ async def _run_background_query_impl(
         # Store pending background task reference now that pool entry exists
         _store_background_task(session_id)
 
-        # Execute query
-        response_text = []
-        tool_messages = []  # Collect tool use/result messages for storage
         # This lane bypasses the turn queue, so there is no live turn row and
         # the identity falls back to a fresh per-run key. Without one,
         # _persist_turn_results refuses to book and the run's usage is lost.
@@ -425,8 +422,6 @@ async def _run_background_query_impl(
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
-                        response_text.append(block.text)
-
                         if recorder:
                             await recorder.on_event({
                                 "type": "chunk",
@@ -434,14 +429,6 @@ async def _run_background_query_impl(
                             })
 
                     elif isinstance(block, ToolUseBlock):
-                        # Collect tool use for storage
-                        tool_messages.append({
-                            "type": "tool_use",
-                            "name": block.name,
-                            "tool_id": getattr(block, 'id', None),
-                            "input": block.input
-                        })
-
                         if recorder:
                             await recorder.on_event({
                                 "type": "tool_use",
@@ -452,14 +439,6 @@ async def _run_background_query_impl(
 
                     elif isinstance(block, ToolResultBlock):
                         output = truncate_large_payload(block.content)
-
-                        # Collect tool result for storage
-                        tool_messages.append({
-                            "type": "tool_result",
-                            "name": getattr(block, 'name', 'unknown'),
-                            "tool_id": getattr(block, 'tool_use_id', None),
-                            "output": output
-                        })
 
                         if recorder:
                             await recorder.on_event({
@@ -500,14 +479,6 @@ async def _run_background_query_impl(
                     if isinstance(block, ToolResultBlock):
                         output = truncate_large_payload(block.content) if block.content else ""
                         logger.debug(f"[Background] UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}")
-
-                        # Collect tool result for storage
-                        tool_messages.append({
-                            "type": "tool_result",
-                            "name": "unknown",
-                            "tool_id": block.tool_use_id,
-                            "output": output
-                        })
 
                         if recorder:
                             await recorder.on_event({

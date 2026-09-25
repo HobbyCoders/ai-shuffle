@@ -1,5 +1,5 @@
 """
-Mobile device API routes for push notifications and action confirmations
+Mobile device API routes: pairing, key renewal, push registration and devices
 """
 
 import asyncio
@@ -7,7 +7,6 @@ import json
 import secrets
 import logging
 import re
-import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Literal
 
@@ -23,8 +22,6 @@ from app.core.models import (
     MobileDeviceRegisterRequest,
     MobileDeviceRegisterResponse,
     MobileDeviceCapabilitiesRequest,
-    PendingAction,
-    ActionConfirmRequest,
     PushTokenRequest,
     UnifiedPushEndpointRequest,
 )
@@ -47,33 +44,6 @@ MOBILE_API_KEY_PREFIX = "aim_"
 from app.core.device_keys import KEY_LIFETIME_DAYS, key_expiry
 
 MOBILE_API_KEY_EXPIRY_DAYS = KEY_LIFETIME_DAYS
-
-# Default expiry for pending actions (5 minutes)
-PENDING_ACTION_EXPIRY_MINUTES = 5
-
-
-# The expired-action sweep is a table-wide UPDATE; one run per process per
-# interval is enough because every read filters on expires_at itself.
-EXPIRED_ACTION_SWEEP_INTERVAL_S = 60
-_last_expired_action_sweep: float | None = None
-
-
-def _expired_action_sweep_due() -> bool:
-    """True at most once per EXPIRED_ACTION_SWEEP_INTERVAL_S per process."""
-    global _last_expired_action_sweep
-    clock = time.monotonic()
-    if (_last_expired_action_sweep is not None
-            and clock - _last_expired_action_sweep < EXPIRED_ACTION_SWEEP_INTERVAL_S):
-        return False
-    _last_expired_action_sweep = clock
-    return True
-
-
-def _reset_expired_action_sweep() -> None:
-    """Test hook: make the next sweep check run the sweep."""
-    global _last_expired_action_sweep
-    _last_expired_action_sweep = None
-
 
 def generate_mobile_api_key() -> str:
     """Generate a secure mobile API key"""
@@ -289,106 +259,6 @@ async def update_capabilities(
         )
 
     return {"status": "ok", "message": "Capabilities updated"}
-
-
-@router.get("/pending", response_model=List[PendingAction])
-async def get_pending_actions(request: Request):
-    """
-    Get pending actions for the authenticated device.
-
-    Returns a list of actions waiting for confirmation.
-    """
-    device = await run_sync(get_device_with_scope, request, "mobile:actions")
-
-    # Sweep expired actions occasionally. This is a table-wide UPDATE across
-    # every device, and the read below already filters on expires_at, so it is
-    # throttled instead of running on each poll.
-    if _expired_action_sweep_due():
-        await run_sync(db.cleanup_expired_actions)
-
-    actions = await run_sync(db.get_pending_actions_for_device, device["device_id"])
-
-    return [
-        PendingAction(
-            id=a["id"],
-            device_id=a["device_id"],
-            action_type=a["action_type"],
-            params=a.get("params", {}),
-            security_level=a.get("security_level", "normal"),
-            created_at=datetime.fromisoformat(a["created_at"]) if isinstance(a["created_at"], str) else a["created_at"],
-            expires_at=datetime.fromisoformat(a["expires_at"]) if isinstance(a["expires_at"], str) else a["expires_at"],
-            status=a["status"]
-        )
-        for a in actions
-    ]
-
-
-@router.post("/confirm/{action_id}")
-async def confirm_action(
-    action_id: str,
-    confirm_request: ActionConfirmRequest,
-    request: Request
-):
-    """
-    Confirm or reject a pending action.
-
-    The action must belong to the authenticated device.
-    """
-    device = await run_sync(get_device_with_scope, request, "mobile:actions")
-
-    # Get the action
-    action = await run_sync(db.get_pending_action, action_id)
-    if not action:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Action not found"
-        )
-
-    # Verify action belongs to this device
-    if action["device_id"] != device["device_id"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Action does not belong to this device"
-        )
-
-    # Check if action is still pending
-    if action["status"] != "pending":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Action already {action['status']}"
-        )
-
-    # Check if action has expired
-    expires_at = action["expires_at"]
-    if isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at)
-    if datetime.now(timezone.utc) > expires_at:
-        await run_sync(db.update_pending_action_status, action_id, "expired")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Action has expired"
-        )
-
-    # Check biometric requirement for high/critical security levels
-    security_level = action.get("security_level", "normal")
-    if security_level in ("high", "critical") and not confirm_request.biometric_verified:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Biometric verification required for {security_level} security actions"
-        )
-
-    # Update status
-    new_status = "approved" if confirm_request.approved else "rejected"
-    await run_sync(db.update_pending_action_status, action_id, new_status)
-
-    logger.debug(f"Action {action_id} {new_status} by device {device['device_id']}")
-
-    return {
-        "status": "ok",
-        "action_id": action_id,
-        "result": new_status,
-        "biometric_verified": confirm_request.biometric_verified
-    }
 
 
 @router.post("/push/token")

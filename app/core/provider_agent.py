@@ -1533,9 +1533,6 @@ async def _notify_caller_terminal(
     value ``start_task`` registered, so the registry lookup behind the ownership
     gate resolves.
 
-    ``origin`` marks the frame as worker-produced
-    (``turn_scheduler.PROVIDER_AGENT_ORIGIN``).
-
     Never raises — a wake failure must not change how the worker's dispatch
     reports.
     """
@@ -1565,7 +1562,6 @@ async def _notify_caller_terminal(
             "status": status,
             "tool_use_id": launch_key,
             "summary": summary or "",
-            "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
         })
     except Exception:  # noqa: BLE001 — the worker's own outcome stands regardless
         logger.exception(

@@ -142,17 +142,6 @@ class TestPushNotificationService:
         service = PushNotificationService()
         assert service is not None
 
-    def test_service_tracks_sent_notifications(self):
-        """Service should track sent notifications in mock mode."""
-        service = PushNotificationService()
-        assert hasattr(service, "_sent_notifications")
-        assert isinstance(service._sent_notifications, list)
-
-    def test_service_has_callbacks(self):
-        """Service should support notification callbacks."""
-        service = PushNotificationService()
-        assert hasattr(service, "_notification_callbacks")
-
     def test_service_starts_uninitialized(self):
         """Service should start uninitialized."""
         service = PushNotificationService()
@@ -293,7 +282,6 @@ class TestUnifiedPushTransport:
         # Did not fall through to the mock path; really attempted the POST.
         client.post.assert_awaited_once()
         assert result.success is True
-        assert service.get_mock_notifications() == []
 
     async def test_send_via_unifiedpush_network_error(self):
         """An httpx exception should be caught and reported as failure."""

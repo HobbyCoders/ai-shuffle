@@ -620,7 +620,7 @@ class TestNestingGuardWiring:
             )
 
         assert pa.is_worker_session("worker-q") is False
-        assert qo.WORKER_DISALLOWED_TOOL in (opts.disallowed_tools or [])
+        assert qo.WORKER_DISALLOWED_TOOLS[0] in (opts.disallowed_tools or [])
 
     async def test_task_dispatch_refuses_beyond_max_depth(self, db, monkeypatch):
         """(P2c) The depth gate replaced the old one-level handler refusal:

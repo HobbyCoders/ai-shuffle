@@ -180,17 +180,6 @@ def _seed_default_templates():
         )
 
 
-def get_builtin_profile_defaults(profile_id: str) -> Optional[Dict[str, Any]]:
-    """Get the original seed defaults for a built-in agent.
-
-    Always ``None`` today: no agent ships as built-in any more. The starter
-    agent is an ordinary row the user owns from the moment it is created, so
-    there is nothing to restore it to. Kept as the seam the restore endpoint
-    calls, for whenever a genuinely built-in agent exists again.
-    """
-    return None
-
-
 def get_profile(profile_id: str) -> Optional[Dict[str, Any]]:
     """Get a profile from database"""
     return database.get_profile(profile_id)

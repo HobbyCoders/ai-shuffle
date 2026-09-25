@@ -20,9 +20,7 @@ import logging
 import os
 import sys
 import threading
-from typing import Optional, Dict, Callable, Awaitable
-from dataclasses import dataclass, field
-from datetime import datetime
+from typing import Optional, Callable, Awaitable
 import re
 
 # PTY-related imports are Unix-only
@@ -59,24 +57,6 @@ def validate_session_id(session_id: str) -> bool:
     if not session_id:
         return False
     return bool(UUID_PATTERN.match(session_id))
-
-
-@dataclass
-class CLISession:
-    """Track state for an active CLI session"""
-    session_id: str  # Our session ID
-    sdk_session_id: str  # Claude SDK session ID for --resume
-    working_dir: str  # Working directory for the CLI
-    pid: int  # Process ID
-    fd: int  # File descriptor for PTY master
-    is_active: bool = True
-    created_at: datetime = field(default_factory=datetime.now)
-    command: Optional[str] = None  # Current command being executed
-    output_buffer: str = ""  # Accumulated output
-
-
-# Track active CLI sessions
-_cli_sessions: Dict[str, CLISession] = {}
 
 
 class CLIBridge:
@@ -190,17 +170,6 @@ class CLIBridge:
 
                 # Set terminal size (80x24 is standard)
                 self._set_terminal_size(80, 24)
-
-                # Store session
-                cli_session = CLISession(
-                    session_id=self.session_id,
-                    sdk_session_id=self.sdk_session_id,
-                    working_dir=self.working_dir,
-                    pid=pid,
-                    fd=fd,
-                    command=command
-                )
-                _cli_sessions[self.session_id] = cli_session
 
                 # Start reading output with theme detection
                 self._output_buffer = ""
@@ -346,10 +315,6 @@ class CLIBridge:
                             if not self._theme_prompt_handled:
                                 await self._handle_theme_selection()
 
-                            # Store in buffer
-                            if self.session_id in _cli_sessions:
-                                _cli_sessions[self.session_id].output_buffer += output
-
                             # Send to callback
                             if self.on_output:
                                 await self.on_output(output)
@@ -389,10 +354,6 @@ class CLIBridge:
             except OSError:
                 pass
             self._fd = None
-
-        # Remove from active sessions
-        if self.session_id in _cli_sessions:
-            del _cli_sessions[self.session_id]
 
         # Notify exit
         if self.on_exit:
@@ -539,76 +500,12 @@ class PtyProcess:
                 break
 
 
-def get_cli_session(session_id: str) -> Optional[CLISession]:
-    """Get an active CLI session by session ID"""
-    return _cli_sessions.get(session_id)
-
-
-def get_active_cli_sessions() -> list:
-    """Get list of active CLI session IDs"""
-    return list(_cli_sessions.keys())
-
-
 class RewindParser:
     """
     Parser for /rewind command output.
 
-    Extracts checkpoint information and selected options from CLI output.
+    Extracts the selected option and checkpoint from CLI output.
     """
-
-    @staticmethod
-    def parse_checkpoints(output: str) -> list:
-        """
-        Parse checkpoint list from /rewind output.
-
-        Returns list of checkpoints:
-        [
-            {"index": 0, "message": "...", "changes": "+1 -0", "is_current": True},
-            ...
-        ]
-        """
-        checkpoints = []
-        lines = output.split("\n")
-
-        current_checkpoint = None
-        for line in lines:
-            # Match checkpoint lines like "  create a hello world text file"
-            # or "> (current)"
-            stripped = line.strip()
-
-            if stripped == "> (current)" or stripped == "(current)":
-                if current_checkpoint:
-                    current_checkpoint["is_current"] = True
-            elif stripped.startswith(">"):
-                # Selected item
-                text = stripped[1:].strip()
-                if text and text != "(current)":
-                    current_checkpoint = {
-                        "index": len(checkpoints),
-                        "message": text,
-                        "changes": "",
-                        "is_current": False,
-                        "selected": True
-                    }
-                    checkpoints.append(current_checkpoint)
-            elif stripped and not stripped.startswith("Rewind") and not stripped.startswith("Restore"):
-                # Potential checkpoint or change info
-                # Check if it's a change line like "hello.txt +1 -0"
-                change_match = re.search(r'\+\d+\s+-\d+', stripped)
-                if change_match and current_checkpoint:
-                    current_checkpoint["changes"] = stripped
-                elif not stripped.startswith("Enter") and not stripped.startswith("No code"):
-                    # New checkpoint
-                    current_checkpoint = {
-                        "index": len(checkpoints),
-                        "message": stripped,
-                        "changes": "",
-                        "is_current": False,
-                        "selected": False
-                    }
-                    checkpoints.append(current_checkpoint)
-
-        return checkpoints
 
     @staticmethod
     def parse_selected_option(output: str) -> Optional[int]:

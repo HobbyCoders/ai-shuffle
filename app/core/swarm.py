@@ -227,8 +227,7 @@ def make_handler(session_id_supplier):
                         wire_status = "completed" if status == "completed" else "killed" if status == "cancelled" else "error"
                         task_registry.complete_task(session_id, key, wire_status, summary=summary)
                         await turn_scheduler.on_task_terminal(session_id, dict(task_id=key,
-                            status=wire_status, tool_use_id=key, summary=summary,
-                            origin=turn_scheduler.PROVIDER_AGENT_ORIGIN))
+                            status=wire_status, tool_use_id=key, summary=summary))
                     coordinator = SwarmCoordinator(session_id, ctx.extra["task_dispatch"], cancel_worker, publish, finished)
                     coordinators[session_id] = coordinator
                 snapshot, receipt = await coordinator.start(data, ctx)

@@ -11,7 +11,7 @@ eliminating the overhead of temp file creation and cold Node.js startup per call
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from app.mcp.inproc import tool, create_tool_server
 from mcp.types import ToolAnnotations
@@ -415,19 +415,6 @@ def _is_tool_enabled(tool_name: str, ai_tools_config: dict) -> bool:
         return ai_tools_config.get(config_key, False)
 
     return False
-
-
-def get_enabled_tool_names(ai_tools_config: dict) -> List[str]:
-    """
-    Get list of MCP tool names that should be enabled based on config.
-
-    Returns tool names in the mcp__<server>__<tool> format for allowed_tools.
-    """
-    enabled = []
-    for tool_name in TOOL_CONFIG_MAP:
-        if _is_tool_enabled(tool_name, ai_tools_config):
-            enabled.append(f"mcp__ai-tools__{tool_name}")
-    return enabled
 
 
 # ============================================================================

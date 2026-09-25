@@ -17,15 +17,12 @@ class AgentOptions(SessionOptions):
     extra_args: dict[str, str | None] = field(default_factory=dict)
     settings: str | None = None
     resume: str | None = None
-    continue_conversation: bool = False
-    fork_session: bool = False
     can_use_tool: Callable | None = None
 
 
 @dataclass
 class PermissionResultAllow:
     updated_input: dict[str, Any] | None = None
-    updated_permissions: list[Any] | None = None
     behavior: str = field(default="allow", init=False)
 
 

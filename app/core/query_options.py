@@ -96,7 +96,6 @@ def _ai_tools_credential_config(
 # questions do not — they would stall on the question TTL. Fluid's AskUser has
 # the same interaction kind as the CLI's AskUserQuestion.
 WORKER_DISALLOWED_TOOLS = ("AskUserQuestion", "AskUser")
-WORKER_DISALLOWED_TOOL = WORKER_DISALLOWED_TOOLS[0]
 
 
 # The Claude Code CLI ships a ``claude-api`` skill (Anthropic SDK reference
@@ -531,33 +530,6 @@ COMPUTER_USE_GUIDANCE = (
     "- Synthetic input cannot operate the Windows UAC / secure desktop or the lock screen. "
     "If you hit an elevation prompt or a black screenshot, stop and ask the user to handle it."
 )
-
-# ─── Session store singleton (Phase 1.5) ────────────────────────────────────
-# Constructed once per process. Wrapped in try/except so Postgres
-# unavailability is non-fatal — callers get None and degrade gracefully.
-_session_store_singleton = None
-_session_store_init_attempted = False
-
-
-def _get_session_store():
-    """Return the module-level PgSessionStore singleton, or None if unavailable."""
-    global _session_store_singleton, _session_store_init_attempted
-    if _session_store_init_attempted:
-        return _session_store_singleton
-    _session_store_init_attempted = True
-    try:
-        from app.core.pg_session_store import PgSessionStore
-        _session_store_singleton = PgSessionStore()
-        logger.info("PgSessionStore singleton created")
-    except Exception:
-        logger.warning(
-            "PgSessionStore construction failed — proceeding without session_store. "
-            "Check the managed PostgreSQL supervisor and its private descriptor.",
-            exc_info=True,
-        )
-        _session_store_singleton = None
-    return _session_store_singleton
-
 
 # Token budgets for thinking modes (token-based thinking)
 THINKING_TOKEN_BUDGETS = {
@@ -1212,7 +1184,7 @@ def build_options_from_profile(
 
     final_system_prompt = _append_system_block(
         final_system_prompt,
-        parent_subagent_guidance(profile.get("id"), provider_id),
+        parent_subagent_guidance(),
     )
     final_system_prompt = _append_system_block(
         final_system_prompt,
@@ -1596,10 +1568,6 @@ def build_options_from_profile(
         # Streaming behavior - enable partial messages for real-time streaming
         include_partial_messages=config.get("include_partial_messages", True),
 
-        # Session behavior
-        continue_conversation=config.get("continue_conversation", False),
-        fork_session=config.get("fork_session", False),
-
         # Settings loading
         setting_sources=[] if session_mode == "chat" else config.get("setting_sources"),
 
@@ -1727,22 +1695,6 @@ def build_options_from_profile(
     # Resume existing session
     if resume_session_id:
         options.resume = resume_session_id
-
-    # Session store wiring — attach PgSessionStore when available. The harness
-    # adapter ignores ``session_store*`` and ``enable_file_checkpointing``, so
-    # both are inert on the options; checkpointing is still switched off when a
-    # store is attached so the two never appear together.
-    _store = _get_session_store()
-    if _store is not None:
-        options.session_store = _store
-        options.session_store_flush = "eager"
-        if getattr(options, "enable_file_checkpointing", False):
-            logger.warning(
-                "Disabling enable_file_checkpointing because a session_store is "
-                "attached — the SDK rejects combining the two, and the "
-                "mirrored transcript supersedes local-disk checkpoints."
-            )
-            options.enable_file_checkpointing = False
 
     # Carry the resolved model-provider binding on the options object. The fluid
     # HarnessAdapter reads it in connect_with_sdk_options and

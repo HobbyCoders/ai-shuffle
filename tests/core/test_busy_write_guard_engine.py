@@ -136,7 +136,7 @@ async def test_native_chat_admission_passes_its_lane_to_eviction(tmp_path):
         stack.enter_context(patch.object(qe, "memory_leg_for_options", return_value="native"))
         # The missing CWD stops at the next boundary, before adapter creation.
         stack.enter_context(patch("app.core.hook_service.attach_hooks_to_options", return_value=None))
-        await collect(qe.stream_to_websocket("fixture", "new-native", "claude-code"))
+        await collect(qe._stream_to_websocket_impl("fixture", "new-native", "claude-code"))
     assert lanes == ["native"]
     assert "busy-one" in busy_pool and "busy-two" in busy_pool
 
@@ -152,7 +152,7 @@ async def test_chat_gate_refuses_busy_client_and_never_writes_stdin():
 
     with ExitStack() as stack:
         _chat_patches(stack, pool)
-        events = await collect(qe.stream_to_websocket("hi", "sess-busy", "claude-code"))
+        events = await collect(qe._stream_to_websocket_impl("hi", "sess-busy", "claude-code"))
 
     assert any(e.get("type") == "error" and "busy" in e.get("message", "").lower()
                for e in events), events
@@ -177,7 +177,7 @@ async def test_chat_gate_uses_current_pool_entry_after_async_setup():
         # Any await between the pool read and the reuse decision will do;
         # the pending-checkout wait is one.
         stack.enter_context(patch("app.core.query_options.ensure_pending_checkout", new=_slow_checkout))
-        query = asyncio.create_task(collect(qe.stream_to_websocket(
+        query = asyncio.create_task(collect(qe._stream_to_websocket_impl(
             "hi", "sess-replaced", "claude-code",
             overrides={"provider_id": "provider-a"},
         )))
@@ -208,7 +208,7 @@ async def test_chat_gate_claims_is_streaming_at_decision_point():
     with ExitStack() as stack:
         options = _chat_patches(stack, pool)
         _claim_window_options(options)
-        await collect(qe.stream_to_websocket("hi", "sess-claim", "claude-code"))
+        await collect(qe._stream_to_websocket_impl("hi", "sess-claim", "claude-code"))
 
     assert observed == [True], (
         "is_streaming must already be claimed when the first await after the "
@@ -236,7 +236,7 @@ async def test_chat_gate_two_concurrent_entrants_exactly_one_proceeds():
         a_events: list = []
 
         async def _consume_a():
-            async for ev in qe.stream_to_websocket("first", "sess-race", "claude-code"):
+            async for ev in qe._stream_to_websocket_impl("first", "sess-race", "claude-code"):
                 a_events.append(ev)
 
         task_a = asyncio.create_task(_consume_a())
@@ -244,7 +244,7 @@ async def test_chat_gate_two_concurrent_entrants_exactly_one_proceeds():
         assert state.is_streaming is True
 
         # B arrives while A is mid-turn.
-        b_events = await collect(qe.stream_to_websocket("second", "sess-race", "claude-code"))
+        b_events = await collect(qe._stream_to_websocket_impl("second", "sess-race", "claude-code"))
 
         a_release.set()
         await asyncio.wait_for(task_a, timeout=5.0)
@@ -265,7 +265,7 @@ async def test_chat_is_streaming_cleared_on_exception():
 
     with ExitStack() as stack:
         _chat_patches(stack, pool)
-        events = await collect(qe.stream_to_websocket("hi", "sess-exc", "claude-code"))
+        events = await collect(qe._stream_to_websocket_impl("hi", "sess-exc", "claude-code"))
 
     assert any(e.get("type") == "error" for e in events), events
     assert state.is_streaming is False
@@ -285,7 +285,7 @@ async def test_chat_is_streaming_cleared_on_cancel():
 
     with ExitStack() as stack:
         _chat_patches(stack, pool)
-        events = await collect(qe.stream_to_websocket("hi", "sess-cancel", "claude-code"))
+        events = await collect(qe._stream_to_websocket_impl("hi", "sess-cancel", "claude-code"))
 
     assert any(e.get("type") == "interrupted" for e in events), events
     assert state.is_streaming is False
@@ -388,7 +388,7 @@ async def test_chat_claim_window_exception_clears_flag():
         options = _chat_patches(stack, pool)
         _claim_window_options(options)
         with pytest.raises(KeyboardInterrupt):
-            await collect(qe.stream_to_websocket("hi", "sess-window", "claude-code"))
+            await collect(qe._stream_to_websocket_impl("hi", "sess-window", "claude-code"))
 
     assert state.is_streaming is False, "claim must be released on claim-window failure"
     assert state.streaming_started_at is None
@@ -405,7 +405,7 @@ async def test_chat_claim_window_cancel_clears_flag():
         options = _chat_patches(stack, pool)
         _claim_window_options(options)
         with pytest.raises(asyncio.CancelledError):
-            await collect(qe.stream_to_websocket("hi", "sess-window", "claude-code"))
+            await collect(qe._stream_to_websocket_impl("hi", "sess-window", "claude-code"))
 
     assert state.is_streaming is False, "claim must be released on cancellation"
     assert state.streaming_started_at is None
@@ -499,7 +499,7 @@ async def test_chat_applies_permission_mode_on_reuse_without_respawn():
         options = _chat_patches(stack, pool)
         options.permission_mode = "plan"
         options.model = "m"  # unchanged → set_model must NOT fire
-        events = await collect(qe.stream_to_websocket("hi", "sess-perm", "claude-code"))
+        events = await collect(qe._stream_to_websocket_impl("hi", "sess-perm", "claude-code"))
 
     state.adapter.set_permission_mode.assert_awaited_once_with("plan")
     state.adapter.set_model.assert_not_awaited()
@@ -517,7 +517,7 @@ async def test_chat_permission_mode_unchanged_does_not_call_setter():
         options = _chat_patches(stack, pool)
         options.permission_mode = "plan"
         options.model = "m"
-        await collect(qe.stream_to_websocket("hi", "sess-noop", "claude-code"))
+        await collect(qe._stream_to_websocket_impl("hi", "sess-noop", "claude-code"))
 
     state.adapter.set_permission_mode.assert_not_awaited()
 
@@ -534,7 +534,7 @@ async def test_chat_permission_mode_setter_failure_does_not_propagate():
         options = _chat_patches(stack, pool)
         options.permission_mode = "plan"
         options.model = "m"
-        events = await collect(qe.stream_to_websocket("hi", "sess-perm-boom", "claude-code"))
+        events = await collect(qe._stream_to_websocket_impl("hi", "sess-perm-boom", "claude-code"))
 
     state.adapter.set_permission_mode.assert_awaited_once_with("plan")
     assert not any(e.get("type") == "error" for e in events), events

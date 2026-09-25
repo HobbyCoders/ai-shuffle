@@ -92,7 +92,7 @@ async def session_sync_websocket(
         })
 
         # Keep connection alive and handle client messages
-        ping_task = asyncio.create_task(ping_loop(websocket, device_id))
+        ping_task = asyncio.create_task(ping_loop(websocket))
 
         try:
             while True:

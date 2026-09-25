@@ -7,8 +7,8 @@ query_engine.py / query_background.py); `HarnessAdapter.requires_reconnect` /
 latent correctness — see docs/MULTI_PROVIDER_PLAN.md R2/R3. These tests target
 the live path primarily, with a light mirror pass over the adapter methods.
 
-R3: the comparison is the named `PROVIDER_ENV_KEYS` constant (the set of
-overlay-controlled provider env keys), not full env-dict equality (would force
+R3: the comparison uses the named `PROVIDER_IDENTITY_ENV_KEYS` and
+`PROVIDER_OVERLAY_ENV_KEYS` constants, not full env-dict equality (would force
 respawns on benign env churn, killing background subagents) and not a
 narrower 3-key tuple (would miss provider config edits).
 """
@@ -19,7 +19,6 @@ import pytest
 from app.core.agent_types import AgentOptions
 
 from app.core.session_pool import (
-    PROVIDER_ENV_KEYS,
     PROVIDER_IDENTITY_ENV_KEYS,
     PROVIDER_OVERLAY_ENV_KEYS,
     SessionState,
@@ -257,11 +256,6 @@ def test_identity_key_change_always_reconnects_even_native():
     state = _make_state({"ANTHROPIC_AUTH_TOKEN": "old"})
     new = _new_options({"ANTHROPIC_AUTH_TOKEN": "new"})
     assert requires_reconnect(state, new) is True
-
-
-def test_provider_env_keys_is_identity_plus_overlay():
-    """The union constant is preserved for existing importers."""
-    assert PROVIDER_ENV_KEYS == PROVIDER_IDENTITY_ENV_KEYS + PROVIDER_OVERLAY_ENV_KEYS
 
 
 def test_provider_env_requires_reconnect_helper_directly():

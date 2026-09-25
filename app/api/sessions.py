@@ -1127,7 +1127,7 @@ async def get_live_session(
 
     # Primary read: the Postgres session store.
     store_parse_failed = False
-    if include_messages and not messages and sdk_session_id:
+    if include_messages and sdk_session_id:
         try:
             from app.core.message_resolver import resolve_working_dir
 
@@ -1256,9 +1256,8 @@ async def get_live_session(
         # page (the whole transcript for any ordinary session), and this says
         # whether older messages exist and how to ask for them.
         "message_pagination": message_pagination,
+        "session_meta": session_meta,
     }
-    if session_meta:
-        result["session_meta"] = session_meta
 
     # Live ProviderAgent worker attribution: per-turn worker token/spend grouped by the worker's PROVIDER, while
     # the turn is still running. Attached ONLY when workers are actually live,

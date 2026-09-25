@@ -21,7 +21,8 @@ class UsageDeferred(Exception):
 # be retried on the normal exponential schedule.  The state row is durable,
 # so this negative cache also survives a worker restart.  A changed
 # credential produces a different identity; callers that repair/reconfigure
-# the same credential use ``resume_authentication`` to clear the old state.
+# the same credential use ``usage_budget.resume_authentication`` to clear the
+# old state.
 _PAUSE_STATUSES = frozenset((401, 403, 405, 410, 501))
 
 
@@ -74,11 +75,6 @@ def finish(key, now, status, retry_after=0, interval=300, *, lease=None):
             UPDATE usage_poll_state SET next_attempt = %s, failures = %s, paused = %s, lease_token = NULL
             WHERE identity = %s
         """, (now + delay, failures, status in _PAUSE_STATUSES, key))
-
-
-def resume_authentication(url, headers):
-    """Only explicit credential configuration resumes an authentication refusal."""
-    resume_identity(identity(url, headers))
 
 
 def resume_identity(key):

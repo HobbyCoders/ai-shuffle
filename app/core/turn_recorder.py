@@ -533,10 +533,6 @@ class TurnRecorder:
         self._recording_failed = False
         self._recording_failed_dropped = 0
         self.on_recording_failed: Optional[Callable[[], None]] = None
-        # seq of this turn's FIRST appended event — the truncation point for
-        # an empty-turn discard (record_empty_turn_discard, wired in a later
-        # commit).
-        self._first_seq: Optional[int] = None
         self._renew_task: Optional[asyncio.Task] = None
         # Serializes buffer mutation + appends (on_event vs. the flush timer)
         # so log order always reflects pump order.
@@ -593,11 +589,6 @@ class TurnRecorder:
         recorder = cls(session_id, command_id, run_id, fence_token, runner_id)
         if run_id is not None:
             recorder._renew_task = asyncio.create_task(recorder._renew_loop())
-        # Registry of the LAST recorder per session so the post-turn
-        # empty-turn-discard path (``discard_empty_turn``) can reach it after
-        # the pump has closed it — the instance itself never escapes
-        # ``stream_to_websocket``.
-        _last_turn_recorders[session_id] = recorder
         return recorder
 
     @classmethod
@@ -644,7 +635,6 @@ class TurnRecorder:
         )
         recorder.turn_id = turn_id
         recorder._owns_lease = False
-        _last_turn_recorders[session_id] = recorder
         return recorder
 
     async def start(
@@ -874,28 +864,6 @@ class TurnRecorder:
                 # Run left active (released — or expired/transferred if the
                 # release lost). Either way, re-check + broadcast the diff.
                 _notify_run_change(self.session_id)
-
-    async def record_empty_turn_discard(self) -> None:
-        """Append ``transcript.rewound`` erasing this turn's events.
-
-        For turns whose user message is discarded end-to-end (stopped before
-        any output — see the interrupted-user-message poller). Truncates the
-        reduced transcript from this turn's FIRST appended event. Unfenced —
-        the discard decision lands after the turn's run lease is released.
-        Reached post-turn via module-level ``discard_empty_turn``. Never raises.
-        """
-        if self._first_seq is None or self._recording_failed:
-            return
-        try:
-            await _append_unfenced(self.session_id, [_build_event(
-                contract.TranscriptRewound, self.session_id,
-                from_seq=self._first_seq,
-            )])
-        except Exception:
-            logger.warning(
-                "[TurnRecorder] record_empty_turn_discard failed for %s",
-                self.session_id, exc_info=True,
-            )
 
     # ------------------------------------------------------------------
     # translation core (lock held)
@@ -1234,17 +1202,15 @@ class TurnRecorder:
             return
         try:
             if self.run_id is not None and self.fence_token is not None:
-                seqs = await asyncio.to_thread(
+                await asyncio.to_thread(
                     session_events_db.append_events,
                     self.session_id, events,
                     run_id=self.run_id, fence_token=self.fence_token,
                 )
             else:
-                seqs = await asyncio.to_thread(
+                await asyncio.to_thread(
                     session_events_db.append_events, self.session_id, events
                 )
-            if self._first_seq is None and seqs:
-                self._first_seq = seqs[0]
             self._last_append_at = time.monotonic()
         except session_events_db.FenceViolation:
             self._mark_superseded(len(events))
@@ -1353,38 +1319,6 @@ class TurnRecorder:
 # ----------------------------------------------------------------------
 # Module-level taps (between turns / stop / park) — all unfenced appends.
 # ----------------------------------------------------------------------
-
-# Last recorder per session (set by ``TurnRecorder.maybe_create``). Lets the
-# post-turn empty-turn-discard path reach the just-closed recorder — the
-# instance itself is encapsulated inside ``stream_to_websocket``. Overwritten
-# every turn; entries are tiny (buffers are drained on close).
-_last_turn_recorders: Dict[str, "TurnRecorder"] = {}
-
-
-async def discard_empty_turn(session_id: str) -> None:
-    """Append ``transcript.rewound`` erasing the LAST recorded turn's events.
-
-    For a turn stopped before ANY output whose user message is discarded
-    end-to-end. Delegates to the last recorder's
-    ``record_empty_turn_discard`` (no-op if the turn appended nothing or no
-    recorder exists). Never raises.
-    """
-    recorder = _last_turn_recorders.get(session_id)
-    if recorder is None:
-        return
-    await recorder.record_empty_turn_discard()
-
-
-def pop_last_turn_recorder(session_id: str) -> None:
-    """Drop the session's last-recorder entry (session teardown).
-
-    ``_last_turn_recorders`` is overwritten per turn but never emptied when a
-    session goes away, so a long-lived server leaks one (tiny) entry per dead
-    session. Called from the session teardown paths alongside
-    ``task_registry.clear_session``. Never raises.
-    """
-    _last_turn_recorders.pop(session_id, None)
-
 
 async def _append_unfenced(session_id: str, events: List[Dict[str, Any]]) -> None:
     if not events:

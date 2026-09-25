@@ -271,5 +271,4 @@ async def finish_message_resume(session_id, settled, outcome):
         "task_id": session_id, "tool_use_id": session_id,
         "status": status, "summary": summary,
         "agent_message_turn_id": settled["id"],
-        "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
     })

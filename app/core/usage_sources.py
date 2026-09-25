@@ -158,13 +158,6 @@ def is_grok_subscription_row(row: Mapping[str, Any] | None) -> bool:
     return r.get("provider_type") == "grok" or r.get("auth_mode") == "grok"
 
 
-def is_chatgpt_subscription_row(row: Mapping[str, Any] | None) -> bool:
-    r = row or {}
-    if r.get("provider_type") == "openai":
-        return False
-    return r.get("provider_type") == "chatgpt" or r.get("auth_mode") == "chatgpt"
-
-
 def is_official_openrouter_row(row: Mapping[str, Any] | None) -> bool:
     try:
         url = urlsplit((row or {}).get("base_url") or "")

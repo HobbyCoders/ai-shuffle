@@ -58,7 +58,7 @@ class TestPingProtocol:
                 raise asyncio.CancelledError
 
         with patch("app.api.ws_utils.asyncio.sleep", fake_sleep):
-            await ping_loop(mock_ws, "test-device", send_fn=capture_send)
+            await ping_loop(mock_ws, send_fn=capture_send)
 
         assert len(sent_messages) >= 1, "No ping messages sent"
         ping_msg = sent_messages[0]
@@ -88,7 +88,7 @@ class TestPingProtocol:
 
         with patch("app.api.ws_utils.asyncio.sleep", no_sleep):
             await asyncio.wait_for(
-                ping_loop(mock_ws, "test-device", send_fn=failing_send), timeout=2
+                ping_loop(mock_ws, send_fn=failing_send), timeout=2
             )
         # The loop exits after the first failed send
         assert call_count == 1

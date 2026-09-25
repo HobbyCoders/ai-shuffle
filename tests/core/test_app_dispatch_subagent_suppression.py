@@ -64,7 +64,7 @@ async def _run(session_id, messages):
     pool = StubPool(state)
     with ExitStack() as stack:
         _chat_patches(stack, pool)
-        return await collect(qe.stream_to_websocket("prompt", session_id, "claude-code"))
+        return await collect(qe._stream_to_websocket_impl("prompt", session_id, "claude-code"))
 
 
 class TestAppDispatchSubagentStartSuppressed:

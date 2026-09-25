@@ -18,16 +18,6 @@ from app.db import database
 
 logger = logging.getLogger(__name__)
 
-# Written by app/api/auth.py at import; nothing in this module reads it.
-_SERVER_INSTANCE_ID = "unknown"
-
-
-def set_server_instance_id(instance_id: str):
-    """Set the server instance ID for diagnostic logging"""
-    global _SERVER_INSTANCE_ID
-    _SERVER_INSTANCE_ID = instance_id
-
-
 def find_gh_executable() -> Optional[str]:
     """Find the gh executable, handling Windows installations"""
     # First try shutil.which (works for PATH)
@@ -62,7 +52,6 @@ class AuthService:
         else:
             # Last resort fallback
             home = Path.home() if sys.platform == 'win32' else Path('/home/appuser')
-        self.config_dir = home / '.claude'
 
         # Match gh's config resolution, including custom/container locations.
         if os.environ.get('GH_CONFIG_DIR'):
@@ -86,14 +75,6 @@ class AuthService:
     def is_setup_required(self) -> bool:
         from app.core.owner_auth import setup_required
         return setup_required()
-
-    def login(self, username, password):
-        return None
-
-    def validate_session(self, token: str) -> bool:
-        if not token or not token.startswith('shr_'):
-            return False
-        return database.get_auth_session(token) is not None
 
     def logout(self, token: str):
         if token:
@@ -125,32 +106,6 @@ class AuthService:
         """
         from app.core import claude_cli_status
         return claude_cli_status.is_signed_in_cached()
-
-    def get_claude_token_status(self) -> Dict[str, Any]:
-        """Token-shaped view of the CLI probe, for callers of the old fields.
-
-        The CLI owns and refreshes its token; AI Shuffle no longer reads it,
-        so expiry and refresh-token presence are unknown.
-        """
-        signed_in = self.is_claude_authenticated()
-        return {
-            "token_valid": signed_in,
-            "expired": False,
-            "expires_at": None,
-            "has_refresh_token": None,
-        }
-
-    def get_claude_auth_info(self) -> Dict[str, Any]:
-        """Get Claude CLI authentication info, as the CLI reports it."""
-        token_status = self.get_claude_token_status()
-        return {
-            "authenticated": token_status["token_valid"],
-            "token_valid": token_status["token_valid"],
-            "expired": False,
-            "expires_at": None,
-            "has_refresh_token": None,
-            "config_dir": str(self.config_dir),
-        }
 
     def get_login_instructions(self) -> Dict[str, Any]:
         """Get instructions for Claude CLI login"""

@@ -235,36 +235,6 @@ class GitHubService:
                 ttl=None if value else GH_AUTH_NEGATIVE_TTL_SECONDS,
             )
 
-    def get_auth_info(self) -> Dict[str, Any]:
-        """
-        Get detailed authentication information.
-
-        Returns:
-            Dict with 'authenticated', 'username', 'scopes' keys
-        """
-        info = {
-            'authenticated': False,
-            'username': None,
-            'scopes': []
-        }
-
-        try:
-            result = self._run_gh(['auth', 'status'], timeout=10)
-            info['authenticated'] = result.returncode == 0
-
-            # Parse output for username and scopes
-            output = result.stdout + result.stderr
-
-            # Look for "Logged in to github.com account <username>"
-            username_match = re.search(r'account\s+(\S+)', output)
-            if username_match:
-                info['username'] = username_match.group(1)
-
-            return info
-        except Exception as e:
-            logger.debug(f"Failed to get auth info: {e}")
-            return info
-
     def get_repo_from_remote(self, working_dir: str) -> Optional[str]:
         """
         Extract owner/repo from git remote URL in a directory.

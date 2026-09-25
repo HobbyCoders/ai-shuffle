@@ -12,8 +12,8 @@ This module is the main orchestrator. Related logic is split across:
 - query_background.py     — background (fire-and-forget) query execution
 - query_session_lifecycle.py — session state inspection, interrupt, active lists
 
-All public symbols from those modules are re-exported here for backward
-compatibility.
+A few of their symbols are re-exported here for callers and test patch
+targets that still reach them through this module.
 """
 
 import json
@@ -23,10 +23,9 @@ import re
 import time
 import uuid
 import asyncio
-from typing import Optional, Dict, Any, AsyncGenerator, Callable, List
+from typing import Optional, Dict, Any, AsyncGenerator, List
 from datetime import datetime, timezone
 
-from app.core.agent_types import AgentOptions
 # Provider-agnostic mirrors of the SDK streaming message vocabulary (identical
 # class/attribute names — see app/core/provider/events.py). Every stream this
 # module consumes is translated at its boundary (adapter.receive_events()), so
@@ -52,7 +51,7 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
-    requires_reconnect, reconnect_option_names, graceful_disconnect, mark_subprocess_oom_killable,
+    requires_reconnect, reconnect_option_names, mark_subprocess_oom_killable,
 )
 from app.core.session_title import derive_session_title
 from app.core.profiles import get_profile
@@ -63,34 +62,18 @@ from app.core.user_question_handler import user_question_handler
 from app.core.task_registry import task_registry
 from app.core.system_message_filter import HIDDEN_SYSTEM_SUBTYPES
 
-# --- Re-export symbols from extracted modules for backward compatibility ---
-# These were originally defined here; other files import them from query_engine.
+# Helpers from the extracted modules. Some are also reached through this module
+# by other code and tests (``qe.<name>`` patch targets, app/api imports).
 from app.core.query_streaming import (  # noqa: F401 — re-exports
     extract_mcp_image,
     is_context_snapshot_only as _is_context_snapshot_only,
     truncate_large_payload,
-    MAX_TOOL_OUTPUT_SIZE,
-    MAX_DISPLAY_OUTPUT_SIZE,
 )
 from app.core.query_options import (  # noqa: F401 — re-exports
-    THINKING_TOKEN_BUDGETS,
     resolve_note_references,
     DEFAULT_SECURITY_INSTRUCTIONS,
-    get_security_instructions,
-    generate_environment_details,
     build_options_from_profile,
     WorktreeUnavailableError,
-    _build_thinking_config,
-    _build_mcp_servers_dict,
-    _build_mcp_servers_dict_with_ai_tools,
-    _build_plugins_list,
-    _is_git_repo,
-    _get_os_version,
-    _get_decrypted_api_key,
-    _resolve_api_credential,
-    _get_hook_tool_names,
-    _build_extra_args,
-    _build_env_with_ai_tools,
 )
 from app.core.query_persistence import (  # noqa: F401 — re-exports
     _wrap_stderr_capture,
@@ -105,17 +88,11 @@ from app.core.memory_sync import (
     memory_leg_for_options, reconcile_memory, push_memory,
 )
 from app.core.query_background import (  # noqa: F401 — re-exports
-    _pending_background_tasks,
-    _store_background_task,
-    _run_background_query,
     start_background_query,
 )
 from app.core.query_session_lifecycle import (  # noqa: F401 — re-exports
-    get_session_state,
     interrupt_session,
     stop_session_task,
-    stop_all_background_tasks,
-    get_active_sessions,
     get_streaming_sessions,
 )
 
@@ -184,11 +161,8 @@ _TASK_NOTIFICATION_STATUS_MAP = {
 # UNLIKE TaskNotificationMessage, a TaskUpdatedMessage is NOT always terminal — it
 # fires on every state transition (pending/running/paused/completed/failed/killed,
 # per the SDK's TaskUpdatedStatus literal). We act ONLY on its terminal statuses,
-# and map them onto the registry vocabulary. This is a DEDICATED set (not the
-# shared ``_TERMINAL_TASK_STATUSES`` in chat_ws_handler, whose values are the
-# *notification* literal) so adding the update-only "killed" value here cannot
-# alter the notification path's behaviour. "stopped" is included defensively even
-# though TaskUpdatedStatus uses "killed" for the TaskStop case.
+# and map them onto the registry vocabulary. "stopped" is included defensively
+# even though TaskUpdatedStatus uses "killed" for the TaskStop case.
 _TASK_UPDATE_TERMINAL_STATUS_MAP = {
     "completed": "completed",
     "failed": "error",
@@ -1570,49 +1544,6 @@ def pooled_client_lacks_approver(state: Any, broadcast_func: Any) -> bool:
     client, so the turn needs a fresh one or its prompts go unanswered.
     """
     return bool(broadcast_func) and not getattr(state.adapter, "has_permission_callback", True)
-
-
-async def stream_to_websocket(
-    prompt: str,
-    session_id: str,
-    profile_id: str,
-    project_id: Optional[str] = None,
-    overrides: Optional[Dict[str, Any]] = None,
-    broadcast_func: Optional[callable] = None,
-    api_user_id: Optional[str] = None,
-    user_id: Optional[str] = None,
-    v2_command_id: Optional[str] = None,
-) -> AsyncGenerator[Dict[str, Any], None]:
-    """Recording tap around ``_stream_to_websocket_impl``.
-
-    A ``TurnRecorder`` observes every yielded pump event BEFORE it is passed to
-    the consumer and appends the typed translation to the session event log;
-    ``close()`` runs in the ``finally`` so the crash/abandonment path still
-    records a terminal ``turn.aborted``. When no recorder is available this
-    wrapper is a pure passthrough. See app/core/turn_recorder.py.
-    """
-    from app.core.turn_recorder import TurnRecorder
-
-    recorder = await TurnRecorder.maybe_create(session_id, command_id=v2_command_id)
-    if recorder:
-        await recorder.start(prompt, profile_id=profile_id)
-    try:
-        async for event in _stream_to_websocket_impl(
-            prompt=prompt,
-            session_id=session_id,
-            profile_id=profile_id,
-            project_id=project_id,
-            overrides=overrides,
-            broadcast_func=broadcast_func,
-            api_user_id=api_user_id,
-            user_id=user_id,
-        ):
-            if recorder:
-                await recorder.on_event(event)
-            yield event
-    finally:
-        if recorder:
-            await recorder.close()
 
 
 async def _stream_to_websocket_impl(

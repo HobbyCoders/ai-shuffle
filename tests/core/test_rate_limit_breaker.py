@@ -133,7 +133,6 @@ class TestTripAndExpiry:
         sees the same open circuit (the 07-22 storm spanned many sessions)."""
         circuit_breaker.record_rate_limited(PROVIDER)
         assert circuit_breaker.check(PROVIDER) is not None
-        assert circuit_breaker.get_breaker().check(PROVIDER) is not None
 
     def test_until_reflects_retry_after(self):
         now = 1_000_000.0

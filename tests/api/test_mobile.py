@@ -24,7 +24,6 @@ from app.api.mobile import (
     get_device_from_api_key,
     MOBILE_API_KEY_PREFIX,
     MOBILE_API_KEY_EXPIRY_DAYS,
-    PENDING_ACTION_EXPIRY_MINUTES,
 )
 
 
@@ -119,10 +118,6 @@ class TestExpiryConstants:
     def test_api_key_expiry_days(self):
         """New API keys expire after 90 days; legacy rows retain their deadline."""
         assert MOBILE_API_KEY_EXPIRY_DAYS == 90
-
-    def test_pending_action_expiry_minutes(self):
-        """Pending action expiry should be 5 minutes."""
-        assert PENDING_ACTION_EXPIRY_MINUTES == 5
 
 
 # =============================================================================
@@ -331,166 +326,6 @@ class TestUpdateCapabilities:
         )
 
         assert response.status_code == 403
-
-
-# =============================================================================
-# Pending Actions Tests
-# =============================================================================
-
-class TestGetPendingActions:
-    """Test pending actions retrieval."""
-
-    def test_get_pending_actions_success(self, client, mock_database, mock_auth):
-        """Should return pending actions for authenticated device."""
-        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
-        now = datetime.now(timezone.utc)
-        mock_database.get_pending_actions_for_device.return_value = [
-            {
-                "id": "action-1",
-                "device_id": "test-device",
-                "action_type": "approve_command",
-                "params": {"command": "rm -rf /tmp/test"},
-                "security_level": "high",
-                "created_at": now.isoformat(),
-                "expires_at": (now + timedelta(minutes=5)).isoformat(),
-                "status": "pending"
-            }
-        ]
-
-        response = client.get(
-            "/api/v1/mobile/pending",
-            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
-        )
-
-        assert response.status_code == 200
-        actions = response.json()
-        assert len(actions) == 1
-        assert actions[0]["id"] == "action-1"
-        assert actions[0]["action_type"] == "approve_command"
-
-
-class TestConfirmAction:
-    """Test action confirmation endpoint."""
-
-    def test_confirm_action_approved(self, client, mock_database, mock_auth):
-        """Approved action should update status."""
-        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
-        now = datetime.now(timezone.utc)
-        mock_database.get_pending_action.return_value = {
-            "id": "action-1",
-            "device_id": "test-device",
-            "status": "pending",
-            "security_level": "normal",
-            "expires_at": (now + timedelta(minutes=5)).isoformat()
-        }
-        mock_database.update_pending_action_status.return_value = True
-
-        response = client.post(
-            "/api/v1/mobile/confirm/action-1",
-            json={"approved": True, "biometric_verified": False},
-            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
-        )
-
-        assert response.status_code == 200
-        assert response.json()["result"] == "approved"
-        mock_database.update_pending_action_status.assert_called_once_with("action-1", "approved")
-
-    def test_confirm_action_rejected(self, client, mock_database, mock_auth):
-        """Rejected action should update status."""
-        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
-        now = datetime.now(timezone.utc)
-        mock_database.get_pending_action.return_value = {
-            "id": "action-2",
-            "device_id": "test-device",
-            "status": "pending",
-            "security_level": "normal",
-            "expires_at": (now + timedelta(minutes=5)).isoformat()
-        }
-        mock_database.update_pending_action_status.return_value = True
-
-        response = client.post(
-            "/api/v1/mobile/confirm/action-2",
-            json={"approved": False, "biometric_verified": False},
-            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
-        )
-
-        assert response.status_code == 200
-        assert response.json()["result"] == "rejected"
-
-    def test_confirm_action_not_found(self, client, mock_database, mock_auth):
-        """Non-existent action should return 404."""
-        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
-        mock_database.get_pending_action.return_value = None
-
-        response = client.post(
-            "/api/v1/mobile/confirm/nonexistent",
-            json={"approved": True, "biometric_verified": False},
-            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
-        )
-
-        assert response.status_code == 404
-
-    def test_confirm_action_wrong_device(self, client, mock_database, mock_auth):
-        """Action for different device should return 403."""
-        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("device-a")
-        mock_database.get_pending_action.return_value = {
-            "id": "action-1",
-            "device_id": "device-b",
-            "status": "pending"
-        }
-
-        response = client.post(
-            "/api/v1/mobile/confirm/action-1",
-            json={"approved": True, "biometric_verified": False},
-            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
-        )
-
-        assert response.status_code == 403
-
-    def test_confirm_already_processed_action(self, client, mock_database, mock_auth):
-        """Already processed action should return 400."""
-        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
-        mock_database.get_pending_action.return_value = {
-            "id": "action-1",
-            "device_id": "test-device",
-            "status": "approved"
-        }
-
-        response = client.post(
-            "/api/v1/mobile/confirm/action-1",
-            json={"approved": True, "biometric_verified": False},
-            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
-        )
-
-        assert response.status_code == 400
-
-    def test_confirm_high_security_requires_biometric(self, client, mock_database, mock_auth):
-        """High security action requires biometric verification."""
-        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
-        now = datetime.now(timezone.utc)
-        mock_database.get_pending_action.return_value = {
-            "id": "action-1",
-            "device_id": "test-device",
-            "status": "pending",
-            "security_level": "high",
-            "expires_at": (now + timedelta(minutes=5)).isoformat()
-        }
-
-        response = client.post(
-            "/api/v1/mobile/confirm/action-1",
-            json={"approved": True, "biometric_verified": False},
-            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
-        )
-
-        assert response.status_code == 400
-        assert "Biometric" in response.json()["detail"]
 
 
 # =============================================================================
@@ -782,9 +617,5 @@ class TestModuleImports:
 
     def test_mobile_models_import(self):
         """Mobile models should be importable."""
-        from app.core.models import (
-            MobileDevice,
-            PendingAction,
-        )
+        from app.core.models import MobileDevice
         assert MobileDevice is not None
-        assert PendingAction is not None

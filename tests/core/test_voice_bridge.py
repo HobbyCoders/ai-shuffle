@@ -177,7 +177,7 @@ async def test_start_opens_sideband_and_configures_the_session(mock_db, fake_soc
         "create_response": True,
     }
     # The coordinator prompt (VW4 replaced the V1 placeholder; alias kept).
-    assert session["instructions"] == vb.VOICE_INSTRUCTIONS_V1
+    assert session["instructions"] == vb.VOICE_INSTRUCTIONS
     await bridge.stop()
 
 
@@ -193,7 +193,7 @@ async def test_start_seeds_recent_history_as_conversation_context(
 
     bridge = await _bridge(fake_sockets)
     instructions = fake_sockets[0].session_update()["session"]["instructions"]
-    assert instructions.startswith(vb.VOICE_INSTRUCTIONS_V1)
+    assert instructions.startswith(vb.VOICE_INSTRUCTIONS)
     # Nothing the model said last time is in the instruction block any more.
     assert vb.CONTEXT_SEED_HEADER not in instructions
     assert "it finished ten minutes ago" not in instructions
@@ -788,7 +788,6 @@ async def test_instructions_are_the_delegation_first_contract(mock_db, fake_sock
     instructions = fake_sockets[0].session_update()["session"]["instructions"]
 
     assert instructions == vb.VOICE_INSTRUCTIONS
-    assert vb.VOICE_INSTRUCTIONS_V1 is vb.VOICE_INSTRUCTIONS   # VW3 alias holds
     assert "You are a coordinator" in instructions
     assert "dispatch_agent" in instructions and "respond_approval" in instructions
     assert "message_agent" in instructions and "stop_agent" in instructions
@@ -1482,7 +1481,9 @@ async def test_the_default_pick_is_stable_across_row_order(
     for ordering in (rows, list(reversed(rows))):
         monkeypatch.setattr(database, "get_all_profiles", lambda o=ordering: list(o))
         bridge = await _bridge(fake_sockets)
-        assert await bridge._default_agent_ref() == "alpha"
+        rows = vb._roster_rows(await bridge._voice_roster())
+        picked = vb._pick_default_agent(rows, preferred=await bridge._caller_profile_id())
+        assert picked == "alpha"
         await bridge.stop()
 
 

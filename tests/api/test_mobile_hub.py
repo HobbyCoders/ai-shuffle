@@ -373,15 +373,6 @@ def test_authoritative_owner_checked(setup, monkeypatch, result):
         account_hub.mobile_hub_ownership(database.get_mobile_device(DEVICE))
 
 
-def test_controller_cannot_become_admin(setup, monkeypatch):
-    from app.core.auth import auth_service
-    lookup = Mock(return_value={'token': 'injected'})
-    monkeypatch.setattr(database, 'get_auth_session', lookup)
-    assert not auth_service.validate_session('shc_injected')
-    assert not auth_service.validate_session('aim_injected')
-    lookup.assert_not_called()
-
-
 def test_enroll_requires_link_and_limited(setup):
     body = {'ticket': 'ticket', 'device_info': info().model_dump()}
     assert setup.post('/api/v1/mobile/hub/enroll', json=body).status_code == 403

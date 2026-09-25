@@ -18,12 +18,8 @@ from fastapi import APIRouter, WebSocket, Query
 
 from app.api.chat_ws_handler import ChatWebSocketHandler
 
-# Re-exported for chat_ws_handler, app.core.resource_monitor and tests.
+# Re-exported for chat_ws_handler and tests.
 from app.api.ws_auth import authenticate_websocket  # noqa: F401
-from app.api.ws_cleanup import (  # noqa: F401
-    _active_chat_sessions,
-    _active_sessions_lock,
-)
 from app.api.ws_utils import ping_loop  # noqa: F401
 from app.api.ws_cli import (  # noqa: F401
     _active_cli_bridges,
