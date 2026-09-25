@@ -132,3 +132,45 @@ async def test_no_sdk_hooks_leave_the_bus_neutral():
     adapter = HarnessAdapter()
     decision = await adapter.hooks.emit("PreToolUse", _pre_tool_payload("Bash"))
     assert decision.action == "allow" and decision.permission_decision is None
+
+
+@pytest.mark.asyncio
+async def test_db_hooks_on_observed_events_are_dispatched_from_the_bus(monkeypatch, tmp_path):
+    """DB hooks on events without a blocking handler (PostToolUse,
+    UserPromptSubmit, ...) reach execute_hooks_for_event when the bus fires,
+    and never change the turn's outcome."""
+    monkeypatch.setattr(hook_service, "_project_has_db_pretooluse_hooks", lambda _p: False)
+    monkeypatch.setattr(hook_service.database, "get_all_hooks_for_project", lambda _p: [
+        {"event": "PostToolUse", "enabled": True},
+        {"event": "UserPromptSubmit", "enabled": True},
+        {"event": "SessionEnd", "enabled": False},
+    ])
+    fired: list[tuple] = []
+
+    async def _dispatch(project_id, event, event_data, tool_name=None, session_id=None):
+        fired.append((project_id, event, tool_name, event_data.get("hook_event_name")))
+
+    monkeypatch.setattr(hook_service, "execute_hooks_for_event", _dispatch)
+    config = hook_service.build_hooks_config(str(tmp_path), "proj-1")
+    assert "SessionEnd" not in config  # disabled hooks register nothing
+
+    adapter = HarnessAdapter()
+    adapter._sdk_hook_bus = sdk_hooks_bus(config, str(tmp_path))
+    post = await adapter.hooks.emit("PostToolUse", {
+        **_pre_tool_payload("Bash"), "output": {"stdout": "ok"},
+    })
+    await adapter.hooks.emit("TurnStart", {"session_id": "ses_1", "turn_id": "t1", "prompt": "hi"})
+
+    assert post.action != "deny"
+    assert fired == [
+        ("proj-1", "PostToolUse", "Bash", "PostToolUse"),
+        ("proj-1", "UserPromptSubmit", None, "UserPromptSubmit"),
+    ]
+
+
+def test_project_less_sessions_register_app_level_observed_hooks(monkeypatch, tmp_path):
+    monkeypatch.setattr(hook_service.database, "get_app_hooks", lambda: [
+        {"event": "SessionStart", "enabled": True},
+    ])
+    config = hook_service.build_hooks_config(str(tmp_path), None)
+    assert "SessionStart" in config

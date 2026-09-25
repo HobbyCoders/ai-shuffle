@@ -536,6 +536,28 @@ class TestUpdateProfileEndpoint:
             assert result["config"]["model"] == "opus"
 
     @pytest.mark.asyncio
+    async def test_update_config_is_full_replacement(self):
+        """PUT ``config`` replaces the stored config; it is not merged.
+
+        The agent editor (ProfileCard.svelte buildProfilePayload) always sends
+        the complete config and relies on replacement to clear fields, e.g.
+        switching tool access to 'all' drops ``allowed_tools`` by omitting it.
+        """
+        from app.api.agents import update_profile
+        from app.core.models import ProfileUpdate, ProfileConfig
+
+        profile = {**sample_profile(), "config": {"model": "sonnet", "allowed_tools": ["Read"]}}
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = profile
+            mock_db.update_profile.return_value = profile
+            await update_profile(
+                "test-profile", ProfileUpdate(config=ProfileConfig(model="opus")), token="t"
+            )
+        written = mock_db.update_profile.call_args.kwargs["config"]
+        assert written.get("model") == "opus"
+        assert "allowed_tools" not in written
+
+    @pytest.mark.asyncio
     async def test_update_builtin_profile(self):
         """Updating a builtin profile should work (allow_builtin=True)."""
         from app.api.agents import update_profile

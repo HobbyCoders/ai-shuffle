@@ -8,7 +8,7 @@ import logging
 import time
 import uuid
 
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, Request, status
 from fastapi.responses import StreamingResponse
 from starlette.requests import ClientDisconnect
 
@@ -17,7 +17,10 @@ from app.core.models import (
 )
 from app.core.query_engine import stream_query, interrupt_session, start_background_query
 from app.core.session_title import derive_session_title
-from app.api.auth import require_api_key, require_auth
+from app.db import database
+from app.db.async_database import run_sync
+from app.api.auth import get_api_user_from_request, require_api_key, require_auth
+from app.api.sessions_helpers import check_session_access_for_api_user, require_session
 from app.api.sse_utils import is_client_disconnect
 
 logger = logging.getLogger(__name__)
@@ -528,13 +531,17 @@ async def start_conversation(
 
 @router.post("/session/{session_id}/interrupt")
 async def interrupt(
+    request: Request,
     session_id: str,
     token: str = Depends(require_auth)
 ):
     """
     Interrupt an active streaming session.
     Returns success if the session was interrupted, error if not found or already completed.
+    A restricted API user may only interrupt sessions it can access (403 otherwise).
     """
+    if get_api_user_from_request(request):
+        await require_session(request, session_id)
     success = await interrupt_session(session_id)
 
     if success:
@@ -548,11 +555,32 @@ async def interrupt(
 
 @router.get("/streaming/active")
 async def list_active_sessions(
+    request: Request,
     token: str = Depends(require_auth)
 ):
     """
     List all currently streaming sessions (actively generating responses).
     Note: This returns sessions that are actively streaming, not just connected.
+    An API user only sees the sessions it can access.
     """
     from app.core.query_engine import get_streaming_sessions
-    return {"active_sessions": get_streaming_sessions()}
+    active = get_streaming_sessions()
+    api_user = get_api_user_from_request(request)
+    if api_user:
+        active = await run_sync(_accessible_session_ids, api_user, active)
+    return {"active_sessions": active}
+
+
+def _accessible_session_ids(api_user: dict, session_ids: list) -> list:
+    """The subset of ``session_ids`` the API user may access (unknown ids drop)."""
+    visible = []
+    for session_id in session_ids:
+        session = database.get_session(session_id)
+        if not session:
+            continue
+        try:
+            check_session_access_for_api_user(api_user, session)
+        except HTTPException:
+            continue
+        visible.append(session_id)
+    return visible

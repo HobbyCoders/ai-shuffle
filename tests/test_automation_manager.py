@@ -7,7 +7,9 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.core.automation_manager import AutomationManager
+from datetime import datetime, timedelta, timezone
+
+from app.core.automation_manager import AutomationManager, crontab_day_of_week
 
 
 # =============================================================================
@@ -992,6 +994,62 @@ class TestScheduleReconcile:
             await manager.schedule_automation("auto-1")
         assert manager._scheduled_versions["auto-1"] == AutomationManager._trigger_version(auto)
         manager._scheduler.add_job.assert_called_once()
+
+
+class TestCronDayOfWeek:
+    """Cron day-of-week follows crontab semantics (0 and 7 = Sunday), not
+    APScheduler's Monday=0 numbering."""
+
+    async def _fire_days(self, manager, expression, start):
+        """Weekday names of the next 7 fire times of a scheduled cron trigger."""
+        auto = {
+            "id": "auto-1",
+            "is_enabled": True,
+            "triggers": [{"type": "cron", "config": {"expression": expression, "timezone": "UTC"}}],
+        }
+        manager._scheduler = MagicMock(get_jobs=MagicMock(return_value=[]))
+        with patch("app.core.automation_manager.database") as db:
+            db.get_automation.return_value = auto
+            await manager.schedule_automation("auto-1")
+        trigger = manager._scheduler.add_job.call_args.args[1]
+        days, prev, now = [], None, start
+        for _ in range(7):
+            nxt = trigger.get_next_fire_time(prev, now)
+            days.append(nxt.strftime("%a"))
+            prev, now = nxt, nxt + timedelta(minutes=1)
+        return days
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("expression,expected", [
+        ("0 9 * * 1-5", ["Mon", "Tue", "Wed", "Thu", "Fri", "Mon", "Tue"]),
+        ("0 9 * * 0", ["Sun"] * 7),
+        ("0 9 * * 7", ["Sun"] * 7),
+        ("0 9 * * 5", ["Fri"] * 7),
+        ("0 9 * * 0,6", ["Sat", "Sun", "Sat", "Sun", "Sat", "Sun", "Sat"]),
+        ("0 9 * * mon-fri", ["Mon", "Tue", "Wed", "Thu", "Fri", "Mon", "Tue"]),
+    ])
+    async def test_weekday_numbering_is_crontab(self, manager, expression, expected):
+        # 2026-09-26 is a Saturday.
+        start = datetime(2026, 9, 26, 0, 0, tzinfo=timezone.utc)
+        assert await self._fire_days(manager, expression, start) == expected
+
+    @pytest.mark.parametrize("field,expected", [
+        ("*", "*"),
+        ("1-5", "mon,tue,wed,thu,fri"),
+        ("0", "sun"),
+        ("7", "sun"),
+        ("5-7", "fri,sat,sun"),
+        ("*/2", "sun,tue,thu,sat"),
+        ("1-5/2", "mon,wed,fri"),
+        ("mon-fri", "mon-fri"),
+        ("sat,0", "sat,sun"),
+    ])
+    def test_crontab_day_of_week_translation(self, field, expected):
+        assert crontab_day_of_week(field) == expected
+
+    def test_out_of_range_day_rejected(self):
+        with pytest.raises(ValueError):
+            crontab_day_of_week("8")
 
 
 class TestExecuteRunProjectResolution:

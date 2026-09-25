@@ -711,6 +711,12 @@ class TestStartConversation:
 # Test Interrupt Session Endpoint
 # =============================================================================
 
+def _owner_request():
+    """An owner request (no API user): no per-session filtering applies."""
+    from types import SimpleNamespace
+    return SimpleNamespace(state=SimpleNamespace(api_user=None))
+
+
 class TestInterruptSession:
     """Tests for POST /api/v1/session/{session_id}/interrupt endpoint."""
 
@@ -731,7 +737,7 @@ class TestInterruptSession:
         """Should interrupt active session successfully."""
         from app.api.query import interrupt
 
-        result = await interrupt("session-123", "test-token")
+        result = await interrupt(_owner_request(), "session-123", "test-token")
 
         assert result["status"] == "interrupted"
         assert result["session_id"] == "session-123"
@@ -746,7 +752,7 @@ class TestInterruptSession:
         mock_interrupt_dependencies["interrupt"].return_value = False
 
         with pytest.raises(HTTPException) as exc_info:
-            await interrupt("nonexistent-session", "test-token")
+            await interrupt(_owner_request(), "nonexistent-session", "test-token")
 
         assert exc_info.value.status_code == 404
         assert "No active session found" in str(exc_info.value.detail)
@@ -777,7 +783,7 @@ class TestListActiveSessions:
         """Should return list of active streaming sessions."""
         from app.api.query import list_active_sessions
 
-        result = await list_active_sessions("test-token")
+        result = await list_active_sessions(_owner_request(), "test-token")
 
         assert "active_sessions" in result
         assert result["active_sessions"] == ["session-1", "session-2", "session-3"]
@@ -789,7 +795,7 @@ class TestListActiveSessions:
 
         mock_list_dependencies["get_sessions"].return_value = []
 
-        result = await list_active_sessions("test-token")
+        result = await list_active_sessions(_owner_request(), "test-token")
 
         assert result["active_sessions"] == []
 

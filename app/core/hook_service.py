@@ -5,14 +5,12 @@ This service provides a unified interface for handling hooks from multiple sourc
 1. Plugin hooks - Shell/Python scripts defined in plugin hooks.json files
 2. Database hooks - Custom hooks created via HooksCard
 
-IMPORTANT: The Claude Agent SDK does NOT auto-execute plugin hooks!
-Unlike the terminal CLI which reads hooks.json and executes the scripts,
-the SDK only executes Python callbacks we provide via options.hooks.
-
-This service bridges that gap by:
+The harness runs only the Python callbacks on ``options.hooks`` (bridged onto
+fluid's HookBus by ``app.core.provider.sdk_hook_bridge``); nothing executes a
+plugin's hooks.json on its own. This service bridges that gap by:
 1. Reading all enabled plugins' hooks.json files
 2. Creating Python wrapper functions that execute the plugin scripts
-3. Registering those wrappers with the SDK
+3. Attaching those wrappers to the options (``attach_hooks_to_options``)
 
 This enables plugins like Ralph Loop, security-guidance, etc. to work
 through AI Shuffle just like they do in the terminal CLI.
@@ -35,7 +33,12 @@ from app.core.agent_types import (
 
 from app.db import database
 from app.db.async_database import run_sync
-from app.core.hook_executor import execute_hook, kill_hook_process, spawn_hook_shell
+from app.core.hook_executor import (
+    execute_hook,
+    execute_hooks_for_event,
+    kill_hook_process,
+    spawn_hook_shell,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -645,7 +648,7 @@ def _map_db_pretooluse_decision(
     """
     Map a DB bash hook's result to a PreToolUse permission decision.
 
-    Semantics (matching the bundled CLI's hook contract):
+    Semantics (matching the Claude Code CLI's hook contract):
       - Parseable JSON stdout:
           * hookSpecificOutput.permissionDecision (or top-level permissionDecision)
             in {allow, deny, ask}  → mapped directly, with permissionDecisionReason.
@@ -836,7 +839,7 @@ def create_agent_arg_strip_hook_handler(
     Create a PreToolUse handler that strips coerced ``model``/``isolation`` args
     from Agent/Task tool calls on translated (ChatGPT/Codex-served) mains.
 
-    Ruling S8-R1: a translated main's Responses backend coerces every tool schema
+    A translated main's Responses backend coerces every tool schema
     to strict:true + all-props-required, so the model is grammar-forced to fill
     ``model`` and ``isolation`` on every Agent call. Both are enums with no neutral
     value, so the filled value carries no intent — and on a translated main every
@@ -889,6 +892,40 @@ def _project_has_db_pretooluse_hooks(project_id: Optional[str]) -> bool:
     except Exception as e:
         logger.debug(f"Could not check for DB PreToolUse hooks: {e}")
         return False
+
+
+# DB hook events with no blocking handler of their own (PreToolUse and Stop have
+# one). Their bash/webhook hooks are observational: dispatched fire-and-forget
+# through hook_executor.execute_hooks_for_event, so they cannot block or modify.
+_OBSERVED_DB_HOOK_EVENTS = (
+    "PostToolUse", "UserPromptSubmit", "SessionStart", "SessionEnd",
+    "SubagentStop", "PreCompact", "Notification",
+)
+
+
+def _db_observed_hook_events(project_id: Optional[str]) -> List[str]:
+    """Observed events with at least one enabled DB hook (project + app-level).
+    Best-effort: a DB error means none, so config construction never fails."""
+    try:
+        hooks = database.get_all_hooks_for_project(project_id) if project_id else database.get_app_hooks()
+        events = {h.get("event") for h in hooks or () if h.get("enabled")}
+    except Exception as e:
+        logger.debug(f"Could not list DB hook events: {e}")
+        return []
+    return [event for event in _OBSERVED_DB_HOOK_EVENTS if event in events]
+
+
+def create_db_event_hook_handler(event: str, project_id: Optional[str]):
+    """SDK callback dispatching ``event``'s DB hooks; never blocks the turn."""
+    async def db_event_hook_handler(hook_input: HookInput, tool_use_id: Optional[str],
+                                    context: HookContext) -> SyncHookJSONOutput:
+        if hook_input.get("hook_event_name") == event:
+            data = json.loads(json.dumps(dict(hook_input), default=str))
+            # No app session id reaches this callback (hook_input carries the
+            # engine's), so message hooks record "No active session" and skip.
+            await execute_hooks_for_event(project_id, event, data, tool_name=data.get("tool_name"))
+        return SyncHookJSONOutput()
+    return db_event_hook_handler
 
 
 def build_hooks_config(
@@ -952,9 +989,15 @@ def build_hooks_config(
         )
         logger.debug(f"[HookService] Registered DB PreToolUse handler for project {project_id}")
 
+    for event in _db_observed_hook_events(project_id):
+        hooks_config.setdefault(event, []).append(
+            HookMatcher(hooks=[create_db_event_hook_handler(event, project_id)])
+        )
+        logger.debug(f"[HookService] Registered DB {event} handler for project {project_id}")
+
     # On a translated (ChatGPT/Codex-served) main the backend coerces the Agent
     # tool schema to all-props-required, force-filling `model`/`isolation`. Strip
-    # them so stamped-frontmatter subagent pins survive (ruling S8-R1).
+    # them so stamped-frontmatter subagent pins survive.
     if translated_main:
         hooks_config.setdefault("PreToolUse", []).append(
             HookMatcher(matcher="Agent|Task", hooks=[create_agent_arg_strip_hook_handler(stderr_callback)])

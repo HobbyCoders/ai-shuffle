@@ -54,6 +54,7 @@ def seed():
     db.set_codex_token_bundle('p', access_token=enc('oauth-access'), refresh_token=enc('oauth-refresh'),
         account_id='account', id_token_expires_at='2030-01-01T00:00:00+00:00',
         last_refresh='2026-01-01T00:00:00+00:00')
+    db.update_model_provider('p', openai_admin_key=enc('openai-admin'))
 
 
 def test_fresh_local_database_needs_no_password_or_account_and_reloads():
@@ -77,7 +78,7 @@ def test_adopts_every_legacy_store_without_rewriting_ciphertext_or_metadata():
     before = stored_values()
     old_key = encryption._encryption_key
     provider = db.get_model_provider('p', include_token=True)
-    assert len(before) == 8  # seven locations; both automation columns
+    assert len(before) == 9  # eight locations; both automation columns
     assert encryption.initialize_server_key(db, PASSWORD)
     assert encryption._encryption_key == old_key
     assert stored_values() == before
@@ -87,7 +88,7 @@ def test_adopts_every_legacy_store_without_rewriting_ciphertext_or_metadata():
     assert encryption.initialize_server_key(db)
     assert {encryption.decrypt_value(value) for value in before} == {
         'settings-secret', 'old-trigger', 'new-trigger', 'connector-secret', 'integration-secret',
-        'provider-secret', 'oauth-access', 'oauth-refresh'}
+        'provider-secret', 'oauth-access', 'oauth-refresh', 'openai-admin'}
 
 
 def test_empty_encrypted_plaintext_is_valid_during_adoption_and_restart():
@@ -117,6 +118,16 @@ def test_legacy_failures_never_activate_or_rewrite(problem, test_db):
     assert metadata()['wrapped_dek'] is None
     assert stored_values() == before
     assert not (keys.settings.effective_data_dir / '.credential-keys').exists()
+
+
+def test_corrupt_openai_admin_key_refuses_adoption():
+    """The OpenAI Admin key is an encrypted provider column like the others;
+    one the adopted key cannot decrypt must block activation."""
+    seed()
+    db.update_model_provider('p', openai_admin_key='enc:invalid')
+    assert not encryption.initialize_server_key(db, PASSWORD)
+    assert metadata()['wrapped_dek'] is None
+    assert not encryption.is_encryption_ready()
 
 
 @pytest.mark.parametrize('table', [entry[0] for entry in keys._TABLES])
@@ -321,7 +332,7 @@ assert 'ADMIN_PASSWORD' not in os.environ
 assert encryption.initialize_server_key(database)
 with database.get_db() as conn:
     values=credential_keys._encrypted_values(conn.cursor())
-assert len(values)==8
+assert len(values)==9
 assert all(encryption.decrypt_value(v) for v in values)
 print('fresh-process-recovery-ok')
 '''

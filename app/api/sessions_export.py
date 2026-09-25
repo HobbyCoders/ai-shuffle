@@ -5,13 +5,14 @@ Extracted from sessions.py for maintainability. The sub-router is
 included in the main sessions router for backward compatibility.
 """
 
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Query, status, Request, UploadFile, File
 
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.auth import require_auth, get_api_user_from_request
+from app.api.auth import require_admin, require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
 from app.api.sessions_helpers import (
     require_session,
@@ -656,14 +657,34 @@ async def import_session(
     )
 
 
+def _confined_jsonl_path(raw_path: str) -> Path:
+    """Resolve ``raw_path`` and require it inside a transcript root.
+
+    Roots are the Claude projects directory (where CLI transcripts live) and
+    the workspace. Resolution follows symlinks and ``..``, so traversal or a
+    link pointing outside a root is rejected with 400 before any existence
+    check (no probing of arbitrary server paths).
+    """
+    from app.core.config import settings
+
+    resolved = Path(raw_path).expanduser().resolve()
+    roots = (settings.get_claude_projects_dir, settings.effective_workspace_dir)
+    if not any(resolved.is_relative_to(Path(root).resolve()) for root in roots):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="jsonl_path must be inside the Claude projects directory or the workspace",
+        )
+    return resolved
+
+
 @export_router.post("/import-jsonl", response_model=ImportJSONLResponse)
 async def import_jsonl_session(
     request: Request,
     body: ImportJSONLRequest,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
     """
-    Import an existing Claude Code JSONL session into AI Shuffle.
+    Import an existing Claude Code JSONL session into AI Shuffle - Owner only.
 
     This allows resuming sessions that were created directly in Claude Code
     without going through AI Shuffle. The session will be registered in the
@@ -671,7 +692,8 @@ async def import_jsonl_session(
 
     Args:
         body: Request containing:
-            - jsonl_path: Full path to the JSONL file
+            - jsonl_path: Full path to the JSONL file, inside the Claude
+              projects directory or the workspace (400 otherwise)
             - profile_id: Optional profile to associate (defaults to 'default')
             - project_id: Optional project to associate
 
@@ -679,13 +701,12 @@ async def import_jsonl_session(
         Information about the imported session
     """
     import uuid
-    from pathlib import Path
     from app.core.jsonl_parser import (
         get_session_cost_from_jsonl,
         _get_session_title_and_preview
     )
 
-    jsonl_path = Path(body.jsonl_path)
+    jsonl_path = _confined_jsonl_path(body.jsonl_path)
 
     # Validate the file exists and is a JSONL file
     if not jsonl_path.exists():

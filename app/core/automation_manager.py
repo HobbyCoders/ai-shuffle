@@ -24,6 +24,50 @@ from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
+# APScheduler 3.x numbers day_of_week Monday=0, while crontab (and the UI,
+# docs and MCP tool examples) number it Sunday=0 with 7 also meaning Sunday.
+_CRON_DOW_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+
+
+def crontab_day_of_week(field: str) -> str:
+    """Translate a crontab day-of-week field into APScheduler's syntax.
+
+    Numeric values follow crontab semantics (0 and 7 = Sunday, ``1-5`` =
+    Monday to Friday) and are expanded into explicit weekday names, so the
+    result never depends on APScheduler's Monday=0 numbering. Name tokens
+    (``mon-fri``) and bare ``*`` pass through unchanged.
+    """
+    field = field.strip()
+    if field == "*":
+        return field
+    out: List[str] = []
+    for item in field.split(","):
+        base, _, step_s = item.partition("/")
+        if base == "*":
+            lo, hi = 0, 6
+        elif "-" in base:
+            a, _, b = base.partition("-")
+            if not (a.isdigit() and b.isdigit()):
+                out.append(item)  # names (mon-fri): APScheduler handles these
+                continue
+            lo, hi = int(a), int(b)
+        elif base.isdigit():
+            lo = int(base)
+            hi = 7 if step_s else lo  # crontab: "N/S" means N-7/S
+        else:
+            out.append(item)
+            continue
+        if step_s and not step_s.isdigit():
+            raise ValueError(f"invalid day-of-week step: {item!r}")
+        step = int(step_s) if step_s else 1
+        if not (0 <= lo <= 7 and 0 <= hi <= 7 and lo <= hi and step > 0):
+            raise ValueError(f"invalid day-of-week value: {item!r}")
+        for n in range(lo, hi + 1, step):
+            name = _CRON_DOW_NAMES[n % 7]
+            if name not in out:
+                out.append(name)
+    return ",".join(out)
+
 # Automations are shared across installs but APScheduler jobs are per-process,
 # so each install periodically re-syncs its jobs from the database to pick up
 # automations created, changed, or deleted on other installs.
@@ -222,7 +266,8 @@ class AutomationManager:
                     trigger = CronTrigger(
                         minute=parts[0], hour=parts[1],
                         day=parts[2], month=parts[3],
-                        day_of_week=parts[4], timezone=timezone,
+                        day_of_week=crontab_day_of_week(parts[4]),
+                        timezone=timezone,
                     )
                     self._scheduler.add_job(
                         self._on_schedule_trigger,

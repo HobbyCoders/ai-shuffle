@@ -4,12 +4,13 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.websockets import WebSocketState
 
 from app.core.sync_engine import sync_engine
 from app.db import database
 from app.db.async_database import run_sync
+from app.api.sessions_helpers import check_session_access_for_api_user
 from app.api.ws_auth import authenticate_websocket
 from app.api.ws_utils import ping_loop
 
@@ -52,15 +53,21 @@ async def session_sync_websocket(
     await websocket.accept()
 
     # Authenticate
-    auth_ok, _api_user = await authenticate_websocket(websocket, token)
+    auth_ok, api_user = await authenticate_websocket(websocket, token)
     if not auth_ok:
         await websocket.close(code=4001, reason="Authentication failed")
         return
 
-    # Verify session exists
+    # Verify session exists and the caller may see it (same rule as the REST
+    # session routes: a restricted API user is confined to its project/agent).
     session = await run_sync(database.get_session, session_id)
     if not session:
         await websocket.close(code=4004, reason="Session not found")
+        return
+    try:
+        check_session_access_for_api_user(api_user, session)
+    except HTTPException:
+        await websocket.close(code=4003, reason="Access denied")
         return
     logger.debug(f"WebSocket connected: device={device_id}, session={session_id}")
 
