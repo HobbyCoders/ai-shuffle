@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
@@ -51,9 +51,13 @@ def _reset_passed(resets_at: Any) -> bool:
         stamp = float(resets_at)
     except (TypeError, ValueError):
         try:
-            stamp = datetime.fromisoformat(str(resets_at).strip().replace("Z", "+00:00")).timestamp()
+            parsed = datetime.fromisoformat(str(resets_at).strip().replace("Z", "+00:00"))
         except ValueError:
             return False
+        # Host timestamps are UTC; a zone-less one must not read as local time.
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        stamp = parsed.timestamp()
     else:
         if stamp >= 1e12:
             stamp /= 1000.0
@@ -79,7 +83,42 @@ def _window(raw: Any, *, source: str, remaining_input: bool) -> dict[str, Any] |
     }
     if rolled_over:
         window["rolled_over"] = True
+    observed_at = _epoch_seconds(raw.get("observed_at"))
+    if observed_at is not None:
+        window["observed_at"] = raw.get("observed_at")
     return window
+
+
+def _epoch_seconds(value: Any) -> float | None:
+    """Epoch seconds from an epoch-seconds or epoch-ms stamp, else None."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        stamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if stamp != stamp or stamp <= 0 or stamp in (float("inf"), float("-inf")):
+        return None
+    # App snapshots use seconds for Claude and milliseconds for provider rows
+    # and per-window observations.
+    return stamp / 1000.0 if stamp > 10_000_000_000 else stamp
+
+
+def _oldest_observation(fetched_at: Any, windows: Any) -> Any:
+    """When the least recently reported Claude window was observed.
+
+    One CLI event dates one window, so a snapshot's ``fetched_at`` (moved by
+    any window) overstates the others' freshness. The usage panel dates the
+    section by its oldest window; the tool does the same. Windows without
+    their own ``observed_at`` fall back to ``fetched_at``.
+    """
+    fallback = _epoch_seconds(fetched_at)
+    stamps = [
+        observed if (observed := _epoch_seconds(w.get("observed_at"))) is not None else fallback
+        for w in windows or () if isinstance(w, dict)
+    ]
+    stamps = [s for s in stamps if s is not None]
+    return min(stamps) if stamps else fetched_at
 
 
 def _freshness(fetched_at: Any, *, available: bool = True) -> str:
@@ -119,7 +158,10 @@ def _payload(raw: Any) -> dict[str, Any]:
             "device_name": account.get("device_name"),
             "available": bool(account.get("available")),
             "source": "cached_host_snapshot",
-            "freshness": _freshness(account_fetched_at, available=bool(account.get("available"))),
+            "freshness": _freshness(
+                _oldest_observation(account_fetched_at, account.get("windows")),
+                available=bool(account.get("available")),
+            ),
             "fetched_at": account_fetched_at,
             "windows": [
                 item for value in account.get("windows") or ()
@@ -158,7 +200,8 @@ def _payload(raw: Any) -> dict[str, Any]:
         if isinstance(credits, dict):
             entry["credits"] = {
                 key: credits[key]
-                for key in ("unlimited", "balance_remaining", "limit_remaining", "balance", "usage", "total_available", "spend_month")
+                for key in ("unlimited", "balance_remaining", "limit_remaining", "limit", "balance", "usage",
+                            "total_available", "total_credits", "total_usage", "spend_month", "currency")
                 if key in credits
             }
         providers.append(entry)
@@ -186,7 +229,9 @@ def _payload(raw: Any) -> dict[str, Any]:
         for entry in providers
     )
     available = claude_available or provider_available
-    claude_freshness = _freshness(fetched_at, available=claude_available)
+    claude_freshness = _freshness(
+        _oldest_observation(fetched_at, raw.get("windows")), available=claude_available,
+    )
     provider_freshness = {entry["freshness"] for entry in providers}
     aggregate_freshness = (
         claude_freshness

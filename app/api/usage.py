@@ -8,6 +8,7 @@ on page load, before any live ``usage_snapshot`` WS event arrives.
 """
 
 import logging
+import math
 import time
 from typing import List, Literal, Optional
 
@@ -101,6 +102,23 @@ class ProviderUsageWindow(BaseModel):
     @classmethod
     def _coerce_resets_at(cls, v: object) -> object:
         return _coerce_epoch_resets_at(v)
+
+
+def _provider_windows(windows: object) -> list[ProviderUsageWindow]:
+    """The readable windows of a stored row; an unreadable one is dropped alone.
+
+    A window without a type or a finite utilization (NaN would also make the
+    response invalid JSON) is skipped rather than failing the whole row.
+    """
+    valid: list[ProviderUsageWindow] = []
+    for window in windows if isinstance(windows, list) else []:
+        try:
+            parsed = ProviderUsageWindow.model_validate(window)
+        except Exception:  # noqa: BLE001 — pydantic.ValidationError and friends
+            continue
+        if parsed.type and math.isfinite(parsed.utilization):
+            valid.append(parsed)
+    return valid
 
 
 ErrorKind = Literal["billing_access_denied", "missing_credentials", "timeout", "unavailable", "unsupported"]
@@ -219,85 +237,89 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
         entries: List[ProviderUsageEntry] = []
         now_ms = time.time() * 1000
         for row in rows:
-            # Usage history can outlive a provider (including an in-flight poll
-            # finishing after deletion). Only configured accounts belong here;
-            # fal.ai is configured separately and has no model-provider row.
-            if row["provider_id"] not in names and row["provider_id"] != FAL_USAGE_PROVIDER_ID:
-                continue
-            # Retired OAuth fallback snapshots are not Platform billing accounts.
-            if row["provider_id"] == OPENAI_API_USAGE_PROVIDER_ID:
-                continue
-            # The registry decides visibility. Rate-limit-only sources (xAI and
-            # other OpenAI-compatible hosts, Anthropic headers) stay hidden:
-            # their only content is per-minute headroom (~always 0%). OpenAI
-            # rows are included once Admin usage has a figure or an explicit
-            # failure status; their per-minute windows are stripped so the
-            # popover headlines reported spend instead of a ~0% requests bar.
-            # Capture itself stays; it doubles as the 429 breaker seam.
-            ptype = row.get("provider_type")
-            credits = row.get("credits")
-            windows = row.get("windows") or []
-            raw = row.get("raw") or {}
-            error = raw.get("usage_error") if isinstance(raw, dict) else None
-            if error not in {"billing_access_denied", "missing_credentials", "timeout", "unavailable", "unsupported"}:
-                error = None
-            source_def = usage_sources.source_for_snapshot(ptype)
-            if source_def is not None and not source_def.shown:
-                continue
-            fetched_at = row.get("fetched_at")
-            if ptype == "openai":
-                if raw.get("source") != "openai_admin":
-                    credits = None
-                    error = error or "missing_credentials"
-                if not _credits_are_displayable(credits) and error is None:
+            try:
+                # Usage history can outlive a provider (including an in-flight poll
+                # finishing after deletion). Only configured accounts belong here;
+                # fal.ai is configured separately and has no model-provider row.
+                if row["provider_id"] not in names and row["provider_id"] != FAL_USAGE_PROVIDER_ID:
                     continue
-                fetched_at = raw.get("billing_fetched_at", fetched_at if _credits_are_displayable(credits) else None)
-                windows = []
-            # ChatGPT/Codex header credits (x-codex-credits-balance, often 0)
-            # are extra-credit crumbs on the subscription quota row — not
-            # prepaid API balance. That figure belongs to configured OpenAI rows.
-            if ptype == "chatgpt":
-                credits = None
-            if ptype == "openrouter" and isinstance(credits, dict):
-                # Old snapshots mixed /key limits with account-wide /credits.
-                credits = {k: v for k, v in credits.items()
-                           if k not in {"total_credits", "total_usage", "balance_remaining"}}
-            attempted = raw.get("usage_attempted_at") if error else None
-            attempted = attempted if isinstance(attempted, int) and not isinstance(attempted, bool) else None
-            last_attempt = max((t for t in (fetched_at, attempted) if t), default=None)
-            interval_ms = (source_def.min_interval if source_def and source_def.min_interval else 300) * 1000
-            cooldown_until = (last_attempt + interval_ms) if last_attempt else None
-            if (cooldown_until is not None and cooldown_until <= now_ms) or error in {
-                "billing_access_denied", "unsupported",
-            }:
-                cooldown_until = None
-            name = names.get(row["provider_id"])
-            if not name and row["provider_id"] == FAL_USAGE_PROVIDER_ID:
-                name = FAL_USAGE_PROVIDER_NAME
-            entries.append(
-                ProviderUsageEntry(
-                    provider_id=row["provider_id"],
-                    provider_name=name,
-                    provider_type=ptype,
-                    plan_type=row.get("plan_type"),
-                    windows=windows,
-                    credits=credits,
-                    fetched_at=fetched_at,
-                    status=(
-                        "stale" if fetched_at and (
-                            error or now_ms - fetched_at > interval_ms
-                        ) else "fresh" if fetched_at else
-                        "unavailable" if error else "never_fetched"
-                    ),
-                    last_error_kind=error,
-                    source=source_def.label if source_def else None,
-                    scope=source_def.scope_label if source_def else None,
-                    source_info=_source_info(source_def),
-                    last_success_at=fetched_at,
-                    last_attempt_at=last_attempt,
-                    cooldown_until=cooldown_until,
+                # Retired OAuth fallback snapshots are not Platform billing accounts.
+                if row["provider_id"] == OPENAI_API_USAGE_PROVIDER_ID:
+                    continue
+                # The registry decides visibility. Rate-limit-only sources (xAI and
+                # other OpenAI-compatible hosts, Anthropic headers) stay hidden:
+                # their only content is per-minute headroom (~always 0%). OpenAI
+                # rows are included once Admin usage has a figure or an explicit
+                # failure status; their per-minute windows are stripped so the
+                # popover headlines reported spend instead of a ~0% requests bar.
+                # Capture itself stays; it doubles as the 429 breaker seam.
+                ptype = row.get("provider_type")
+                credits = row.get("credits")
+                windows = row.get("windows") or []
+                raw = row.get("raw") or {}
+                error = raw.get("usage_error") if isinstance(raw, dict) else None
+                if error not in {"billing_access_denied", "missing_credentials", "timeout", "unavailable", "unsupported"}:
+                    error = None
+                source_def = usage_sources.source_for_snapshot(ptype)
+                if source_def is not None and not source_def.shown:
+                    continue
+                fetched_at = row.get("fetched_at")
+                if ptype == "openai":
+                    if raw.get("source") != "openai_admin":
+                        credits = None
+                        error = error or "missing_credentials"
+                    if not _credits_are_displayable(credits) and error is None:
+                        continue
+                    fetched_at = raw.get("billing_fetched_at", fetched_at if _credits_are_displayable(credits) else None)
+                    windows = []
+                # ChatGPT/Codex header credits (x-codex-credits-balance, often 0)
+                # are extra-credit crumbs on the subscription quota row — not
+                # prepaid API balance. That figure belongs to configured OpenAI rows.
+                if ptype == "chatgpt":
+                    credits = None
+                if ptype == "openrouter" and isinstance(credits, dict):
+                    # Old snapshots mixed /key limits with account-wide /credits.
+                    credits = {k: v for k, v in credits.items()
+                               if k not in {"total_credits", "total_usage", "balance_remaining"}}
+                attempted = raw.get("usage_attempted_at") if error else None
+                attempted = attempted if isinstance(attempted, int) and not isinstance(attempted, bool) else None
+                last_attempt = max((t for t in (fetched_at, attempted) if t), default=None)
+                interval_ms = (source_def.min_interval if source_def and source_def.min_interval else 300) * 1000
+                cooldown_until = (last_attempt + interval_ms) if last_attempt else None
+                if (cooldown_until is not None and cooldown_until <= now_ms) or error in {
+                    "billing_access_denied", "unsupported",
+                }:
+                    cooldown_until = None
+                name = names.get(row["provider_id"])
+                if not name and row["provider_id"] == FAL_USAGE_PROVIDER_ID:
+                    name = FAL_USAGE_PROVIDER_NAME
+                entries.append(
+                    ProviderUsageEntry(
+                        provider_id=row["provider_id"],
+                        provider_name=name,
+                        provider_type=ptype,
+                        plan_type=row.get("plan_type"),
+                        windows=_provider_windows(windows),
+                        credits=credits,
+                        fetched_at=fetched_at,
+                        status=(
+                            "stale" if fetched_at and (
+                                error or now_ms - fetched_at > interval_ms
+                            ) else "fresh" if fetched_at else
+                            "unavailable" if error else "never_fetched"
+                        ),
+                        last_error_kind=error,
+                        source=source_def.label if source_def else None,
+                        scope=source_def.scope_label if source_def else None,
+                        source_info=_source_info(source_def),
+                        last_success_at=fetched_at,
+                        last_attempt_at=last_attempt,
+                        cooldown_until=cooldown_until,
+                    )
                 )
-            )
+            except Exception:  # noqa: BLE001 — one unreadable row never hides the others
+                logger.debug("provider usage row %s skipped", row.get("provider_id"), exc_info=True)
+
         return entries
     except Exception:
         logger.debug("provider usage load failed; keeping client rows", exc_info=True)

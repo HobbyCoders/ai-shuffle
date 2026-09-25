@@ -244,6 +244,26 @@ async def _persist_codex_capture(provider_id: str, headers: Dict[str, str]) -> N
         u = normalize_codex_headers(headers)
         from app.db import database as db
 
+        windows, plan_type = u.windows, u.plan_type
+        if not windows or plan_type is None:
+            # Every response is captured, errors included, and some carry only
+            # part of the header set (credits without the quota windows, for
+            # example). A capture without windows or a plan must not erase the
+            # ones the last full reading reported.
+            try:
+                rows = await run_sync(db.get_all_provider_usage_snapshots) or []
+            except Exception:  # noqa: BLE001 — an unreadable cache still stores the capture
+                rows = []
+            previous = next(
+                (r for r in rows
+                 if r.get("provider_id") == provider_id and r.get("provider_type") == "chatgpt"),
+                None,
+            ) or {}
+            if not windows:
+                windows = previous.get("windows") or []
+            if plan_type is None:
+                plan_type = previous.get("plan_type")
+
         # Poll recovered: forget the suppressed-failure state so the
         # next failure is reported at ERROR straight away.
         _clear_poll_failure(f"codex-capture:{provider_id}")
@@ -251,8 +271,8 @@ async def _persist_codex_capture(provider_id: str, headers: Dict[str, str]) -> N
             db.upsert_provider_usage_snapshot,
             provider_id,
             "chatgpt",
-            u.plan_type,
-            u.windows,
+            plan_type,
+            windows,
             u.credits,
             u.raw,
             int(time.time() * 1000),
@@ -557,18 +577,46 @@ def _openrouter_windows_and_credits(
 
     windows: List[Dict[str, Any]] = []
     if limit is not None and limit > 0:
-        used = _as_float(data.get("usage"))
+        # A limit with a reset cadence applies to the current period, but
+        # ``usage`` is the key's lifetime spend: the period's use is what the
+        # limit has lost (``limit - limit_remaining``). Lifetime usage is only
+        # the fallback when ``limit_remaining`` is absent.
+        remaining = _as_float(data.get("limit_remaining"))
+        used = (limit - remaining) if remaining is not None else _as_float(data.get("usage"))
         if used is not None:
             windows.append(
                 {
                     "type": "credit_limit",
                     "utilization": max(0.0, min(100.0, used / limit * 100.0)),
-                    # /key's `limit_reset` is a cadence descriptor ("monthly"),
-                    # not a timestamp, so there is no `resets_at` to surface.
-                    "resets_at": None,
+                    "resets_at": _openrouter_limit_resets_at(data.get("limit_reset")),
                 }
             )
     return windows, credits
+
+
+def _openrouter_limit_resets_at(cadence: Any, now: Optional[float] = None) -> Optional[str]:
+    """Epoch seconds (as str) of the next reset for a ``limit_reset`` cadence.
+
+    OpenRouter resets key limits at midnight UTC; weeks run Monday to Sunday.
+    ``None`` (no reset) and unknown cadences yield no reset time.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if not isinstance(cadence, str):
+        return None
+    current = datetime.fromtimestamp(time.time() if now is None else now, tz=timezone.utc)
+    midnight = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    cadence = cadence.strip().lower()
+    if cadence == "daily":
+        reset = midnight + timedelta(days=1)
+    elif cadence == "weekly":
+        reset = midnight + timedelta(days=7 - midnight.weekday())
+    elif cadence == "monthly":
+        first = midnight.replace(day=1)
+        reset = first.replace(year=first.year + 1, month=1) if first.month == 12 else first.replace(month=first.month + 1)
+    else:
+        return None
+    return str(int(reset.timestamp()))
 
 
 # ---------------------------------------------------------------------------

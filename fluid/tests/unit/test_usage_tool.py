@@ -154,3 +154,78 @@ def test_an_empty_provider_list_still_means_none_configured(monkeypatch) -> None
     assert out["providers"] == []
     assert "providers_unavailable" not in out
     assert out["reason"] == "no cached subscription usage is available"
+
+
+def test_claude_freshness_follows_the_oldest_window_like_the_panel() -> None:
+    """One CLI event dates one window. The panel shows "Updated 20m ago" for a
+    bucket whose other window was last reported 20 minutes ago; the tool must
+    not call the same data fresh because ``fetched_at`` moved."""
+    now = time.time()
+    out = _payload({
+        "available": True,
+        "fetched_at": now - 5,
+        "windows": [
+            {"type": "five_hour", "utilization": 60, "observed_at": int((now - 5) * 1000)},
+            {"type": "seven_day", "utilization": 90, "observed_at": int((now - 1200) * 1000)},
+        ],
+        "snapshots": [{
+            "instance_id": "a", "available": True, "fetched_at": int((now - 5) * 1000),
+            "windows": [{"type": "seven_day", "utilization": 90, "observed_at": int((now - 1200) * 1000)}],
+        }],
+    })
+    assert out["claude_freshness"] == "stale"
+    assert out["freshness"] == "stale"
+    assert out["accounts"][0]["freshness"] == "stale"
+    assert out["windows"][1]["observed_at"] == int((now - 1200) * 1000)
+    # Windows persisted before per-window dating fall back to fetched_at.
+    legacy = _payload({"available": True, "fetched_at": now - 5,
+                       "windows": [{"type": "five_hour", "utilization": 60}]})
+    assert legacy["claude_freshness"] == "fresh"
+    assert "observed_at" not in legacy["windows"][0]
+
+
+def test_zone_less_reset_is_read_as_utc(monkeypatch) -> None:
+    """A zone-less ISO reset is UTC; reading it as host-local time would keep a
+    window "not yet reset" for hours on a host west of UTC."""
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    try:
+        passed = datetime.fromtimestamp(time.time() - 60, timezone.utc).replace(tzinfo=None)
+        pending = datetime.fromtimestamp(time.time() + 600, timezone.utc).replace(tzinfo=None)
+        out = _payload({"available": True, "fetched_at": time.time(), "windows": [
+            {"type": "five_hour", "utilization": 10, "resets_at": passed.isoformat()},
+            {"type": "seven_day", "utilization": 10, "resets_at": pending.isoformat()},
+        ]})
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
+    rolled, live = out["windows"]
+    assert rolled.get("rolled_over") is True and rolled["remaining_percent"] == 100.0
+    assert "rolled_over" not in live and live["remaining_percent"] == 10.0
+
+
+@pytest.mark.parametrize("utilization,used,remaining", [(0, 0.0, 100.0), (100, 100.0, 0.0), (130, 100.0, 0.0)])
+def test_provider_edges_match_the_panel(utilization, used, remaining, monkeypatch) -> None:
+    import fluid.tools.builtins.usage as usage
+
+    monkeypatch.setattr(usage, "_last_providers", None, raising=False)
+    out = _payload({"available": False, "fetched_at": None, "windows": [], "providers": [{
+        "provider_id": "cx", "status": "fresh", "fetched_at": time.time() * 1000,
+        "windows": [{"type": "five_hour", "utilization": utilization, "resets_at": None}],
+    }]})
+    window = out["providers"][0]["windows"][0]
+    assert (window["used_percent"], window["remaining_percent"]) == (used, remaining)
+
+
+def test_provider_credits_carry_the_figures_the_panel_shows(monkeypatch) -> None:
+    import fluid.tools.builtins.usage as usage
+
+    monkeypatch.setattr(usage, "_last_providers", None, raising=False)
+    out = _payload({"available": False, "fetched_at": None, "windows": [], "providers": [{
+        "provider_id": "or", "status": "fresh", "fetched_at": time.time() * 1000,
+        "credits": {"balance_remaining": 4.5, "total_usage": 5.5, "total_credits": 10,
+                    "currency": "USD", "secret": "x"},
+    }]})
+    assert out["providers"][0]["credits"] == {
+        "balance_remaining": 4.5, "total_usage": 5.5, "total_credits": 10, "currency": "USD",
+    }

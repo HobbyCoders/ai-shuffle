@@ -323,29 +323,45 @@ export function parseResetMs(resetsAt: string | number | null | undefined): numb
 		const n = Number(trimmed);
 		return n < 1e12 ? n * 1000 : n;
 	}
-	const parsed = Date.parse(trimmed);
+	// Backend timestamps are UTC. `Date.parse` reads a zone-less date-time as
+	// the browser's LOCAL time, which would shift the reset by the UTC offset.
+	const naive = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(trimmed);
+	const parsed = Date.parse(naive ? `${trimmed.replace(' ', 'T')}Z` : trimmed);
 	return Number.isNaN(parsed) ? null : parsed;
+}
+
+/**
+ * Round a 0–100 percent for display without claiming an edge it has not
+ * reached: 0.4 shows as 1 (not "0% left" while quota remains) and 99.6 as 99
+ * (not "100% left" once some was used). Exact 0 and 100 stay as they are.
+ */
+function _displayPct(value: number): number {
+	const pct = _clampPct(value);
+	const rounded = Math.round(pct);
+	if (rounded === 0 && pct > 1e-6) return 1;
+	if (rounded === 100 && pct < 100 - 1e-6) return 99;
+	return rounded;
 }
 
 /** Effective utilization for a window, accounting for a rolled-over window. */
 export function effectivePct(w: UsageWindow, nowMs: number): number {
 	const resetMs = parseResetMs(w.resets_at);
 	if (resetMs != null && resetMs <= nowMs) return 0; // window rolled over
-	return Math.round(w.utilization);
+	return _displayPct(w.utilization);
 }
 
 /** Reported remaining quota, returning a fresh window after rollover. */
 export function reportedRemainingPct(w: UsageWindow, nowMs: number): number {
 	const resetMs = parseResetMs(w.resets_at);
 	if (resetMs != null && resetMs <= nowMs) return 100;
-	return Math.round(w.utilization);
+	return _displayPct(w.utilization);
 }
 
 /** Convert reported used quota to remaining, returning a fresh window after rollover. */
 export function remainingFromUsedPct(w: UsageWindow, nowMs: number): number {
 	const resetMs = parseResetMs(w.resets_at);
 	if (resetMs != null && resetMs <= nowMs) return 100;
-	return Math.round(100 - w.utilization);
+	return _displayPct(100 - _clampPct(w.utilization));
 }
 
 /** Format a countdown like "3h 12m" / "12m 4s"; '' once the reset has passed. */
@@ -449,6 +465,21 @@ export function bucketObservedAt(bucket: UsageBucket): number | null {
 		.map((w) => w.received_at)
 		.filter((t) => typeof t === 'number' && Number.isFinite(t));
 	return times.length > 0 ? Math.min(...times) : bucket.fetchedAt;
+}
+
+/**
+ * A provider row's status as of `nowMs`. The backend dates `fresh` when it
+ * answers, but rows also come from localStorage and outlive a failed refresh,
+ * so a `fresh` reading older than its source's interval (the backend's own
+ * threshold, 300 s by default) is shown as `stale`.
+ */
+export function providerStatusAt(
+	pb: Pick<ProviderUsageBucket, 'status' | 'fetchedAt' | 'sourceInfo'>,
+	nowMs: number
+): ProviderUsageStatus | undefined {
+	if (pb.status !== 'fresh' || pb.fetchedAt == null) return pb.status;
+	const intervalMs = (pb.sourceInfo?.min_interval_seconds || 300) * 1000;
+	return nowMs - pb.fetchedAt > intervalMs ? 'stale' : 'fresh';
 }
 
 /** Whether any of a bucket's windows has aged past `BUCKET_STALE_MS` (needs a refresh). */

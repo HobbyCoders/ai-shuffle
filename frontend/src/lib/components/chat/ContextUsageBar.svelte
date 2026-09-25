@@ -76,6 +76,7 @@
 		bucketObservedAt,
 		isBucketStale,
 		parseResetMs,
+		providerStatusAt,
 		resolveBucket,
 		resolveBucketKey,
 		selfBucketKey,
@@ -397,8 +398,9 @@
 		return typeof v === 'number' && Number.isFinite(v) ? v : null;
 	}
 
-	function providerStatusText(pb: ProviderUsageBucket): string | null {
-		if (pb.status !== 'stale' && pb.status !== 'unavailable' && pb.status !== 'never_fetched') return null;
+	function providerStatusText(pb: ProviderUsageBucket, nowMs: number): string | null {
+		const status = providerStatusAt(pb, nowMs);
+		if (status !== 'stale' && status !== 'unavailable' && status !== 'never_fetched') return null;
 		// Keep credential problems actionable without narrating background refreshes.
 		const isOpenAI = pb.providerType?.toLowerCase() === 'openai';
 		if (pb.lastErrorKind === 'billing_access_denied') {
@@ -868,7 +870,7 @@
 				{@const pbWindows = displayWindows(pb.windows)}
 				{@const pbShowsRemaining = providerShowsRemaining(pb)}
 				{@const pbSummary = providerWindowSummary(pbWindows, now, pbShowsRemaining)}
-				{@const pbStatus = providerStatusText(pb)}
+				{@const pbStatus = providerStatusText(pb, now)}
 				<div class="popover-section">
 					<div class="provider-header">
 						<button
@@ -955,7 +957,7 @@
 					{#if credits}
 						<div class="row-reset usage-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits`, text: credits }}></div>
 					{/if}
-					{#if pb.status === 'stale' && pb.fetchedAt != null}
+					{#if providerStatusAt(pb, now) === 'stale' && pb.fetchedAt != null}
 						{@const nextCheck = pb.cooldownUntil != null ? formatCountdown(String(pb.cooldownUntil), now) : ''}
 						<div class="row-reset usage-as-of">Updated {formatAsOf(pb.fetchedAt, now)}{nextCheck ? ` · next check in ${nextCheck}` : ''}</div>
 					{/if}
