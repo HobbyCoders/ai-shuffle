@@ -45,20 +45,24 @@ async def fetch(client, link, digest: str):
                 if len(raw) > MAX_RESPONSE:
                     raise ValueError("Peer file part is too large")
         import json
-        item = json.loads(raw)
-        member = engine.require_context().member(link.device_id)
-        unsigned = {k: v for k, v in item.items() if k != "signature"}
-        if (member is None or member.status != "active"
-                or not crypto.verify(member.signing_public, crypto.canonical_json(unsigned), crypto.b64u_decode(item["signature"]))):
-            raise ValueError("Peer file signature is invalid")
-        header = {k: item[k] for k in ("network_id", "publisher", "recipient", "hash", "index", "size")}
-        if (header != {"network_id": ctx.network_id, "publisher": link.device_id, "recipient": ctx.device_id,
-                       "hash": digest, "index": index, "size": item["size"]}
-                or not 0 <= item["size"] <= blobs.MAX_BLOB_BYTES or total not in (None, item["size"])):
-            raise ValueError("Peer file part does not match request")
-        total = item["size"]
-        key = crypto.unwrap_key(ctx.identity.encryption_private, item["key"])
-        clear = crypto.decrypt_payload(key, item["ciphertext"], crypto.canonical_json(header))
+        try:
+            item = json.loads(raw)
+            member = engine.require_context().member(link.device_id)
+            unsigned = {k: v for k, v in item.items() if k != "signature"}
+            if (member is None or member.status != "active"
+                    or not crypto.verify(member.signing_public, crypto.canonical_json(unsigned), crypto.b64u_decode(item["signature"]))):
+                raise ValueError("Peer file signature is invalid")
+            header = {k: item[k] for k in ("network_id", "publisher", "recipient", "hash", "index", "size")}
+            if (header != {"network_id": ctx.network_id, "publisher": link.device_id, "recipient": ctx.device_id,
+                           "hash": digest, "index": index, "size": item["size"]}
+                    or not 0 <= item["size"] <= blobs.MAX_BLOB_BYTES or total not in (None, item["size"])):
+                raise ValueError("Peer file part does not match request")
+            total = item["size"]
+            key = crypto.unwrap_key(ctx.identity.encryption_private, item["key"])
+            clear = crypto.decrypt_payload(key, item["ciphertext"], crypto.canonical_json(header))
+        except (KeyError, TypeError, AttributeError) as exc:
+            # A member's malformed part is a failed fetch, like a bad signature.
+            raise ValueError("Peer file part is malformed") from exc
         if len(clear) != min(PART_BYTES, total - len(data)):
             raise ValueError("Peer file part is truncated")
         data.extend(clear)

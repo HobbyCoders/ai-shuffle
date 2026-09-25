@@ -49,7 +49,10 @@ def refresh_desired_from_installed() -> int:
         desired = {r["id"]: dict(r) for r in cursor.fetchall()}
         for plugin_id, info in installed.items():
             current = desired.get(plugin_id)
-            if current and (current.get("version") or "") == (info["version"] or "") and bool(current.get("enabled")) == info["enabled"]:
+            # ``apply_desired`` never reinstalls to match a version, so workers
+            # holding different versions would overwrite each other's row on
+            # every scan. Only a new plugin or an enabled change is published.
+            if current and bool(current.get("enabled")) == info["enabled"]:
                 continue
             cursor.execute(
                 """INSERT INTO network_plugins_desired (id, version, enabled, config, updated_at)

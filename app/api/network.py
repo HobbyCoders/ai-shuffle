@@ -322,7 +322,7 @@ async def recovery_status(_: str = Depends(require_admin)) -> dict:
 async def create_recovery(_: str = Depends(require_admin)) -> dict:
     try:
         return await run_sync(recovery.create)
-    except engine.NotEnrolled as exc:
+    except (engine.NotEnrolled, recovery.RecoveryError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
 
@@ -606,7 +606,7 @@ async def hydrate_session(device_id: str, session_id: str, request: Request, _: 
         return await control.hydrate(device_id, session_id)
     except control.RunnerUnreachable as exc:
         raise HTTPException(503, f"The owning worker is offline: {exc}") from exc
-    except control.ControlRefused as exc:
+    except (control.ControlRefused, engine.NotEnrolled) as exc:
         raise HTTPException(409, str(exc)) from exc
 
 

@@ -192,8 +192,12 @@ class PeerLink:
             marks = current
         if await self._check_rollback(client, ctx, theirs):
             ctx = engine.require_context()
-        their_endpoints = exchange.get("endpoints") or []
-        await asyncio.to_thread(store.touch_member, self.device_id, capabilities=exchange.get("capabilities"),
+        # Stored addresses follow the same rule as dialed ones (``endpoints``).
+        their_endpoints = exchange.get("endpoints")
+        their_endpoints = validate_endpoints(their_endpoints) if isinstance(their_endpoints, list) else []
+        capabilities = exchange.get("capabilities")
+        await asyncio.to_thread(store.touch_member, self.device_id,
+                                capabilities=capabilities if isinstance(capabilities, dict) else None,
                                 endpoints=their_endpoints or None, version=exchange.get("version"),
                                 incarnation=exchange.get("incarnation"))
         if their_endpoints:

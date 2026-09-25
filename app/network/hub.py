@@ -17,6 +17,7 @@ from app.db import network as store
 from app.db.async_database import run_sync
 from app.network import crypto, engine, membership
 from app.network import identity as identity_mod
+from app.network.endpoints import validate_endpoints
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,10 @@ def refresh_peer_endpoints() -> None:
         endpoints = device.get("endpoints")
         if isinstance(endpoints, list) and endpoints and all(isinstance(url, str) for url in endpoints):
             existing = (store.get_member(member.device_id) or {}).get("endpoints") or []
-            store.touch_member(member.device_id, endpoints=list(dict.fromkeys(endpoints + existing)))
+            # Stored addresses follow the rule dialed ones do, and stay bounded.
+            merged = validate_endpoints(endpoints + list(existing))
+            if merged:
+                store.touch_member(member.device_id, endpoints=merged)
 
 
 def pending_devices() -> List[dict]:

@@ -157,7 +157,7 @@ curl -X POST http://localhost:8000/api/v1/network/runners/DEVICE_ID/sessions/SES
   -H "Authorization: Bearer aih_your_key"
 ```
 
-**Response:** `{"published": 42}`. `503` when the owning worker is offline or was removed from the network, `409` when it refuses (for example, it does not own the session).
+**Response:** `{"published": 42}`. `503` when the owning worker is offline or was removed from the network, `409` when it refuses (for example, it does not own the session) or this worker is not in a network.
 
 ## Definition owners
 
@@ -187,7 +187,7 @@ A recovery key lets you restore the network onto a fresh worker.
 | Method | Path | Body or query | Notes |
 |--------|------|---------------|-------|
 | `GET` | `/api/v1/network/recovery` | none | Owner only. `{"configured": true, "stale": false, "created_at": "...", "key_version": 3}` |
-| `POST` | `/api/v1/network/recovery` | none | Owner only. Create or replace the key. `201` with `recovery_key`, `created_at`, `key_version` |
+| `POST` | `/api/v1/network/recovery` | none | Owner only. Create or replace the key. `201` with `recovery_key`, `created_at`, `key_version`; `409` when this worker is not in a network |
 
 The `recovery_key` in the `POST` response is shown once and cannot be read back. A key becomes `stale` after the network key rotates; create a new one.
 
