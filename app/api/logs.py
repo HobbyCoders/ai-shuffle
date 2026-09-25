@@ -7,6 +7,7 @@ Provides endpoints to:
 """
 
 import asyncio
+import json
 import logging
 from collections import deque
 from datetime import datetime, timezone
@@ -163,6 +164,23 @@ async def export_logs(
 # Sources a client is allowed to report (backend errors are captured server-side).
 _CLIENT_SOURCES = {"frontend", "ws", "api"}
 
+# Any caller, API keys included, can write here; the store clips message and
+# detail itself, so bound the other free-form fields before they reach it.
+_MAX_URL = 2048
+_MAX_LEVEL = 16
+_MAX_SESSION_ID = 200
+_MAX_CONTEXT_BYTES = 16 * 1024
+
+
+def _bounded_context(context: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """The context as sent, or a size marker when its JSON is too large."""
+    if not context:
+        return context
+    size = len(json.dumps(context, default=str))
+    if size > _MAX_CONTEXT_BYTES:
+        return {"truncated": True, "original_bytes": size}
+    return context
+
 
 class ClientErrorIn(BaseModel):
     message: str
@@ -201,13 +219,13 @@ async def report_client_error(
         error_logs.record_error,
         source,
         payload.message,
-        level=(payload.level or "ERROR").upper(),
+        level=(payload.level or "ERROR").upper()[:_MAX_LEVEL],
         detail=payload.detail,
-        url=payload.url,
+        url=payload.url[:_MAX_URL] if payload.url else payload.url,
         status_code=payload.status_code,
-        session_id=payload.session_id,
+        session_id=payload.session_id[:_MAX_SESSION_ID] if payload.session_id else payload.session_id,
         user_id=user_id,
-        context=payload.context,
+        context=_bounded_context(payload.context),
     )
     return {"ok": True, "id": error_id}
 

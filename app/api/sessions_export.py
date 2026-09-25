@@ -433,6 +433,9 @@ async def import_session(
         content = b"".join(chunks)
 
         import_data = json.loads(content.decode('utf-8'))
+    except HTTPException:
+        # The size caps above: keep their 413 instead of the generic 400 below.
+        raise
     except json.JSONDecodeError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -460,6 +463,20 @@ async def import_session(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid export format. 'session' must be an object and 'messages' must be an array."
         )
+    if not all(isinstance(m, dict) for m in messages_data):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid export format. Every message must be an object."
+        )
+    # These feed numeric increments; a string would fail the UPDATE after the
+    # session row was already created.
+    for field in ('total_cost_usd', 'total_tokens_in', 'total_tokens_out', 'turn_count'):
+        value = session_data.get(field)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid export format. '{field}' must be a number."
+            )
 
     # Generate new session ID
     new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
@@ -490,6 +507,10 @@ async def import_session(
                 detail="Access denied to this project",
             )
         project_id = api_user['project_id']
+    elif project_id and not await run_sync(database.get_project, project_id):
+        # An export from another install names a project this one lacks;
+        # sessions.project_id has a FK to projects, so file it projectless.
+        project_id = None
 
     # Create session in database
     title = session_data.get('title') or 'Imported Session'
@@ -545,7 +566,7 @@ async def import_session(
                 role = msg.get('role', 'user')
                 content = msg.get('content', '')
                 msg_type = msg.get('type')
-                timestamp = msg.get('metadata', {}).get('timestamp') or datetime.now(timezone.utc).isoformat()
+                timestamp = (msg.get('metadata') or {}).get('timestamp') or datetime.now(timezone.utc).isoformat()
                 msg_uuid = msg.get('id') or str(uuid.uuid4())
 
                 if role == 'user' and msg_type != 'tool_result':

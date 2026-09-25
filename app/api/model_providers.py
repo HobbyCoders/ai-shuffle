@@ -1547,6 +1547,11 @@ async def codex_clear_reauth(provider_id: str, token: str = Depends(require_admi
     if stored is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
+    # The bundle write also sets auth_mode: on a provider without a ChatGPT
+    # sign-in it would turn an API-key or Grok provider into a ChatGPT one.
+    if stored.get("auth_mode") != "chatgpt":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Model provider has no ChatGPT sign-in")
     row = await run_sync(
         db.set_codex_token_bundle,
         provider_id,
@@ -1556,6 +1561,7 @@ async def codex_clear_reauth(provider_id: str, token: str = Depends(require_admi
         id_token_expires_at=stored.get("codex_id_token_expires_at"),
         last_refresh=stored.get("codex_last_refresh"),
         needs_reauth=False,
+        auth_mode="chatgpt",
     )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
@@ -1711,6 +1717,10 @@ async def xai_clear_reauth(provider_id: str, token: str = Depends(require_admin)
     if stored is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
+    # Same guard as the Codex route: never re-label another provider as Grok.
+    if stored.get("auth_mode") != "grok":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Model provider has no Grok sign-in")
     row = await run_sync(
         db.set_codex_token_bundle,
         provider_id,
@@ -1720,7 +1730,7 @@ async def xai_clear_reauth(provider_id: str, token: str = Depends(require_admin)
         id_token_expires_at=stored.get("codex_id_token_expires_at"),
         last_refresh=stored.get("codex_last_refresh"),
         needs_reauth=False,
-        auth_mode=stored.get("auth_mode") or "grok",
+        auth_mode="grok",
     )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,

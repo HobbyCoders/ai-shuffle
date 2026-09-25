@@ -1242,7 +1242,7 @@ Record an error seen by a client in the error log.
 { "message": "Failed to load session", "source": "frontend", "level": "ERROR", "url": "/chat/sess_abc123", "status_code": 500 }
 ```
 
-`message` is required. `source` is `frontend`, `ws` or `api` (other values count as `frontend`); `level` defaults to `ERROR`. Optional: `detail`, `url`, `status_code`, `session_id`, `context` (object). Returns `{"ok": true, "id": ...}`.
+`message` is required. `source` is `frontend`, `ws` or `api` (other values count as `frontend`); `level` defaults to `ERROR`. Optional: `detail`, `url`, `status_code`, `session_id`, `context` (object). Long values are cut to fit: `url` to 2048 characters, `level` to 16, `session_id` to 200, and a `context` over 16 KB is stored as `{"truncated": true, "original_bytes": ...}`. Returns `{"ok": true, "id": ...}`.
 
 ### GET /api/v1/logs/errors
 

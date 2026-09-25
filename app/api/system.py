@@ -486,7 +486,8 @@ async def browse_filesystem(
     import sys
 
     local_mode = is_local_mode()
-    workspace_root = app_settings.workspace_dir.resolve()
+    # The effective dir: ``workspace_dir`` is None unless WORKSPACE_DIR is set.
+    workspace_root = app_settings.effective_workspace_dir.resolve()
 
     if not path:
         entries = []

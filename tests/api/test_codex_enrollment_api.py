@@ -209,6 +209,37 @@ class TestClearReauth:
         )
         assert resp.status_code == 404
 
+    def test_clear_reauth_without_a_chatgpt_sign_in_is_404(
+        self, authenticated_client, mock_db
+    ):
+        """An API-key provider must not be relabelled ``auth_mode='chatgpt'``
+        (the docs: auth_mode cannot be set through the API)."""
+        unlock_encryption(mock_db)
+        _make_provider()
+        resp = authenticated_client.post(
+            f"{ROOT}/{PROVIDER_ID}/codex/clear-reauth", json={}
+        )
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Model provider has no ChatGPT sign-in"
+        assert db.get_codex_tokens(PROVIDER_ID)["auth_mode"] is None
+
+    def test_clear_reauth_leaves_a_grok_provider_alone(
+        self, authenticated_client, mock_db
+    ):
+        unlock_encryption(mock_db)
+        _make_provider()
+        db.set_codex_token_bundle(
+            PROVIDER_ID, access_token=encryption.encrypt_value("acc"),
+            refresh_token=encryption.encrypt_value("ref"), account_id=None,
+            needs_reauth=True, auth_mode="grok",
+        )
+        resp = authenticated_client.post(
+            f"{ROOT}/{PROVIDER_ID}/codex/clear-reauth", json={}
+        )
+        assert resp.status_code == 404
+        stored = db.get_codex_tokens(PROVIDER_ID)
+        assert (stored["auth_mode"], bool(stored["needs_reauth"])) == ("grok", True)
+
 
 class TestDeleteRevoke:
     def test_delete_best_effort_revokes_codex(
