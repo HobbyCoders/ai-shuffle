@@ -98,6 +98,10 @@ jobs:
       PYTEST_WORKERS: ${{ inputs.runner_cpus == '4' && '4' || '2' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The schema lifecycle tests build old-schema databases from git
+          # history; a shallow clone would skip them.
+          fetch-depth: 0
 
       # Upstream actions/setup-* on purpose: Blacksmith archived its
       # useblacksmith/setup-* forks and now routes the official cache actions
