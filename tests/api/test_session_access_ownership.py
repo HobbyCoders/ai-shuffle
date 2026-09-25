@@ -26,6 +26,7 @@ from app.db import database
 from app.db import turns as turns_db
 from tests.api.test_chat_ws_v2_turns import _Patches, _make_session
 from tests.core.interaction_harness import (  # noqa: F401  (autouse fixtures)
+    no_connector_delivery,
     no_gateway_listener,
     no_push,
     reset_backfill_memo_on_setup,

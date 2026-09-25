@@ -1,8 +1,9 @@
 """Autouse fixtures shared by the interaction/approval tests.
 
-A plain module: the importing file gets all four by importing them, e.g.
-``from tests.core.interaction_harness import (no_gateway_listener, no_push,
-reset_backfill_memo_on_setup, reset_interaction_wait_state)  # noqa: F401``.
+A plain module: the importing file gets all five by importing them, e.g.
+``from tests.core.interaction_harness import (no_connector_delivery,
+no_gateway_listener, no_push, reset_backfill_memo_on_setup,
+reset_interaction_wait_state)  # noqa: F401``.
 """
 import pytest
 
@@ -19,6 +20,25 @@ def no_push(monkeypatch):
     import app.services.push_notification as pn
 
     monkeypatch.setattr(pn, "fire_and_forget_notify", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def no_connector_delivery(monkeypatch):
+    """Turn off the best-effort connector-chat funnel of the permission path.
+
+    ``deliver_permission_prompt`` lazily imports ``app.core.connectors.manager``,
+    which pulls in every platform SDK (aiogram alone takes seconds). When a
+    test is the first in its process to raise a permission prompt, that import
+    runs synchronously on the event loop and starves the test's polling
+    deadlines, so the test passed only when an earlier test had already paid
+    the import. The funnel has its own tests (test_connector_permission_bridge).
+    """
+    from app.core import connector_permissions
+
+    async def _no_delivery(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(connector_permissions, "deliver_permission_prompt", _no_delivery)
 
 
 @pytest.fixture(autouse=True)

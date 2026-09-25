@@ -23,6 +23,7 @@ from app.core.user_question_handler import UserQuestionHandler
 from app.db import interactions
 from app.db import session_events as session_events_db
 from tests.core.interaction_harness import (  # noqa: F401  (autouse fixtures)
+    no_connector_delivery,
     no_gateway_listener,
     no_push,
     reset_backfill_memo_on_setup,

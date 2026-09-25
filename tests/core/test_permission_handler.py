@@ -30,6 +30,21 @@ from app.core.permission_handler import (
 )
 
 
+async def _wait_until(condition, timeout=10.0):
+    """Poll ``condition`` until it holds; fail if it never does.
+
+    ``request_permission`` creates the durable row in a worker thread before it
+    broadcasts, and the connector funnel after it may import the connector
+    stack on first use, so a fixed sleep only passed on an idle machine.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        if loop.time() >= deadline:
+            raise AssertionError("condition never became true")
+        await asyncio.sleep(0.01)
+
+
 # =============================================================================
 # Enum Tests
 # =============================================================================
@@ -603,11 +618,8 @@ class TestPermissionHandler:
                 )
             )
 
-            # Give time for request to be queued. V2 creates the durable row via
-            # asyncio.to_thread before broadcasting, so the previous legacy-path
-            # sleep(0.01) is occasionally too short for the broadcast to have
-            # fired yet (flaky under V2); 0.05 gives the thread-pool hop margin.
-            await asyncio.sleep(0.05)
+            # Wait for the request to be queued and broadcast.
+            await _wait_until(lambda: mock_broadcast.called)
 
             # Check it was queued
             assert handler.get_queue_count("session-1") == 1
@@ -642,7 +654,9 @@ class TestPermissionHandler:
         """Should return allow result when user allows."""
         with patch("app.db.database.get_permission_rules", return_value=[]):
             async def respond_after_delay():
-                await asyncio.sleep(0.01)
+                # Answer once the durable row exists: an answer that arrives
+                # first finds nothing and the request waits out its full TTL.
+                await _wait_until(lambda: handler.get_queue_count("session-1") == 1)
                 await handler.respond(
                     request_id="req-1",
                     session_id="session-1",
@@ -669,7 +683,9 @@ class TestPermissionHandler:
         """Should return deny result when user denies."""
         with patch("app.db.database.get_permission_rules", return_value=[]):
             async def respond_after_delay():
-                await asyncio.sleep(0.01)
+                # Answer once the durable row exists: an answer that arrives
+                # first finds nothing and the request waits out its full TTL.
+                await _wait_until(lambda: handler.get_queue_count("session-1") == 1)
                 await handler.respond(
                     request_id="req-1",
                     session_id="session-1",
@@ -961,9 +977,7 @@ class TestEnrichmentFields:
                 )
             )
 
-            # V2 creates the durable row via asyncio.to_thread before
-            # broadcasting, so sleep(0.01) is occasionally too short (flaky).
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: mock_broadcast.called)
 
             # Inspect the broadcast that was fired
             assert mock_broadcast.called
@@ -995,9 +1009,7 @@ class TestEnrichmentFields:
                 )
             )
 
-            # V2 creates the durable row via asyncio.to_thread before
-            # broadcasting, so sleep(0.01) is occasionally too short (flaky).
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: mock_broadcast.called)
 
             payload = mock_broadcast.call_args[0][0]
             assert payload["type"] == "permission_request"
@@ -1028,9 +1040,7 @@ class TestEnrichmentFields:
                 )
             )
 
-            # V2 creates the durable row via asyncio.to_thread before
-            # broadcasting, so sleep(0.01) is occasionally too short (flaky).
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: mock_broadcast.called)
 
             payload = mock_broadcast.call_args[0][0]
             assert payload["title"] == "Only title set"
@@ -1194,7 +1204,7 @@ class TestConnectorFunnelHook:
                     broadcast_func=broadcast,
                 )
             )
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: bool(captured))
             await handler.cancel_request("req-funnel", "session-1")
             await task
 
@@ -1208,7 +1218,10 @@ class TestConnectorFunnelHook:
         """A connector-side explosion must leave the durable flow intact."""
         broadcast = AsyncMock()
 
+        raised = []
+
         async def boom(**kwargs):
+            raised.append(kwargs["request_id"])
             raise RuntimeError("discord down")
 
         with patch("app.db.database.get_permission_rules", return_value=[]), \
@@ -1223,7 +1236,7 @@ class TestConnectorFunnelHook:
                     broadcast_func=broadcast,
                 )
             )
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: bool(raised))
 
             # The durable row exists and the WS broadcast still happened.
             assert handler.get_queue_count("session-1") == 1

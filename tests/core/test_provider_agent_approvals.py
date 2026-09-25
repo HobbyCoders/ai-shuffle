@@ -32,6 +32,7 @@ from app.core.permission_handler import PermissionHandler
 import app.core.permission_handler as ph
 from app.db import interactions
 from tests.core.interaction_harness import (  # noqa: F401  (autouse fixtures)
+    no_connector_delivery,
     no_gateway_listener,
     no_push,
     reset_backfill_memo_on_setup,

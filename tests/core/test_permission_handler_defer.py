@@ -74,7 +74,13 @@ class TestRequestPermissionReturnsSentinel:
 
         with patch("app.db.database.get_permission_rules", return_value=[]):
             async def defer_after_delay():
-                await asyncio.sleep(0.01)
+                # Answer once the durable row exists: an answer that arrives
+                # first finds nothing and the request waits out its full TTL.
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 10.0
+                while handler.get_queue_count("session-1") != 1:
+                    assert loop.time() < deadline, "the permission row never appeared"
+                    await asyncio.sleep(0.01)
                 await handler.respond(
                     request_id="req-1",
                     session_id="session-1",

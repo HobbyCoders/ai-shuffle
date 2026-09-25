@@ -1,6 +1,7 @@
 """Shared fixtures for the multi-worker network tests."""
 import pytest
 
+from app.api import network as network_api
 from app.api import pairing
 from app.network import engine, tokens, transport
 from tests.core.network.harness import Worker
@@ -24,9 +25,26 @@ def workers(tmp_path):
     transport.reset_for_tests()
 
 
+_PER_PROCESS_LIMITERS = (
+    pairing._exchange_limiter,
+    network_api._join_limiter,
+    network_api._challenge_limiter,
+)
+
+
 @pytest.fixture(autouse=True)
-def _reset_pairing_limiter():
-    """Every pairing in a test counts against the per-process exchange limiter."""
-    pairing._exchange_limiter.reset()
+def _reset_request_limiters():
+    """Start every test with empty per-process request limiters.
+
+    Every in-process worker calls from the same client address, so pairings,
+    joins and peer challenges (one per ``PeerLink.authenticate``) all count
+    against one per-minute bucket. Without a reset, a test's outcome depended
+    on how many earlier tests had authenticated in the last minute: a run of
+    the network tests alone came within a few challenges of the 60/min cap,
+    and an unlucky order got HTTP 429 instead of a device token.
+    """
+    for limiter in _PER_PROCESS_LIMITERS:
+        limiter.reset()
     yield
-    pairing._exchange_limiter.reset()
+    for limiter in _PER_PROCESS_LIMITERS:
+        limiter.reset()
