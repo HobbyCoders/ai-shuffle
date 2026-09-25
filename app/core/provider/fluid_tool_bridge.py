@@ -134,7 +134,8 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "SessionView": "safe",
     "ScheduleWakeup": "safe",
     "NotifyDevices": "safe",
-    "Monitor": "safe",
+    # Monitor runs a host shell command; fluid rates its own Monitor "write".
+    "Monitor": "write",
     "TaskOutput": "safe",
     "TaskGet": "safe",
     "TaskList": "safe",
