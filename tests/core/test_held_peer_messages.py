@@ -272,7 +272,6 @@ async def test_a_steered_completion_carries_held_messages_once(
     monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: object())
     monkeypatch.setattr(session_runtime, "try_steer_task_notification", _steer)
     monkeypatch.setattr(task_registry, "is_own_background_task", lambda *a, **k: True)
-    monkeypatch.setattr(turn_scheduler, "_cli_owns_at_rest_wake", lambda *a, **k: False)
 
     await turn_scheduler.on_task_terminal("g3", _frame("w2"))
 

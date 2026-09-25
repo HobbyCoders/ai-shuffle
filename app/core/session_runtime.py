@@ -940,9 +940,8 @@ class SessionRuntime:
             #     A queued turn intentionally starts while a PRIOR turn is parked
             #     on RUNNING work (turn_scheduler starts the next turn without
             #     waiting for the park to resolve), and that parked row is the
-            #     signal ``_cli_owns_at_rest_wake`` / ``_latest_context_turn``
-            #     rely on — settling it early risks a duplicate wake and wrong
-            #     context attribution. We do NOT also gate on unresolved launches:
+            #     signal ``_latest_context_turn`` and the held-peer gate rely
+            #     on — settling it early risks wrong context attribution. We do NOT also gate on unresolved launches:
             #     a launch that never materializes a registry record must not
             #     block the self-heal (that would re-introduce the stuck-parked
             #     stick this heal exists to clear). Best-effort: a settle failure

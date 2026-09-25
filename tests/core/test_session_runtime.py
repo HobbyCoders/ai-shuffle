@@ -608,8 +608,8 @@ async def test_turn_start_self_heal_settles_stale_park_when_no_bg_work(mock_db):
 async def test_turn_start_self_heal_spares_park_with_running_bg_work(mock_db):
     """FIX 2: the self-heal is GATED on has_active_background_work. A queued turn
     intentionally starts while a prior turn is parked on RUNNING work; that parked
-    row is the live signal _cli_owns_at_rest_wake / _latest_context_turn rely on,
-    so settling it early would risk a duplicate wake. With running bg work the
+    row is the live signal _latest_context_turn relies on, so settling it early
+    would risk wrong context attribution. With running bg work the
     stale-looking parked row must SURVIVE."""
     sid = "s4spare"
     stale = turns_db.enqueue_turn(sid, "user", prompt="old")

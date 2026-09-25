@@ -793,8 +793,7 @@ def _session_has_parked_turn(session_id: str) -> bool:
 
     A background sub-agent/shell only outlives its turn by PARKING it, so a
     parked turn is the observable "the parent is at rest waiting on background
-    work" signal the CLI keys its own at-rest wake on (see
-    :func:`_cli_owns_at_rest_wake`)."""
+    work" signal."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -804,62 +803,11 @@ def _session_has_parked_turn(session_id: str) -> bool:
         return cursor.fetchone() is not None
 
 
-#: ``frame["origin"]`` stamped by :mod:`app.core.provider_agent` on the terminal
-#: frame it hands to :func:`on_task_terminal`. Additive — no other frame producer
-#: sets ``origin``, so every other frame is unaffected.
-#:
-#: It exists for ONE decision: a ProviderAgent worker is registered
-#: ``kind == "agent"`` (load-bearing — it is what pins the parent in the session
-#: pool), so a COMPLETED worker resting under a parked parent matches every
-#: condition of the CLI-owned-wake suppression below. But that suppression is
-#: predicated on the CLI delivering its own rich ``<task-notification>`` follow-up
-#: turn, and there is NO CLI task here at all: the worker is a separate session
-#: dispatched from an MCP tool handler. Suppressing the app's wake would strand
-#: the parent parked forever. The marker keeps the suppression's scope exactly as
-#: written for genuine CLI-native sub-agents.
+#: ``frame["origin"]`` stamped on the terminal frames of app-dispatched workers
+#: (:mod:`app.core.provider_agent`, Swarm, worker continuations). The app's own
+#: wake is the only delivery of every completion on every leg — no CLI turn
+#: carries one — so the scheduler treats marked and unmarked frames alike.
 PROVIDER_AGENT_ORIGIN = "provider_agent"
-
-
-# The CLI-native duplicate. When a TOP-LEVEL backgrounded Task/Agent
-# comes to rest while the parent turn is PARKED, the CLI itself starts a follow-up
-# turn injecting the rich ``[SYSTEM NOTIFICATION] … <task-notification>`` string.
-# The app's own consolidated
-# ``source=unpark`` wake, built from the content-poor bare TaskUpdated frame, is a
-# SECOND (empty) delivery of the same completion. When the CLI owns the at-rest
-# wake we suppress the app's enqueue entirely so the model sees ONE (rich) wake.
-#
-# Scope (conservative — a wrong suppression strands a real completion):
-#   * status == "completed" ONLY. failed/killed/stopped keep the app wake — the
-#     CLI has no at-rest resume for a kill (chat_ws_handler), so its notification
-#     is the ONLY delivery.
-#   * registry record ``kind == "agent"`` ONLY. Backgrounded SHELLS (kind
-#     "shell", incl. a backgrounded local_bash) keep the app wake — the CLI does
-#     not own a shell's at-rest resume the way it owns a sub-agent's.
-#   * parent PARKED ONLY. The CLI's rich follow-up turn exists only in the parked
-#     state; with no parked turn the app wake is the sole delivery and must fire
-#     (keeps the non-parked own-lane regression guards green).
-# NOTE: a top-level backgrounded agent is ALSO tagged ``is_sdk_background_task``
-# (query_engine marks agents whose launch was a background launch), so that flag
-# does NOT distinguish agent-from-shell — the ``kind == "agent"`` record field is
-# the reliable discriminator.
-# ALSO EXCLUDED: a ProviderAgent worker frame (``origin`` marker) — it satisfies
-# every condition above but has no CLI task behind it at all. See
-# PROVIDER_AGENT_ORIGIN.
-def _cli_owns_at_rest_wake(session_id: str, frame: Dict[str, Any]) -> bool:
-    """True iff the CLI owns this completion's at-rest wake (so the app must NOT
-    also enqueue one). Caller is already inside the OWN (top-level) branch."""
-    if frame.get("origin") == PROVIDER_AGENT_ORIGIN:
-        # A ProviderAgent worker has no CLI task behind it — see
-        # PROVIDER_AGENT_ORIGIN. The app's wake is the ONLY delivery.
-        return False
-    if frame.get("status") != "completed":
-        return False
-    from app.core.task_registry import task_registry
-
-    record = task_registry.get_task(session_id, frame.get("task_id"))
-    if not record or record.get("kind") != "agent":
-        return False
-    return _session_has_parked_turn(session_id)
 
 
 # A frame is "richer" than a stored one when it POPULATES any content field
@@ -929,8 +877,6 @@ def _dedupe_frames_by_task_id(
 # * a completion steered into a live turn carries them in the same steer
 #   (:func:`_try_steer_terminal_notification`); a steer the turn never
 #   delivers puts them back for the wake that replaces it;
-# * a CLI-owned wake on the delegated leg: the CLI writes that wake's prompt
-#   itself, so the app cannot add to it; the messages wait for the deadline;
 # * an urgent message takes them along into its own wake;
 # * the deadline fires: the wakeup service promotes them to a
 #   ``source="promotion"`` turn (:func:`promote_held_peer_messages`).
@@ -1775,19 +1721,15 @@ async def _retire_without_wake(
 _terminal_delivery_locks: WeakValueDictionary = WeakValueDictionary()
 
 
-async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[str]:
+async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
     """Serialize delivery without spending the delivered latch on failed enqueue."""
     async with _terminal_delivery_lock(session_id):
         return await _on_task_terminal_locked(session_id, frame)
 
 
-async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Optional[str]:
+async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> None:
     """A background task reached a terminal state between turns. Fold the
     terminal task into ONE consolidated ``source=unpark`` wake.
-
-    Returns ``"cli-owned-wake"`` when it takes the CLI-owned-wake suppression
-    branch (the CLI owns this completion's at-rest wake and will deliver it
-    itself). Every other path returns ``None``.
 
     Near-simultaneous completions must batch into a single turn (the builder's
     consolidation only fires when it sees all pending frames at once), and a
@@ -1849,8 +1791,8 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
             )
             return
         # An explicit Stop suppresses the canceled task before issuing provider
-        # cancellation. Check at the entry point — ahead of both CLI-owned and
-        # app-owned wake paths — so every terminal-frame race is a no-op.
+        # cancellation. Check at the entry point, ahead of every wake path, so
+        # every terminal-frame race is a no-op.
         if task_id and task_registry.is_wake_suppressed(session_id, task_id):
             logger.info(
                 "turn_scheduler: wake suppressed for user-canceled task %s/%s",
@@ -1869,25 +1811,6 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
         if task_registry.is_own_background_task(session_id, task_id):
             # Explicit Stop is suppressed above; an unattributed kill is news.
             # ── OWN lane — rich consolidated source=unpark wake ──
-            # If the CLI owns this completion's at-rest wake (a
-            # top-level backgrounded agent resting while the parent is parked),
-            # the CLI already injects the rich <task-notification> follow-up turn;
-            # the app's own wake would be a SECOND, content-poor delivery. Suppress
-            # it. Shells and non-completed terminals (failed/killed/stopped) keep
-            # the app wake — the CLI does not own their at-rest resume.
-            if await asyncio.to_thread(_cli_owns_at_rest_wake, session_id, frame):
-                # Latch: the CLI emits a rest-notification each time the agent
-                # rests; latching the woken mark here lets the late-frame guard
-                # drop post-unpark duplicate frames instead of enqueueing an empty
-                # wake. (Return value ignored — this is a suppression path.)
-                if task_id:
-                    task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
-                logger.info(
-                    "turn_scheduler: unpark for %s — task %s completed; CLI owns "
-                    "the at-rest wake (parent parked), suppressing app enqueue",
-                    session_id, task_id,
-                )
-                return "cli-owned-wake"
             existing = await asyncio.to_thread(_queued_unpark_turn, session_id)
             if existing is not None:
                 existing_payload = dict(existing.get("payload") or {})

@@ -3336,11 +3336,9 @@ async def _stream_to_websocket_impl(
                     logger.debug(f"[WS] UserMessage string content preview: {content[:200] if content else 'empty'}")
                     # NOTE: a CLI-injected <task-notification> user-lane steering
                     # message can flow through here mid-turn. No latch is needed:
-                    # the app never delivers its own unpark for the backgrounded
-                    # Task/Agent class when the CLI owns the wake (see
-                    # turn_scheduler._cli_owns_at_rest_wake), so there is no
-                    # duplicate to suppress at this source. At-rest injections
-                    # never pass through stream_to_websocket.
+                    # the CLI's own Task/Agent tools are banned on the delegated
+                    # leg, so no CLI notification duplicates an app unpark.
+                    # At-rest injections never pass through stream_to_websocket.
                     # Check for local command output
                     if "<local-command-stdout>" in content:
                         match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
@@ -3366,9 +3364,7 @@ async def _stream_to_websocket_impl(
                     if isinstance(block, TextBlock):
                         text = block.text
                         # NOTE: no straddle latch needed for a CLI-injected
-                        # <task-notification> observed here — the pump never
-                        # app-delivers the backgrounded Task/Agent class
-                        # (cli-owned-wake), so nothing can duplicate. See the
+                        # <task-notification> observed here. See the
                         # string-content branch above.
                         # Check for local command output (e.g., /context, /compact)
                         if "<local-command-stdout>" in text:

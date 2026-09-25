@@ -32,7 +32,7 @@ FAKE_CLI = textwrap.dedent(
     r'''
     import json, os, sys, time
 
-    MODE = os.environ["WAKE_MODE"]  # "perm" or "latency"
+    MODE = os.environ["WAKE_MODE"]  # "perm", "latency", "notify" or "plain"
     SID = "cli-wake-1"
     pending_users = []
 
@@ -104,8 +104,17 @@ FAKE_CLI = textwrap.dedent(
         first = False
         # The background job the first turn started has finished: the CLI
         # runs a turn of its own to report it, with no user frame.
+        if MODE == "plain":
+            continue
+        if MODE == "notify":
+            # A notification with no wake turn behind it.
+            emit({"type": "system", "subtype": "task_notification", "session_id": SID,
+                  "task_id": "job-1", "status": "completed"})
+            continue
         if MODE == "latency":
-            time.sleep(0.5)  # the wake turn's model call
+            # The wake turn's first frame lands inside the drain's settle window
+            # (fluid.engine.delegated._WAKE_SETTLE) after the previous result.
+            time.sleep(0.1)
             emit(assistant([{"type": "text", "text": "WAKE: background job finished"}], "end_turn"))
             emit(result())
         else:
@@ -191,6 +200,53 @@ async def test_a_slow_wake_turn_does_not_steal_the_next_turns_reply(monkeypatch,
             f"turn 2 was answered with the CLI's own wake turn ({second!r}); the "
             "real reply to 'second' arrives after the turn ended and is discarded"
         )
+    finally:
+        await adapter.disconnect()
+
+
+async def _timed_drains(monkeypatch, adapter) -> list[float]:
+    """Wrap the engine's between-turn drain and record how long each one took."""
+    loop = adapter._engine
+    original = loop._discard_stale_stdout
+    durations: list[float] = []
+
+    async def timed():
+        started = asyncio.get_running_loop().time()
+        try:
+            await original()
+        finally:
+            durations.append(asyncio.get_running_loop().time() - started)
+
+    monkeypatch.setattr(loop, "_discard_stale_stdout", timed)
+    return durations
+
+
+@pytest.mark.asyncio
+async def test_a_plain_next_turn_is_not_held_by_the_drain(monkeypatch, tmp_path):
+    adapter = await _adapter(monkeypatch, tmp_path, "plain")
+    try:
+        assert "ANSWER: first" in await _turn_text(adapter, "first")
+        durations = await _timed_drains(monkeypatch, adapter)
+        # Sent the moment the previous result arrived: the drain may watch for
+        # a wake briefly, but must not add more than ~300 ms to the turn.
+        assert "ANSWER: second" in await asyncio.wait_for(
+            _turn_text(adapter, "second"), TURN_BUDGET_SECONDS,
+        )
+        assert durations and max(durations) < 0.3, durations
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_a_lone_task_notification_does_not_arm_the_wake_wait(monkeypatch, tmp_path):
+    adapter = await _adapter(monkeypatch, tmp_path, "notify")
+    try:
+        assert "ANSWER: first" in await _turn_text(adapter, "first")
+        durations = await _timed_drains(monkeypatch, adapter)
+        assert "ANSWER: second" in await asyncio.wait_for(
+            _turn_text(adapter, "second"), TURN_BUDGET_SECONDS,
+        )
+        assert durations and max(durations) < 1.0, durations
     finally:
         await adapter.disconnect()
 

@@ -1510,16 +1510,14 @@ async def _notify_caller_terminal(
 ) -> None:
     """Proactively wake the CALLER now that this worker reached a terminal state.
 
-    Task workers are dispatched from an app tool handler, so NOTHING in the
-    CLI-driven notification pipeline ever sees them: there is no CLI task and
-    no ``TaskNotificationMessage``, which is why ``idle_reader`` — the only other
-    producer of terminal frames — never fires for a worker. Without this call a
+    Task workers are dispatched from an app tool handler, so there is no CLI
+    task and no ``TaskNotificationMessage`` for them. Without this call a
     parent that parked on a background worker is woken by nobody: the worker's
     result lands in the registry row and the subagent card, and the parent sits
     parked until a human types something.
 
-    So ``dispatch_worker``'s ``finally`` calls the SAME scheduler seam the idle
-    reader uses, with an equivalent frame. Every guard on the far side is left
+    So ``dispatch_worker``'s ``finally`` calls the scheduler's unpark seam
+    (``turn_scheduler.on_task_terminal``) with a terminal frame. Every guard on the far side is left
     alone and still applies: the ownership gate (``is_own_background_task`` —
     which passes because dispatch registers the launch key, see
     ``mark_background_launch`` at the dispatch site), the one-wake-per-task
@@ -1535,10 +1533,8 @@ async def _notify_caller_terminal(
     value ``start_task`` registered, so the registry lookup behind the ownership
     gate resolves.
 
-    ``origin`` marks the frame as worker-produced so
-    ``turn_scheduler._cli_owns_at_rest_wake`` does not mistake a COMPLETED worker
-    for a CLI-native backgrounded sub-agent and suppress the app's wake in favour
-    of a CLI follow-up turn that will never come (there is no CLI task here).
+    ``origin`` marks the frame as worker-produced
+    (``turn_scheduler.PROVIDER_AGENT_ORIGIN``).
 
     Never raises — a wake failure must not change how the worker's dispatch
     reports.

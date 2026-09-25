@@ -638,8 +638,6 @@ class TestTerminalsBatch:
         with patch.object(
             turn_scheduler, "_try_steer_terminal_notification",
             new=AsyncMock(return_value=False),
-        ), patch.object(
-            turn_scheduler, "_cli_owns_at_rest_wake", lambda sid, frame: False,
         ), _pool_with(_RecordingAdapter()):
             for tid in ("t-1", "t-2", "t-3"):
                 await turn_scheduler.on_task_terminal("sess-1", {
@@ -668,8 +666,6 @@ class TestTerminalsBatch:
         with patch.object(
             turn_scheduler, "_try_steer_terminal_notification",
             new=AsyncMock(return_value=False),
-        ), patch.object(
-            turn_scheduler, "_cli_owns_at_rest_wake", lambda sid, frame: False,
         ), patch.object(
             turn_scheduler, "TERMINAL_BATCH_WINDOW_SECONDS", 0.05,
         ), patch.object(

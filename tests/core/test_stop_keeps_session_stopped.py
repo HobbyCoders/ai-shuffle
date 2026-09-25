@@ -337,8 +337,6 @@ async def test_the_next_user_message_starts_a_turn_and_reopens_the_wakes(mock_db
     with patch.object(turn_scheduler, "_kick_after_batch_window"), patch.object(
         turn_scheduler, "_try_steer_terminal_notification",
         new=AsyncMock(return_value=False),
-    ), patch.object(
-        turn_scheduler, "_cli_owns_at_rest_wake", return_value=False
     ):
         await turn_scheduler.on_task_terminal(SESSION, {
             "task_id": fresh,
