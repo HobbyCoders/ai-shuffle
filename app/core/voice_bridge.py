@@ -189,7 +189,7 @@ APP_TOOLS_INSTRUCTIONS = (
 CALL_STARTED_PREFIX = "[call started]"
 CONTEXT_SEED_MARKER = "[earlier conversation]"
 
-# The note injected at the start of a browser call (never on a wake-word
+# The note injected at the start of a browser call (never on a native phone
 # session, which must stay silent until the user speaks). A first-time call
 # gets a greeting; a rejoined session gets a welcome back keyed off the
 # replayed history item the bridge sends just before it.
@@ -201,31 +201,10 @@ GREETING_PROMPT = (
     "would like to do. Do not list your capabilities."
 )
 
-# Default per-mode appendices for native-app sessions (the Android voice
-# assistant). A native client reports its launch mode on call attach
-# (``session_mode``); browser calls send none and get the base prompt only.
-DEFAULT_COMMAND_INSTRUCTIONS = (
-    "Hands-free mode: you are also the user's phone assistant, speaking "
-    "through their Android phone, and this session was started by wake word. "
-    "The user may be driving and cannot touch the phone.\n"
-    "- Stay completely silent until the user speaks. Never speak first.\n"
-    "- You can act on the phone with the device tools the session declares "
-    "(calls, texts, notifications, apps, navigation, alarms, timers, "
-    "calendar, location, end_session). Use them immediately, without "
-    "asking for confirmation, except send_sms: its body is transcribed "
-    "speech, so call it without confirmed=true first, read the message back "
-    "in one short sentence, and send with confirmed=true only after a spoken "
-    "yes.\n"
-    "- If a contact lookup is ambiguous the tool says so: ask which one, "
-    "briefly. If a tool reports a missing permission, say so in a few words "
-    "and move on.\n"
-    "- Handle the request, say a very short confirmation, then call "
-    "end_session. Do not ask 'anything else?' and do not keep the session "
-    "open. If the user goes silent, call end_session.\n"
-    "- Keep every reply to one short sentence: no greetings, no explaining "
-    "what you are doing."
-)
-
+# Default per-mode appendix for native-app sessions (the Android voice
+# assistant). A native client reports its mode on call attach
+# (``session_mode``, always "chat"); browser calls send none and get the base
+# prompt only.
 DEFAULT_CHAT_INSTRUCTIONS = (
     "Phone mode: you are also the user's phone assistant, speaking through "
     "their Android phone.\n"
@@ -246,7 +225,6 @@ DEFAULT_CHAT_INSTRUCTIONS = (
 
 #: session_mode → default appendix (the route composes stored overrides).
 DEFAULT_MODE_INSTRUCTIONS: Dict[str, str] = {
-    "command": DEFAULT_COMMAND_INSTRUCTIONS,
     "chat": DEFAULT_CHAT_INSTRUCTIONS,
 }
 
@@ -891,7 +869,7 @@ class VoiceBridge:
             self._app_tools[schema["name"]] = tool
             self._app_tool_schemas.append(schema)
         # Whether to open the call with a greeting (browser calls only — a
-        # wake-word session must stay silent until the user speaks).
+        # native phone session must stay silent until the user speaks).
         self._greet = bool(greet)
 
     # -- lifecycle ---------------------------------------------------------

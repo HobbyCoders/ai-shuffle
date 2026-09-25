@@ -563,25 +563,17 @@ class TestCreateVoiceSession:
         assert overrides["is_active"] is True
         assert overrides["voice_config"]["provider_id"] == "prov-openai"
 
-    def test_command_mode_creates_a_hidden_session(
-        self, authenticated_client, mock_db, monkeypatch
-    ):
-        """A wake-word command session is BORN list-hidden (v75) — it never
-        exists in a visible state — but stays fetchable by id."""
+    def test_command_mode_is_refused(self, authenticated_client, mock_db):
+        """The wake-word "command" mode has no client left (the Android app
+        only sends "chat"), so it is an invalid mode, not a hidden session."""
         _enable_voice()
         _make_provider()
-        _install_mock_transport(monkeypatch, _secret_handler())
-
         resp = authenticated_client.post(
             f"{VOICE_ROOT}/sessions", json={"session_mode": "command", "model": "sonnet"}
         )
-        assert resp.status_code == 200, resp.text
-        session_id = resp.json()["session_id"]
-
-        row = db.get_session(session_id)
-        assert row is not None
-        assert row["hidden"] in (True, 1)
-        assert session_id not in {s["id"] for s in db.get_sessions()}
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"] == "session_mode must be 'chat'."
+        assert db.get_sessions(limit=50) == []
 
     def test_chat_mode_session_stays_visible(
         self, authenticated_client, mock_db, monkeypatch
@@ -915,57 +907,26 @@ class TestVoiceCallAttach:
         ]
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 
-    def test_command_attach_hides_the_session(
-        self, authenticated_client, mock_db, sidebands, monkeypatch
+    def test_command_attach_is_refused(
+        self, authenticated_client, mock_db, sidebands
     ):
-        """The shipped app declares session_mode only at attach time — a
-        "command" attach backfills hidden=TRUE on the already-visible row AND
-        broadcasts the flip, so a list that rendered the card during the
-        create→attach window drops it live."""
+        """No client declares "command" at attach any more; it is refused
+        before a sideband opens and the row stays visible."""
         unlock_encryption(mock_db)
         _enable_voice()
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         _mk_voice_session()
-        assert SESSION_ID in {s["id"] for s in db.get_sessions()}
-
-        from app.core.sync_engine import sync_engine
-        broadcasts = []
-
-        async def _record(user_id, session_id, updates, source_device_id=None):
-            broadcasts.append((user_id, session_id, updates))
-
-        monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", _record)
 
         resp = authenticated_client.post(
             f"{VOICE_ROOT}/sessions/{SESSION_ID}/call",
             json={"call_id": "rtc_1", "session_mode": "command"},
         )
-        assert resp.status_code == 200, resp.text
-
-        assert SESSION_ID not in {s["id"] for s in db.get_sessions()}
-        # Still fully fetchable and attachable — list-visibility only.
-        assert db.get_session(SESSION_ID) is not None
-        assert len(sidebands) == 1
-        assert broadcasts == [
-            ("admin", SESSION_ID, {"hidden": True}),
-            ("admin", SESSION_ID, {"is_active": True}),
-        ]
-
-        # A reconnect re-declaring "command" finds the row already hidden —
-        # no redundant hidden write/broadcast. Successful attaches still
-        # refresh active membership for connected devices.
-        resp = authenticated_client.post(
-            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call",
-            json={"call_id": "rtc_2", "session_mode": "command"},
-        )
-        assert resp.status_code == 200, resp.text
-        assert broadcasts == [
-            ("admin", SESSION_ID, {"hidden": True}),
-            ("admin", SESSION_ID, {"is_active": True}),
-            ("admin", SESSION_ID, {"is_active": True}),
-        ]
-
-        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+        assert resp.status_code == 400, resp.text
+        assert "session_mode" in resp.json()["detail"]
+        assert sidebands == []
+        assert SESSION_ID in {s["id"] for s in db.get_sessions()}
+        assert not hasattr(voice_bridge, "DEFAULT_COMMAND_INSTRUCTIONS")
+        assert set(voice_bridge.DEFAULT_MODE_INSTRUCTIONS) == {"chat"}
 
     def test_chat_attach_leaves_the_session_visible(
         self, authenticated_client, mock_db, sidebands

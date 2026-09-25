@@ -9,9 +9,7 @@ Deliberately small surface:
 * ``POST /api/v1/voice/sessions`` — create the session row (a voice
   session is a REAL ``sessions`` row, created eagerly, ``mode='voice'``) and
   mint a short-lived OpenAI client secret for the browser's WebRTC leg, so the
-  provider's API key never leaves this process. A declared
-  ``session_mode='command'`` (hands-free wake-word one-shots) creates the row
-  list-hidden — fully functional, just not in "recent sessions".
+  provider's API key never leaves this process.
 * ``POST /api/v1/voice/sessions/{id}/secret`` — re-mint that secret for an
   EXISTING voice session (rejoin, or the FE's reconnect near OpenAI's session
   wall). Same flag / eligibility / decrypt path as creation.
@@ -179,10 +177,9 @@ class VoiceAgent(BaseModel):
 class VoiceSessionCreateRequest(BaseModel):
     """Start a voice session. Every field is optional.
 
-    ``session_mode`` ("command" | "chat") declared at creation lets a
-    wake-word "command" session be born hidden (``sessions.hidden``) so
-    the quick one-shot task never flashes into the sessions list. Chat and
-    browser sessions (no mode) are created visible as before.
+    ``session_mode`` ("chat") marks a native phone call: it is validated here
+    and the call attach composes its instructions appendix. Browser sessions
+    send no mode and are greeted when the call opens.
     """
     profile_id: Optional[str] = None
     project_id: Optional[str] = None
@@ -232,11 +229,10 @@ class VoiceCallRequest(BaseModel):
     ``client_instructions`` is appended to the coordinator instructions to
     teach the model when/how to use those tools.
 
-    ``session_mode`` ("command" | "chat") is how a native client reports what
-    kind of session this is; the route composes the matching instructions
-    appendix (Settings-overridable) into the sideband's system prompt, and
-    "command" additionally hides the session from the sessions list.
-    Browser calls omit it and get the base prompt only.
+    ``session_mode`` ("chat") is how a native client reports what kind of
+    session this is; the route composes the matching instructions appendix
+    into the sideband's system prompt. Browser calls omit it and get the base
+    prompt only.
     """
     call_id: str
     client_tools: Optional[List[Dict[str, Any]]] = None
@@ -682,9 +678,6 @@ async def create_voice_session(
     Order matters: project authorization happens before the upstream mint, and
     the mint happens before the row is written, so neither a denied request nor
     a rejected mint leaves an orphaned session on the board.
-
-    A declared ``session_mode`` of "command" stamps ``hidden=TRUE`` at INSERT —
-    the row never exists in a visible state, so the list can't even flash it.
     """
     from app.api.settings import get_voice_settings
     from app.core import voice_bridge
@@ -693,7 +686,7 @@ async def create_voice_session(
     if session_mode is not None and session_mode not in voice_bridge.DEFAULT_MODE_INSTRUCTIONS:
         raise HTTPException(
             status_code=400,
-            detail="session_mode must be 'command' or 'chat'.",
+            detail="session_mode must be 'chat'.",
         )
 
     # Voice uses the same origin authorization as normal branch sessions.
@@ -793,7 +786,6 @@ async def create_voice_session(
         "context_window": request.context_window,
         "fast": request.fast,
         "mode": "voice",
-        "hidden": session_mode == "command",
         "voice_config": {
             "model": model, "voice": voice_settings["voice_voice"],
             "provider_id": provider_row["id"], "options": options,
@@ -1049,31 +1041,8 @@ async def attach_voice_call(
     if session_mode is not None and session_mode not in voice_bridge.DEFAULT_MODE_INSTRUCTIONS:
         raise HTTPException(
             status_code=400,
-            detail="session_mode must be 'command' or 'chat'.",
+            detail="session_mode must be 'chat'.",
         )
-
-    # A "command" session is list-hidden. Creation already stamps this
-    # when the mode is declared up front; the shipped app only declares it
-    # here at attach time, so backfill the flag for that client too — and
-    # broadcast the flip, so a list that rendered the card during the
-    # create→attach window drops it live instead of on the next refetch.
-    # User-level fan-out on purpose: no device ever watches a wake-word
-    # session, so the session-scoped broadcast would reach nobody.
-    if session_mode == "command" and not session_row.get("hidden"):
-        await run_sync(database.set_session_hidden, session_id, True)
-        try:
-            from app.core.sync_engine import sync_engine
-            await sync_engine.broadcast_user_session_updated(
-                user_id=session_row.get("api_user_id") or "admin",
-                session_id=session_id,
-                updates={"hidden": True},
-                source_device_id=None,
-            )
-        except Exception:
-            logger.warning(
-                "Voice: hidden-backfill broadcast failed for session %s",
-                session_id, exc_info=True,
-            )
 
     # Compose the agent's system prompt: the base contract, plus the appendix
     # for the client's session mode (browser calls have none).
