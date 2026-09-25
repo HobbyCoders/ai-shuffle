@@ -449,6 +449,9 @@ curl -X DELETE http://localhost:8000/api/v1/pairing/grants/GRANT_ID \
 | `GET` | `/api/v1/pairing/clients` | none | Active paired devices: `{"clients": [{"id", "device_id", "device_name", "platform", "client_type", "scopes", "paired_at", "last_seen", "session_expires_at"}]}` |
 | `PATCH` | `/api/v1/pairing/clients/{client_id}` | `device_name` (required, 1-100) | Rename. Returns the updated device. `404` if unknown |
 | `DELETE` | `/api/v1/pairing/clients/{client_id}` | none | Revoke the device's access. `204`, or `404` if no active device has that id |
+| `DELETE` | `/api/v1/mobile/devices/{device_id}` | none | Remove a registered mobile device and revoke its pairing, with its pending and trusted actions. `204`, or `404` if unknown |
+
+Both `DELETE` routes close every socket the device holds (chat, session stream, browser panel, voice, streaming transcription) with `4001` at once. A device revoked another way, one that logs out or one whose session token is replaced loses its sockets within about 30 seconds. See [WebSocket authentication](/docs/api-reference/websocket#connection-parameters).
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/pairing/clients/CLIENT_ID \

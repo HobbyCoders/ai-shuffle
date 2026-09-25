@@ -283,7 +283,7 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/resume \
 { "turn_id": "...", "session_id": "sess_abc123", "queued": false }
 ```
 
-`queued` is `true` when the retry waits behind a running turn. If a retry is already queued, that turn is returned with `"duplicate": true`. Claude Code sessions cannot be resumed this way and return `409`.
+`queued` is `true` when the retry waits behind a running turn. If a retry is already queued, that turn is returned with `"duplicate": true`. Claude Code sessions cannot be resumed this way and return `409`. When the provider cut the last reply off mid-stream, that partial reply stays in the transcript marked interrupted, and the retry starts again from the user's message.
 
 ### POST /api/v1/sessions/batch-delete
 
@@ -590,7 +590,9 @@ Import a session from JSON file.
 
 **Auth:** Required
 
-The imported session belongs to the caller. For an API key, an export that names an agent outside the key's assigned agents returns `403`, and a key limited to one project files the session under that project (an export naming another project returns `403`).
+The imported session belongs to the caller. For an API key, an export that names an agent outside the key's assigned agents returns `403`, and a key limited to one project files the session under that project (an export naming another project returns `403`). For the owner, an export naming a project this install does not have is imported without a project.
+
+Errors: `400` for a file whose name does not end in `.json`, invalid JSON, a missing `session` or `messages` field, a message that is not an object, or a `total_cost_usd`, `total_tokens_in`, `total_tokens_out` or `turn_count` that is not a number; `413` for a file over 50 MB.
 
 ### POST /api/v1/sessions/import-jsonl
 

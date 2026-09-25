@@ -144,6 +144,18 @@ curl -X POST http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a6
 
 Returns `404` if the provider does not exist.
 
+### Timeouts and provider errors
+
+Sessions on these providers call the provider directly. Three settings bound those calls; set them as environment variables or in `.env` and restart. They apply to every such session the app starts.
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `PROVIDER_READ_TIMEOUT` | `600` | Longest silence, in seconds, between two reads of a model response |
+| `PROVIDER_STREAM_DEADLINE` | `900` | Wall-clock limit, in seconds, for one whole model call; `0` disables it |
+| `PROVIDER_FIRST_BYTE_TIMEOUT` | `60` | Seconds to wait for a call's first byte before retrying it (Anthropic API only); `0` disables it |
+
+A provider error carries the HTTP status and the provider's own short message (`provider returned HTTP 429: ...`), and a `429` shows the rate-limited notice. Billing errors that providers send as `429` (for example `insufficient_quota`) are reported as `402` and are not retried. A reply cut off mid-stream keeps its partial text, marked interrupted; [Resume](/docs/api-reference/sessions#post-apiv1sessionssession_idresume) runs the turn again from the user's message.
+
 ## Model catalog
 
 ### POST /api/v1/model-providers/{provider_id}/fetch-models
