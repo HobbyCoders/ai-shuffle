@@ -9,7 +9,6 @@ Convention:
 - Relative paths: resolved against settings.effective_workspace_dir
 """
 
-import sys
 from pathlib import Path
 from typing import Callable, Optional, Union
 

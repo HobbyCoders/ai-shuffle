@@ -134,7 +134,8 @@ jobs:
         # 20-minute job timeout with no diagnosis.
         # One pytest-xdist worker per vCPU; the dispatch input selects both
         # runner size and worker count for repeatable comparisons.
-        run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance -o addopts="" -q -p no:cacheprovider --timeout=120 -n "$PYTEST_WORKERS"
+        # tests/mcp, services, unit, scripts and top-level tests/test_*.py are hermetic too (~45s at -n 4).
+        run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance tests/mcp tests/services tests/unit tests/scripts tests/test_*.py -o addopts="" -q -p no:cacheprovider --timeout=120 -n "$PYTEST_WORKERS"
 
       - name: Packaging and backup regression checks
         run: python -m pytest tests/test_packaging_audit.py tests/test_run_local_supervisor.py tests/test_chrome_supervisor.py tests/test_connector_catalog.py tests/test_connector_packages.py tests/test_buyer_docs.py tests/scripts/test_release_preflight.py -o addopts="" -q --timeout=120

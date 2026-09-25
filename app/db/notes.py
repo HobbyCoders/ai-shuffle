@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db, row_to_dict, rows_to_list
 
 
 # ============================================================================
@@ -257,15 +256,6 @@ def get_notes_autocomplete(
             })
 
         return result
-
-
-def count_all_notes() -> int:
-    """Count total notes"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) as count FROM notes")
-        row = cursor.fetchone()
-        return row["count"] if row else 0
 
 
 def get_all_note_filenames() -> set:

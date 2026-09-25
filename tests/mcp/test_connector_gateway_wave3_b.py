@@ -584,7 +584,7 @@ class TestBlueBubblesApprovalFlow:
         )
         await asyncio.sleep(0.05)
         conn.send_message.assert_awaited_once()
-        request_id = next(iter(conn._pending_action_approvals))
+        assert conn._pending_action_approvals
 
         handled = conn._check_permission_response("approve")
         assert handled is True

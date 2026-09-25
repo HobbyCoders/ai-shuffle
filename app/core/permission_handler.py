@@ -11,7 +11,6 @@ Manages tool permission requests with a queue system that supports:
 import asyncio
 import logging
 import fnmatch
-from collections import defaultdict
 from typing import Optional, Dict, Any, List, Literal, Union
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -38,12 +37,6 @@ class PermissionDecision(str, Enum):
 
 class _DeferSentinel:
     """Returned by request_permission when user defers; query_engine translates to SDK deferred output."""
-
-
-class RememberScope(str, Enum):
-    NONE = "none"           # Don't remember
-    SESSION = "session"     # Remember for this session only
-    PROFILE = "profile"     # Remember for all sessions with this profile
 
 
 @dataclass
@@ -146,17 +139,8 @@ class PermissionHandler:
     """
 
     def __init__(self):
-        # Pending requests by session_id
-        self._pending_requests: Dict[str, Dict[str, PermissionRequest]] = {}
-
-        # Deferred requests by session_id (Slice B)
-        self._deferred: Dict[str, Dict[str, PermissionRequest]] = defaultdict(dict)
-
         # In-memory session rules (cleared when session ends)
         self._session_rules: Dict[str, List[PermissionRule]] = {}
-
-        # Lock for thread-safe operations
-        self._lock = asyncio.Lock()
 
     async def request_permission(
         self,
@@ -228,8 +212,7 @@ class PermissionHandler:
     # The durable ``pending_interactions`` row is the single source of truth:
     # the executing runner blocks on it via
     # ``interaction_wait.await_interaction`` while ANY install answers it
-    # directly against the shared table (no cloud_relay). The in-memory
-    # ``_pending_requests`` / ``_deferred`` dicts are NOT used on this path;
+    # directly against the shared table (no cloud_relay).
     # ``_session_rules`` (a purely local convenience) still short-circuits
     # future prompts on the executing runner exactly as before. All frontend
     # WebSocket shapes are byte-identical to the legacy path.
@@ -297,8 +280,8 @@ class PermissionHandler:
 
 
     def _payload_row_to_dict(self, row: Dict[str, Any], state: str) -> Dict[str, Any]:
-        """Serialize a permission interaction row to the legacy request dict
-        shape (matches :meth:`_request_to_dict`)."""
+        """Serialize a permission interaction row to the request dict shape
+        sent over the WebSocket."""
         payload = row.get("payload") or {}
         created = row.get("created_at")
         if hasattr(created, "isoformat"):
@@ -373,11 +356,10 @@ class PermissionHandler:
         interaction_id = row["id"]
 
         # Queue position counts this session's pending permission rows (the row
-        # just created is included) — matches legacy len(_pending_requests).
+        # just created is included).
         queue_position = self._v2_pending_count(session_id)
 
-        # Broadcast the SAME permission_request event as legacy (transient
-        # request object, never registered in _pending_requests).
+        # Broadcast the permission_request event (transient request object).
         request = PermissionRequest(
             request_id=request_id,
             session_id=session_id,
@@ -640,8 +622,7 @@ class PermissionHandler:
         rule: PermissionRule,
         answered_by_device: Optional[str],
     ) -> tuple:
-        """Answer every OTHER pending permission row matching ``rule`` (table
-        analogue of :meth:`_resolve_matching_requests`).
+        """Answer every OTHER pending permission row matching ``rule``.
 
         Returns ``(resolved_request_ids, emits)`` where ``emits`` is a list of
         ``(interaction_id, request_id, answer)`` tuples for every row whose
@@ -924,48 +905,6 @@ class PermissionHandler:
             answered_by_device=answered_by_device,
         )
 
-    async def _resolve_matching_requests(
-        self,
-        session_id: str,
-        rule: PermissionRule,
-        broadcast_func: Optional[callable]
-    ) -> List[str]:
-        """Resolve all queued requests that match the new rule"""
-        resolved_ids = []
-
-        if session_id not in self._pending_requests:
-            return resolved_ids
-
-        # Find all matching requests
-        requests_to_resolve = []
-        for req_id, req in list(self._pending_requests[session_id].items()):
-            if rule.matches(req.tool_name, req.tool_input):
-                requests_to_resolve.append((req_id, req))
-
-        # Resolve them
-        for req_id, req in requests_to_resolve:
-            if rule.decision == PermissionDecision.ALLOW:
-                req.response = {"behavior": "allow", "updatedInput": req.tool_input}
-            else:
-                req.response = {"behavior": "deny", "message": "Denied by rule"}
-
-            req.response_event.set()
-            del self._pending_requests[session_id][req_id]
-            resolved_ids.append(req_id)
-
-            logger.debug(f"Auto-resolved request {req_id} for {req.tool_name} by new rule")
-
-        # Broadcast updated queue if any were resolved
-        if resolved_ids and broadcast_func:
-            await broadcast_func({
-                "type": "permission_queue_update",
-                "session_id": session_id,
-                "resolved_ids": resolved_ids,
-                "remaining_count": len(self._pending_requests.get(session_id, {}))
-            })
-
-        return resolved_ids
-
     def _check_rules(
         self,
         session_id: str,
@@ -1014,34 +953,6 @@ class PermissionHandler:
                 continue
             out.append(self._payload_row_to_dict(row, "deferred"))
         return out
-
-    def _request_to_dict(self, req: "PermissionRequest") -> Dict[str, Any]:
-        """Serialize a PermissionRequest to a dict for WS broadcast."""
-        d: Dict[str, Any] = {
-            "session_id": req.session_id,
-            "request_id": req.request_id,
-            "tool_name": req.tool_name,
-            "tool_input": req.tool_input,
-            "created_at": req.created_at.isoformat(),
-            "state": req.state,
-        }
-        if req.tool_use_id:
-            d["tool_use_id"] = req.tool_use_id
-        if req.agent_id:
-            d["agent_id"] = req.agent_id
-        if req.title is not None:
-            d["title"] = req.title
-        if req.display_name is not None:
-            d["display_name"] = req.display_name
-        if req.description is not None:
-            d["description"] = req.description
-        if req.decision_reason is not None:
-            d["decision_reason"] = req.decision_reason
-        if req.blocked_path is not None:
-            d["blocked_path"] = req.blocked_path
-        if req.provider_agent is not None:
-            d["provider_agent"] = req.provider_agent
-        return d
 
     async def requeue_deferred(
         self,
@@ -1132,13 +1043,11 @@ class PermissionHandler:
         ]
 
     def reset_all(self) -> None:
-        """Drop all pending/deferred requests and session rules.
+        """Drop all session rules.
 
         Used on server shutdown and between tests to prevent unbounded growth
         across sessions. Synchronous so it can run outside an event loop.
         """
-        self._pending_requests.clear()
-        self._deferred.clear()
         self._session_rules.clear()
 
 

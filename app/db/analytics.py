@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import logging
 from datetime import date, datetime
 from typing import Optional, List, Dict, Any, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db, logger
 from app.db.compat import sql_date, sql_strftime
 
 # Whitelisted values for dynamic query parameters to prevent SQL injection.

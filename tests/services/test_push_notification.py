@@ -91,13 +91,6 @@ class TestSecurityLevel:
         assert SecurityLevel.HIGH.value == "high"
         assert SecurityLevel.CRITICAL.value == "critical"
 
-    def test_security_levels_match_action_queue(self):
-        """Security levels should match action queue levels."""
-        from app.services.action_queue import SecurityLevel as ActionSecurityLevel
-        assert SecurityLevel.LOW.value == ActionSecurityLevel.LOW.value
-        assert SecurityLevel.MEDIUM.value == ActionSecurityLevel.MEDIUM.value
-        assert SecurityLevel.HIGH.value == ActionSecurityLevel.HIGH.value
-
 
 # =============================================================================
 # NotificationResult Tests

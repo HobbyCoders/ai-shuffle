@@ -42,7 +42,7 @@ from typing import Any, Collection, Dict, List, Optional
 import psycopg2
 
 from app.core.config import settings
-from app.db.base import get_db
+from app.db.base import get_db, parse_jsonb as _parse_json
 from app.db.compat import phs
 
 logger = logging.getLogger(__name__)
@@ -59,17 +59,6 @@ _INTEGRITY_ERRORS = (psycopg2.IntegrityError, sqlite3.IntegrityError)
 LIVE_STATES = ("running", "interrupting", "draining")
 # Terminal states — settle/park are idempotent no-ops once a turn is here.
 TERMINAL_STATES = ("completed", "aborted", "parked")
-
-
-def _parse_json(raw: Any) -> Any:
-    """Decode a JSONB column that the test shim stores as TEXT (dict/list pass
-    through untouched; None stays None)."""
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return None
-    return raw
 
 
 def _row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

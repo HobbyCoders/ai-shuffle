@@ -11,8 +11,6 @@ import asyncio
 import logging
 import uuid
 from typing import Dict, Any, List, Optional
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 from app.core.config import settings
 
@@ -148,25 +146,8 @@ def _question_ttl_seconds() -> int:
     return int(getattr(settings, "user_question_timeout_seconds", 3600))
 
 
-@dataclass
-class QuestionRequest:
-    """A pending user question request."""
-    request_id: str
-    tool_use_id: str
-    session_id: str
-    questions: List[Dict[str, Any]]
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    response_event: asyncio.Event = field(default_factory=asyncio.Event)
-    answers: Optional[Dict[str, Any]] = None
-
-
 class UserQuestionHandler:
     """Handles user questions from Claude with a queue system."""
-
-    def __init__(self):
-        # Pending question requests by session_id -> request_id -> request
-        self._pending_questions: Dict[str, Dict[str, QuestionRequest]] = {}
-        self._lock = asyncio.Lock()
 
     async def request_answers(
         self,

@@ -6,11 +6,13 @@ Uses PostgreSQL via psycopg2 with a threaded connection pool.
 All domain modules import from here. Do NOT import domain modules from this file.
 """
 
+import json
 import re
 from collections import deque
 import threading
 import time
 import logging
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
@@ -717,3 +719,19 @@ def rows_to_list(rows: list) -> List[Dict[str, Any]]:
     if isinstance(rows[0], dict):
         return list(rows)
     return [dict(row) for row in rows]
+
+
+def parse_jsonb(raw: Any) -> Any:
+    """Decode a JSONB column that the test shim stores as TEXT (dict/list pass
+    through untouched; None stays None)."""
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    return raw
+
+
+def utc_now_iso() -> str:
+    """Current UTC time as an ISO-8601 string."""
+    return datetime.now(timezone.utc).isoformat()

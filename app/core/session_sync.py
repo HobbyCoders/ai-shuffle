@@ -20,7 +20,6 @@ from typing import Dict, List, Any, Optional
 
 from app.core.cli_sessions import list_sessions, SessionInfo
 
-from app.core.config import settings
 from app.core.project_utils import get_project_working_dir
 from app.core.jsonl_parser import get_session_cost_from_jsonl
 from app.db import database

@@ -14,7 +14,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Tuple
 
 import psycopg2
 
@@ -40,7 +40,6 @@ from app.db.compat import (  # noqa: F401
     sql_date,
     sql_strftime,
     sql_ilike,
-    sql_current_timestamp,
 )
 
 # Database error type for catch blocks
@@ -2061,7 +2060,7 @@ def _run_column_migrations(cursor):
     #     the local-default (the resolver runs it on the local runner).
     # Composition with v40: on any DB at schema >=v40 every session row already
     # carries instance_id (orphan NULL rows were adopted locally by the v40
-    # backfill earlier in this function, ~line 372-385), so Step B honors
+    # backfill earlier in this function), so Step B honors
     # instance_id as-found and stays a pure function of row data — that local
     # adoption is v40's long-established semantic, not nondeterminism Phase 4
     # introduces.
@@ -2314,7 +2313,7 @@ def _run_column_migrations(cursor):
     # Worker network (v87): private-database peers replace the shared-database
     # cluster. Additive, nullable columns naming the owning device on the
     # tables whose rows execute somewhere, plus the local network tables.
-    # The startup backfill (app.network.migration) stamps this worker's device
+    # The startup backfill (app.network.startup.backfill_owner_device_ids) stamps this worker's device
     # id onto rows that still only carry instance_id.
     from app.db.network import create_schema as _create_network_schema
     _create_network_schema(cursor)
@@ -3076,7 +3075,6 @@ from app.db.subagents import (  # noqa: F401
     delete_subagent,
     set_subagent_builtin,
     revert_subagent_to_defaults,
-    has_subagent_been_modified,
     builtin_subagent_is_modified,
     add_permission_rule,
     get_permission_rule,
@@ -3190,7 +3188,6 @@ from app.db.git import (  # noqa: F401
     create_worktree,
     update_worktree,
     delete_worktree,
-    delete_worktrees_for_repository,
 )
 
 from app.db.notes import (  # noqa: F401
@@ -3201,7 +3198,6 @@ from app.db.notes import (  # noqa: F401
     delete_note,
     get_all_note_tags,
     get_notes_autocomplete,
-    count_all_notes,
     get_all_note_filenames,
     get_notes_without_file_path,
     bulk_update_note_file_paths,
@@ -3219,7 +3215,6 @@ from app.db.hooks import (  # noqa: F401
     get_hooks_for_project,
     get_app_hooks,
     get_all_hooks_for_project,
-    get_enabled_hooks_for_project,
     get_hooks_for_project_and_event,
     get_app_hooks_for_event,
     create_hook,
@@ -3238,24 +3233,11 @@ from app.db.mobile import (  # noqa: F401
     update_mobile_device_unifiedpush_endpoint,
     update_mobile_device_last_seen,
     delete_mobile_device,
-    create_pending_action,
     get_pending_action,
     get_pending_actions_for_device,
     update_pending_action_status,
     cleanup_expired_actions,
-    create_trusted_action,
-    get_trusted_action,
-    get_trusted_actions_for_device,
-    delete_trusted_action,
-    get_mobile_schedules,
-    get_mobile_schedule,
-    save_mobile_schedule,
-    delete_mobile_schedule,
-    get_mobile_actions,
-    save_mobile_action,
-    delete_mobile_action,
     get_mobile_devices,
-    save_mobile_device,
 )
 
 from app.db.pairing import (  # noqa: F401
@@ -3295,10 +3277,8 @@ def get_paired_client_by_session_hash(token_hash):
 
 from app.db.installs import (  # noqa: F401
     register_install,
-    touch_install_last_seen,
     touch_install_heartbeat,
     set_install_name,
-    set_install_base_url,
     set_install_approval,
     is_install_approved,
     get_install,
@@ -3336,10 +3316,3 @@ from app.db.background_tasks import (  # noqa: F401
     upsert_background_task,
     mark_stale_background_tasks_killed,
 )
-
-# Backward-compatible alias kept for callers that import the private helper.
-_parse_subagent_json_fields = None
-try:
-    from app.db.subagents import _parse_json_fields as _parse_subagent_json_fields  # noqa: F401
-except ImportError:
-    pass

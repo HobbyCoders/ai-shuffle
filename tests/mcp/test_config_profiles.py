@@ -153,7 +153,7 @@ class TestCreateProfile:
     @pytest.mark.asyncio
     async def test_create_profile_with_system_prompt_content_stores_custom(self, admin_tools):
         tool = _get_tool(admin_tools, "createProfile")
-        with patch("app.db.database.get_profile", return_value=None) as mock_get, \
+        with patch("app.db.database.get_profile", return_value=None), \
              patch("app.db.database.create_profile") as mock_create:
             mock_create.return_value = _make_profile(
                 id="custom-prompt-profile",

@@ -14,12 +14,10 @@ definitions in ``app.core.builtin_subagents.BUILTIN_SUBAGENTS`` — the old
 
 from __future__ import annotations
 
-import json
-import logging
 from datetime import datetime, timezone
 from typing import Any, Optional, List, Dict, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db, row_to_dict, rows_to_list
 from app.db import profiles as _agents_db
 
 
@@ -52,12 +50,6 @@ class PermissionRuleRow(TypedDict):
 # ============================================================================
 # Agent-row <-> subagent-shape projection
 # ============================================================================
-
-def _parse_json_fields(row: dict) -> dict:
-    """Kept for import compatibility (database.py re-exports it); the agents
-    config blob is already parsed by the profiles accessor."""
-    return row
-
 
 def _agent_to_subagent(agent: Optional[dict]) -> Optional[SubagentRow]:
     if not agent:
@@ -259,11 +251,6 @@ def builtin_subagent_is_modified(agent: Optional[dict]) -> Optional[bool]:
         or (current["tools"] or None) != (defaults.get("tools") or None)
         or (current["model"] or None) != (defaults.get("model") or None)
     )
-
-
-def has_subagent_been_modified(subagent_id: str) -> bool:
-    """True when a built-in agent differs from its in-repo definition."""
-    return bool(builtin_subagent_is_modified(get_subagent(subagent_id)))
 
 
 # ============================================================================

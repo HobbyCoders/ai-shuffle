@@ -15,17 +15,13 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.db.base import get_db, row_to_dict, rows_to_list
+from app.db.base import get_db, row_to_dict, rows_to_list, utc_now_iso as _now
 
 logger = logging.getLogger(__name__)
 
 CONFLICT_RETENTION_DAYS = 30
 LANE_SETTINGS = "settings"
 LANE_HISTORY = "history"
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json(value: Any) -> str:

@@ -339,11 +339,6 @@ class SyncEvent:
 
 
 
-# Back-compat alias: this writer is shared with the API layer
-# (chat_ws_handler reuses it for the origin socket), so the public name
-# is canonical and the underscored one is retained for older references.
-_ConnectionWriter = ConnectionWriter
-
 @dataclass
 class DeviceConnection:
     """Represents a connected device watching a session"""
@@ -456,7 +451,6 @@ class SyncEngine:
     - Track device connections per session
     - Broadcast non-render events to all devices watching a session
     - Exclude source device from broadcasts (to avoid echo)
-    - Enforce single active device per session (session locking)
 
     V2: this engine carries NO streaming state. Render frames ride the
     session event feed (SSE); busy truth is the durable runs table
@@ -468,7 +462,8 @@ class SyncEngine:
         self._connections: Dict[str, Dict[str, DeviceConnection]] = {}
         # Lock for thread-safe connection management
         self._lock = asyncio.Lock()
-        # Session locks: session_id -> device_id that owns the lock
+        # Never written; kept only because query_background's stream-end
+        # cleanup still pops from it.
         self._session_locks: Dict[str, str] = {}
         # User connections for tab sync: user_id -> {device_id -> UserDeviceConnection}
         self._user_connections: Dict[str, Dict[str, UserDeviceConnection]] = {}
@@ -592,114 +587,6 @@ class SyncEngine:
         """
         return any(conn.device_id == device_id
                    for conn in self._connections.get(session_id, {}).values())
-
-    async def sweep_stale_maps(self) -> int:
-        """Sweep orphaned session locks.
-
-        A lock becomes orphaned when its owning device disconnects abnormally
-        without releasing it: with no device left connected, nothing can ever
-        release the lock. Sessions with an ACTIVE run (durable runs table) are
-        spared — their device may reconnect mid-turn.
-
-        Returns:
-            Number of orphaned locks removed.
-        """
-        from app.core import streaming_status
-
-        async with self._lock:
-            candidates = [
-                sid for sid in self._session_locks
-                if sid not in self._connections
-            ]
-        stale_lock_ids = [
-            sid for sid in candidates
-            if not await asyncio.to_thread(streaming_status.has_active_run, sid)
-        ]
-
-        removed = 0
-        async with self._lock:
-            for sid in stale_lock_ids:
-                # Re-check: a device may have (re)connected while we were
-                # checking the runs table off-lock.
-                if sid in self._session_locks and sid not in self._connections:
-                    del self._session_locks[sid]
-                    removed += 1
-        if removed:
-            logger.info(
-                "Swept %d orphaned session lock(s). Remaining: session_locks=%d",
-                removed, len(self._session_locks),
-            )
-        return removed
-
-    async def acquire_session_lock(self, session_id: str, device_id: str) -> tuple[bool, Optional[str]]:
-        """Acquire exclusive lock on a session for a device.
-
-        Only one device can hold the lock for a session at a time.
-        If the same device already holds the lock, it succeeds (idempotent).
-
-        Args:
-            session_id: The session to lock
-            device_id: The device requesting the lock
-
-        Returns:
-            Tuple of (success, current_owner_device_id)
-            - (True, None) if lock acquired successfully
-            - (False, owner_device_id) if another device holds the lock
-        """
-        async with self._lock:
-            if session_id in self._session_locks:
-                current_owner = self._session_locks[session_id]
-                if current_owner != device_id:
-                    logger.debug(
-                        "Session %s lock denied for device %s, owned by %s",
-                        session_id, device_id, current_owner,
-                    )
-                    return False, current_owner
-                # Same device already owns it
-                return True, None
-
-            self._session_locks[session_id] = device_id
-            logger.debug(
-                "Session %s lock acquired by device %s", session_id, device_id
-            )
-            return True, None
-
-    async def release_session_lock(self, session_id: str, device_id: str) -> bool:
-        """Release the lock on a session.
-
-        Only the device that holds the lock can release it.
-
-        Args:
-            session_id: The session to unlock
-            device_id: The device releasing the lock
-
-        Returns:
-            True if lock was released, False if device didn't hold the lock
-        """
-        async with self._lock:
-            if session_id not in self._session_locks:
-                return True  # No lock exists, consider it released
-
-            if self._session_locks[session_id] != device_id:
-                logger.warning(
-                    "Device %s tried to release lock on session %s owned by %s",
-                    device_id, session_id, self._session_locks[session_id],
-                )
-                return False
-
-            del self._session_locks[session_id]
-            logger.debug(
-                "Session %s lock released by device %s", session_id, device_id
-            )
-            return True
-
-    def get_session_lock_owner(self, session_id: str) -> Optional[str]:
-        """Get the device ID that currently holds the lock on a session."""
-        return self._session_locks.get(session_id)
-
-    def is_session_locked(self, session_id: str) -> bool:
-        """Check if a session is currently locked by any device."""
-        return session_id in self._session_locks
 
     async def broadcast_event(
         self,

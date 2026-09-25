@@ -94,15 +94,10 @@ def sql_epoch_seconds(column: str) -> str:
     return f"EXTRACT(EPOCH FROM {column})"
 
 
-def sql_current_timestamp() -> str:
-    """Current UTC timestamp expression for use in queries (not DDL defaults)."""
-    return "NOW()"
-
-
 def sql_interval(value: int, unit: str = "days") -> str:
     """Generate an interval expression for date arithmetic.
 
-    Usage: WHERE created_at > {sql_current_timestamp()} - {sql_interval(7, 'days')}
+    Usage: WHERE created_at > NOW() - {sql_interval(7, 'days')}
     """
     return f"INTERVAL '{value} {unit}'"
 

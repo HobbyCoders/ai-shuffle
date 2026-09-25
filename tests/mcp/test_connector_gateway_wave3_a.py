@@ -260,7 +260,7 @@ class TestSignalHandlers:
         )
         assert res["success"] is True
         assert conn._api_post.await_count >= 2
-        args, kwargs = conn._api_post.await_args.args, conn._api_post.await_args
+        args, _kwargs = conn._api_post.await_args.args, conn._api_post.await_args
         assert args[0] == "/api/v2/send"
 
     @pytest.mark.asyncio

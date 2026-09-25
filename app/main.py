@@ -406,7 +406,6 @@ class LimitRequestBodyMiddleware(BaseHTTPMiddleware):
                         body_chunk = message.get("body", b"")
                         bytes_read += len(body_chunk)
                         if bytes_read > max_size:
-                            from fastapi.responses import JSONResponse
                             raise ValueError(
                                 f"Request body too large. Maximum size is {settings.max_request_body_mb}MB"
                             )

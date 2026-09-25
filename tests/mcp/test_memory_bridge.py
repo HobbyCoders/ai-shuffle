@@ -9,7 +9,6 @@ tools end to end against a temp skills root; the session pair is registration-
 gated on a database, so only its wiring is asserted here.
 """
 
-import json
 from unittest.mock import patch
 
 import pytest

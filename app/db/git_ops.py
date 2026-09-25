@@ -33,7 +33,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from app.db.base import get_db
+from app.db.base import get_db, parse_jsonb as _parse_json
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +45,6 @@ TERMINAL_STATUSES = ("done", "error")
 # a long add is not skipped. Metadata GET must never fail these; cleanup lives
 # only in ``ensure_pending_checkout`` and only for this runner.
 STALE_RUNNING_SECONDS = 15 * 60
-
-
-def _parse_json(raw: Any) -> Any:
-    """Decode a JSONB column that the test shim stores as TEXT (dict/list pass
-    through untouched; None stays None)."""
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return None
-    return raw
 
 
 def _row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

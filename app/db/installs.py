@@ -117,17 +117,6 @@ def register_install(
     return get_install(install_id)
 
 
-def touch_install_last_seen(install_id: str) -> None:
-    """Heartbeat: bump last_seen for this install (no other columns)."""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE installs SET last_seen = %s WHERE id = %s",
-            (now, install_id),
-        )
-
-
 def touch_install_heartbeat(
     install_id: str, capabilities: Optional[Dict[str, Any]] = None
 ) -> None:
@@ -160,17 +149,6 @@ def set_install_name(install_id: str, device_name: str) -> Optional[InstallRow]:
         if cursor.rowcount == 0:
             return None
     return get_install(install_id)
-
-
-def set_install_base_url(install_id: str, base_url: Optional[str]) -> None:
-    """Persist a (re)discovered peer-reachable base URL for this install."""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE installs SET base_url = %s, updated_at = %s WHERE id = %s",
-            (base_url, now, install_id),
-        )
 
 
 def set_install_approval(install_id: str, approved: bool) -> Optional[InstallRow]:

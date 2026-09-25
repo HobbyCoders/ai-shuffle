@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db, row_to_dict, rows_to_list
 
 
 # ============================================================================
@@ -445,11 +443,3 @@ def delete_worktree(worktree_id: str) -> bool:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM worktrees WHERE id = %s", (worktree_id,))
         return cursor.rowcount > 0
-
-
-def delete_worktrees_for_repository(repository_id: str) -> int:
-    """Delete all worktrees for a repository. Returns count of deleted worktrees."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM worktrees WHERE repository_id = %s", (repository_id,))
-        return cursor.rowcount

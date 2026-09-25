@@ -14,10 +14,9 @@ event loop offload these via ``asyncio.to_thread``.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 from typing import List, Optional, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list
+from app.db.base import get_db, row_to_dict, rows_to_list, utc_now_iso as _now
 
 
 class MemoryFileRow(TypedDict):
@@ -30,10 +29,6 @@ class MemoryFileRow(TypedDict):
     deleted: bool
     updated_at: object  # psycopg2 returns TIMESTAMPTZ as an aware datetime
     updated_by: Optional[str]
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def get_memory_files(memory_key: str) -> List[MemoryFileRow]:

@@ -4,7 +4,6 @@ Push notification service for mobile devices using Firebase Cloud Messaging.
 Supports both real FCM delivery and mock mode for development without Firebase.
 """
 
-import json
 import logging
 import os
 from dataclasses import dataclass
@@ -418,98 +417,6 @@ class PushNotificationService:
 
         return results
 
-    async def send_action_request(
-        self,
-        device_id: str,
-        action_id: str,
-        action_type: str,
-        params: Dict[str, Any],
-        security_level: SecurityLevel = SecurityLevel.MEDIUM,
-    ) -> NotificationResult:
-        """
-        Send an action request notification requiring user confirmation.
-
-        Args:
-            device_id: FCM registration token
-            action_id: Unique identifier for this action
-            action_type: Type of action (e.g., "file_write", "command_exec")
-            params: Action parameters to display
-            security_level: Required security level for approval
-
-        Returns:
-            NotificationResult
-        """
-        title = f"Action Required: {action_type}"
-        body = self._format_action_body(action_type, params)
-
-        data = {
-            "type": "action_request",
-            "action_id": action_id,
-            "action_type": action_type,
-            "params": json.dumps(params),
-            "security_level": security_level.value,
-            "requires_confirmation": True,
-        }
-
-        return await self.send_notification(
-            device_id=device_id,
-            title=title,
-            body=body,
-            data=data,
-            priority=NotificationPriority.HIGH,
-        )
-
-    def _format_action_body(self, action_type: str, params: Dict[str, Any]) -> str:
-        """Format action parameters for notification body."""
-        if action_type == "file_write":
-            path = params.get("path", "unknown file")
-            return f"Approve writing to {path}?"
-        elif action_type == "command_exec":
-            cmd = params.get("command", "unknown command")
-            # Truncate long commands
-            if len(cmd) > 50:
-                cmd = cmd[:47] + "..."
-            return f"Approve running: {cmd}?"
-        elif action_type == "file_delete":
-            path = params.get("path", "unknown file")
-            return f"Approve deleting {path}?"
-        else:
-            return f"Approve {action_type}?"
-
-    async def send_proactive_message(
-        self,
-        device_id: str,
-        message_type: str,
-        content: Dict[str, Any],
-    ) -> NotificationResult:
-        """
-        Send a proactive message/briefing notification.
-
-        Args:
-            device_id: FCM registration token
-            message_type: Type of proactive message (e.g., "daily_briefing", "reminder")
-            content: Message content
-
-        Returns:
-            NotificationResult
-        """
-        title = content.get("title", "AI Shuffle Update")
-        body = content.get("body", content.get("summary", "You have new updates"))
-
-        data = {
-            "type": "proactive_message",
-            "message_type": message_type,
-            "content": json.dumps(content),
-        }
-
-        return await self.send_notification(
-            device_id=device_id,
-            title=title,
-            body=body,
-            data=data,
-            priority=NotificationPriority.NORMAL,
-        )
-
     def get_mock_notifications(self) -> List[Dict[str, Any]]:
         """Get list of sent notifications (only in mock mode, for testing)."""
         return list(self._sent_notifications)
@@ -534,10 +441,7 @@ async def deliver_local_notification(
     push without Firebase or a UnifiedPush distributor app) and to any locally
     registered UnifiedPush/FCM transports. All errors are swallowed.
 
-    This is the single local-delivery primitive shared by two callers:
-    ``fire_and_forget_notify`` (the originating install's local leg) and the
-    cluster ``/mobile-notify`` peer endpoint. The peer endpoint calls *only*
-    this — it must never re-fan-out, or notifications would loop between installs.
+    Called by ``fire_and_forget_notify``.
     """
     from app.services.mobile_push_hub import mobile_push_hub
 

@@ -8,7 +8,6 @@ app's embedded foreground service), so it must:
 - stop delivering after unsubscribe
 """
 
-import asyncio
 
 from app.services.mobile_push_hub import MobilePushHub, mobile_push_hub
 

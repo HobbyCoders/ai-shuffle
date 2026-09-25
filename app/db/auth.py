@@ -8,12 +8,10 @@ Login Attempts, Account Lockouts, and API Key Sessions.
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
-from app.core.config import settings
 
 
 # ============================================================================

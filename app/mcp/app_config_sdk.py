@@ -21,29 +21,13 @@ Module layout (split for maintainability):
   - config_mcp_servers.py  — MCP server management tools
   - config_profiles.py     — profile CRUD tools
   - config_connectors.py   — connector status/toggle tools
+  - config_subagents.py    — subagent CRUD tools
 """
 
-import json
 import logging
-import secrets as _secrets
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
-# Re-export constants and helpers for backward compatibility
-from app.mcp.config_helpers import (
-    VALID_HOOK_EVENTS,
-    VALID_HOOK_TYPES,
-    VALID_TRIGGER_TYPES,
-    _tool_result,
-    _error,
-    _sanitize_hook,
-    _sanitize_automation,
-    _sanitize_connector,
-    _hook_summary,
-    _automation_summary,
-)
-
-# Re-export tool factory functions for backward compatibility
+from app.mcp.config_helpers import _tool_result
 from app.mcp.config_hooks import _create_hook_tools
 from app.mcp.config_automations import _create_automation_tools
 from app.mcp.config_mcp_servers import _create_mcp_tools

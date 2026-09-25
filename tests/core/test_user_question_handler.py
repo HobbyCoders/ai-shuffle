@@ -2,7 +2,6 @@
 Unit tests for user_question_handler module.
 
 Tests cover:
-- QuestionRequest dataclass initialization
 - UserQuestionHandler.request_answers() - normal flow, timeout, broadcast
 - UserQuestionHandler.respond() - success, not found, session not found
 - UserQuestionHandler.get_pending_questions() - with and without questions
@@ -13,11 +12,10 @@ Tests cover:
 
 import asyncio
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 from app.core.user_question_handler import (
-    QuestionRequest,
     UserQuestionHandler,
     user_question_handler
 )
@@ -76,59 +74,6 @@ async def _wait_for_broadcast(broadcast_mock, *request_ids, timeout=REGISTRATION
         await asyncio.sleep(0.005)
 
 
-class TestQuestionRequest:
-    """Test QuestionRequest dataclass."""
-
-    def test_question_request_initialization(self):
-        """QuestionRequest should initialize with required fields."""
-        request = QuestionRequest(
-            request_id="req-123",
-            tool_use_id="tool-456",
-            session_id="session-789",
-            questions=[{"question": "Test?", "header": "Q1"}]
-        )
-
-        assert request.request_id == "req-123"
-        assert request.tool_use_id == "tool-456"
-        assert request.session_id == "session-789"
-        assert request.questions == [{"question": "Test?", "header": "Q1"}]
-        assert request.answers is None
-        assert isinstance(request.created_at, datetime)
-        assert isinstance(request.response_event, asyncio.Event)
-
-    def test_question_request_default_values(self):
-        """QuestionRequest should set default values correctly."""
-        before = datetime.now(timezone.utc)
-        request = QuestionRequest(
-            request_id="req-123",
-            tool_use_id="tool-456",
-            session_id="session-789",
-            questions=[]
-        )
-        after = datetime.now(timezone.utc)
-
-        assert before <= request.created_at <= after
-        assert request.answers is None
-        assert not request.response_event.is_set()
-
-    def test_question_request_with_multiple_questions(self):
-        """QuestionRequest should handle multiple questions."""
-        questions = [
-            {"question": "What color?", "header": "Color", "options": ["Red", "Blue"]},
-            {"question": "What size?", "header": "Size", "multiSelect": True}
-        ]
-        request = QuestionRequest(
-            request_id="req-123",
-            tool_use_id="tool-456",
-            session_id="session-789",
-            questions=questions
-        )
-
-        assert len(request.questions) == 2
-        assert request.questions[0]["options"] == ["Red", "Blue"]
-        assert request.questions[1]["multiSelect"] is True
-
-
 class TestUserQuestionHandler:
     """Test UserQuestionHandler class."""
 
@@ -164,7 +109,7 @@ class TestRequestAnswers(TestUserQuestionHandler):
 
         asyncio.create_task(respond_quickly())
 
-        result = await handler.request_answers(
+        await handler.request_answers(
             request_id="req-123",
             tool_use_id="tool-456",
             session_id="session-1",

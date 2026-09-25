@@ -117,10 +117,6 @@ async def _collect_metrics() -> dict:
             len(devices) for devices in sync_engine._connections.values()
         )
         metrics["sync_user_connections"] = len(sync_engine._user_connections)
-        metrics["sync_session_locks"] = len(sync_engine._session_locks)
-        metrics["sync_session_user_map"] = len(sync_engine._session_user_map)
-        metrics["sync_session_project_map"] = len(sync_engine._session_project_map)
-        metrics["sync_session_worktree_map"] = len(sync_engine._session_worktree_map)
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to collect sync engine metrics: {e}")
 
@@ -192,7 +188,6 @@ async def _collect_metrics() -> dict:
 
     # --- Event loop responsiveness ---
     try:
-        loop = asyncio.get_running_loop()
         lag_start = time.monotonic()
         await asyncio.sleep(0)  # Yield to event loop
         lag = time.monotonic() - lag_start
@@ -250,13 +245,7 @@ async def _collect_metrics() -> dict:
     # --- Handler accumulation tracking ---
     try:
         from app.core.permission_handler import permission_handler
-        metrics["perm_pending_sessions"] = len(permission_handler._pending_requests)
         metrics["perm_session_rules"] = len(permission_handler._session_rules)
-    except Exception:
-        pass
-    try:
-        from app.core.user_question_handler import user_question_handler
-        metrics["question_pending_sessions"] = len(user_question_handler._pending_questions)
     except Exception:
         pass
 
@@ -508,15 +497,6 @@ async def _periodic_cleanup() -> dict:
     Returns a dict of cleanup actions taken (for logging).
     """
     cleaned = {}
-
-    # Sweep stale sync engine maps
-    try:
-        from app.core.sync_engine import sync_engine
-        count = await sync_engine.sweep_stale_maps()
-        if count:
-            cleaned["stale_sync_maps"] = count
-    except Exception as e:
-        logger.debug(f"{_PREFIX} Failed to sweep sync engine maps: {e}")
 
     # Clean up done tasks from _active_chat_sessions
     try:

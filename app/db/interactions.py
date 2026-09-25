@@ -16,20 +16,9 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
-from app.db.base import get_db, rows_to_list
+from app.db.base import get_db, parse_jsonb as _parse_json, rows_to_list
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_json(raw: Any) -> Any:
-    """Decode a JSONB column that the test shim stores as TEXT (dict/list pass
-    through untouched; None stays None)."""
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return None
-    return raw
 
 
 def _parse_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

@@ -10,7 +10,8 @@ the agent can query what it has running and the UI can surface it on every poll:
    ``app/mcp/builtin_tools.py``.
 
 Key principles:
-1. In-memory only — no DB table, no migration. State is rebuilt on restart.
+1. In-memory first; ``_persist_task_state`` mirrors state into the
+   ``background_tasks`` table.
 2. Keyed by AI Shuffle ``session_id`` then ``task_id``.
 3. Tasks intentionally OUTLIVE a single turn — the registry is only cleared when
    the session itself is torn down (clear, eviction, worktree termination).
@@ -62,22 +63,11 @@ _RECENT_COMPLETED_WINDOW_SECONDS = 600.0
 
 # How long a cleanly completed task stays SURFACED on ``/live`` (``get_visible``).
 # Deliberately separate from — and much shorter than — the readability window
-# above: this one exists to bridge the completion → unpark hand-off, not to
-# display a result. ``complete_task`` drops a task from ``get_active`` the
-# moment its completion is consumed (for Monitor shells: the moment the process
-# exits), but the ``unpark_pending`` latch is only set a beat later — after the
-# drain pump's dispatch awaits, or, for shells, after the SDK's own terminal
-# notification arrives seconds behind the process exit (and the deliver-time
-# ``end_streaming`` briefly clears the latch before re-asserting it). In every
-# one of those gaps a ``/live`` response read (is_streaming=false,
-# activeTasks=[], unpark_pending=false) — indistinguishable from idle — so a
-# poll landing there STOPPED the poller and a session LOAD landing there
-# classified the session idle and never armed one; the unpark follow-up then
-# streamed into a dead UI until a manual refresh. Retaining the completed row
-# keeps park-polling and load classification alive across the gap; the
-# ``unpark_pending`` latch takes over well within the window. Self-limiting:
-# with no follow-up coming, the poller goes idle when the window expires — which
-# is why the taskbar keeps the SHORT window while the record itself lives on.
+# above: it bridges the completion → follow-up hand-off, so a ``/live`` poll or
+# session load landing in that gap does not read the session as idle and stop
+# polling. Self-limiting: with no follow-up coming, the poller goes idle when
+# the window expires — which is why the taskbar keeps the SHORT window while
+# the record itself lives on.
 _COMPLETED_VISIBLE_WINDOW_SECONDS = 15.0
 
 # Statuses that mean a task DIED rather than finished cleanly. These get the
@@ -254,25 +244,6 @@ class TaskRegistry:
         # slow path is a background agent launched in turn N whose notification
         # arrives between turn N and N+1.
         self._background_launches: Dict[str, set] = {}
-        # session_ids with an "unpark" follow-up turn COMMITTED but not yet
-        # streaming. Set the instant the drain pump (or in-stream stash) hands a
-        # background sub-agent's completion off to a follow-up ``run_query``, and
-        # cleared the moment that turn starts streaming (or it tears down).
-        # It bridges the gap between a background task
-        # completing — ``complete_task`` removes it from ``get_active`` so the poll
-        # reports ``activeTasks=[]`` — and the follow-up turn flipping
-        # ``is_streaming`` back to ``true``. ``/live`` surfaces it so a polling
-        # client keeps its park-poll alive across that gap instead of seeing a
-        # transient ``(is_streaming=false, activeTasks=[])`` and STOPPING — which
-        # stranded the parked UI (the origin socket is gone, so nothing restarts
-        # polling and the follow-up streamed unseen until a full reload).
-        self._unpark_pending: set = set()
-        # session_id -> monotonic timestamp of when the unpark-pending latch
-        # was last set. Lets the runtime reconciler age-gate its "stale latch"
-        # repair (a latch is legal for the brief commit -> start_streaming
-        # hand-off; one older than the grace window with no pump and nothing
-        # streaming is stranded). Kept in lock-step with ``_unpark_pending``.
-        self._unpark_pending_since: Dict[str, float] = {}
         # session_id -> {task_id, ...} for SDK-managed BACKGROUND tasks that PARK
         # the parent and unpark via a terminal TaskNotificationMessage on the
         # pooled SDK client — i.e. backgrounded shell commands (Bash/PowerShell
@@ -1149,7 +1120,7 @@ class TaskRegistry:
         ``_RECENT_TERMINAL_WINDOW_SECONDS`` so a force-cleanup reap (dead SDK
         client) doesn't drop the row with no failed indication; clean completions
         get the much shorter ``_RECENT_COMPLETED_WINDOW_SECONDS`` purely to keep
-        park-polling alive across the completion → ``unpark_pending`` hand-off gap.
+        park-polling alive across the completion → follow-up hand-off gap.
 
         ``summary``/``reason`` attribute the kill (item 4a): shutdown-origin
         reaps stamp ``SERVER_SHUTDOWN_SUMMARY``/``SERVER_SHUTDOWN_REASON`` so
@@ -1433,8 +1404,6 @@ class TaskRegistry:
         composer hints (the caller checks get_active). Never truncate to the
         taskbar's retained/display limit or treat wake submission as delivery.
         """
-        if session_id in self._unpark_pending:
-            return True
         # Nested task results go to their owning agent, not this session.
         # Match on_task_terminal's OWN lane: only parent-owned completions can
         # produce a parent delivery receipt. Active nested work still blocks
@@ -1665,8 +1634,6 @@ class TaskRegistry:
         self._tasks.pop(session_id, None)
         self._started_this_turn.pop(session_id, None)
         self._background_launches.pop(session_id, None)
-        self._unpark_pending.discard(session_id)
-        self._unpark_pending_since.pop(session_id, None)
         self._sdk_background_tasks.pop(session_id, None)
         self._monitor_shell_tasks.pop(session_id, None)
         self._serving_monitor_tasks.pop(session_id, None)
@@ -1689,8 +1656,6 @@ class TaskRegistry:
         self._tasks.clear()
         self._started_this_turn.clear()
         self._background_launches.clear()
-        self._unpark_pending.clear()
-        self._unpark_pending_since.clear()
         self._sdk_background_tasks.clear()
         self._monitor_shell_tasks.clear()
         self._serving_monitor_tasks.clear()

@@ -8,16 +8,12 @@ picker keep working unchanged.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from app.core.config import settings
 from app.db import network as store
+from app.db.base import utc_now_iso as _now_iso
 from app.network import engine, membership, transport
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def directory() -> dict:
