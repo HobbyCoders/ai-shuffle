@@ -80,6 +80,13 @@ To sign in to the Claude Code CLI from Unraid's own terminal instead of the in-a
 docker exec -it -u appuser AI-Shuffle claude auth login
 ```
 
+## Optional environment variables
+
+A few settings have no field in the template. To set one, edit the container, choose **Add another Path, Port, Variable, Label or Device**, pick **Variable**, enter the name as the **Key** and the value, then **Apply**:
+
+- `BROWSER_SSRF_ALLOW`, `BROWSER_SSRF_ALLOW_LOOPBACK`, `BROWSER_SSRF_BLOCK`: which private addresses the built-in browser may open. By default it can reach `localhost` inside the container but not your LAN or Tailscale addresses. See [the built-in browser's network access](/docs/getting-started/install-docker-compose#the-built-in-browsers-network-access-optional).
+- `TRUSTED_PROXIES`: the address of a reverse proxy in another container or on the server itself (comma-separated IPs or ranges). Without it, rate limits and the audit log see every visitor as the proxy. See [Behind a reverse proxy](/docs/getting-started/install-docker-compose#behind-a-reverse-proxy-optional).
+
 ## Back up
 
 Stop the container, then back up `/mnt/user/appdata/ai-shuffle/`. The `data` folder holds the database and the key that encrypts your saved credentials; always keep them together. An appdata backup plugin works as long as it stops the container first.

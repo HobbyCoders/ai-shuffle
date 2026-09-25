@@ -114,7 +114,7 @@ A webhook trigger generates a secret when you omit one. The secret is stored enc
 ```json
 {
   "event_type": "session.complete",
-  "connector_id": "conn_abc123",
+  "connector_id": "conn-1a2b3c4d",
   "filter": { "status": "ok" }
 }
 ```

@@ -127,6 +127,8 @@ Rename a file or folder. Pass its path as `?path=` and the new name in the body:
 
 Delete a file or folder given by the `path` query parameter (required).
 
+Upload, folder create, rename and delete return `400` for any path that names the repository's `.git` directory, in any spelling git itself refuses (other letter case, trailing dots or spaces, NTFS names such as `GIT~1` or `.git::$INDEX_ALLOCATION`) or through a link that resolves to it. Deleting a link that points to `.git` removes only the link.
+
 ## Chat History
 
 ### GET /api/v1/projects/{project_id}/chat-history

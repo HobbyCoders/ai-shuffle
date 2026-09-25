@@ -65,7 +65,7 @@ invite or phone/browser code), `WorkerDeviceConfirmations` and
 sign in, join with an invite); and the runner picker, which lists network
 runners (`GET /api/v1/cluster/installs` returns them when the worker is
 enrolled). Recovery keys, conflicts and advertised addresses have API routes
-(`/api/v1/network/recovery`, `/api/v1/network/conflicts`,
+(`/api/v1/network/recovery`, `/api/v1/network/conflicts` (owner only),
 `/api/v1/cluster/advertise`) but no Settings UI.
 
 ## How sync works
@@ -93,7 +93,8 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
 4. **Applying.** Verify signature against the members table, reject a revoked
    origin past its `last_seq_accepted`, order per stream (holes wait in
    `sync_pending`), decrypt, last-writer-wins on (clock, device id), materialize
-   into the domain table, keep the loser in `sync_conflicts` for 30 days,
+   into the domain table, keep the loser in `sync_conflicts` for 30 days
+   (columns encrypted at rest are stored as `<secret>`, never in plaintext),
    advance the watermark. All in one transaction per envelope.
 5. **Bootstrap.** A joiner installs the join response (keys wrapped to it, the
    membership chain), copies signed snapshot chunks from the inviter, adopts the

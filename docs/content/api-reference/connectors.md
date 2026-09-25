@@ -117,7 +117,7 @@ curl http://localhost:8000/api/v1/connectors \
 ```json
 [
   {
-    "id": "conn_abc123",
+    "id": "conn-1a2b3c4d",
     "name": "My Telegram Bot",
     "type": "telegram",
     "is_active": true,
@@ -191,7 +191,7 @@ Returns the updated connector. `400` for an unknown event type, or for `"is_acti
 **Auth:** Owner only
 
 ```bash
-curl -X PATCH http://localhost:8000/api/v1/connectors/conn_abc123 \
+curl -X PATCH http://localhost:8000/api/v1/connectors/conn-1a2b3c4d \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -217,7 +217,7 @@ Test the connector's connection without activating it.
 **Auth:** Owner only
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/test \
+curl -X POST http://localhost:8000/api/v1/connectors/conn-1a2b3c4d/test \
   -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
@@ -238,7 +238,7 @@ Activating a connector that is already connected, or still connecting, leaves th
 **Auth:** Owner only
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/activate \
+curl -X POST http://localhost:8000/api/v1/connectors/conn-1a2b3c4d/activate \
   -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
@@ -263,14 +263,14 @@ Get the runtime status of a connector, including whether its instance is current
 **Auth:** Owner only
 
 ```bash
-curl http://localhost:8000/api/v1/connectors/conn_abc123/status \
+curl http://localhost:8000/api/v1/connectors/conn-1a2b3c4d/status \
   -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
 **Response:**
 ```json
 {
-  "id": "conn_abc123",
+  "id": "conn-1a2b3c4d",
   "status": "connected",
   "status_message": null,
   "last_connected_at": "2025-01-15T10:00:00Z",
@@ -287,7 +287,7 @@ Get the recent event logs for a connector.
 **Auth:** Owner only
 
 ```bash
-curl http://localhost:8000/api/v1/connectors/conn_abc123/logs \
+curl http://localhost:8000/api/v1/connectors/conn-1a2b3c4d/logs \
   -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
@@ -296,7 +296,7 @@ curl http://localhost:8000/api/v1/connectors/conn_abc123/logs \
 [
   {
     "id": "evt_abc123",
-    "connector_id": "conn_abc123",
+    "connector_id": "conn-1a2b3c4d",
     "event_type": "message_received",
     "direction": "inbound",
     "payload": {},
@@ -347,7 +347,7 @@ Execute a connector action directly against a running connector instance. The JS
 **Auth:** Owner only
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/actions/send_message/execute \
+curl -X POST http://localhost:8000/api/v1/connectors/conn-1a2b3c4d/actions/send_message/execute \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "chat_id": 12345678, "text": "Hello" }'
@@ -492,7 +492,7 @@ Run these through `POST /api/v1/connectors/{connector_id}/actions/{action_id}/ex
 In `transactions`, positive amounts are money spent and negative amounts are refunds or credits. Pending entries can still change.
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/actions/transactions/execute \
+curl -X POST http://localhost:8000/api/v1/connectors/conn-1a2b3c4d/actions/transactions/execute \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"start_date": "2025-01-01", "end_date": "2025-01-31", "count": 50}'

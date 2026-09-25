@@ -452,7 +452,7 @@ curl http://localhost:8000/api/v1/plugins/runtime/telegram%40shuffle-connectors/
 ```json
 [
   {
-    "id": "conn_abc123",
+    "id": "conn-1a2b3c4d",
     "name": "Team Telegram",
     "active": true,
     "automations": [

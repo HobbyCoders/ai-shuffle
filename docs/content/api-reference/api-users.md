@@ -97,7 +97,7 @@ Get API user details (key is not included). This and the routes below return `40
 
 ### PATCH /api/v1/api-users/{user_id}
 
-Update an API user. Takes the same fields as create, plus `is_active` (set `false` to disable the key without deleting it).
+Update an API user. Takes the same fields as create, plus `is_active` (set `false` to disable the key without deleting it; an open chat WebSocket using the key then closes with `4001`).
 
 **Auth:** Owner only
 
@@ -113,7 +113,7 @@ curl -X PATCH http://localhost:8000/api/v1/api-users/3f9a1c2e \
 
 ### DELETE /api/v1/api-users/{user_id}
 
-Delete an API user and invalidate its key.
+Delete an API user and invalidate its key. An open chat WebSocket using the key closes with `4001`.
 
 **Auth:** Owner only
 
@@ -121,7 +121,7 @@ Delete an API user and invalidate its key.
 
 ### POST /api/v1/api-users/{user_id}/rotate-key
 
-Generate a new API key for the user, invalidating the old one.
+Generate a new API key for the user, invalidating the old one. An open chat WebSocket using the old key closes with `4001`; reconnect with the new one.
 
 **Auth:** Owner only
 

@@ -145,6 +145,8 @@ When a Codex or SuperGrok banked reset is used (`POST /api/v1/model-providers/{p
 
 ## Git Integration
 
+A git route that takes a `worktree_id` query parameter accepts only a worktree of the project in the path; a worktree of another project returns `404`, the same answer as an unknown id.
+
 ### GET /api/v1/projects/{project_id}/git/status
 
 Get git status for a project.
@@ -216,7 +218,7 @@ Delete a branch. Add `?force=true` to delete a branch that is not fully merged. 
 | `POST` | `/git/checkout` | Body: `{"ref": "main", "auto_stash": false}` | Switch branch or commit in the project folder. Returns `409` for uncommitted changes unless `auto_stash` is `true`. Not allowed with `worktree_id` |
 | `POST` | `/git/fetch` | Query: `remote` (default `origin`) | Returns `502` if the remote cannot be reached |
 | `POST` | `/git/pull` | Body: `{"remote": "origin", "strategy": "merge", "auto_stash": false}` | `strategy` is `merge` or `rebase`. On a conflict the pull is aborted and the response has `success: false`, `has_conflicts: true` and `conflicts` |
-| `POST` | `/git/push` | Body: `{"remote": "origin", "branch": null, "set_upstream": false, "force": false}` | `branch` defaults to the current branch |
+| `POST` | `/git/push` | Body: `{"remote": "origin", "branch": null, "set_upstream": false, "force": false}` | `branch` defaults to the current branch and must be a plain branch name: a refspec (`:main`, `+main`, `a:b`) or a name starting with `-` returns `400`. `remote` is letters, digits, `.`, `_` and `-`, and must not start with `-` |
 | `POST` | `/git/stage` | Body: `{"files": ["src/app.py"]}` | |
 | `POST` | `/git/unstage` | Body: `{"files": ["src/app.py"]}` | Keeps the changes in the working tree |
 | `POST` | `/git/discard` | Body: `{"files": ["src/app.py"]}` | Reverts the files; untracked files are deleted. Optional `file_statuses` maps a file to `modified`, `staged` or `untracked`; otherwise it is read from git status |
@@ -252,7 +254,7 @@ curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/init \
 | `create_github_repo` | boolean | `false` | Create a GitHub repository (needs `github_repo_name` and a signed-in GitHub CLI) and push the initial commit to it |
 | `github_repo_name` | string | | Up to 100 characters |
 | `github_private` | boolean | `true` | Make the GitHub repository private |
-| `default_branch` | string | `main` | Name of the first branch |
+| `default_branch` | string | `main` | Name of the first branch. Letters, digits, `.`, `_`, `/` and `-`, starting with a letter, digit or `_` (`422` otherwise) |
 
 Returns `success`, `message`, `repository_id`, `github_repo_url` and `github_repo_name`. Returns `400` if the folder is already a repository or GitHub is not signed in.
 
@@ -270,6 +272,8 @@ curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/clone \
 ```
 
 `clone_url` (required, up to 500 characters) is an HTTPS or SSH URL. Returns `success`, `message` and `repository_id`; `400` if the folder is already a repository, `500` if the clone fails.
+
+Credentials in an HTTPS URL (`https://user:token@host/...`) are redacted from the message, from error text and from the logs, and the repository's stored `remote_url` (shown by `git/status`) leaves them out. The clone's own git remote keeps them, so fetch and push go on working. The user in an SSH URL (`git@host:...`) is kept.
 
 ### POST /api/v1/projects/{project_id}/git/generate-commit-message
 
@@ -297,7 +301,7 @@ Suggest a branch name for a task.
 { "message": "The login page times out after 5 seconds", "prefix": "fix" }
 ```
 
-`message` (required) is 1 to 2000 characters. `prefix` is optional (for example `feat`, `fix`, `chore`); without it one is chosen from the message. Returns `{"branch_name": "fix/login-page-timeout", "display_name": "Login Page Timeout"}`. If AI is unavailable, the name is made from the message's words.
+`message` (required) is 1 to 2000 characters. `prefix` is optional (for example `feat`, `fix`, `chore`): a letter or digit followed by up to 31 letters, digits, `_` or `-`. Without it, or when it is not in that form, one is chosen from the message. Returns `{"branch_name": "fix/login-page-timeout", "display_name": "Login Page Timeout"}`. If AI is unavailable, the name is made from the message's words.
 
 ### POST /api/v1/projects/{project_id}/git/ship
 
@@ -492,6 +496,8 @@ For fal.ai models, the owner's requests use the owner's fal.ai key. A request ma
 | `admin_provided` | The owner's key. |
 
 Models served by OpenAI use the owner's OpenAI provider key.
+
+Errors from both routes: `400` for invalid input (empty text or text over 4096 characters; an empty, unreadable or over-25 MB file), a missing key or a key the provider rejects; `403` when the credential policy above leaves the API key without one; `429` when the provider rate-limits; `502` when fal.ai or OpenAI returns an error or cannot be reached; `504` when it does not answer in time.
 
 ### DELETE /api/v1/settings/integrations/fal-ai
 
@@ -847,7 +853,7 @@ Drop a held turn without running it. Returns `{"success": true}`, or `404`.
 
 ### Import Claude and Codex settings
 
-Copy instructions, skills, agents, hooks, enabled Claude Code plugins, MCP server definitions and configured projects from a Claude Code or Codex home folder into AI Shuffle. This is the **Import settings** button in **Settings → Providers**. The source folder is only read, and credentials and session history are never read. An existing destination file is never overwritten (it shows as a conflict instead), except that imported hooks are merged into an existing hooks file. Secret-looking MCP values are replaced by `${VAR}` placeholders. Anything that cannot be imported, such as a plugin name that is not a plain `name@marketplace`, is listed with a diagnostic and skipped.
+Copy instructions, skills, agents, hooks, enabled Claude Code plugins, MCP server definitions and configured projects from a Claude Code or Codex home folder into AI Shuffle. This is the **Import settings** button in **Settings → Providers**. The source folder is only read, and credentials and session history are never read. An existing destination file is never overwritten (it shows as a conflict instead), except that imported hooks are merged into an existing hooks file. Secret-looking MCP values are replaced by `${VAR}` placeholders. Anything that cannot be imported, such as a plugin name that is not a plain `name@marketplace`, is listed with a diagnostic and skipped. In the **Settings and plugins** category, hooks, enabled Claude Code plugins and Codex's model and approval settings are copied; the other settings it lists are shown for reference only.
 
 **Auth:** Owner only
 

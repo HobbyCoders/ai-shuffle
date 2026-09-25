@@ -110,12 +110,12 @@ When two workers change the same record, one change wins and the other is kept h
 
 | Method | Path | Body or query | Notes |
 |--------|------|---------------|-------|
-| `GET` | `/api/v1/network/conflicts` | none | Required auth. `{"conflicts": [...]}` with `id`, `collection`, `record_id`, `losing_device_id`, `losing_record`, `winning_device_id`, `created_at`, `expires_at` |
+| `GET` | `/api/v1/network/conflicts` | none | Owner only. `{"conflicts": [...]}` with `id`, `collection`, `record_id`, `losing_device_id`, `losing_record`, `winning_device_id`, `created_at`, `expires_at`. In `losing_record`, columns that are encrypted at rest (API keys, tokens and other secrets) read `<secret>` |
 | `DELETE` | `/api/v1/network/conflicts/{conflict_id}` | none | Owner only. Dismiss one conflict (integer id). `204`, or `404` |
 
 ```bash
 curl http://localhost:8000/api/v1/network/conflicts \
-  -H "Authorization: Bearer aih_your_key"
+  -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
 ## Runners

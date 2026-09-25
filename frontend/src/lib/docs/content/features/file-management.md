@@ -44,6 +44,8 @@ curl -X POST http://localhost:8000/api/v1/projects/proj_abc/upload \
 
 Files can be associated with specific sessions or worktrees.
 
+Uploads, new folders, renames and deletes never touch a repository's `.git` directory: a path that names it, in any spelling, is refused with `400`.
+
 ## File Downloads
 
 ### Via the API

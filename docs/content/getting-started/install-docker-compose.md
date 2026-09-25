@@ -241,6 +241,21 @@ To change this, add a line under `environment:` in `compose.yaml` (a line in `.e
 - `BROWSER_SSRF_ALLOW_LOOPBACK: "false"`: refuse `localhost` as well. Use it when people you do not trust can prompt agents on this install. It has no effect when `BROWSER_SSRF_ALLOW` is set.
 - `BROWSER_SSRF_BLOCK`: ranges to refuse even if `BROWSER_SSRF_ALLOW` lists them.
 
+## Behind a reverse proxy (optional)
+
+AI Shuffle takes a visitor's address from the `X-Forwarded-For` or `X-Real-IP` header only when the connection comes from loopback or from an address listed in `TRUSTED_PROXIES`. Rate limits and the security audit log use that address.
+
+A reverse proxy in another container, or one on the host (Tailscale Serve included) that reaches AI Shuffle through the published port, connects from a Docker network address instead of loopback. Without `TRUSTED_PROXIES`, every visitor then counts as the proxy: one visitor's failed sign-ins can rate-limit everyone, and the audit log shows only the proxy's address. Add the proxy's address as the container sees it under `environment:` in `compose.yaml`, then run `docker compose up -d`:
+
+```yaml
+    environment:
+      # (keep the lines already there)
+      # The reverse proxy's address, as AI Shuffle sees it.
+      TRUSTED_PROXIES: "172.18.0.1"
+```
+
+It takes IP addresses or ranges (`172.18.0.0/16`), separated by commas. For a proxy on the host, use the gateway of the `ai-shuffle_default` network (`docker network inspect ai-shuffle_default` shows it). Never list your whole LAN: any host in a trusted range can choose the address AI Shuffle records for it.
+
 ## Back up
 
 Stop the container (`docker compose stop`), then back up the Docker volumes whose names start with `ai-shuffle_` and your `WORKSPACE_DIR` folder. The `data` volume holds the database and the key that encrypts your saved credentials; always keep them together. Start again with `docker compose start`.
