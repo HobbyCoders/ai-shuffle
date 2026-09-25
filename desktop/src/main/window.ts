@@ -20,7 +20,7 @@ import { WindowStateStore } from './state';
 import { managedContext } from './managed-context';
 
 export const PARTITION = 'persist:shuffle';
-export const TITLE_BAR_HEIGHT = 52;
+const TITLE_BAR_HEIGHT = 52;
 
 export interface TitleBarTheme {
 	background: string;

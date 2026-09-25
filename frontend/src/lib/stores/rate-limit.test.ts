@@ -25,6 +25,8 @@ import {
 	resolveBucket,
 	resolveBucketKey,
 	selfBucketKey,
+	isBucketStale,
+	BUCKET_STALE_MS,
 	windowLabel,
 	displayWindows,
 	reportedRemainingPct,
@@ -443,6 +445,34 @@ describe('rateLimit.applyLiveEvent — routing by instance_id', () => {
 		// Over the limit (1.05 used) leaves nothing, not ~99% (it is not a percent).
 		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 1.05, resets_at: future() });
 		expect(selfBucket()!.windows.five_hour.utilization).toBe(0);
+	});
+
+	it('refreshes the bucket timestamp on every live event, even with unchanged values', () => {
+		vi.useFakeTimers();
+		try {
+			const start = new Date('2026-01-01T00:00:00Z').getTime();
+			vi.setSystemTime(start);
+			const resetsAt = future();
+			rateLimit.applySnapshot({
+				available: true,
+				windows: [],
+				self_instance_id: 'primary',
+				snapshots: [
+					{ instance_id: 'primary', available: true, fetched_at: start, windows: [{ type: 'five_hour', utilization: 75, resets_at: resetsAt }] },
+				],
+			});
+			const later = start + BUCKET_STALE_MS + 60_000;
+			vi.setSystemTime(later);
+			expect(isBucketStale(selfBucket()!, later)).toBe(true);
+
+			// Same reading as the snapshot (0.25 used → 75 left): still counts as fresh data.
+			rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.25, resets_at: resetsAt, instance_id: 'primary' });
+			expect(selfBucket()!.windows.five_hour.utilization).toBe(75);
+			expect(selfBucket()!.fetchedAt).toBe(later);
+			expect(isBucketStale(selfBucket()!, later)).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 

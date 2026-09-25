@@ -15,13 +15,9 @@ export type {
 } from './models.svelte';
 export {
 	supportsAutoPermission,
-	INHERIT_VALUE,
 	CUSTOM_VALUE,
 	NATIVE_PROVIDER_KEY,
 	VOICE_PROVIDER_KEY,
-	CLAUDE_BRAND,
-	API_SUBTEXT,
-	SUBSCRIPTION_SUBTEXT,
 	getProviderDisplay,
 	getClaudeDisplay,
 	formatProviderDisplay,
@@ -44,7 +40,6 @@ export {
 	getProviderContextWindow,
 	getModelLabel,
 	getModelFamily,
-	inferModelFamily,
 	getModelBadgeClass,
 	hydrateModelRegistry,
 	ensureModelRegistryHydrated

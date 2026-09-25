@@ -11,29 +11,17 @@ function makeBridge() {
 	const bridge: ShuffleDesktopBridge = {
 		version: '1.2.1',
 		platform: 'win32',
-		titleBarHeight: 52,
 		window: {
 			getState: () => Promise.resolve({ maximized: false, fullscreen: false, focused: true }),
 			onStateChange: () => () => {},
-			minimize: () => {},
-			toggleMaximize: () => {},
 			close: () => {},
-			focus: () => {},
 			setTitleBarTheme: () => {}
 		},
 		shell: {
-			openExternal: () => {},
-			setBadge: () => {},
-			notify: () => {},
-			onNotificationClick: () => () => {},
-			onCommand: () => () => {},
-			onNativeTheme: () => () => {}
+			onCommand: () => () => {}
 		},
 		worker: {
 			getState: () => Promise.resolve({ phase: 'ready', port: 8000, url: 'http://127.0.0.1:8000', pid: 1, external: false, error: null, exitCode: null, startedAt: null, logPath: '' }),
-			onState: () => () => {},
-			restart: () => Promise.resolve(),
-			openLogs: () => {},
 			openStatus: vi.fn()
 		},
 		updates: {
@@ -96,7 +84,7 @@ describe('desktop update announcement', () => {
 		desktop?.worker.openStatus();
 
 		expect(bridge.worker.openStatus).toHaveBeenCalledOnce();
-		expect(Object.keys(bridge.worker).sort()).toEqual(['getState', 'onState', 'openLogs', 'openStatus', 'restart']);
+		expect(Object.keys(bridge.worker).sort()).toEqual(['getState', 'openStatus']);
 	});
 
 	it('puts a downloaded update in the bell once, with a restart action', async () => {

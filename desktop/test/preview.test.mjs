@@ -119,7 +119,7 @@ test('preview updater cannot register, check, download, install, or schedule upd
 
 test('update preload commands return promises and IPC rejects senders outside the main window', async () => {
  const handlers = new Map(); const calls = [];
- const { registerIpc } = loadMain('ipc', { electron: { ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} }, app: {} }, './window': { TITLE_BAR_HEIGHT: 52 } });
+ const { registerIpc } = loadMain('ipc', { electron: { ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} }, app: {} } });
  registerIpc({ window: { isOwnSender: id => id === 7 }, updater: {
   check: async interactive => calls.push(['check', interactive]), download: async () => calls.push(['download']), install: async () => calls.push(['install'])
  }, worker: {} });
@@ -138,7 +138,7 @@ test('update preload commands return promises and IPC rejects senders outside th
 
 test('IPC and preload contain no external database actions, even on bundled pages', () => {
 	const handlers = new Map(); const listeners = new Map();
-	const { registerIpc } = loadMain('ipc', { electron: { ipcMain: { handle: (name, handler) => handlers.set(name, handler), on: (name, handler) => listeners.set(name, handler) }, app: {} }, './window': { TITLE_BAR_HEIGHT: 52 } });
+	const { registerIpc } = loadMain('ipc', { electron: { ipcMain: { handle: (name, handler) => handlers.set(name, handler), on: (name, handler) => listeners.set(name, handler) }, app: {} } });
 	registerIpc({ window: { isOwnSender: () => true }, updater: {}, worker: {} });
 	for (const name of ['desktop:db-check', 'desktop:settings-get', 'desktop:setup-save', 'desktop:setup-use-bundled', 'desktop:setup-cancel', 'desktop:worker-open-setup']) assert.equal(handlers.has(name), false, name);
 	assert.equal(handlers.has('desktop:worker-open-status'), true);

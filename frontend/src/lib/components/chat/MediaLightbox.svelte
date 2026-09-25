@@ -8,6 +8,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import { lightbox, openLightbox, closeLightbox, selectGalleryMedia } from '$lib/stores/lightbox';
+	import { filenameFromMediaUrl } from '$lib/utils/media';
 	import { ChevronLeft, ChevronRight, X, Download, Minus, Plus, Film } from 'lucide-svelte';
 	let viewportEl = $state<HTMLDivElement | null>(null);
 	let overlayEl: HTMLElement | null = null;
@@ -295,20 +296,7 @@
 	}
 
 	function downloadName(src: string): string {
-		const m = src.match(/[?&]path=([^&]+)/);
-		if (m) {
-			try {
-				const name = decodeURIComponent(m[1]).split(/[/\\]/).pop();
-				if (name) return name;
-			} catch {
-				/* ignore */
-			}
-		}
-		if (!src.startsWith('data:')) {
-			const name = src.split(/[?#]/)[0].split('/').pop();
-			if (name && name.includes('.')) return name;
-		}
-		return $lightbox.type === 'video' ? 'video.mp4' : 'image.png';
+		return filenameFromMediaUrl(src) ?? ($lightbox.type === 'video' ? 'video.mp4' : 'image.png');
 	}
 </script>
 

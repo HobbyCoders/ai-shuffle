@@ -63,17 +63,15 @@ export function classifyMediaUrl(url: string): MediaKind | null {
 	return null;
 }
 
-/** Derive a download filename from a URL when none is supplied. */
-function filenameFor(url: string, kind: MediaKind): string {
-	const ext = extOf(url);
-	const fallback = kind === 'image' ? 'png' : kind === 'video' ? 'mp4' : 'mp3';
-	const base = `generated-${kind}`;
-	// /api/.../by-path?path=.../name.ext  or  /api/.../name.ext
+/**
+ * The file name a media URL points at, or null when it names none:
+ * `/api/.../by-path?path=.../name.ext` or `/api/.../name.ext`.
+ */
+export function filenameFromMediaUrl(url: string): string | null {
 	const m = url.match(/[?&]path=([^&]+)/);
 	if (m) {
 		try {
-			const decoded = decodeURIComponent(m[1]);
-			const name = decoded.split(/[/\\]/).pop();
+			const name = decodeURIComponent(m[1]).split(/[/\\]/).pop();
 			if (name) return name;
 		} catch {
 			/* ignore */
@@ -83,7 +81,13 @@ function filenameFor(url: string, kind: MediaKind): string {
 		const name = url.split(/[?#]/)[0].split('/').pop();
 		if (name && name.includes('.')) return name;
 	}
-	return `${base}.${ext || fallback}`;
+	return null;
+}
+
+/** Derive a download filename from a URL when none is supplied. */
+function filenameFor(url: string, kind: MediaKind): string {
+	const fallback = kind === 'image' ? 'png' : kind === 'video' ? 'mp4' : 'mp3';
+	return filenameFromMediaUrl(url) ?? `generated-${kind}.${extOf(url) || fallback}`;
 }
 
 const DOWNLOAD_ICON =

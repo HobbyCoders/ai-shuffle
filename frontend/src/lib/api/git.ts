@@ -315,8 +315,7 @@ function transformCommit(raw: RawCommitNode): CommitNode {
         if (ref.startsWith('tag: ')) {
             tags.push(ref.replace('tag: ', ''));
         } else if (cleanRef.startsWith('origin/')) {
-            // Skip remote refs for display (or include them if desired)
-            // branches.push(cleanRef);
+            // Skip remote refs for display
         } else if (cleanRef && cleanRef !== 'HEAD') {
             branches.push(cleanRef);
         }

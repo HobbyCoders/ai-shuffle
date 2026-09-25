@@ -1,8 +1,8 @@
 <script lang="ts">
 	/**
-	 * ContextUsageBar — the single chat-toolbar usage pill. Merges the former
-	 * ContextUsageBar (context-window %) and UsageLimitIndicator (plan usage
-	 * limits) into ONE glass pill + ONE popover.
+	 * ContextUsageBar — the single chat-toolbar usage pill. Shows the
+	 * context-window % and the plan usage limits in ONE glass pill + ONE
+	 * popover.
 	 *
 	 * The pill is a single circular progress ring (context-window fraction),
 	 * coloured by the current chat's context severity. No inline text — the

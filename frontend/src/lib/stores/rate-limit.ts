@@ -25,12 +25,12 @@
  *
  * Windows key on the window-type string (`five_hour`, `seven_day`,
  * `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included`,
- * `overage`). Buckets are persisted to localStorage so the header pill/popover
+ * `overage`). Buckets are persisted to localStorage so the usage pill/popover
  * stay populated across reloads.
  *
- * Plain `.ts` (no $state runes) — see KNOWN_ISSUES.md Root Cause 10.
+ * Plain `.ts` (no $state runes) so it can be imported before component init.
  *
- * Consumers: `UsageLimitIndicator.svelte` (header pill + popover) resolves a
+ * Consumers: `ContextUsageBar.svelte` (chat-toolbar pill + popover) resolves a
  * bucket via `resolveBucket`; `ws-message-handlers.ts` calls `applyLiveEvent` /
  * `applySnapshot`; `usage-target.ts` derives which install to show.
  */
@@ -240,7 +240,7 @@ const STORAGE_KEY_V3 = 'usage-limit-buckets-v3';
 const LEGACY_STORAGE_KEY = 'usage-limit-windows';
 
 // Human labels per known window type. Unknown types get a humanized fallback.
-export const WINDOW_LABELS: Record<string, string> = {
+const WINDOW_LABELS: Record<string, string> = {
 	five_hour: '5-hour limit',
 	seven_day: 'Weekly (all models)',
 	seven_day_opus: 'Weekly Opus',
@@ -264,7 +264,7 @@ export const WINDOW_LABELS: Record<string, string> = {
 };
 
 // Display order for the popover / headline selection tie-breaks.
-export const WINDOW_ORDER = [
+const WINDOW_ORDER = [
 	'five_hour',
 	'seven_day',
 	'seven_day_opus',
@@ -374,7 +374,7 @@ export function formatAsOf(fetchedAt: number | null | undefined, nowMs: number):
 export const BUCKET_STALE_MS = 5 * 60_000;
 
 /** Windows as an array, ordered by WINDOW_ORDER then any extras alphabetically. */
-export function orderedWindows(windows: Record<string, UsageWindow>): UsageWindow[] {
+function orderedWindows(windows: Record<string, UsageWindow>): UsageWindow[] {
 	const known = WINDOW_ORDER.filter((t) => t in windows).map((t) => windows[t]);
 	const extra = Object.keys(windows)
 		.filter((t) => !WINDOW_ORDER.includes(t))
@@ -564,6 +564,7 @@ export const rateLimit = {
 		// A data-less event (utilization null) must NOT create/wipe a window —
 		// the CLI emits these before any usage is recorded.
 		if (!rate_limit_type || utilization == null || typeof utilization !== 'number') return;
+		const now = Date.now();
 		const win: UsageWindow = {
 			type: rate_limit_type,
 			// SDK events report the USED fraction; the polled Claude feed — and every
@@ -571,7 +572,7 @@ export const rateLimit = {
 			// quota REMAINING, so convert at ingest.
 			utilization: 100 - _fractionToPct(utilization),
 			resets_at: event.resets_at ?? null,
-			received_at: Date.now(),
+			received_at: now,
 			source: 'live',
 		};
 		_store.update((s) => {
@@ -581,6 +582,9 @@ export const rateLimit = {
 				...(prev ?? { windows: {}, fetchedAt: null, available: true }),
 				windows: { ...(prev?.windows ?? {}), [rate_limit_type]: win },
 				available: true,
+				// A live reading is current even when its values are unchanged, so
+				// the "Updated X ago" staleness line must not age past it.
+				fetchedAt: now,
 			};
 			const buckets = { ...s.buckets, [key]: bucket };
 			const next = { ...s, buckets };

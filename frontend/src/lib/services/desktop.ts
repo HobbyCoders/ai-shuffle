@@ -83,32 +83,20 @@ export interface DesktopAgentAccess {
 export interface ShuffleDesktopBridge {
 	version: string;
 	platform: DesktopPlatform;
-	titleBarHeight: number;
 	/** Older shells lack it. */
 	agentAccess?: DesktopAgentAccess | null;
 	window: {
 		getState(): Promise<DesktopWindowState>;
 		onStateChange(listener: (state: DesktopWindowState) => void): () => void;
-		minimize(): void;
-		toggleMaximize(): void;
 		close(): void;
-		focus(): void;
 		setTitleBarTheme(theme: { background: string; symbol: string }): void;
 	};
 	shell: {
-		openExternal(url: string): void;
-		setBadge(count: number): void;
-		notify(payload: { title: string; body?: string; tag?: string; silent?: boolean }): void;
-		onNotificationClick(listener: (payload: { tag: string | null }) => void): () => void;
 		onCommand(listener: (command: DesktopCommand | string) => void): () => void;
-		onNativeTheme(listener: (payload: { dark: boolean }) => void): () => void;
 	};
 	/** The local worker this window belongs to. */
 	worker: {
 		getState(): Promise<DesktopWorkerState>;
-		onState(listener: (state: DesktopWorkerState) => void): () => void;
-		restart(): Promise<void>;
-		openLogs(): void;
 		openStatus(): void;
 		/**
 		 * The header and per-launch token the shell already adds to every
@@ -137,20 +125,6 @@ export const desktop: ShuffleDesktopBridge | null =
 
 export const isDesktop = desktop !== null;
 
-/** Command handlers the page registers; the menu looks them up by name. */
-const commandHandlers = new Map<string, () => void>();
-
-/**
- * Lets a page own a menu command. The default handler (below) already routes
- * commands to registered keyboard shortcuts, so most pages need nothing.
- */
-export function onDesktopCommand(command: DesktopCommand, handler: () => void): () => void {
-	commandHandlers.set(command, handler);
-	return () => {
-		if (commandHandlers.get(command) === handler) commandHandlers.delete(command);
-	};
-}
-
 const SHORTCUT_FOR_COMMAND: Record<string, string> = {
 	'new-session': 'new-chat',
 	'command-palette': 'spotlight',
@@ -158,12 +132,8 @@ const SHORTCUT_FOR_COMMAND: Record<string, string> = {
 	find: 'advanced-search'
 };
 
+/** Menu and tray commands are routed to the matching keyboard shortcut or store action. */
 async function runCommand(command: string): Promise<void> {
-	const own = commandHandlers.get(command);
-	if (own) {
-		own();
-		return;
-	}
 	if (command === 'toggle-sidebar') {
 		const { layout } = await import('$lib/stores/layout.svelte');
 		layout.toggleSidebar();

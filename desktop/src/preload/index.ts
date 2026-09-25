@@ -3,7 +3,7 @@
  * the desktop app and to talk to the shell.
  *
  * The preload runs for every document in the main window. The worker's web
- * UI gets the window, theme, notification, update and worker-status surface.
+ * UI gets the window, menu-command, update and worker-status surface.
  * The raw worker log is exposed only to the bundled status page (file://)
  * as `window.shuffleDesktopWorker`. No database configuration is exposed.
  */
@@ -22,7 +22,6 @@ function subscribe<T>(channel: string, listener: Listener<T>): () => void {
 const info = ipcRenderer.sendSync('desktop:info') as {
 	platform: NodeJS.Platform;
 	version: string;
-	titleBarHeight: number;
 	worker: { url: string; phase: string; external: boolean } | null;
 	windowState: { maximized: boolean; fullscreen: boolean; focused: boolean };
 	updateState: unknown;
@@ -33,29 +32,20 @@ const bridge = {
 	/** Shell version, e.g. `0.8.5`. */
 	version: info?.version ?? '0.0.0',
 	platform: info?.platform ?? process.platform,
-	titleBarHeight: info?.titleBarHeight ?? 52,
 	/** "Agents run as you": the disclosure shown on first launch, for Settings to repeat. */
 	agentAccess: info?.agentAccess ?? null,
 
 	window: {
 		getState: () => ipcRenderer.invoke('desktop:window-state') as Promise<{ maximized: boolean; fullscreen: boolean; focused: boolean }>,
 		onStateChange: (listener: Listener<{ maximized: boolean; fullscreen: boolean; focused: boolean }>) => subscribe('desktop:window-state', listener),
-		minimize: () => void ipcRenderer.invoke('desktop:window-action', 'minimize'),
-		toggleMaximize: () => void ipcRenderer.invoke('desktop:window-action', 'toggle-maximize'),
 		close: () => void ipcRenderer.invoke('desktop:window-action', 'close'),
-		focus: () => void ipcRenderer.invoke('desktop:window-action', 'focus'),
 		/** Colours for the OS-drawn window controls; hex `#rrggbb` only. */
 		setTitleBarTheme: (theme: { background: string; symbol: string }) => void ipcRenderer.invoke('desktop:set-title-bar-theme', theme)
 	},
 
 	shell: {
-		openExternal: (url: string) => void ipcRenderer.invoke('desktop:open-external', url),
-		setBadge: (count: number) => void ipcRenderer.invoke('desktop:set-badge', count),
-		notify: (payload: { title: string; body?: string; tag?: string; silent?: boolean }) => void ipcRenderer.invoke('desktop:notify', payload),
-		onNotificationClick: (listener: Listener<{ tag: string | null }>) => subscribe('desktop:notification-click', listener),
 		/** Fired for menu items and tray actions: `new-session`, `command-palette`, `toggle-sidebar`, `open-settings`, `focus-composer`, `find`, `open-docs`. */
-		onCommand: (listener: Listener<string>) => subscribe('desktop:command', listener),
-		onNativeTheme: (listener: Listener<{ dark: boolean }>) => subscribe('desktop:native-theme', listener)
+		onCommand: (listener: Listener<string>) => subscribe('desktop:command', listener)
 	},
 
 	/** Collect once on request; no background sampling or retained history. */
@@ -64,9 +54,6 @@ const bridge = {
 	/** The local worker this window belongs to. */
 	worker: {
 		getState: () => ipcRenderer.invoke('desktop:worker-state'),
-		onState: (listener: Listener<unknown>) => subscribe('desktop:worker-state', listener),
-		restart: () => ipcRenderer.invoke('desktop:worker-restart'),
-		openLogs: () => void ipcRenderer.invoke('desktop:worker-open-logs'),
 		openStatus: () => void ipcRenderer.invoke('desktop:worker-open-status'),
 		/**
 		 * The header and per-launch token the shell already adds to every

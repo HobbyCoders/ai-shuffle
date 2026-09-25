@@ -5,12 +5,12 @@
  * worker's raw log is additionally limited to the bundled status page
  * (file://). No renderer can read or change database credentials.
  */
-import { app, ipcMain, Notification, shell, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron';
+import { app, ipcMain, shell, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron';
 import type { PostgresPhase } from './postgres';
 import type { Updater } from './updater';
 import { managedContext } from './managed-context';
 import { desktopSampler } from './diagnostics';
-import { MainWindow, TITLE_BAR_HEIGHT, type TitleBarTheme } from './window';
+import type { MainWindow, TitleBarTheme } from './window';
 import { type WorkerState, type WorkerSupervisor } from './worker';
 import { LISTENER_HEADER, type ListenerTarget } from './listener';
 import { AGENT_ACCESS } from './disclosure';
@@ -74,7 +74,6 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 		event.returnValue = {
 			platform: process.platform,
 			version: managedContext() ? `main@${managedContext()!.application.revision.slice(0, 12)}` : app.getVersion(),
-			titleBarHeight: TITLE_BAR_HEIGHT,
 			worker: { url: state.url, phase: state.phase, external: state.external },
 			windowState: window.windowState(),
 			updateState: updater.current,
@@ -109,51 +108,12 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 
 	// Window and shell.
 	handle('desktop:window-action', fromMainWindow, (_e, action) => {
-		const win = window.browserWindow;
-		if (!win) return;
-		switch (action) {
-			case 'minimize':
-				win.minimize();
-				break;
-			case 'toggle-maximize':
-				win.isMaximized() ? win.unmaximize() : win.maximize();
-				break;
-			case 'close':
-				win.close();
-				break;
-			case 'focus':
-				window.focus();
-				break;
-		}
+		if (action === 'close') window.browserWindow?.close();
 	});
 	handle('desktop:window-state', fromMainWindow, () => window.windowState());
 	handle('desktop:set-title-bar-theme', fromMainWindow, (_e, theme) => {
 		if (!isTitleBarTheme(theme)) return;
 		window.setTitleBarTheme(theme);
-	});
-	handle('desktop:open-external', fromMainWindow, (_e, url) => {
-		if (typeof url === 'string') window.openExternal(url);
-	});
-	handle('desktop:set-badge', fromMainWindow, (_e, count) => {
-		const n = typeof count === 'number' && Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
-		if (process.platform === 'win32') {
-			window.browserWindow?.flashFrame(n > 0);
-			return;
-		}
-		app.setBadgeCount(n);
-	});
-	handle('desktop:notify', fromMainWindow, (_e, payload) => {
-		if (!Notification.isSupported() || !payload || typeof payload !== 'object') return;
-		const p = payload as { title?: unknown; body?: unknown; tag?: unknown; silent?: unknown };
-		const title = typeof p.title === 'string' ? p.title.slice(0, 120) : 'AI Shuffle';
-		const body = typeof p.body === 'string' ? p.body.slice(0, 400) : '';
-		const tag = typeof p.tag === 'string' ? p.tag.slice(0, 200) : null;
-		const notification = new Notification({ title, body, silent: p.silent === true });
-		notification.on('click', () => {
-			window.focus();
-			window.send('desktop:notification-click', { tag });
-		});
-		notification.show();
 	});
 
 	// Worker state is visible to every page; control is too, since the web UI

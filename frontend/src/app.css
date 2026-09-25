@@ -236,13 +236,6 @@
 		--input-border: var(--border);
 		--input-border-hover: color-mix(in oklch, var(--border) 70%, var(--primary) 30%);
 
-		/* Chart/visualization colors */
-		--chart-1: oklch(0.72 0.14 180);
-		--chart-2: oklch(0.72 0.115 250);
-		--chart-3: oklch(0.72 0.145 300);
-		--chart-4: oklch(0.80 0.145 78);
-		--chart-5: oklch(0.76 0.15 155);
-
 		/* Typography - font families (can be overridden by theme presets) */
 		--font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 		--font-serif: 'Playfair Display', Georgia, ui-serif, serif;
@@ -397,13 +390,6 @@
 		--input-bg-focus: var(--background);
 		--input-border: var(--border);
 		--input-border-hover: color-mix(in oklch, var(--border) 70%, var(--primary) 30%);
-
-		/* Chart/visualization colors - light theme */
-		--chart-1: oklch(0.60 0.115 180);
-		--chart-2: oklch(0.55 0.16 255);
-		--chart-3: oklch(0.52 0.17 300);
-		--chart-4: oklch(0.63 0.145 62);
-		--chart-5: oklch(0.55 0.14 155);
 
 		/* Primary variations */
 		--primary-10: oklch(0.60 0.115 180 / 0.1);

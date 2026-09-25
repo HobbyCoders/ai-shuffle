@@ -39,7 +39,6 @@ test('listener token IPC answers only the worker main frame of the app window', 
 		if (name === 'electron') return { ipcMain: { handle: (key, fn) => handlers.set(key, fn), on() {} }, app: {} };
 		if (name === './managed-context') return { managedContext: () => null };
 		if (name === './diagnostics') return { desktopSampler: () => () => ({}) };
-		if (name === './window') return { TITLE_BAR_HEIGHT: 52 };
 		if (name === './listener') return require('../dist/main/listener.js');
 		if (name === './disclosure') return require('../dist/main/disclosure.js');
 		throw new Error(name);

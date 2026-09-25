@@ -186,8 +186,8 @@ export async function disableAutomation(id: string): Promise<Automation> {
 	return api.post<Automation>(`/automations/${id}/disable`);
 }
 
-export async function triggerAutomation(id: string): Promise<any> {
-	return api.post<any>(`/automations/${id}/trigger`);
+export async function triggerAutomation(id: string): Promise<unknown> {
+	return api.post<unknown>(`/automations/${id}/trigger`);
 }
 
 export async function getAutomationRuns(id: string, limit = 50, offset = 0): Promise<AutomationRun[]> {

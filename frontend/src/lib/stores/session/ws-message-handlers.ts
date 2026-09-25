@@ -974,7 +974,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// EMITTING install's bucket. `instance_id` tags which install it came
 				// from (relayed remote-session events carry the worker's id); the
 				// store routes by it so an offloaded session's usage lands in the
-				// right bucket. The UsageLimitIndicator reads the store reactively.
+				// right bucket. ContextUsageBar reads the store reactively.
 				rateLimit.applyLiveEvent({
 					status: (data.status as string) ?? 'unknown',
 					rate_limit_type: (data.rate_limit_type as string) ?? 'unknown',

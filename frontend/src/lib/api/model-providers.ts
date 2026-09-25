@@ -319,7 +319,6 @@ export async function consumeCodexRateLimitResetCredit(
 // Same public contract as Codex; only the routes and reset_type differ.
 // ============================================================================
 
-export type GrokRateLimitResetCredit = CodexRateLimitResetCredit;
 export type GrokRateLimitResetCreditsResponse = CodexRateLimitResetCreditsResponse;
 export type ConsumeGrokRateLimitResetCreditRequest = ConsumeCodexRateLimitResetCreditRequest;
 export type ConsumeGrokRateLimitResetCreditResponse = ConsumeCodexRateLimitResetCreditResponse;

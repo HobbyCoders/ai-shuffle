@@ -6,7 +6,7 @@
  * to one already running on this computer), and opens its web UI. A first
  * run needs no setup: the embedded cluster is created on the spot.
  */
-import { app, dialog, nativeTheme, safeStorage, session, shell } from 'electron';
+import { app, dialog, safeStorage, session, shell } from 'electron';
 import { QuitGuard } from './quit';
 import { showCloseDialog } from './close-dialog';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -236,7 +236,6 @@ async function main(): Promise<void> {
 	}
 	registerIpc({ window, updater, worker });
 	updater.subscribe((state) => window.send('desktop:update-state', state));
-	nativeTheme.on('updated', () => window.send('desktop:native-theme', { dark: nativeTheme.shouldUseDarkColors }));
 
 	let quitting = false;
 	let applicationFailed = false;

@@ -9,12 +9,7 @@
 // The usage-snapshot wire shapes live in the rate-limit store (their canonical
 // consumer). Re-export them here under the API-layer names other modules use so
 // there's a single source of truth. Types-only import — no runtime cycle.
-import type {
-	SnapshotWindow,
-	SnapshotInstance,
-	UsageSnapshot,
-	ProviderUsageEntry,
-} from '$lib/stores/rate-limit';
+import type { UsageSnapshot, ProviderUsageEntry } from '$lib/stores/rate-limit';
 import { apiBase, withAuth } from './runtime';
 
 
@@ -499,10 +494,6 @@ export async function importAgent(data: AgentImportRequest): Promise<Profile> {
 	return api.post<Profile>('/agents/import', data);
 }
 
-/** One rate-limit window in a usage snapshot. */
-export type UsageLimitsWindow = SnapshotWindow;
-/** One install's usage bucket within a snapshot (clustered deployment). */
-export type UsageLimitsInstanceSnapshot = SnapshotInstance;
 /** One non-Claude provider's usage entry within a snapshot (U4 wire shape:
  *  provider_id, provider_name, provider_type, plan_type, windows, credits,
  *  fetched_at). Surfaced on {@link UsageLimitsSnapshot} as `providers?`. */

@@ -558,15 +558,7 @@ Use glass effects for floating UI that overlays content:
 
 .progress-fill {
   background: var(--primary);
-  /* For multi-color: use chart colors */
 }
-
-/* Charts - use chart color variables */
-.chart-series-1 { fill: var(--chart-1); stroke: var(--chart-1); }
-.chart-series-2 { fill: var(--chart-2); stroke: var(--chart-2); }
-.chart-series-3 { fill: var(--chart-3); stroke: var(--chart-3); }
-.chart-series-4 { fill: var(--chart-4); stroke: var(--chart-4); }
-.chart-series-5 { fill: var(--chart-5); stroke: var(--chart-5); }
 
 /* Stats cards */
 .stat-value {

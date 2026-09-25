@@ -27,11 +27,6 @@ export interface ThemeStyles {
 	border: string;
 	input: string;
 	ring: string;
-	'chart-1'?: string;
-	'chart-2'?: string;
-	'chart-3'?: string;
-	'chart-4'?: string;
-	'chart-5'?: string;
 	sidebar?: string;
 	'sidebar-foreground'?: string;
 	'sidebar-primary'?: string;
