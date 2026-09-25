@@ -99,7 +99,7 @@ def normalize_docker_path(path: str) -> str:
     if not is_absolute_project_path(path) or is_local_mode():
         return path
 
-    workspace = settings.workspace_dir.resolve()
+    workspace = settings.effective_workspace_dir.resolve()
     try:
         resolved = Path(path).resolve()
         rel = resolved.relative_to(workspace)
@@ -147,10 +147,13 @@ def validate_project_path(path: str, allow_create: bool = False) -> Path:
         return full_path
 
     # Relative path - resolve within workspace and enforce boundary
-    full_path = (settings.workspace_dir / path).resolve()
+    # The effective workspace (the one chosen during setup), not the start-up
+    # value: project_utils resolves stored relative paths against it too.
+    workspace = settings.effective_workspace_dir.resolve()
+    full_path = (workspace / path).resolve()
 
     try:
-        full_path.relative_to(settings.workspace_dir.resolve())
+        full_path.relative_to(workspace)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

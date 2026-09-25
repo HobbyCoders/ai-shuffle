@@ -797,7 +797,7 @@ def build_options_from_profile(
                 working_dir = config.get("cwd")
                 working_dir_source = "profile config"
             else:
-                working_dir = str(settings.workspace_dir)
+                working_dir = str(settings.effective_workspace_dir)
     elif project:
         working_dir = get_project_working_dir(project)
         working_dir_source = "project"
@@ -805,7 +805,7 @@ def build_options_from_profile(
         working_dir = config.get("cwd")
         working_dir_source = "profile config"
     else:
-        working_dir = str(settings.workspace_dir)
+        working_dir = str(settings.effective_workspace_dir)
 
     # ── The session's sidepanel lane, resolved BEFORE the cwd is final ───────
     #

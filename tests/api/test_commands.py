@@ -164,7 +164,7 @@ class TestGetWorkingDirForProject:
         """Should return workspace dir when project_id is None."""
         from app.api.commands import get_working_dir_for_project
 
-        mock_settings.workspace_dir = "/workspace"
+        mock_settings.effective_workspace_dir = Path("/workspace")
 
         result = get_working_dir_for_project(None)
 
@@ -176,7 +176,7 @@ class TestGetWorkingDirForProject:
         from app.api.commands import get_working_dir_for_project
 
         mock_database.get_project.return_value = None
-        mock_settings.workspace_dir = "/workspace"
+        mock_settings.effective_workspace_dir = Path("/workspace")
 
         result = get_working_dir_for_project("nonexistent-project")
 
@@ -469,6 +469,7 @@ class TestExecuteRewindEndpoint:
             "project_id": None
         }
         mock_database.get_project.return_value = None
+        mock_settings.effective_workspace_dir = Path("/workspace")
         mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = MockRewindResult(
             success=True,
             message="Rewind successful",
@@ -490,7 +491,7 @@ class TestExecuteRewindEndpoint:
         mock_jsonl_rewind_service.truncate_to_checkpoint.assert_called_once_with(
             sdk_session_id="sdk-session-1",
             target_uuid="uuid-1",
-            working_dir=mock_settings.workspace_dir.__truediv__.return_value.__str__.return_value if mock_database.get_project.return_value else str(mock_settings.workspace_dir),
+            working_dir="/workspace",  # no project: the effective workspace
             include_response=True,
             target_role="user"
         )

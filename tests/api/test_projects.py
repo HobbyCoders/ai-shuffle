@@ -62,8 +62,9 @@ def mock_api_user():
 def app(mock_database, mock_settings, mock_api_user):
     """Create a FastAPI app with the projects router and mocked dependencies."""
     # Path composition happens in app.core.project_utils (get_project_working_dir*),
-    # which reads project_utils.settings.workspace_dir; projects.py also references
-    # settings.workspace_dir directly. Patch both so the temp workspace applies.
+    # which reads project_utils.settings.effective_workspace_dir; projects.py also
+    # references settings.effective_workspace_dir directly. Patch both so the temp
+    # workspace applies.
     with patch("app.api.projects.settings", mock_settings), \
          patch("app.core.project_utils.settings", mock_settings):
         app = FastAPI()
@@ -130,7 +131,7 @@ class TestValidateProjectPath:
     def test_valid_path_within_workspace(self, temp_dir):
         """Valid path within workspace should be accepted."""
         mock_settings = MagicMock()
-        mock_settings.workspace_dir = temp_dir
+        mock_settings.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings):
             # Create the path first
@@ -143,7 +144,7 @@ class TestValidateProjectPath:
         """Path traversal attempts should be rejected."""
         from fastapi import HTTPException
         mock_settings = MagicMock()
-        mock_settings.workspace_dir = temp_dir
+        mock_settings.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings):
             with pytest.raises(HTTPException) as exc_info:
@@ -158,7 +159,7 @@ class TestNormalizeDockerPath:
     def test_absolute_workspace_path_normalized_in_docker_mode(self, temp_dir):
         """Absolute workspace path should be converted to relative in Docker mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):
@@ -168,7 +169,7 @@ class TestNormalizeDockerPath:
     def test_absolute_workspace_root_normalized_in_docker_mode(self, temp_dir):
         """Absolute workspace root path should be normalized to empty string in Docker mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):
@@ -178,7 +179,7 @@ class TestNormalizeDockerPath:
     def test_nested_workspace_path_normalized_in_docker_mode(self, temp_dir):
         """Nested absolute workspace path should be converted to relative in Docker mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):
@@ -188,7 +189,7 @@ class TestNormalizeDockerPath:
     def test_absolute_path_outside_workspace_unchanged_in_docker_mode(self, temp_dir):
         """Absolute path outside workspace should remain unchanged in Docker mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):
@@ -198,7 +199,7 @@ class TestNormalizeDockerPath:
     def test_absolute_path_unchanged_in_local_mode(self, temp_dir):
         """Absolute paths should be unchanged in local mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=True):
@@ -209,7 +210,7 @@ class TestNormalizeDockerPath:
     def test_relative_path_unchanged(self, temp_dir):
         """Relative paths should be returned unchanged."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):
@@ -219,7 +220,7 @@ class TestNormalizeDockerPath:
     def test_validate_accepts_absolute_workspace_path_in_docker_mode(self, temp_dir):
         """validate_project_path should accept absolute workspace paths in Docker mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         # Create the target directory
         project_dir = temp_dir / "ai-dungeon"
@@ -234,7 +235,7 @@ class TestNormalizeDockerPath:
         """validate_project_path should reject absolute paths outside workspace in Docker mode."""
         from fastapi import HTTPException
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):

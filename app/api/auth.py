@@ -454,6 +454,10 @@ async def logout(request: Request, response: Response):
         if paired_client:
             from app.core.pairing import hash_controller_session
             await run_sync(db.clear_paired_client_session, paired_client["id"], hash_controller_session(token))
+            # The device's open sockets re-check now and close (4001) instead of
+            # at their periodic re-check; its other live sessions pass and stay.
+            from app.api.ws_key_watch import close_paired_client_sockets
+            close_paired_client_sockets(paired_client["id"])
             await run_sync(audit_service.log_logout, request, paired_client["id"], "paired_client")
         else:
             valid_session = await run_sync(db.get_auth_session, token)

@@ -67,7 +67,7 @@ def command_context(
             raise HTTPException(404, "Project not found")
         return str(get_project_working_dir(project)), None
     config = _command_profile_config(request, None, profile_id)
-    return str(config.get("cwd") or Path(settings.workspace_dir)), None
+    return str(config.get("cwd") or Path(settings.effective_workspace_dir)), None
 
 
 def command_setting_sources(

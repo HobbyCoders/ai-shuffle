@@ -344,7 +344,7 @@ def resolve_project_path(
             the main project path.
         fallback_to_workspace: When True **and** neither *worktree_id*
             nor *project_id* resolve to a path, fall back to
-            ``settings.workspace_dir``.
+            ``settings.effective_workspace_dir``.
 
     Returns:
         A :class:`~pathlib.Path` pointing at the resolved directory, or
@@ -373,7 +373,7 @@ def resolve_project_path(
             if allow_missing:
                 return None
             if fallback_to_workspace:
-                return Path(str(settings.workspace_dir))
+                return Path(settings.effective_workspace_dir)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Project not found: {project_id}",
@@ -391,7 +391,7 @@ def resolve_project_path(
 
     # --- fallback -------------------------------------------------------------
     if fallback_to_workspace:
-        return Path(str(settings.workspace_dir))
+        return Path(settings.effective_workspace_dir)
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
