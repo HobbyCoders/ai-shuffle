@@ -16,6 +16,20 @@
 	let { requests, onRespond, onDismissAll }: Props = $props();
 
 	let showPendingList = $state(false);
+	let queueEl: HTMLElement | undefined = $state();
+
+	// When the queue advances, the answered prompt (and whatever in it had
+	// focus) is replaced; move focus onto the new prompt so its shortcuts and
+	// screen readers reach it, as focusTrap does for the first one.
+	let shownRequestId: string | null = null;
+	$effect(() => {
+		const id = requests[0]?.request_id ?? null;
+		const previous = shownRequestId;
+		shownRequestId = id;
+		if (!id || !previous || id === previous || !queueEl) return;
+		if (queueEl.contains(document.activeElement)) return;
+		queueEl.querySelector<HTMLElement>('.permission-panel')?.focus({ preventScroll: true });
+	});
 
 	function handleRespond(detail: {
 		request_id: string;
@@ -99,7 +113,7 @@
 	<!-- The queue is shown as a blocking modal: focus moves onto the prompt so its
 	     Enter/Esc shortcuts and screen readers reach it, stays inside while it
 	     blocks, and returns to the composer once every request is answered. -->
-	<div class="permission-queue space-y-3" use:focusTrap={{ initial: '.permission-panel' }}>
+	<div class="permission-queue space-y-3" bind:this={queueEl} use:focusTrap={{ initial: '.permission-panel' }}>
 		<!-- Queue Header (when multiple requests) -->
 		{#if requests.length > 1}
 			<div class="queue-header rounded-xl border border-warning/30 bg-warning/5 p-3">
@@ -183,12 +197,16 @@
 		{/if}
 
 		<!-- Current Permission Request -->
+		<!-- Keyed so each request gets a fresh prompt: nothing ticked or armed
+		     for one request (the "always" box, a pending click) carries over. -->
 		{#if requests.length > 0}
-			<PermissionRequest
-				request={requests[0]}
-				queueCount={requests.length}
-				onRespond={handleRespond}
-			/>
+			{#key requests[0].request_id}
+				<PermissionRequest
+					request={requests[0]}
+					queueCount={requests.length}
+					onRespond={handleRespond}
+				/>
+			{/key}
 		{/if}
 
 	</div>

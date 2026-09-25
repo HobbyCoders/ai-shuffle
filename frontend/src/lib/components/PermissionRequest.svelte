@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import './deck/cards/card-design-system.css';
 
 	export interface PermissionRequestData {
@@ -179,53 +180,121 @@
 		return alwaysForTool ? 'profile' : 'none';
 	}
 
-	function handleAllow() {
-		onRespond?.({
-			request_id: request.request_id,
-			decision: 'allow',
-			remember: currentRemember()
-		});
-	}
-
-	function handleDeny() {
-		onRespond?.({
-			request_id: request.request_id,
-			decision: 'deny',
-			remember: currentRemember()
-		});
-	}
-
-	// Keyboard shortcuts. They are page-wide, so they must not steal keys a
-	// focused control owns: Enter on a focused Deny / Details button activates
-	// that button, and Enter / Escape while typing (the chat composer, a form
-	// field) stay with the field instead of approving or denying.
-	//
-	// They are also armed, per request, so a key meant for something else never
-	// answers a prompt the user has not seen. Focus moves onto the prompt as it
-	// appears, so without this an Enter typed a moment later to send a chat
-	// message would approve, and a held Enter would approve a whole queue.
-	// - A key only counts once a keyup has been seen since this request appeared
-	//   (a key already down when it opened never counts), and auto-repeats never
-	//   count.
-	// - Enter additionally waits until the request has been visible for
-	//   SHORTCUT_ARM_DELAY_MS. Escape does not: denying early is the safe side.
-	// - A new request replacing this one (the queue advancing) re-arms both.
+	// Arming. A prompt must never be answered by input meant for something
+	// else, so every way of answering it is held back for a moment after it
+	// appears, and again whenever a new request replaces it:
+	// - A pointer click on Approve / Deny counts only once the request has been
+	//   visible for POINTER_ARM_DELAY_MS. The queue shows the next request's
+	//   buttons where the last ones were, so the second click of a double-click
+	//   would otherwise answer a request the user never saw.
+	// - Enter (the page-wide approve shortcut, and Enter or Space on one of the
+	//   prompt's focused buttons) counts only once the request has been visible
+	//   for SHORTCUT_ARM_DELAY_MS, and only for a fresh press: never an
+	//   auto-repeat, and never a key whose keydown predates the request. So an
+	//   Enter typed a moment later to send a chat message (focus moves onto the
+	//   prompt as it appears) and a held Enter cannot approve. After the window
+	//   the first fresh press counts, with or without a keyup seen before it, so
+	//   an idle keyboard or screen-reader user's first Enter works; a polite live
+	//   region announces when the shortcuts become live.
+	// - Escape denies (the safe side), so it also counts before the window once
+	//   a keyup has been seen since the request appeared.
+	// - A request is answered once: after an answer the buttons are disabled and
+	//   further keys and clicks are ignored until the next request (or, if this
+	//   one is still shown after ANSWER_RETRY_MS, e.g. the answer was lost on a
+	//   dropped connection, until the buttons come back so it can be retried).
+	// The page-wide shortcuts also leave alone keys a focused control owns:
+	// Enter on a focused Deny / Details button activates that button, and
+	// Enter / Escape while typing (the chat composer, a form field) stay with
+	// the field instead of approving or denying.
 	const SHORTCUT_ARM_DELAY_MS = 500;
-	let timeArmedFor: string | null = null;
-	let keyupSeenFor: string | null = null;
+	const POINTER_ARM_DELAY_MS = 300;
+	const ANSWER_RETRY_MS = 5000;
+	let answered = $state(false);
+	let shortcutsArmed = $state(false);
+	let pointerArmed = false;
+	let keyupSeen = false;
+	/** When this request appeared, on the clock events' `timeStamp` uses. */
+	let shownAt = 0;
+	/** An unarmed Enter / Space on one of the prompt's buttons: the click it
+	 *  would generate is dropped too. */
+	let keyClickBlocked = false;
 	let panelEl: HTMLElement | undefined = $state();
 
 	const requestId = $derived(request.request_id);
 	$effect(() => {
-		const id = requestId;
-		const timer = setTimeout(() => {
-			timeArmedFor = id;
-		}, SHORTCUT_ARM_DELAY_MS);
-		return () => clearTimeout(timer);
+		void requestId;
+		// Everything per-request starts over when the request changes, even if
+		// this component instance is reused for the next one.
+		untrack(() => {
+			alwaysForTool = false;
+			showDetails = false;
+			descriptionExpanded = false;
+			enrichmentDetailsExpanded = false;
+			answered = false;
+			shortcutsArmed = false;
+			pointerArmed = false;
+			keyupSeen = false;
+			keyClickBlocked = false;
+			// A synthetic event's timeStamp reads the same clock as input events.
+			shownAt = new Event('permission-shown').timeStamp;
+		});
+		const pointerTimer = setTimeout(() => (pointerArmed = true), POINTER_ARM_DELAY_MS);
+		const shortcutTimer = setTimeout(() => (shortcutsArmed = true), SHORTCUT_ARM_DELAY_MS);
+		return () => {
+			clearTimeout(pointerTimer);
+			clearTimeout(shortcutTimer);
+		};
 	});
 
-	function handleKeyup() {
-		keyupSeenFor = request.request_id;
+	$effect(() => {
+		if (!answered) return;
+		const retry = setTimeout(() => (answered = false), ANSWER_RETRY_MS);
+		return () => clearTimeout(retry);
+	});
+
+	function answer(decision: 'allow' | 'deny', e?: MouseEvent) {
+		if (answered) return;
+		if (e) {
+			if (!pointerArmed) return;
+			// A click with no pointer behind it (detail 0) that an unarmed Enter
+			// or Space on the button generated.
+			if (e.detail === 0 && keyClickBlocked) return;
+		}
+		answered = true;
+		onRespond?.({
+			request_id: request.request_id,
+			decision,
+			remember: currentRemember()
+		});
+	}
+
+	function handleAllow(e?: MouseEvent) {
+		answer('allow', e);
+	}
+
+	function handleDeny(e?: MouseEvent) {
+		answer('deny', e);
+	}
+
+	/** Not an auto-repeat, and not a key that was already down when this
+	 *  request appeared. */
+	function isFreshPress(e: KeyboardEvent): boolean {
+		if (e.repeat) return false;
+		return !(e.timeStamp > 0 && e.timeStamp < shownAt);
+	}
+
+	function handleKeyup(e: KeyboardEvent) {
+		keyupSeen = true;
+		if (keyClickBlocked) {
+			// Space activates a focused button on keyup: hold that back as well,
+			// then let later clicks through once this one would have fired.
+			if (isSpaceKey(e)) e.preventDefault();
+			setTimeout(() => (keyClickBlocked = false), 0);
+		}
+	}
+
+	function isSpaceKey(e: KeyboardEvent): boolean {
+		return e.key === ' ' || e.key === 'Spacebar';
 	}
 
 	function isTextEntry(target: HTMLElement): boolean {
@@ -242,22 +311,35 @@
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.defaultPrevented || e.isComposing) return;
 		const isEnter = e.key === 'Enter' && !e.shiftKey;
-		if (!isEnter && e.key !== 'Escape') return;
-		if (e.target instanceof HTMLElement && isTextEntry(e.target)) return;
+		const isSpace = isSpaceKey(e);
+		if (!isEnter && !isSpace && e.key !== 'Escape') return;
+		const target = e.target instanceof HTMLElement ? e.target : null;
+		if (target && isTextEntry(target)) return;
+		const inPanel = !!target && !!panelEl?.contains(target);
 
-		const id = request.request_id;
-		const fresh = !e.repeat && keyupSeenFor === id;
-		const armed = fresh && (!isEnter || timeArmedFor === id);
-		if (!armed) {
-			// A native Enter activation of this prompt's own buttons (e.g. a
-			// focused Approve after a click, then a held Enter) is held back too.
-			if (isEnter && e.target instanceof Node && panelEl?.contains(e.target)) e.preventDefault();
+		const fresh = !answered && isFreshPress(e);
+		if (isSpace) {
+			// Space is not a shortcut; it only activates a focused button, and on
+			// this prompt's buttons it is armed exactly like Enter.
+			if (inPanel && target?.closest('button') && !(fresh && shortcutsArmed)) {
+				e.preventDefault();
+				keyClickBlocked = true;
+			}
 			return;
 		}
-		if (ownsKey(e.target, e.key)) return;
+
+		const armed = fresh && (shortcutsArmed || (!isEnter && keyupSeen));
+		if (!armed) {
+			// A native Enter activation of this prompt's own buttons (a focused
+			// Approve after a click, then a held Enter) is held back too.
+			if (isEnter && inPanel) {
+				e.preventDefault();
+				keyClickBlocked = true;
+			}
+			return;
+		}
+		if (ownsKey(target, e.key)) return;
 		e.preventDefault();
-		// One press, one answer: the next shortcut needs a new keyup.
-		keyupSeenFor = null;
 		if (isEnter) handleAllow();
 		else handleDeny();
 	}
@@ -470,6 +552,7 @@
 			<button
 				type="button"
 				onclick={handleDeny}
+				disabled={answered}
 				class="deny-btn"
 			>
 				Deny
@@ -479,11 +562,17 @@
 			<button
 				type="button"
 				onclick={handleAllow}
+				disabled={answered}
 				class="allow-btn"
 			>
 				Approve
 			</button>
 		</div>
+
+		<!-- Tells screen-reader users when the shortcuts start to count. -->
+		<p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+			{shortcutsArmed && !answered ? 'Press Enter to approve, Escape to deny' : ''}
+		</p>
 
 		<!-- Keyboard Hints -->
 		<div class="mt-2 flex flex-wrap items-center justify-center gap-3 text-[10px] text-muted-foreground">
@@ -652,6 +741,13 @@
 	.deny-btn,
 	.allow-btn {
 		min-height: 44px;
+	}
+
+	/* Answered, waiting for the next request. */
+	.deny-btn:disabled,
+	.allow-btn:disabled {
+		opacity: 0.6;
+		cursor: default;
 	}
 
 	/* Slice D: SDK enrichment subhead + details disclosure */

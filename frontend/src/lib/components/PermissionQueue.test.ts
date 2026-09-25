@@ -116,6 +116,19 @@ describe('PermissionQueue keyboard shortcuts across queued requests', () => {
 		]);
 	});
 
+	it('moves focus onto the next prompt when the queue advances', async () => {
+		vi.useFakeTimers();
+		await renderQueue();
+		vi.advanceTimersByTime(300);
+		const approve = screen.getByRole('button', { name: 'Approve' });
+		approve.focus();
+		await fireEvent.click(approve);
+		await settle();
+
+		expect(screen.getByText(/rm -rf build/)).toBeTruthy();
+		expect(document.activeElement).toBe(screen.getByRole('dialog', { name: /Bash|Permission/ }));
+	});
+
 	it('Escape after a keyup denies the current request', async () => {
 		vi.useFakeTimers();
 		const onRespond = await renderQueue();
@@ -124,5 +137,100 @@ describe('PermissionQueue keyboard shortcuts across queued requests', () => {
 		await fireEvent.keyUp(panel, { key: 'Shift' });
 		await fireEvent.keyDown(panel, { key: 'Escape' });
 		expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ request_id: 'req-1', decision: 'deny' }));
+	});
+});
+
+describe('PermissionQueue gives each request a fresh prompt', () => {
+	const bash = { request_id: 'req-1', tool_name: 'Bash', tool_input: { command: 'ls' } };
+	const write = { request_id: 'req-2', tool_name: 'Write', tool_input: { file_path: '/etc/x', content: 'y' } };
+
+	async function renderQueue() {
+		const onRespond = vi.fn();
+		let requests = [bash, write];
+		const view = render(PermissionQueue, { props: { requests, onRespond } });
+		onRespond.mockImplementation(({ request_id }: { request_id: string }) => {
+			requests = requests.filter((r) => r.request_id !== request_id);
+			void view.rerender({ requests, onRespond });
+		});
+		await settle();
+		return onRespond;
+	}
+
+	const calls = (fn: ReturnType<typeof vi.fn>) =>
+		fn.mock.calls.map(([r]) => [r.request_id, r.decision, r.remember]);
+
+	it('"Always do this for Bash" does not stay ticked for the next request', async () => {
+		vi.useFakeTimers();
+		const onRespond = await renderQueue();
+		vi.advanceTimersByTime(300);
+
+		await fireEvent.click(screen.getByLabelText(/Always do this for Bash/));
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		await settle();
+
+		const box = screen.getByLabelText(/Always do this for Write/) as HTMLInputElement;
+		expect(box.checked).toBe(false);
+		vi.advanceTimersByTime(300);
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		expect(calls(onRespond)).toEqual([
+			['req-1', 'allow', 'profile'],
+			['req-2', 'allow', 'none']
+		]);
+	});
+
+	it('a double-click on Approve answers only the first request', async () => {
+		vi.useFakeTimers();
+		const onRespond = await renderQueue();
+		vi.advanceTimersByTime(300);
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		await settle();
+		vi.advanceTimersByTime(80);
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		await settle();
+
+		expect(calls(onRespond)).toEqual([['req-1', 'allow', 'none']]);
+		expect(screen.getByText(/\/etc\/x/)).toBeTruthy();
+	});
+
+	it('a click within 300 ms of the next request appearing does nothing; after that it counts', async () => {
+		vi.useFakeTimers();
+		const onRespond = await renderQueue();
+		vi.advanceTimersByTime(300);
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
+		await settle();
+		vi.advanceTimersByTime(299);
+		await fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		expect(onRespond).toHaveBeenCalledTimes(1);
+
+		vi.advanceTimersByTime(1);
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		expect(calls(onRespond)).toEqual([
+			['req-1', 'deny', 'none'],
+			['req-2', 'allow', 'none']
+		]);
+	});
+
+	it("an idle user's first Enter on the next prompt approves it once its window has passed", async () => {
+		vi.useFakeTimers();
+		const onRespond = await renderQueue();
+		const panel = () => screen.getByRole('dialog', { name: /Bash|Write|Permission/ });
+
+		vi.advanceTimersByTime(500);
+		await fireEvent.keyDown(panel(), { key: 'Enter' });
+		await fireEvent.keyUp(panel(), { key: 'Enter' });
+		await settle();
+		expect(screen.getByRole('status').textContent?.trim()).toBe('');
+
+		vi.advanceTimersByTime(500);
+		await settle();
+		expect(screen.getByRole('status').textContent?.trim()).toBe('Press Enter to approve, Escape to deny');
+		await fireEvent.keyDown(panel(), { key: 'Enter' });
+		expect(calls(onRespond)).toEqual([
+			['req-1', 'allow', 'none'],
+			['req-2', 'allow', 'none']
+		]);
 	});
 });

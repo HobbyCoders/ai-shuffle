@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import PermissionRequest, { type PermissionRequestData } from './PermissionRequest.svelte';
 
 function makeRequest(over: Partial<PermissionRequestData> = {}): PermissionRequestData {
@@ -18,8 +19,17 @@ function makeRequest(over: Partial<PermissionRequestData> = {}): PermissionReque
 }
 
 afterEach(() => {
+	vi.useRealTimers();
 	cleanup();
 });
+
+/** Clicks only count once the prompt has been visible for 300 ms. */
+function renderArmedForClicks(props: { request: PermissionRequestData; onRespond?: (detail: { request_id: string }) => void }) {
+	vi.useFakeTimers();
+	const view = render(PermissionRequest, { props });
+	vi.advanceTimersByTime(300);
+	return view;
+}
 
 describe('PermissionRequest — approve/deny + always-remember', () => {
 	it('shows the tool name and the requested details', () => {
@@ -40,7 +50,7 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 
 	it('approves without remembering when the checkbox is unchecked', async () => {
 		const onRespond = vi.fn();
-		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		renderArmedForClicks({ request: makeRequest(), onRespond });
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
 
@@ -56,7 +66,7 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 
 	it('denies without remembering when the checkbox is unchecked', async () => {
 		const onRespond = vi.fn();
-		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		renderArmedForClicks({ request: makeRequest(), onRespond });
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
 
@@ -68,7 +78,7 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 
 	it('checkbox + Approve remembers an always-allow for the tool', async () => {
 		const onRespond = vi.fn();
-		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		renderArmedForClicks({ request: makeRequest(), onRespond });
 
 		const checkbox = screen.getByRole('checkbox') as HTMLInputElement;
 		expect(checkbox.checked).toBe(false);
@@ -84,7 +94,7 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 
 	it('checkbox + Deny remembers an always-deny for the tool', async () => {
 		const onRespond = vi.fn();
-		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		renderArmedForClicks({ request: makeRequest(), onRespond });
 
 		await fireEvent.click(screen.getByRole('checkbox'));
 		await fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
@@ -101,6 +111,76 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 		expect(screen.getByLabelText(/Always do this for WebFetch/i)).toBeTruthy();
 	});
 
+	it('ignores a click within 300 ms of the request appearing', async () => {
+		vi.useFakeTimers();
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+
+		vi.advanceTimersByTime(299);
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
+		expect(onRespond).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(1);
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		expect(onRespond).toHaveBeenCalledTimes(1);
+	});
+
+	it('answers once: a double-click sends one answer and the buttons are disabled until the next request', async () => {
+		const onRespond = vi.fn();
+		const view = renderArmedForClicks({ request: makeRequest(), onRespond });
+
+		const approve = screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+		await fireEvent.click(approve);
+		await fireEvent.click(approve);
+		await fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
+		expect(onRespond).toHaveBeenCalledTimes(1);
+		expect(approve.disabled).toBe(true);
+
+		// The same instance given the next request starts over, clicks re-armed.
+		await view.rerender({ request: makeRequest({ request_id: 'req-2' }), onRespond });
+		expect(approve.disabled).toBe(false);
+		await fireEvent.click(approve);
+		expect(onRespond).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(300);
+		await fireEvent.click(approve);
+		expect(onRespond.mock.calls.map(([r]) => r.request_id)).toEqual(['req-1', 'req-2']);
+	});
+
+	it('the "always" box and expanded details reset when the request changes', async () => {
+		const onRespond = vi.fn();
+		const view = renderArmedForClicks({ request: makeRequest(), onRespond });
+
+		await fireEvent.click(screen.getByRole('checkbox'));
+		await fireEvent.click(screen.getByRole('button', { name: 'Show details' }));
+		expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+
+		await view.rerender({
+			request: makeRequest({ request_id: 'req-2', tool_name: 'Write', tool_input: { file_path: '/tmp/x' } }),
+			onRespond
+		});
+		expect((screen.getByLabelText(/Always do this for Write/) as HTMLInputElement).checked).toBe(false);
+		expect(screen.getByRole('button', { name: 'Show details' })).toBeTruthy();
+
+		vi.advanceTimersByTime(300);
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		expect(onRespond.mock.calls[0][0]).toMatchObject({ request_id: 'req-2', remember: 'none' });
+	});
+
+	it('comes back after a while if the answered request is still shown, so it can be retried', async () => {
+		const onRespond = vi.fn();
+		renderArmedForClicks({ request: makeRequest(), onRespond });
+
+		const approve = screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+		await fireEvent.click(approve);
+		vi.advanceTimersByTime(4999);
+		expect(approve.disabled).toBe(true);
+		vi.advanceTimersByTime(1);
+		await tick();
+		expect(approve.disabled).toBe(false);
+		await fireEvent.click(approve);
+		expect(onRespond).toHaveBeenCalledTimes(2);
+	});
 
 });
 
@@ -119,16 +199,22 @@ describe('PermissionRequest — page-wide keyboard shortcuts', () => {
 		vi.useRealTimers();
 	});
 
-	it('once armed, Enter with nothing focused approves and Escape denies', async () => {
+	it('once armed, Enter with nothing focused approves', async () => {
 		const onRespond = vi.fn();
 		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
 		await arm();
 
 		await fireEvent.keyDown(document.body, { key: 'Enter' });
-		await fireEvent.keyUp(document.body, { key: 'Enter' });
-		await fireEvent.keyDown(document.body, { key: 'Escape' });
+		expect(onRespond.mock.calls.map(([r]) => r.decision)).toEqual(['allow']);
+	});
 
-		expect(onRespond.mock.calls.map(([r]) => r.decision)).toEqual(['allow', 'deny']);
+	it('once armed, Escape with nothing focused denies', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		await arm();
+
+		await fireEvent.keyDown(document.body, { key: 'Escape' });
+		expect(onRespond.mock.calls.map(([r]) => r.decision)).toEqual(['deny']);
 	});
 
 	it('Enter within the visibility window does nothing, even after a keyup', async () => {
@@ -147,13 +233,95 @@ describe('PermissionRequest — page-wide keyboard shortcuts', () => {
 		expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ decision: 'allow' }));
 	});
 
-	it('Enter after the window but with no keyup since the prompt appeared does nothing', async () => {
+	it("an idle user's first Enter after the window approves, without a keyup before it", async () => {
 		const onRespond = vi.fn();
 		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
-		vi.advanceTimersByTime(2000);
+		vi.advanceTimersByTime(5000);
+
+		const panel = screen.getByRole('dialog');
+		panel.focus();
+		const notPrevented = await fireEvent.keyDown(panel, { key: 'Enter' });
+		expect(notPrevented).toBe(false);
+		expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ decision: 'allow' }));
+	});
+
+	it("an idle user's first Escape after the window denies, without a keyup before it", async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		vi.advanceTimersByTime(500);
+
+		await fireEvent.keyDown(document.body, { key: 'Escape' });
+		expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ decision: 'deny' }));
+	});
+
+	it('a key whose keydown predates the prompt never counts, even after the window', async () => {
+		const beforePrompt = new Event('probe').timeStamp;
+		vi.advanceTimersByTime(10);
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		await arm();
+
+		for (const key of ['Enter', 'Escape']) {
+			const stale = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+			Object.defineProperty(stale, 'timeStamp', { value: beforePrompt });
+			await fireEvent(document.body, stale);
+		}
+		expect(onRespond).not.toHaveBeenCalled();
 
 		await fireEvent.keyDown(document.body, { key: 'Enter' });
-		await fireEvent.keyDown(document.body, { key: 'Escape' });
+		expect(onRespond).toHaveBeenCalledTimes(1);
+	});
+
+	it('announces the shortcuts in a polite live region once they are armed', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		const status = screen.getByRole('status');
+		expect(status.getAttribute('aria-live')).toBe('polite');
+		expect(status.textContent?.trim()).toBe('');
+
+		vi.advanceTimersByTime(500);
+		await tick();
+		expect(status.textContent?.trim()).toBe('Press Enter to approve, Escape to deny');
+
+		await fireEvent.keyDown(document.body, { key: 'Enter' });
+		await tick();
+		expect(status.textContent?.trim()).toBe('');
+	});
+
+	it('Space on a focused Approve is held back until armed, like Enter', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		const approve = screen.getByRole('button', { name: 'Approve' });
+		approve.focus();
+
+		// Pressed before the window has passed: the key and the click it would
+		// generate (detail 0, no pointer) are both dropped, even after 300 ms.
+		vi.advanceTimersByTime(400);
+		expect(await fireEvent.keyDown(approve, { key: ' ' })).toBe(false);
+		vi.advanceTimersByTime(200);
+		expect(await fireEvent.keyUp(approve, { key: ' ' })).toBe(false);
+		await fireEvent.click(approve, { detail: 0 });
+		expect(onRespond).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(0);
+
+		// An auto-repeat is held back as well.
+		expect(await fireEvent.keyDown(approve, { key: ' ', repeat: true })).toBe(false);
+		await fireEvent.keyUp(approve, { key: ' ' });
+		vi.advanceTimersByTime(0);
+
+		// A fresh press once armed activates the button natively.
+		expect(await fireEvent.keyDown(approve, { key: ' ' })).toBe(true);
+		expect(await fireEvent.keyUp(approve, { key: ' ' })).toBe(true);
+		await fireEvent.click(approve, { detail: 0 });
+		expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ decision: 'allow' }));
+	});
+
+	it('Space elsewhere on the prompt is not a shortcut', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		await arm();
+
+		expect(await fireEvent.keyDown(screen.getByRole('dialog'), { key: ' ' })).toBe(true);
 		expect(onRespond).not.toHaveBeenCalled();
 	});
 
