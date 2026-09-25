@@ -1,4 +1,4 @@
-"""The commit gate — guarded harness evolution (HCL), Phase 2.2.
+"""The commit gate — guarded harness evolution (HCL).
 
 Memories and skills keep their existing lighter gates (selftest verification,
 caps, screening). This module gates the state that *instructs* rather than

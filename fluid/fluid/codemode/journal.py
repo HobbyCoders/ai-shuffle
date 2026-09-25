@@ -271,20 +271,6 @@ def append_friction(
             pass
 
 
-def record_friction(
-    skills: SkillStore | None,
-    detector: FrictionDetector,
-    name: str,
-    input: Any,
-    output: str,
-    is_error: bool,
-) -> list[dict[str, Any]]:
-    """Observe one tool call and journal whatever friction it earned."""
-    entries = detector.observe(name, input, output, is_error)
-    append_friction(skills, entries)
-    return entries
-
-
 class ToolJournal:
     def __init__(
         self,
@@ -345,8 +331,8 @@ class ToolJournal:
             self._skills.journal_append(entry)
         except Exception:
             pass
-        record_friction(
-            self._skills, self._friction, name, input, output, is_error,
+        append_friction(
+            self._skills, self._friction.observe(name, input, output, is_error),
         )
 
     async def aclose(self) -> None:

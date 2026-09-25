@@ -86,10 +86,8 @@ async def run_once(
     prompt: str,
     *,
     provider: Any | None = None,
-    provider_name: str | None = None,
     out=None,
     on_permission=auto_deny,
-    on_question=None,
     session_id: str | None = None,
 ) -> int:
     """Run a single turn and stream it to ``out``. Returns a process exit code.
@@ -101,7 +99,7 @@ async def run_once(
     out = out or sys.stdout
     meta = await open_session(store, session_id, cwd=config.cwd)
     engine = make_engine(
-        config, store, provider=provider, provider_name=provider_name,
+        config, store, provider=provider,
         session_id=meta.session_id, permission_responder=on_permission,
     )
     host = host_of(engine)
@@ -126,7 +124,7 @@ async def run_once(
         with sigint_scope(on_sigint):
             stop = await stream_turn(
                 engine, meta.session_id, prompt, out=out, on_permission=on_permission,
-                on_question=on_question or tty_question_responder() or auto_answer,
+                on_question=tty_question_responder() or auto_answer,
                 wait_background=True,
             )
     finally:
@@ -188,12 +186,11 @@ async def chat_session(
     config: HarnessConfig,
     store,
     *,
-    provider_name: str | None = None,
     use_tui: bool = False,
     session_id: str | None = None,
 ) -> int:
     meta = await open_session(store, session_id, cwd=config.cwd)
-    engine = make_engine(config, store, provider_name=provider_name, session_id=meta.session_id)
+    engine = make_engine(config, store, session_id=meta.session_id)
     try:
         if use_tui:
             from fluid.cli.tui import run_tui

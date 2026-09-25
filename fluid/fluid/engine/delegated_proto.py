@@ -452,11 +452,9 @@ class StreamJsonMapper:
     def _on_compact_boundary(self, frame: dict[str, Any]) -> Mapped:
         """The CLI compacted its own context — report it the way the native leg does.
 
-        Without this the delegated leg emitted nothing at all when the prompt
-        collapsed mid-turn (166k → 35k tokens behind a 74-second stall in one
-        audited session), so a host asking for the latest compaction boundary
-        concluded a Claude-lane session had never compacted and the model
-        re-ran work whose results had just left the context.
+        Without it the delegated leg would emit nothing when the prompt
+        collapses mid-turn, and a host asking for the latest compaction
+        boundary would conclude a Claude-lane session had never compacted.
 
         The CLI owns the compaction, so the event carries what it reports and
         nothing invented: its trigger as the reason, its own before/after token

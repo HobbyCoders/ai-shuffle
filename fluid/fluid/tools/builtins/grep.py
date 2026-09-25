@@ -4,9 +4,8 @@ Both branches are bounded and both label their output ("searched via ..."), so
 a search that found nothing is diagnosable rather than ambiguous: it comes back
 as that header plus the literal line "(no matches)", never as an empty string.
 Callers must test for the sentinel, not for truthiness. The fallback runs on a
-worker thread: it used to walk the tree synchronously inside the coroutine,
-which pinned the event loop for as long as the walk took (minutes on a large
-repo) and stopped interrupts from landing.
+worker thread, so a long walk (minutes on a large repo) never pins the event
+loop or blocks interrupts.
 """
 
 from __future__ import annotations

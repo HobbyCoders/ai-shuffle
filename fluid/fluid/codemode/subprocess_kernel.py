@@ -15,9 +15,8 @@ time the child spends running until it either finishes or asks for a tool) is
 deducted from the budget, but the time the host spends servicing a host call —
 which can be an arbitrarily long parked permission prompt — is not. A single
 host call is nonetheless bounded (``KernelConfig.host_call_timeout``, and never
-below the cell's own declared timeout): an audited cell declaring ``timeout:
-30`` sat three hours on a hung browser MCP call, with no ToolResult, no
-TurnComplete and a session that still presented as running. Time the host spent
+below the cell's own declared timeout), so a hung MCP call cannot hold the cell
+open. Time the host spent
 waiting on a *human* is credited back, so an approval nobody answers for ten
 minutes is never mistaken for a hung tool.
 """
@@ -25,6 +24,7 @@ minutes is never mistaken for a hung tool.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import signal
@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from fluid.codemode.kernel import HostCall, HostReply, KernelResult
+from fluid.codemode.truncate import DEFAULT_LIMIT, DEFAULT_STDOUT_CAP
 from fluid.codemode.vfs import DEFAULT_ALLOWLIST
 
 _RUNNER = os.path.join(os.path.dirname(__file__), "_runner.py")
@@ -74,8 +75,8 @@ class KernelConfig:
     mem_limit_bytes: int = _GB
     allow_network: bool = False
     allow_fs: bool = False  # direct open()/io/pathlib I/O inside the kernel
-    ref_threshold: int = 8192
-    stdout_cap: int = 16384
+    ref_threshold: int = DEFAULT_LIMIT
+    stdout_cap: int = DEFAULT_STDOUT_CAP
     # Namespace checkpointing: after each exec the child pickles its picklable
     # variables; on a timeout/OOM restart the host restores them, so kernel
     # death no longer destroys accumulated data (functions/classes defined in
@@ -109,12 +110,10 @@ class KernelConfig:
 def _restart_notice(detail: str) -> str:
     """The "your kernel restarted" line stamped onto the next cell's result.
 
-    A restart between turns left no trace at all: the next cell just raised
-    ``NameError: name 'Note' is not defined. Did you mean: 'None'?`` for a name
-    that had worked one turn earlier, and the model — told by run_python's own
-    description that kernel state persists — had no way to read that as a
-    restart. Four audited sessions lost a cell to it, one of them re-billing a
-    52k-token uncached prefix twice on the way.
+    Without it a restart between turns leaves no trace: the next cell raises
+    ``NameError`` for a name that worked one turn earlier, and the model —
+    told by run_python's own description that kernel state persists — has no
+    way to read that as a restart.
     """
     if "namespace lost" in detail:
         return (
@@ -236,9 +235,9 @@ class SubprocessKernel:
         """Why the child is gone, from its exit status and stderr tail.
 
         An exit the runner chose (a cell called ``sys.exit``), a signal, and
-        a memory-cap kill all used to read as "likely OOM"; the status tells
-        them apart, and the last lines of stderr say what the child printed
-        on its way out.
+        a memory-cap kill are not all "likely OOM"; the status tells them
+        apart, and the last lines of stderr say what the child printed on its
+        way out.
         """
         code = proc.returncode if proc is not None else None
         if code is None:
@@ -324,9 +323,7 @@ class SubprocessKernel:
 
         Returns the note appended to the exec error message, so the model
         knows exactly what state survived, and arms :attr:`_restart_note` for
-        the NEXT cell — a kernel recycled between turns produced no signal at
-        all, and four audited sessions lost a cell to a bare ``NameError: name
-        'Note' is not defined. Did you mean: 'None'?`` after a park.
+        the NEXT cell (see :func:`_restart_notice`).
         """
         await self._restart()
         detail = await self._restore()
@@ -425,9 +422,8 @@ class SubprocessKernel:
     ) -> KernelResult:
         if self._proc is None or self._proc.returncode is not None:
             # The kernel died between turns (eviction, an OOM kill, a host
-            # restart). This used to be a bare respawn: the checkpoint was
-            # never replayed, so the next cell met a fresh empty namespace and
-            # a NameError with no explanation. Restore it, and arm the notice.
+            # restart). Restore the checkpoint and arm the notice rather than
+            # hand the next cell an empty namespace with no explanation.
             if self._ever_started:
                 await self._restart_and_restore()
             else:
@@ -521,7 +517,7 @@ class SubprocessKernel:
     # ── frame IO ──
     async def _send(self, obj: dict) -> None:
         assert self._proc is not None and self._proc.stdin is not None
-        body = _dumps(obj)
+        body = json.dumps(obj).encode("utf-8")
         self._proc.stdin.write(struct.pack(">I", len(body)) + body)
         await self._proc.stdin.drain()
 
@@ -530,7 +526,7 @@ class SubprocessKernel:
         header = await self._proc.stdout.readexactly(4)
         (length,) = struct.unpack(">I", header)
         body = await self._proc.stdout.readexactly(length)
-        return _loads(body)
+        return json.loads(body.decode("utf-8"))
 
 
 # ── Windows Job Object memory limit (host-side counterpart of the POSIX rlimit
@@ -640,14 +636,3 @@ def _reply_frame(reply: HostReply) -> dict:
         }
     return frame
 
-
-def _dumps(obj: dict) -> bytes:
-    import json
-
-    return json.dumps(obj).encode("utf-8")
-
-
-def _loads(body: bytes) -> dict:
-    import json
-
-    return json.loads(body.decode("utf-8"))

@@ -137,11 +137,9 @@ def runtime_facts(cwd: str) -> str:
 
 # ─── mechanical fact harvest ─────────────────────────────────────────────────
 #
-# The note above is per turn and per process; nothing carried it across
-# sessions, so every session re-discovered "no pytest in the worker Python"
-# and "this worktree has no node_modules" by hand (round 9: 6fb34af0,
-# 59e41e2f, 98490077, 80c82234 ...). The harvesters below turn the same
-# observations into FactStore entries with ``provenance="tool"`` and a stable
+# The note above is per turn and per process. The harvesters below turn the
+# same observations ("no pytest in the worker Python", "this worktree has no
+# node_modules") into FactStore entries with ``provenance="tool"`` and a stable
 # key, so a later session on the same project sees them in the # Memory
 # section (rendered with a "confirm with Remember" hint) without the model
 # or the synthesizer having to do anything.

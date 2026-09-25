@@ -171,10 +171,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
 async def _with_roster(outcome: ToolOutcome, ctx: ToolCtx) -> ToolOutcome:
     """An undeliverable message names who IS reachable, with ids.
 
-    Round 9: "Unknown agent 'general-purpose'; use ListAgents" cost a round
-    trip every time, and the roster it pointed at listed every agent as
-    "General Purpose". The error now carries the live roster inline, task
-    ids included, so the retry can address one directly.
+    The error carries the live roster inline, task ids included, so the retry
+    can address one directly instead of spending a round trip on ListAgents.
     """
     roster = (ctx.extra or {}).get("agent_roster")
     if roster is None or "reachable:" in outcome.text.lower():

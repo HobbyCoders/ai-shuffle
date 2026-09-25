@@ -1,4 +1,4 @@
-"""Advisory cross-process file lock, one helper for the whole package.
+"""Advisory cross-process file lock.
 
 The lock lives on its own file rather than on the document it guards: a
 document that is replaced by rename during a rewrite would leave a lock on

@@ -1,4 +1,4 @@
-"""The anchor-replay runner — headless, isolated, bounded (Phase 2.1/2.2).
+"""The anchor-replay runner — headless, isolated, bounded.
 
 Replays run **in-process** through the same recipe the subagent host uses
 (:meth:`fluid.cli.host.CliHost._run_child`): build an engine, submit one

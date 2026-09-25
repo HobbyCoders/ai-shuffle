@@ -26,7 +26,7 @@ Components (v1):
 
   * skills   ``skills/*/SKILL.md``    → :class:`~fluid.context.instructions.Skill`
   * commands ``commands/*.md``        → :class:`~fluid.context.instructions.Command`
-  * agents   ``agents/**/*.md``       → :class:`PluginAgent` (body unread; W4 consumes)
+  * agents   ``agents/**/*.md``       → :class:`PluginAgent` (body read by ``agents.discover_agents``)
   * MCP      ``.mcp.json`` or the manifest's ``mcpServers`` key
 
 All three component kinds are namespaced ``<plugin>:<name>`` — Claude Code's own
@@ -85,7 +85,7 @@ class PluginAgent:
 
     Same progressive-disclosure shape as :class:`Skill`: the frontmatter's name
     and description are parsed at discovery time, the body (the agent's system
-    prompt) is left on disk for W4's agent loader to read.
+    prompt) is left on disk for :func:`fluid.context.agents.discover_agents`.
     """
 
     name: str  # namespaced: "<plugin>:<agent>"

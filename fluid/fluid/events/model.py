@@ -515,12 +515,11 @@ class SubagentEvent(Event):
     * ``"suppressed"`` — a terminal completion where a wake IS owed but the
       host owns it: the embedding app already unparks its own session, or the
       CLI drives the continuation itself, so the engine deliberately stands
-      down. Audits repeatedly misread the ``wake=False`` this produces as "the
-      session never woke", and concluded a latch was stuck when nothing was.
+      down. The ``wake=False`` this produces does not mean the session never
+      woke.
     * ``"not_applicable"`` — a non-terminal event (``started``,
-      ``completion_pending``) where waking is not a question yet. These
-      previously carried ``wake=True`` purely because that is the field default,
-      which was never a claim about anything.
+      ``completion_pending``) where waking is not a question yet; their
+      ``wake`` is just the field default.
 
     Additive and defaulted, so rows persisted before it existed decode as
     ``"auto"`` — which is what the old default ``wake=True`` already meant."""
@@ -695,9 +694,9 @@ def event_from_dict(d: dict[str, Any]) -> Event:
     if cls is Usage and isinstance(kwargs.get("raw"), dict):
         usage_raw = kwargs["raw"]
         if "cache_read_report" in usage_raw:
-            # Stored reports predating #1406 used provider capabilities to
-            # interpret already-normalized input. Recompute from the durable
-            # exclusive counters, including plausible but incorrect full hits.
+            # Older stored reports used provider capabilities to interpret
+            # already-normalized input. Recompute from the durable exclusive
+            # counters, including plausible but incorrect full hits.
             from fluid.context.cache_probe import cache_read_report
 
             kwargs["raw"] = {

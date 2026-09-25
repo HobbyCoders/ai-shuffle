@@ -1028,7 +1028,7 @@ def build_engine(
     # ``trim_only`` splits the ladder at tier 1: results are trimmed to
     # recoverable placeholders, but no turn is digested and no epoch folded.
     # Inert when the whole section is disabled.
-    trim_only = cc.enabled and getattr(cc, "trim_only", False)
+    trim_only = cc.enabled and cc.trim_only
     compaction = CompactionConfig(
         enabled=cc.enabled and not trim_only,
         trim=TrimConfig(
@@ -1047,7 +1047,7 @@ def build_engine(
         epoch_fold_spans=cc.epoch_fold_spans,
         intake_stub_chars=cc.intake_stub_chars,
         tool_result_stub_chars=cc.tool_result_stub_chars,
-        image_trigger_ratio=getattr(cc, "image_trigger_ratio", 1.0),
+        image_trigger_ratio=cc.image_trigger_ratio,
     )
 
     return NativeLoop(

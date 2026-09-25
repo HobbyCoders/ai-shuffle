@@ -113,10 +113,8 @@ _RUN_PYTHON_DESC = (
 def _run_python_desc(stdout_cap: int = KernelConfig.stdout_cap) -> str:
     """run_python's description plus this session's real stdout budget.
 
-    The cap used to be undocumented, and it is the single largest silent loss
-    in the code surface: transcripts show cells printing 27k chars, losing 11k
-    of them, and the model paying to re-run the tools because nothing had told
-    it a budget existed or that the full results were still in the kernel.
+    Stating the cap tells the model a budget exists and that full results stay
+    in the kernel, so it slices them instead of re-running the tools.
     """
     return (
         f"{_RUN_PYTHON_DESC}\n"
@@ -356,11 +354,8 @@ class CodeModeSession:
         src = self._projection().docs(name)
         if src is None:
             return f"No such tool: {name!r}. Try list_tools or search_tools."
-        # Audited sessions re-fetched the same four browser stubs an hour
-        # apart with the first copy still in context, eight calls for four
-        # signatures. The docs are returned anyway — a compaction may have
-        # taken them — but the model is told it is probably already holding
-        # them.
+        # A repeat fetch returns the docs anyway — a compaction may have taken
+        # them — but tells the model it is probably already holding them.
         if name in self._docs_served:
             return (
                 f"(You already read {name}'s docs earlier in this session; "
@@ -539,8 +534,8 @@ class CodeModeSession:
             except asyncio.CancelledError:
                 # The kernel's per-call ceiling (or the turn's watchdog)
                 # cancelled this call. The ToolUse above already went out;
-                # without a matching ToolResult the transcript shows a call
-                # that never returned and the audit reads it as a dead turn.
+                # without a matching ToolResult the transcript would show a
+                # call that never returned.
                 try:
                     await loop._emit(ToolResult(
                         session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,

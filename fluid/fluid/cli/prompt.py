@@ -128,9 +128,8 @@ CODE_MODE_TOOL_NAMES: tuple[str, ...] = (
 # ─── model-family guidance ───────────────────────────────────────────────────
 
 # Which blocks a family gets is decided by explicit family resolution (see
-# ``resolve_model_family`` below), never by a substring test over the model id:
-# ``"gpt" in model`` matched gpt-oss as GPT and gave an unknown stealth model
-# nothing at all. ACT is for families that describe intended actions instead of
+# ``resolve_model_family`` below), never by a substring test over the model id,
+# which would match gpt-oss as GPT and give an unknown model nothing. ACT is for families that describe intended actions instead of
 # calling tools, or stop after a stub. DISCIPLINE is for families observed
 # doing arithmetic in prose, skipping read-back verification after external
 # writes, "repairing" identifiers, and claiming completeness despite count
@@ -997,7 +996,7 @@ def compose_base_prompt(profile: PromptProfile | None = None) -> str:
     """Compose the base prompt for ``profile`` (default: the full surface).
 
     Deterministic: the same profile always yields the same bytes. Ends with a
-    single trailing newline, like the constant it replaced.
+    single trailing newline.
     """
     p = profile or PromptProfile()
     sections: list[str | None] = [
@@ -1019,8 +1018,7 @@ def compose_base_prompt(profile: PromptProfile | None = None) -> str:
 
 
 # The full-surface, default-identity rendering — what a stock `fluid chat`
-# session ships, and the compatibility constant tests and embedders compare
-# against. (The default model is Claude-family, so no guidance blocks.)
+# session ships, and the constant tests compare against. (The default model is Claude-family, so no guidance blocks.)
 DEFAULT_BASE_PROMPT = compose_base_prompt(
     PromptProfile(tools=_FULL_TOOLSET, model="claude")
 )

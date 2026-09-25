@@ -141,6 +141,7 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from fluid.messages.content import SteerDelivery
 from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
@@ -167,6 +168,7 @@ from fluid.store.base import (
     replay_source,
 )
 from fluid.tools.builtins._util import resolve as resolve_tool_path
+from fluid.tools.hardening import defang_harness_markers
 from fluid.tools.builtins.tool_search import (
     parse_deferred_catalog,
     render_deferred_catalog,
@@ -310,8 +312,6 @@ def _render_interjection(text: str, sender: str | None, origin: str) -> str:
     user's own authority, and a <task-notification> whose summary a sub-agent
     wrote plainly does not.
     """
-    from fluid.messages.content import SteerDelivery
-
     return SteerDelivery(text=text, sender=sender, origin=origin).render()
 
 
@@ -389,14 +389,6 @@ _OVERFLOW_MARKERS = (
 # HTTP statuses that mean the request body itself was rejected for size.
 _OVERFLOW_STATUSES = frozenset({413})
 
-# Events whose loss costs a gap in the replay log and nothing else: they are
-# progress frames, and the assistant node the turn stores carries the same
-# content in full. A store failure on one of these is logged, not raised (see
-# NativeLoop._emit). Everything else — ToolUse, ToolResult, Usage, every
-# lifecycle event — is load-bearing, and a store that cannot take it must say
-# so loudly.
-_RECONSTRUCTIBLE_EVENTS = RECONSTRUCTIBLE_EVENTS
-
 # Exception class-name suffixes that mean "the transport or the database was
 # briefly unavailable", matched anywhere in an exception's inheritance chain.
 # Named rather than imported: fluid must not depend on whichever driver the
@@ -463,8 +455,8 @@ def _describe_engine_failure(exc: BaseException, *, transient: bool) -> str:
 
 # How long a turn parks on a QuestionRequest before giving up on an answer,
 # so a host that renders no questions cannot hold the turn open for good. An
-# engine instance may set ``question_timeout`` to
-# another number of seconds, or None to wait without limit.
+# engine instance may set ``question_timeout`` to another number of seconds, or
+# None to wait without limit.
 QUESTION_TIMEOUT_S = 30 * 60.0
 
 # How long a turn parks on a PermissionRequest before denying the call, so a
@@ -1003,6 +995,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._pending_system_text: str | None = None
         self._prev_system_text: str | None = None
         self._pending_questions: dict[str, asyncio.Future] = {}
+        self.question_timeout: float | None = QUESTION_TIMEOUT_S
         # Mid-turn user steers and peer messages awaiting the next tool
         # result (see the Steer and AgentMessage ops).
         self._pending_steers: list[Steer | AgentMessage | str] = []
@@ -1454,8 +1447,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             # wrote — which must not be able to close the notice and open the
             # user's marker.
             if op.origin != "user":
-                from fluid.tools.hardening import defang_harness_markers
-
                 op = replace(op, text=defang_harness_markers(op.text))
             if self._turn_task is not None and not self._turn_task.done():
                 self._pending_steers.append(op)
@@ -1470,8 +1461,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             # the answer. Busy: queue like a steer, rendered in the peer marker
             # so it cannot borrow the user's authority. Idle: an ordinary turn,
             # unless the host owns wake scheduling and disables it on the op.
-            from fluid.tools.hardening import defang_harness_markers
-
             if self._background_closed or self._interrupted.is_set():
                 raise RuntimeError("receiver is stopping; peer message was not delivered")
             text = defang_harness_markers(op.text)
@@ -1608,7 +1597,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         try:
             await persist_event(self.store, sequenced)
         except Exception as exc:
-            if not isinstance(event, _RECONSTRUCTIBLE_EVENTS):
+            if not isinstance(event, RECONSTRUCTIBLE_EVENTS):
                 raise
             self._note_dropped_event(event, exc)
         return sequenced
@@ -1703,7 +1692,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         """Claude-Code-parity breakdown of what the NEXT request would carry.
 
         A snapshot, safe between turns: it reads the store, renders the history
-        through the trimmer's read-only view (:meth:`ToolResultTrimmer.view` —
+        through the compactor's read-only view (:meth:`Compactor.view` —
         no batch is armed, nothing is trimmed as a side effect) and prices the
         same tool schemas ``_build_request`` would send. No model call is made
         and no node is written; a session that does not exist yet simply prices
@@ -1970,7 +1959,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     def _human_wait_pending(self) -> bool:
         """A permission or question is out to the user: silence is not a hang."""
-        for futures in (self._pending_permissions, getattr(self, "_pending_questions", {})):
+        for futures in (self._pending_permissions, self._pending_questions):
             for fut in list(futures.values()):
                 if not fut.done():
                     return True
@@ -1981,7 +1970,8 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         Polls at a quarter of the limit (at least once a second). A pending
         permission or question resets the clock: waiting on a person is not
-        a hang. When it fires, the cancel reason names the silence so the
+        a hang, and those waits end on their own ``permission_timeout`` /
+        ``question_timeout``. When it fires, the cancel reason names the silence so the
         ErrorEvent the cancel path emits says why the turn ended.
         """
         interval = max(1.0, limit / 4)
@@ -2724,17 +2714,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # Nothing came back. Re-send the SAME history — the transcript
                 # gains no node — but WITHOUT the sticky-routing key, so
                 # OpenRouter may pick a different upstream replica. Retrying
-                # byte-identically pins the retry to the replica that just
-                # failed, which is how ten retries in a row all come back empty.
+                # byte-identically would pin the retry to the replica that just
+                # failed.
                 #
                 # A key whose replica is dead stays dead for longer than one
-                # call: a turn that re-probed stickiness after every recovery
-                # paid a dud call plus a backoff on all 16 of its model calls.
-                # So if THIS call carried the key, drop it — and keep it dropped
-                # past the end of the turn. Re-probing once per turn was cheap
-                # while dead replicas failed fast, but a replica that HANGS
-                # makes every probe cost a full first-data watchdog timeout. A
-                # new session (or a new process) starts clean.
+                # call, and a replica that HANGS makes every re-probe cost a
+                # full first-data watchdog timeout. So if THIS call carried the
+                # key, drop it — and keep it dropped past the end of the turn.
+                # A new session (or a new process) starts clean.
                 #
                 # That is OpenRouter's policy. The provider decides through
                 # classify_error: the Responses API never drops its
@@ -4418,8 +4405,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # (the schema was never sent), so this is the defense against
         # hallucinated and stale-transcript names — it answers in-context
         # instead of crashing the turn. Placed ahead of the hook and permission
-        # gates so the same wall covers the code-mode bridge, which enters the
-        # dispatch path here rather than through ``_dispatch_tool``.
+        # gates. Code mode enforces the same predicate in its own bridge.
         if not self._tool_permitted(name):
             return await self._finish_tool(
                 sid, turn_id, name, tool_use_id,
@@ -4478,8 +4464,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             if verdict == "allow" and self.permissions.note_execution(name, input):
                 # Doom-loop checkpoint. Under never_ask there may be nobody
                 # listening for permission prompts (headless embedders), so an
-                # "ask" would park the turn forever — deny with in-context
-                # feedback instead; that alone breaks the repeat pattern.
+                # "ask" would park the turn until ``permission_timeout`` —
+                # deny with in-context feedback instead; that alone breaks the
+                # repeat pattern.
                 if self.permissions.approval_policy == "never_ask":
                     return await self._finish_tool(
                         sid, turn_id, name, tool_use_id,
@@ -4544,7 +4531,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         """One QuestionRequest/RespondQuestion round-trip per MRTR request.
 
         Returns {server-request-id: answer} for the retry's ``inputResponses``,
-        or None if the turn was interrupted while parked on a question.
+        or None if the turn was interrupted while parked on a question or no
+        answer came within ``question_timeout``.
         """
         answers: dict[str, Any] = {}
         user_answered = False
@@ -4567,7 +4555,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             try:
                 done, _ = await asyncio.wait(
                     {fut, interrupt_wait},
-                    timeout=getattr(self, "question_timeout", QUESTION_TIMEOUT_S),
+                    timeout=self.question_timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if fut not in done:
@@ -4685,8 +4673,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             # Genuine instances are appended AFTER this point (steers below,
             # nested-instruction reminders in _dispatch_tool), so they are
             # never touched.
-            from fluid.tools.hardening import defang_harness_markers
-
             defanged = defang_harness_markers(outcome.text)
             if defanged is not outcome.text:
                 outcome = replace(outcome, text=defanged)
@@ -4739,7 +4725,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._pending_steers:
             delivered = [_steer_parts(pending) for pending in self._pending_steers]
             self._pending_steers.clear()
-            from fluid.messages.content import SteerDelivery
             self._tool_deliveries.extend(
                 SteerDelivery(id=steer_id, text=text, sender=sender, origin=origin)
                 for steer_id, text, sender, origin in delivered

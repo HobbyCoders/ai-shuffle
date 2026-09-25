@@ -17,8 +17,8 @@ estimated context size crosses a trigger. Design rules (plan §7):
   consumption is a batched decision like any other: it needs pressure and a
   turn boundary, and it swaps only the Image blocks in place so the sibling
   text — and every request byte before the result — is untouched. Consuming an
-  image between two calls of the same turn rewrote a message the provider had
-  already cached and re-billed the whole prompt at full price.
+  image between two calls of the same turn would rewrite a message the provider
+  has already cached and re-bill the whole prompt at full price.
 * **The tree is never mutated.** Trimming is a view transformation applied when
   history is rendered for a request; the stored SessionNodes keep full fidelity
   (rewind/fork/audit see everything).
@@ -68,7 +68,7 @@ class TrimConfig:
 # conditioned to a ~1568px long edge before they enter history (see
 # fluid.tools.images), so the real charge is ~1.5-2k tokens per image. A
 # flat weight keeps the estimate sane and makes image-bearing blocks eligible
-# for trimming; pricing the base64 by chars/4 once made a 531k PNG look like
+# for trimming; pricing the base64 by chars/4 would make a 531k PNG look like
 # 130k tokens.
 IMAGE_CHARS = 6_000
 

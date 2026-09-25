@@ -1,4 +1,4 @@
-"""Per-model guidance files — shared mechanics (Phase 2.3).
+"""Per-model guidance files — shared mechanics.
 
 ``~/.fluid/guidance/<stem>.md`` holds guidance for model families whose id
 contains ``stem`` (case-insensitive substring: ``glm.md`` matches

@@ -10,20 +10,18 @@ The Responses stream is stateful (item ids, lazily-opened blocks, authoritative
 final items delivered only on ``response.output_item.done``), so unlike the
 Anthropic per-event ``sse_to_chunk`` this side is a small stateful normalizer.
 
-Event-mapping knowledge is ported from a production translator gateway
-(``responses_to_anthropic.py``) and ``docs/CODEX_SPIKE_FINDINGS.md`` — fluid's
-chunk model is simpler, so this is a port of the *knowledge*, not the code:
+Event-mapping rules the Responses stream imposes:
 
-  * ``response.completed.output`` is ALWAYS empty (spike surprise #2); the
+  * ``response.completed.output`` is ALWAYS empty; the
     authoritative message/function_call/reasoning items arrive only via
     ``response.output_item.done``. Each ``block_stop`` therefore carries the
     complete done item under ``payload["block"]`` so the engine can rebuild the
     reasoning envelope (encrypted_content) and full function-call arguments.
   * ``function_call_arguments.delta`` fragments pass through byte-for-byte as
-    ``tool_args_delta``; the ``obfuscation`` padding field is ignored (surprise
-    #10 — only ``delta`` is load-bearing).
-  * On stateless resend every input item strips ``id`` AND ``status`` (surprise
-    #6); ``encrypted_content`` / ``call_id`` / ``arguments`` / ``summary`` /
+    ``tool_args_delta``; the ``obfuscation`` padding field is ignored (only
+    ``delta`` is load-bearing).
+  * On stateless resend every input item strips ``id`` AND ``status``;
+    ``encrypted_content`` / ``call_id`` / ``arguments`` / ``summary`` /
     ``content`` are preserved verbatim.
   * Usage: ``input_tokens_details.cached_tokens`` → ``cache_read_input_tokens``
     (Anthropic-style keys the engine merges); Responses ``input_tokens``
@@ -235,9 +233,9 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
     body: dict[str, Any] = {
         "model": request.model,
         "input": input_items,
-        # Stateless-history mode invariants (spike surprises #3 / E4): always
-        # stream, never persist server-side, always ask for the encrypted
-        # reasoning blob so it round-trips.
+        # Stateless-history mode invariants: always stream, never persist
+        # server-side, always ask for the encrypted reasoning blob so it
+        # round-trips.
         "store": False,
         "stream": True,
         "include": ["reasoning.encrypted_content"],

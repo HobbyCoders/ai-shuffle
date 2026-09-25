@@ -338,8 +338,7 @@ _UNQUOTED_HINT = (
 # The tail of the tool call's own JSON envelope, left on the last line of the
 # cell: ``print(r)"}``. The model closed the `code` string and the argument
 # object in the source it was writing. It is the cheapest SyntaxError to
-# diagnose and the one an audited session hit on its very first tool call, so
-# it is checked before the heredoc story and answered in one line.
+# diagnose, so it is checked before the heredoc story and answered in one line.
 _ENVELOPE_TAIL_RE = re.compile(r"""["']\s*\}\s*,?\s*$""")
 
 _ENVELOPE_HINT = (
@@ -389,8 +388,8 @@ def _name_error_hint(name: str) -> str:
     """A NameError against a mounted tool means the namespace was reset.
 
     Python answers with ``Did you mean: 'hash'?`` — a suggestion that is never
-    right for ``Bash``, ``Note`` or ``Ledger``, and four audited sessions lost
-    a cell to it. The kernel knows which names it mounts, so it can say the one
+    right for ``Bash``, ``Note`` or ``Ledger``. The kernel knows which names it
+    mounts, so it can say the one
     thing that helps: the tool is here, this namespace just does not have it
     bound any more, and a kernel restart between turns is why.
     """
@@ -630,9 +629,7 @@ class _SegmentedStdout(io.TextIOBase):
 # ─── the calls the error cancelled ───────────────────────────────────────────
 #
 # A host call that raises aborts the whole cell, so everything queued after it
-# is dropped without a word: audited sessions lost Note/Ledger bookkeeping,
-# commits and Monitor launches this way and re-issued them a turn later — once,
-# twelve model calls later. The host names the calls that *completed*; this
+# is dropped without a word. The host names the calls that *completed*; this
 # names the ones that never got their turn, read statically off the cell source.
 
 # Statements whose body may not run at all, so a call inside one is only
@@ -931,9 +928,9 @@ def _checkpoint() -> dict:
         "dropped": sorted(dropped),
         "oversized": sorted(oversized),
         # Tool and skill stubs never pickle as data, and re-importing them is
-        # both cheap and exactly what the model would have to do by hand. A
-        # restart that drops `Bash` and `Note` is the audited NameError; the
-        # names are recorded here so the restore can just put them back.
+        # both cheap and exactly what the model would have to do by hand. The
+        # names are recorded here so the restore can just put them back
+        # instead of leaving a NameError for the next cell.
         "tools": sorted(_bound_stubs(_SOURCES)),
         "skills": sorted(_bound_stubs(_SKILLS)),
     }

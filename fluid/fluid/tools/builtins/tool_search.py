@@ -184,8 +184,7 @@ SPEC = ToolSpec(
 # Called from inside run_python, the wire name (``mcp__browser__navigate``) is
 # exactly the wrong thing to print: the kernel mounts tools under the leaf name
 # (``navigate``), the wire name is not importable, and "callable from your next
-# reply" is false — a loaded tool is importable in the very next cell. One
-# audited session burned twelve model calls on that gap.
+# reply" is false — a loaded tool is importable in the very next cell.
 
 
 def _kernel_name(tool_name: str) -> str:
@@ -203,16 +202,11 @@ def _import_lines(specs: Sequence[ToolSpec]) -> str:
 
 
 # ── select: name resolution ──
-# The discovery surface and the load surface used to speak different languages.
 # ``search_tools`` / ``read_tool_docs`` / ``from tools.X import X`` all name a
-# tool by its LEAF (``browser_navigate``); ``select:`` resolved through
-# ``registry.get``, which knows only the WIRE name
-# (``mcp__browser__browser_navigate``). Six audited sessions in one day asked
-# for the leaf names the code surface had just printed at them and got a bare
-# "unknown tool(s)" — each raise aborting the enclosing cell and the calls
-# queued behind it. Both spellings resolve here now, through the same
-# projection the kernel mounts, so the leaf a session was taught is the leaf
-# that loads.
+# tool by its LEAF (``browser_navigate``), while ``registry.get`` knows only the
+# WIRE name (``mcp__browser__browser_navigate``). ``select:`` resolves both
+# spellings through the same projection the kernel mounts, so the leaf a
+# session was taught is the leaf that loads.
 
 
 def _projection(registry: Any, tool_filter: Any) -> Any:
@@ -300,8 +294,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         names = [n.strip() for n in query[len("select:"):].split(",") if n.strip()]
         projection = _projection(registry, tool_filter)
         resolved, missing = _resolve_selection(names, registry, projection, visible)
-        # Partial success: one mistyped name used to throw away the whole call,
-        # including the names that were right.
+        # Partial success: one mistyped name does not throw away the names
+        # that were right.
         if not resolved:
             candidates = _candidates(registry, projection, visible)
             listing = ", ".join(n + _did_you_mean(n, candidates) for n in missing)

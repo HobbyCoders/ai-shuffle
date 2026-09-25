@@ -171,9 +171,8 @@ _SLUG_MAX = 40
 def agent_name_for(input: dict[str, Any]) -> str:
     """A short, addressable name for the agent a Task starts.
 
-    Round 9: every subagent was listed as "General Purpose" (its agent
-    TYPE), so SendMessage by description failed with "Unknown agent" and
-    two same-type agents were indistinguishable. The name is the explicit
+    Naming an agent after its TYPE would make two same-type agents
+    indistinguishable to SendMessage. The name is the explicit
     ``name`` when given, else the first few words of the label or prompt as
     a slug (``fix-flaky-login-test``). The host appends the task id's short
     ref when two agents collide, so the slug does not have to be unique.

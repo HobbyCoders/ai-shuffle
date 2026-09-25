@@ -116,8 +116,8 @@ async def run_tui(engine, session_id: str) -> int:
                 self.exit()
                 return
             if text.split(maxsplit=1)[0].lower() in _INFO_COMMANDS:
-                # Read-only views shared with the line REPL; they never
-                # submit a turn, so they cannot collide with the event pump.
+                # Handled by the line REPL's dispatcher; none of them submits
+                # a turn, so they cannot collide with the event pump.
                 await Repl(self.engine, self.session_id, out=self._writer).dispatch_slash(text)
                 return
             await self.engine.submit(UserTurn(content=text))

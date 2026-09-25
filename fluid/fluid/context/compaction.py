@@ -17,9 +17,8 @@ Invariants (shared with tier 1, enforced here):
   sticky for the engine's lifetime; between batches the rendered prefix is
   byte-identical, so provider cache hits resume after the one-time break.
   Consume-once image trims obey this too — they wait for pressure and for the
-  first model call of a turn, and they swap only the image blocks in place.
-  Firing them on every render, mid-turn, at any occupancy is what made a
-  screenshot cost a full-price re-send of the whole prompt.
+  first model call of a turn, and they swap only the image blocks in place,
+  so a screenshot never forces a full-price re-send of the whole prompt.
 * **The tree is never mutated.** All tiers are view transformations; the
   stored SessionNodes keep full fidelity (rewind/fork/audit/recall see
   everything).
@@ -166,10 +165,9 @@ def derive_trigger_tokens(
 
     Two clamps keep the ceiling meaningful on small windows. The output
     reserve is capped at a quarter of the window (a 32k model cannot reserve
-    32k for output), and the result never drops below half the window: with
-    the defaults a 32k window used to yield -16,000 and an 8k window -39,808,
-    so the ladder fired on every render and ``_digest_until`` never reached
-    its target. The floor only rescues a collapsed ceiling; it never raises a
+    32k for output), and the result never drops below half the window, or a
+    small window would yield a negative threshold and the ladder would fire on
+    every render. The floor only rescues a collapsed ceiling; it never raises a
     threshold above ``scaled``, so ``window_ratio=0`` still pins ``base``.
     """
     if context_window is None:
@@ -276,9 +274,9 @@ def completed_segments(
     tool text may contain a real steer whose provenance cannot be recovered.
     An error result blocks a segment only when its text is longer than
     ``error_text_cap`` (the digest quotes errors up to that cap verbatim, so
-    a short error loses nothing in digestion). Round 9: code-mode cells that
-    raise are error results, and treating every one as unsafe kept whole
-    mega-turns undigestible.
+    a short error loses nothing in digestion); code-mode cells that raise are
+    error results, and treating every one as unsafe would keep whole turns
+    undigestible.
     """
     segments: list[list[SessionNode]] = []
     batch: list[SessionNode] = []
@@ -510,11 +508,9 @@ class Compactor:
 
     def _render(self, nodes: list[SessionNode]) -> list[Message]:
         index = {n.node_id: i for i, n in enumerate(nodes)}
-        # Decided state only. This used to recompute the consume-once image set
-        # on every render, which made an image leave context the instant a
-        # later assistant node existed — no pressure check, no turn boundary,
-        # and a rewritten message in the middle of an already-cached prefix.
-        # apply() owns the decision now; rendering just replays it.
+        # Decided state only: apply() owns the consume-once image decision
+        # (pressure plus a turn boundary); rendering just replays it, so a
+        # render never rewrites a message inside an already-cached prefix.
         trimmed = self.trimmer._trimmed
         consumed = self.trimmer._image_consumed
         out: list[Message] = []
@@ -749,9 +745,8 @@ class Compactor:
         ), scale)
         total = overhead_tokens + estimate_tokens_of_messages(rendered)
         # Consume-once image trims: a rung like any other, so they wait for
-        # pressure and for a turn boundary. They used to run unconditionally
-        # before the threshold was even computed, which is how a session at
-        # 18% window occupancy paid twelve mid-turn prefix rewrites.
+        # pressure and for a turn boundary rather than rewriting the prefix
+        # mid-turn at low occupancy.
         promotions: list[Promotion] = []
         if turn_boundary and total > self._image_threshold(threshold):
             promotions = self._consume_images(nodes)
@@ -762,8 +757,8 @@ class Compactor:
             return rendered, promotions
         # The rungs below stay available mid-turn on purpose: past the trigger
         # the prompt is genuinely close to the window, and a rewrite that costs
-        # one cache break beats a turn that overflows. Only the image rung —
-        # which used to fire at any occupancy — is held for a turn boundary.
+        # one cache break beats a turn that overflows. Only the image rung is
+        # held for a turn boundary.
         target = int(threshold * self.config.target_ratio)
 
         # Rung 1: batch-trim tool results.
@@ -869,8 +864,8 @@ class Compactor:
         """Persist consume-once image trims and report them as a promotion.
 
         An image dropping out of context is a real loss — HistoryExpand cannot
-        put it back — and it used to happen silently, so neither the transcript
-        nor the user could see it. Reporting it as a tier-1 promotion with its
+        put it back — so it must not happen silently. Reporting it as a tier-1
+        promotion with its
         own reason gives it a ``ContextCompaction`` event, and makes the
         decision replay on resume like every other rung's.
         """
@@ -900,7 +895,7 @@ class Compactor:
 
         Same batch-and-sticky discipline as the full ladder (rare, amortized,
         cache-safe), driven by the tier-1 trigger rather than the ladder's —
-        image consumption included, which this path used to run unguarded.
+        image consumption included.
         """
         rendered = self._render(nodes)
         threshold = _in_estimate_units(self._threshold(
@@ -1138,7 +1133,9 @@ class Compactor:
         if keep and self.config.recall_tools:
             # Protect three completed segments plus the still-open tail.
             for span in spans[-keep:]:
-                old.extend(completed_segments(span)[:-3])
+                old.extend(completed_segments(
+                    span, error_text_cap=self.config.error_text_cap,
+                )[:-3])
         covered: set[str] = set()  # node ids inside existing promotions
         index = {n.node_id: i for i, n in enumerate(nodes)}
         for (start, end), _kind in self._digested.items():

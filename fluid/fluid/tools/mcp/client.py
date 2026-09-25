@@ -11,9 +11,10 @@ task that owns the session for its whole lifetime; callers submit commands over
 an ``asyncio.Queue`` and await a future. This keeps all session traffic
 single-threaded regardless of which task calls ``list_tools``/``call_tool``.
 
-Caching: ``tools/list`` honors the spec's ``ttlMs``/``cacheScope`` freshness
-hints. Within the TTL a repeat ``list_tools`` is served from cache without a
-round-trip; a legacy server that sends no TTL is simply never cached.
+Caching: ``tools/list`` honors the spec's ``ttlMs`` freshness hint (the cache
+is per client, so ``cacheScope`` is not consulted). Within the TTL a repeat
+``list_tools`` is served from cache without a round-trip; a legacy server that
+sends no TTL is simply never cached.
 
 Deadlines: every await on the server is bounded. ``connect_timeout`` covers
 opening the transport plus the handshake, ``call_timeout`` covers one
@@ -36,10 +37,9 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 DEFAULT_CONNECT_TIMEOUT_S = 30.0
-# One tools/call. Round 9: a browser_snapshot that never answered held a
-# turn until the host tore the engine down (no ToolResult, no terminal
-# event, the turn's cost never recorded). 60 s is generous for any tool
-# that is answering at all; a server that needs longer sets call_timeout.
+# One tools/call, so a server that never answers cannot hold the turn open.
+# 60 s is generous for any tool that is answering at all; a server that needs
+# longer sets call_timeout.
 DEFAULT_CALL_TIMEOUT_S = 60.0
 DEFAULT_SHUTDOWN_TIMEOUT_S = 5.0
 
@@ -68,7 +68,6 @@ class ToolDescriptor:
 class _ListCache:
     tools: list[ToolDescriptor]
     expires_at: float | None  # monotonic deadline; None = do not cache
-    scope: str | None = None
 
 
 class McpClient:
@@ -296,12 +295,11 @@ class McpClient:
                 risk=_risk_from_annotations(annotations),
                 annotations=annotations,
             ))
-        # ``ttlMs``/``cacheScope`` are native on the 2.0 SDK; fall back to the
-        # raw dict for older SDKs that don't surface them as attributes.
+        # ``ttlMs`` is native on the 2.0 SDK; fall back to the raw dict for
+        # older SDKs that don't surface it as an attribute.
         ttl_ms = _field(result, "ttl_ms", "ttlMs")
-        scope = _field(result, "cache_scope", "cacheScope")
         expires = now + ttl_ms / 1000.0 if ttl_ms else None
-        self._cache = _ListCache(tools=tools, expires_at=expires, scope=scope)
+        self._cache = _ListCache(tools=tools, expires_at=expires)
         return tools
 
     async def _do_call(
@@ -517,8 +515,8 @@ def _map_call_result(result: Any) -> dict[str, Any]:
         if ctype == "text" and _field(c, "text") is not None:
             text_parts.append(_field(c, "text"))
         elif ctype == "image" and _field(c, "data"):
-            # ImageContent: base64 ``data`` + ``mimeType`` — dropped before this
-            # existed, which silently blanked screenshot-style tool results.
+            # ImageContent: base64 ``data`` + ``mimeType``; screenshot-style
+            # tools answer with nothing else.
             images.append({
                 "media_type": _field(c, "mime_type", "mimeType") or "image/png",
                 "data": _field(c, "data"),
@@ -536,8 +534,8 @@ def _map_call_result(result: Any) -> dict[str, Any]:
     structured = _model_dump(_field(result, "structured_content", "structuredContent"))
     text = "".join(text_parts)
     if not text and structured:
-        # A tool that answers only through structuredContent used to read as
-        # an empty success; the structure is the answer.
+        # A tool that answers only through structuredContent: the structure
+        # is the answer, not an empty success.
         import json
 
         text = json.dumps(structured, ensure_ascii=False, indent=2)

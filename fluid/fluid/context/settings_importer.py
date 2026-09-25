@@ -965,8 +965,8 @@ def _redact_args(server: str, args: list[str], placeholders: list[str]) -> list[
     return clean
 
 
-def _sanitize_server(name: str, raw: Any) -> tuple[dict[str, Any] | None, str | None, list[str]]:
-    """One server entry in fluid's mcp.json shape: ``(entry, note, placeholders)``.
+def _sanitize_server(name: str, raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """One server entry in fluid's mcp.json shape: ``(entry, note)``.
 
     Secret-shaped values in ``env``, ``headers``, query strings and arguments
     are replaced by ``${SERVER_KEY}`` placeholders (never copied, never
@@ -977,26 +977,26 @@ def _sanitize_server(name: str, raw: Any) -> tuple[dict[str, Any] | None, str | 
     placeholder in.
     """
     if not isinstance(name, str) or not name or not isinstance(raw, dict):
-        return None, "server name and definition must be non-empty string/object", []
+        return None, "server name and definition must be non-empty string/object"
     command, url = raw.get("command"), raw.get("url")
     if not isinstance(command, str) and not isinstance(url, str):
-        return None, "server requires a string command or url", []
+        return None, "server requires a string command or url"
     if isinstance(command, str) and isinstance(url, str):
-        return None, "server cannot specify both command and url", []
+        return None, "server cannot specify both command and url"
     args = raw.get("args", [])
     if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
-        return None, "server args must be a list of strings", []
+        return None, "server args must be a list of strings"
     placeholders: list[str] = []
     notes: list[str] = []
     clean: dict[str, Any] = {}
     if isinstance(command, str):
         if _contains_embedded_secret(command):
-            return None, "server command embeds a credential", []
+            return None, "server command embeds a credential"
         clean["command"] = command
     else:
         redacted = _redact_url(name, url, placeholders)
         if redacted is None:
-            return None, "server URL carries a credential outside its query string", []
+            return None, "server URL carries a credential outside its query string"
         clean["url"] = redacted
     if args:
         clean["args"] = _redact_args(name, args, placeholders)
@@ -1025,7 +1025,7 @@ def _sanitize_server(name: str, raw: Any) -> tuple[dict[str, Any] | None, str | 
         notes.append("unsupported field(s) omitted: " + ", ".join(dropped_other))
     if placeholders:
         notes.append("set before use: " + ", ".join(dict.fromkeys(placeholders)))
-    return clean, "; ".join(notes) or None, placeholders
+    return clean, "; ".join(notes) or None
 
 
 def _mcp_items(items: list[SettingsImportItem], inputs: dict[Path | None, list[tuple[Path, dict[str, Any]]]],
@@ -1038,7 +1038,7 @@ def _mcp_items(items: list[SettingsImportItem], inputs: dict[Path | None, list[t
         for path, supplied in groups:
             paths.append(path)
             for name, raw in sorted(supplied.items()):
-                clean, note, _placeholders = _sanitize_server(str(name), raw)
+                clean, note = _sanitize_server(str(name), raw)
                 if clean is None:
                     items.append(_diagnostic("claude" if path.name.endswith("json") else "codex", "mcp_server", path,
                                              f"MCP server {name!r} rejected: {note}"))

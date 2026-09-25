@@ -116,7 +116,7 @@ class AgentMessage(Op):
     wake: bool = True
     # A receiver that is parked on background tasks (a parent waiting for
     # its subagents) queues an ordinary message until its next wake instead
-    # of waking for it, avoiding needless billed turns.
+    # of waking for it, since such a wake costs a model call for nothing.
     # ``urgent`` skips the hold: the receiver wakes, or with wake=False the
     # submit raises so the host can schedule the wake itself.
     urgent: bool = False

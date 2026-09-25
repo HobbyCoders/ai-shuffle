@@ -193,8 +193,12 @@ When a prompt appears it looks like
 | `a`, `always` | Allow this tool for the rest of the session. For `Bash` the allow is scoped to the programs the command runs: answering `a` to `uv run pytest` covers later `uv` commands, not `rm`. A configured `[[permission.rules]]` entry still wins over a session allow. |
 | anything else, or Enter | Deny. The model is told the user denied it at the prompt and should not retry the same action through another tool. |
 
+A prompt nobody answers within 15 minutes is denied, on both engine legs, so a
+turn cannot stay parked on it forever.
+
 Three identical calls in a row force one extra prompt regardless of policy, to
-break retry loops. Denials from a configured rule, from the prompt, and from a
+break retry loops; under `never_ask`, where nobody may be watching, the call is
+denied with an explanation instead. Denials from a configured rule, from the prompt, and from a
 non-interactive run each carry a different message so the model knows whether
 to ask, stop, or suggest a config change.
 

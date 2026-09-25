@@ -527,9 +527,7 @@ class CliHost:
 
         if input.get("mode", "sync") == "background":
             worker.task = asyncio.create_task(
-                self._run_child_detached(
-                    worker, child, worker.worker_session_id, UserTurn(content=prompt),
-                ),
+                self._run_child_detached(worker, child, UserTurn(content=prompt)),
                 name=f"fluid-task-{worker.task_id}",
             )
             return BackgroundTaskReceipt(
@@ -710,7 +708,7 @@ class CliHost:
         resumed.engine = child
         self.workers[resumed.task_id] = resumed
         resumed.task = asyncio.create_task(
-            self._run_child_detached(resumed, child, session_id, message),
+            self._run_child_detached(resumed, child, message),
             name=f"fluid-task-{resumed.task_id}",
         )
         # Register the run with the parent engine the way Task's background
@@ -985,11 +983,10 @@ class CliHost:
             text = f"subagent error: {error}"
         return status, text or "(the subagent returned no text)"
 
-    async def _run_child_detached(
-        self, worker: Worker, child: Any, session_id: str, op: Any
-    ) -> None:
+    async def _run_child_detached(self, worker: Worker, child: Any, op: Any) -> None:
+        # ``_build_child`` bound ``worker.worker_session_id`` to the child's session.
         try:
-            status, text = await self._run_child(child, session_id, op)
+            status, text = await self._run_child(child, worker.worker_session_id, op)
         except asyncio.CancelledError:
             worker.summary = "subagent cancelled"
             raise

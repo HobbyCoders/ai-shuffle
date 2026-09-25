@@ -20,7 +20,7 @@ kernel but ``fluid.codemode.vfs`` on the host).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 DEFAULT_LIMIT = 8192  # bytes; results larger than this ride behind a ResultRef
@@ -47,9 +47,8 @@ class ReadPointer(str):
 
     A repeat read returns guidance ("it is in ``_refs[7]``") rather than the
     bytes. As a plain ``str`` that guidance is indistinguishable from content
-    to code: a transcript shows ``card = Read(...)`` followed by
-    ``card.splitlines()``, which quietly iterated the *notice* and produced a
-    report about nothing.
+    to code: ``card = Read(...)`` followed by ``card.splitlines()`` would
+    quietly iterate the *notice*.
 
     Subclassing ``str`` keeps everything that made the pointer useful —
     ``print(pointer)`` shows the guidance, f-strings and ``==`` behave, and the
@@ -96,9 +95,8 @@ class ReadPointer(str):
 def repeat_read_pointer(key: int, size: int) -> ReadPointer:
     """The result a repeat read of an unchanged file gets instead of the bytes.
 
-    The passive "unchanged since your earlier read" note asked the model to
-    please not re-read; transcripts show it re-reading anyway and paying full
-    price. This removes the choice: the payload is already alive in the kernel
+    A passive "unchanged since your earlier read" note does not stop a
+    re-read. This removes the choice: the payload is already alive in the kernel
     under a registry id, so the second read returns the id and the size and
     nothing else. Slicing ``_refs[key]`` costs no host round-trip at all.
 
@@ -121,10 +119,9 @@ def windowed_read_pointer(
 ) -> ReadPointer:
     """The result a re-read of an unchanged file at a *new* window gets.
 
-    Keying the pointer on the exact ``(path, offset, limit)`` window left the
-    commonest waste in place: transcripts show the same file re-read six to
-    eight times at different offsets, each one a full second payload, when the
-    whole file was sitting in the kernel the entire time. If the ref contains
+    Keying the pointer only on the exact ``(path, offset, limit)`` window would
+    let the same file be re-read at every new offset while the whole file sits
+    in the kernel. If the ref contains
     the window, that window is a slice of it — so the answer is the slicing
     expression, spelled out, rather than the lines.
 
@@ -156,13 +153,10 @@ def windowed_read_pointer(
 DEFAULT_STDOUT_CAP = 16384  # chars of cell stdout that reach the model
 _DROP_MARKER = "…[-{n} chars]"
 _NAMED_DROPS = 2  # how many of the heaviest drops the notice names
-# How many kernel handles the notice names. It used to be 3, which was the
-# second half of a two-part loss: a cell that batched three whole-file Reads had
-# only its largest result behind a ref at all, and the notice then named that
-# one as if it were the cell's whole output. Refs are now created for every
-# result of a truncated cell (see ``SPILL_MIN``), so the list has to be able to
-# name them all; the ceiling only exists so a cell with fifty calls cannot turn
-# the notice into a page.
+# How many kernel handles the notice names. Refs are created for every result
+# of a truncated cell (see ``SPILL_MIN``), so the list has to be able to name
+# them all; the ceiling only exists so a cell with fifty calls cannot turn the
+# notice into a page.
 _NAMED_REFS = 12
 # A result the cell did not print in full is worth a handle only if recovering
 # it saves a round-trip. Below this, re-running the tool is cheaper than
@@ -178,8 +172,8 @@ def _handle_list(refs) -> tuple[str, str]:
     """``(named handles, "and N more" tail)`` for a cell's refs.
 
     Accepts ``(key, size)`` or ``(key, size, tool_name)``; the tool name is
-    included when known, because "this cell's full tool output" was a lie in
-    every cell that made more than one call.
+    included when known, so a cell that made several calls says which result
+    each handle holds.
     """
     seen = list(dict.fromkeys(tuple(entry) for entry in refs))
     named = seen[:_NAMED_REFS]
@@ -192,13 +186,13 @@ def _handle_list(refs) -> tuple[str, str]:
     return ", ".join(parts), (f" (and {rest} more in _refs)" if rest else "")
 
 
-def _recovery_clause(refs: "list[tuple[int, int]] | tuple" ) -> str:
+def _recovery_clause(refs: Sequence[tuple]) -> str:
     """How to get the dropped chars back — a handle, not an instruction to redo.
 
-    Truncated stdout used to end at "heaviest drops", which reads as "that
-    output is gone" and buys a re-run of the tools that produced it. When the
-    payload came from tool calls whose full results are alive in the kernel,
-    the recovery is free and it should be spelled out.
+    A notice that ends at "heaviest drops" reads as "that output is gone" and
+    buys a re-run of the tools that produced it. When the payload came from
+    tool calls whose full results are alive in the kernel, the recovery is
+    free and it should be spelled out.
     """
     handles, more = _handle_list(refs)
     if not handles:
@@ -216,10 +210,9 @@ def _recovery_clause(refs: "list[tuple[int, int]] | tuple" ) -> str:
 def refs_footer(refs) -> str:
     """One line naming the refs a cell's host calls produced, or ``""``.
 
-    Refs used to be announced only when stdout was truncated, so a cell that
-    stayed under the cap left its handles undiscoverable: a transcript shows a
-    44k-token call spent guessing which ``_refs`` slot held a Read. Every cell
-    that created refs now says so, in one line, whether or not anything was cut.
+    Every cell that created refs says so, in one line, whether or not anything
+    was cut, so a cell that stayed under the cap still leaves its handles
+    discoverable.
     """
     handles, more = _handle_list(refs)
     if not handles:
@@ -234,7 +227,7 @@ def fair_share_stdout(
     segments: list[str],
     cap: int = DEFAULT_STDOUT_CAP,
     *,
-    refs: "list[tuple[int, int]] | tuple" = (),
+    refs: Sequence[tuple] = (),
 ) -> str:
     """Fit a cell's prints into ``cap`` chars, fairly, and name the damage.
 
@@ -250,8 +243,8 @@ def fair_share_stdout(
     results are alive in the kernel — the ``_refs`` handles that hold them
     whole, so the recovery is a slice rather than a re-run.
 
-    ``refs`` is this cell's ``(registry id, size)`` pairs, in the order the
-    calls happened.
+    ``refs`` is this cell's ``(registry id, size[, tool name])`` tuples, in the
+    order the calls happened.
 
     Markers are paid for out of their own segment's share, so the returned
     payload never exceeds ``cap`` (the closing notice is metadata on top).

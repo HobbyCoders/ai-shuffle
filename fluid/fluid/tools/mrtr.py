@@ -55,7 +55,6 @@ async def resolve_input_required(
     name: str,
     collect: CollectAnswers,
     redispatch: Redispatch,
-    max_rounds: int = MAX_ROUNDS,
 ) -> ToolOutcome:
     """Drive an ``input_required`` outcome to a real result.
 
@@ -63,7 +62,7 @@ async def resolve_input_required(
     every dispatch through this without branching.
     """
     rounds = 0
-    while outcome.input_required is not None and rounds < max_rounds:
+    while outcome.input_required is not None and rounds < MAX_ROUNDS:
         rounds += 1
         marker = outcome.input_required
         answers = await collect(marker)

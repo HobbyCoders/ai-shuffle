@@ -317,11 +317,8 @@ class OpenAIResponsesClient:
         body = build_request_body(request)
         if self._is_codex_backend():
             # The ChatGPT/Codex backend is not the public Responses API and
-            # the Codex CLI never sends an output ceiling. Session turns leave
-            # max_tokens unset and succeed; every memory-learner request,
-            # which set it, came back HTTP 400 on the desktop worker (273
-            # calls, 2026-09-13..18, and the 2026-09-09/10 ones before the
-            # effort field existed). The model's own maximum applies instead.
+            # answers an output ceiling with HTTP 400 (the Codex CLI never
+            # sends one). The model's own maximum applies instead.
             body.pop("max_output_tokens", None)
         # An uncertain media request can already have generated a billed image.
         # Keep an explicit auth-refresh retry, but never replay a native image

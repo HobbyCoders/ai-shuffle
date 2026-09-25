@@ -253,12 +253,9 @@ def html_to_text(html: str, base_url: str = "") -> tuple[str, str]:
 # ─── navigation-page diagnostic ──────────────────────────────────────────────
 #
 # A doc-site index fetches as a wall of link text with almost no prose, and the
-# model gets no signal that the page it just paid for is a table of contents.
-# Two audited sessions ended there: one fetched a docs index, reported "mainly
-# navigation and internal indexes", and handed the question back to the user
-# without trying a single one of the links it had just been handed; another
-# spent unnecessary calls and money re-deriving a fact the linked page held. The
-# footer below turns that dead end into a next move.
+# model gets no signal that the page it just paid for is a table of contents,
+# so it may stop there instead of following a link. The footer below turns that
+# dead end into a next move.
 
 #: Link text this share (or more) of the extracted text ⇒ a navigation page.
 NAV_LINK_RATIO = 0.55
@@ -559,10 +556,10 @@ def _strip_tags(html: str) -> str:
 
 def _result_url(href: str) -> str:
     # DuckDuckGo wraps result URLs as //duckduckgo.com/l/?uddg=<encoded>.
-    from urllib.parse import parse_qs, unquote, urlparse as _urlparse
+    from urllib.parse import parse_qs, unquote
 
     if "uddg=" in href:
-        query = parse_qs(_urlparse(href).query)
+        query = parse_qs(urlparse(href).query)
         target = query.get("uddg", [""])[0]
         if target:
             return unquote(target)

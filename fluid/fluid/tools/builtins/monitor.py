@@ -61,11 +61,9 @@ from fluid.tools.registry import (
 
 #: The ctx key a host uses to declare the wall-clock budget it enforces on a
 #: monitored command (seconds). The host that stops the process at N seconds is
-#: the only one that knows N, and every piece of Monitor prose that talks about
-#: bounds is wrong without it — the description told models to bound the command
-#: without saying below what, and the spawn warning claimed a command "will
-#: never wake you" while the host's own receipt said it would be woken at the
-#: budget. Absent or non-positive, the prose falls back to the budget-less
+#: the only one that knows N, and Monitor prose that talks about bounds (the
+#: description, the spawn warning) must name it or contradict the host's own
+#: receipt. Absent or non-positive, the prose falls back to the budget-less
 #: wording.
 BUDGET_EXTRA_KEY = "monitor_budget_seconds"
 
@@ -87,9 +85,8 @@ def describe(
     """Monitor's description, specialized to the session's tool surface.
 
     ``budget_seconds`` is the host's enforced wall-clock budget (see
-    :data:`BUDGET_EXTRA_KEY`). Given it, the description names the number: a
-    session that only heard "cap the total wait" wrote a 3600s watcher against
-    a 1200s budget and lost the twenty minutes it ran before the host killed it.
+    :data:`BUDGET_EXTRA_KEY`). Given it, the description names the number, so
+    a watcher is not written to outlive the budget the host kills it at.
     """
     has = (lambda name: tools is None or name in tools)
     budget = budget_seconds_of(budget_seconds)
@@ -248,18 +245,13 @@ SPEC = ToolSpec(
 
 def started_text(task_id: str) -> str:
     """The success receipt. It commands the park rather than merely reporting
-    the spawn: sessions that read a neutral acknowledgement have gone on to
-    sleep-poll the very task they just handed off.
+    the spawn: after a neutral acknowledgement a model may sleep-poll the very
+    task it just handed off.
 
-    Three audited corrections. (1) "End the turn now" was unconditional here
-    while Task's receipt said "unless you have genuinely disjoint work" — a
-    session did the disjoint work, which was right, and violated this receipt
-    to do it. Two receipts for the same doctrine may not disagree. (2) Nothing
-    said to start the OTHER independent jobs first, so three turns went
-    start-park-wake, start-park-wake for two commands that could have shared
-    one park. (3) "Do not check on it yourself" also forbade reading the full
-    buffer after the completion arrived, which is not polling and is often the
-    only way to see the failure.
+    It agrees with Task's receipt ("unless you have genuinely disjoint work"),
+    asks for the OTHER independent jobs to start first so one park covers
+    them, and allows reading the full output once the completion arrives,
+    which is not polling and is often the only way to see the failure.
     """
     return (
         f"Monitoring started (task {task_id}). Start every other independent "
@@ -290,11 +282,10 @@ def serving_text(task_id: str) -> str:
 # ─── Spawn-time lint ─────────────────────────────────────────────────────────
 #
 # The description already forbids an unbounded watch and demands a time budget,
-# and sessions still write them: an audited CI watcher looped on
-# ``case $s in *pending*|*""*)`` — where quote removal turns ``*""*`` into the
-# glob ``**``, matching every string — and held the session parked for 9m37s
-# past a green CI run until a force-reap killed it. Prose in a tool description
-# is read once; a warning stapled to the receipt is read at the moment the
+# and models still write them (for example a CI watcher looping on
+# ``case $s in *pending*|*""*)``, where quote removal turns ``*""*`` into the
+# glob ``**``, matching every string). Prose in a tool description is read
+# once; a warning stapled to the receipt is read at the moment the
 # mistake was made. Warn, never refuse: the model may know something the
 # patterns do not.
 
@@ -330,9 +321,8 @@ _TIME_BOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bin\s+\$\(\s*seq\b"),                # for i in $(seq 1 60)
     re.compile(r"\bfor\s*\(\([^;]*;[^;]*[<>][^;]*;"),  # for ((i=0; i<60; i++))
     # A count-and-continue test (`while [ $i -lt 60 ]`) and its mirror image,
-    # the count-and-BREAK test (`[ $i -ge 60 ] && break`). Only the first half
-    # was recognised, so every capped loop written the second way — the more
-    # common shape inside a `while true` — was reported as unbounded.
+    # the count-and-BREAK test (`[ $i -ge 60 ] && break`), the more common
+    # shape inside a `while true`.
     re.compile(r"-(?:lt|le|ge|gt)\s"),
     # The arithmetic spellings of the same cap: ((i>=60)), (( n < 60 )),
     # ((i++ >= 60)).
@@ -341,7 +331,7 @@ _TIME_BOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 # A loop that ends from inside its own body. Consulted only for loop-shaped
 # reasons, and only when the body can be trusted — a match-all glob makes the
-# arm holding the `break` dead code, which is exactly the audited park.
+# arm holding the `break` dead code.
 _LOOP_EXIT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:^|[\s;&|(])break(?:\s|;|$|\))"),
     re.compile(r"(?:^|[\s;&|(])exit\b"),
@@ -402,11 +392,8 @@ def spawn_warning(
 
     ``budget_seconds`` is the host's enforced wall-clock budget (see
     :data:`BUDGET_EXTRA_KEY`). Hosts that enforce one append their own "you
-    will be woken with a timeout" line to the receipt, and this warning used to
-    contradict it flatly — one receipt promised a wake and the next paragraph
-    said there would never be one. Models believed the alarming half and spent
-    turns stopping and relaunching a task that was working. Given the budget,
-    the warning says what actually happens instead.
+    will be woken with a timeout" line to the receipt; given the budget, the
+    warning says what actually happens instead of contradicting that line.
     """
     budget = budget_seconds_of(budget_seconds)
     parts: list[str] = []

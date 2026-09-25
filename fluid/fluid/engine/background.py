@@ -155,8 +155,8 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         A ``serves`` receipt (a dev server, a tunnel — see
         ``BackgroundTaskReceipt.serves``) is tracked and surfaced like any
         other background task, but it is not work whose result the session
-        wants: its only "completion" is its own death. Counting it parked the
-        session on every turn that had a server running, so it is excluded
+        wants: its only "completion" is its own death. Counting it would park
+        the session on every turn that had a server running, so it is excluded
         here — the one place park accounting is decided. A turn whose only
         live tasks are serving ones therefore parks on nothing and emits no
         ``SessionParked`` at all.
@@ -186,8 +186,6 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     description=receipt.description,
                     worker_session_id=receipt.worker_session_id,
                     # A task that has only just started owes nobody a wake yet.
-                    # The default wake=True here was the dataclass default, not
-                    # a claim about anything.
                     wake_disposition=WAKE_NOT_APPLICABLE,
                     serves=receipt.serves,
                 ))

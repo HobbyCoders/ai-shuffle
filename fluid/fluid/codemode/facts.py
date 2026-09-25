@@ -189,10 +189,7 @@ class FactStore:
             return self._prepare()
 
     def entries(self, archived=False):
-        from fluid.codemode.skills import MemoryEntry
-        allowed = {f.name for f in fields(MemoryEntry)}
-        return [MemoryEntry(**{k: v for k, v in e.items() if k in allowed})
-                for e in self.snapshot()["archived" if archived else "entries"]]
+        return [self._entry(e) for e in self.snapshot()["archived" if archived else "entries"]]
 
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
              key=None, expected_revision=None, source_session=None, restore=False):

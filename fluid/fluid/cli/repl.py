@@ -85,9 +85,9 @@ SIGINT_EXIT_CODE = 130
 class LineReader:
     """Blocking ``input_fn`` calls on one daemon thread, handed back as futures.
 
-    ``asyncio.to_thread`` ran the read on the default executor, whose threads
-    are joined at shutdown, so a Ctrl-C at the prompt hung the process until
-    stdin produced a line. This thread is a daemon: exit never waits for it. A
+    Not ``asyncio.to_thread``: the default executor's threads are joined at
+    shutdown, so a Ctrl-C at the prompt would hang the process until stdin
+    produced a line. This thread is a daemon: exit never waits for it. A
     read the signal handler abandons keeps blocking here; the line it finally
     gets is kept and answers the next request, so nothing typed after an
     interrupt is lost.

@@ -1,4 +1,4 @@
-"""CLI surfaces for anchors and guarded evolution (Phase 2.1/2.2).
+"""CLI surfaces for anchors and guarded evolution.
 
 ``fluid anchors``  — manage the anchor set: list, add, rm, run (replay and
 record baselines), harvest (draft candidates from recent project sessions,

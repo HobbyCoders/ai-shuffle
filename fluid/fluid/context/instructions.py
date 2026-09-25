@@ -669,7 +669,7 @@ def discover_commands(
 
     Same one-per-name precedence as :func:`discover_skills`: project over
     global, nearest directory over outer, ``.fluid`` over ``.agents``; sorted
-    by name. The REPL executes these via :func:`render_command`.
+    by name. The REPL executes these via :func:`render_command_blocks`.
     ``include_plugins`` appends enabled plugins' commands, namespaced
     ``<plugin>:<name>``.
     """
