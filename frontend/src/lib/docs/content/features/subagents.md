@@ -16,6 +16,7 @@ Subagents are no longer a separate concept. There is no more standalone `/api/v1
 - A former subagent's `memory` is now `config.memory`.
 - Delegation from one agent to a specialist during a session still works the same way, but the specialist is now managed through the owning agent's nested-agent endpoints (`/api/v1/agents/{agent_id}/agents`) rather than a standalone router.
 - Orchestration and multi-step delegation during a session go through the app's Task tooling, not a separate subagent-dispatch mechanism.
+- A Task worker started from an API key's session runs as that key (its agents, tools and credentials) and cannot use an agent outside the key's assigned agents. See [API Users](/docs/api-reference/api-users#own-sessions).
 
 ## Where to look now
 

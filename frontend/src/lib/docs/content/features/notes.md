@@ -8,6 +8,8 @@ order: 8
 
 Notes provide a simple, global space for capturing ideas, tracking bugs, and planning work. They support markdown formatting, tags, and search.
 
+Notes are not tied to a project or session. Each [API key](/docs/api-reference/api-users) has its own notes and sees only those; as the owner you see every note, including the ones API keys wrote.
+
 ## Features
 
 - **Markdown** — Write notes in markdown with live preview

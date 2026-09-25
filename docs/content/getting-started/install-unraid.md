@@ -85,7 +85,8 @@ docker exec -it -u appuser AI-Shuffle claude auth login
 A few settings have no field in the template. To set one, edit the container, choose **Add another Path, Port, Variable, Label or Device**, pick **Variable**, enter the name as the **Key** and the value, then **Apply**:
 
 - `BROWSER_SSRF_ALLOW`, `BROWSER_SSRF_ALLOW_LOOPBACK`, `BROWSER_SSRF_BLOCK`: which private addresses the built-in browser may open. By default it can reach `localhost` inside the container but not your LAN or Tailscale addresses. See [the built-in browser's network access](/docs/getting-started/install-docker-compose#the-built-in-browsers-network-access-optional).
-- `TRUSTED_PROXIES`: the address of a reverse proxy in another container or on the server itself (comma-separated IPs or ranges). Without it, rate limits and the audit log see every visitor as the proxy. See [Behind a reverse proxy](/docs/getting-started/install-docker-compose#behind-a-reverse-proxy-optional).
+- `TRUSTED_PROXIES`: the address of a reverse proxy in another container or on the server itself (comma-separated IPs or ranges). Without it, the audit log and the pairing and network-join attempt limits see every visitor as the proxy (the owner sign-in limit always counts by the direct connection). See [Behind a reverse proxy](/docs/getting-started/install-docker-compose#behind-a-reverse-proxy-optional).
+- `CODE_MODE_OS_SANDBOX`: `auto` (the default), `required` or `off`. Whether agents' Python code runs inside a bubblewrap sandbox with no network and none of the server's files. `auto` falls back to running without it, with one log line, when Docker does not let the container create user namespaces; to allow that, switch the edit page to **Advanced View** and add `--security-opt seccomp=unconfined` to **Extra Parameters**. See [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox-optional).
 
 ## Back up
 

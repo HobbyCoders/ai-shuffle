@@ -241,11 +241,39 @@ To change this, add a line under `environment:` in `compose.yaml` (a line in `.e
 - `BROWSER_SSRF_ALLOW_LOOPBACK: "false"`: refuse `localhost` as well. Use it when people you do not trust can prompt agents on this install. It has no effect when `BROWSER_SSRF_ALLOW` is set.
 - `BROWSER_SSRF_BLOCK`: ranges to refuse even if `BROWSER_SSRF_ALLOW` lists them.
 
+## The code-mode sandbox (optional)
+
+Agents on the Fluid harness (every model except the Claude Code CLI, outside chat sessions) run their work as Python code in a separate process, the code-mode kernel. The tools that code calls still run in AI Shuffle with their usual permissions; the sandbox limits the Python code itself.
+
+On Linux, AI Shuffle can run that process inside bubblewrap: no network, none of the host's files except the Python runtime, a private `/tmp` and its own process list. The image includes bubblewrap, but Docker's default security profile does not let the container create the user namespaces it needs. The kernel then runs without the sandbox, and the log says why once: `code-mode OS sandbox unavailable, kernel child runs without it`.
+
+To use the sandbox, allow the container to create user namespaces, then run `docker compose up -d`:
+
+```yaml
+services:
+  ai-shuffle:
+    # (keep the lines already there)
+    security_opt:
+      - seccomp=unconfined
+      # Only on hosts that use AppArmor, such as Ubuntu and Debian:
+      - apparmor=unconfined
+```
+
+These lines turn off Docker's default seccomp and AppArmor filters for the whole container, so weigh that against what the sandbox adds. A custom seccomp profile that allows `unshare`, `clone` with namespace flags and `mount` works as well. The host must also allow unprivileged user namespaces; Ubuntu 24.04 and later restrict them through AppArmor.
+
+`CODE_MODE_OS_SANDBOX` chooses how the sandbox is used. Set it under `environment:` in `compose.yaml` (a line in `.env` alone does not reach the container):
+
+- `auto` (the default): use the sandbox when its self-test at startup passes, otherwise run without it after the one log line above.
+- `required`: never run code without the sandbox. When it is unavailable, every Python cell fails with the reason.
+- `off`: never use it.
+
+The kernel's own checks inside the process stay on in every mode, as a second layer; the sandbox is the boundary that holds.
+
 ## Behind a reverse proxy (optional)
 
-AI Shuffle takes a visitor's address from the `X-Forwarded-For` or `X-Real-IP` header only when the connection comes from loopback or from an address listed in `TRUSTED_PROXIES`. Rate limits and the security audit log use that address.
+AI Shuffle takes a visitor's address from the `X-Forwarded-For` or `X-Real-IP` header only when the connection comes from loopback or from an address listed in `TRUSTED_PROXIES`. The security audit log records that address, and the attempt limits for pairing a device and for joining a worker network count by it. The owner sign-in limit always counts by the direct connection, so this setting does not change it.
 
-A reverse proxy in another container, or one on the host (Tailscale Serve included) that reaches AI Shuffle through the published port, connects from a Docker network address instead of loopback. Without `TRUSTED_PROXIES`, every visitor then counts as the proxy: one visitor's failed sign-ins can rate-limit everyone, and the audit log shows only the proxy's address. Add the proxy's address as the container sees it under `environment:` in `compose.yaml`, then run `docker compose up -d`:
+A reverse proxy in another container, or one on the host (Tailscale Serve included) that reaches AI Shuffle through the published port, connects from a Docker network address instead of loopback. Without `TRUSTED_PROXIES`, every visitor then counts as the proxy: the audit log shows only the proxy's address, and one visitor's failed pairing or network-join attempts can block everyone's. Add the proxy's address as the container sees it under `environment:` in `compose.yaml`, then run `docker compose up -d`:
 
 ```yaml
     environment:
@@ -254,7 +282,7 @@ A reverse proxy in another container, or one on the host (Tailscale Serve includ
       TRUSTED_PROXIES: "172.18.0.1"
 ```
 
-It takes IP addresses or ranges (`172.18.0.0/16`), separated by commas. For a proxy on the host, use the gateway of the `ai-shuffle_default` network (`docker network inspect ai-shuffle_default` shows it). Never list your whole LAN: any host in a trusted range can choose the address AI Shuffle records for it.
+It takes IP addresses or ranges (`172.18.0.0/16`), separated by commas. For a proxy on the host, use the gateway of the `ai-shuffle_default` network (`docker network inspect ai-shuffle_default` shows it). Never list your whole LAN: any host in a trusted range can choose the address AI Shuffle records for it. On Docker Desktop and rootless Docker, every connection to the published port arrives from that gateway address, so when `BIND_HOST` is not `127.0.0.1`, trusting the gateway lets any LAN device choose its own address again.
 
 ## Back up
 

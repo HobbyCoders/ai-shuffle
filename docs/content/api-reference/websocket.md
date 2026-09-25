@@ -203,7 +203,7 @@ Authentication is performed via:
 - Session cookie (for the owner's web UI)
 - API key or owner token in the query string: `?token=aih_your_key`
 
-A disabled API key fails authentication (`4001`). On `/ws/chat` the key is checked again before every frame is acted on, so a key that is disabled, deleted or rotated while its socket is open closes that socket with `4001` at its next frame (at the latest with the next keepalive `pong`, about 30 seconds).
+A disabled API key fails authentication (`4001`). On `/ws/chat` the key is checked again before every frame is acted on and every 30 seconds whether or not the client sends anything, so a key that is disabled, deleted or rotated while its socket is open closes that socket with `4001`: at once when the change is made through the API users routes, otherwise within about 30 seconds.
 
 ## Error Handling
 

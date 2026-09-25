@@ -143,7 +143,7 @@ curl -X POST http://localhost:8000/api/v1/api-users/3f9a1c2e/rotate-key \
 ### Project Restriction
 
 When `project_id` is set, the API user can only:
-- Create sessions in that project
+- Create sessions in that project (a session started without a project, over REST or the chat WebSocket, is filed under it)
 - Access files in that project
 - Query using that project's context
 
@@ -168,7 +168,18 @@ Every API key acts only on the sessions it started. It cannot read, continue, st
 - `/ws/sessions/{session_id}` closes with `4003` (`4004` for an unknown id).
 - Voice call routes return `403` (see [Voice](/docs/api-reference/voice#call-control)).
 
-Worker sessions an agent starts belong to whoever owns the session that started them. A permission answer from an API key never creates an agent-wide rule; `remember: "profile"` is kept to that session.
+Worker sessions an agent starts (Task workers and the workers a voice call hands work to) belong to whoever owns the session that started them, and run as that caller. A worker started from a key's session runs with the key's tools and credentials, like a session the key started itself, and a worker on an agent outside the key's assigned agents is refused. A permission answer from an API key never creates an agent-wide rule; `remember: "profile"` is kept to that session.
+
+### Other data a key cannot reach
+
+Some data belongs to the owner's account, to the whole install or to another key. A key's requests and the agents in its sessions are held to their own part of it:
+
+- **Agent tools.** In a key's session, `GetAppLogs`, `GetAppErrors`, `CronList`, `CronCreate` and `RemoteTrigger` refuse to run, and `GetUsage` returns no readings with the reason. `SessionSearch`, `SessionView` and the list of recent sessions the agent is given cover only the key's own sessions; another session reads as unknown.
+- **Usage.** `GET /api/v1/usage/limits` returns an empty reading (`"available": false`, `"providers": []`) and never starts a provider refresh. Usage is the owner's subscription and provider billing (see [Usage Limits](/docs/api-reference/miscellaneous#usage-limits)).
+- **Notes.** Each key has its own notes and sees only those, including through `@Notes/...` references in a prompt. The owner sees every note (see [Notes](/docs/api-reference/notes)).
+- **MCP server settings.** The server lists show environment and header values, URL credentials and secret-looking arguments as `********` (see [MCP Servers](/docs/api-reference/mcp#get-apiv1mcpservers)).
+- **Session import.** An imported session stays inside the key's agents and project (see [Import](/docs/api-reference/sessions#post-apiv1sessionsimport)).
+- **Agent teams.** The `/api/v1/teams` routes, which list and stop an agent's teammates, are owner-only.
 
 ## Using API Keys
 

@@ -19,6 +19,7 @@ Key concepts:
 - **Built-in servers:** AI Shuffle ships managed integrations (e.g. `browser`) that appear alongside configured servers
 - **Tool discovery:** MCP tools are automatically discovered and namespaced
 - **Owner-only management:** Creating, updating, deleting, and toggling servers requires the owner
+- **Secrets stay with the owner:** API keys and paired devices that are not the owner's can list servers, but environment and header values, URL credentials and secret-looking arguments read `********` (see [the API reference](/docs/api-reference/mcp#get-apiv1mcpservers))
 
 ## Server Types
 

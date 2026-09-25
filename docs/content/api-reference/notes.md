@@ -8,7 +8,7 @@ order: 16
 
 Endpoints for notes: free-form markdown notes for ideas, bugs and planning, with tags, pinning and file attachments. Notes are global, not tied to a project or session.
 
-Every endpoint on this page needs authentication. Notes are shared: the owner and every API key see, edit and delete the same set of notes, and there is no per-key scoping.
+Every endpoint on this page needs authentication. A note belongs to whoever wrote it. An API key sees, edits and deletes only its own notes; any other note, with its attachments, returns `404` as if it did not exist, and the list, tags and autocomplete leave it out. The owner sees every note, including those API keys wrote. A note reference in a prompt (`@Notes/note-<id>`) is expanded the same way: from an API key's session only the key's own notes are filled in, and other references stay as typed. Workers in a [network](/docs/features/worker-network) keep the same owner on every device.
 
 Each note is also saved on the server as a markdown file. If that file is edited directly on disk, the change is picked up the next time the note is read with `GET /api/v1/notes/{note_id}`.
 

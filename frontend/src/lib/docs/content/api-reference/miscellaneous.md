@@ -108,7 +108,7 @@ Which providers get a row:
 
 xAI API keys, other OpenAI-compatible hosts and the Anthropic API key get no row: they report only per-minute rate limits. Rows of a deleted provider are dropped.
 
-**Auth:** Required.
+**Auth:** Required. Every reading is the owner's subscription and provider billing, so an API key gets an empty reading (`"available": false`, no `windows`, `"providers": []`) and its request never starts a refresh. The agent tool `GetUsage` likewise returns nothing in an API key's session.
 
 **Query parameters:**
 
@@ -132,7 +132,7 @@ curl "http://localhost:8000/api/v1/usage/limits?refresh=true" \
 
 | Field | Description |
 |-------|-------------|
-| `windows[].observed_at` | Epoch ms when the Claude CLI last reported this window. Each window has its own, so an old window still shows its age after a newer event updates another one. The same field appears in `snapshots[].windows[]` |
+| `windows[].observed_at` | Epoch ms when the Claude CLI last reported this window. Each window has its own, so an old window still shows its age after a newer event updates another one. A repeated identical reading moves it too; the shared copy other devices read is updated at most once a minute per window. A window the CLI reports as rejected counts as fully used even when the report has no utilization. The same field appears in `snapshots[].windows[]` |
 | `providers` | The provider rows described above. `null` when the cached rows could not be read; keep the rows you already show instead of clearing them |
 | `providers[].status` | `fresh` (read within the provider's interval), `stale` (older, or the last attempt failed), `unavailable` (failed with no reading yet) or `never_fetched` |
 | `providers[].last_error_kind` | Why the last attempt failed: `billing_access_denied`, `missing_credentials`, `timeout`, `unavailable` or `unsupported`; `null` after a success. After `billing_access_denied` or `unsupported` the provider is not asked again until its key changes |
@@ -1017,6 +1017,8 @@ Renew the lease with the license server now. No body. Returns the status fields.
 The notification history behind the bell. Each caller (the owner, or each API key) has its own.
 
 **Auth:** Required
+
+The bell is the channel that reaches you: notifications arrive live in the open web, desktop and mobile app. Phone push notifications are not delivered; no current app version receives them. An agent's `NotifyDevices` tool sends push only to devices whose app declared it can receive push, so it normally reports `"delivered": false` with a `reason` (`no device can receive push notifications`, push in mock mode without Firebase credentials, or every device rejecting the message) and a note to tell you in chat instead. `delivered` is `true` only when such a device acknowledged the message.
 
 ### GET /api/v1/notifications
 

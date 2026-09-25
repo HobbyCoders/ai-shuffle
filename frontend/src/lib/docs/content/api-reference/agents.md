@@ -152,6 +152,8 @@ The tool names that may appear in `allowed_tools` / `disallowed_tools` are not a
 
 Each agent can delegate to its own nested agents during a session — specialists with their own prompt, tool restrictions, and model. These are a distinct, flatter object shape (not a `config` sub-object); the fields below are exactly what the API returns and accepts today.
 
+A worker session that a session started with an API key hands work to (with the Task tool, or from a voice call) runs as that key: with the key's tools and credentials, never the owner's. A worker on an agent outside the key's assigned agents is refused with an error the calling agent sees. See [API Users](/docs/api-reference/api-users#own-sessions).
+
 ### GET /api/v1/agents/{agent_id}/agents
 
 Get the full nested-agent objects enabled for this agent.

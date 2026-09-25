@@ -38,6 +38,8 @@ curl http://localhost:8000/api/v1/mcp/servers \
 ]
 ```
 
+Secret values are shown only to the owner. For an API key or a paired device that is not the owner's, every `env` and `headers` value reads `********` (the names stay, so you can see what a server needs), credentials in `url` are removed, and `args` that look secret are masked the same way: the value of a flag, `NAME=value` pair or `Header: value` whose name looks secret (such as `--token`, `API_KEY=` or `Authorization:`), bearer tokens, credentials and secret query parameters in URLs, and values that look like a key or token. The same applies to the project list below.
+
 ### POST /api/v1/mcp/servers
 
 Add a global MCP server.
@@ -123,6 +125,8 @@ List all MCP servers available to a project, grouped by scope.
   "total_count": 0
 }
 ```
+
+Secret values are masked for API keys and non-owner devices, as for [the global list](#get-apiv1mcpservers).
 
 ### POST /api/v1/projects/{project_id}/mcp/servers
 

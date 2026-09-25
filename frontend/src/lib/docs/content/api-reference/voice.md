@@ -113,7 +113,7 @@ JSON body. Every field is optional, but `model` is needed for GPT Live calls (`4
 | `worktree_branch`, `base_branch` | With `worktree` mode, the branch to use; without `worktree_branch` a new `voice/...` branch is created from `base_branch` (default `main`). A project is required |
 | `worktree_id` | An existing worktree of the project (needs `project_id`) |
 | `target_instance_id` | Run on another connected device |
-| `session_mode` | `command` or `chat`. `command` hides the session from session lists |
+| `session_mode` | Only `chat` is accepted (sent by the native apps). Any other value returns `400` |
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/voice/sessions \
@@ -169,7 +169,7 @@ JSON body:
 | `call_id` | Yes | The OpenAI call id |
 | `client_tools` | No | Up to 32 extra function tools the client handles itself. Each needs a unique `name` (up to 64 letters, digits, `_` or `-`) and may have `description` and `parameters` |
 | `client_instructions` | No | Extra instructions for those tools, up to 6000 characters |
-| `session_mode` | No | `command` or `chat`. `command` also hides the session |
+| `session_mode` | No | Only `chat` is accepted. It adds the native app's instructions to the call; browser calls leave it out |
 
 Returns `400` for a GPT Live session or an invalid body, `403` when voice mode is disabled, `409` once the call has reached its length limit, and `502` when the server cannot join the call.
 

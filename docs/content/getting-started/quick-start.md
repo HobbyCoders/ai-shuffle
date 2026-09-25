@@ -59,6 +59,8 @@ For programmatic access:
 4. Copy the generated API key (shown only once)
 5. Use it in the `Authorization: Bearer aih_...` header
 
+A key works only with its own sessions and notes. Agents in its sessions, and the workers they start, run with the key's agents, tools and credentials, and cannot read your usage, the app's logs or your scheduled jobs. See [API Users](/docs/api-reference/api-users#other-data-a-key-cannot-reach).
+
 ## Example API Call
 
 Use the id of one of your agents. API fields still say `profile`.

@@ -83,4 +83,4 @@ The Realtime cost display is an **estimate based on reported token usage**, incl
 - `POST /api/v1/voice/sessions/{id}/secret`, `/call`, `/hangup`, `GET .../state` — the call lifecycle. Only Realtime needs a short-lived provider credential for the browser.
 - `WS /api/v1/voice/sessions/{id}/audio` — server-owned GPT Live and PersonaPlex audio transport.
 
-The session routes above and the audio socket apply the same access check as other session requests: an API key can use only the voice sessions it started (and only within its project and agents), while the owner can use any.
+The session routes above and the audio socket apply the same access check as other session requests: an API key can use only the voice sessions it started (and only within its project and agents), while the owner can use any. Workers the call hands work to run as the same key, on the key's agents only.

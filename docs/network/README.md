@@ -18,8 +18,8 @@ original plan.
   digest, so it is self-certifying. Its fingerprint (8 groups of 4 hex) travels
   in invite links so the joiner can check it is talking to the intended inviter.
 - Workers connected into one **network** converge on the same settings, keys,
-  profiles, preferences, UI state, notes, plugins, memory facts, skills and
-  session catalog. Each session executes on exactly one **owner device**;
+  profiles, preferences, UI state, notes (each keeping the API key that owns
+  it, `notes.api_user_id`), plugins, memory facts, skills and session catalog. Each session executes on exactly one **owner device**;
   every worker can see it and drive it.
 
 ## Code map

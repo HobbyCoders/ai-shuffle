@@ -590,6 +590,8 @@ Import a session from JSON file.
 
 **Auth:** Required
 
+The imported session belongs to the caller. For an API key, an export that names an agent outside the key's assigned agents returns `403`, and a key limited to one project files the session under that project (an export naming another project returns `403`).
+
 ### POST /api/v1/sessions/import-jsonl
 
 Import a Claude Code CLI JSONL session.
