@@ -30,7 +30,7 @@ from fluid.events import (
     Usage,
     UserTurn,
 )
-from fluid.events.model import Interrupted
+from fluid.events.model import Interrupted, RateLimit
 from fluid.events.ops import Interrupt, SetPermissionMode
 from fluid.store.base import MemoryStore
 
@@ -599,5 +599,27 @@ async def test_the_cli_child_gets_a_scrubbed_environment(tmp_path, monkeypatch) 
         assert env["HARMLESS_SETTING"] == "kept"
         assert env["FAL_KEY"] == "fal-on-purpose"
         assert env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+    finally:
+        await run.aclose()
+
+
+async def test_rejected_rate_limit_without_utilization_reaches_the_bus(tmp_path) -> None:
+    """The 2.1.x CLI can report a window ``rejected`` with no utilization; the
+    verdict is the only sign the window is exhausted, so it must not be lost."""
+    turn = [
+        {"op": "frame", "frame": {"type": "rate_limit_event", "rate_limit_info": {
+            "status": "rejected", "rateLimitType": "five_hour", "resetsAt": 1900000000,
+        }}},
+        {"op": "text", "text": "limited"},
+        {"op": "result"},
+    ]
+    run = Scripted(tmp_path, {"turns": [turn]})
+    try:
+        events = await run.turn("hi")
+        assert isinstance(events[-1], TurnComplete)
+        (limit,) = _of(events, RateLimit)
+        assert (limit.kind, limit.status, limit.utilization, limit.resets_at) == (
+            "five_hour", "rejected", None, 1900000000,
+        )
     finally:
         await run.aclose()

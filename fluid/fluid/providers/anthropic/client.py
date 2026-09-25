@@ -9,8 +9,10 @@ subprocess), not this client.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -20,12 +22,15 @@ from fluid.providers._trace import trace_request
 from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
 from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
+    DEFAULT_FIRST_BYTE_TIMEOUT_S,
     DEFAULT_STREAM_DEADLINE_S,
     StreamDiagnostics,
     StreamDeadlineExceeded,
     deadline_error_payload,
     is_closed_client_error,
     is_usable_client,
+    open_stream,
+    provider_error_summary,
     truncated_stream_payload,
     with_deadline,
 )
@@ -55,6 +60,7 @@ class AnthropicClient:
         base_url: str = API_URL,
         timeout: float = 600.0,
         stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
+        first_byte_timeout: float | None = DEFAULT_FIRST_BYTE_TIMEOUT_S,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
     ) -> None:
@@ -64,6 +70,12 @@ class AnthropicClient:
         # Wall clock for one whole model call, above the per-read ``timeout``.
         # None disables it. See fluid.providers._transport.
         self._stream_deadline = stream_deadline
+        # Wall clock from sending the request to its first SSE event (headers
+        # included). The API sends message_start as soon as it accepts a
+        # call, so a stream silent this long is dead: it is abandoned and
+        # retried like a read timeout before content, instead of holding the
+        # turn for the whole per-read ``timeout``. None or 0 disables it.
+        self._first_byte_timeout = first_byte_timeout
         self._http = http_client
         self._retry = retry or RetryPolicy()
 
@@ -113,9 +125,13 @@ class AnthropicClient:
                 )
                 try:
                     trace_request("anthropic", body)
-                    async with client.stream(
-                        "POST", self._base_url, json=body, headers=headers
-                    ) as resp:
+                    first_byte = self._first_byte_timeout
+                    sent_at = time.monotonic()
+                    async with contextlib.AsyncExitStack() as scope:
+                        resp = await open_stream(
+                            scope, client, "POST", self._base_url,
+                            first_byte_timeout=first_byte, json=body, headers=headers,
+                        )
                         diagnostics.received_headers(resp)
                         if resp.status_code != 200:
                             text = (await resp.aread()).decode(errors="replace")
@@ -128,6 +144,7 @@ class AnthropicClient:
                             yield StreamChunk(
                                 "error",
                                 {"status": resp.status_code, "message": text[:2000],
+                                 "provider_message": provider_error_summary(text),
                                  "retriable": retriable},
                             )
                             return
@@ -140,8 +157,17 @@ class AnthropicClient:
                         # Set once message_stop or an error reached the
                         # engine; a body that ends before either was cut off.
                         terminal = False
+                        # The headers took part of the first-byte budget; the
+                        # first SSE event gets the rest (never less than a
+                        # sliver, so a slow header does not fail the read).
+                        first_event_wait = (
+                            max(first_byte - (time.monotonic() - sent_at), 0.05)
+                            if first_byte and first_byte > 0 else None
+                        )
                         events = with_deadline(
-                            sse_events(diagnostics.lines()), self._stream_deadline
+                            sse_events(diagnostics.lines()), self._stream_deadline,
+                            first_item_timeout=first_event_wait,
+                            first_byte_budget=first_byte,
                         )
                         async for event_name, data in events:
                             chunk = sse_to_chunk(event_name, data)

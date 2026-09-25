@@ -16,6 +16,8 @@ Two failures the per-operation httpx timeout cannot see:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import html
 import json
 import logging
 import re
@@ -30,6 +32,16 @@ import httpx
 # reasoning call on a slow provider must never trip it, so it sits far above
 # any plausible honest call.
 DEFAULT_STREAM_DEADLINE_S = 900.0
+
+# How long a call may go without its first byte (response headers, then the
+# first SSE event) before it is abandoned and retried like a read timeout.
+# The per-read ``timeout`` is sized for gaps inside a long generation, so a
+# provider that accepts the connection and then says nothing would otherwise
+# hold the turn for the full read timeout (600 s) before anything happened.
+DEFAULT_FIRST_BYTE_TIMEOUT_S = 60.0
+
+# Longest provider explanation carried on an error (see provider_error_summary).
+PROVIDER_MESSAGE_LIMIT = 300
 
 T = TypeVar("T")
 log = logging.getLogger(__name__)
@@ -107,6 +119,101 @@ class StreamDiagnostics:
         return evidence
 
 
+class FirstByteTimeout(httpx.ReadTimeout):
+    """No byte of the response arrived within the first-byte budget.
+
+    A ``ReadTimeout`` so every client's transport handler treats it as one: a
+    failure before any content, retried on the transport budget.
+    """
+
+    def __init__(self, budget: float) -> None:
+        super().__init__(
+            f"provider sent no response within {budget:g}s (first-byte timeout)"
+        )
+        self.budget = budget
+
+
+async def open_stream(
+    scope: contextlib.AsyncExitStack,
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    first_byte_timeout: float | None,
+    **kwargs: Any,
+) -> httpx.Response:
+    """``client.stream(...)`` entered on ``scope``, with the header wait bounded.
+
+    Raises :class:`FirstByteTimeout` when the response headers do not arrive
+    within ``first_byte_timeout`` seconds (``None`` or 0 disables the bound).
+    The body is read by the caller under ``scope``.
+    """
+    manager = client.stream(method, url, **kwargs)
+    if not first_byte_timeout or first_byte_timeout <= 0:
+        return await scope.enter_async_context(manager)
+    try:
+        async with asyncio.timeout(first_byte_timeout):
+            return await scope.enter_async_context(manager)
+    except TimeoutError as exc:
+        raise FirstByteTimeout(first_byte_timeout) from exc
+
+
+_HTML_DROP = re.compile(r"(?is)<(script|style)\b.*?</\1\s*>")
+_HTML_TAG = re.compile(r"(?s)<[^>]*>")
+
+
+def _error_text(value: Any) -> str | None:
+    """The human-readable message inside a provider's JSON error body."""
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, list) and value:
+        return _error_text(value[0])
+    if not isinstance(value, dict):
+        return None
+    for key in ("message", "error_description", "detail", "error", "msg"):
+        found = _error_text(value.get(key))
+        if found:
+            return found
+    return None
+
+
+def provider_error_summary(body: Any, limit: int = PROVIDER_MESSAGE_LIMIT) -> str | None:
+    """A short, readable account of a provider error, or None when empty.
+
+    ``body`` is a response body (text or parsed JSON) or an error object. A
+    JSON body yields its ``error.message`` (or the nearest equivalent); an
+    HTML page (a gateway's 502, a Cloudflare challenge) is reduced to its
+    text; anything else is whitespace-collapsed. Capped at ``limit`` chars.
+    """
+    if body is None:
+        return None
+    text: str | None
+    if isinstance(body, (dict, list)):
+        text = _error_text(body)
+    else:
+        raw = str(body)
+        text = None
+        stripped = raw.strip()
+        if stripped[:1] in ("{", "["):
+            try:
+                text = _error_text(json.loads(stripped))
+            except ValueError:
+                text = None
+        if text is None:
+            text = raw
+    if not text:
+        return None
+    if "<" in text and ">" in text:
+        text = _HTML_TAG.sub(" ", _HTML_DROP.sub(" ", text))
+        text = html.unescape(text)
+    text = " ".join(text.split())
+    if not text:
+        return None
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "\u2026"
+    return text
+
+
 class StreamDeadlineExceeded(Exception):
     """The whole-stream wall-clock budget for one model call ran out."""
 
@@ -137,30 +244,54 @@ def is_usable_client(client: Any) -> bool:
 
 
 async def with_deadline(
-    source: AsyncIterator[T], budget: float | None
+    source: AsyncIterator[T],
+    budget: float | None,
+    *,
+    first_item_timeout: float | None = None,
+    first_byte_budget: float | None = None,
 ) -> AsyncIterator[T]:
     """Yield from ``source`` until ``budget`` seconds have elapsed in total.
 
     Raises :class:`StreamDeadlineExceeded` when the budget runs out, whether
     the stream was mid-read or between reads. ``None`` disables the guard.
+
+    ``first_item_timeout`` bounds the wait for the FIRST item only and raises
+    :class:`FirstByteTimeout` (naming ``first_byte_budget``, the caller's whole
+    first-byte allowance, when given) — the tail of a first-byte budget whose
+    head was spent waiting for the response headers.
     """
-    if budget is None or budget <= 0:
+    has_budget = budget is not None and budget > 0
+    first_wait = first_item_timeout if first_item_timeout and first_item_timeout > 0 else None
+    if not has_budget and first_wait is None:
         async for item in source:
             yield item
         return
-    deadline = time.monotonic() + budget
+    deadline = time.monotonic() + budget if has_budget else None
     iterator = source.__aiter__()
     try:
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise StreamDeadlineExceeded(budget)
+            wait: float | None = None
+            deadline_bound = False
+            if deadline is not None:
+                wait = deadline - time.monotonic()
+                if wait <= 0:
+                    raise StreamDeadlineExceeded(budget)  # type: ignore[arg-type]
+                deadline_bound = True
+            if first_wait is not None and (wait is None or first_wait < wait):
+                wait = first_wait
+                deadline_bound = False
             try:
-                item = await asyncio.wait_for(iterator.__anext__(), remaining)
+                if wait is None:
+                    item = await iterator.__anext__()
+                else:
+                    item = await asyncio.wait_for(iterator.__anext__(), wait)
             except StopAsyncIteration:
                 return
             except (asyncio.TimeoutError, TimeoutError):
-                raise StreamDeadlineExceeded(budget) from None
+                if deadline_bound:
+                    raise StreamDeadlineExceeded(budget) from None  # type: ignore[arg-type]
+                raise FirstByteTimeout(first_byte_budget or first_wait) from None  # type: ignore[arg-type]
+            first_wait = None
             yield item
     finally:
         close = getattr(iterator, "aclose", None)

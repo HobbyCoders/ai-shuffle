@@ -23,6 +23,15 @@ from fluid.providers.openrouter.serialize import build_request_body
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
+def is_openrouter_url(url: str) -> bool:
+    """True when ``url`` points at OpenRouter (``openrouter.ai`` or a subdomain)."""
+    try:
+        host = (httpx.URL(url).host or "").lower().rstrip(".")
+    except Exception:  # noqa: BLE001 — an unparseable URL is not OpenRouter
+        return False
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+
 class OpenRouterClient:
     name = "openrouter"
     # OpenAI-compatible: no stateful reasoning, no signed thinking; parallel
@@ -48,6 +57,7 @@ class OpenRouterClient:
         retry: RetryPolicy | None = None,
         pricing: dict[str, dict[str, float]] | None = None,
         allow_fallbacks: bool = False,
+        openrouter: bool | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         self._base_url = base_url
@@ -66,6 +76,15 @@ class OpenRouterClient:
         # logical call stays bound to one upstream generation; set it when the
         # embedder prefers OpenRouter's silent failover to visible failures.
         self._allow_fallbacks = allow_fallbacks
+        # Whether the endpoint is OpenRouter, which decides whether its body
+        # extensions (``usage``, ``provider``) are sent. This client is also
+        # the generic chat/completions client for custom OpenAI-format rows
+        # (vLLM, Groq, xAI) whose strict servers reject unknown fields. None
+        # infers it from the host; a row that is OpenRouter behind a proxy
+        # says so explicitly.
+        self._openrouter = (
+            is_openrouter_url(base_url) if openrouter is None else bool(openrouter)
+        )
 
     def classify_error(self, error: dict) -> ErrorClass:
         """Retry class of an error; an empty completion drops ``session_id``.
@@ -103,7 +122,9 @@ class OpenRouterClient:
             "content-type": "application/json",
             "accept": "text/event-stream",
         }
-        body = build_request_body(request, allow_fallbacks=self._allow_fallbacks)
+        body = build_request_body(
+            request, allow_fallbacks=self._allow_fallbacks, openrouter=self._openrouter,
+        )
         if not is_usable_client(self._http):
             # A host-injected client its owner has closed can never send again;
             # drop it here so later calls do not re-check a corpse.

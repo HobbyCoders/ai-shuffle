@@ -80,9 +80,16 @@ def _mark_trailing_breakpoint(messages: list[dict[str, Any]]) -> None:
 
 
 def build_request_body(
-    request: ProviderRequest, *, allow_fallbacks: bool = False
+    request: ProviderRequest, *, allow_fallbacks: bool = False,
+    openrouter: bool = True,
 ) -> dict[str, Any]:
-    """Serialize ``request``; ``allow_fallbacks`` is the client's standing knob."""
+    """Serialize ``request``; ``allow_fallbacks`` is the client's standing knob.
+
+    ``openrouter`` says whether the endpoint is OpenRouter itself. Only then
+    are its own body extensions (``usage``, ``provider``) sent: the same
+    client serves custom OpenAI-format rows (vLLM, Groq, xAI), and a strict
+    server rejects a request carrying fields it does not know.
+    """
     breakpoints = (
         request.cache_breakpoints if _supports_cache_control(request.model) else 0
     )
@@ -114,15 +121,16 @@ def build_request_body(
         "stream": True,
         # Ask for a usage object on the terminal chunk (finalize hook).
         "stream_options": {"include_usage": True},
+    }
+    if openrouter:
         # OpenRouter usage accounting: adds `cost` (USD credits) to the
         # terminal chunk's usage object alongside the token counts.
-        "usage": {"include": True},
+        body["usage"] = {"include": True}
         # OpenRouter otherwise retries another upstream provider invisibly
         # before the first token. The harness owns retry visibility/budgets, so
         # keep one logical call bound to one upstream generation. Embedders that
         # would rather have the silent failover set allow_fallbacks on the client.
-        "provider": {"allow_fallbacks": allow_fallbacks},
-    }
+        body["provider"] = {"allow_fallbacks": allow_fallbacks}
     # Omitted when uncapped: OpenRouter then applies the model's own output
     # maximum. Sending a fixed ceiling truncated any tool call whose arguments
     # carried a large payload — a Write of a file bigger than the cap lost its

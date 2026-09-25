@@ -55,6 +55,7 @@ from fluid.providers._transport import (
     deadline_error_payload,
     is_closed_client_error,
     is_usable_client,
+    provider_error_summary,
     truncated_stream_payload,
     with_deadline,
 )
@@ -463,6 +464,7 @@ class OpenAIResponsesClient:
                             {
                                 "status": resp.status_code,
                                 "message": text[:2000],
+                                "provider_message": provider_error_summary(text),
                                 "retriable": retriable,
                             },
                         )

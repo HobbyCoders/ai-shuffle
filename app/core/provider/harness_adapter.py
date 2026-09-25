@@ -514,10 +514,13 @@ class HarnessAdapter(ProviderAdapter):
             # GetUsage is deliberately cache-only: the tool may inspect the
             # app's last observed snapshot, but a model call must never start
             # provider billing/subscription polling or touch credentials.
+            # Bound to this session: an API key's session reads no owner usage.
             try:
-                from app.api.usage import get_cached_usage_payload
+                from app.api.usage import session_usage_callback
 
-                native_ctx.extra["usage_snapshot"] = get_cached_usage_payload
+                native_ctx.extra["usage_snapshot"] = session_usage_callback(
+                    self._resolve_app_session_id
+                )
             except Exception:  # noqa: BLE001 — standalone Fluid still reports unavailable
                 logger.debug("usage snapshot injection unavailable", exc_info=True)
             # This ctx also accompanies delayed Swarm dependency launches. Keep
@@ -2835,17 +2838,31 @@ class HarnessAdapter(ProviderAdapter):
                 cost = rollup.get("cost_usd") or cost
             if not isinstance(calls, int) or calls < self._turn_model_calls:
                 calls = self._turn_model_calls if self._turn_model_calls else calls
+            # The HTTP status the provider refused the call with, when it gave
+            # one: the field the CLI leg's result carries, so a native 429
+            # reaches the same rate-limited notice and "provider returned
+            # HTTP N" handling. Read defensively (a vendor without the field
+            # keeps None). With a status, the message is the provider's own
+            # short explanation rather than the raw response body.
+            status = getattr(event, "status", None)
+            if isinstance(status, bool) or not isinstance(status, int):
+                status = None
+            message = event.message
+            short = getattr(event, "provider_message", None)
+            if status is not None and isinstance(short, str) and short:
+                message = f"provider returned HTTP {status}: {short}"
             return [
                 ResultMessage(
                     subtype="error_during_execution",
                     is_error=True,
                     num_turns=calls if isinstance(calls, int) else 0,
                     session_id=getattr(event, "session_id", "") or "",
-                    result=event.message,
-                    errors=[event.message],
+                    result=message,
+                    errors=[message],
                     total_cost_usd=float(cost) if cost is not None else 0.0,
                     usage=usage,
                     uuid=self._uuid(event),
+                    api_error_status=status,
                 )
             ]
 

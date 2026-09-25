@@ -233,6 +233,23 @@ async def test_translation_table():
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_status_reaches_the_app():
+    """The CLI's verdict rides the RateLimitInfo: a ``rejected`` window with no
+    utilization must still say so; an event without a verdict reads allowed."""
+    events = [
+        lm.RateLimit(session_id=SID, kind="five_hour", resets_at="1900000000", status="rejected"),
+        lm.RateLimit(session_id=SID, kind="seven_day", utilization=0.2),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = [e for e in await _collect(_adapter_with(FakeEngine(events)))
+           if isinstance(e, RateLimitEvent)]
+    assert [(e.rate_limit_info.rate_limit_type, e.rate_limit_info.status,
+             e.rate_limit_info.utilization) for e in got] == [
+        ("five_hour", "rejected", None), ("seven_day", "allowed", 0.2),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_host_monitor_receipt_translates_as_a_shell_task():
     """A SubagentEvent receipt WITHOUT a worker session is a host Monitor
     shell: its TaskStarted must carry task_type="local_bash" so
@@ -4109,11 +4126,25 @@ async def test_max_turns_becomes_model_call_budget(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_native_get_usage_receives_the_cache_only_host_callback(monkeypatch, tmp_path):
+    """The callback is the cache-only snapshot, bound to this adapter's app
+    session so an API key's session is refused (app.api.usage)."""
+    import app.api.usage as usage_api
+
+    seen = []
+
+    async def _payload(session_id):
+        seen.append(session_id)
+        return {"available": False}
+
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(usage_api, "get_session_usage_payload", _payload)
+    monkeypatch.setattr(ha.HarnessAdapter, "_resolve_app_session_id", lambda self: "app-sess-1")
     captured = await _connect_capturing_native(monkeypatch, tmp_path)
     callback = captured["ctx"].extra.get("usage_snapshot")
-    from app.api.usage import get_cached_usage_payload
 
-    assert callback is get_cached_usage_payload
+    assert await callback() == {"available": False}
+    assert seen == ["app-sess-1"]
 
 
 @pytest.mark.asyncio
@@ -7017,6 +7048,34 @@ async def test_error_event_with_no_calls_still_bills_zero():
     assert result.total_cost_usd == 0.0
     assert result.usage == {}
     assert result.num_turns == 0
+
+
+@pytest.mark.asyncio
+async def test_error_event_status_reaches_api_error_status():
+    """Regression: a native provider refusal reached the app as body text
+    only, so ``api_error_status`` stayed None and the rate-limited notice and
+    "provider returned HTTP N" handling never ran for native sessions."""
+    events = [lm.ErrorEvent(
+        session_id=SID, retriable=True, status=429,
+        message='{"error": {"message": "Rate limit reached", "type": "rate_limit"}}',
+        provider_message="Rate limit reached",
+    )]
+    [result] = await _collect(_adapter_with(FakeEngine(events)))
+
+    assert isinstance(result, ResultMessage) and result.is_error
+    assert result.api_error_status == 429
+    assert result.errors == ["provider returned HTTP 429: Rate limit reached"]
+    assert result.result == "provider returned HTTP 429: Rate limit reached"
+
+
+@pytest.mark.asyncio
+async def test_error_event_without_status_keeps_its_message():
+    events = [lm.ErrorEvent(session_id=SID, message="stream truncated", retriable=False,
+                            provider_message="ignored without a status")]
+    [result] = await _collect(_adapter_with(FakeEngine(events)))
+
+    assert result.api_error_status is None
+    assert result.errors == ["stream truncated"]
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -46,6 +46,7 @@ from fluid.providers._transport import (
     deadline_error_payload,
     is_closed_client_error,
     is_usable_client,
+    provider_error_summary,
 )
 from fluid.providers.base import StreamChunk, flatten_system
 
@@ -328,12 +329,17 @@ class ChatCompletionsNormalizer:
             # The embedded code decides retriability, exactly as a non-200
             # status would: a Cloudflare 520 from the upstream provider is a
             # blip worth another attempt, an auth or validation failure is not.
+            status = coerce_status(code)
             out.append(
                 StreamChunk(
                     "error",
                     {
-                        "status": code,
+                        # A symbolic code ("rate_limit_exceeded") is kept for
+                        # logs; ``status`` is only ever an HTTP status.
+                        "status": status,
+                        "code": code,
                         "message": message[:2000],
+                        "provider_message": provider_error_summary(message),
                         "retriable": is_retriable_status(code),
                     },
                 )
@@ -586,6 +592,7 @@ async def stream_chat_completions(
                             with_request_evidence({
                                 "status": resp.status_code,
                                 "message": text[:2000],
+                                "provider_message": provider_error_summary(text),
                                 "retriable": retriable,
                             }),
                         )

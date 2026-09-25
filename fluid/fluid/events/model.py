@@ -158,6 +158,16 @@ class ErrorEvent(Event):
     # Model calls issued before the error ended the turn — same accounting
     # rationale as Interrupted. ``None`` means "not reported".
     num_model_calls: int | None = None
+    # The HTTP status the provider refused the call with (a non-200 response,
+    # or the code an in-stream error carried), when it gave one. A host reads
+    # it the way it reads the CLI's ``api_error_status``: 429 is a rate limit,
+    # 5xx a service fault. ``None`` for errors that carry no status (a dropped
+    # connection, a truncated stream, an engine-side failure).
+    status: int | None = None
+    # The provider's own short explanation (its ``error.message``, or the
+    # response body with HTML stripped), at most ~300 characters. ``message``
+    # may carry the raw body; this is what a person should read.
+    provider_message: str | None = None
 
 
 # ─── Streaming content ───────────────────────────────────────────────────────
@@ -419,6 +429,9 @@ class RateLimit(Event):
     kind: str
     resets_at: str | None = None
     utilization: float | None = None
+    # The CLI's verdict on the window: ``allowed``, ``allowed_warning`` or
+    # ``rejected``. A ``rejected`` reading may carry no utilization at all.
+    status: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

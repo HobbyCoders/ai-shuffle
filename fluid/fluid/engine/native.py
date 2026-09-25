@@ -20,7 +20,15 @@ The loop re-sends the same history up to
 each attempt and backing off (interruptibly) in between; only after the cap is
 reached does the turn end with the usual terminal ErrorEvent. No empty
 assistant node is ever written, and each failed call's usage is still folded
-into the turn totals so nothing billed is lost.
+into the turn totals so nothing billed is lost. A stream cut while a tool
+call's arguments were still arriving is the same retry under its own label
+("truncated stream") and a lower cap, ``TRUNCATED_STREAM_MAX_RETRIES``.
+
+A call that fails after content streamed keeps that content: the visible text
+and the tool calls that closed are stored as an assistant node marked
+``provider_meta["interrupted"]``, each closed call answered by an error
+result, whether the stream died on a dropped connection, an in-stream error or
+a body cut before its terminal event.
 
 A turn that ends on an ErrorEvent leaves the head on an unanswered user node —
 a text prompt, or the tool results the model never got to read. The Resume op
@@ -368,6 +376,13 @@ class _CallResult:
     # HTTP status of a rejected request, when the provider reported one. A
     # 413 means "the prompt no longer fits" whatever the body says.
     error_status: int | None = None
+    # The provider's own short explanation of the error (≤300 chars, HTML
+    # stripped), for the ErrorEvent; ``error_message`` may be the raw body.
+    error_provider_message: str | None = None
+    # The stream failed while a tool_use block was still open: the provider
+    # cut it mid-arguments. Such a call is retried under its own, lower cap
+    # (TRUNCATED_STREAM_MAX_RETRIES) and reported as a truncated stream.
+    cut_in_tool_args: bool = False
     # The provider's own verdict on the upstream call when it differs from the
     # normalized stop reason (OpenRouter's native_finish_reason). "stop" with a
     # native reason of "network_error" is how a dead upstream replica looks.
@@ -484,6 +499,14 @@ def _is_context_overflow(message: str, status: int | None = None) -> bool:
     return any(marker in lowered for marker in _OVERFLOW_MARKERS)
 
 
+# The token counters a provider's usage report carries. A call whose usage
+# holds none of them was never reported on (as opposed to reported as zero).
+_USAGE_TOKEN_KEYS = (
+    "input_tokens", "output_tokens",
+    "cache_read_input_tokens", "cache_creation_input_tokens",
+)
+
+
 def _measured_prompt_tokens(usage: dict[str, Any]) -> int:
     """What a provider actually billed for the PROMPT of one call.
 
@@ -510,7 +533,20 @@ def _measured_prompt_tokens(usage: dict[str, Any]) -> int:
 
 EMPTY_COMPLETION_MAX_RETRIES = 10
 
+# A stream cut while a tool call's arguments were still arriving is retried
+# like an empty completion (nothing usable was delivered), but under a much
+# lower cap: an empty 200 is a replica blip that clears on its own, while a
+# stream that keeps dying mid-arguments is usually a proxy or size limit the
+# same request will hit again. Three attempts rides out a blip without
+# spending ten full generations on a request that cannot get through.
+TRUNCATED_STREAM_MAX_RETRIES = 3
+
 _EMPTY_STREAM_MARKER = "terminal usage chunk"
+
+# Stored on ``Message.provider_meta`` of an assistant node kept from a call
+# that failed mid-stream: the text is what the user saw arrive, not a
+# finished answer. The value says why the stream ended.
+INTERRUPTED_META_KEY = "interrupted"
 
 
 def _empty_retry_delay(attempt: int) -> float:
@@ -2683,6 +2719,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         overflow_retries = 0
         result: _CallResult | None = None
         empty_retries = 0  # CONSECUTIVE empty completions; any real call resets it
+        truncated_retries = 0  # of those, streams cut mid tool arguments
         continuations = 0
         stop_hook_continuations = 0
         arg_stream_retries = 0  # runaway tool-argument streams, retried once
@@ -2726,9 +2763,16 @@ class NativeLoop(BackgroundLifecycleMixin):
             result = await self._stream_once(
                 sid, turn_id, history, sticky=call_was_sticky
             )
-            if not _is_empty_completion(result):
+            empty = _is_empty_completion(result)
+            truncated = empty and result.cut_in_tool_args
+            if not empty:
                 empty_retries = 0
-            elif empty_retries < EMPTY_COMPLETION_MAX_RETRIES:
+                truncated_retries = 0
+            elif (
+                truncated_retries < TRUNCATED_STREAM_MAX_RETRIES
+                if truncated
+                else empty_retries < EMPTY_COMPLETION_MAX_RETRIES
+            ):
                 # Nothing came back. Re-send the SAME history — the transcript
                 # gains no node — but WITHOUT the sticky-routing key, so
                 # OpenRouter may pick a different upstream replica. Retrying
@@ -2767,6 +2811,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                         miss_class=PROVIDER_FALLBACK,
                     ))
                 empty_retries += 1
+                if truncated:
+                    truncated_retries += 1
                 # The dud call may still have billed something.
                 self._fold_call_usage(total_usage, result.usage)
                 # Rotate the prefix fingerprint past the dud call too, so the
@@ -2777,13 +2823,20 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # Set after the dud call's own probe fields: the call
                     # that follows is the first without the key.
                     self._sticky_drop_unreported = True
-                delay = _empty_retry_delay(empty_retries)
+                attempt = truncated_retries if truncated else empty_retries
+                delay = _empty_retry_delay(attempt)
                 await self._emit(ProviderRetry(
                     session_id=sid, turn_id=turn_id,
-                    attempt=empty_retries,
-                    max_attempts=EMPTY_COMPLETION_MAX_RETRIES,
+                    attempt=attempt,
+                    max_attempts=(
+                        TRUNCATED_STREAM_MAX_RETRIES if truncated
+                        else EMPTY_COMPLETION_MAX_RETRIES
+                    ),
                     reason=(
-                        "empty response from provider"
+                        (
+                            "truncated stream from provider (cut mid tool arguments)"
+                            if truncated else "empty response from provider"
+                        )
                         + _upstream_suffix(result.native_stop_reason)
                     ),
                     delay_seconds=delay, model=self.model,
@@ -2808,15 +2861,21 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # end the turn on; the message deliberately carries no
                 # context-overflow marker, so the trim-and-retry branch below
                 # cannot mistake it for a too-long prompt.
+                if truncated:
+                    reason = (
+                        f"provider stream was cut mid tool arguments "
+                        f"{truncated_retries + 1} times in a row; giving up"
+                    )
+                else:
+                    reason = (
+                        f"provider returned an empty response "
+                        f"{empty_retries + 1} times in a row; giving up"
+                    )
                 result = _CallResult(
                     message=result.message,
                     usage=result.usage,
                     stop_reason="error",
-                    error_message=(
-                        f"provider returned an empty response "
-                        f"{empty_retries + 1} times in a row; giving up"
-                        + _upstream_suffix(result.native_stop_reason)
-                    ),
+                    error_message=reason + _upstream_suffix(result.native_stop_reason),
                     error_retriable=False,
                     native_stop_reason=result.native_stop_reason,
                 )
@@ -2953,54 +3012,62 @@ class NativeLoop(BackgroundLifecycleMixin):
                         continue
                 # The failed call's usage was folded in above (before the
                 # escalation decision) — snapshot it, don't re-fold.
-                if result.usage.get("transport_failure"):
-                    # Keep visible text and completed tool requests for a later
-                    # user-directed continuation. Incomplete arguments and opaque
-                    # reasoning envelopes are not safe provider history.
-                    completed_ids = {tu["tool_use_id"] for tu in result.tool_uses}
-                    content = [
-                        block for block in result.message.content
-                        if isinstance(block, Text) or (
-                            isinstance(block, ToolUseBlock) and block.id in completed_ids
-                        )
-                    ]
-                    if content:
-                        node = SessionNode(
-                            node_id=new_id("node"), parent_id=parent.node_id,
-                            message=Message(role="assistant", content=content),
-                        )
-                        await self.store.append(sid, node)
-                        parent = node
-                    aborted = []
-                    for tu in result.tool_uses:
-                        text = "Tool not executed: the provider connection was interrupted before the response finished."
-                        await self._emit(ToolResult(
-                            session_id=sid, turn_id=turn_id,
-                            tool_use_id=tu["tool_use_id"], name=tu["name"],
-                            output=text, is_error=True,
-                        ))
-                        aborted.append(ToolResultBlock(
-                            tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
-                        ))
-                    if aborted:
-                        node = SessionNode(
-                            node_id=new_id("node"), parent_id=parent.node_id,
-                            message=Message(role="user", content=aborted),
-                        )
-                        await self.store.append(sid, node)
-                        parent = node
-                else:
-                    # The failed call's message is not stored, but the tool
-                    # blocks that closed before the failure were already
-                    # published as ToolUse events. Answer each one, so a host
-                    # rendering the stream never keeps a tool card open for a
-                    # call that will never run.
-                    for tu in result.tool_uses:
-                        await self._emit(ToolResult(
-                            session_id=sid, turn_id=turn_id,
-                            tool_use_id=tu["tool_use_id"], name=tu["name"],
-                            output=_FAILED_CALL_TOOL_TEXT, is_error=True,
-                        ))
+                #
+                # Whatever the user watched stream is kept, however the stream
+                # ended (a dropped connection, an in-stream error, a body cut
+                # before its terminal event): the visible text and the tool
+                # requests that closed, for a later user-directed continuation.
+                # The node is marked interrupted so no reader takes it for a
+                # finished answer. Incomplete arguments and opaque reasoning
+                # envelopes are not safe provider history and are dropped.
+                transport = bool(result.usage.get("transport_failure"))
+                completed_ids = {tu["tool_use_id"] for tu in result.tool_uses}
+                content = [
+                    block for block in result.message.content
+                    if (isinstance(block, Text) and block.text) or (
+                        isinstance(block, ToolUseBlock) and block.id in completed_ids
+                    )
+                ]
+                if content:
+                    node = SessionNode(
+                        node_id=new_id("node"), parent_id=parent.node_id,
+                        message=Message(
+                            role="assistant", content=content,
+                            provider_meta={
+                                INTERRUPTED_META_KEY: (
+                                    "transport_failure" if transport else "provider_error"
+                                ),
+                            },
+                        ),
+                    )
+                    await self.store.append(sid, node)
+                    parent = node
+                # The tool blocks that closed before the failure were already
+                # published as ToolUse events. Answer each one, so a host
+                # rendering the stream never keeps a tool card open for a call
+                # that will never run, and the stored call has its result.
+                text = (
+                    "Tool not executed: the provider connection was interrupted "
+                    "before the response finished."
+                    if transport else _FAILED_CALL_TOOL_TEXT
+                )
+                aborted = []
+                for tu in result.tool_uses:
+                    await self._emit(ToolResult(
+                        session_id=sid, turn_id=turn_id,
+                        tool_use_id=tu["tool_use_id"], name=tu["name"],
+                        output=text, is_error=True,
+                    ))
+                    aborted.append(ToolResultBlock(
+                        tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
+                    ))
+                if aborted and content:
+                    node = SessionNode(
+                        node_id=new_id("node"), parent_id=parent.node_id,
+                        message=Message(role="user", content=aborted),
+                    )
+                    await self.store.append(sid, node)
+                    parent = node
                 partial, partial_cost = self._partial_usage(total_usage)
                 await self._emit_terminal_with_park(ErrorEvent(
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id,
@@ -3008,6 +3075,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     retriable=result.error_retriable,
                     usage=partial, cost_usd=partial_cost,
                     num_model_calls=num_calls,
+                    status=result.error_status,
+                    provider_message=result.error_provider_message,
                 ))
                 return  # leave the turn open-ended
             self._fold_call_usage(total_usage, result.usage)
@@ -3023,10 +3092,14 @@ class NativeLoop(BackgroundLifecycleMixin):
             usage_raw["model_call_index"] = num_calls
             usage_raw["projected_prompt_tokens"] = projected_prompt
             usage_raw.update(self._cache_probe_fields(result.usage))
-            prompt_tokens = _measured_prompt_tokens(result.usage)
+            prompt_tokens = (
+                0 if result.usage.get("input_tokens_estimated")
+                else _measured_prompt_tokens(result.usage)
+            )
             if prompt_tokens > 0:
                 # A provider that reported nothing leaves the estimate in place
-                # rather than pinning the whole context at zero tokens.
+                # rather than pinning the whole context at zero tokens (nor at
+                # an estimate standing in for the missing report).
                 self._last_call_usage[sid] = (node.node_id, dict(result.usage))
                 self._last_call_model[sid] = call_model
             snapshot: dict[str, Any] | None = None
@@ -3947,6 +4020,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         "The response may be incomplete. No automatic replay was attempted. "
                         "Review any completed actions before asking to continue."
                     )
+                provider_message = payload.get("provider_message")
                 return _CallResult(
                     message=self._assemble_message(blocks, request.model),
                     tool_uses=tool_uses,
@@ -3954,8 +4028,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                     stop_reason="error",
                     error_message=error_message,
                     error_retriable=False if transport_failure else bool(payload.get("retriable")),
-                    error_status=status if isinstance(status, int) else None,
+                    error_status=(
+                        status if isinstance(status, int) and not isinstance(status, bool)
+                        else None
+                    ),
+                    error_provider_message=(
+                        provider_message if isinstance(provider_message, str) else None
+                    ),
                     native_stop_reason=native_stop_reason,
+                    cut_in_tool_args=any(
+                        b["type"] == "tool_use" and "input" not in b
+                        for b in blocks.values()
+                    ),
                 )
 
         if self._interrupted.is_set():
@@ -3990,6 +4074,15 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
 
         if interrupted or arg_stream_error is not None:
+            self._estimate_partial_usage(usage_totals, blocks, request)
+        elif not any(key in usage_totals for key in _USAGE_TOKEN_KEYS) and any(
+            b.get("text") or b.get("args") for b in blocks.values()
+        ):
+            # A reply the provider sent no usage for (a server that ignores
+            # stream_options.include_usage). It was billed all the same, so
+            # it is estimated the way an interrupted call is and flagged as
+            # such. A reply with no content keeps its empty usage: that is
+            # what the empty-completion retry recognises.
             self._estimate_partial_usage(usage_totals, blocks, request)
 
         # Reasoning-channel answer fallback (observed on GLM-4.5 via

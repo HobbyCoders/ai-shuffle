@@ -712,11 +712,15 @@ class StreamJsonMapper:
         # Without a window type there is nothing to key the reading on.
         if not info.get("rateLimitType"):
             return Mapped()
+        status = info.get("status")
         return Mapped(events=[RateLimit(
             session_id=self.session_id, turn_id=self.turn_id,
             kind=info["rateLimitType"],
             resets_at=info.get("resetsAt"),
             utilization=info.get("utilization"),
+            # ``rejected`` marks the window exhausted even when the CLI sends
+            # no utilization with it, so the verdict has to reach the host.
+            status=status if isinstance(status, str) and status else None,
         )])
 
     def _on_control_request(self, frame: dict[str, Any]) -> Mapped:

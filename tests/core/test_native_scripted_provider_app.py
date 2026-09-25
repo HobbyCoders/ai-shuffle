@@ -435,7 +435,14 @@ async def test_a_stream_cut_after_a_tool_call_is_an_error_and_leaves_no_open_too
     uses, results = _tool_uses(messages), _tool_results(messages)
     assert [u.id for u in uses] == [r.tool_use_id for r in results] == ["toolu_c1"]
     assert results[0].is_error
-    assert [m.role for m in stored] == ["user"]  # the cut reply is not history
+    # The store matches what the app showed: the closed call, marked as part
+    # of an interrupted reply, answered by its error result — never a call
+    # left without one, and never a finished reply.
+    assert [m.role for m in stored] == ["user", "assistant", "user"]
+    assert stored[1].provider_meta == {"interrupted": "provider_error"}
+    assert [b.id for b in stored[1].content if isinstance(b, FluidToolUse)] == ["toolu_c1"]
+    [stored_result] = stored[2].content
+    assert isinstance(stored_result, FluidToolResult) and stored_result.is_error
 
 
 @pytest.mark.asyncio
@@ -534,3 +541,71 @@ async def test_an_approved_write_has_the_same_shape_on_both_legs(
     ]
     assert _shape(native) == expected
     assert _shape(delegated) == expected
+
+
+# ─── provider refusals reach the app with their HTTP status ─────────────────
+
+
+async def _chat_turn_outcome(tmp_path: Path, result: ResultMessage) -> dict:
+    """What the app's chat-turn path does with one terminal ResultMessage:
+    the frames the client sees, the metadata persisted for the turn (which the
+    account-failover seam reads) and the notifications emitted."""
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock, patch
+
+    import app.core.query_engine as qe
+    from app.core import account_failover
+    from tests.core.engine_harness import collect
+    from tests.core.query_engine_flow_harness import engine_patches, frames_of, fresh_adapter
+
+    emit = AsyncMock()
+    with ExitStack() as stack:
+        bounds = engine_patches(stack, cwd=str(tmp_path), adapter=fresh_adapter([result]))
+        stack.enter_context(
+            patch("app.services.notification_service.emit_notification", new=emit))
+        events = await collect(qe._stream_to_websocket_impl(
+            "hi", "native-429", "claude-code", api_user_id="u-1"))
+    metadata = bounds.persist.await_args.kwargs["metadata"]
+
+    notices = AsyncMock()
+    with patch("app.services.notification_service.emit_notification", new=notices):
+        if account_failover.is_usage_limit_error(metadata):
+            await account_failover.attempt_failover("native-429", "u-1")
+    return {
+        "api_error_frames": frames_of(events, "api_error"),
+        "api_error_status": metadata.get("api_error_status"),
+        "generic_notifications": emit.await_count,
+        "rate_limited_notices": [c.kwargs["message"] for c in notices.await_args_list],
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_native_429_reaches_the_app_like_the_cli_legs_429(
+    monkeypatch, tmp_path, provider
+):
+    """Regression: a native provider's 429 surfaced as body text only; the
+    ResultMessage had no ``api_error_status``, so the app's rate-limited
+    notice never fired for native sessions."""
+    provider.script(*[fps.error_reply(429, "Rate limit reached for requests",
+                                      retry_after="0") for _ in range(3)])
+    async with NativeRun(monkeypatch, tmp_path, provider) as run:
+        messages = await run.turn("hi")
+
+    native = messages[-1]
+    assert isinstance(native, ResultMessage) and native.is_error
+    assert native.api_error_status == 429
+    assert native.errors == ["provider returned HTTP 429: Rate limit reached for requests"]
+    assert len(provider.requests) == 3  # retried on retry-after first
+
+    # The CLI leg's terminal result for the same refusal.
+    cli = ResultMessage(subtype="success", is_error=True, api_error_status=429)
+    native_outcome = await _chat_turn_outcome(tmp_path, native)
+    cli_outcome = await _chat_turn_outcome(tmp_path, cli)
+
+    assert native_outcome == cli_outcome
+    assert native_outcome["api_error_status"] == 429
+    assert native_outcome["api_error_frames"] == [
+        {"type": "api_error", "status": 429, "session_id": "native-429"}]
+    assert native_outcome["generic_notifications"] == 0  # the 429 notice owns it
+    [notice] = native_outcome["rate_limited_notices"]
+    assert notice.startswith("Usage limit reached")

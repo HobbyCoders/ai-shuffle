@@ -46,8 +46,9 @@ from fluid.messages import (
     ToolUseBlock,
     UnknownBlock,
 )
-from fluid.providers._retry import is_retriable_status
+from fluid.providers._retry import coerce_status, is_retriable_status
 from fluid.providers._sse import KEEPALIVE_EVENT
+from fluid.providers._transport import provider_error_summary
 from fluid.providers.base import (
     INTERNAL_EXTRA_PREFIX,
     ErrorClass,
@@ -312,6 +313,17 @@ def retry_after_hint(err: Any) -> float | None:
     if match.group(2).lower().startswith("m"):
         value /= 1000.0
     return value
+
+
+# In-stream error codes whose HTTP twin is unambiguous, so a host reads an
+# in-stream rate limit exactly like a 429 response. Only codes that are
+# already retried are mapped: the status also feeds classify_error, and a
+# mapping must not make a fatal code retriable.
+_CODE_STATUS = {
+    "rate_limit_exceeded": 429,
+    "server_error": 500,
+    "server_is_overloaded": 503,
+}
 
 
 def _error_fields(err: Any) -> tuple[str | None, str | None, Any]:
@@ -740,11 +752,17 @@ class ResponsesStreamNormalizer:
             payload: dict[str, Any] = {
                 "message": str(err), "retriable": classify_error(err).retriable,
             }
-            code, etype, _status = _error_fields(err)
+            code, etype, status = _error_fields(err)
             if code is not None:
                 payload["code"] = code
             if etype is not None:
                 payload["type"] = etype
+            status = coerce_status(status)
+            if status is None and code in _CODE_STATUS:
+                status = _CODE_STATUS[code]
+            if status is not None:
+                payload["status"] = status
+            payload["provider_message"] = provider_error_summary(err)
             out.append(StreamChunk("error", payload))
             return out
 

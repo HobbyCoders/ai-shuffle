@@ -56,6 +56,29 @@ def test_rate_limit_without_window_type_is_dropped() -> None:
     assert not [e for e in mapper.feed(untyped).events if isinstance(e, RateLimit)]
 
 
+def test_rate_limit_carries_the_cli_verdict() -> None:
+    """``status`` survives the mapper; a ``rejected`` window with no utilization
+    is still a reading, and a missing or non-string verdict reads as None."""
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    frames = [
+        {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": 1900000000},
+        {"status": "allowed_warning", "rateLimitType": "seven_day", "utilization": 0.81},
+        {"rateLimitType": "seven_day_opus", "utilization": 0.1},
+        {"status": 3, "rateLimitType": "overage", "utilization": 0.1},
+    ]
+    got = [
+        e for info in frames
+        for e in mapper.feed({"type": "rate_limit_event", "rate_limit_info": info}).events
+        if isinstance(e, RateLimit)
+    ]
+    assert [(e.kind, e.status, e.utilization, e.resets_at) for e in got] == [
+        ("five_hour", "rejected", None, 1900000000),
+        ("seven_day", "allowed_warning", 0.81, None),
+        ("seven_day_opus", None, 0.1, None),
+        ("overage", None, 0.1, None),
+    ]
+
+
 def test_unpriceable_model_leaves_cost_out() -> None:
     raw = per_call_usage({"input_tokens": 5}, model="no-such-model", index=1)
     assert "cost_usd" not in raw and raw["model_call_index"] == 1

@@ -16,9 +16,11 @@ import asyncio
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+import httpx
 import pytest
 
 import fluid.engine.native as native_mod
@@ -43,6 +45,7 @@ from fluid.providers.anthropic.client import AnthropicClient
 from fluid.providers.local.client import LocalClient
 from fluid.providers.openai_responses.client import OpenAIResponsesClient
 from fluid.providers.openrouter.client import OpenRouterClient
+from fluid.providers.pricing import ModelPrice
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
@@ -557,7 +560,11 @@ async def test_a_reply_cut_without_its_terminal_event_is_an_error_not_an_answer(
     error = _terminal(events)
     assert isinstance(error, ErrorEvent)
     assert "truncated" in error.message
-    assert _roles(stored) == ["user"]
+    # What streamed is kept, marked as interrupted rather than finished.
+    assert _roles(stored) == ["user", "assistant"]
+    assert stored[1].text() == "The answer is"
+    assert stored[1].provider_meta == {"interrupted": "provider_error"}
+    assert error.node_id is not None
 
 
 @pytest.mark.parametrize("kind", ["anthropic", "responses"])
@@ -579,7 +586,9 @@ async def test_a_tool_call_cut_mid_arguments_is_retried_not_stored_half_open(ser
     finally:
         await run.aclose()
 
-    assert [r.reason for r in _of(events, ProviderRetry)] == ["empty response from provider"]
+    [retry] = _of(events, ProviderRetry)
+    assert retry.reason == "truncated stream from provider (cut mid tool arguments)"
+    assert retry.max_attempts == native_mod.TRUNCATED_STREAM_MAX_RETRIES == 3
     assert isinstance(_terminal(events), TurnComplete)
     assert _of(events, ToolUse) == [] and run.ran == []
     assert _roles(stored) == ["user", "assistant"] and stored[1].text() == "second try"
@@ -639,6 +648,7 @@ async def test_a_socket_dropped_mid_reply_keeps_the_text_and_says_so(server):
     assert isinstance(error, ErrorEvent) and not error.retriable
     assert "connection was interrupted" in error.message
     assert _roles(stored) == ["user", "assistant"] and stored[1].text() == "Partial"
+    assert stored[1].provider_meta == {"interrupted": "transport_failure"}
     assert len(server.requests) == 1  # never replayed after content flowed
 
 
@@ -718,8 +728,11 @@ async def test_a_complete_chat_stream_without_a_usage_chunk_is_still_an_answer(
     done = _terminal(events)
     assert isinstance(done, TurnComplete) and done.stop_reason == "end_turn"
     assert stored[-1].text() == "Complete answer."
+    # Billed all the same: estimated like an interrupted call, and flagged.
     [usage] = _of(events, Usage)
-    assert (usage.input_tokens, usage.output_tokens) == (0, 0)
+    assert usage.input_tokens > 0 and usage.output_tokens > 0
+    assert usage.raw["input_tokens_estimated"] is True
+    assert usage.raw["output_tokens_estimated"] is True
 
 
 async def test_a_tool_loop_without_usage_chunks_runs_to_the_end(server):
@@ -886,3 +899,315 @@ async def test_the_tools_offered_are_the_registry_surface(server, kind):
     assert body["stream"] is True
     assert body["model"] == MODELS[kind]
 
+
+
+# ─── provider error status and message ──────────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", DIALECTS)
+async def test_a_refusal_reports_its_http_status_and_the_providers_own_words(server, kind):
+    """Regression: the ErrorEvent carried only the raw body text, so a host
+    could not tell a rate limit from any other failure."""
+    server.script(*[fps.error_reply(429, "Rate limit reached, slow down", retry_after="0")
+                    for _ in range(3)])
+    run = Harness(server, kind)
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    error = _terminal(events)
+    assert isinstance(error, ErrorEvent) and error.retriable
+    assert error.status == 429
+    assert error.provider_message == "Rate limit reached, slow down"
+    assert len(server.requests) == 3
+
+
+async def test_an_html_error_page_is_reduced_to_a_short_message(server):
+    page = ("<html><head><title>502 Bad Gateway</title><style>body{color:red}</style>"
+            "</head><body><h1>502 Bad Gateway</h1>" + "<p>upstream &amp; retry</p>" * 200
+            + "</body></html>")
+    bad_gateway = Reply(status=502, frames=[page], content_type="text/html")
+    server.script(bad_gateway, bad_gateway, bad_gateway)
+    run = Harness(server, "openrouter")
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    error = _terminal(events)
+    assert error.status == 502
+    summary = error.provider_message
+    assert summary.startswith("502 Bad Gateway 502 Bad Gateway upstream & retry")
+    assert len(summary) <= 300 and "<" not in summary and "color:red" not in summary
+
+
+async def test_an_in_stream_rate_limit_reports_status_429(server):
+    server.script([Messages.start(), *Messages.text_block(0, "Hal"),
+                   Messages.error("rate_limit_error", "Number of requests exceeded")])
+    run = Harness(server, "anthropic")
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    error = _terminal(events)
+    assert (error.status, error.provider_message) == (429, "Number of requests exceeded")
+
+
+async def test_a_dropped_connection_has_no_http_status(server):
+    server.script(Reply(frames=[Messages.start(), *Messages.text_block(0, "x")[:2], CUT],
+                        framing="chunked"))
+    run = Harness(server, "anthropic")
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    assert _terminal(events).status is None
+
+
+# ─── partial text on a failed stream ────────────────────────────────────────
+
+
+@pytest.mark.parametrize("shape", ["anthropic_error", "chat_error", "chat_cut"])
+async def test_text_streamed_before_a_failure_is_kept_as_interrupted(server, shape):
+    """Regression: a turn that failed mid-stream (an in-stream error, a body
+    cut before its terminal chunk) dropped the text the user had watched
+    arrive, while a dropped connection kept it."""
+    if shape == "anthropic_error":
+        kind = "anthropic"
+        frames = [Messages.start(), *Messages.text_block(0, "Half an answer"),
+                  Messages.error("invalid_request_error", "bad")]
+    elif shape == "chat_error":
+        kind = "openrouter"
+        frames = [*Chat.text("Half an answer", finish=None, usage=False, done=False),
+                  fps.sse({"error": {"code": 400, "message": "bad"}})]
+    else:
+        kind = "local"
+        frames = Chat.text("Half an answer", finish=None, usage=False, done=False)
+    server.script(frames)
+    run = Harness(server, kind)
+    try:
+        events = await run.turn()
+        stored = await run.stored()
+    finally:
+        await run.aclose()
+
+    error = _terminal(events)
+    assert isinstance(error, ErrorEvent)
+    streamed = "".join(e.text for e in events if type(e).__name__ == "TextDelta")
+    assert streamed == "Half an answer"
+    assert _roles(stored) == ["user", "assistant"]
+    assert stored[1].text() == streamed
+    assert stored[1].provider_meta == {"interrupted": "provider_error"}
+    assert error.node_id is not None and len(server.requests) == 1
+
+
+async def test_a_failed_stream_stores_its_closed_tool_call_with_an_error_result(server):
+    server.script([Messages.start(), *Messages.text_block(0, "Let me check."),
+                   *Messages.tool_block(1, "call_1", "Echo", {"text": "x"}),
+                   Messages.error()])
+    run = Harness(server, "anthropic")
+    try:
+        events = await run.turn()
+        stored = await run.stored()
+    finally:
+        await run.aclose()
+
+    assert isinstance(_terminal(events), ErrorEvent) and run.ran == []
+    assert _roles(stored) == ["user", "assistant", "user"]
+    [use] = [b for b in stored[1].content if isinstance(b, ToolUseBlock)]
+    [result] = stored[2].content
+    assert isinstance(result, ToolResultBlock) and result.is_error
+    assert use.id == result.tool_use_id == "call_1"
+
+
+# ─── streams cut mid tool arguments ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", ["anthropic", "openrouter"])
+async def test_a_stream_cut_mid_arguments_every_time_gives_up_after_three_retries(
+    server, kind
+):
+    """Regression: a stream cut inside a tool call's arguments was retried as
+    an "empty response" up to ten times."""
+    if kind == "anthropic":
+        cut = [Messages.start(),
+               *Messages.tool_block(0, "call_1", "Echo", '{"text": "hel', stop=False)]
+    else:
+        cut = Chat.tool_calls([{"id": "c1", "name": "Echo", "args": {"text": "hello"}}],
+                              finish=None, usage=False, done=False)[:-1]
+    server.script(*[list(cut) for _ in range(4)], text_reply(kind, "never reached"))
+    run = Harness(server, kind)
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    retries = _of(events, ProviderRetry)
+    assert [(r.attempt, r.max_attempts) for r in retries] == [(1, 3), (2, 3), (3, 3)]
+    assert {r.reason for r in retries} == {
+        "truncated stream from provider (cut mid tool arguments)"}
+    error = _terminal(events)
+    assert isinstance(error, ErrorEvent)
+    assert "cut mid tool arguments 4 times in a row" in error.message
+    assert len(server.requests) == 4 and run.ran == []
+
+
+async def test_an_empty_reply_keeps_its_own_label_and_budget(server):
+    empty = [Messages.start(input_tokens=0), *Messages.end("end_turn", 0)]
+    server.script(empty, empty, Messages.text("ok"))
+    run = Harness(server, "anthropic")
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    assert [(r.reason, r.max_attempts) for r in _of(events, ProviderRetry)] == [
+        ("empty response from provider", native_mod.EMPTY_COMPLETION_MAX_RETRIES)] * 2
+    assert isinstance(_terminal(events), TurnComplete)
+
+
+# ─── OpenRouter-only body fields ────────────────────────────────────────────
+
+
+class _SendTo(httpx.AsyncBaseTransport):
+    """Deliver every request to the fake server, whatever host it names."""
+
+    def __init__(self, origin: str) -> None:
+        self._origin = httpx.URL(origin)
+        self._inner = httpx.AsyncHTTPTransport()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        request.url = request.url.copy_with(
+            scheme=self._origin.scheme, host=self._origin.host, port=self._origin.port,
+        )
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+@pytest.mark.parametrize("url,explicit,expected", [
+    ("https://openrouter.ai/api/v1/chat/completions", None, True),
+    ("https://eu.openrouter.ai/api/v1/chat/completions", None, True),
+    ("https://api.groq.com/openai/v1/chat/completions", None, False),
+    ("https://api.x.ai/v1/chat/completions", None, False),
+    ("http://vllm.internal:8000/v1/chat/completions", None, False),
+    ("https://proxy.example/v1/chat/completions", True, True),
+])
+async def test_openrouter_body_fields_go_only_to_openrouter(server, url, explicit, expected):
+    """Regression: custom OpenAI-format rows (vLLM, Groq, xAI) run through the
+    OpenRouter client and were sent ``usage`` and ``provider``, which a strict
+    server rejects."""
+    server.script(Chat.text("ok"))
+    http = httpx.AsyncClient(transport=_SendTo(server.url))
+    store = MemoryStore()
+    loop = NativeLoop(
+        provider=OpenRouterClient(api_key="k", base_url=url, http_client=http,
+                                  retry=FAST_RETRY, openrouter=explicit),
+        store=store, model="vendor/fake-model",
+    )
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await asyncio.wait_for(loop.wait_turn(), TURN_BUDGET)
+    finally:
+        await loop.aclose()
+        await http.aclose()
+
+    body = server.requests[0].body
+    assert ("usage" in body, "provider" in body) == (expected, expected)
+    if expected:
+        assert body["usage"] == {"include": True}
+        assert body["provider"] == {"allow_fallbacks": False}
+    assert body["stream_options"] == {"include_usage": True}
+
+
+# ─── a provider that says nothing ───────────────────────────────────────────
+
+
+async def test_a_silent_anthropic_stream_is_retried_after_the_first_byte_timeout(server):
+    """Regression: a stream that answered 200 and then sent nothing held the
+    turn for the whole 600 s read timeout."""
+    server.script([Sleep(30)], Messages.text("second attempt"))
+    run = Harness(server, "anthropic", client_kwargs={"first_byte_timeout": 0.3})
+    started = time.monotonic()
+    try:
+        events = await run.turn()
+        stored = await run.stored()
+    finally:
+        await run.aclose()
+
+    assert time.monotonic() - started < 10
+    assert isinstance(_terminal(events), TurnComplete)
+    assert stored[-1].text() == "second attempt"
+    assert len(server.requests) == 2
+    assert server.requests[0].body == server.requests[1].body
+
+
+async def test_anthropic_headers_that_never_arrive_hit_the_first_byte_timeout():
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(30)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              content=b"".join(Messages.text("ok")))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = AnthropicClient(api_key="k", base_url="https://api.anthropic.test/v1/messages",
+                             http_client=http, retry=FAST_RETRY, first_byte_timeout=0.3)
+    loop = NativeLoop(provider=client, store=MemoryStore(), model=MODELS["anthropic"])
+    started = time.monotonic()
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await asyncio.wait_for(loop.wait_turn(), TURN_BUDGET)
+    finally:
+        await loop.aclose()
+        await http.aclose()
+
+    assert time.monotonic() - started < 10
+    assert calls == 2
+    assert isinstance(_terminal(loop.bus.log(loop.session_id)), TurnComplete)
+
+
+def test_the_first_byte_timeout_defaults_to_sixty_seconds():
+    assert AnthropicClient(api_key="k")._first_byte_timeout == 60.0
+
+
+# ─── replies without usage ──────────────────────────────────────────────────
+
+
+async def test_a_reply_without_usage_is_booked_at_an_estimated_cost(server):
+    """Regression: a reply with no usage chunk booked 0 tokens and no cost."""
+    server.script(Chat.text("An answer long enough to estimate.", usage=False))
+    rates = ModelPrice(input=3.0, output=15.0, source="test")
+    run = Harness(server, "local", pricing=lambda model: rates)
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    [usage] = _of(events, Usage)
+    assert usage.output_tokens > 0 and usage.input_tokens > 0
+    assert usage.raw["output_tokens_estimated"] and usage.raw["input_tokens_estimated"]
+    assert usage.raw["cost_estimated"] is True
+    done = _terminal(events)
+    assert done.cost_usd and done.cost_usd > 0
+    # An estimate is not a measurement: the context gauge keeps its own.
+    assert run.loop._last_call_usage.get(run.loop.session_id) is None
+
+
+async def test_an_empty_reply_without_usage_is_still_retried_as_empty(server):
+    server.script([Chat.chunk({}, "stop"), Chat.DONE], Chat.text("ok"))
+    run = Harness(server, "local")
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    assert [r.reason for r in _of(events, ProviderRetry)] == ["empty response from provider"]
+    assert isinstance(_terminal(events), TurnComplete)
