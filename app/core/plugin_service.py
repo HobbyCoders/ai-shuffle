@@ -21,8 +21,9 @@ import re
 import threading
 from pathlib import Path
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, NoReturn, Optional, Dict, Any
 
+from app.core.mcp_service import McpConfigUnreadable
 
 # Re-export all models and helpers for backward compatibility
 from app.core.plugin_models import (  # noqa: F401
@@ -43,6 +44,21 @@ from app.core import plugin_hooks as _hooks_mod
 from app.core import plugin_updates as _upd_mod
 
 logger = logging.getLogger(__name__)
+
+
+class PluginConfigUnreadable(McpConfigUnreadable):
+    """A plugin settings/registry file exists but cannot be read, so it is not rewritten.
+
+    Same 409 and message as :class:`McpConfigUnreadable` (the plugins API
+    lets it through like any HTTPException); when the bytes were readable,
+    the detail also names the ``.bak`` copy.
+    """
+
+    def __init__(self, path: Path, backup: Optional[Path] = None):
+        super().__init__(path)
+        self.backup = backup
+        if backup is not None:
+            self.detail = f"{self.detail} A copy of it was saved to {backup}."
 
 
 class PluginService:
@@ -126,22 +142,101 @@ class PluginService:
             plugins_dir.mkdir(parents=True, exist_ok=True)
         return plugins_dir
 
-    def _read_json_file(self, path: Path, default: Any = None) -> Any:
-        """Safely read a JSON file"""
+    def _read_json_file(self, path: Path, default: Any = None, *, for_update: bool = False) -> Any:
+        """Read a JSON object file.
+
+        A missing file reads as ``default`` (``{}``). An unreadable or corrupt
+        one (permission denied, not UTF-8, not JSON, not an object) also reads
+        as ``default`` for display, but with ``for_update`` it raises
+        :class:`PluginConfigUnreadable`: the caller is about to write the
+        result back, and writing what an unreadable file "read as" would
+        replace the whole file.
+        """
+        fallback = default if default is not None else {}
         try:
-            if path.exists():
-                with open(path, 'r') as f:
-                    return json.load(f)
-            return default if default is not None else {}
-        except (json.JSONDecodeError, IOError) as e:
+            if not path.exists():
+                return fallback
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # Every caller indexes the result as an object; a file holding
+            # ``null`` or a list would otherwise raise AttributeError.
+            if not isinstance(data, dict):
+                raise ValueError("top-level JSON is not an object")
+            return data
+        except (ValueError, OSError) as e:
+            # ValueError covers JSONDecodeError and a non-UTF-8 file.
             logger.error(f"Error reading {path}: {e}")
-            return default if default is not None else {}
+            if for_update:
+                self._refuse_unreadable(path, e)
+            return fallback
+
+    @staticmethod
+    def _keep_backup(path: Path, raw: bytes) -> Optional[Path]:
+        """Save ``raw`` (the bytes of a file that failed to parse) to ``<name>.bak``."""
+        backup = path.with_name(path.name + ".bak")
+        try:
+            backup.write_bytes(raw)
+            return backup
+        except OSError as e:
+            logger.error(f"Could not back up {path} to {backup}: {e}")
+            return None
+
+    def _refuse_unreadable(self, path: Path, cause: BaseException) -> NoReturn:
+        """Raise :class:`PluginConfigUnreadable` for ``path``, leaving it untouched.
+
+        When the file's bytes can be read (it failed to parse rather than to
+        open), a copy is kept at ``<name>.bak`` so the owner can recover it
+        even after deleting or hand-editing the original.
+        """
+        try:
+            raw: Optional[bytes] = path.read_bytes()
+        except OSError:
+            raw = None
+        backup = self._keep_backup(path, raw) if raw is not None else None
+        raise PluginConfigUnreadable(path, backup) from cause
+
+    def _check_replaceable(self, path: Path) -> None:
+        """Refuse to replace a file that exists but is not a readable JSON object.
+
+        The delegate modules read with the tolerant reader and write the
+        result back, so this is where a read-modify-write of a corrupt file
+        is stopped. A missing file is fine: the write creates it.
+
+        The auto-update settings file is the exception: it is always written
+        as a whole record (never merged into), so one that fails to parse is
+        copied to ``.bak`` and replaced; otherwise it could never be fixed
+        from the app and every background run would fail. One that cannot be
+        opened at all is still refused, since no copy can be kept.
+        """
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            self._refuse_unreadable(path, e)
+        try:
+            data = json.loads(raw.decode('utf-8'))
+            if isinstance(data, dict):
+                return
+            cause: Exception = ValueError("top-level JSON is not an object")
+        except ValueError as e:
+            cause = e
+        if path == self.AUTO_UPDATE_FILE:
+            logger.error(f"Replacing unreadable {path}: {cause}")
+            self._keep_backup(path, raw)
+            return
+        self._refuse_unreadable(path, cause)
 
     def _write_json_file(self, path: Path, data: Any) -> bool:
-        """Safely write a JSON file with atomic operation"""
+        """Atomically write a JSON file.
+
+        Raises :class:`PluginConfigUnreadable` (409) instead of replacing an
+        existing file that cannot be read as a JSON object.
+        """
+        self._check_replaceable(path)
         try:
             temp_path = path.with_suffix('.tmp')
-            with open(temp_path, 'w') as f:
+            with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
             temp_path.replace(path)
             return True
@@ -818,7 +913,7 @@ class PluginService:
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.set_enabled(kind, True)
-        settings = self._read_json_file(self.SETTINGS_FILE, {})
+        settings = self._read_json_file(self.SETTINGS_FILE, {}, for_update=True)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = True
@@ -830,7 +925,7 @@ class PluginService:
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.set_enabled(kind, False)
-        settings = self._read_json_file(self.SETTINGS_FILE, {})
+        settings = self._read_json_file(self.SETTINGS_FILE, {}, for_update=True)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = False
@@ -864,8 +959,14 @@ class PluginService:
             return self.project_dir / ".fluid" / "settings.local.json"
         return self.project_dir / ".fluid" / "settings.json"
 
-    def _read_project_settings(self, scope: Optional[PluginScope] = None) -> Dict[str, Any]:
-        """Read project Fluid settings. No scope merges both enabledPlugins maps."""
+    def _read_project_settings(
+        self, scope: Optional[PluginScope] = None, *, for_update: bool = False
+    ) -> Dict[str, Any]:
+        """Read project Fluid settings. No scope merges both enabledPlugins maps.
+
+        ``for_update`` (single scope only) refuses an unreadable file; see
+        :meth:`_read_json_file`.
+        """
         if scope is None:
             enabled: Dict[str, Any] = {}
             for layer_scope in (PluginScope.PROJECT, PluginScope.LOCAL):
@@ -874,7 +975,7 @@ class PluginService:
             return {"enabledPlugins": enabled}
         settings_file = self._get_project_settings_file(scope)
         if settings_file:
-            return self._read_json_file(settings_file, {})
+            return self._read_json_file(settings_file, {}, for_update=for_update)
         return {}
 
     def _write_project_settings(self, data: Dict[str, Any], scope: PluginScope = PluginScope.PROJECT) -> bool:
@@ -1026,7 +1127,7 @@ class PluginService:
     def enable_project_plugin(self, plugin_id: str) -> bool:
         """Enable a plugin in its Fluid project/local settings file."""
         scope = self._scope_from_project_plugin_id(plugin_id)
-        settings = self._read_project_settings(scope)
+        settings = self._read_project_settings(scope, for_update=True)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = True
@@ -1035,7 +1136,7 @@ class PluginService:
     def disable_project_plugin(self, plugin_id: str) -> bool:
         """Disable a plugin in its Fluid project/local settings file."""
         scope = self._scope_from_project_plugin_id(plugin_id)
-        settings = self._read_project_settings(scope)
+        settings = self._read_project_settings(scope, for_update=True)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = False
