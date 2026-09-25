@@ -12,10 +12,13 @@
 	 * - LOCAL scope (.claude/.mcp.json) — edit
 	 * - PROJECT scope (.mcp.json) — edit
 	 */
-	import { mcp, projectMcpServers, mcpLoading } from '$lib/stores/mcp.svelte';
+	import { untrack } from 'svelte';
+	import { mcp, projectMcpServers, mcpLoading, mcpError } from '$lib/stores/mcp.svelte';
 	import type { McpServerInfo } from '$lib/api/mcp';
 	import McpServerForm from '$lib/components/mcp/McpServerForm.svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+	import Banner from '$lib/components/Banner.svelte';
 	import { Search, Server, Globe, FolderGit2, FolderLock, Download, Trash2, Pencil } from 'lucide-svelte';
 	import './project-tabs.css';
 
@@ -51,11 +54,23 @@
 		if (e.key === 'Escape') actionsOpenKey = null;
 	}
 
-	// Load MCP servers when project changes
+	// Load MCP servers when project changes. An open editor, a pending removal
+	// and the search belong to the previous project, so drop them.
+	let loadedProjectId: string | null = null;
 	$effect(() => {
-		if (projectId) {
-			mcp.loadProjectServers(projectId);
-		}
+		const id = projectId;
+		if (!id) return;
+		untrack(() => {
+			if (loadedProjectId !== null && loadedProjectId !== id) {
+				showMcpServerForm = false;
+				editingMcpServer = null;
+				pendingRemove = null;
+				searchQuery = '';
+			}
+			loadedProjectId = id;
+			// A failed load is shown through $mcpError.
+			mcp.loadProjectServers(id).catch(() => {});
+		});
 	});
 
 	// Filter servers by search
@@ -91,7 +106,13 @@
 		}
 	}
 
-	// Remove server
+	// Remove server (after confirmation: a global server is deleted everywhere)
+	let pendingRemove = $state<McpServerInfo | null>(null);
+	async function confirmRemove() {
+		const server = pendingRemove;
+		pendingRemove = null;
+		if (server) await handleRemoveServer(server);
+	}
 	async function handleRemoveServer(server: McpServerInfo) {
 		try {
 			await mcp.removeProjectServer(projectId, server.name, server.scope as 'user' | 'installed' | 'local' | 'project');
@@ -197,7 +218,7 @@
 				class:on={server.enabled}
 				role="switch"
 				aria-checked={server.enabled}
-				aria-label={server.enabled ? 'Disable server' : 'Enable server'}
+				aria-label={`${server.enabled ? 'Disable' : 'Enable'} ${server.name}`}
 				title={server.enabled ? 'Disable server' : 'Enable server'}
 				onclick={() => handleToggle(server)}
 			><i></i></button>
@@ -207,7 +228,7 @@
 					onToggle={(e) => toggleRowActions(e, rowKey(server))}
 					label="Server actions"
 				>
-					<button type="button" class="icon-btn danger" title="Remove server" onclick={(e) => { e.stopPropagation(); actionsOpenKey = null; handleRemoveServer(server); }}>
+					<button type="button" class="icon-btn danger" title="Remove server" aria-label={`Remove ${server.name}`} onclick={(e) => { e.stopPropagation(); actionsOpenKey = null; pendingRemove = server; }}>
 						<Trash2 size={15} />
 					</button>
 				</RowActionMenu>
@@ -223,7 +244,7 @@
 			{@render serverMeta(server)}
 		</div>
 		<div class="ctl">
-			<button type="button" class="icon-btn" title="Edit server" onclick={() => handleEditServer(server)}>
+			<button type="button" class="icon-btn" title="Edit server" aria-label={`Edit ${server.name}`} onclick={() => handleEditServer(server)}>
 				<Pencil size={15} />
 			</button>
 		</div>
@@ -237,6 +258,10 @@
 			<Search />
 			<input type="text" bind:value={searchQuery} placeholder="Search MCP servers…" class="inp" />
 		</div>
+	{/if}
+
+	{#if $mcpError}
+		<Banner severity="error" message={$mcpError} dismissible onDismiss={() => mcp.clearError()} />
 	{/if}
 
 	<!-- Global (User) MCP Servers -->
@@ -292,13 +317,25 @@
 	{/if}
 
 	<!-- Empty state -->
-	{#if totalServers === 0}
+	{#if totalServers === 0 && !$mcpError}
 		<div class="empty-state">
 			<Server />
 			<p class="es-title">No MCP servers available</p>
 			<p class="es-desc">Add MCP servers from the MCP Servers card to see them here.</p>
 		</div>
 	{/if}
+
+	<ConfirmDialog
+		open={!!pendingRemove}
+		title="Remove MCP server"
+		message={pendingRemove?.scope === 'user'
+			? `Remove "${pendingRemove?.name}"? It is a global server, so every project loses it.`
+			: `Remove "${pendingRemove?.name}" from this project?`}
+		confirmLabel="Remove"
+		danger
+		onConfirm={confirmRemove}
+		onCancel={() => (pendingRemove = null)}
+	/>
 
 	<!-- MCP Server Form Modal -->
 	<McpServerForm bind:this={remoteForm}

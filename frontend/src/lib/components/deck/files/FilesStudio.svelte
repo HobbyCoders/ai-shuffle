@@ -83,11 +83,13 @@
 		newFolderName = '';
 	}
 	async function confirmNewFolder() {
+		if (creatingFolder) return;
 		const name = newFolderName.trim();
 		if (!name) { showNewFolder = false; return; }
 		creatingFolder = true;
 		try {
-			await files.createFolder(name);
+			// On failure the store shows the error; keep the typed name for a retry.
+			if (!(await files.createFolder(name))) return;
 			await loadRootDirs();
 			refreshTree();
 			showNewFolder = false;
@@ -124,7 +126,8 @@
 	}
 	async function confirmRename() {
 		if (renameTarget && renameValue.trim() && renameValue.trim() !== renameTarget.name) {
-			await files.rename(renameTarget.path, renameValue.trim());
+			// On failure the store shows the error; keep the rename open for a retry.
+			if (!(await files.rename(renameTarget.path, renameValue.trim()))) return;
 			await loadRootDirs();
 			refreshTree();
 		}
@@ -385,10 +388,10 @@
 									onToggle={(e) => toggleRowActions(e, item.path)}
 									label="File actions"
 								>
-									<button class="fs-icon-btn" title="Rename" onclick={(e) => startRename(item, e)}><Edit3 size={14} strokeWidth={1.8} /></button>
-									<button class="fs-icon-btn fs-icon-btn--danger" title="Delete" onclick={(e) => { e.stopPropagation(); pendingDelete = item; }}><Trash2 size={14} strokeWidth={1.8} /></button>
+									<button class="fs-icon-btn" title="Rename" aria-label="Rename {item.name}" onclick={(e) => startRename(item, e)}><Edit3 size={14} strokeWidth={1.8} /></button>
+									<button class="fs-icon-btn fs-icon-btn--danger" title="Delete" aria-label="Delete {item.name}" onclick={(e) => { e.stopPropagation(); pendingDelete = item; }}><Trash2 size={14} strokeWidth={1.8} /></button>
 									{#if item.type === 'file'}
-										<button class="fs-icon-btn" title="Download" onclick={(e) => download(item, e)}><Download size={14} strokeWidth={1.8} /></button>
+										<button class="fs-icon-btn" title="Download" aria-label="Download {item.name}" onclick={(e) => download(item, e)}><Download size={14} strokeWidth={1.8} /></button>
 									{/if}
 								</RowActionMenu>
 							</div>

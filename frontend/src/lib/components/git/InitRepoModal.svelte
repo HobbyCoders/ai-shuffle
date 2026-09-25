@@ -157,6 +157,7 @@
 				<button
 					class="mode-btn"
 					class:active={mode === 'init'}
+					aria-pressed={mode === 'init'}
 					onclick={() => mode = 'init'}
 					disabled={loading}
 				>
@@ -166,6 +167,7 @@
 				<button
 					class="mode-btn"
 					class:active={mode === 'clone'}
+					aria-pressed={mode === 'clone'}
 					onclick={() => mode = 'clone'}
 					disabled={loading}
 				>
@@ -237,6 +239,7 @@
 							<button
 								class="vis-btn"
 								class:active={githubPrivate}
+								aria-pressed={githubPrivate}
 								onclick={() => githubPrivate = true}
 								disabled={loading}
 							>
@@ -246,6 +249,7 @@
 							<button
 								class="vis-btn"
 								class:active={!githubPrivate}
+								aria-pressed={!githubPrivate}
 								onclick={() => githubPrivate = false}
 								disabled={loading}
 							>
@@ -258,7 +262,7 @@
 			{/if}
 
 			{#if error}
-				<div class="error-msg">{error}</div>
+				<div class="error-msg" role="alert">{error}</div>
 			{/if}
 
 			<!-- Action -->

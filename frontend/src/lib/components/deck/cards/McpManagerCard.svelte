@@ -64,7 +64,8 @@
 
 	// Load data on mount
 	onMount(() => {
-		mcp.loadGlobalServers();
+		// A failed load is shown through $mcpError; don't leave the rejection unhandled.
+		mcp.loadGlobalServers().catch(() => {});
 	});
 
 	let consumedItemId: string | null = null;

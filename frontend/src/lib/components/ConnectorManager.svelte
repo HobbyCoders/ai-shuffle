@@ -796,7 +796,7 @@
 												class:on={connector.is_active}
 												role="switch"
 												aria-checked={connector.is_active}
-												aria-label={connector.is_active ? 'Deactivate connector' : 'Activate connector'}
+												aria-label={`${connector.is_active ? 'Deactivate' : 'Activate'} ${connector.name}`}
 												onclick={() => handleToggle(connector)}
 												title={connector.is_active ? 'Deactivate' : 'Activate'}
 											>
@@ -809,6 +809,7 @@
 												disabled={testingId === connector.id}
 												class="connector-action-btn"
 												title="Test connection"
+												aria-label={`Test ${connector.name}`}
 											>
 												{#if testingId === connector.id}
 													<svg
@@ -858,6 +859,8 @@
 												class="connector-action-btn"
 												class:active={expandedLogs.has(connector.id)}
 												title="View event logs"
+												aria-label={`Event logs for ${connector.name}`}
+												aria-expanded={expandedLogs.has(connector.id)}
 											>
 												<svg
 													fill="none"
@@ -878,6 +881,7 @@
 												onclick={() => startEdit(connector)}
 												class="connector-action-btn"
 												title="Edit connector"
+												aria-label={`Edit ${connector.name}`}
 											>
 												<svg
 													fill="none"
@@ -898,6 +902,7 @@
 												onclick={() => handleDelete(connector.id)}
 												class="connector-action-btn act-danger"
 												title="Delete connector"
+												aria-label={`Delete ${connector.name}`}
 											>
 												<svg
 													fill="none"

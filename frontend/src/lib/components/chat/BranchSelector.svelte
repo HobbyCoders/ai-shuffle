@@ -189,6 +189,7 @@
 						bind:value={branchSearch}
 						type="text"
 						class="branch-search-input"
+						aria-label="Filter branches"
 						placeholder="Filter branches..."
 						onclick={(e) => e.stopPropagation()}
 						onkeydown={(e) => {
@@ -211,6 +212,8 @@
 				{#each filteredLocalBranches as branch (branch.name)}
 					<button
 						type="button"
+						role="menuitemradio"
+						aria-checked={branch.name === currentBranch}
 						class="dropdown-item"
 						class:active={branch.name === currentBranch}
 						onclick={() => checkoutBranch(branch.name)}
@@ -231,6 +234,7 @@
 				{#each filteredRemoteBranches as branch (branch.name)}
 					<button
 						type="button"
+						role="menuitem"
 						class="dropdown-item remote-item"
 						onclick={() => checkoutBranch(branch.shortName)}
 						title={branch.name}
@@ -247,7 +251,7 @@
 			{/if}
 
 			<div class="dropdown-divider"></div>
-			<button type="button" class="dropdown-item new-branch-item" onclick={handleNewBranch}>
+			<button type="button" role="menuitem" class="dropdown-item new-branch-item" onclick={handleNewBranch}>
 				<Plus size={13} strokeWidth={1.5} />
 				<span class="dropdown-item-name">New branch...</span>
 			</button>

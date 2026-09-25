@@ -35,8 +35,10 @@ export interface ApiUserCreate {
 
 export interface ApiUserUpdate {
 	name?: string;
-	description?: string;
-	project_id?: string;
+	/** null clears it; omitted leaves it unchanged. */
+	description?: string | null;
+	/** null removes the project restriction; omitted leaves it unchanged. */
+	project_id?: string | null;
 	profile_ids?: string[];
 	is_active?: boolean;
 	model?: string | null;

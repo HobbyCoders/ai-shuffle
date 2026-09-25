@@ -137,10 +137,12 @@
 		formError = '';
 
 		try {
+			// null (not undefined) so clearing the description or the project
+			// restriction is sent; the PATCH ignores omitted fields.
 			await updateApiUserApi(editingUser.id, {
 				name: formName.trim(),
-				description: formDescription.trim() || undefined,
-				project_id: formProjectId || undefined,
+				description: formDescription.trim() || null,
+				project_id: formProjectId || null,
 				profile_ids: formProfileIds,
 				is_active: formIsActive,
 				model: formModel || null,

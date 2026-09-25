@@ -41,7 +41,7 @@
 				.replace(/-+/g, '-')
 				.replace(/^-|-$/g, '')
 				.slice(0, 60);
-			branchName = '';
+			branchName = sanitized;
 			showPrefix = false;
 			prefix = 'codex/';
 			loading = false;
@@ -183,7 +183,7 @@
 			</div>
 
 			{#if error}
-				<div class="error-msg">{error}</div>
+				<div class="error-msg" role="alert">{error}</div>
 			{/if}
 
 			<!-- Action -->
