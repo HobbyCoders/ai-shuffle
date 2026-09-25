@@ -2,7 +2,7 @@
  * Store Utilities — Centralized subscriber/notify boilerplate.
  *
  * This is a plain .ts file (NOT .svelte.ts) to avoid dual module
- * evaluation issues with Svelte 5 runes. See KNOWN_ISSUES.md Root Cause 10.
+ * evaluation issues with Svelte 5 runes.
  *
  * Does NOT use $state, $derived, or $effect runes.
  *

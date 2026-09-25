@@ -38,12 +38,11 @@
     {/each}
   </nav>
   <section aria-label="Sample messages">
-    {#each messages as message, index}
+    {#each messages as message}
       {#if message.role === 'user'}
         <UserMessage content={message.content} />
       {:else}
-        <AssistantMessage content={message.content} messageIndex={index}
-          messageId={`demo-${selected}-${index}`} profileName="Preset sample — not AI" />
+        <AssistantMessage content={message.content} profileName="Preset sample — not AI" />
       {/if}
     {/each}
   </section>

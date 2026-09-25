@@ -22,15 +22,12 @@
 		/** Real-time WS stream buffer — updates every delta, not just every poll */
 		wsContent?: string;
 		timestamp?: Date | string;
-		messageIndex: number;
-		messageId: string;
-		messageUuid?: string | null;  // UUID from JSONL for direct rewind (may be same as messageId)
+		messageUuid?: string | null;  // UUID from JSONL for direct rewind
 		sessionId?: string | null;
 		streaming?: boolean;
 		hasPartialMessages?: boolean;
 		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 		metadata?: Record<string, unknown>;
-		onCopy?: (content: string, messageId: string) => void;
 		onRewindComplete?: () => void;
 		/** Profile name to display in header (defaults to "Assistant") */
 		profileName?: string;
@@ -43,15 +40,12 @@
 		wsContent = '',
 		gallerySources,
 		timestamp,
-		messageIndex,
-		messageId,
 		messageUuid = null,  // UUID from JSONL for direct rewind
 		sessionId,
 		streaming = false,
 		hasPartialMessages = true,
 		fileCheckpointingEnabled = false,
 		metadata,
-		onCopy,
 		onRewindComplete,
 		profileName = 'Assistant',
 		modelLabel = null

@@ -27,10 +27,6 @@ export interface MemoryFile {
 	updated_at: string | null;
 }
 
-export interface SaveMemoryRequest {
-	content: string;
-}
-
 /**
  * Agent-memory import: copies a provider's per-project memory dir
  * (~/.claude/projects/<slug>/memory, or the codex equivalent) into the
@@ -75,16 +71,6 @@ export interface MemoryImportResult {
  */
 export async function getMemoryFiles(projectId: string): Promise<MemoryFile[]> {
 	return api.get(`/projects/${projectId}/memory`);
-}
-
-/**
- * Get a specific memory file by location
- */
-export async function getMemoryFile(
-	projectId: string,
-	location: MemoryLocation
-): Promise<MemoryFile> {
-	return api.get(`/projects/${projectId}/memory/${location}`);
 }
 
 /**

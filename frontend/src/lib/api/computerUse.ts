@@ -39,10 +39,6 @@ export async function getComputerUseStatus(): Promise<ComputerUseStatus> {
 	return api.get<ComputerUseStatus>('/computer-use/status');
 }
 
-export async function getComputerUseEnabled(): Promise<{ enabled: boolean }> {
-	return api.get<{ enabled: boolean }>('/computer-use/enabled');
-}
-
 export async function setComputerUseEnabled(enabled: boolean): Promise<{ enabled: boolean }> {
 	return api.put<{ enabled: boolean }>('/computer-use/enabled', { enabled });
 }

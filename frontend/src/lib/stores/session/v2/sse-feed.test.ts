@@ -1,5 +1,5 @@
 /**
- * Frame-parser tests for the V2 SSE feed client (docs/V2_PHASE1_DESIGN.md §6).
+ * Frame-parser tests for the V2 SSE feed client.
  *
  * `createFrameParser` is the deterministic, side-effect-free core of the feed:
  * it turns an arbitrarily-chunked SSE body into complete `{ id, event, data }`

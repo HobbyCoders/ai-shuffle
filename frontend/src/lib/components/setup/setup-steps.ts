@@ -70,4 +70,3 @@ export function markWelcomeSeen(): void {
 
 /** Where to read about each disclosure. */
 export const PRIVACY_UPDATES_URL = 'https://hobbycoders.com/privacy#updates';
-export const PRIVACY_URL = 'https://hobbycoders.com/privacy';

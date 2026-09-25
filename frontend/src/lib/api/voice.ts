@@ -1,5 +1,5 @@
 /**
- * Voice-mode API client (wave VW2 of docs/VOICE_MODE_PLAN.md).
+ * Voice-mode API client (wave VW2).
  *
  * Two groups of endpoints live here:
  *
@@ -105,22 +105,6 @@ export interface VoiceSettingsUpdate {
 	voice_input_mode?: 'auto' | 'toggle';
 	voice_input_silence_seconds?: number;
 	voice_app_tools_enabled?: boolean;
-}
-
-/** An agent a voice call can dispatch, and the leg its worker runs on. */
-export interface VoiceAgent {
-	id: string;
-	name: string;
-	description: string;
-	model: string;
-	provider_id: string | null;
-	provider_name: string;
-}
-
-/** A `model_providers` row eligible to fund a realtime call (VM3). */
-export interface VoiceProvider {
-	id: string;
-	name: string;
 }
 
 export interface VoiceExecutionContext {
@@ -264,15 +248,6 @@ export async function isVoiceEnabled(): Promise<boolean> {
 // ============================================================================
 // Providers + session creation (VW1)
 // ============================================================================
-
-export function getVoiceProviders(): Promise<VoiceProvider[]> {
-	return api.get<VoiceProvider[]>('/voice/providers');
-}
-
-/** The agents a voice call can dispatch (voice assignment under Agents → Provider models). */
-export function getVoiceAgents(): Promise<VoiceAgent[]> {
-	return api.get<VoiceAgent[]>('/voice/agents');
-}
 
 /**
  * Fetch a short spoken sample for `voice` (VM21 settings preview).

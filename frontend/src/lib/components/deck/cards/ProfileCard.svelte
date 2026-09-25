@@ -76,7 +76,6 @@
 	}
 
 	interface Props {
-		mobile?: boolean;
 		/** When embedded in the Build page, render the header-less card grid
 		 *  while keeping the same editor form. */
 		embedded?: boolean;
@@ -88,7 +87,6 @@
 	}
 
 	let {
-		mobile = false,
 		embedded = false,
 		onDetailChange,
 		initialSelectedId
@@ -388,9 +386,6 @@
 	}
 
 	// Agent helpers
-	const builtinAgentIds = $derived(allSubagents.filter(a => a.is_builtin).map(a => a.id));
-	const customAgents = $derived(allSubagents.filter(a => !a.is_builtin));
-
 	function toggleAgent(agentId: string) {
 		if (profileForm.enabled_agents.includes(agentId)) {
 			profileForm.enabled_agents = profileForm.enabled_agents.filter((id) => id !== agentId);
@@ -790,8 +785,6 @@
 				{toolSelectionMode}
 				{groups}
 				{allSubagents}
-				{builtinAgentIds}
-				{customAgents}
 				{templates}
 				{toolSurface}
 				{toolsLoading}

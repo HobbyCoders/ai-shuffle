@@ -90,29 +90,6 @@ export const projectAgents = {
 		}
 	},
 
-	/**
-	 * Load a specific agent with full details
-	 */
-	async selectAgent(projectId: string, agentName: string): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
-			const selectedAgent = await projectAgentsApi.getProjectAgent(projectId, agentName);
-			_update((state) => ({ ...state, selectedAgent, loading: false }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load agent details';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
-	},
-
-	/**
-	 * Clear selected agent
-	 */
-	clearSelectedAgent(): void {
-		_update((state) => ({ ...state, selectedAgent: null }));
-	},
-
 	// ========================================================================
 	// Agent CRUD Operations
 	// ========================================================================
@@ -135,66 +112,6 @@ export const projectAgents = {
 			return agent;
 		} catch (e) {
 			const error = e instanceof Error ? e.message : 'Failed to create agent';
-			_update((state) => ({ ...state, error, saving: false }));
-			throw e;
-		}
-	},
-
-	/**
-	 * Update an existing agent
-	 */
-	async updateAgent(
-		projectId: string,
-		agentName: string,
-		data: UpdateProjectAgentRequest
-	): Promise<ProjectAgent> {
-		_update((state) => ({ ...state, saving: true, error: null }));
-
-		try {
-			const agent = await projectAgentsApi.updateProjectAgent(projectId, agentName, data);
-			_update((state) => ({
-				...state,
-				agents: state.agents.map((a) => (a.name === agentName ? agent : a)),
-				selectedAgent:
-					state.selectedAgent?.name === agentName
-						? { ...state.selectedAgent, ...agent, ...data }
-						: state.selectedAgent,
-				saving: false
-			}));
-			return agent;
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to update agent';
-			_update((state) => ({ ...state, error, saving: false }));
-			throw e;
-		}
-	},
-
-	/**
-	 * Rename an agent
-	 */
-	async renameAgent(
-		projectId: string,
-		oldName: string,
-		newName: string
-	): Promise<ProjectAgent> {
-		_update((state) => ({ ...state, saving: true, error: null }));
-
-		try {
-			const agent = await projectAgentsApi.renameProjectAgent(projectId, oldName, newName);
-			_update((state) => ({
-				...state,
-				agents: state.agents
-					.map((a) => (a.name === oldName ? agent : a))
-					.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())),
-				selectedAgent:
-					state.selectedAgent?.name === oldName
-						? { ...state.selectedAgent, name: newName, file_path: agent.file_path }
-						: state.selectedAgent,
-				saving: false
-			}));
-			return agent;
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to rename agent';
 			_update((state) => ({ ...state, error, saving: false }));
 			throw e;
 		}

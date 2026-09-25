@@ -170,10 +170,6 @@ export async function createAutomation(data: AutomationCreate): Promise<Automati
 	return api.post<Automation>('/automations', data);
 }
 
-export async function getAutomation(id: string): Promise<Automation> {
-	return api.get<Automation>(`/automations/${id}`);
-}
-
 export async function updateAutomation(id: string, data: AutomationUpdate): Promise<Automation> {
 	return api.patch<Automation>(`/automations/${id}`, data);
 }
@@ -194,16 +190,8 @@ export async function triggerAutomation(id: string): Promise<any> {
 	return api.post<any>(`/automations/${id}/trigger`);
 }
 
-export async function testAutomation(id: string): Promise<AutomationTestResult> {
-	return api.post<AutomationTestResult>(`/automations/${id}/test`);
-}
-
 export async function getAutomationRuns(id: string, limit = 50, offset = 0): Promise<AutomationRun[]> {
 	return api.get<AutomationRun[]>(`/automations/${id}/runs?limit=${limit}&offset=${offset}`);
-}
-
-export async function getAutomationRun(automationId: string, runId: string): Promise<AutomationRun> {
-	return api.get<AutomationRun>(`/automations/${automationId}/runs/${runId}`);
 }
 
 export async function getAutomationStats(id: string): Promise<AutomationStats> {

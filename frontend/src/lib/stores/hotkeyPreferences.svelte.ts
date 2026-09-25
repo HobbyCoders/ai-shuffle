@@ -173,40 +173,6 @@ function updatePreference<K extends keyof HotkeyPreferences>(
 	});
 }
 
-/**
- * Reset all preferences to defaults
- */
-function reset(): void {
-	_state = DEFAULT_PREFERENCES;
-	_notifySubscribers();
-	saveToLocalStorage(DEFAULT_PREFERENCES);
-	saveToServer(DEFAULT_PREFERENCES);
-}
-
-/**
- * Get current value of a preference (non-reactive)
- */
-function getValue<K extends keyof HotkeyPreferences>(key: K): HotkeyPreferences[K] {
-	return _state[key];
-}
-
-/**
- * Sync preferences from server (call after authentication)
- * Server is the source of truth - if server has different data, update local
- * If server is empty but local has data, push local to server (migration)
- */
-async function syncFromServer(): Promise<void> {
- await preferenceSync.refresh(SERVER_PREFERENCE_KEY);
-}
-
-/**
- * Legacy load function - now just calls syncFromServer
- * Kept for backward compatibility with existing code
- */
-async function load(): Promise<void> {
-	return syncFromServer();
-}
-
 // ============================================
 // Exported Store
 // ============================================
@@ -218,11 +184,7 @@ export const hotkeyPreferences = {
 
 	subscribe,
 
-	load,
-	syncFromServer,
 	updatePreference,
-	reset,
-	getValue,
 
 	// Convenience setters
 	setGlobalSttEnabled: (value: boolean) => updatePreference('globalSttEnabled', value),

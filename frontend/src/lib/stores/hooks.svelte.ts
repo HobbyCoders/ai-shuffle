@@ -76,17 +76,6 @@ export const hooks = {
 	// ========================================================================
 
 	/**
-	 * Load hooks for a project (includes app-level hooks)
-	 */
-	async loadProjectHooks(projectId: string): Promise<void> {
-		_update((state) => ({ ...state, currentProjectId: projectId }));
-		return withLoading(_update, async () => {
-			const hooksData = await api.getProjectHooks(projectId);
-			_update((state) => ({ ...state, hooks: hooksData }));
-		}, 'Failed to load hooks');
-	},
-
-	/**
 	 * Load app-level hooks only (no project context)
 	 */
 	async loadAppHooks(): Promise<void> {
@@ -221,16 +210,6 @@ export const hooks = {
 	// ========================================================================
 
 	/**
-	 * Load all plugin-contributed hooks
-	 */
-	async loadPluginHooks(): Promise<void> {
-		return withLoading(_update, async () => {
-			const pluginHooks = await api.getPluginHooks();
-			_update((state) => ({ ...state, pluginHooks }));
-		}, 'Failed to load plugin hooks');
-	},
-
-	/**
 	 * Load all hooks (project + app + plugin)
 	 */
 	async loadAll(projectId: string): Promise<void> {
@@ -269,16 +248,6 @@ export const hooks = {
 		_notifySubscribers();
 	},
 
-	/**
-	 * Set current project (for switching without reloading)
-	 */
-	setCurrentProject(projectId: string | null): void {
-		_update((state) => ({
-			...state,
-			currentProjectId: projectId,
-			hooks: projectId === state.currentProjectId ? state.hooks : []
-		}));
-	}
 };
 
 // ============================================================================

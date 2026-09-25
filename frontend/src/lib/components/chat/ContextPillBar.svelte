@@ -356,7 +356,6 @@
 {#if $activeSession.mode !== 'chat' && $activeSession.project}
 	<CreateBranchModal
 		open={showCreateBranchModal}
-		projectId={$activeSession.project}
 		onClose={() => (showCreateBranchModal = false)}
 		onCreated={() => git.refreshStatus()}
 	/>

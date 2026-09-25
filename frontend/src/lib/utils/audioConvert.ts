@@ -24,13 +24,6 @@ function getAudioContextCtor(): AudioContextCtor | null {
 }
 
 /**
- * Whether WAV conversion is possible in this environment (Web Audio API present).
- */
-export function canConvertToWav(): boolean {
-	return getAudioContextCtor() !== null && typeof OfflineAudioContext !== 'undefined';
-}
-
-/**
  * Decode an arbitrary audio Blob and re-encode it as a 16 kHz mono WAV Blob.
  *
  * Throws if the audio cannot be decoded (caller should fall back to uploading

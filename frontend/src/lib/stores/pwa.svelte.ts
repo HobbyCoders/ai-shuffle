@@ -293,12 +293,6 @@ export const pwa = {
 		}
 	},
 
-	async clearCache() {
-		if (_state.serviceWorkerRegistration?.active) {
-			_state.serviceWorkerRegistration.active.postMessage({ type: 'CLEAR_CACHE' });
-		}
-	},
-
 	async registerServiceWorker() {
 		return registerServiceWorker();
 	},

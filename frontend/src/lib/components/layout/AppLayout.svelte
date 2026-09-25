@@ -29,10 +29,8 @@
 		isAdmin?: boolean;
 		onNewSession: () => void;
 		onSettledOpenSession: () => void;
-		onNewSessionForProject?: (projectId: string) => void;
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
-		onOpenPlugins?: () => void;
 		onOpenSpotlight?: () => void;
 	}
 
@@ -40,10 +38,8 @@
 		isAdmin = false,
 		onNewSession,
 		onSettledOpenSession,
-		onNewSessionForProject,
 		onOpenSession,
 		onOpenFeature,
-		onOpenPlugins,
 		onOpenSpotlight
 	}: Props = $props();
 
@@ -159,9 +155,6 @@
 
 		<MainPanel
 			{onOpenSession}
-			{onOpenPlugins}
-			{onNewSession}
-			{onNewSessionForProject}
 			sidebarCollapsed={$sidebarCollapsed}
 			onToggleSidebar={() => layout.toggleSidebar()}
 		/>

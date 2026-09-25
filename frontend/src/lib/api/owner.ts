@@ -19,7 +19,7 @@ export interface OwnerStatus {
 	min_length: number;
 }
 
-export function isOwnerStatus(value: unknown): value is OwnerStatus {
+function isOwnerStatus(value: unknown): value is OwnerStatus {
 	if (!value || typeof value !== 'object') return false;
 	const v = value as Record<string, unknown>;
 	return ['password_set', 'setup_allowed', 'required', 'trusted_lan', 'login_available']

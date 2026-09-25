@@ -1,7 +1,7 @@
 /**
  * V2 session reducer — PURE `(state, wireEvent) -> state`.
  *
- * V2 Phase 1 (docs/V2_PHASE1_DESIGN.md §6). For `v2_stream` sessions the
+ * V2 Phase 1. For `v2_stream` sessions the
  * transcript is rebuilt deterministically from the append-only event log
  * (`GET /api/v1/sessions/{id}/events`) instead of the poller + 3-phase merge.
  *
@@ -248,7 +248,7 @@ function findSubagentByTask(
  * it gets a paragraph break. Every other boundary (a coalescer splitting one
  * block mid-sentence) is untouched.
  */
-export function joinThinking(previous: string, chunk: string): string {
+function joinThinking(previous: string, chunk: string): string {
 	if (!previous) return chunk;
 	if (previous.trimEnd().endsWith('**') && chunk.trimStart().startsWith('**')) {
 		return `${previous.trimEnd()}\n\n${chunk.trimStart()}`;

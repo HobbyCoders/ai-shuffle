@@ -8,7 +8,7 @@
  * - Session rewind and reload
  * - Session takeover (lock acquisition)
  *
- * Plain .ts file — no $state/$derived/$effect runes (see KNOWN_ISSUES.md Root Cause 10).
+ * Plain .ts file — no $state/$derived/$effect runes (rune-free so it can be imported before component init).
  */
 
 import type { ActiveSessionState } from '../active-session';
@@ -83,11 +83,6 @@ export function createDraftManager(deps: DraftManagerDeps) {
 					systemSubtype: subtype,
 				}]
 			}));
-		},
-
-		/** @deprecated Use clearError() instead. Kept for backward compatibility. */
-		acknowledgeError() {
-			this.clearError();
 		},
 
 		/** Rewind session to a specific message. The rewind command is executed

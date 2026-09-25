@@ -42,14 +42,6 @@
 	import SystemTab from './settings/SystemTab.svelte';
 	import LogsTab from './settings/LogsTab.svelte';
 
-	interface Props {
-		mobile?: boolean;
-	}
-
-	let {
-		mobile = false
-	}: Props = $props();
-
 	// Navigation — rail mirrors the mockup's information architecture.
 	type Tab = 'account' | 'chat' | 'voice' | 'providers' | 'license' | 'api' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');

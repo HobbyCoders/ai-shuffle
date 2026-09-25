@@ -20,7 +20,7 @@ import {
 import { providerGlyphKind, type ProviderGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
 
 /** Stable bucket key for the native Claude catalog. */
-export const NATIVE_GROUP_KEY = '__claude__';
+const NATIVE_GROUP_KEY = '__claude__';
 
 export interface PickerGroup {
 	/** Stable bucket identity (provider id, or the native sentinel). */

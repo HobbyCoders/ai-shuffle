@@ -33,19 +33,16 @@
 	--color-primary-foreground: var(--primary-foreground);
 
 	--color-secondary: var(--secondary);
-	--color-secondary-foreground: var(--secondary-foreground);
 
 	--color-destructive: var(--destructive);
 	--color-destructive-foreground: var(--destructive-foreground);
 
 	--color-success: var(--success);
-	--color-success-foreground: var(--success-foreground);
 
 	--color-warning: var(--warning);
 	--color-warning-foreground: var(--warning-foreground);
 
 	--color-info: var(--info);
-	--color-info-foreground: var(--info-foreground);
 
 	--color-muted: var(--muted);
 	--color-muted-foreground: var(--muted-foreground);
@@ -53,30 +50,10 @@
 	--color-accent: var(--accent);
 	--color-accent-foreground: var(--accent-foreground);
 
-	--color-popover: var(--popover);
-	--color-popover-foreground: var(--popover-foreground);
-
 	--color-card: var(--card);
-	--color-card-foreground: var(--card-foreground);
 
 	--color-selection: var(--selection);
-	--color-selection-ring: var(--selection-ring);
-	--color-selection-glow: var(--selection-glow);
 	--color-selection-text: var(--selection-text);
-
-	/* Studio Noir token pass-through */
-	--color-subtle-foreground: var(--subtle-foreground);
-	--color-border-strong: var(--border-strong);
-
-	--color-sidebar: var(--sidebar);
-	--color-sidebar-foreground: var(--sidebar-foreground);
-	--color-sidebar-border: var(--sidebar-border);
-	--color-sidebar-accent: var(--sidebar-accent);
-	--color-sidebar-accent-active: var(--sidebar-accent-active);
-	--color-sidebar-muted: var(--sidebar-muted);
-
-	--color-scrim: var(--scrim);
-	--color-code-bg: var(--code-bg);
 
 	/* Radius scale keyed off the --radius token. `rounded-sm` keeps
 	   Tailwind's default 0.25rem: it is the v4 name for what v3 called a
@@ -87,33 +64,12 @@
 	/* Utility names deliberately match the token names (`shadow-s` →
 	   `var(--shadow-s)`, defined in @layer base below). */
 	--shadow-s: var(--shadow-s);
-	--shadow-m: var(--shadow-m);
-	--shadow-l: var(--shadow-l);
 	--shadow-selection: var(--selection-shadow);
-	--shadow-selection-subtle: var(--selection-shadow-subtle);
 
 	--background-color-hover-overlay: var(--hover-overlay);
-	--background-color-active-overlay: var(--active-overlay);
-	--background-color-input-bg: var(--input-bg);
-	--background-color-input-hover: var(--input-bg-hover);
-	--background-color-input-focus: var(--input-bg-focus);
-	--background-color-status-success: var(--status-success-bg);
-	--background-color-status-warning: var(--status-warning-bg);
-	--background-color-status-error: var(--status-error-bg);
-	--background-color-status-info: var(--status-info-bg);
-	--background-color-selection: var(--selection-bg);
 	--background-color-selection-emphasis: var(--selection-bg-emphasis);
 
-	--border-color-subtle: var(--border-subtle);
-	--border-color-input-border: var(--input-border);
-	--border-color-input-hover: var(--input-border-hover);
-	--border-color-status-success: var(--status-success-border);
-	--border-color-status-warning: var(--status-warning-border);
-	--border-color-status-error: var(--status-error-border);
-	--border-color-status-info: var(--status-info-border);
 	--border-color-selection: var(--selection-ring);
-
-	--text-color-placeholder: var(--input-placeholder);
 }
 
 @layer base {
@@ -124,36 +80,6 @@
 	.dark {
 		/* Background colors */
 		--background: oklch(0.145 0.004 240);
-
-		/* AI Shuffle Palette - Welcome Page (teal, harmonized with --primary) */
-		--accent-cyan: oklch(0.72 0.14 180);
-		--accent-cyan-dim: oklch(0.60 0.115 180);
-		--accent-cyan-bright: oklch(0.82 0.13 180);
-		--accent-glow: oklch(0.72 0.14 180 / 0.3);
-		--accent-glow-strong: oklch(0.72 0.14 180 / 0.5);
-		--card-surface-welcome: oklch(0.178 0.005 240);
-		--card-bg-welcome: oklch(0.145 0.004 240);
-
-		/* Legacy aliases for compatibility */
-		--gold: var(--accent-cyan);
-		--gold-dim: var(--accent-cyan-dim);
-		--gold-bright: var(--accent-cyan-bright);
-		--gold-glow: var(--accent-glow);
-		--gold-glow-strong: var(--accent-glow-strong);
-
-		/* Dealer Button */
-		--dealer-white: #f8f6f0;
-		--dealer-cream: #e8e4d9;
-		--dealer-shadow: #d4d0c5;
-		--dealer-text: #1a1a1a;
-
-		/* Felt (casino table surface) */
-		--felt: oklch(0.165 0.005 240);
-		--felt-deep: oklch(0.125 0.005 240);
-
-		/* Menu Card */
-		--menu-card-bg: oklch(0.155 0.005 240);
-		--menu-card-border: oklch(1 0 0 / 0.085);
 
 		/* Display font */
 		--font-display: 'Playfair Display', Georgia, serif;
@@ -175,16 +101,12 @@
 		--muted: oklch(0.225 0.006 240);
 		--muted-foreground: oklch(0.705 0.008 240);
 		--subtle-foreground: oklch(0.575 0.008 240);
-		--muted-light: oklch(0.28 0.006 240);
-		--muted-dark: oklch(0.17 0.005 240);
-		--muted-border: color-mix(in oklch, var(--muted) 60%, var(--border));
 
 		/* Accent for hover states */
 		--accent: oklch(0.24 0.007 240);
 		--accent-foreground: oklch(0.97 0.003 240);
 
 		/* Studio Noir accent set */
-		--amber: oklch(0.80 0.145 78);
 		--emerald: oklch(0.76 0.15 155);
 		--rose: oklch(0.70 0.175 20);
 		--blue: oklch(0.72 0.115 250);
@@ -197,7 +119,6 @@
 		--warning: oklch(0.80 0.145 78);
 		--warning-foreground: oklch(0.22 0.05 78);
 		--info: oklch(0.72 0.115 250);
-		--info-foreground: oklch(0.18 0.04 250);
 
 		/* Borders and inputs */
 		--border: oklch(1 0 0 / 0.085);
@@ -214,11 +135,6 @@
 		--sidebar-muted: oklch(0.68 0.008 240);
 
 		/* Studio Noir surface effects */
-		--glass: oklch(0.24 0.006 240 / 0.55);
-		/* Opaque stand-in used wherever the blur is switched off (see the
-		   compositing-budget block below). */
-		--glass-solid: oklch(0.21 0.006 240);
-		--glass-highlight: oklch(1 0 0 / 0.09);
 		--glow: oklch(0.72 0.14 180 / 0.30);
 		--code-bg: oklch(0.125 0.005 240);
 		--scrim: oklch(1 0 0 / 0.04);
@@ -235,32 +151,19 @@
 		/* Scrollbar colors */
 		--scrollbar-thumb: oklch(0.32 0.006 240);
 		--scrollbar-thumb-hover: oklch(0.42 0.006 240);
-		--scrollbar-track: transparent;
 
 		/* Glass effects (derived from theme variables for preset compatibility) */
 		--glass-bg: color-mix(in oklch, var(--card) 85%, transparent);
 		--glass-border: color-mix(in oklch, var(--border) 40%, transparent);
-		--glass-blur: 12px;
 
 		/* Border variations */
 		--border-subtle: oklch(1 0 0 / 0.06);
-		--border-medium: oklch(1 0 0 / 0.12);
 
 		/* Primary variations */
 		--primary-10: oklch(0.72 0.14 180 / 0.1);
 		--primary-20: oklch(0.72 0.14 180 / 0.2);
-		--primary-30: oklch(0.72 0.14 180 / 0.3);
-
-		/* Floating panel */
-		--panel-bg: oklch(0.178 0.005 240 / 0.85);
-		--panel-bg-solid: oklch(0.178 0.005 240);
-		--panel-border: oklch(1 0 0 / 0.10);
-		--panel-shadow-inset: oklch(0.95 0 0 / 0.03);
-		--panel-shadow-outer: oklch(0 0 0 / 0.4);
-		--panel-shadow-inner: oklch(0 0 0 / 0.2);
 
 		/* Glow effect - uses theme primary color */
-		--glow-color: color-mix(in srgb, var(--primary) 40%, transparent);
 		--glow-color-soft: color-mix(in srgb, var(--primary) 30%, transparent);
 
 		/* Selection state system - derived from --ring for preset compatibility */
@@ -316,20 +219,15 @@
 		   Purple, same hue as --feature-agents, so a merged PR reads apart
 		   from success green at a glance. */
 		--status-merged: oklch(0.74 0.145 300);
-		--status-merged-fg: oklch(0.18 0.045 300);
 
 		/* Chip/badge colors - derived from theme primary */
 		--chip-primary-bg: color-mix(in srgb, var(--primary) 15%, transparent);
-		--chip-primary-text: var(--primary);
-		--chip-primary-border: color-mix(in srgb, var(--primary) 30%, transparent);
 
 		/* Modal overlay */
 		--modal-overlay: oklch(0 0 0 / 0.6);
-		--modal-overlay-blur: oklch(0 0 0 / 0.4);
 
 		/* Button gradients */
 		--button-primary-gradient: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.04) c h));
-		--button-success-gradient: linear-gradient(135deg, var(--success), oklch(from var(--success) calc(l - 0.04) c h));
 
 		/* Input states - dark mode (derived from theme variables) */
 		--input-bg: color-mix(in oklch, var(--background) 70%, var(--muted) 30%);
@@ -337,22 +235,6 @@
 		--input-bg-focus: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
 		--input-border: var(--border);
 		--input-border-hover: color-mix(in oklch, var(--border) 70%, var(--primary) 30%);
-		--input-placeholder: var(--muted-foreground);
-
-		/* Text on dark backgrounds */
-		--text-on-dark: oklch(0.965 0.003 240);
-		--text-on-dark-muted: oklch(0.705 0.008 240);
-
-		/* Terminal colors */
-		--terminal-bg: oklch(0.125 0.005 240);
-		--terminal-fg: oklch(0.90 0.003 240);
-		--terminal-cursor: oklch(0.965 0.003 240);
-		--terminal-red: oklch(0.70 0.175 20);
-		--terminal-green: oklch(0.76 0.15 155);
-		--terminal-yellow: oklch(0.80 0.145 78);
-		--terminal-blue: oklch(0.72 0.115 250);
-		--terminal-cyan: oklch(0.72 0.14 180);
-		--terminal-magenta: oklch(0.72 0.15 320);
 
 		/* Chart/visualization colors */
 		--chart-1: oklch(0.72 0.14 180);
@@ -360,8 +242,6 @@
 		--chart-3: oklch(0.72 0.145 300);
 		--chart-4: oklch(0.80 0.145 78);
 		--chart-5: oklch(0.76 0.15 155);
-		--chart-6: oklch(0.70 0.175 20);
-		--chart-7: oklch(0.72 0.13 340);
 
 		/* Typography - font families (can be overridden by theme presets) */
 		--font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -376,36 +256,6 @@
 		/* Background colors */
 		--background: oklch(0.995 0 0);
 		--foreground: oklch(0.21 0.005 250);
-
-		/* AI Shuffle Palette - Light theme variant (teal, harmonized with --primary) */
-		--accent-cyan: oklch(0.60 0.115 180);
-		--accent-cyan-dim: oklch(0.50 0.10 180);
-		--accent-cyan-bright: oklch(0.68 0.125 180);
-		--accent-glow: oklch(0.60 0.115 180 / 0.25);
-		--accent-glow-strong: oklch(0.60 0.115 180 / 0.4);
-		--card-surface-welcome: oklch(1 0 0);
-		--card-bg-welcome: oklch(0.975 0.002 250);
-
-		/* Legacy aliases for compatibility */
-		--gold: var(--accent-cyan);
-		--gold-dim: var(--accent-cyan-dim);
-		--gold-bright: var(--accent-cyan-bright);
-		--gold-glow: var(--accent-glow);
-		--gold-glow-strong: var(--accent-glow-strong);
-
-		/* Dealer Button - Light theme: subtle gray tones for contrast */
-		--dealer-white: #e8e8e8;
-		--dealer-cream: #d8d8d8;
-		--dealer-shadow: #b8b8b8;
-		--dealer-text: #2a2a2a;
-
-		/* Menu Card - Light theme */
-		--menu-card-bg: oklch(1 0 0);
-		--menu-card-border: oklch(0.21 0.01 250 / 0.11);
-
-		/* Felt (casino table surface) - Light theme: soft gray surface */
-		--felt: oklch(0.968 0.002 250);
-		--felt-deep: oklch(0.94 0.003 250);
 
 		/* Elevated surfaces */
 		--card: oklch(1 0 0);
@@ -423,16 +273,12 @@
 		--muted: oklch(0.965 0.002 250);
 		--muted-foreground: oklch(0.475 0.008 250);
 		--subtle-foreground: oklch(0.565 0.008 250);
-		--muted-light: oklch(0.982 0.001 250);
-		--muted-dark: oklch(0.925 0.004 250);
-		--muted-border: color-mix(in oklch, var(--muted) 60%, var(--border));
 
 		/* Accent for hover states */
 		--accent: oklch(0.955 0.003 250);
 		--accent-foreground: oklch(0.21 0.005 250);
 
 		/* Studio Noir accent set */
-		--amber: oklch(0.63 0.145 62);
 		--emerald: oklch(0.55 0.14 155);
 		--rose: oklch(0.55 0.19 22);
 		--blue: oklch(0.55 0.16 255);
@@ -445,7 +291,6 @@
 		--warning: oklch(0.63 0.145 62);
 		--warning-foreground: oklch(0.22 0.05 62);
 		--info: oklch(0.55 0.16 255);
-		--info-foreground: oklch(0.99 0 0);
 
 		/* Borders and inputs */
 		--border: oklch(0.21 0.01 250 / 0.11);
@@ -462,9 +307,6 @@
 		--sidebar-muted: oklch(0.455 0.008 250);
 
 		/* Studio Noir surface effects */
-		--glass: oklch(1 0 0 / 0.72);
-		--glass-solid: oklch(0.985 0.001 240);
-		--glass-highlight: oklch(1 0 0 / 0.9);
 		--glow: oklch(0.60 0.115 180 / 0.22);
 		--code-bg: oklch(0.975 0.002 250);
 		--scrim: oklch(0.21 0.01 250 / 0.035);
@@ -486,16 +328,7 @@
 		--glass-bg: color-mix(in oklch, var(--card) 85%, transparent);
 		--glass-border: color-mix(in oklch, var(--border) 40%, transparent);
 
-		/* Floating panel */
-		--panel-bg: oklch(1 0 0 / 0.9);
-		--panel-bg-solid: oklch(1 0 0);
-		--panel-border: oklch(0.21 0.01 250 / 0.14);
-		--panel-shadow-inset: oklch(1 0 0 / 0.5);
-		--panel-shadow-outer: oklch(0 0 0 / 0.1);
-		--panel-shadow-inner: oklch(0 0 0 / 0.05);
-
 		/* Glow effect - uses theme primary color */
-		--glow-color: color-mix(in srgb, var(--primary) 30%, transparent);
 		--glow-color-soft: color-mix(in srgb, var(--primary) 20%, transparent);
 
 		/* Selection state system - light theme adjustments */
@@ -512,7 +345,6 @@
 		--hover-overlay: oklch(0.21 0.01 250 / 0.045);
 		--active-overlay: oklch(0.21 0.01 250 / 0.075);
 		--border-subtle: oklch(0.21 0.01 250 / 0.07);
-		--border-medium: oklch(0.21 0.01 250 / 0.14);
 
 		/* ========================================
 		   SEMANTIC UI COLORS - LIGHT THEME
@@ -549,20 +381,15 @@
 		--status-pending-border: oklch(0.565 0.008 250 / 0.25);
 		/* Merged — light theme; darkened the same way the other purples are. */
 		--status-merged: oklch(0.52 0.17 300);
-		--status-merged-fg: oklch(0.99 0 0);
 
 		/* Chip/badge colors - derived from theme primary */
 		--chip-primary-bg: color-mix(in srgb, var(--primary) 12%, transparent);
-		--chip-primary-text: var(--primary);
-		--chip-primary-border: color-mix(in srgb, var(--primary) 25%, transparent);
 
 		/* Modal overlay - light theme */
 		--modal-overlay: oklch(0 0 0 / 0.5);
-		--modal-overlay-blur: oklch(0 0 0 / 0.3);
 
 		/* Button gradients - light theme */
 		--button-primary-gradient: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.06) c h));
-		--button-success-gradient: linear-gradient(135deg, var(--success), oklch(from var(--success) calc(l - 0.06) c h));
 
 		/* Input states - light mode (derived from theme variables) */
 		--input-bg: color-mix(in oklch, var(--background) 70%, var(--muted) 30%);
@@ -570,22 +397,6 @@
 		--input-bg-focus: var(--background);
 		--input-border: var(--border);
 		--input-border-hover: color-mix(in oklch, var(--border) 70%, var(--primary) 30%);
-		--input-placeholder: var(--muted-foreground);
-
-		/* Text on light backgrounds */
-		--text-on-dark: oklch(0.21 0.005 250);
-		--text-on-dark-muted: oklch(0.475 0.008 250);
-
-		/* Terminal colors - light theme */
-		--terminal-bg: oklch(0.975 0.002 250);
-		--terminal-fg: oklch(0.24 0.006 250);
-		--terminal-cursor: oklch(0.21 0.005 250);
-		--terminal-red: oklch(0.55 0.19 22);
-		--terminal-green: oklch(0.55 0.14 155);
-		--terminal-yellow: oklch(0.63 0.145 62);
-		--terminal-blue: oklch(0.55 0.16 255);
-		--terminal-cyan: oklch(0.60 0.115 180);
-		--terminal-magenta: oklch(0.52 0.17 320);
 
 		/* Chart/visualization colors - light theme */
 		--chart-1: oklch(0.60 0.115 180);
@@ -593,19 +404,10 @@
 		--chart-3: oklch(0.52 0.17 300);
 		--chart-4: oklch(0.63 0.145 62);
 		--chart-5: oklch(0.55 0.14 155);
-		--chart-6: oklch(0.55 0.19 22);
-		--chart-7: oklch(0.55 0.16 340);
 
 		/* Primary variations */
 		--primary-10: oklch(0.60 0.115 180 / 0.1);
 		--primary-20: oklch(0.60 0.115 180 / 0.2);
-		--primary-30: oklch(0.60 0.115 180 / 0.3);
-
-		/* Scrollbar track */
-		--scrollbar-track: transparent;
-
-		/* Glass blur */
-		--glass-blur: 12px;
 	}
 
 	/* Theme transition for smooth changes */
@@ -690,34 +492,24 @@
    rails 12px → 8px): blur cost grows with the radius, and the visual difference
    above 8px on these small surfaces is marginal. */
 :root {
-	--fx-glass-backdrop: blur(8px) saturate(150%);
 	--fx-rail-backdrop: blur(8px) saturate(140%);
-	--fx-panel-backdrop: blur(20px);
 	--fx-grain-blend: overlay;
 }
 
 @media (prefers-reduced-transparency: reduce) {
 	:root {
-		--fx-glass-backdrop: none;
 		--fx-rail-backdrop: none;
-		--fx-panel-backdrop: none;
 		--fx-grain-blend: normal;
 		--grain-opacity: 0;
-		--glass: var(--glass-solid);
 		--glass-bg: var(--card);
-		--panel-bg: var(--panel-bg-solid);
 	}
 }
 
 :root[data-fx='low'] {
-	--fx-glass-backdrop: none;
 	--fx-rail-backdrop: none;
-	--fx-panel-backdrop: none;
 	--fx-grain-blend: normal;
 	--grain-opacity: 0;
-	--glass: var(--glass-solid);
 	--glass-bg: var(--card);
-	--panel-bg: var(--panel-bg-solid);
 }
 
 /* Procedural grain overlay for large surfaces.
@@ -816,15 +608,6 @@ code {
 	background-color: var(--accent);
 }
 
-.btn-danger {
-	background-color: var(--destructive);
-	color: var(--destructive-foreground);
-}
-
-.btn-danger:hover {
-	opacity: 0.9;
-}
-
 /* Input styles */
 .input {
 	width: 100%;
@@ -909,14 +692,6 @@ select option {
 
 .card:hover {
 	box-shadow: var(--shadow-m);
-}
-
-/* Subtle text gradient for headings */
-.text-gradient {
-	background: linear-gradient(135deg, var(--foreground), var(--muted-foreground));
-	-webkit-background-clip: text;
-	-webkit-text-fill-color: transparent;
-	background-clip: text;
 }
 
 /* Markdown prose styling (Studio Noir body metrics) */
@@ -1095,8 +870,6 @@ select option {
    ======================================== */
 
 :root {
-	--breakpoint-mobile: 640px;
-	--breakpoint-tablet: 1024px;
 }
 
 /* ========================================
@@ -1138,12 +911,7 @@ select option {
 		font-size: 16px;
 	}
 
-	/* Larger touch targets on mobile */
-	.touch-target {
-		min-width: 44px;
-		min-height: 44px;
 	}
-}
 
 /* ========================================
    ACCESSIBILITY: REDUCED MOTION
@@ -1159,11 +927,6 @@ select option {
 		scroll-behavior: auto !important;
 	}
 
-	/* Disable specific animations */
-	.panel-slide-in {
-		animation: none !important;
-	}
-
 	/* The streaming cursor is injected as raw HTML by AssistantMessage, so it
 	   carries Tailwind's animate-pulse and is outside any component's scoped
 	   styles — it needs an explicit global stop, and must settle FULLY VISIBLE
@@ -1173,129 +936,11 @@ select option {
 		opacity: 1 !important;
 	}
 
-	.theme-toggle-icon.rotating {
-		transform: none !important;
 	}
-
-	/* Keep visual feedback but remove motion */
-	.context-container {
-		transition: none !important;
-	}
-
-	.floating-panel {
-		animation: none !important;
-	}
-}
 
 /* Touch-friendly tap targets */
 button, a, .clickable {
 	-webkit-tap-highlight-color: transparent;
-}
-
-/* Prevent text selection on interactive elements */
-.no-select {
-	-webkit-user-select: none;
-	user-select: none;
-}
-
-/* Safe area insets for notched devices */
-@supports (padding-bottom: env(safe-area-inset-bottom)) {
-	.safe-bottom {
-		padding-bottom: env(safe-area-inset-bottom);
-	}
-}
-
-/* Smooth scrolling on mobile */
-.smooth-scroll {
-	-webkit-overflow-scrolling: touch;
-	scroll-behavior: smooth;
-}
-
-/* Floating Panel System - Glass morphism sidebar */
-.floating-panel {
-	background: var(--panel-bg);
-	backdrop-filter: var(--fx-panel-backdrop);
-	-webkit-backdrop-filter: var(--fx-panel-backdrop);
-	border: 1px solid var(--panel-border);
-	box-shadow:
-		0 0 0 1px var(--panel-shadow-inset) inset,
-		0 8px 32px var(--panel-shadow-outer),
-		0 2px 8px var(--panel-shadow-inner);
-}
-
-/* Panel slide-in animation */
-.panel-slide-in {
-	animation: panelSlideIn 200ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-@keyframes panelSlideIn {
-	from {
-		opacity: 0;
-		transform: translateX(-12px);
-	}
-	to {
-		opacity: 1;
-		transform: translateX(0);
-	}
-}
-
-/* Glow effect for active items */
-.shadow-glow {
-	box-shadow:
-		0 0 12px var(--glow-color),
-		0 0 4px var(--glow-color-soft);
-}
-
-/* Theme toggle button animation */
-.theme-toggle-icon {
-	transition: transform 0.3s ease, opacity 0.3s ease;
-}
-
-.theme-toggle-icon.rotating {
-	transform: rotate(180deg);
-}
-
-/* Custom scrollbar styling */
-.custom-scrollbar::-webkit-scrollbar {
-	width: 8px;
-}
-.custom-scrollbar::-webkit-scrollbar-track {
-	background: var(--scrollbar-track);
-	border-radius: calc(var(--radius, 0.75rem) * 0.33);
-}
-.custom-scrollbar::-webkit-scrollbar-thumb {
-	background: var(--scrollbar-thumb);
-	border-radius: calc(var(--radius, 0.75rem) * 0.33);
-}
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-	background: var(--primary-30);
-}
-
-/* Floating Island Input Container */
-.floating-island {
-	background-color: var(--input);
-	border: 1px solid var(--border);
-	border-radius: 1rem;
-	box-shadow: var(--shadow-m);
-	transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
-}
-
-.floating-island:focus-within {
-	border-color: var(--ring);
-	box-shadow: var(--shadow-l), 0 0 0 2px oklch(from var(--ring) l c h / 0.15);
-}
-
-/* Dark mode floating island - slightly elevated */
-.dark .floating-island {
-	background-color: oklch(0.16 0.01 260);
-	border-color: oklch(0.32 0.012 260);
-}
-
-/* Light mode floating island - pure white with subtle shadow */
-.light .floating-island {
-	background-color: oklch(1 0 0);
-	border-color: oklch(0.82 0.01 260);
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 /* ── Generated media (images / video / audio rendered inline in chat) ────────
@@ -1373,9 +1018,6 @@ button.ctx-chip:disabled {
 	flex-shrink: 0;
 	color: var(--subtle-foreground);
 }
-.ctx-chip.ctx-chip-icon {
-	padding: 0 5px;
-}
 .ctx-chip .ctx-chip-label {
 	min-width: 0;
 	overflow: hidden;
@@ -1431,7 +1073,6 @@ button.ctx-chip:disabled {
 	background: var(--border-strong);
 	flex-shrink: 0;
 }
-
 
 /* ============================================================
    DESKTOP APP CHROME
@@ -1530,9 +1171,6 @@ html.desktop .topbar {
 }
 html.desktop .topbar .tb-icon:hover {
 	background: var(--sidebar-accent);
-}
-html.desktop .topbar .tb-sep {
-	background: var(--sidebar-border);
 }
 html.desktop .sidebar-slot:not(.floating) {
 	border-right-color: transparent;

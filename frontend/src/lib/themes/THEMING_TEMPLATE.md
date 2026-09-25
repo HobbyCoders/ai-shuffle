@@ -49,8 +49,6 @@
 │  --card                │ Elevated surfaces (cards, panels)      │
 │  --popover             │ Floating elements (dropdowns, modals)  │
 │  --muted               │ Subdued backgrounds (inputs, headers)  │
-│  --muted-light         │ Lighter muted variant                  │
-│  --muted-dark          │ Darker muted variant                   │
 ├─────────────────────────────────────────────────────────────────┤
 │  TEXT                                                           │
 ├─────────────────────────────────────────────────────────────────┤
@@ -94,7 +92,6 @@ These should be defined using `color-mix()` from core variables:
 --glass-border: color-mix(in oklch, var(--border) 40%, transparent);
 
 /* Glow effects */
---glow-color: color-mix(in srgb, var(--primary) 40%, transparent);
 --glow-color-soft: color-mix(in srgb, var(--primary) 30%, transparent);
 
 /* Hover overlay */
@@ -104,7 +101,6 @@ These should be defined using `color-mix()` from core variables:
 /* Primary with opacity */
 --primary-10: color-mix(in oklch, var(--primary) 10%, transparent);
 --primary-20: color-mix(in oklch, var(--primary) 20%, transparent);
---primary-30: color-mix(in oklch, var(--primary) 30%, transparent);
 
 /* Status backgrounds */
 --status-success-bg: color-mix(in oklch, var(--success) 15%, transparent);
@@ -285,8 +281,8 @@ Use glass effects for floating UI that overlays content:
 ```css
 .floating-panel {
   background: var(--glass-bg);
-  backdrop-filter: blur(var(--glass-blur, 12px));
-  -webkit-backdrop-filter: blur(var(--glass-blur, 12px));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--glass-border);
 }
 ```
@@ -532,24 +528,9 @@ Use glass effects for floating UI that overlays content:
 .tool-badge-edit { background: color-mix(in oklch, var(--tool-edit) 15%, transparent); color: var(--tool-edit); }
 ```
 
-### Terminal/Code
+### Code
 
 ```css
-/* Terminal container */
-.terminal {
-  background: var(--terminal-bg);
-  color: var(--terminal-fg);
-  font-family: var(--font-mono);
-}
-
-/* Use dedicated terminal colors for syntax */
-.terminal-red { color: var(--terminal-red); }
-.terminal-green { color: var(--terminal-green); }
-.terminal-yellow { color: var(--terminal-yellow); }
-.terminal-blue { color: var(--terminal-blue); }
-.terminal-cyan { color: var(--terminal-cyan); }
-.terminal-magenta { color: var(--terminal-magenta); }
-
 /* Code blocks */
 .code-block {
   background: var(--muted);

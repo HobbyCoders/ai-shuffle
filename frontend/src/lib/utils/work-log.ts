@@ -143,7 +143,7 @@ const GROUPABLE_SYSTEM_SUBTYPES = new Set([
 	'task_notification'
 ]);
 
-export function isGroupableSystem(msg: ChatMessage): boolean {
+function isGroupableSystem(msg: ChatMessage): boolean {
 	return msg.type === 'system' && GROUPABLE_SYSTEM_SUBTYPES.has(msg.systemSubtype || '');
 }
 
@@ -176,7 +176,7 @@ function isSettledSubagent(msg: ChatMessage): boolean {
 }
 
 /** A terminal retry failure folds only after recovery or supersession. */
-export function isFoldableRetryCard(msg: ChatMessage): boolean {
+function isFoldableRetryCard(msg: ChatMessage): boolean {
 	if (msg.systemSubtype !== 'provider_retry') return false;
 	if (msg.type !== 'system' && msg.role !== 'system') return false;
 	const data = msg.systemData as Record<string, unknown> | undefined;

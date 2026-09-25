@@ -485,7 +485,6 @@ const wsConn: WsConnection = createWsConnection({
 		if (acceptUserEvent(data, 'chat')) handleMessage(data);
 	},
 	onConnected: () => {
-		console.debug(`[ActiveSession] onConnected: sessionId=${_state.sessionId}, isStreaming=${_state.isStreaming}, hasMessages=${_state.messages.length > 0}`);
 		_update(s => ({ ...s, wsConnected: true, wsReconnectRequired: false, error: null }));
 
 		// A WS (re)connect means the backend is reachable again — heal a boot-time
@@ -858,7 +857,6 @@ export const activeSession = {
 		const mode = reconciledSessionMode(sessionId, sessionsList);
 		if (!mode) return null;
 		if (mode !== _state.mode) {
-			console.debug(`[ActiveSession] reconcileSessionMode: ${_state.mode} -> ${mode} for ${sessionId}`);
 			_update(s => ({ ...s, mode }));
 		}
 		return mode;
@@ -961,7 +959,6 @@ export const activeSession = {
 	clearMessages: draftManager.clearMessages,
 	reloadSession: draftManager.reloadSession,
 	addSystemMessage: draftManager.addSystemMessage,
-	acknowledgeError: draftManager.acknowledgeError,
 	rewindToMessage: draftManager.rewindToMessage,
 	takeOverSession: draftManager.takeOverSession,
 

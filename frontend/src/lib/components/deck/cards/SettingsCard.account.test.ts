@@ -84,8 +84,8 @@ describe('Account settings', () => {
   if (!hadAnimate) delete proto.animate;
  });
 
- it.each([false, true])('omits Downloads and Plugins from settings (mobile=%s)', async (mobile) => {
-  render(SettingsCard, { props: { mobile } });
+ it('omits Downloads and Plugins from settings', async () => {
+  render(SettingsCard);
   await screen.findByDisplayValue('/workspace/projects');
   expect(screen.queryByRole('button', { name: 'Downloads' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Plugins' })).toBeNull();

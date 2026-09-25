@@ -5,7 +5,7 @@
  * - sendPermissionResponse / sendUserQuestionResponse
  * - syncPendingPermissions / syncPendingQuestions
  *
- * Plain .ts file — no $state/$derived/$effect runes (see KNOWN_ISSUES.md Root Cause 10).
+ * Plain .ts file — no $state/$derived/$effect runes (rune-free so it can be imported before component init).
  */
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────

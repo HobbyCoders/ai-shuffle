@@ -7,12 +7,6 @@
 	 * functionality via the `files` store.
 	 */
 	import FilesStudio from '../files/FilesStudio.svelte';
-
-	interface Props {
-		mobile?: boolean;
-	}
-
-	let { mobile = false }: Props = $props();
 </script>
 
 <FilesStudio />

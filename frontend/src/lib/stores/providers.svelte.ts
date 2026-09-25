@@ -1,24 +1,19 @@
 /**
  * Providers Store — unified model-source state for the Settings "Providers" surface.
  *
- * Owns the two state clusters that `SettingsCard.svelte` / `ConnectionsSection.svelte`
- * currently prop-drill (see PROVIDERS_UI_RESTRUCTURE_PLAN.md §2.4, landmine L2):
+ * Owns two state clusters shared by the Settings provider panels:
  *
  *   1. The Anthropic API key integration status. (Claude sign-in is the stock
  *      CLI's own; see `ClaudeCliPanel` and `$lib/api/claude-cli`.)
- *   2. The `model_providers` registry: load / save / toggle / delete / fetch,
- *      lifted from `ConnectionsSection.svelte`. `refreshProviders()` funnels EVERY
- *      mutation through `hydrateModelRegistry()` so the profile editor's model
- *      picker never goes stale (landmine L4).
+ *   2. The `model_providers` registry: load / save / toggle / delete / fetch.
+ *      `refreshProviders()` funnels EVERY mutation through
+ *      `hydrateModelRegistry()` so the profile editor's model picker never
+ *      goes stale.
  *
  * Follows the existing store convention (see `github.svelte.ts`): a single
  * `$state` object + the `createSubscribers` subscribe shim, exposed as an object
  * with a `get current()` getter, `subscribe`, and action methods. Components read
  * the store directly — no prop drill.
- *
- * This chunk (Chunk 2) only CREATES the store; the originals in SettingsCard /
- * ConnectionsSection are untouched here. Chunks 3–5 rewire the components to
- * consume it and delete the lifted originals.
  */
 
 import { apiBase, withAuth } from '$lib/api/runtime';
@@ -95,7 +90,7 @@ let _state = $state<ProvidersState>({ ...initialState });
  */
 let _initialLoadStarted = false;
 
-const { subscribe, update: _update, notifySubscribers: _notifySubscribers, createDerived } =
+const { subscribe, update: _update, notifySubscribers: _notifySubscribers } =
 	createSubscribers<ProvidersState>(
 		() => _state,
 		(v) => {
@@ -115,7 +110,7 @@ export const providers = {
 	subscribe,
 
 	// ------------------------------------------------------------------------
-	// model_providers registry (lifted from ConnectionsSection:454-609)
+	// model_providers registry
 	// ------------------------------------------------------------------------
 
 	/**
@@ -299,9 +294,3 @@ export const providers = {
 		_notifySubscribers();
 	}
 };
-
-// ============================================================================
-// Derived stores
-// ============================================================================
-
-export const modelProvidersList = createDerived(() => _state.providers);

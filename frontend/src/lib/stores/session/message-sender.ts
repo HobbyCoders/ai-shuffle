@@ -2,7 +2,7 @@
  * Message Sender — Send message flow, worktree creation, stop generation, and
  * removal of messages the model hasn't seen yet.
  *
- * Plain .ts file — no $state/$derived/$effect runes (see KNOWN_ISSUES.md Root Cause 10).
+ * Plain .ts file — no $state/$derived/$effect runes (rune-free so it can be imported before component init).
  */
 
 import type { ActiveSessionState } from '../active-session';
@@ -356,7 +356,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 				internal.pendingRequestId = requestId;
 			}
-			console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=${internal.awaitingNewSession}, wsConnected=${wsConn.isConnected()}, sendWhileStreaming=${sendWhileStreaming}`);
 
 			// Optimistic echo, in whichever place the message actually belongs.
 			// While a turn is live the prompt is NOT part of the transcript yet, so

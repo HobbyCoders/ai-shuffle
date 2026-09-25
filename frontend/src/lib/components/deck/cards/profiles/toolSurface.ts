@@ -40,7 +40,7 @@ const KIND_ORDER: ToolGroupKind[] = [
 	'mcp'
 ];
 
-export function isToolSelectionMode(value: unknown): value is ToolSelectionMode {
+function isToolSelectionMode(value: unknown): value is ToolSelectionMode {
 	return typeof value === 'string' && (MODES as string[]).includes(value);
 }
 

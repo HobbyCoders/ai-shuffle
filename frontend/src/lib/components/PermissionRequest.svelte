@@ -18,9 +18,7 @@
 
 	interface Props {
 		request: PermissionRequestData;
-		isFirst?: boolean;
 		queueCount?: number;
-		compact?: boolean;
 		onRespond?: (detail: {
 			request_id: string;
 			decision: 'allow' | 'deny';
@@ -29,7 +27,7 @@
 		}) => void;
 	}
 
-	let { request, isFirst = true, queueCount = 1, compact = false, onRespond }: Props = $props();
+	let { request, queueCount = 1, onRespond }: Props = $props();
 
 	let showDetails = $state(false);
 	/**

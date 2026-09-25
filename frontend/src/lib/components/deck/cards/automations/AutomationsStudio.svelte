@@ -33,7 +33,6 @@
 		onApprove: (approvalId: string) => void;
 		onDeny: (approvalId: string) => void;
 		onClearError: () => void;
-		formatTime: (dateStr: string | null) => string;
 		formatCost: (cost: number) => string;
 		triggerTypeLabel: (type: TriggerType) => string;
 	}
@@ -54,7 +53,6 @@
 		onApprove,
 		onDeny,
 		onClearError,
-		formatTime,
 		formatCost,
 		triggerTypeLabel
 	}: Props = $props();

@@ -1,5 +1,5 @@
 /**
- * Feed-controller tests (docs/V2_PHASE1_DESIGN.md §6).
+ * Feed-controller tests.
  *
  * Two behaviours are pinned here:
  *

@@ -14,10 +14,10 @@ import {
 	formatCountdown,
 	formatFingerprint,
 	isCompleteFingerprint,
+	joiningDeviceCount,
 	looksLikeJoinLink,
 	normalizeFingerprint,
 	parseJoinLink,
-	pendingApprovalCount,
 	relativeTime,
 	secondsUntil
 } from './network-status';
@@ -89,13 +89,13 @@ describe('deriveNetworkState', () => {
 	});
 });
 
-describe('joiningDeviceCount (pendingApprovalCount alias)', () => {
+describe('joiningDeviceCount', () => {
 	it('adds joins and account-pending devices, but only when enrolled', () => {
 		const join = { id: 'j', status: 'pending', device_id: 'd', name: 'n', platform: null, fingerprint: null, legacy_instance_id: null, created_at: null, expires_at: null };
 		const device = { device_id: 'h', name: 'phone', platform: 'android', signing_public: 'AAAA' };
-		expect(pendingApprovalCount(status({ pending_joins: [join], hub: { linked: true, pending_devices: [device, device] } }))).toBe(3);
-		expect(pendingApprovalCount(status({ enrolled: false, pending_joins: [join] }))).toBe(0);
-		expect(pendingApprovalCount(null)).toBe(0);
+		expect(joiningDeviceCount(status({ pending_joins: [join], hub: { linked: true, pending_devices: [device, device] } }))).toBe(3);
+		expect(joiningDeviceCount(status({ enrolled: false, pending_joins: [join] }))).toBe(0);
+		expect(joiningDeviceCount(null)).toBe(0);
 	});
 });
 

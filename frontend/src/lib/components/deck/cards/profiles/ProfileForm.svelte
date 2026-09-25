@@ -75,8 +75,6 @@
 		toolSelectionMode: 'all' | 'none' | 'allow' | 'disallow';
 		groups: GroupState;
 		allSubagents: Subagent[];
-		builtinAgentIds: string[];
-		customAgents: Subagent[];
 		/** Built-in system-prompt templates (GET /agents/templates), for new agents. */
 		templates: AgentTemplate[];
 		/** Live tool surface (GET /tools/surface) driving the picker. */
@@ -105,8 +103,6 @@
 		toolSelectionMode,
 		groups,
 		allSubagents,
-		builtinAgentIds,
-		customAgents,
 		templates,
 		toolSurface,
 		toolsLoading,

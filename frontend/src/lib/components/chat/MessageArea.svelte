@@ -79,8 +79,8 @@
 	import SystemMessageGroup from './SystemMessageGroup.svelte';
 	import ThinkingBlock from './ThinkingBlock.svelte';
 	import CommandMessage from './CommandMessage.svelte';
-	// Note: ToolResultMessage is intentionally not imported - tool_result messages are
-	// always merged into tool_use messages to prevent flickering during streaming
+	// tool_result messages are always merged into tool_use messages to prevent
+	// flickering during streaming, so they have no component of their own.
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import TeamMemberMessage from '$lib/components/TeamMemberMessage.svelte';
@@ -1976,8 +1976,6 @@
 				content={message.content}
 				{gallerySources}
 				timestamp={message.timestamp}
-				messageIndex={messageIndex}
-				messageId={message.id}
 				messageUuid={message.jsonlUuid}
 				sessionId={$activeSession.sessionId}
 				streaming={isStreamAnchor}

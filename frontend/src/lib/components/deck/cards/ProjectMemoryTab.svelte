@@ -39,6 +39,7 @@
 		Download
 	} from 'lucide-svelte';
 	import Banner from '$lib/components/Banner.svelte';
+	import { formatBytes } from '$lib/utils/format-bytes';
 	import './project-tabs.css';
 
 	interface Props {
@@ -207,11 +208,6 @@
 		});
 	}
 
-	function formatSize(bytes: number): string {
-		if (bytes < 1024) return `${bytes} B`;
-		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-	}
 	let remoteChange = $state('');
 	watchResources(['projects'], async () => {
 		const id = projectId;
@@ -310,7 +306,7 @@
 							<p class="mem-empty-line">File is empty. Click to edit.</p>
 						{/if}
 						<div class="mem-meta">
-							<span>{formatSize(file.size)}</span>
+							<span>{formatBytes(file.size)}</span>
 							{#if file.updated_at}<span>Modified {formatDate(file.updated_at)}</span>{/if}
 						</div>
 					</div>
@@ -384,7 +380,7 @@
 							{#each importPreview.items as item (item.relative_path)}
 								<li>
 									<span class="imp-file">{item.relative_path}</span>
-									<span class="imp-size">{formatSize(item.size)}</span>
+									<span class="imp-size">{formatBytes(item.size)}</span>
 									<span class="badge {item.status === 'ready' ? 'success' : 'muted'}">
 										{item.status === 'ready' ? 'Ready' : 'Already exists'}
 									</span>

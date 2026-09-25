@@ -75,34 +75,3 @@ export async function setWorkspaceConfig(workspace_path: string): Promise<import
 export async function validateWorkspacePath(workspace_path: string): Promise<import('./client').WorkspaceValidation> {
 	return api.post('/workspace/validate', { workspace_path });
 }
-
-export interface AuditLogEntry {
-	id: string;
-	user_id: string | null;
-	user_type: string;
-	event_type: string;
-	ip_address: string | null;
-	user_agent: string | null;
-	details: Record<string, any> | null;
-	created_at: string;
-}
-
-export interface AuditLogResponse {
-	entries: AuditLogEntry[];
-	total: number;
-	limit: number;
-	offset: number;
-}
-
-export async function getAuditLog(options: {
-	event_type?: string;
-	limit?: number;
-	offset?: number;
-} = {}): Promise<AuditLogResponse> {
-	const params = new URLSearchParams();
-	if (options.event_type) params.set('event_type', options.event_type);
-	if (options.limit) params.set('limit', options.limit.toString());
-	if (options.offset) params.set('offset', options.offset.toString());
-	const query = params.toString();
-	return api.get(`/security/audit-log${query ? `?${query}` : ''}`);
-}

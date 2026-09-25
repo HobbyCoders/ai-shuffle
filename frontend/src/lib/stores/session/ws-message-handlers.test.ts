@@ -38,7 +38,6 @@ vi.mock('./v2/feed-controller', () => ({
 		stop: vi.fn(),
 		restart: vi.fn(),
 		isFeeding: vi.fn(() => false),
-		currentSessionId: vi.fn(() => null),
 		invalidate: vi.fn(),
 	},
 	// Mirrors the real constant: `start` marks streaming OPTIMISTICALLY so the

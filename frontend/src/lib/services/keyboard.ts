@@ -43,9 +43,6 @@ const shortcuts: Map<string, KeyboardShortcut> = new Map();
 // Track if the global listener is attached
 let listenerAttached = false;
 
-// Track if shortcuts are enabled (can be disabled temporarily)
-let shortcutsEnabled = true;
-
 /**
  * Generate a unique key for matching shortcuts
  */
@@ -98,8 +95,6 @@ function isInputElement(target: EventTarget | null): boolean {
  * Handle keydown events
  */
 function handleKeyDown(e: KeyboardEvent): void {
-	if (!shortcutsEnabled) return;
-
 	// Auto-repeat is never what a shortcut wants: every registered shortcut here
 	// is a one-shot action or a toggle. Holding the voice-input hotkey used to
 	// fire ~30 toggles a second, so the recording was cancelled the instant it
@@ -174,25 +169,6 @@ export function registerShortcut(shortcut: KeyboardShortcut): ShortcutRegistrati
 }
 
 /**
- * Unregister a shortcut by ID
- */
-export function unregisterShortcut(id: string): void {
-	let keyToDelete: string | null = null;
-	shortcuts.forEach((shortcut, key) => {
-		if (shortcut.id === id) {
-			keyToDelete = key;
-		}
-	});
-	if (keyToDelete) {
-		shortcuts.delete(keyToDelete);
-	}
-
-	if (shortcuts.size === 0) {
-		detachListener();
-	}
-}
-
-/**
  * Get all registered shortcuts (for help display)
  */
 export function getShortcuts(): KeyboardShortcut[] {
@@ -221,27 +197,6 @@ export function getShortcutsByCategory(): Record<string, KeyboardShortcut[]> {
 	});
 
 	return byCategory;
-}
-
-/**
- * Temporarily disable all shortcuts
- */
-export function disableShortcuts(): void {
-	shortcutsEnabled = false;
-}
-
-/**
- * Re-enable shortcuts
- */
-export function enableShortcuts(): void {
-	shortcutsEnabled = true;
-}
-
-/**
- * Check if shortcuts are currently enabled
- */
-export function areShortcutsEnabled(): boolean {
-	return shortcutsEnabled;
 }
 
 /**
@@ -297,20 +252,6 @@ export function formatShortcut(shortcut: KeyboardShortcut): string {
 	parts.push(keyDisplay);
 
 	return parts.join('+');
-}
-
-/**
- * Get the modifier key name for the current platform
- */
-export function getModifierKey(): string {
-	return isMac ? 'Cmd' : 'Ctrl';
-}
-
-/**
- * Check if we're on a Mac
- */
-export function isMacPlatform(): boolean {
-	return isMac;
 }
 
 /**

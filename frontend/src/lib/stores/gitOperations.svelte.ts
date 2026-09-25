@@ -28,13 +28,6 @@ import { isApiError } from '$lib/api/client';
 import { git } from './git.svelte';
 import { createSubscribers } from './store-utils';
 
-export type {
-	GitOperation,
-	GitOperationStep,
-	GitOperationResult,
-	GitOperationStepStatus
-} from '$lib/api/git';
-
 // ============================================================================
 // Types
 // ============================================================================

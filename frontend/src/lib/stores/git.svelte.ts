@@ -48,22 +48,6 @@ import { isApiError } from '$lib/api/client';
 import { github } from './github.svelte';
 import { createSubscribers } from './store-utils';
 
-// Re-export types from API
-export type {
-	Branch,
-	CommitNode,
-	Worktree,
-	GitStatus,
-	DiffStats,
-	PullResponse,
-	FileChangeInfo,
-	ChangedFilesResponse,
-	FileDiffResponse,
-	OperationResponse,
-	PrState,
-	OpenPrInfo
-} from '$lib/api/git';
-
 // ============================================================================
 // Store State
 // ============================================================================
@@ -724,13 +708,6 @@ async function _bgRefreshTick(): Promise<void> {
 		// `null` means "could not ask GitHub" (502) — an unknown, not a denial.
 		// Only a definitive verdict feeds the availability hysteresis.
 		if (typeof authed === 'boolean') git.setGithubAuth(authed);
-	}
-
-	// CI: only meaningful (and only worth a `gh` round trip) once there is an
-	// open PR whose checks the user is waiting on.
-	const branch = _state.status?.current_branch ?? null;
-	if (hasGithub && branch && _state.prState?.open_pr) {
-		await github.refreshChecks(projectId, branch).catch(() => {});
 	}
 }
 

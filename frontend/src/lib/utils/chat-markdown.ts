@@ -13,6 +13,7 @@
  */
 import { Marked, type Tokens } from 'marked';
 import { highlightToInnerHtml, resolveShikiLang } from './shiki';
+import { escapeHtml } from './escape-html';
 
 /** Parsed fence info string: ```ts title="src/a.ts" / ```ts:src/a.ts / ```ts src/a.ts */
 export interface FenceMeta {
@@ -64,14 +65,6 @@ export function parseFenceMeta(info: string | undefined | null): FenceMeta {
 	}
 
 	return { lang: lang.toLowerCase(), filename };
-}
-
-function escapeHtml(s: string): string {
-	return s
-		.replace(/&/g, '&amp;')
-		.replace(/</g, '&lt;')
-		.replace(/>/g, '&gt;')
-		.replace(/"/g, '&quot;');
 }
 
 const FILE_ICON =

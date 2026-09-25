@@ -75,21 +75,6 @@ export interface FileBasedAgent {
 	model: string | null;
 }
 
-export interface InstallPluginRequest {
-	plugin_id: string;
-	scope?: string;
-}
-
-export interface InstallPluginsBatchRequest {
-	plugin_ids: string[];
-	scope?: string;
-}
-
-export interface AddMarketplaceRequest {
-	url: string;
-	name: string;
-}
-
 export interface PluginUpdateInfo {
 	plugin_id: string;
 	name: string;

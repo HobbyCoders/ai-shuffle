@@ -24,7 +24,6 @@
 	import Banner from '$lib/components/Banner.svelte';
 
 	interface Props {
-		mobile?: boolean;
 		/** When embedded in the Build page, render the header-less rows list
 		 *  while keeping the same editor form. */
 		embedded?: boolean;
@@ -34,7 +33,6 @@
 	}
 
 	let {
-		mobile = false,
 		embedded = false,
 		initialSelectedId,
 		onDetailChange

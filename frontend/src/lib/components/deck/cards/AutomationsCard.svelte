@@ -783,7 +783,6 @@
 				onApprove={handleApprove}
 				onDeny={handleDeny}
 				onClearError={() => error = ''}
-				{formatTime}
 				{formatCost}
 				{triggerTypeLabel}
 			/>

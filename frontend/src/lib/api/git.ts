@@ -344,10 +344,6 @@ export interface CommitGraphResponse {
 // Worktree Types
 // ============================================================================
 
-/** @deprecated Alias kept for the worktree-list shape below; new code uses
- *  {@link StagedFileEntry}. */
-export type StagedFile = StagedFileEntry;
-
 export interface WorktreeGitStatus {
     is_clean: boolean;
     current_branch: string | null;
@@ -357,7 +353,7 @@ export interface WorktreeGitStatus {
     untracked_count: number;
     // Full file lists (may be empty for list endpoint)
     modified: string[];
-    staged: StagedFile[];
+    staged: StagedFileEntry[];
     untracked: string[];
 }
 
@@ -419,11 +415,6 @@ export async function getGitStatus(projectId: string, worktreeId?: string, optio
 
 interface RawBranchListResponse {
     branches: RawBranch[];
-    current_branch: string | null;
-}
-
-export interface BranchListResponse {
-    branches: Branch[];
     current_branch: string | null;
 }
 
@@ -1198,13 +1189,6 @@ export interface GitOperation {
     result?: GitOperationResult;
 }
 
-export interface FinishOperationRequest {
-    worktree_id?: string;
-    session_id?: string;
-    merge_method: MergeMethod;
-    cleanup: boolean;
-}
-
 export interface ShipOperationRequest {
     worktree_id?: string;
     session_id?: string;
@@ -1215,17 +1199,6 @@ export interface ShipOperationRequest {
      *  name lives on ShipItOptions and is mapped to this at the client boundary. */
     base_branch?: string;
     draft?: boolean;
-}
-
-/**
- * Start a "Finish" operation — merge the branch's open PR into the default
- * branch (and optionally clean up). Returns the operation's initial snapshot.
- */
-export async function startFinishOperation(
-    projectId: string,
-    request: FinishOperationRequest
-): Promise<GitOperation> {
-    return api.post<GitOperation>(`${BASE}/${projectId}/git/finish`, request);
 }
 
 /**

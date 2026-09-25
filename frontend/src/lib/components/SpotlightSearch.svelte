@@ -17,10 +17,9 @@
   onOpenSettings: () => void;
   onImportSession?: () => void;
   onManageTags?: () => void;
-  onManageKnowledge?: () => void;
  }
  let { visible, currentProjectId, onClose, onSelectSession, onSelectAgent, onOpenFeature,
-  onNewChat, onOpenSettings, onImportSession, onManageTags, onManageKnowledge }: Props = $props();
+  onNewChat, onOpenSettings, onImportSession, onManageTags }: Props = $props();
  let query = $state('');
  let selectedIndex = $state(0);
  let input = $state<HTMLInputElement>();
@@ -34,8 +33,7 @@
   { id: 'new', label: 'New conversation', action: onNewChat },
   { id: 'settings', label: 'Open settings', action: onOpenSettings },
   ...(onImportSession ? [{ id: 'import', label: 'Import session', action: onImportSession }] : []),
-  ...(onManageTags ? [{ id: 'tags', label: 'Manage session tags', action: onManageTags }] : []),
-  ...(currentProjectId && onManageKnowledge ? [{ id: 'knowledge', label: 'Manage project knowledge', action: onManageKnowledge }] : [])
+  ...(onManageTags ? [{ id: 'tags', label: 'Manage session tags', action: onManageTags }] : [])
  ]);
  const groups = $derived<SearchGroup[]>([
   ...results,

@@ -160,26 +160,11 @@ export const layout = {
 		_update((s) => ({ ...s, sidebarCollapsed: collapsed }));
 	},
 
-	/** Set the active view (what's shown in the main panel) */
-	setActiveView(view: ActiveView | null) {
-		_update((s) => ({ ...s, activeView: view }));
-	},
-
 	/** Navigate to a chat session */
 	openChat(sessionId: string | null) {
 		_update((s) => ({
 			...s,
 			activeView: { type: 'session', sessionId }
-		}));
-	},
-
-	/** Navigate home. The Sessions board is retired — home is a fresh chat;
-	 *  sessions are navigated from the sidebar. ('board' stays in the ViewType
-	 *  union so persisted views from older builds still type-check.) */
-	openBoard() {
-		_update((s) => ({
-			...s,
-			activeView: { type: 'session', sessionId: null }
 		}));
 	},
 

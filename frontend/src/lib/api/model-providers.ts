@@ -241,11 +241,6 @@ export async function codexDevicePoll(id: string): Promise<CodexDevicePoll> {
 	return api.post(`/model-providers/${id}/codex/device/poll`);
 }
 
-/** Clear ONLY the `needs_reauth` flag on a Codex provider (token kept intact). */
-export async function codexClearReauth(id: string): Promise<ModelProvider> {
-	return api.post(`/model-providers/${id}/codex/clear-reauth`);
-}
-
 // ============================================================================
 // xAI / SuperGrok device-code OAuth enrollment
 // ============================================================================
@@ -266,11 +261,6 @@ export async function xaiDeviceStart(id: string): Promise<CodexDeviceStart> {
  */
 export async function xaiDevicePoll(id: string): Promise<CodexDevicePoll> {
 	return api.post(`/model-providers/${id}/xai/device/poll`);
-}
-
-/** Clear ONLY the `needs_reauth` flag on a Grok provider (token kept intact). */
-export async function xaiClearReauth(id: string): Promise<ModelProvider> {
-	return api.post(`/model-providers/${id}/xai/clear-reauth`);
 }
 
 // ============================================================================

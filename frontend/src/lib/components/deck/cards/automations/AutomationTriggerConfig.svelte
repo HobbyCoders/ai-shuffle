@@ -623,7 +623,7 @@
 		cursor: default;
 	}
 
-	/* ── Trigger-type / cron-mode selectors (chip row, matches .chsel theme) ── */
+	/* ── Trigger-type / cron-mode selectors (chip row) ── */
 	.auto-trigger-selector {
 		display: flex;
 		gap: 6px;

@@ -64,7 +64,7 @@ const COUNTED_TOOLS = new Set(['Grep', 'Glob']);
  * so this walks the raw text from the field's opening quote and unescapes by
  * hand. Returns '' when the field has not arrived yet.
  */
-export function extractFieldFromPartial(partial: string, fieldName: string): string {
+function extractFieldFromPartial(partial: string, fieldName: string): string {
 	const fieldMatch = partial.match(new RegExp(`"${fieldName}"\\s*:\\s*"`));
 	if (!fieldMatch || fieldMatch.index === undefined) return '';
 

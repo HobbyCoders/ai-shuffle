@@ -10,7 +10,6 @@
 
 	interface Props {
 		open: boolean;
-		projectId: string;
 		defaultName?: string;
 		/** When true, the modal does NOT create the branch itself — it just
 		 *  validates the name and hands it back via `onCreated`. Used by cloud
@@ -20,7 +19,7 @@
 		onCreated?: (branchName: string) => void;
 	}
 
-	let { open, projectId, defaultName = '', stageOnly = false, onClose, onCreated }: Props = $props();
+	let { open, defaultName = '', stageOnly = false, onClose, onCreated }: Props = $props();
 
 	let branchName = $state('');
 	let showPrefix = $state(false);

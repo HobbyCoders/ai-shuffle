@@ -177,13 +177,6 @@ function reset(): void {
 }
 
 /**
- * Get current value of a preference (non-reactive)
- */
-function getValue<K extends keyof ChatPreferences>(key: K): ChatPreferences[K] {
-	return _state[key];
-}
-
-/**
  * Sync preferences from server (call after authentication)
  * Server is the source of truth - if server has different data, update local
  * If server is empty but local has data, push local to server (migration)
@@ -212,10 +205,8 @@ export const chatPreferences = {
 	subscribe,
 
 	load,
-	syncFromServer,
 	updatePreference,
 	reset,
-	getValue,
 
 	// Convenience setters for each preference
 	setShowThinkingBlocks: (value: boolean) => updatePreference('showThinkingBlocks', value),

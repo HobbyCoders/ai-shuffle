@@ -45,7 +45,6 @@
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
 	import TagManager from '$lib/components/TagManager.svelte';
-	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
 
@@ -61,7 +60,6 @@
 	let showKeyboardShortcuts = $state(false);
 	let showImportModal = $state(false);
 	let showTagManager = $state(false);
-	let showKnowledgeModal = $state(false);
 	let showSpotlight = $state(false);
 
 	// Tag state
@@ -322,7 +320,6 @@
 					if (showKeyboardShortcuts) showKeyboardShortcuts = false;
 					else if (showSpotlight) showSpotlight = false;
 					else if (showImportModal) showImportModal = false;
-					else if (showKnowledgeModal) showKnowledgeModal = false;
 					else if (showTagManager) showTagManager = false;
 				}
 			}),
@@ -470,7 +467,6 @@
 		onOpenSettings={handleSpotlightOpenSettings}
 		onImportSession={() => { showSpotlight = false; showImportModal = true; }}
 		onManageTags={() => { showSpotlight = false; showTagManager = true; }}
-		onManageKnowledge={() => { showSpotlight = false; showKnowledgeModal = true; }}
 	/>
 
 	<!-- Keyboard Shortcuts Modal -->
@@ -488,14 +484,6 @@
 		<TagManager
 			onclose={handleTagManagerClose}
 			ontagsupdated={() => loadAllTags()}
-		/>
-	{/if}
-
-	<!-- Knowledge Base Modal -->
-	{#if showKnowledgeModal && $activeSession?.project}
-		<KnowledgeManager
-			projectId={$activeSession.project}
-			onclose={() => showKnowledgeModal = false}
 		/>
 	{/if}
 

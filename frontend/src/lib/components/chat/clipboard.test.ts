@@ -11,7 +11,7 @@ const markdown = '```html\n' + code + '\n```';
 
 function mount(kind: string) {
 	const view = kind === 'chat'
-		? render(AssistantMessage, { content: markdown, messageIndex: 0, messageId: 'copy-test', streaming: false })
+		? render(AssistantMessage, { content: markdown, streaming: false })
 		: render(DocsContent, { content: markdown });
 	return { ...view, button: view.container.querySelector('.code-copy-btn') as HTMLButtonElement };
 }

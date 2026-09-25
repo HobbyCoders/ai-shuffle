@@ -66,8 +66,6 @@ const mocks = vi.hoisted(() => {
 		}),
 		gitMode: store<string>('project'),
 		githubRepoInfo: store<Record<string, unknown> | null>({ default_branch: 'main' }),
-		githubChecks: store<Record<string, unknown> | null>(null),
-		githubChecksStale: store<boolean>(false),
 		loadBranches: vi.fn(),
 		refreshDiffStats: vi.fn(),
 		refreshChangedFiles: vi.fn(),
@@ -89,9 +87,7 @@ vi.mock('$lib/stores/git.svelte', () => ({
 	gitMode: mocks.gitMode
 }));
 vi.mock('$lib/stores/github.svelte', () => ({
-	githubRepoInfo: mocks.githubRepoInfo,
-	githubChecks: mocks.githubChecks,
-	githubChecksStale: mocks.githubChecksStale
+	githubRepoInfo: mocks.githubRepoInfo
 }));
 vi.mock('$lib/stores/gitCheckoutAction', () => ({
 	checkoutBranchWithToast: mocks.checkoutBranchWithToast
@@ -201,7 +197,6 @@ function baseHandlers() {
 function renderHeader(props: Record<string, unknown> = {}, handlers = baseHandlers()) {
 	const result = render(GitHeaderActions, {
 		props: {
-			projectId: 'p1',
 			showBranchSelector: false,
 			isGitRepo: true,
 			...handlers,
@@ -219,8 +214,6 @@ beforeEach(() => {
 	localStorage.clear();
 	gitActionPreferences.reset();
 	openHeaderDropdown.set(null);
-	mocks.githubChecks.set(null);
-	mocks.githubChecksStale.set(false);
 	mocks.gitMode.set('project');
 	vi.clearAllMocks();
 });

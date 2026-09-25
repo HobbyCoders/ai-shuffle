@@ -1,7 +1,7 @@
 /**
  * SSE feed client — fetch-streaming reader for the per-session event log.
  *
- * V2 Phase 1 (docs/V2_PHASE1_DESIGN.md §6). Reads
+ * V2 Phase 1. Reads
  * `GET /api/v1/sessions/{id}/events?from_seq=N` as an SSE body through
  * `$lib/api/runtime` (cookie auth on the web UI; Bearer token on the bundled
  * mobile UI — the endpoint's require_auth accepts either, so no EventSource is

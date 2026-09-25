@@ -182,7 +182,6 @@
 		{#if requests.length > 0}
 			<PermissionRequest
 				request={requests[0]}
-				isFirst={true}
 				queueCount={requests.length}
 				onRespond={handleRespond}
 			/>

@@ -376,61 +376,6 @@ export interface Profile {
 	updated_at: string;
 }
 
-// Query types
-export interface QueryRequest {
-	prompt: string;
-	profile?: string;
-	project?: string;
-	overrides?: {
-		model?: string;
-		permission_mode?: string;
-		effort?: string;
-		/** Explicit token ceiling: 200k/256k standard, or 1m extended. */
-		context_window?: number;
-		system_prompt_append?: string;
-	};
-}
-
-export interface ConversationRequest {
-	prompt: string;
-	session_id?: string;
-	profile?: string;
-	project?: string;
-	overrides?: {
-		model?: string;
-		permission_mode?: string;
-		effort?: string;
-		/** Explicit token ceiling: 200k/256k standard, or 1m extended. */
-		context_window?: number;
-		system_prompt_append?: string;
-	};
-}
-
-export interface QueryResponse {
-	response: string;
-	session_id: string;
-	metadata: {
-		model?: string;
-		duration_ms?: number;
-		total_cost_usd?: number;
-		num_turns?: number;
-	};
-}
-
-// Health types
-export interface HealthResponse {
-	status: string;
-	service: string;
-	version: string;
-	authenticated: boolean;
-	setup_required: boolean;
-	auth_mode?: 'local' | 'account';
-	local_access?: boolean;
-	owner_linked?: boolean;
-	credential_storage?: { ready: boolean; state: string };
-	claude_authenticated: boolean;
-}
-
 // File upload types
 export interface FileUploadResponse {
 	filename: string;
@@ -448,27 +393,6 @@ export interface PermissionRequest {
 	queue_position?: number;
 	queue_total?: number;
 	created_at?: string;
-}
-
-export interface PermissionResponse {
-	request_id: string;
-	decision: 'allow' | 'deny';
-	remember?: 'none' | 'session' | 'profile';
-	pattern?: string;
-}
-
-export interface PermissionRule {
-	id: string;
-	profile_id: string | null;
-	tool_name: string;
-	tool_pattern: string | null;
-	decision: 'allow' | 'deny';
-	created_at: string;
-}
-
-export interface PermissionQueueUpdate {
-	resolved_ids: string[];
-	remaining_count: number;
 }
 
 // User Question types (for AskUserQuestion tool)
@@ -492,13 +416,6 @@ export interface UserQuestionRequest {
 	/** AskUser posted without blocking the running turn. */
 	nonblocking?: boolean;
 	created_at?: string;
-}
-
-export interface UserQuestionResponse {
-	request_id: string;
-	tool_use_id: string;
-	answers: Record<string, string | string[]>;
-	remaining_count: number;
 }
 
 // Workspace configuration types
@@ -573,13 +490,6 @@ export interface AgentImportRequest extends AgentExport {
  */
 export async function exportAgent(profileId: string): Promise<void> {
 	await fetchAndDownload(`/agents/${profileId}/export`, `${profileId}-agent.json`);
-}
-
-/**
- * Get agent export data without downloading (for preview)
- */
-export async function getAgentExportData(profileId: string): Promise<AgentExport> {
-	return api.get<AgentExport>(`/agents/${profileId}/export`);
 }
 
 /**
@@ -759,10 +669,7 @@ export function getErrorMessage(e: unknown, fallback = 'Unknown error'): string 
 export * from './sessions';
 export * from './tags';
 export * from './analytics';
-export * from './templates';
 export * from './notes';
 export * from './hooks';
-export * from './preferences';
 export * from './rewind';
-export * from './knowledge';
 export * from './generation';

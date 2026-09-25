@@ -9,6 +9,7 @@
 	 */
 	import { Paperclip } from 'lucide-svelte';
 	import type { NoteAttachment } from '$lib/api/client';
+	import { formatBytes } from '$lib/utils/format-bytes';
 
 	interface Props {
 		visible: boolean;
@@ -35,12 +36,6 @@
 		filtered;
 		selectedIndex = 0;
 	});
-
-	function formatSize(size: number): string {
-		if (size < 1024) return `${size} B`;
-		if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-		return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-	}
 
 	function scrollToSelected() {
 		const el = listEl?.querySelector(`[data-index="${selectedIndex}"]`) as HTMLElement | null;
@@ -117,7 +112,7 @@
 						>
 							<Paperclip size={14} />
 							<span class="note-autocomplete-name">{att.filename}</span>
-							<span class="note-autocomplete-size">{formatSize(att.size_bytes)}</span>
+							<span class="note-autocomplete-size">{formatBytes(att.size_bytes)}</span>
 						</button>
 					</li>
 				{/each}

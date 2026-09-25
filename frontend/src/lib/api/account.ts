@@ -107,11 +107,6 @@ export async function disconnectAccount(): Promise<AccountConnection> {
 	return result as AccountConnection;
 }
 
-/** Bounded worker-side display cache; not authorization or account inventory. */
-export async function getAccountDisplay(): Promise<Pick<AccountProfile, 'account'>> {
-	return api.get<Pick<AccountProfile, 'account'>>('/mobile/hub/account/display', { cache: 'no-store' });
-}
-
 export async function getAccountProfile(): Promise<AccountProfile> {
 	return api.get<AccountProfile>('/mobile/hub/account', { cache: 'no-store' });
 }

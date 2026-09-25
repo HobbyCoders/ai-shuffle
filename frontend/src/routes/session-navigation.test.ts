@@ -25,7 +25,6 @@ vi.mock('$lib/components/voice/GlobalVoiceInput.svelte', () => ({ default: () =>
 vi.mock('$lib/components/KeyboardShortcutsModal.svelte', () => ({ default: () => {} }));
 vi.mock('$lib/components/ImportSessionModal.svelte', () => ({ default: () => {} }));
 vi.mock('$lib/components/TagManager.svelte', () => ({ default: () => {} }));
-vi.mock('$lib/components/KnowledgeManager.svelte', () => ({ default: () => {} }));
 vi.mock('$lib/components/SpotlightSearch.svelte', () => ({ default: () => {} }));
 
 import Page from './+page.svelte';

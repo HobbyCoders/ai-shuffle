@@ -57,9 +57,6 @@ export function joiningDeviceCount(status: NetworkStatus | null | undefined): nu
 	return (status.pending_joins?.length ?? 0) + (status.hub?.pending_devices?.length ?? 0);
 }
 
-/** @deprecated use joiningDeviceCount — nothing waits for an approval any more. */
-export const pendingApprovalCount = joiningDeviceCount;
-
 /** `/pair#token=…` (a phone/browser pairing link) is not a worker invite. */
 export function looksLikePairingLink(value: string): boolean {
 	return /\/pair#token=/.test(value.trim());

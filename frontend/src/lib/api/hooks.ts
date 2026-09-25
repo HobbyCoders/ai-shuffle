@@ -93,13 +93,6 @@ export interface PluginHookInfo {
 // ============================================================================
 
 /**
- * Get all valid hook event types
- */
-export async function getHookEventTypes(): Promise<string[]> {
-	return api.get<string[]>('/hooks/events');
-}
-
-/**
  * Get all hooks for a project (includes app-level hooks)
  */
 export async function getProjectHooks(projectId: string): Promise<Hook[]> {
@@ -125,13 +118,6 @@ export async function createHook(projectId: string, data: HookCreate): Promise<H
  */
 export async function createAppHook(data: HookCreate): Promise<Hook> {
 	return api.post<Hook>('/hooks/app', data);
-}
-
-/**
- * Get a single hook by ID
- */
-export async function getHook(hookId: string): Promise<Hook> {
-	return api.get<Hook>(`/hooks/${hookId}`);
 }
 
 /**

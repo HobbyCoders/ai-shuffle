@@ -14,10 +14,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('$lib/api/client', () => ({
-	getPreference: vi.fn().mockResolvedValue(null),
-	setPreference: vi.fn().mockResolvedValue(undefined),
-}));
+vi.mock('$lib/api/client', () => ({}));
 
 const STORAGE_KEY = 'ai-shuffle-git-action-preferences';
 

@@ -54,18 +54,6 @@ export async function listPairingEndpoints(): Promise<PairingEndpoint[]> {
 	return response.endpoints;
 }
 
-export async function createPairingGrant(
-	endpointUrl: string | null,
-	deviceLabel?: string,
-	purpose: 'controller' | 'runner' = 'controller'
-): Promise<CreatedPairingGrant> {
-	return api.post<CreatedPairingGrant>('/pairing/grants', {
-		endpoint_url: endpointUrl,
-		device_label: deviceLabel?.trim() || null,
-		purpose
-	});
-}
-
 export type DeviceGrantPurpose = 'controller' | 'network:join' | 'runner';
 
 export interface DeviceGrant extends CreatedPairingGrant {
@@ -105,12 +93,6 @@ export async function exchangePairingGrant(input: {
 export async function listPairedClients(): Promise<PairedClient[]> {
 	const response = await api.get<{ clients: PairedClient[] }>('/pairing/clients');
 	return response.clients;
-}
-
-export async function renamePairedClient(clientId: string, deviceName: string): Promise<PairedClient> {
-	return api.patch(`/pairing/clients/${encodeURIComponent(clientId)}`, {
-		device_name: deviceName
-	});
 }
 
 export async function revokePairedClient(clientId: string): Promise<void> {

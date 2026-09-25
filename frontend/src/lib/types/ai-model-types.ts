@@ -42,26 +42,6 @@ export interface ImageModel {
 	deprecated?: boolean;
 }
 
-export interface ImageAspectRatio {
-	value: string;
-	label: string;
-	width: number;
-	height: number;
-}
-
-export interface VideoAspectRatio {
-	value: string;
-	label: string;
-	width: number;
-	height: number;
-}
-
-export interface ImageStylePreset {
-	id: string;
-	name: string;
-	description?: string;
-}
-
 // ============================================================================
 // Video Model Types
 // ============================================================================
@@ -91,7 +71,6 @@ export interface VideoModel {
 // 3D Model Types
 // ============================================================================
 
-export type Model3DMode = 'text-to-3d' | 'image-to-3d';
 export type Model3DArtStyle = 'realistic' | 'sculpture';
 export type Model3DTopology = 'quad' | 'triangle';
 

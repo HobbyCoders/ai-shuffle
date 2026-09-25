@@ -12,9 +12,9 @@ import {
 export type ContextWindowChoice = 'standard' | '1m';
 
 export const DEFAULT_CONTEXT_WINDOW_CHOICE: ContextWindowChoice = '1m';
-export const CLAUDE_STANDARD_CONTEXT = 200_000;
-export const GPT_STANDARD_CONTEXT = 256_000;
-export const EXTENDED_CONTEXT = 1_000_000;
+const CLAUDE_STANDARD_CONTEXT = 200_000;
+const GPT_STANDARD_CONTEXT = 256_000;
+const EXTENDED_CONTEXT = 1_000_000;
 
 export interface ModelContextControl {
 	standardTokens: typeof CLAUDE_STANDARD_CONTEXT | typeof GPT_STANDARD_CONTEXT;

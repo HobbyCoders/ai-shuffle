@@ -43,7 +43,7 @@ export interface AgentCredentials {
 	apiKey: ClaudeAuthSummary['api_key'];
 }
 
-export function isClaudeAuthMode(value: unknown): value is ClaudeAuthMode {
+function isClaudeAuthMode(value: unknown): value is ClaudeAuthMode {
 	return value === 'subscription' || value === 'api_key';
 }
 

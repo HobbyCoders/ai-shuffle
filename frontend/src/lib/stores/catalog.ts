@@ -6,7 +6,7 @@
  * automatically when fal.ai adds new models.
  *
  * NOTE: This is a plain .ts file (not .svelte.ts) to avoid dual module
- * evaluation issues with Svelte 5 runes. See KNOWN_ISSUES.md Root Cause 10.
+ * evaluation issues with Svelte 5 runes.
  */
 
 import { api } from '$lib/api/client';
@@ -74,20 +74,6 @@ export const catalogStore = {
 		}
 
 		return results;
-	},
-
-	/**
-	 * Check if a specific endpoint_id exists in the catalog.
-	 */
-	hasModel(endpointId: string): boolean {
-		return _models.some(m => m.endpoint_id === endpointId);
-	},
-
-	/**
-	 * Get a specific model by endpoint_id.
-	 */
-	getModel(endpointId: string): CatalogModel | undefined {
-		return _models.find(m => m.endpoint_id === endpointId);
 	},
 
 	/**

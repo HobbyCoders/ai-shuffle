@@ -76,7 +76,6 @@
 		onToggleSection: (id: string) => void;
 		onToggleTriggerExpand: (idx: number) => void;
 		onToggleActionExpand: (idx: number) => void;
-		onSyncCronFields?: (expr: string) => void;
 	}
 
 	let {
@@ -128,8 +127,7 @@
 		onUpdateFormActionSteps,
 		onToggleSection,
 		onToggleTriggerExpand,
-		onToggleActionExpand,
-		onSyncCronFields
+		onToggleActionExpand
 	}: Props = $props();
 
 	// Subscription mode: an automation runs on the user's Claude plan while

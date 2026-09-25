@@ -41,10 +41,6 @@ export interface UpdateProjectAgentRequest {
 	tools?: string[];
 }
 
-export interface RenameProjectAgentRequest {
-	new_name: string;
-}
-
 // ============================================================================
 // API Functions
 // ============================================================================

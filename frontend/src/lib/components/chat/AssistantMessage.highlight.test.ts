@@ -42,7 +42,7 @@ const NO_CODE = 'just prose, no fences at all';
 
 function mount(content: string) {
 	return render(AssistantMessage, {
-		props: { content, messageIndex: 0, messageId: 'm1', streaming: false }
+		props: { content, streaming: false }
 	});
 }
 

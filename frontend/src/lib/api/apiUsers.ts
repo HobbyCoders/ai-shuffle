@@ -64,10 +64,6 @@ export async function createApiUser(data: ApiUserCreate): Promise<ApiUserCreateR
 	return api.post<ApiUserCreateResponse>('/api-users', data);
 }
 
-export async function getApiUser(id: string): Promise<ApiUser> {
-	return api.get<ApiUser>(`/api-users/${id}`);
-}
-
 export async function updateApiUser(id: string, data: ApiUserUpdate): Promise<ApiUser> {
 	return api.patch<ApiUser>(`/api-users/${id}`, data);
 }

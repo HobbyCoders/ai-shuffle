@@ -88,9 +88,6 @@
 
 	interface Props {
 		onOpenSession?: (sessionId: string) => void;
-		onOpenPlugins?: () => void;
-		onNewSession?: () => void;
-		onNewSessionForProject?: (projectId: string) => void;
 		/**
 		 * Replaces the StudioTopBar with the shell's own header. The mobile app
 		 * uses this for its PageHeader; the web UI leaves it unset.
@@ -103,9 +100,6 @@
 
 	let {
 		onOpenSession,
-		onOpenPlugins,
-		onNewSession,
-		onNewSessionForProject,
 		header,
 		sidebarCollapsed = false,
 		onToggleSidebar
@@ -877,7 +871,6 @@
 	})}
 		<div class="git-actions-host">
 			<GitHeaderActions
-				projectId={activeProject!}
 				isStreaming={$gitControlsStreaming}
 				error={$git.error}
 				operationInProgress={$gitOperationRunning}
@@ -1031,7 +1024,6 @@
 			bare
 			props={{
 				open: showCreateBranchModal,
-				projectId: activeProject,
 				defaultName: activeTab?.title || '',
 				onClose: () => (showCreateBranchModal = false),
 				onCreated: () => git.refreshStatus()

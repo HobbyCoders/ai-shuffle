@@ -595,7 +595,6 @@
 
 <CreateBranchModal
 	open={showCreateModal}
-	projectId={$activeSession.project}
 	onClose={() => showCreateModal = false}
 	onCreated={handleBranchCreated}
 />

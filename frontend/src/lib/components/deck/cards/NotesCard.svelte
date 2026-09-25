@@ -30,6 +30,7 @@
 	} from '$lib/api/client';
 	import { onMount, untrack } from 'svelte';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
+	import { escapeHtml } from '$lib/utils/escape-html';
 
 	interface Props {
 		mobile?: boolean;
@@ -697,14 +698,6 @@
 		if (days < 7) return `${days} days ago`;
 		if (days < 30) return `${Math.floor(days / 7)} weeks ago`;
 		return date.toLocaleDateString();
-	}
-
-	function escapeHtml(text: string): string {
-		return text
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;');
 	}
 
 	// Convert an `@[name](attachment://id)` reference into a clickable chip link.

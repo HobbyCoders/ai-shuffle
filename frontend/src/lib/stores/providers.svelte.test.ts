@@ -1,5 +1,5 @@
 /**
- * Smoke tests for the providers store (Chunk 2).
+ * Smoke tests for the providers store.
  *
  * Covers the model_providers registry cluster:
  *  1. `loadProviders` populates state from the list API.

@@ -37,7 +37,7 @@ export function isLowEndDevice(hints: DeviceHints): boolean {
 }
 
 /** Read whatever hints this browser exposes. */
-export function readDeviceHints(): DeviceHints {
+function readDeviceHints(): DeviceHints {
 	if (typeof navigator === 'undefined') return {};
 	const nav = navigator as Navigator & { deviceMemory?: number; connection?: { saveData?: boolean } };
 	return {
@@ -59,9 +59,4 @@ export function applyPerformanceProfile(): void {
 	if (isLowEndDevice(readDeviceHints())) {
 		document.documentElement.dataset.fx = 'low';
 	}
-}
-
-/** Test seam: forget that the profile was applied. */
-export function resetPerformanceProfileForTests(): void {
-	applied = false;
 }

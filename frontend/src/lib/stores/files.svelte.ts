@@ -195,16 +195,6 @@ export const files = {
 		files.loadFiles();
 	},
 
-	navigateUp(): void {
-		if (!_state.currentPath) return;
-
-		const parts = _state.currentPath.split('/');
-		parts.pop();
-		const parentPath = parts.join('/');
-
-		files.navigateTo(parentPath);
-	},
-
 	// ========================================================================
 	// File Loading
 	// ========================================================================
@@ -454,30 +444,6 @@ export const files = {
 	// ========================================================================
 	// View Settings
 	// ========================================================================
-
-	setViewMode(mode: 'grid' | 'list'): void {
-		_update((s) => {
-			const newState = { ...s, viewMode: mode };
-			saveToStorage(newState);
-			return newState;
-		});
-	},
-
-	setSortBy(sortBy: 'name' | 'size' | 'modified'): void {
-		_update((s) => {
-			const newState = { ...s, sortBy };
-			saveToStorage(newState);
-			return newState;
-		});
-	},
-
-	toggleSortDirection(): void {
-		_update((s) => {
-			const newState = { ...s, sortAsc: !s.sortAsc };
-			saveToStorage(newState);
-			return newState;
-		});
-	},
 
 	toggleShowHidden(): void {
 		_update((s) => {

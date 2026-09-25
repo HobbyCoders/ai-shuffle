@@ -36,7 +36,6 @@ vi.mock('$lib/components/voice/GlobalVoiceInput.svelte', () => import('$lib/test
 vi.mock('$lib/components/KeyboardShortcutsModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/ImportSessionModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/TagManager.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
-vi.mock('$lib/components/KnowledgeManager.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/SpotlightSearch.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/Banner.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('lucide-svelte', async () => {

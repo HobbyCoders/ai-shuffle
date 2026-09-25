@@ -4,7 +4,7 @@ import { apiUrl, withAuth } from './runtime';
 // Outside /api/v1 — resolved against the runtime API origin per request.
 const settingsImportBase = () => apiUrl('/api/settings/import');
 
-export const SETTINGS_IMPORT_PROVIDERS = ['codex', 'claude'] as const;
+const SETTINGS_IMPORT_PROVIDERS = ['codex', 'claude'] as const;
 
 export type SettingsImportProvider = (typeof SETTINGS_IMPORT_PROVIDERS)[number];
 

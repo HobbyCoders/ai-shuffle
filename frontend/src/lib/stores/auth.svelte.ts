@@ -93,9 +93,6 @@ export const auth = {
 		_update(s => ({ ...s, error: null }));
 	},
 
-	setError(error: string) {
-		_update(s => ({ ...s, error }));
-	}
 };
 
 // ============================================

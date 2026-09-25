@@ -176,28 +176,6 @@ export const groups = {
 	},
 
 	/**
-	 * Rename a group
-	 */
-	renameGroup(entityType: EntityType, oldName: string, newName: string) {
-		_update((state) => {
-			const entity = state[entityType];
-			// Update group name
-			const groups = entity.groups.map((g) =>
-				g.name === oldName ? { ...g, name: newName } : g
-			);
-			// Update all assignments using this group
-			const assignments: Record<string, string> = {};
-			for (const [id, group] of Object.entries(entity.assignments)) {
-				assignments[id] = group === oldName ? newName : group;
-			}
-			return {
-				...state,
-				[entityType]: { groups, assignments }
-			};
-		});
-	},
-
-	/**
 	 * Delete a group (items become ungrouped)
 	 */
 	deleteGroup(entityType: EntityType, groupName: string) {
@@ -215,38 +193,6 @@ export const groups = {
 			return {
 				...state,
 				[entityType]: { groups, assignments }
-			};
-		});
-	},
-
-	/**
-	 * Toggle group collapsed state
-	 */
-	toggleGroupCollapsed(entityType: EntityType, groupName: string) {
-		_update((state) => {
-			const entity = state[entityType];
-			const groups = entity.groups.map((g) =>
-				g.name === groupName ? { ...g, collapsed: !g.collapsed } : g
-			);
-			return {
-				...state,
-				[entityType]: { ...entity, groups }
-			};
-		});
-	},
-
-	/**
-	 * Set group collapsed state
-	 */
-	setGroupCollapsed(entityType: EntityType, groupName: string, collapsed: boolean) {
-		_update((state) => {
-			const entity = state[entityType];
-			const groups = entity.groups.map((g) =>
-				g.name === groupName ? { ...g, collapsed } : g
-			);
-			return {
-				...state,
-				[entityType]: { ...entity, groups }
 			};
 		});
 	},
@@ -282,46 +228,6 @@ export const groups = {
 		_update((state) => {
 			const entity = state[entityType];
 			const { [itemId]: _, ...assignments } = entity.assignments;
-			return {
-				...state,
-				[entityType]: { ...entity, assignments }
-			};
-		});
-	},
-
-	/**
-	 * Get the group name for an item (or undefined if ungrouped)
-	 */
-	getItemGroup(entityType: EntityType, itemId: string): string | undefined {
-		return _state[entityType].assignments[itemId];
-	},
-
-	/**
-	 * Reorder groups
-	 */
-	reorderGroups(entityType: EntityType, groupDefs: GroupDefinition[]) {
-		_update((state) => ({
-			...state,
-			[entityType]: {
-				...state[entityType],
-				groups: groupDefs
-			}
-		}));
-	},
-
-	/**
-	 * Clean up assignments for items that no longer exist
-	 */
-	cleanupAssignments(entityType: EntityType, existingIds: string[]) {
-		_update((state) => {
-			const entity = state[entityType];
-			const existingSet = new Set(existingIds);
-			const assignments: Record<string, string> = {};
-			for (const [id, group] of Object.entries(entity.assignments)) {
-				if (existingSet.has(id)) {
-					assignments[id] = group;
-				}
-			}
 			return {
 				...state,
 				[entityType]: { ...entity, assignments }

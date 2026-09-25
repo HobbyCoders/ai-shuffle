@@ -96,16 +96,6 @@ export const plugins = {
 	// ========================================================================
 
 	/**
-	 * Load all marketplaces
-	 */
-	async loadMarketplaces(): Promise<void> {
-		return withLoading(_update, async () => {
-			const marketplaces = await pluginsApi.getMarketplaces();
-			_update((state) => ({ ...state, marketplaces }));
-		}, 'Failed to load marketplaces');
-	},
-
-	/**
 	 * Add a new marketplace
 	 */
 	async addMarketplace(url: string, name: string): Promise<MarketplaceInfo> {
@@ -400,20 +390,6 @@ export const plugins = {
 	// File-Based Agents
 	// ========================================================================
 
-	/**
-	 * Load file-based agents from enabled plugins
-	 */
-	async loadFileBasedAgents(): Promise<void> {
-		try {
-			const fileBasedAgents = await pluginsApi.getFileBasedAgents();
-			_update((state) => ({ ...state, fileBasedAgents }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load file-based agents';
-			_update((state) => ({ ...state, error }));
-			throw e;
-		}
-	},
-
 	// ========================================================================
 	// Plugin Updates
 	// ========================================================================
@@ -522,20 +498,6 @@ export const plugins = {
 	// ========================================================================
 	// Auto-Update Settings
 	// ========================================================================
-
-	/**
-	 * Load auto-update settings
-	 */
-	async loadAutoUpdateSettings(): Promise<void> {
-		try {
-			const autoUpdateSettings = await pluginsApi.getAutoUpdateSettings();
-			_update((state) => ({ ...state, autoUpdateSettings }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load auto-update settings';
-			_update((state) => ({ ...state, error }));
-			throw e;
-		}
-	},
 
 	/**
 	 * Update auto-update settings

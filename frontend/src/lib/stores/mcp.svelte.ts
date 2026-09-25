@@ -160,25 +160,6 @@ export const mcp = {
 		}, (e) => extractError(e, 'Failed to remove MCP server'));
 	},
 
-	/**
-	 * Toggle a global MCP server enabled/disabled
-	 */
-	async toggleGlobalServer(serverName: string, enabled: boolean): Promise<void> {
-		try {
-			const updated = await mcpApi.toggleGlobalMcpServer(serverName, enabled);
-			_update((state) => ({
-				...state,
-				globalServers: state.globalServers.map((s) =>
-					s.name === serverName ? updated : s
-				)
-			}));
-		} catch (e) {
-			const error = extractError(e, 'Failed to toggle MCP server');
-			_update((state) => ({ ...state, error }));
-			throw e;
-		}
-	},
-
 	// ========================================================================
 	// Project Server Operations
 	// ========================================================================
@@ -310,29 +291,6 @@ export const mcp = {
 	// MCP Tools Discovery
 	// ========================================================================
 
-	/**
-	 * Load discovered MCP tools
-	 */
-	async loadTools(refresh: boolean = false): Promise<void> {
-		return withLoading(_update, async () => {
-			const tools = await mcpApi.getMcpTools(refresh);
-			_update((state) => ({ ...state, tools }));
-		}, (e) => extractError(e, 'Failed to load MCP tools'));
-	},
-
-	/**
-	 * Load MCP stats
-	 */
-	async loadStats(): Promise<void> {
-		try {
-			const stats = await mcpApi.getMcpStats();
-			_update((state) => ({ ...state, stats }));
-		} catch (e) {
-			// Non-critical, don't throw
-			console.error('Failed to load MCP stats:', e);
-		}
-	},
-
 	// ========================================================================
 	// Utility
 	// ========================================================================
@@ -352,16 +310,6 @@ export const mcp = {
 		_notifySubscribers();
 	},
 
-	/**
-	 * Get all servers combined (for stats)
-	 */
-	getAllServers(): McpServerInfo[] {
-		return [
-			..._state.globalServers,
-			..._state.projectServers.local,
-			..._state.projectServers.project
-		];
-	}
 };
 
 // ============================================================================

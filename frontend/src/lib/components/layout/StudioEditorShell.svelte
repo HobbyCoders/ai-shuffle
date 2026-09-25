@@ -529,48 +529,6 @@
 		cursor: not-allowed;
 	}
 
-	/* Multi-select chips. */
-	.ed-content :global(.chips-select) {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 8px;
-	}
-	.ed-content :global(.chsel) {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		min-height: 31px;
-		padding: 0 12px;
-		border-radius: 9px;
-		border: 1px solid var(--border);
-		background: var(--background);
-		color: var(--foreground);
-		font: inherit;
-		font-size: 12.5px;
-		font-weight: 500;
-		cursor: pointer;
-		transition: background 0.12s, border-color 0.12s, color 0.12s;
-	}
-	.ed-content :global(.chsel:hover) {
-		border-color: var(--muted-foreground);
-	}
-	.ed-content :global(.chsel.on) {
-		background: var(--primary);
-		border-color: var(--primary);
-		color: var(--primary-foreground);
-	}
-	.ed-content :global(.chsel:disabled) {
-		opacity: 0.45;
-		cursor: not-allowed;
-	}
-	.ed-content :global(.chsel:disabled:hover) {
-		border-color: var(--border);
-	}
-	.ed-content :global(.chsel svg) {
-		width: 12px;
-		height: 12px;
-	}
-
 	/* Segmented control. */
 	.ed-content :global(.seg) {
 		display: inline-flex;
@@ -623,15 +581,6 @@
 		font-size: 11.5px;
 		font-weight: 500;
 		color: var(--muted-foreground);
-	}
-
-	/* Color dot (subagent accent). */
-	.ed-content :global(.sd) {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		display: inline-block;
-		flex-shrink: 0;
 	}
 
 	/* Dashed info callout. */

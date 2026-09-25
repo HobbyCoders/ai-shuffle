@@ -27,7 +27,7 @@ import { createSseFeed, type SseFeed } from '$lib/stores/session/v2/sse-feed';
 export const FIRST_RUN_PROMPT = 'Say hello in one short sentence, then list three things you can help me with, one line each.';
 
 /** How long to wait for the reply before giving up. */
-export const FIRST_RUN_TIMEOUT_MS = 180_000;
+const FIRST_RUN_TIMEOUT_MS = 180_000;
 
 /** How long an abort from the feed waits for the WebSocket's coded error frame. */
 export const ABORT_GRACE_MS = 1000;

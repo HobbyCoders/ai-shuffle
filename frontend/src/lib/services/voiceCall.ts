@@ -1,5 +1,5 @@
 /**
- * WebRTC voice-call controller (wave VW2 of docs/VOICE_MODE_PLAN.md).
+ * WebRTC voice-call controller (wave VW2).
  *
  * One singleton per active call. Transport is ruling VM2: the browser talks
  * DIRECTLY to OpenAI over WebRTC (audio never transits our backend) and the
@@ -619,7 +619,7 @@ function applyMicMuted(muted: boolean): void {
 }
 
 /** Mute/unmute the microphone (the track stays attached; it is just disabled). */
-export function setMicMuted(muted: boolean): void {
+function setMicMuted(muted: boolean): void {
 	applyMicMuted(muted);
 	patch({ micMuted: muted });
 }
@@ -629,7 +629,7 @@ export function toggleMic(): void {
 }
 
 /** Mute/unmute the agent's voice (playback only — the model keeps talking). */
-export function setAgentMuted(muted: boolean): void {
+function setAgentMuted(muted: boolean): void {
 	if (audioEl) audioEl.muted = muted;
 	audioStream?.muteOutput(muted);
 	patch({ agentMuted: muted });

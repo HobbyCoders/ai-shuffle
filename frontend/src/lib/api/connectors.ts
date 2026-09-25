@@ -155,13 +155,6 @@ export async function createConnector(data: ConnectorCreate): Promise<Connector>
 }
 
 /**
- * Get a single connector by ID
- */
-export async function getConnector(id: string): Promise<Connector> {
-	return api.get<Connector>(`/connectors/${id}`);
-}
-
-/**
  * Update a connector
  */
 export async function updateConnector(id: string, data: ConnectorUpdate): Promise<Connector> {
@@ -208,14 +201,6 @@ export async function deactivateConnector(id: string): Promise<Connector> {
 }
 
 /**
- * Restart a connector
- * TODO: Wire up to ConnectorManager UI (restart button)
- */
-export async function restartConnector(id: string): Promise<Connector> {
-	return api.post<Connector>(`/connectors/${id}/restart`);
-}
-
-/**
  * Get all available connector types with config field definitions
  */
 export async function getConnectorTypes(): Promise<ConnectorTypeInfo[]> {
@@ -245,50 +230,4 @@ export async function discoverDiscord(body: {
  */
 export async function getConnectorLogs(id: string): Promise<ConnectorEventLog[]> {
 	return api.get<ConnectorEventLog[]>(`/connectors/${id}/logs`);
-}
-
-/**
- * Get current status for a connector
- * TODO: Wire up to ConnectorManager UI (status display)
- */
-export async function getConnectorStatus(id: string): Promise<any> {
-	return api.get<any>(`/connectors/${id}/status`);
-}
-
-// ============================================================================
-// Variant API Functions (Triggers, Actions, Tools)
-// TODO: Wire up to ConnectorManager UI — backend endpoints exist and are functional
-// ============================================================================
-
-/**
- * Get available triggers for a connector
- */
-export async function getConnectorTriggers(id: string): Promise<ConnectorTriggerInfo[]> {
-	return api.get<ConnectorTriggerInfo[]>(`/connectors/${id}/triggers`);
-}
-
-/**
- * Get available actions for a connector
- */
-export async function getConnectorActions(id: string): Promise<ConnectorActionInfo[]> {
-	return api.get<ConnectorActionInfo[]>(`/connectors/${id}/actions`);
-}
-
-/**
- * Get available tools for a connector
- */
-export async function getConnectorTools(id: string): Promise<ConnectorToolInfo[]> {
-	return api.get<ConnectorToolInfo[]>(`/connectors/${id}/tools`);
-}
-
-/**
- * Execute a connector action directly
- * TODO: Wire up to ConnectorManager UI (action executor)
- */
-export async function executeConnectorAction(
-	id: string,
-	actionId: string,
-	params: Record<string, any> = {}
-): Promise<any> {
-	return api.post<any>(`/connectors/${id}/actions/${actionId}/execute`, params);
 }

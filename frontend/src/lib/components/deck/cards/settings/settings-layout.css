@@ -37,14 +37,6 @@
 	padding: 10px 14px;
 }
 
-.settings.card-system .tab-content .section-content {
-	padding: 0 14px;
-}
-
-.settings.card-system .tab-content .setting-row {
-	padding: 10px 0;
-}
-
 @media (max-width: 560px) {
 	.settings.card-system .tab-content .set-grouphead,
 	.settings.card-system .tab-content .set-row,
