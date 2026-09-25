@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -116,7 +117,41 @@ async def spawn_hook_shell(
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=env,
+        # Own process group, so a timeout can kill whatever the hook spawned
+        # (see kill_hook_process). Not on the cmd.exe fallback.
+        **({} if _IS_WINDOWS else {"start_new_session": True}),
     )
+
+
+async def kill_hook_process(
+    process: asyncio.subprocess.Process, *, drain_timeout: float = 2.0
+) -> None:
+    """
+    Kill a timed-out hook and everything it spawned, then reap it.
+
+    ``/bin/sh -c`` forks children instead of exec'ing them, so killing only the
+    shell leaves e.g. a ``sleep`` holding stdout/stderr open, and reaping the
+    shell would then block for that child's whole lifetime. On POSIX the hook
+    runs in its own session (``spawn_hook_shell``), so kill the whole group.
+    The drain is still bounded: a descendant that left the group (``setsid``)
+    can keep the pipes open and must not stall the tool call.
+    """
+    if not _IS_WINDOWS:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        await asyncio.wait_for(process.communicate(), timeout=drain_timeout)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Hook process %s killed but its output pipes stayed open; not waiting further",
+            process.pid,
+        )
 
 
 async def execute_bash_hook(
@@ -174,8 +209,7 @@ async def execute_bash_hook(
                 timeout=timeout_seconds
             )
         except asyncio.TimeoutError:
-            process.kill()
-            await process.communicate()
+            await kill_hook_process(process)
             duration_ms = int((time.time() - start_time) * 1000)
             return {
                 "success": False,
@@ -360,7 +394,7 @@ async def execute_message_hook(
         # Inject as a user message into the session. One isolated write (the
         # broadcast below is a real await), so one thread hop. Exceptions still
         # propagate to this coroutine's ``except Exception`` handler unchanged.
-        message = await run_sync(
+        await run_sync(
             database.add_session_message,
             session_id=session_id,
             role="user",

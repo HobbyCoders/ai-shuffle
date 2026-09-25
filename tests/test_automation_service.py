@@ -3,7 +3,7 @@ Tests for automation service — prompt rendering, budget checking, CRUD operati
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from app.core.automation_service import (
     render_prompt,

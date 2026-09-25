@@ -1,10 +1,7 @@
 """Server key adoption preserves ciphertext and survives real custody failures."""
-import base64
 from contextlib import contextmanager
-import hashlib
 import json
 import os
-from pathlib import Path
 import sqlite3
 import subprocess
 import sys

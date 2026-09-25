@@ -23,7 +23,6 @@ def clean_runtime():
 @pytest.mark.asyncio
 async def test_real_task_dispatch_producer_routes_only_aggregate_completion(agents, monkeypatch):
     from app.core import task_dispatch, provider_agent, turn_scheduler
-    from app.core.task_registry import task_registry
     _mk_session(agents, "swarm-parent", "root-agent")
     events, calls = [], []
     async def persist(snapshot):

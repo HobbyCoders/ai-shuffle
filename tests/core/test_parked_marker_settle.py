@@ -12,7 +12,6 @@ and only logged it.
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 from app.core.config import settings
 from app.core.turn_finalize import clear_parked_marker_if_idle

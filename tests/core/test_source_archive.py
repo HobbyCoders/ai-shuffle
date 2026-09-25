@@ -1,5 +1,4 @@
 """The update feed's source archive carries runtime paths only."""
-from pathlib import Path
 import hashlib
 import subprocess
 import zipfile

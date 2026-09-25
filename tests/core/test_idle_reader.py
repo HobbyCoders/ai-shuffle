@@ -466,7 +466,7 @@ async def test_unregistered_notification_handoff_stays_kindless(mock_db):
 # 6. Completed task: bare TaskUpdated + rich TaskNotification → ONE effective wake
 # ---------------------------------------------------------------------------
 
-async def test_completed_task_updated_plus_notification_single_effective_wake(mock_db):
+async def test_completed_task_updated_plus_notification_single_effective_wake(mock_db, monkeypatch):
     """A completed background task streams BOTH frames the SDK emits: the bare
     ``TaskUpdatedMessage`` (task_id/status/tool_use_id only) AND the rich
     ``TaskNotificationMessage`` (summary/usage). Both branches hand off to the
@@ -480,6 +480,8 @@ async def test_completed_task_updated_plus_notification_single_effective_wake(mo
     from app.core.query_engine import TaskUpdatedMessage
     from app.core import turn_scheduler
 
+    # Don't wait out the real 2s terminal-batch window before the kick.
+    monkeypatch.setattr(turn_scheduler, "TERMINAL_BATCH_WINDOW_SECONDS", 0.1)
     task_registry.reset_all()
     turn = turns_db.enqueue_turn("s7", "user", prompt="kick off bg")
     turns_db.start_turn(turn["id"], None, "runner")

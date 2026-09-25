@@ -68,7 +68,6 @@ from app.core.provider.events import (
 import app.core.query_engine as qe
 import app.core.query_persistence as qp
 from app.core import jsonl_parser as jp
-from app.core.config import settings
 from app.core.session_pool import SessionState
 from app.db import database
 

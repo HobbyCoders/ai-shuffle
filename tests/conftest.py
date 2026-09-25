@@ -16,7 +16,6 @@ import pytest
 from pathlib import Path
 from typing import Generator
 from unittest.mock import patch, AsyncMock
-from contextlib import contextmanager
 
 # Add the project root to the path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -284,7 +283,6 @@ def client(mock_db, _api_unit_credentials):
     from fastapi.testclient import TestClient
     from app.main import app
     from app.core.automation_manager import automation_manager
-    from app.core.connectors.manager import connector_manager
 
     # Prevent scheduler shutdown errors during test teardown
     automation_manager._scheduler = None
@@ -321,7 +319,6 @@ def authenticated_client(mock_db, _api_unit_credentials):
     from app.main import app
     from app.api.auth import require_auth, require_admin
     from app.core.automation_manager import automation_manager
-    from app.core.connectors.manager import connector_manager
 
     # Prevent scheduler shutdown errors during test teardown
     automation_manager._scheduler = None
@@ -340,70 +337,6 @@ def authenticated_client(mock_db, _api_unit_credentials):
 
 
 # =============================================================================
-# Auth Fixtures
-# =============================================================================
-
-@pytest.fixture(scope="function")
-def mock_auth():
-    """
-    Mock authentication for protected endpoints using patches.
-
-    Note: For HTTP tests with authenticated_client, use the authenticated_client
-    fixture which properly overrides FastAPI dependencies. This fixture is for
-    direct function calls that need mocked auth.
-
-    This fixture patches:
-    - require_auth: Returns a valid session token
-    - require_admin: Passes admin check
-    - require_api_key: Returns valid API user
-    """
-    with patch("app.api.auth.require_auth") as mock_require_auth:
-        mock_require_auth.return_value = "test-session-token"
-
-        with patch("app.api.auth.require_admin") as mock_require_admin:
-            mock_require_admin.return_value = None
-
-            with patch("app.api.auth.get_api_user_from_request") as mock_api_user:
-                mock_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user",
-                    "role": "admin"
-                }
-
-                yield {
-                    "require_auth": mock_require_auth,
-                    "require_admin": mock_require_admin,
-                    "api_user": mock_api_user
-                }
-
-
-@pytest.fixture(scope="function")
-def admin_user():
-    """
-    Return admin user data for tests.
-    """
-    return {
-        "id": "admin-user-id",
-        "username": "admin",
-        "role": "admin",
-        "created_at": "2024-01-01T00:00:00Z"
-    }
-
-
-@pytest.fixture(scope="function")
-def api_user():
-    """
-    Return API user data for tests.
-    """
-    return {
-        "id": "api-user-id",
-        "username": "api-user",
-        "role": "user",
-        "created_at": "2024-01-01T00:00:00Z"
-    }
-
-
-# =============================================================================
 # Temporary Directory Fixtures
 # =============================================================================
 
@@ -416,68 +349,6 @@ def temp_dir() -> Generator[Path, None, None]:
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir)
-
-
-@pytest.fixture(scope="function")
-def mock_workspace(temp_dir: Path):
-    """
-    Create a mock workspace directory structure.
-    """
-    workspace = temp_dir / "workspace"
-    workspace.mkdir()
-
-    # Create .claude directory
-    claude_dir = workspace / ".claude"
-    claude_dir.mkdir()
-
-    return workspace
-
-
-# =============================================================================
-# Sample Data Fixtures
-# =============================================================================
-
-@pytest.fixture
-def sample_session():
-    """
-    Return sample session data.
-    """
-    return {
-        "id": "test-session-id",
-        "title": "Test Session",
-        "profile_id": "default",
-        "project_id": None,
-        "status": "active",
-        "created_at": "2024-01-01T00:00:00Z",
-        "updated_at": "2024-01-01T00:00:00Z"
-    }
-
-
-@pytest.fixture
-def sample_profile():
-    """
-    Return sample profile data.
-    """
-    return {
-        "id": "test-profile-id",
-        "name": "Test Profile",
-        "system_prompt": "You are a helpful assistant.",
-        "model": "claude-sonnet-4-20250514",
-        "created_at": "2024-01-01T00:00:00Z"
-    }
-
-
-@pytest.fixture
-def sample_project():
-    """
-    Return sample project data.
-    """
-    return {
-        "id": "test-project-id",
-        "name": "Test Project",
-        "path": "/path/to/project",
-        "created_at": "2024-01-01T00:00:00Z"
-    }
 
 
 # =============================================================================
@@ -591,6 +462,20 @@ def live_hub_verdicts(monkeypatch):
     except Exception:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_host_memory_admission_floor(monkeypatch):
+    """Admission must not depend on how much RAM the test host has free.
+
+    ``SessionPool.admission_check`` reads real host MemAvailable against
+    ``sdk_admission_min_available_mb``; under ``-n 4`` on a small machine the
+    other workers push it below the floor and real turns get refused. Tests
+    that exercise the floor set their own value.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "sdk_admission_min_available_mb", 0)
 
 
 @pytest.fixture(autouse=True)

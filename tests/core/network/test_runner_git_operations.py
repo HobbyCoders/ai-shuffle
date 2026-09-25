@@ -147,7 +147,7 @@ def test_catalog_unavailable_owner_is_not_advertised(workers, monkeypatch, tmp_p
     from app.network import control
 
     a, b = _join_with_distinct_legacy_ids(workers, monkeypatch)
-    project = _seed_project(b, tmp_path)
+    _seed_project(b, tmp_path)
     from tests.core.network.harness import exchange
     with b.active():
         engine.scan_all()

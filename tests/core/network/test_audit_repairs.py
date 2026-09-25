@@ -390,8 +390,6 @@ async def test_rollback_claim_without_proof_is_ignored(workers):
         assert await link._check_rollback(None, ctx, claims) is False
         assert engine.context().identity.incarnation == 1
 
-        with b.active():
-            b_ctx = engine.context()
         forged = envelope_mod.build(
             network_id=ctx.network_id, collection="user_preferences", record_id="admin|@owner|forged", op="upsert",
             clock=5, origin_device_id=a.device_id, origin_incarnation=1, origin_seq=10 ** 6, schema_version=1,

@@ -23,7 +23,6 @@ session), so every gate recognises cross-turn background ids again.
 Harness mirrors tests/core/test_busy_write_guard_engine.py: no Postgres / real SDK.
 """
 
-import asyncio
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -34,7 +33,6 @@ from app.core.task_registry import task_registry
 from app.core.provider.events import (
     AssistantMessage,
     StreamEvent,
-    TextBlock,
     ToolResultBlock,
     ToolUseBlock,
 )

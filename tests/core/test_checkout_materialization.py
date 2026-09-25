@@ -410,7 +410,6 @@ def test_deleted_branch_restored_from_pull_ref(project, tmp_path, workspace_root
         if remnant == "nonempty":
             (dest / "keep.txt").write_text("do not remove", encoding="utf-8")
 
-    from app.db.sessions import latest_pr_number_for_branch
     from unittest.mock import patch
 
     with patch(

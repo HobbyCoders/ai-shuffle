@@ -20,7 +20,6 @@ import asyncio
 import collections
 import logging
 
-import pytest
 
 from app.core.query_persistence import (
     _wrap_stderr_capture,
@@ -28,13 +27,11 @@ from app.core.query_persistence import (
     log_captured_cli_stderr,
     _STDERR_CAPTURE_MAXLEN,
 )
-from app.core import session_context
 from app.core.session_context import (
     set_current_session_id,
     get_current_session_id,
     current_session_id,
 )
-from app.core import error_log_handler
 from app.core.error_log_handler import ErrorLogDBHandler
 from app.core import expected_shutdown
 from app.core.expected_shutdown import (

@@ -1,6 +1,7 @@
 """Exercise the recorder-to-voice path, not invented provider event shapes."""
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -79,7 +80,8 @@ async def test_speech_cannot_feed_itself_and_reasoning_is_never_forwarded():
 @pytest.mark.asyncio
 async def test_rate_limit_coalesces_changes_and_bounds_unicode(monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr(voice_progress.time, "monotonic", lambda: clock[0])
+    # Module-local clock: patching stdlib time.monotonic would freeze the loop clock too.
+    monkeypatch.setattr(voice_progress, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     send = AsyncMock()
     p = voice_progress.VoiceProgress("s", send)
     p.note("chat", "Starting.")

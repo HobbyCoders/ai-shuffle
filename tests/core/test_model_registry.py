@@ -15,7 +15,6 @@ import pytest
 
 from app.api import settings_crypto
 from app.core import model_registry as m
-from app.core.config import settings
 from app.db import database as db
 
 

@@ -1055,14 +1055,6 @@ Custom content""")
 
     def test_get_all_commands_includes_plugins(self):
         """Should include plugin commands."""
-        plugin_cmd = {
-            "name": "plugin:action",
-            "display": "/plugin:action",
-            "description": "Plugin action",
-            "argument_hint": None,
-            "type": "plugin",
-            "source": "plugin-id"
-        }
 
         with tempfile.TemporaryDirectory() as tmpdir:
             command = SlashCommand(name="plugin:action", description="Plugin action",

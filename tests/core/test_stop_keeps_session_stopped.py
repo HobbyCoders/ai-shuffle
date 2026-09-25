@@ -23,7 +23,7 @@ What is pinned here, end to end against the real turns/wakeups tables:
 from __future__ import annotations
 
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 

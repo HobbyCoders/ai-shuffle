@@ -4,7 +4,7 @@ Tests for ConnectorManager — lifecycle, public accessors, encryption helpers.
 
 import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from app.core.connectors.manager import ConnectorManager
 from app.core.connectors.base import BaseConnector, ConnectorStatus

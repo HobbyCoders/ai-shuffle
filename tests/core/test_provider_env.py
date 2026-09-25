@@ -14,7 +14,6 @@ Covers:
   query-level provider override wins over the profile config.
 """
 
-import logging
 from unittest.mock import patch
 
 import pytest
@@ -766,13 +765,6 @@ class TestBuildGenerationOptions:
 # ---------------------------------------------------------------------------
 # S3: per-agent frontmatter stamping via build_options_from_profile
 # ---------------------------------------------------------------------------
-
-def _mk_subagent(db, agent_id, model):
-    return db.create_subagent(
-        subagent_id=agent_id, name=agent_id,
-        description="d", prompt="p", model=model,
-    )
-
 
 class TestAgentContextDeclaration:
     """(2026-08-17 ruling, superseding A10) SDK AgentDefinitions stay retired —

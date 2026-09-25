@@ -116,7 +116,6 @@ def _drive_listen_loop(monkeypatch, gateway, connect_effects, max_sleeps=10):
 def test_listen_loop_connects_with_parsed_dsn_kwargs(monkeypatch, gw):
     """The listener must decompose the DSN like the pool does — a raw URL with
     a literal '@' in the password makes libpq mis-parse the host."""
-    import app.core.event_gateway as eg
 
     calls, _ = _drive_listen_loop(monkeypatch, gw, ["fail"], max_sleeps=1)
 

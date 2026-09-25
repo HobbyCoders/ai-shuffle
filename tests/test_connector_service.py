@@ -7,7 +7,7 @@ import types
 import pytest
 
 pytestmark = pytest.mark.usefixtures("bundled_connector_catalog")
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import patch, MagicMock
 
 from app.core.connector_service import (
     get_sensitive_fields,

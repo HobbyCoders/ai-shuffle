@@ -14,7 +14,7 @@ Tests cover:
 import os
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 import tempfile
 
 
@@ -234,8 +234,8 @@ class TestSettingsModelPostInit:
             "WORKSPACE_DIR": str(custom_workspace)
         }, clear=False):
             # These mocks should not be called since paths are provided
-            with patch("app.core.config._get_default_data_dir") as mock_data:
-                with patch("app.core.config._get_default_workspace_dir") as mock_workspace:
+            with patch("app.core.config._get_default_data_dir"):
+                with patch("app.core.config._get_default_workspace_dir"):
                     from app.core.config import Settings
                     settings = Settings()
 
@@ -581,115 +581,74 @@ class TestEnsureDirectories:
                         assert config_module.settings.effective_data_dir.exists()
 
 
-@pytest.mark.skip(reason="Module reload tests are flaky in CI due to import caching")
 class TestLoadWorkspaceFromDatabase:
-    """Test load_workspace_from_database function."""
+    """Test load_workspace_from_database function.
 
-    def test_load_workspace_from_database_with_valid_path(self):
-        """load_workspace_from_database should set workspace from database."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            configured_path = Path(tmpdir) / "configured_workspace"
-            configured_path.mkdir()
+    No importlib.reload (see TestEnsureDirectories): the function writes the
+    module-level ``_runtime_overrides`` dict, which is swapped for a fresh one
+    per test, and reads ``database.get_system_setting``, which is stubbed.
+    """
 
-            mock_database = MagicMock()
-            mock_database.get_system_setting.return_value = str(configured_path)
+    @pytest.fixture
+    def loader(self, monkeypatch):
+        import app.core.config as config_module
+        from app.db import database
 
-            with patch("app.core.config._get_default_data_dir", return_value=Path(tmpdir) / "data"):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path(tmpdir) / "workspace"):
-                    import importlib
-                    import app.core.config as config_module
-                    importlib.reload(config_module)
+        overrides: dict = {}
+        stored: dict = {}
+        monkeypatch.setattr(config_module, "_runtime_overrides", overrides)
+        monkeypatch.setattr(database, "get_system_setting", lambda key: stored.get(key))
+        instance_key = f"workspace_path:{config_module.settings.effective_instance_id}"
+        return config_module, overrides, stored, instance_key
 
-                    # Patch at the point of import in the load_workspace_from_database function
-                    with patch.dict("sys.modules", {"app.db.database": mock_database}):
-                        config_module.load_workspace_from_database()
+    def test_instance_scoped_path_wins(self, loader, tmp_path):
+        config_module, overrides, stored, instance_key = loader
+        stored[instance_key] = str(tmp_path / "mine")
+        stored["workspace_path"] = str(tmp_path / "global")
+        (tmp_path / "mine").mkdir()
 
-                        mock_database.get_system_setting.assert_called_once_with("workspace_path")
-                        assert config_module.settings.workspace_dir == configured_path
+        config_module.load_workspace_from_database()
 
-    def test_load_workspace_from_database_with_parent_exists(self):
-        """load_workspace_from_database should accept path if parent exists."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            parent_dir = Path(tmpdir)
-            configured_path = parent_dir / "new_workspace"  # Doesn't exist but parent does
+        assert overrides["workspace_dir"] == tmp_path / "mine"
+        assert config_module.settings.effective_workspace_dir == tmp_path / "mine"
 
-            mock_database = MagicMock()
-            mock_database.get_system_setting.return_value = str(configured_path)
+    def test_falls_back_to_global_key_and_accepts_missing_leaf(self, loader, tmp_path):
+        config_module, overrides, stored, _ = loader
+        stored["workspace_path"] = str(tmp_path / "not-yet-created")
 
-            with patch("app.core.config._get_default_data_dir", return_value=Path(tmpdir) / "data"):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path(tmpdir) / "workspace"):
-                    import importlib
-                    import app.core.config as config_module
-                    importlib.reload(config_module)
+        config_module.load_workspace_from_database()
 
-                    with patch.dict("sys.modules", {"app.db.database": mock_database}):
-                        config_module.load_workspace_from_database()
+        assert overrides["workspace_dir"] == tmp_path / "not-yet-created"
 
-                        assert config_module.settings.workspace_dir == configured_path
+    def test_no_configured_path_keeps_default(self, loader):
+        config_module, overrides, _, _ = loader
 
-    def test_load_workspace_from_database_no_configured_path(self):
-        """load_workspace_from_database should keep default if no path configured."""
-        mock_database = MagicMock()
-        mock_database.get_system_setting.return_value = None
+        config_module.load_workspace_from_database()
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            default_workspace = Path(tmpdir) / "default_workspace"
+        assert "workspace_dir" not in overrides
 
-            with patch("app.core.config._get_default_data_dir", return_value=Path(tmpdir) / "data"):
-                with patch("app.core.config._get_default_workspace_dir", return_value=default_workspace):
-                    import importlib
-                    import app.core.config as config_module
-                    importlib.reload(config_module)
+    def test_invalid_path_is_ignored_with_warning(self, loader, tmp_path, caplog):
+        config_module, overrides, stored, _ = loader
+        stored["workspace_path"] = str(tmp_path / "missing-parent" / "workspace")
 
-                    original_workspace = config_module.settings.workspace_dir
+        with caplog.at_level("WARNING", logger="app.core.config"):
+            config_module.load_workspace_from_database()
 
-                    with patch.dict("sys.modules", {"app.db.database": mock_database}):
-                        config_module.load_workspace_from_database()
+        assert "workspace_dir" not in overrides
+        assert "does not exist" in caplog.text
 
-                        # Should not change
-                        assert config_module.settings.workspace_dir == original_workspace
+    def test_database_error_is_swallowed(self, loader, monkeypatch):
+        config_module, overrides, _, _ = loader
+        from app.db import database
 
-    def test_load_workspace_from_database_invalid_path(self):
-        """load_workspace_from_database should warn for invalid paths."""
-        mock_database = MagicMock()
-        mock_database.get_system_setting.return_value = "/nonexistent/invalid/path/workspace"
+        def _boom(key):
+            raise RuntimeError("Database error")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("app.core.config._get_default_data_dir", return_value=Path(tmpdir) / "data"):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path(tmpdir) / "workspace"):
-                    import importlib
-                    import app.core.config as config_module
-                    importlib.reload(config_module)
+        monkeypatch.setattr(database, "get_system_setting", _boom)
 
-                    original_workspace = config_module.settings.workspace_dir
+        config_module.load_workspace_from_database()
 
-                    with patch.dict("sys.modules", {"app.db.database": mock_database}):
-                        # Should log warning but not crash
-                        config_module.load_workspace_from_database()
-
-                        # Should not change to invalid path
-                        assert config_module.settings.workspace_dir == original_workspace
-
-    def test_load_workspace_from_database_handles_exception(self):
-        """load_workspace_from_database should handle database errors gracefully."""
-        mock_database = MagicMock()
-        mock_database.get_system_setting.side_effect = Exception("Database error")
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("app.core.config._get_default_data_dir", return_value=Path(tmpdir) / "data"):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path(tmpdir) / "workspace"):
-                    import importlib
-                    import app.core.config as config_module
-                    importlib.reload(config_module)
-
-                    original_workspace = config_module.settings.workspace_dir
-
-                    with patch.dict("sys.modules", {"app.db.database": mock_database}):
-                        # Should not crash
-                        config_module.load_workspace_from_database()
-
-                        # Should keep original workspace
-                        assert config_module.settings.workspace_dir == original_workspace
+        assert "workspace_dir" not in overrides
 
 
 class TestGetDefaultHelpers:

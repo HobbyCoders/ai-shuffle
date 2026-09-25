@@ -10,14 +10,13 @@ first's rotated token, NO double POST); permanent-failure codes flipping
 
 import asyncio
 import base64
-import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 
-from app.core import codex_oauth, codex_token_refresh, encryption
+from app.core import codex_token_refresh, encryption
 from app.core.config import settings
 from app.db import database as db
 
@@ -158,7 +157,6 @@ class TestConcurrencySerialization:
         _seed_provider(last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)))
 
         post_count = 0
-        gate = asyncio.Event()
 
         async def handler(request):
             nonlocal post_count

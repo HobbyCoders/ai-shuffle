@@ -21,7 +21,7 @@ and refuses with "Skill execution blocked by permission rules".
 """
 
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 

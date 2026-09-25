@@ -40,6 +40,13 @@ def mock_db(test_db):
 
 
 @pytest.fixture(autouse=True)
+def _short_terminal_batch_window(monkeypatch):
+    """The real 2s terminal-batch window made every on_task_terminal test wait
+    it out; keep a short (non-zero, so batching still happens) window."""
+    monkeypatch.setattr(turn_scheduler, "TERMINAL_BATCH_WINDOW_SECONDS", 0.1)
+
+
+@pytest.fixture(autouse=True)
 def _clean_module_state():
     from app.core import idle_reader, session_runtime, turn_manager
 

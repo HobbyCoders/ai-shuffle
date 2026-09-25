@@ -257,7 +257,7 @@ class TestNetwork:
 
         # The token's fixed validity window ends on 2026-09-12; the inventory
         # drops expired tokens, so pin the clock inside that window.
-        monkeypatch.setattr(grok.time, "time", lambda: NOW)
+        monkeypatch.setattr(grok, "time", SimpleNamespace(time=lambda: NOW))
         async with _client(handler) as client:
             out = await grok.get_reset_credits(ACCESS, client=client)
 

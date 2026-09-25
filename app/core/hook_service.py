@@ -35,7 +35,7 @@ from app.core.agent_types import (
 
 from app.db import database
 from app.db.async_database import run_sync
-from app.core.hook_executor import execute_hook, spawn_hook_shell
+from app.core.hook_executor import execute_hook, kill_hook_process, spawn_hook_shell
 
 logger = logging.getLogger(__name__)
 
@@ -264,8 +264,7 @@ async def execute_plugin_hook(
         logger.warning(f"Plugin hook timed out after {timeout}s: {command} (cwd={working_dir})")
         logger.warning(f"If this is a Stop hook (e.g., ralph-loop), the transcript may be too large for the timeout.")
         try:
-            process.kill()
-            await process.wait()
+            await kill_hook_process(process)
         except Exception:
             pass
         return None
@@ -621,8 +620,7 @@ async def _execute_db_bash_hook(
             f"treating as no-opinion (tool not blocked)"
         )
         try:
-            process.kill()
-            await process.wait()
+            await kill_hook_process(process)
         except Exception:
             pass
         return ("timeout", None, None, None)

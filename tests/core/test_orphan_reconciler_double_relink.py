@@ -25,7 +25,6 @@ mid-first-turn sessions are not touched.
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 import app.core.orphan_reconciler as orphan
 

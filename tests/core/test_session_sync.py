@@ -9,14 +9,10 @@ Tests cover:
 - Integration with database operations
 """
 
-import json
 import pytest
-import tempfile
-import shutil
 import time
 import uuid
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from app.core.cli_sessions import SessionInfo as SDKSessionInfo
 
@@ -24,25 +20,6 @@ from app.core.cli_sessions import SessionInfo as SDKSessionInfo
 # =============================================================================
 # Fixtures
 # =============================================================================
-
-@pytest.fixture
-def temp_dir():
-    """Create a temporary directory for tests."""
-    tmpdir = tempfile.mkdtemp()
-    yield Path(tmpdir)
-    shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-@pytest.fixture
-def mock_settings(temp_dir):
-    """Mock settings with temporary directories."""
-    mock_settings_obj = MagicMock()
-    mock_settings_obj.workspace_dir = temp_dir / "workspace"
-    mock_settings_obj.get_claude_projects_dir = temp_dir / ".claude" / "projects"
-    mock_settings_obj.workspace_dir.mkdir(parents=True, exist_ok=True)
-    mock_settings_obj.get_claude_projects_dir.mkdir(parents=True, exist_ok=True)
-    return mock_settings_obj
-
 
 @pytest.fixture
 def mock_database():
@@ -59,63 +36,6 @@ def mock_database():
             "sdk_session_id": "test-sdk-id"
         }
         yield mock_db
-
-
-@pytest.fixture
-def sample_project():
-    """Sample project data."""
-    return {
-        "id": "test-project",
-        "name": "Test Project",
-        "path": "test-project",
-        "settings": {}
-    }
-
-
-@pytest.fixture
-def sample_jsonl_content():
-    """Sample JSONL session content."""
-    return [
-        {
-            "type": "user",
-            "message": {"role": "user", "content": "Hello, can you help me?"},
-            "uuid": str(uuid.uuid4()),
-            "timestamp": "2024-01-15T10:00:00Z"
-        },
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": "Of course! How can I help you today?"}],
-                "usage": {"input_tokens": 100, "output_tokens": 50}
-            },
-            "uuid": str(uuid.uuid4()),
-            "timestamp": "2024-01-15T10:00:01Z"
-        },
-        {
-            "type": "user",
-            "message": {"role": "user", "content": "Write a hello world program"},
-            "uuid": str(uuid.uuid4()),
-            "timestamp": "2024-01-15T10:00:02Z"
-        },
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": "Here's a simple Python hello world:\n\n```python\nprint('Hello, World!')\n```"}],
-                "usage": {"input_tokens": 150, "output_tokens": 80}
-            },
-            "uuid": str(uuid.uuid4()),
-            "timestamp": "2024-01-15T10:00:03Z"
-        }
-    ]
-
-
-def create_jsonl_file(path: Path, content: list) -> None:
-    """Helper to create a JSONL file."""
-    with open(path, 'w', encoding='utf-8') as f:
-        for entry in content:
-            f.write(json.dumps(entry) + '\n')
 
 
 def make_sdk_session_info(

@@ -11,6 +11,7 @@ the parent is woken with. Two audited failures come from that:
 """
 
 import os
+import types
 
 import pytest
 
@@ -457,7 +458,10 @@ def _jump_clock(monkeypatch):
         state["n"] += 1
         return state["n"] * 10_000.0
 
-    monkeypatch.setattr(ms.time, "monotonic", _monotonic)
+    # Swap the module's ``time`` binding, not the stdlib function: patching
+    # ``time.monotonic`` process-wide also jumps asyncio's loop clock, so its
+    # executor-join timeout "expires" at once and leaks threads (RuntimeWarning).
+    monkeypatch.setattr(ms, "time", types.SimpleNamespace(monotonic=_monotonic))
 
 
 @pytest.mark.asyncio
@@ -965,7 +969,7 @@ def test_a_summary_with_no_verdict_lines_is_pure_tail(monkeypatch):
 
 def test_a_service_that_exits_nonzero_after_startup_is_a_failure():
     status, summary = _settle(
-        exit_code=1, serves=True, ran_seconds=4000,
+        exit_code=1, serves=True,
         lines=["INFO: Application startup complete."],
     )
 
@@ -977,7 +981,7 @@ def test_a_service_that_exits_nonzero_after_startup_is_a_failure():
 def test_a_service_that_never_came_up_is_still_a_failure():
     """A port clash kills uvicorn in two seconds; that must stay visible."""
     status, summary = _settle(
-        exit_code=1, serves=True, ran_seconds=2,
+        exit_code=1, serves=True,
         lines=["ERROR: [Errno 98] address already in use"],
     )
 
@@ -989,7 +993,7 @@ def test_a_stopped_services_summary_is_capped():
     """One audited settle carried 34k characters of access log into a
     notification whose whole news was "the service is gone"."""
     status, summary = _settle(
-        exit_code=0, serves=True, ran_seconds=4000,
+        exit_code=0, serves=True,
         lines=[f'INFO: 127.0.0.1 - "GET /api/v1/x{i} HTTP/1.1" 200' for i in range(2000)],
     )
 

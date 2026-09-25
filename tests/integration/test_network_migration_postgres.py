@@ -287,7 +287,6 @@ def test_checkpoint_pages_share_the_same_postgres_snapshot(pg):
 
 def test_peer_apply_rolls_back_records_and_frontier_together(pg, monkeypatch, tmp_path):
     import copy
-    import json
 
     from app.db import network as store
     from app.network import engine, peer_snapshot

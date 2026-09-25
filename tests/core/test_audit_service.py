@@ -215,7 +215,7 @@ class TestLogEvent:
         mock_request.headers = {"User-Agent": "TestAgent/1.0"}
         mock_request.client.host = "192.168.1.1"
 
-        result = log_event(
+        log_event(
             event_type=AuditEventType.LOGIN_SUCCESS,
             request=mock_request,
             user_id="test-user"
@@ -230,7 +230,7 @@ class TestLogEvent:
         mock_request.headers = {"User-Agent": "RequestAgent"}
         mock_request.client.host = "10.0.0.1"
 
-        result = log_event(
+        log_event(
             event_type=AuditEventType.LOGIN_SUCCESS,
             request=mock_request,
             user_id="test-user",
@@ -268,7 +268,7 @@ class TestLogEvent:
 
     def test_log_event_without_request(self, mock_db_create_audit_log):
         """Should work without request object."""
-        result = log_event(
+        log_event(
             event_type=AuditEventType.LOGOUT,
             user_id="test-user",
             ip_address="1.2.3.4",
@@ -339,7 +339,7 @@ class TestLogLoginSuccess:
 
     def test_log_login_success_basic(self, mock_request, mock_db_create_audit_log):
         """Should log successful login."""
-        result = log_login_success(mock_request, "user-123")
+        log_login_success(mock_request, "user-123")
 
         call_kwargs = mock_db_create_audit_log.call_args[1]
         assert call_kwargs["event_type"] == AuditEventType.LOGIN_SUCCESS
@@ -367,7 +367,7 @@ class TestLogLoginFailure:
 
     def test_log_login_failure_basic(self, mock_request, mock_db_create_audit_log):
         """Should log failed login."""
-        result = log_login_failure(mock_request)
+        log_login_failure(mock_request)
 
         call_kwargs = mock_db_create_audit_log.call_args[1]
         assert call_kwargs["event_type"] == AuditEventType.LOGIN_FAILURE
@@ -487,7 +487,7 @@ class TestLogEventIntegration:
         mock_request.headers = {"User-Agent": "Integration/Test"}
         mock_request.client.host = "10.0.0.1"
 
-        result = log_event(
+        log_event(
             event_type=AuditEventType.SETTINGS_CHANGED,
             request=mock_request,
             user_id="admin-user",

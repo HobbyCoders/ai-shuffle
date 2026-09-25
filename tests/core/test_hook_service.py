@@ -306,7 +306,6 @@ class TestCreatePluginHookHandler:
         the handler must return a PostToolUseHookSpecificOutput with
         updatedToolOutput == "REWRITTEN".
         """
-        from app.core.agent_types import PostToolUseHookSpecificOutput
 
         async def mock_execute(*args, **kwargs):
             return {"updated_output": "REWRITTEN"}

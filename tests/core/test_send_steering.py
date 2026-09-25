@@ -13,7 +13,6 @@ Three seams are covered here:
 The turns table is real (pg_shim SQLite); the engine and the pump are stubbed.
 """
 
-import asyncio
 import time
 from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch

@@ -19,7 +19,7 @@ import pytest
 import asyncio
 import sys
 from datetime import datetime
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import patch, AsyncMock
 from dataclasses import fields
 
 from app.core.cli_bridge import (
@@ -650,23 +650,18 @@ class TestCLIBridgeStop:
                 mock_kill.assert_called_once()
                 assert mock_kill.call_args[0][1] == signal.SIGTERM
 
-    @pytest.mark.skip(reason="Flaky test - AsyncMock task awaiting issues in different Python versions")
     @skip_on_windows
     @pytest.mark.asyncio
     async def test_stop_cancels_read_task(self, running_bridge):
         """stop should cancel the read task."""
-        # Create a proper AsyncMock for the task
-        mock_task = AsyncMock()
-        mock_task.cancel = MagicMock()
-        # Make awaiting the task raise CancelledError (simulating cancellation)
-        mock_task.side_effect = asyncio.CancelledError()
-        running_bridge._read_task = mock_task
+        read_task = asyncio.create_task(asyncio.sleep(3600))
+        running_bridge._read_task = read_task
 
         with patch('os.kill', side_effect=ProcessLookupError()):
             with patch.object(running_bridge, '_cleanup', new_callable=AsyncMock):
                 await running_bridge.stop()
 
-                mock_task.cancel.assert_called_once()
+        assert read_task.cancelled()
 
 
 class TestCLIBridgeCleanup:
@@ -808,7 +803,7 @@ class TestCLIBridgeResize:
 
         # Mock _set_terminal_size since it uses fcntl
         with patch.object(bridge, '_set_terminal_size') as mock_set_size:
-            with patch('os.kill') as mock_kill:
+            with patch('os.kill'):
                 await bridge.resize(120, 40)
 
                 mock_set_size.assert_called_once_with(120, 40)
@@ -1122,7 +1117,7 @@ class TestCLIBridgeThemeSelection:
         bridge = bridge_with_pending_command
         bridge._output_buffer = "Choose the text style for the interface:\n1. Dark mode\n2. Light mode"
 
-        with patch('os.write') as mock_write:
+        with patch('os.write'):
             with patch('asyncio.sleep', new_callable=AsyncMock):
                 await bridge._handle_theme_selection()
 
@@ -1148,7 +1143,7 @@ class TestCLIBridgeThemeSelection:
         bridge = bridge_with_pending_command
         bridge._output_buffer = "Choose the text style for the interface:\n1. Dark mode"
 
-        with patch('os.write') as mock_write:
+        with patch('os.write'):
             with patch('asyncio.sleep', new_callable=AsyncMock):
                 await bridge._handle_theme_selection()
 
@@ -1161,7 +1156,7 @@ class TestCLIBridgeThemeSelection:
         bridge = bridge_with_pending_command
         bridge._output_buffer = "Welcome to Claude Code!\n" * 100 + "Some more content"
 
-        with patch('os.write') as mock_write:
+        with patch('os.write'):
             with patch('asyncio.sleep', new_callable=AsyncMock):
                 # Simulate the buffer being large enough
                 bridge._output_buffer = "Welcome to Claude Code" + " " * 2500

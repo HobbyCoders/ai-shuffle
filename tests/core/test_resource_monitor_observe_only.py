@@ -22,7 +22,6 @@ spawns real throwaway child processes so the reaping is genuinely exercised.
 import os
 import subprocess
 import sys
-import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -208,7 +207,7 @@ def test_reaper_kills_recorded_orphan_descendants():
 
 def test_reaper_skips_descendant_of_live_session(monkeypatch):
     """A descendant that belongs to a still-LIVE SDK subprocess must NOT be reaped."""
-    psutil = pytest.importorskip("psutil")
+    pytest.importorskip("psutil")
 
     child = _spawn_sleeper()
     try:

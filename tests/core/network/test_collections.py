@@ -1,5 +1,4 @@
 """Milestone 5 collections: memory facts and skills, plugin desired state, blobs, owners."""
-import json
 
 import pytest
 

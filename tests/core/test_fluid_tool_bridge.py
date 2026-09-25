@@ -13,7 +13,6 @@ state), so two sessions' same-named servers must not collide.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 

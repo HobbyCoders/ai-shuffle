@@ -2273,9 +2273,11 @@ async def test_web_fetch_spoken_approval_resolves_real_pending_request(mock_db, 
     from fluid.tools.registry import ToolOutcome
 
     _mk_session()
+    # Patch before _bridge(): it starts the approval poller, whose first sleep
+    # would otherwise already be the real 2s interval.
+    monkeypatch.setattr(vb, "APPROVAL_POLL_SECONDS", 0.01)
     bridge = await _bridge(fake_sockets)
     announced = asyncio.Event()
-    monkeypatch.setattr(vb, "APPROVAL_POLL_SECONDS", 0.01)
 
     async def inject(text):
         if text.startswith(vb.APPROVAL_PREFIX):

@@ -15,7 +15,6 @@ Covers:
 import json
 import uuid
 
-import pytest
 
 from app.core.config import settings
 from app.db import database

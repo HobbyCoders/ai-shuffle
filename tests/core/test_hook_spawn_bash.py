@@ -215,3 +215,44 @@ class TestWindowsEndToEnd:
         stdout, _ = await asyncio.wait_for(process.communicate(b"{}"), timeout=15)
         parsed = json.loads(stdout.decode().strip())
         assert parsed == {"decision": "block", "reason": "e2e-572"}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group kill")
+class TestTimeoutKillsTheWholeHook:
+    """A timed-out hook's children must die with it, or they hold the pipes open.
+
+    ``/bin/sh -c`` forks ``sleep`` rather than exec'ing it; killing only the
+    shell used to leave the child holding stdout/stderr, so the call blocked
+    for the child's whole lifetime instead of returning at the timeout.
+    """
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_promptly_and_kills_the_child(self, tmp_path):
+        import time
+
+        pid_file = tmp_path / "child.pid"
+        started = time.monotonic()
+        result = await hook_executor.execute_bash_hook(
+            {"command": f"sleep 30 & echo $! > {pid_file}; wait", "timeout": 200},
+            {"event": "test", "data": {}},
+        )
+        elapsed = time.monotonic() - started
+
+        assert result["success"] is False
+        assert "timed out" in result["error"]
+        assert elapsed < 5, f"hook call blocked {elapsed:.1f}s past its 0.2s timeout"
+
+        # Linux: the orphaned child must be dead (gone or a zombie awaiting reap).
+        stat = Path(f"/proc/{int(pid_file.read_text().strip())}/stat")
+
+        def _alive() -> bool:
+            try:
+                return stat.read_text().rsplit(")", 1)[-1].split()[0] not in ("Z", "X")
+            except FileNotFoundError:
+                return False
+
+        if Path("/proc/self/stat").exists():
+            deadline = time.monotonic() + 2
+            while _alive():
+                assert time.monotonic() < deadline, "backgrounded child survived the timeout"
+                await asyncio.sleep(0.02)

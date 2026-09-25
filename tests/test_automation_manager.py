@@ -6,7 +6,6 @@ from tests.conftest import async_twin
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime
 
 from app.core.automation_manager import AutomationManager
 
@@ -352,7 +351,7 @@ class TestHandleConnectorEvent:
         )
         database.update_automation("auto-evt", is_enabled=True)
 
-        with patch.object(manager, "_execute", new_callable=AsyncMock) as mock_exec:
+        with patch.object(manager, "_execute", new_callable=AsyncMock):
             await manager.handle_connector_event("session.complete", {"project_id": "proj-2"})
             # _execute should not be called because filter didn't match
             # (but the task might be created — depends on how get_automations_for_event works)

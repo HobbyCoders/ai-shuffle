@@ -18,7 +18,6 @@ BEFORE any teardown step runs, and the unpark delivery path must refuse to
 start a new follow-up ``run_query`` while it is set.
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

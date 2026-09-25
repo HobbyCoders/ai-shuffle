@@ -228,8 +228,8 @@ class TestLifespan:
              patch("app.core.startup.init_encryption_and_sessions") as mock_enc, \
              patch("app.core.startup.init_workspace") as mock_ws, \
              patch("app.core.startup.check_prerequisites") as mock_prereqs, \
-             patch("app.core.startup.start_services", new_callable=AsyncMock) as mock_services, \
-             patch("app.core.startup.start_background_tasks", return_value=[]) as mock_bg, \
+             patch("app.core.startup.start_services", new_callable=AsyncMock), \
+             patch("app.core.startup.start_background_tasks", return_value=[]), \
              patch("app.main.settings") as mock_settings:
 
             mock_settings.version = "1.2.1"

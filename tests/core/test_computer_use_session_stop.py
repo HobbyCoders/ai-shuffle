@@ -7,7 +7,7 @@ a fresh agent can act again.
 """
 
 from contextlib import contextmanager
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 

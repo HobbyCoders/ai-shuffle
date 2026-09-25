@@ -13,7 +13,6 @@ retrieved"). The helper is best-effort and must never raise.
 
 import logging
 
-import pytest
 
 from app.core.query_persistence import log_captured_cli_stderr
 

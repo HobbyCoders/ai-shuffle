@@ -5,7 +5,6 @@ Tests the domain detection, template matching, clarification logic,
 and prompt building functionality.
 """
 
-import pytest
 
 
 class TestToolMapping:

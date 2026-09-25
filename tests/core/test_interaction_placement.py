@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock
 
 from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
 
-from app.core import interaction_events, interaction_sweeper, interaction_wait
+from app.core import interaction_sweeper, interaction_wait
 from app.core.permission_handler import PermissionHandler, _DeferSentinel
 from app.core.user_question_handler import UserQuestionHandler
 from app.db import interactions

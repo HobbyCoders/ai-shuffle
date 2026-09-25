@@ -3,7 +3,6 @@ Tests for the connector permission funnel (app/core/connector_permissions.py)
 and the permission_handler hook that drives it.
 """
 
-import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
