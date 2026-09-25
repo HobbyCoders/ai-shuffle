@@ -50,6 +50,12 @@ const initialState: HooksState = {
 
 let _state = $state<HooksState>({ ...initialState });
 
+/** Latest list load (app or project); an older (slower) response is discarded
+ *  so a project the user already left cannot overwrite the current list. */
+let _loadSeq = 0;
+
+const errorText = (fallback: string) => (e: unknown) => api.getErrorMessage(e, fallback);
+
 // ============================================================================
 // Subscribe Shim (centralized via store-utils)
 // ============================================================================
@@ -79,13 +85,15 @@ export const hooks = {
 	 * Load app-level hooks only (no project context)
 	 */
 	async loadAppHooks(): Promise<void> {
+		const seq = ++_loadSeq;
 		return withLoading(_update, async () => {
 			const [appHooksData, pluginHooksData] = await Promise.all([
 				api.getAppHooks(),
 				api.getPluginHooks()
 			]);
+			if (seq !== _loadSeq) return;
 			_update((state) => ({ ...state, hooks: appHooksData, pluginHooks: pluginHooksData }));
-		}, 'Failed to load app hooks');
+		}, errorText('Failed to load app hooks'));
 	},
 
 	/**
@@ -96,7 +104,7 @@ export const hooks = {
 			const hook = await api.createHook(projectId, data);
 			_update((state) => ({ ...state, hooks: [hook, ...state.hooks] }));
 			return hook;
-		}, 'Failed to create hook');
+		}, errorText('Failed to create hook'));
 	},
 
 	/**
@@ -107,7 +115,7 @@ export const hooks = {
 			const hook = await api.createAppHook(data);
 			_update((state) => ({ ...state, hooks: [hook, ...state.hooks] }));
 			return hook;
-		}, 'Failed to create app hook');
+		}, errorText('Failed to create app hook'));
 	},
 
 	/**
@@ -129,7 +137,7 @@ export const hooks = {
 			}));
 			return hook;
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to update hook';
+			const error = api.getErrorMessage(e, 'Failed to update hook');
 			_update((state) => ({
 				...state,
 				saving: { ...state.saving, [hookId]: false },
@@ -157,7 +165,7 @@ export const hooks = {
 				saving: { ...state.saving, [hookId]: false }
 			}));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to delete hook';
+			const error = api.getErrorMessage(e, 'Failed to delete hook');
 			_update((state) => ({
 				...state,
 				saving: { ...state.saving, [hookId]: false },
@@ -195,7 +203,7 @@ export const hooks = {
 			}));
 			return result;
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to test hook';
+			const error = api.getErrorMessage(e, 'Failed to test hook');
 			_update((state) => ({
 				...state,
 				testing: { ...state.testing, [hookId]: false },
@@ -213,6 +221,7 @@ export const hooks = {
 	 * Load all hooks (project + app + plugin)
 	 */
 	async loadAll(projectId: string): Promise<void> {
+		const seq = ++_loadSeq;
 		_update((state) => ({ ...state, currentProjectId: projectId }));
 		return withLoading(_update, async () => {
 			// Load project hooks (includes app hooks), global plugin hooks, and project plugin hooks
@@ -224,9 +233,10 @@ export const hooks = {
 
 			// Combine global and project plugin hooks
 			const pluginHooks = [...globalPluginHooks, ...projectPluginHooks];
+			if (seq !== _loadSeq) return;
 
 			_update((state) => ({ ...state, hooks: hooksData, pluginHooks }));
-		}, 'Failed to load hooks');
+		}, errorText('Failed to load hooks'));
 	},
 
 	// ========================================================================
@@ -244,6 +254,7 @@ export const hooks = {
 	 * Reset store to initial state
 	 */
 	reset(): void {
+		_loadSeq++;
 		_state = { ...initialState };
 		_notifySubscribers();
 	},

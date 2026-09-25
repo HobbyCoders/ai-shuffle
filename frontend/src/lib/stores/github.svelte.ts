@@ -69,6 +69,12 @@ const initialState: GitHubState = {
 
 let _state = $state<GitHubState>({ ...initialState });
 
+/** Latest status / pull-request request; an older response is discarded so a
+ *  slow reply for a project the user already left cannot overwrite the newer
+ *  one (or leak its repo info — the header's default-branch source). */
+let _statusSeq = 0;
+let _prSeq = 0;
+
 // ============================================================================
 // Subscribe shim (centralized via store-utils)
 // ============================================================================
@@ -94,10 +100,18 @@ export const github = {
 	 * Load GitHub status for a project
 	 */
 	async loadStatus(projectId: string): Promise<boolean | null> {
-		_update(s => ({ ...s, projectId, loading: true, error: null }));
+		const seq = ++_statusSeq;
+		// Switching project drops the previous project's repo info and PRs:
+		// "keep the last known value on a 502" only holds for the same project.
+		const switching = _state.projectId !== projectId;
+		if (switching) _prSeq++;
+		_update(s => switching
+			? { ...initialState, projectId, loading: true }
+			: { ...s, loading: true, error: null });
 
 		try {
 			const status = await githubApi.getGitHubStatus(projectId);
+			if (seq !== _statusSeq) return status.authenticated;
 
 			_update(s => ({
 				...s,
@@ -115,6 +129,7 @@ export const github = {
 			// ("unknown") and leave the previously known repo info in place so a
 			// blip can't blank the header's default-branch source.
 			const unknown = isGitHubUnavailable(e);
+			if (seq !== _statusSeq) return unknown ? null : false;
 			_update(s => ({
 				...s,
 				loading: false,
@@ -129,20 +144,21 @@ export const github = {
 	 * Load pull requests for the current project
 	 */
 	async loadPullRequests(state: 'open' | 'closed' | 'merged' | 'all' = 'open') {
-		if (!_state.projectId) return;
+		const projectId = _state.projectId;
+		if (!projectId) return;
+		const seq = ++_prSeq;
 
 		_update(s => ({ ...s, loadingPRs: true, error: null }));
 
 		try {
-			const pullRequests = await githubApi.getPullRequests(
-				_state.projectId,
-				state
-			);
+			const pullRequests = await githubApi.getPullRequests(projectId, state);
+			if (seq !== _prSeq) return;
 			_update(s => ({ ...s, pullRequests, pullRequestsStale: false, loadingPRs: false }));
 		} catch (e) {
 			const error = e as { detail?: string };
 			// A 502 means GitHub was unreachable — the previously loaded list is
 			// kept (and flagged stale) instead of collapsing to "no pull requests".
+			if (seq !== _prSeq) return;
 			_update(s => ({
 				...s,
 				loadingPRs: false,
@@ -258,6 +274,8 @@ export const github = {
 	 * Clear store state
 	 */
 	clear() {
+		_statusSeq++;
+		_prSeq++;
 		_state = { ...initialState };
 		_notifySubscribers();
 	}

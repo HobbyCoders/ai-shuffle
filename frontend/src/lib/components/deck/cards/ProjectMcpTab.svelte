@@ -54,8 +54,29 @@
 		if (e.key === 'Escape') actionsOpenKey = null;
 	}
 
-	// Load MCP servers when project changes. An open editor, a pending removal
-	// and the search belong to the previous project, so drop them.
+	// The project whose servers the store holds, as far as this tab knows: set
+	// when this tab's newest load for the current project resolves. Until then
+	// (right after a switch, or when that load fails) the list is empty and no
+	// row can act, so the previous project's names are never shown or sent
+	// with the new project's id. A slower load for a project already left is
+	// ignored (the store also drops its late response).
+	let listedProjectId = $state<string | null>(null);
+	const listed = $derived(listedProjectId !== null && listedProjectId === projectId);
+	let loadSeq = 0;
+	async function reload(id: string): Promise<void> {
+		const seq = ++loadSeq;
+		await mcp.loadProjectServers(id);
+		if (seq === loadSeq && id === projectId) listedProjectId = id;
+	}
+	/** After an action for ``id`` finished: if the user switched meanwhile, the
+	 *  action's own reload (or optimistic update) left ``id``'s servers in the
+	 *  store, so fetch the current project's again. */
+	function resyncIfSwitched(id: string) {
+		if (id !== projectId) reload(projectId).catch(() => {});
+	}
+
+	// Load MCP servers when project changes. An open editor, a pending removal,
+	// an open row tray and the search belong to the previous project, so drop them.
 	let loadedProjectId: string | null = null;
 	$effect(() => {
 		const id = projectId;
@@ -65,11 +86,12 @@
 				showMcpServerForm = false;
 				editingMcpServer = null;
 				pendingRemove = null;
+				actionsOpenKey = null;
 				searchQuery = '';
 			}
 			loadedProjectId = id;
 			// A failed load is shown through $mcpError.
-			mcp.loadProjectServers(id).catch(() => {});
+			reload(id).catch(() => {});
 		});
 	});
 
@@ -85,25 +107,32 @@
 		);
 	}
 
-	const filteredUserServers = $derived(() => filterServers($projectMcpServers.user || []));
-	const filteredInstalledServers = $derived(() => filterServers($projectMcpServers.installed || []));
-	const filteredLocalServers = $derived(() => filterServers($projectMcpServers.local || []));
-	const filteredProjectServers = $derived(() => filterServers($projectMcpServers.project || []));
+	const EMPTY: McpServerInfo[] = [];
+	const shown = $derived(
+		listed ? $projectMcpServers : { user: EMPTY, installed: EMPTY, local: EMPTY, project: EMPTY }
+	);
+	const filteredUserServers = $derived(() => filterServers(shown.user || []));
+	const filteredInstalledServers = $derived(() => filterServers(shown.installed || []));
+	const filteredLocalServers = $derived(() => filterServers(shown.local || []));
+	const filteredProjectServers = $derived(() => filterServers(shown.project || []));
 
 	const totalServers = $derived(
-		($projectMcpServers.user?.length || 0) +
-		($projectMcpServers.installed?.length || 0) +
-		($projectMcpServers.local?.length || 0) +
-		($projectMcpServers.project?.length || 0)
+		(shown.user?.length || 0) +
+		(shown.installed?.length || 0) +
+		(shown.local?.length || 0) +
+		(shown.project?.length || 0)
 	);
 
 	// Toggle server enabled/disabled for this project
 	async function handleToggle(server: McpServerInfo) {
+		if (!listed) return;
+		const id = projectId;
 		try {
-			await mcp.toggleProjectServer(projectId, server.name, !server.enabled);
+			await mcp.toggleProjectServer(id, server.name, !server.enabled);
 		} catch (e) {
 			console.error('Failed to toggle MCP server:', e);
 		}
+		resyncIfSwitched(id);
 	}
 
 	// Remove server (after confirmation: a global server is deleted everywhere)
@@ -111,14 +140,16 @@
 	async function confirmRemove() {
 		const server = pendingRemove;
 		pendingRemove = null;
-		if (server) await handleRemoveServer(server);
+		if (server && listed) await handleRemoveServer(server);
 	}
 	async function handleRemoveServer(server: McpServerInfo) {
+		const id = projectId;
 		try {
-			await mcp.removeProjectServer(projectId, server.name, server.scope as 'user' | 'installed' | 'local' | 'project');
+			await mcp.removeProjectServer(id, server.name, server.scope as 'user' | 'installed' | 'local' | 'project');
 		} catch (e) {
 			console.error('Failed to remove MCP server:', e);
 		}
+		resyncIfSwitched(id);
 	}
 
 	// Add new local/project server
@@ -130,6 +161,7 @@
 
 	// Edit local/project/installed server
 	function handleEditServer(server: McpServerInfo) {
+		if (!listed) return;
 		editingMcpServer = server;
 		mcpSelectedScope = server.scope as 'installed' | 'local' | 'project';
 		showMcpServerForm = true;
@@ -146,26 +178,30 @@
 		description?: string;
 		scope?: 'installed' | 'local' | 'project';
 	}) {
+		const id = projectId;
 		try {
 			const scope = config.scope || mcpSelectedScope;
 			if (editingMcpServer) {
 				await mcp.updateProjectServer(
-					projectId,
+					id,
 					editingMcpServer.name,
 					config,
 					scope
 				);
 			} else {
-				await mcp.addProjectServer(projectId, {
+				await mcp.addProjectServer(id, {
 					...config,
 					scope: scope as 'installed' | 'local' | 'project'
 				});
 			}
-			showMcpServerForm = false;
-			editingMcpServer = null;
+			if (id === projectId) {
+				showMcpServerForm = false;
+				editingMcpServer = null;
+			}
 		} catch (e) {
 			console.error('Failed to save MCP server:', e);
 		}
+		resyncIfSwitched(id);
 	}
 
 	// Server type label helper
@@ -181,7 +217,7 @@
 	watchResources(['mcp'], async () => {
 		const selected = editingMcpServer;
 		const id = projectId;
-		await mcp.loadProjectServers(id);
+		await reload(id);
 		if (id !== projectId || !selected || editingMcpServer !== selected || !showMcpServerForm) return;
 		const fresh = Object.values($projectMcpServers).flat().find((server) => server.name === selected.name && server.scope === selected.scope);
 		if (remoteForm?.canRefreshRemote(!fresh)) {
@@ -317,7 +353,7 @@
 	{/if}
 
 	<!-- Empty state -->
-	{#if totalServers === 0 && !$mcpError}
+	{#if listed && totalServers === 0 && !$mcpError}
 		<div class="empty-state">
 			<Server />
 			<p class="es-title">No MCP servers available</p>

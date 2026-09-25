@@ -14,7 +14,9 @@ import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
  * JavaScript treats it as UTC instead of local time.
  */
 export function parseUTC(dateStr: string): Date {
-	if (dateStr && !dateStr.endsWith('Z') && !/[+-]\d{2}:?\d{2}$/.test(dateStr)) {
+	// An explicit designator — `Z`/`z`, `+05:30`, `+0530` or an hour-only `+00`
+	// (Postgres text form) — is kept; appending a second one yields Invalid Date.
+	if (dateStr && !/(?:z|[+-]\d{2}(?::?\d{2})?)$/i.test(dateStr)) {
 		return new Date(dateStr + 'Z');
 	}
 	return new Date(dateStr);

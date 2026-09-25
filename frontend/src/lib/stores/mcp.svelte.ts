@@ -84,6 +84,10 @@ function extractError(e: unknown, fallback: string): string {
 
 let _state = $state<McpState>({ ...initialState, projectServers: { user: [], installed: [], local: [], project: [] } });
 
+/** Latest loadProjectServers call; an older (slower) response is discarded so
+ *  a project the user already left cannot overwrite the current lists. */
+let _projectLoadSeq = 0;
+
 // ============================================================================
 // Subscribe Shim (centralized via store-utils)
 // ============================================================================
@@ -168,9 +172,11 @@ export const mcp = {
 	 * Load all MCP servers for a project
 	 */
 	async loadProjectServers(projectId: string): Promise<void> {
+		const seq = ++_projectLoadSeq;
 		_update((state) => ({ ...state, currentProjectId: projectId }));
 		return withLoading(_update, async () => {
 			const response = await mcpApi.getProjectMcpServers(projectId);
+			if (seq !== _projectLoadSeq) return;
 			_update((state) => ({
 				...state,
 				projectServers: {
@@ -261,7 +267,7 @@ export const mcp = {
 				}));
 			}
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to remove MCP server';
+			const error = extractError(e, 'Failed to remove MCP server');
 			_update((state) => ({ ...state, error, loading: false }));
 			throw e;
 		}
@@ -306,6 +312,7 @@ export const mcp = {
 	 * Reset store to initial state
 	 */
 	reset(): void {
+		_projectLoadSeq++;
 		_state = { ...initialState, projectServers: { user: [], installed: [], local: [], project: [] } };
 		_notifySubscribers();
 	},

@@ -142,4 +142,67 @@ describe('ProjectMcpTab', () => {
 		expect((screen.getByPlaceholderText('Search MCP servers…') as HTMLInputElement).value).toBe('');
 		expect(api.updateProjectMcpServer).not.toHaveBeenCalled();
 	});
+
+	// R13-5: the list itself belongs to the project too.
+	function deferred<T>() {
+		let resolve!: (v: T) => void;
+		let reject!: (e: unknown) => void;
+		const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+		return { promise, resolve, reject };
+	}
+	const p2Servers = () => ({
+		user: [s('github', 'user')], installed: [], local: [s('p2-only', 'local')], project: [], total_count: 2
+	});
+
+	it('hides the previous project\'s servers while the new project loads', async () => {
+		const view = await mount();
+		const p2 = deferred<ReturnType<typeof p2Servers>>();
+		api.getProjectMcpServers.mockReturnValueOnce(p2.promise);
+		await view.rerender({ projectId: 'p2' });
+		await waitFor(() => expect(api.getProjectMcpServers).toHaveBeenLastCalledWith('p2'));
+		// p1's rows are gone, so nothing can act on p2 with p1's names.
+		expect(screen.queryByRole('switch', { name: 'Enable sentry' })).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Edit scratch' })).toBeNull();
+		expect(screen.queryByText('No MCP servers available')).toBeNull();
+		p2.resolve(p2Servers());
+		expect(await screen.findByRole('button', { name: 'Edit p2-only' })).toBeTruthy();
+		expect(screen.queryByText('Installed MCP Servers')).toBeNull();
+	});
+
+	it('does not keep showing the previous project when the new load fails', async () => {
+		const view = await mount();
+		api.getProjectMcpServers.mockRejectedValueOnce({ detail: 'project path missing' });
+		await view.rerender({ projectId: 'p2' });
+		expect(await screen.findByText('project path missing')).toBeTruthy();
+		expect(screen.queryByText('Global MCP Servers')).toBeNull();
+		expect(screen.queryByRole('switch', { name: 'Enable sentry' })).toBeNull();
+	});
+
+	it('ignores a late response for a project the user already left', async () => {
+		const p1 = deferred<ReturnType<typeof servers>>();
+		api.getProjectMcpServers.mockReturnValueOnce(p1.promise).mockResolvedValueOnce(p2Servers());
+		const view = render(ProjectMcpTab, { props: { projectId: 'p1' } });
+		await view.rerender({ projectId: 'p2' });
+		expect(await screen.findByRole('button', { name: 'Edit p2-only' })).toBeTruthy();
+		p1.resolve(servers());
+		await new Promise((r) => setTimeout(r, 0));
+		expect(screen.getByRole('button', { name: 'Edit p2-only' })).toBeTruthy();
+		expect(screen.queryByRole('switch', { name: 'Enable sentry' })).toBeNull();
+	});
+
+	it('shows the current project again after a toggle for the previous one lands', async () => {
+		const view = await mount();
+		const toggle = deferred<undefined>();
+		api.toggleProjectMcpServer.mockReturnValueOnce(toggle.promise);
+		await fireEvent.click(screen.getByRole('switch', { name: 'Enable sentry' }));
+		api.getProjectMcpServers.mockImplementation(async (id: string) => (id === 'p2' ? p2Servers() : servers()));
+		await view.rerender({ projectId: 'p2' });
+		expect(await screen.findByRole('button', { name: 'Edit p2-only' })).toBeTruthy();
+		const before = api.getProjectMcpServers.mock.calls.length;
+		toggle.resolve(undefined); // the store then reloads p1, and the tab p2
+		await waitFor(() => expect(api.getProjectMcpServers.mock.calls.slice(before)).toEqual([['p1'], ['p2']]));
+		expect(api.toggleProjectMcpServer).toHaveBeenCalledWith('p1', 'sentry', true);
+		expect(await screen.findByRole('button', { name: 'Edit p2-only' })).toBeTruthy();
+		expect(screen.queryByText('Installed MCP Servers')).toBeNull();
+	});
 });

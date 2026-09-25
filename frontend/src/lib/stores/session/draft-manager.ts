@@ -29,6 +29,10 @@ interface DraftManagerDeps {
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
+/** Disambiguates system messages added within the same millisecond — the
+ *  transcript is a keyed each block, so a repeated id breaks rendering. */
+let systemMessageSeq = 0;
+
 export function createDraftManager(deps: DraftManagerDeps) {
 	const { update, getState, wsSend, wsIsConnected, feedRestart, feedRevive } = deps;
 
@@ -76,7 +80,7 @@ export function createDraftManager(deps: DraftManagerDeps) {
 			update(s => ({
 				...s,
 				messages: [...s.messages, {
-					id: `system-${Date.now()}`,
+					id: `system-${Date.now()}-${++systemMessageSeq}`,
 					role: 'system' as const,
 					content,
 					type: 'system' as MessageType,

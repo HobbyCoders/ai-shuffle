@@ -13,6 +13,7 @@
 
 import type { MemoryFile, MemoryLocation } from '$lib/api/projectMemory';
 import * as memoryApi from '$lib/api/projectMemory';
+import { getErrorMessage } from '$lib/api/client';
 import { createSubscribers } from './store-utils';
 
 // ============================================================================
@@ -45,6 +46,10 @@ const initialState: ProjectMemoryState = {
 
 let _state = $state<ProjectMemoryState>({ ...initialState });
 
+/** Latest loadFiles call; an older (slower) response is discarded so a
+ *  project the user already left cannot overwrite the current files. */
+let _loadSeq = 0;
+
 // ============================================================================
 // Subscribe shim (centralized via store-utils)
 // ============================================================================
@@ -74,6 +79,7 @@ export const projectMemory = {
 	 * Load all memory files for a project
 	 */
 	async loadFiles(projectId: string): Promise<void> {
+		const seq = ++_loadSeq;
 		_update((state) => ({
 			...state,
 			loading: true,
@@ -83,9 +89,11 @@ export const projectMemory = {
 
 		try {
 			const files = await memoryApi.getMemoryFiles(projectId);
+			if (seq !== _loadSeq) return;
 			_update((state) => ({ ...state, files, loading: false }));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load memory files';
+			if (seq !== _loadSeq) throw e;
+			const error = getErrorMessage(e, 'Failed to load memory files');
 			_update((state) => ({ ...state, error, loading: false }));
 			throw e;
 		}
@@ -116,7 +124,7 @@ export const projectMemory = {
 			}));
 			return file;
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to save memory file';
+			const error = getErrorMessage(e, 'Failed to save memory file');
 			_update((state) => ({ ...state, error, saving: false }));
 			throw e;
 		}
@@ -143,7 +151,7 @@ export const projectMemory = {
 				saving: false
 			}));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to delete memory file';
+			const error = getErrorMessage(e, 'Failed to delete memory file');
 			_update((state) => ({ ...state, error, saving: false }));
 			throw e;
 		}
@@ -158,6 +166,7 @@ export const projectMemory = {
 	},
 
 	reset(): void {
+		_loadSeq++;
 		_state = { ...initialState };
 		_notifySubscribers();
 	}
