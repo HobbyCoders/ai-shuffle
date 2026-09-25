@@ -37,7 +37,7 @@ What the web UI needs to choose between sign-in, first-run setup and the app. No
 
 ### POST /api/v1/owner/password
 
-Create the first owner password, or change it. Creating it needs a browser on the local network (or owner access). Changing it needs owner access and `current_password`. Changing the password signs out every other owner browser.
+Create the first owner password, or change it. Creating it needs a browser on the local network (or owner access). Changing it needs owner access and `current_password`. Both need a same-origin request. Changing the password ends every owner session, including owner Bearer tokens and the one that made the request. Only a same-origin browser on the local listener gets a new `session` cookie back; a script that used a Bearer token must sign in again.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/owner/password \
@@ -71,7 +71,7 @@ Send the token as `Authorization: Bearer <token>` on owner-only endpoints. Retur
 
 Turn **Trusted LAN** on or off. When it is on, every device on the LAN gets owner access without signing in.
 
-**Auth:** Owner only
+**Auth:** Owner only. A request that signs in with the `session` cookie, or relies on passwordless owner access, must be same-origin. A request that sends an owner token as a Bearer (and no cookie) does not need an `Origin` header.
 
 ```json
 {

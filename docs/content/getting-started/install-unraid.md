@@ -88,6 +88,6 @@ Stop the container, then back up `/mnt/user/appdata/ai-shuffle/`. The `data` fol
 
 Edit the container, change the version at the end of **Repository** to the new release, and **Apply**. Unraid's "update ready" notice only appears for the tag you already run, so a new release always means changing the version. See [Updates](/docs/getting-started/updates).
 
-## Remove
+## Uninstall
 
 Remove the container from the Docker tab. Your data stays in `/mnt/user/appdata/ai-shuffle/` until you delete that folder yourself.

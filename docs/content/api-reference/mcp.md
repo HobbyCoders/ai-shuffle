@@ -189,14 +189,14 @@ curl "http://localhost:8000/api/v1/mcp/tools?refresh=true" \
 ```json
 [
   {
-    "name": "mcp__filesystem__read_file",
-    "description": "Read a file from the filesystem",
-    "server": "filesystem"
+    "name": "read_file",
+    "server": "filesystem",
+    "description": "Read a file from the filesystem"
   }
 ]
 ```
 
-Tool names follow the pattern: `mcp__<server_name>__<tool_name>`
+`name` is the tool's own name and `server` is the server it comes from. In an agent's tool lists and in permission rules the same tool is written `mcp__<server>__<name>` (here `mcp__filesystem__read_file`).
 
 ### GET /api/v1/mcp/stats
 

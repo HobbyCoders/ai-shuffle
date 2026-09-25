@@ -113,7 +113,7 @@ wrangler d1 execute shuffle-account-hub --remote --command \
 
 - The result is empty.
 - `GET https://hobbycoders.com/v1/health` returns `{"ok":true}`.
-- A worker keeps its network status in Settings > Devices.
+- A worker keeps its network status in Settings > Providers > Devices.
 - For an account the inventory listed as blocked, `/delete-account` now
   completes. Tell those users or support that self-service deletion works
   again.

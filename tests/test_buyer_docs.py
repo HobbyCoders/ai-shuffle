@@ -194,3 +194,34 @@ def test_every_in_app_link_opens_a_page_in_the_docs_panel():
                 elif anchor and anchor not in heading_ids(target.read_text(encoding="utf-8")):
                     problems.append(f"missing heading: {where}")
     assert not problems, "\n".join(problems)
+
+
+# DOMPurify (SANITIZE_DOM, on by default) drops an `id` whose value is already a
+# property of `document` or of a <form>, so a heading with such an id loses it
+# and its table-of-contents entry scrolls nowhere ("## Remove" -> id "remove").
+# Lowercase single-word names only (heading ids are lowercase slugs); the
+# `on<event>` handler names are left out.
+DOM_CLOBBER_IDS = frozenset("""
+action after anchors animate append applets attributes autocomplete autofocus before blur body
+charset children clear click close closest constructor contains cookie dataset dir doctype domain
+draggable elements embeds encoding enctype evaluate focus fonts forms head hidden id images
+implementation inert lang length links location matches method name nonce normalize open part
+plugins popover prefix prepend referrer remove reset role scripts scroll slot style submit target
+timeline title translate write writeln
+""".split())
+
+
+def test_section_heading_ids_survive_the_sanitizer():
+    problems = []
+    for page in sorted(CONTENT.rglob("*.md")):
+        in_code = False
+        for number, line in enumerate(page.read_text(encoding="utf-8").splitlines(), 1):
+            if line.startswith("```"):
+                in_code = not in_code
+                continue
+            if in_code or not re.match(r"^#{2,6}\s", line):
+                continue
+            (slug,) = heading_ids(line)
+            if slug in DOM_CLOBBER_IDS:
+                problems.append(f"{page.relative_to(CONTENT)}:{number} {line!r} -> id {slug!r}")
+    assert not problems, "headings whose id the in-app sanitizer strips (rename them):\n" + "\n".join(problems)

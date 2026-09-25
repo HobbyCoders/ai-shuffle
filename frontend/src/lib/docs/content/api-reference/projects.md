@@ -190,7 +190,7 @@ curl -X POST http://localhost:8000/api/v1/projects/my-web-app/agents \
 
 ## Project Memory
 
-A project has two memory files that agents read as instructions: `project` (`AGENTS.md` in the project root, meant to be committed) and `local` (`.agents/AGENTS.md`, kept private). If a location has no `AGENTS.md`, an existing `CLAUDE.md` there is read instead; saving always writes `AGENTS.md`.
+A project has two memory files that agents read as instructions: `project` (`AGENTS.md` in the project root, meant to be committed) and `local` (`.agents/AGENTS.md`, kept private). If a location has no `AGENTS.md`, its older file is used instead when it exists: `CLAUDE.md` in the project root for `project`, `.claude/CLAUDE.md` for `local`. Reads and deletes act on that older file; saving always writes `AGENTS.md`. `file_path` is the path of the file in use, relative to the project root.
 
 ### GET /api/v1/projects/{project_id}/memory
 
@@ -205,11 +205,11 @@ List both locations, including ones that do not exist yet.
     "location": "project",
     "exists": true,
     "content": "# Conventions\n...",
-    "file_path": "/home/user/projects/my-web-app/AGENTS.md",
+    "file_path": "AGENTS.md",
     "size": 512,
     "updated_at": "2025-01-15T10:30:00Z"
   },
-  { "location": "local", "exists": false, "content": "", "file_path": "...", "size": 0, "updated_at": null }
+  { "location": "local", "exists": false, "content": "", "file_path": ".agents/AGENTS.md", "size": 0, "updated_at": null }
 ]
 ```
 
@@ -234,7 +234,7 @@ curl -X PUT http://localhost:8000/api/v1/projects/my-web-app/memory/project \
 
 ### DELETE /api/v1/projects/{project_id}/memory/{location}
 
-Delete one file. Returns `204`, or `404` if it does not exist.
+Delete one file: `AGENTS.md`, or the older `CLAUDE.md` file when that is the one in use (never both). Returns `204`, or `404` if neither exists.
 
 **Auth:** Required
 

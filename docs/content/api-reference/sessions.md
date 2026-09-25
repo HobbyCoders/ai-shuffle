@@ -169,7 +169,7 @@ Stream the session's event log as Server-Sent Events. This is how clients receiv
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `from_seq` | integer | Replay events after this sequence number, then stream live (default: 0, the whole transcript) |
+| `from_seq` | integer | Replay events after this sequence number, then stream live (default: 0, the whole transcript, or the part after the last compaction; see below) |
 
 ```bash
 curl -N "http://localhost:8000/api/v1/sessions/sess_abc123/events?from_seq=0" \
@@ -184,7 +184,13 @@ event: assistant.text_delta
 data: {"type": "assistant.text_delta", "seq": 42, "session_id": "sess_abc123", "turn_id": "...", "created_at": "...", ...}
 ```
 
-Common event types include `turn.started`, `message.user`, `assistant.text_delta`, `assistant.thinking_delta`, `message.assistant`, `tool.use`, `tool.result`, `turn.usage`, `turn.completed` and `turn.aborted`. After the replay, the stream sends one `event: caught_up` frame (`{"seq": N}`, no `id`). Idle streams send `: keepalive` comment lines.
+Common event types include `turn.started`, `message.user`, `assistant.text_delta`, `assistant.thinking_delta`, `message.assistant`, `tool.use`, `tool.result`, `turn.usage`, `turn.completed` and `turn.aborted`.
+
+In the replay, each run of consecutive `assistant.text_delta` (or `assistant.thinking_delta`) events from the same turn arrives as one merged frame: its `text` is the whole run and its `id` and `seq` are those of the run's last event. Live events after the replay are not merged.
+
+When `from_seq` is `0` and the conversation has been compacted, the replay skips the compacted part. It starts with one `event: system.compaction_boundary` frame (no `id`; `data.elidedEvents` counts the skipped events) followed by the events from the first turn kept after compaction. A reconnect with `from_seq` above `0` replays from that point and never skips.
+
+After the replay, the stream sends one `event: caught_up` frame (`{"seq": N}`, no `id`). Idle streams send `: keepalive` comment lines.
 
 ### GET /api/v1/sessions/{session_id}/live
 
@@ -318,7 +324,7 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/tasks/task_123/st
 { "session_id": "sess_abc123", "task_id": "task_123", "ok": true, "kind": "shell" }
 ```
 
-A task that could not be stopped (for example, it already finished) returns `200` with `"ok": false` and a `detail` message.
+A task that had already finished returns `"ok": true` with `"detail": "already finished"`, so a stale row in the UI clears. A task the app can no longer reach is marked stopped and also returns `"ok": true`. `"ok": false` (still `200`, with a `detail` message) means the stop did not fully work: a background shell whose child processes outlived it, or a task the app cannot find (`detail` is `session not active`, `session not connected` or `task not found`).
 
 ## Moving Sessions Between Devices
 
@@ -340,7 +346,7 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/adopt \
 { "session_id": "sess_abc123", "instance_id": "...", "adopted": true, "status": "adopted" }
 ```
 
-`status` is `adopted`, or `already_local` (nothing changed, `adopted: false`). Send `{"follow": true}` to take the session without pinning it here, so a later message from another device moves it again; `status` is then `unpinned`. The response may include `warning` (for example, a worktree branch that was not pushed) and `local_project_id`. Returns `409` while the session is running on another device.
+`status` is `adopted`, or `already_local` (nothing changed, `adopted: false`). Send `{"follow": true}` to take the session without pinning it here, so a later message from another device moves it again; `status` is then `unpinned`. Returns `409` while the session is running on another device.
 
 ### POST /api/v1/sessions/{session_id}/move
 

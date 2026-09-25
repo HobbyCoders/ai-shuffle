@@ -61,7 +61,7 @@ ws.send(JSON.stringify({
 | `user_question_response_ack` | Reply to `user_question_response` | `session_id`, `request_id`, `success`, `reason` (`not_pending` when the question was already answered) |
 | `pending_permissions` | Reply to `get_pending_permissions` | `session_id`, `pending`, `deferred` |
 | `pending_questions` | Reply to `get_pending_questions` | `session_id`, `questions` |
-| `permission_queue_update` | Deferred permission requests were put back in the queue | `session_id`, `requeued_ids`, `remaining_count` |
+| `permission_queue_update` | The permission queue changed. Three forms: deferred requests were put back in the queue (`requeued_ids`); a request was deferred (`resolved_ids` and `deferred_ids`, both holding its id); a remembered rule answered other waiting requests (`resolved_ids`) | `session_id`, `remaining_count`, plus `requeued_ids`, or `resolved_ids` and `deferred_ids`, or `resolved_ids` |
 | `sync` | Multi-device update. With `event_type: "queue_updated"`, `data.queued_messages` is the session's current queue | `event_type`, `session_id`, `data` |
 | `error` | Error occurred | `message` |
 | `ping` | Keep-alive | — |

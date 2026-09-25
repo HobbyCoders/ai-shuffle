@@ -58,7 +58,7 @@ original plan.
 | `scripts/network_migrate.py` | Moves an install's session state out of a shared database. See `migration.md`. |
 
 Frontend: `frontend/src/lib/api/network.ts` and `account.ts`; under Settings >
-Devices `DevicesSection.svelte` composes `AccountPanel` (sign in, create
+Providers > Devices `DevicesSection.svelte` composes `AccountPanel` (sign in, create
 account, username, the account's workers, sign out), `AddDevicePanel` (worker
 invite or phone/browser code), `WorkerDeviceConfirmations` and
 `JoinNetworkPanel`; the first-run choices in `routes/setup` (clean install,
@@ -215,7 +215,7 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
 installs that have not joined a network. When a worker is enrolled,
 `get_installs()` returns the network runner directory and the cluster secret is
 only used by the legacy artifact redirect. Remove them once every deployment
-reports Ready in Settings > Devices.
+reports Ready in Settings > Providers > Devices.
 
 ## Test scenarios (as automated)
 

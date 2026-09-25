@@ -31,7 +31,8 @@ The worker needs outbound HTTPS to:
 - `claude.ai` and Anthropic's download servers, to install and update the Claude Code CLI;
 - your AI provider, for example Anthropic's API, and any other provider you set up;
 - `hobbycoders.com`, for update checks, license checks and (only if you turn it on) remote access;
-- the Python package index (`pypi.org`) and the npm registry (`registry.npmjs.org`), only while an in-app update installs.
+- the Python package index (`pypi.org`, with downloads from `files.pythonhosted.org`) and the npm registry (`registry.npmjs.org`), only while an in-app update installs;
+- the Python package index again when you install a connector's runtime in **Build > Plugins** (Apps), which downloads that connector's Python packages.
 
 Nothing needs to reach the worker from the internet. Never forward its port from your router. See [Remote access](/docs/getting-started/remote-access) for safe ways to use it away from home.
 

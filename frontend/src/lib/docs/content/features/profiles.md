@@ -18,8 +18,8 @@ Every session uses an agent. Agents let you create specialized configurations fo
 
 Key concepts:
 
-- **A starter agent** ("Assistant") is created by the setup wizard's first run if you have none. It is an ordinary agent: rename, edit or delete it
-- **Every agent is yours**: nothing ships as a protected built-in
+- **Four built-in agents** ship with the app: **General Purpose**, **Explore**, **Plan** and **Frontend Designer**. Any that is missing is created again on every start. You can edit them and put an edited one back with **Restore defaults** (`POST /api/v1/agents/{profile_id}/restore`), but you cannot delete them (`DELETE` returns 403)
+- **A starter agent** ("Assistant") is created by the setup wizard's first run if you have not made an agent of your own; the built-ins do not count. It is an ordinary agent: rename, edit or delete it
 - **Generate** creates an agent from a description
 - **Export/import** agents as JSON for sharing across instances
 - **Per-agent roster and plugins** for fine-grained control
@@ -71,8 +71,8 @@ Available on current Sonnet, Opus and Fable models (not Haiku). Pick it per sess
 | `low`    | Quick responses, minimal reasoning             |
 | `medium` | Balanced reasoning and speed                   |
 | `high`   | Thorough reasoning                             |
-| `max`    | Maximum reasoning depth                        |
-| `xhigh`  | Highest reasoning depth (not on every model)   |
+| `xhigh`  | Extra-high reasoning (not on every model)      |
+| `max`    | Maximum reasoning depth, the highest level     |
 
 ### Tool Configuration
 

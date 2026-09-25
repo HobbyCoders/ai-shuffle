@@ -229,7 +229,7 @@ Stop the container (`docker compose stop`), then back up the Docker volumes whos
 
 Your data stays in the volumes and in `WORKSPACE_DIR`. See [Updates](/docs/getting-started/updates) for in-app updates and what the update check sends.
 
-## Remove
+## Uninstall
 
 `docker compose down` removes the container and keeps your data.
 

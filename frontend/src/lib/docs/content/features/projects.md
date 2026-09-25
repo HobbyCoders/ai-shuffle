@@ -24,9 +24,11 @@ A project is a reference to a directory (e.g., your code repository). When you c
 
 ### Via the API
 
+Creating a project needs owner access; API-user keys (`aih_...`) get `403`. Send an owner token from `POST /api/v1/owner/login` (see [Owner password](/docs/api-reference/authentication#owner-password)):
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/projects \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "id": "my-web-app",
