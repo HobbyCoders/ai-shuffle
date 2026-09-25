@@ -135,7 +135,7 @@ curl -X POST http://localhost:8000/api/v1/conversation \
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `prompt` | string | Yes | The message to send to the agent |
-| `session_id` | string | No | If provided, continues that session |
+| `session_id` | string | No | If provided, continues that session. It must be one this API key started (403 otherwise) |
 | `profile` | string | No | Agent id for a new session. Required (400 if missing), except that a key assigned exactly one agent runs that agent when this is omitted. A key with assigned agents gets 403 for any other agent. |
 | `project` | string | No | Project context for a new session |
 | `overrides` | object | No | Optional per-query overrides (see One-Shot Query) |

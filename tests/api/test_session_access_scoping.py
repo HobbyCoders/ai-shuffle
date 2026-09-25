@@ -72,7 +72,8 @@ async def test_interrupt_denies_foreign_session(mock_db):
 async def test_interrupt_allows_owner_and_in_scope_user(mock_db):
     from app.db import database
 
-    database.create_session("sess-own", "default")
+    database.create_api_user("u2", "In scope", "hash-u2")
+    database.create_session("sess-own", "default", api_user_id="u2")
     in_scope = {"id": "u2", "project_id": None, "profile_ids": ["default"]}
     with patch.object(query_api, "interrupt_session", AsyncMock(return_value=True)):
         for request in (fake_request(None), fake_request(in_scope)):
@@ -85,9 +86,11 @@ async def test_streaming_active_is_filtered_for_api_users(mock_db):
     from app.db import database
 
     database.create_profile(profile_id="other-profile", name="Other", description=None, config={})
-    database.create_session("sess-mine", "other-profile")
-    database.create_session("sess-theirs", "default")
-    active = ["sess-mine", "sess-theirs", "sess-gone"]
+    database.create_api_user("u1", "Foreign", "hash-u1")
+    database.create_session("sess-mine", "other-profile", api_user_id="u1")
+    database.create_session("sess-theirs", "default", api_user_id="u1")
+    database.create_session("sess-owners", "other-profile")
+    active = ["sess-mine", "sess-theirs", "sess-owners", "sess-gone"]
     with patch("app.core.query_engine.get_streaming_sessions", return_value=active):
         owner = await query_api.list_active_sessions(fake_request(None), token="t")
         scoped = await query_api.list_active_sessions(fake_request(FOREIGN_USER), token="t")

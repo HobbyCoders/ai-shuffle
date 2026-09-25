@@ -39,28 +39,39 @@ class TestAccessHelper:
         check_session_access_for_api_user(None, {"project_id": "p1", "profile_id": "x"})
 
     def test_project_match_ok(self):
-        check_session_access_for_api_user({"project_id": "p1"}, {"project_id": "p1"})
+        check_session_access_for_api_user(
+            {"id": "u", "project_id": "p1"}, {"api_user_id": "u", "project_id": "p1"})
 
     def test_project_mismatch_denied(self):
         with pytest.raises(HTTPException) as exc:
             check_session_access_for_api_user(
-                {"project_id": "p1"}, {"project_id": "p2"}
+                {"id": "u", "project_id": "p1"}, {"api_user_id": "u", "project_id": "p2"}
             )
         assert exc.value.status_code == 403
 
     def test_profile_mismatch_denied(self):
         with pytest.raises(HTTPException) as exc:
-            check_session_access_for_api_user({"profile_ids": ["a"]}, {"profile_id": "b"})
+            check_session_access_for_api_user(
+                {"id": "u", "profile_ids": ["a"]}, {"api_user_id": "u", "profile_id": "b"})
         assert exc.value.status_code == 403
 
     def test_profile_in_assigned_agents_ok(self):
-        check_session_access_for_api_user({"profile_ids": ["a", "b"]}, {"profile_id": "b"})
+        check_session_access_for_api_user(
+            {"id": "u", "profile_ids": ["a", "b"]}, {"api_user_id": "u", "profile_id": "b"})
 
     def test_unrestricted_api_user_ok(self):
-        # No project/profile restriction on the user -> allowed.
+        # No project/profile restriction on the user -> its own sessions allowed.
         check_session_access_for_api_user(
-            {"id": "u"}, {"project_id": "p", "profile_id": "x"}
+            {"id": "u"}, {"api_user_id": "u", "project_id": "p", "profile_id": "x"}
         )
+
+    def test_another_principals_session_denied(self):
+        for owner in (None, "someone-else"):
+            with pytest.raises(HTTPException) as exc:
+                check_session_access_for_api_user(
+                    {"id": "u"}, {"api_user_id": owner, "project_id": "p", "profile_id": "x"}
+                )
+            assert exc.value.status_code == 403
 
 
 # ===========================================================================

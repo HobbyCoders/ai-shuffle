@@ -88,7 +88,9 @@ Other devices watching the same session receive the same control frames. Content
 | `interrupt_for_query` | Interrupt the running turn so a new `query` can follow; replies `interrupt_confirmed` or `interrupt_failed` | `session_id` |
 | `pong` | Keep-alive response to a `ping` | — |
 
-For an API key with assigned agents, `query` and `queue_message` apply the same agent restriction as the REST endpoints: a `profile` outside the key's agents (or an omitted one when the key has several), or a `session_id` whose session runs an agent outside them, is refused with an `error` frame, the WebSocket equivalent of the REST 403/400, and nothing runs.
+An API key acts only on its own sessions, the ones it started. Every frame that names a session (`query` or `queue_message` with a `session_id`, `load_session`, `watch_session`, `stop`, `interrupt_for_query`, `permission_response`, `requeue_deferred_permissions`, `user_question_response`, `remove_queued_message`, `clear_queued_messages`) is refused with an `error` frame when the session belongs to the owner or another key, or is outside the key's project or agents. `interrupt_for_query` replies `interrupt_failed` instead. The refusal carries `session_id` and `message` and changes nothing; it is the WebSocket equivalent of the REST 403. The owner's connection is not limited this way.
+
+For an API key with assigned agents, `query` and `queue_message` apply the same agent restriction as the REST endpoints. On `query`, a `profile` outside the key's agents, or an omitted one when the key has several, is refused with an `error` frame and nothing runs. On `queue_message` a named `profile` must be one of the key's agents; an omitted one keeps the session's agent, which must be one of them too.
 
 ### Permission Handling
 
@@ -100,6 +102,7 @@ When the agent wants to use a tool that requires approval:
 
 // Client approves or denies via a "decision" of "allow" or "deny".
 // "remember" optionally persists the choice: "none", "session", or "profile" (the agent).
+// On an API key's connection "profile" is kept to the session, like "session".
 // "pattern" optionally narrows a remembered rule.
 ws.send(JSON.stringify({
   type: 'permission_response',
@@ -110,7 +113,7 @@ ws.send(JSON.stringify({
 }));
 ```
 
-A `decision` of `"defer"` sets the request aside without answering it; `remember` and `pattern` are ignored. Deferred requests come back in `pending_permissions.deferred`, and `requeue_deferred_permissions` sends them again. The server confirms every answer with `permission_response_ack`.
+An agent-wide (`"profile"`) rule applies to every session on that agent, so only the owner can create one. An API key that sends `remember: "profile"` gets a rule for its own session only, the same as `"session"`. A `decision` of `"defer"` sets the request aside without answering it; `remember` and `pattern` are ignored. Deferred requests come back in `pending_permissions.deferred`, and `requeue_deferred_permissions` sends them again. The server confirms every answer with `permission_response_ack`.
 
 `get_pending_permissions` and `get_pending_questions` act on the session selected by the last `load_session` or `watch_session` on this socket. Send them after reconnecting to restore prompts that are still open.
 
@@ -193,6 +196,6 @@ WebSocket close codes:
 - `1000` — Normal closure
 - `1013` — Authorization temporarily unavailable; retry later
 - `4001` — Authentication failed
-- `4003` — Access denied: the session belongs to another project or agent (`/ws/sessions/{session_id}`)
+- `4003` — Access denied: for an API key, the session is not one it started, or it belongs to another project or agent (`/ws/sessions/{session_id}`)
 - `4004` — Session not found
 - `4005` — No CLI session to bridge (CLI bridge)

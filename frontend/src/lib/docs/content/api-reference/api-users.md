@@ -152,7 +152,11 @@ When `profile_ids` is set, the server limits every agent run started with the ke
 
 ### Unrestricted
 
-When neither is set, the API user has access to all projects and agents (but still cannot perform owner-only operations).
+When neither is set, the API user has access to all projects and agents (but still acts only on its own sessions and cannot perform owner-only operations).
+
+### Own Sessions
+
+Every API key acts only on the sessions it started. It cannot read, continue, stop or answer prompts in the owner's sessions or another key's, even with the session id: REST session routes and the conversation endpoints return `403`, the chat WebSocket answers with an `error` frame, and `/ws/sessions/{session_id}` closes with `4003`. Worker sessions an agent starts belong to the session that started them. A permission answer from an API key never creates an agent-wide rule; `remember: "profile"` is kept to that session.
 
 ## Using API Keys
 

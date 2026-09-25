@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 import app.api.chat_ws_handler as cwh
 from app.db import turns as turns_db
-from tests.api.test_chat_ws_v2_turns import _Patches, _make_handler, _make_session
+from tests.api.test_chat_ws_v2_turns import _Patches, _make_handler
+from tests.api.test_chat_ws_v2_turns import _make_session as _make_any_session
 from tests.helpers import sent_frames
 
 
@@ -16,6 +17,21 @@ def _api_handler(profile_ids):
     handler._authorize_mobile_session = AsyncMock(return_value=True)
     user = {"id": "api-1", "profile_ids": profile_ids}
     return handler, patch.object(cwh.database, "get_api_user", return_value=user)
+
+
+def _make_session(session_id="sess-1", *, profile_id="default"):
+    """A session started by the API user ``api-1`` (API keys act only on their
+    own sessions; tests/api/test_session_access_ownership.py covers that)."""
+    from app.db import database
+    from app.db.base import get_db
+
+    if database.get_api_user("api-1") is None:
+        database.create_api_user("api-1", "Key", "hash-api-1")
+    _make_any_session(session_id, profile_id=profile_id)
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE sessions SET api_user_id = %s WHERE id = %s", ("api-1", session_id))
+    return session_id
 
 
 def _queued_profiles(session_id):

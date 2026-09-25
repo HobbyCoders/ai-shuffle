@@ -54,9 +54,15 @@ def authorize_session_artifact(request, row, digest, session_id=None):
     client = getattr(request.state, 'paired_client', None)
     allowed = False
     if api_user:
-        from app.api.sessions_helpers import check_session_access_for_api_user
-        check_session_access_for_api_user(api_user, session)
-        allowed = session.get('api_user_id') == api_user['id']
+        from app.api.sessions_helpers import (
+            api_user_owns_session,
+            check_session_access_for_api_user,
+        )
+
+        # Another principal's session stays a 404 here (no existence leak).
+        allowed = api_user_owns_session(api_user, session)
+        if allowed:
+            check_session_access_for_api_user(api_user, session)
     elif client:
         owner = mobile_hub.ownership(paired_client_id=client['id'])
         expected = 'account:' + owner['account_id'] if owner else 'paired:' + client['id']

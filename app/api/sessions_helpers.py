@@ -305,18 +305,55 @@ def api_user_profile_filter(api_user: Optional[dict], requested: Optional[str]) 
     return allowed[0] if len(allowed) == 1 else None
 
 
-def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -> None:
-    """Enforce an API user's project/profile access to a session.
+_WORKER_OWNER_DEPTH = 8
 
-    Pure helper (no Request): ``api_user`` is None for admins (full access).
-    Raises HTTPException(403) when a restricted API user is denied. Extracted
-    from :func:`check_session_access` so non-HTTP callers (e.g. the browser
-    panel WebSocket) can reuse the exact same rule.
+
+def api_user_owns_session(api_user: dict, session: dict) -> bool:
+    """True when ``session`` belongs to API user ``api_user``.
+
+    A session belongs to the key that started it (``sessions.api_user_id``,
+    the same column the session list filters on). Worker sessions an agent
+    spawns (``is_worker``) are minted without one and belong to whoever owns
+    the session that spawned them. Every other session with no
+    ``api_user_id`` is the owner's, and a fork belongs to whoever forked it.
+    """
+    caller = api_user.get("id")
+    if not caller:
+        return False
+    row: Optional[dict] = session
+    for _ in range(_WORKER_OWNER_DEPTH):
+        owner = row.get("api_user_id")
+        if owner or not row.get("is_worker") or not row.get("parent_session_id"):
+            return owner == caller
+        row = database.get_session(row["parent_session_id"])
+        if not row:
+            return False
+    return False
+
+
+def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -> None:
+    """Enforce an API user's access to a session.
+
+    Pure helper (no Request): ``api_user`` is None for the owner (full
+    access). An API user may act only on its own sessions
+    (:func:`api_user_owns_session`), and only while the session is inside its
+    project and agent scope, so a project-limited key reaches a session with
+    no project only when that session is its own. Raises
+    HTTPException(403) on refusal. Extracted from :func:`check_session_access`
+    so non-HTTP callers (the chat and sync WebSockets, the browser panel) use
+    the exact same rule.
     """
     if not api_user:
         return  # Admin has full access
 
+    if not api_user_owns_session(api_user, session):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this session"
+        )
+
     # Check project restriction
+    # (a projectless session passes only because it is the caller's own).
     if api_user.get("project_id") and session.get("project_id"):
         if api_user["project_id"] != session["project_id"]:
             raise HTTPException(
@@ -333,7 +370,7 @@ def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -
 
 
 def check_session_access(request: Request, session: dict) -> None:
-    """Check if API user has access to a session based on project/profile restrictions."""
+    """Check that the request's API user owns ``session`` and has it in scope."""
     check_session_access_for_api_user(get_api_user_from_request(request), session)
 
 

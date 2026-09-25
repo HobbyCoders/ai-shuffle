@@ -27,6 +27,12 @@ SPEC = ToolSpec(
 )
 
 
+# The last provider rows this process read successfully. A host reports
+# ``providers: null`` when it could not read its provider rows (as opposed to
+# ``[]``, no providers), and the tool then reports these instead of "none".
+_last_providers: list[dict[str, Any]] | None = None
+
+
 def _percent(value: Any) -> float | None:
     try:
         value = float(value)
@@ -123,6 +129,8 @@ def _payload(raw: Any) -> dict[str, Any]:
     claude_available = claude_available or any(
         account.get("available") is True for account in accounts
     )
+    global _last_providers
+    providers_unread = "providers" in raw and raw["providers"] is None
     providers: list[dict[str, Any]] = []
     for provider in raw.get("providers") or ():
         if not isinstance(provider, dict):
@@ -154,6 +162,10 @@ def _payload(raw: Any) -> dict[str, Any]:
                 if key in credits
             }
         providers.append(entry)
+    if providers_unread:
+        providers = [dict(entry) for entry in _last_providers or ()]
+    else:
+        _last_providers = [dict(entry) for entry in providers]
 
     fetched_at = raw.get("fetched_at")
     provider_available = any(
@@ -189,8 +201,20 @@ def _payload(raw: Any) -> dict[str, Any]:
             "reason": "host did not provide session usage in this snapshot",
         },
     }
+    if providers_unread:
+        result["providers_unavailable"] = True
+        result["providers_reason"] = (
+            "provider usage rows are temporarily unavailable (the host could "
+            "not read them); "
+            + ("these are the last values read" if providers
+               else "this does not mean no providers are configured")
+        )
     if not available and not windows:
-        result["reason"] = "no cached subscription usage is available"
+        result["reason"] = (
+            "provider usage rows are temporarily unavailable and no cached "
+            "subscription usage is available" if providers_unread
+            else "no cached subscription usage is available"
+        )
     return result
 
 

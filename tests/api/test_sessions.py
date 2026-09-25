@@ -180,7 +180,7 @@ class TestCheckSessionAccess:
                 "project_id": "test-project"
             }
             # Should not raise
-            check_session_access(request, {"id": "session-1", "project_id": "test-project"})
+            check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "project_id": "test-project"})
 
     def test_api_user_denied_other_project(self):
         """API user should be denied access to sessions in other projects."""
@@ -191,7 +191,7 @@ class TestCheckSessionAccess:
                 "project_id": "project-a"
             }
             with pytest.raises(HTTPException) as exc_info:
-                check_session_access(request, {"id": "session-1", "project_id": "project-b"})
+                check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "project_id": "project-b"})
             assert exc_info.value.status_code == 403
             assert "Access denied" in exc_info.value.detail
 
@@ -204,7 +204,7 @@ class TestCheckSessionAccess:
                 "profile_ids": ["test-profile"]
             }
             # Should not raise
-            check_session_access(request, {"id": "session-1", "profile_id": "test-profile"})
+            check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "profile_id": "test-profile"})
 
     def test_api_user_denied_other_profile(self):
         """API user should be denied access to sessions with other profiles."""
@@ -215,7 +215,7 @@ class TestCheckSessionAccess:
                 "profile_ids": ["profile-a"]
             }
             with pytest.raises(HTTPException) as exc_info:
-                check_session_access(request, {"id": "session-1", "profile_id": "profile-b"})
+                check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "profile_id": "profile-b"})
             assert exc_info.value.status_code == 403
             assert "Access denied" in exc_info.value.detail
 
@@ -224,10 +224,10 @@ class TestCheckSessionAccess:
         request = MagicMock()
         with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = {"id": "user-1", "profile_ids": ["a", "b"]}
-            check_session_access(request, {"id": "s1", "profile_id": "a"})
-            check_session_access(request, {"id": "s2", "profile_id": "b"})
+            check_session_access(request, {"id": "s1", "api_user_id": "user-1", "profile_id": "a"})
+            check_session_access(request, {"id": "s2", "api_user_id": "user-1", "profile_id": "b"})
             with pytest.raises(HTTPException) as exc_info:
-                check_session_access(request, {"id": "s3", "profile_id": "c"})
+                check_session_access(request, {"id": "s3", "api_user_id": "user-1", "profile_id": "c"})
             assert exc_info.value.status_code == 403
 
     def test_legacy_profile_id_column_is_ignored(self):
@@ -239,7 +239,7 @@ class TestCheckSessionAccess:
                 "id": "user-1", "profile_id": "b", "profile_ids": ["a"],
             }
             with pytest.raises(HTTPException):
-                check_session_access(request, {"id": "s1", "profile_id": "b"})
+                check_session_access(request, {"id": "s1", "api_user_id": "user-1", "profile_id": "b"})
 
 
 class TestEnrichSessionsWithTags:

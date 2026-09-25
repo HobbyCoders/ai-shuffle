@@ -429,13 +429,14 @@ class TestConversation:
         from app.core.models import ConversationRequest
         from app.db import database
 
+        database.create_api_user("user1", "Key", "hash-user1")
         database.create_session(session_id="existing-session-123",
-                                profile_id="default")
+                                profile_id="default", api_user_id="user1")
         request = ConversationRequest(
             prompt="Continue conversation",
             session_id="existing-session-123"
         )
-        api_user = {"id": None, "profile_ids": ["default"]}
+        api_user = {"id": "user1", "profile_ids": ["default"]}
 
         await conversation(request, api_user)
 
@@ -1129,8 +1130,9 @@ _CONTINUING_ENDPOINTS = ["conversation", "stream_conversation", "start_conversat
 
 
 class TestContinuedSessionAccess:
-    """A ``session_id`` naming another scope's session is refused before any
-    turn runs; a session the caller can access continues as before."""
+    """A ``session_id`` naming another principal's session, or one outside the
+    key's scope, is refused before any turn runs; the key's own in-scope
+    session continues as before."""
 
     @staticmethod
     async def _call(endpoint, session, api_user):
@@ -1154,8 +1156,11 @@ class TestContinuedSessionAccess:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("endpoint", _CONTINUING_ENDPOINTS)
     @pytest.mark.parametrize("session", [
-        {"id": "s1", "profile_id": "someone-elses-agent"},  # agent outside the key's set
-        {"id": "s1", "profile_id": "mine", "project_id": "other-project"},  # other project
+        {"id": "s1", "api_user_id": "u1", "profile_id": "someone-elses-agent"},  # agent outside the key's set
+        {"id": "s1", "api_user_id": "u1", "profile_id": "mine", "project_id": "other-project"},  # other project
+        {"id": "s1", "profile_id": "mine", "project_id": "my-project"},  # the owner's session
+        {"id": "s1", "api_user_id": "u2", "profile_id": "mine", "project_id": "my-project"},  # another key's
+        {"id": "s1", "profile_id": "mine"},  # the owner's projectless chat
     ])
     async def test_foreign_session_is_403(self, endpoint, session):
         from fastapi import HTTPException
@@ -1169,12 +1174,33 @@ class TestContinuedSessionAccess:
     @pytest.mark.parametrize("endpoint", _CONTINUING_ENDPOINTS)
     async def test_accessible_session_continues(self, endpoint):
         api_user = {"id": "u1", "profile_ids": ["mine"], "project_id": "my-project"}
-        session = {"id": "s1", "profile_id": "mine", "project_id": "my-project"}
+        session = {"id": "s1", "api_user_id": "u1", "profile_id": "mine", "project_id": "my-project"}
         start, _stream, submit = await self._call(endpoint, session, api_user)
         if endpoint == "start_conversation":
             assert start.call_args.kwargs["session_id"] == "s1"
         elif endpoint == "conversation":
             assert submit.call_args.args[0] == "s1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", _CONTINUING_ENDPOINTS)
+    async def test_project_key_continues_its_own_projectless_session(self, endpoint):
+        api_user = {"id": "u1", "profile_ids": ["mine"], "project_id": "my-project"}
+        session = {"id": "s1", "api_user_id": "u1", "profile_id": "mine"}
+        start, _stream, submit = await self._call(endpoint, session, api_user)
+        if endpoint == "start_conversation":
+            assert start.call_args.kwargs["session_id"] == "s1"
+        elif endpoint == "conversation":
+            assert submit.call_args.args[0] == "s1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", _CONTINUING_ENDPOINTS)
+    async def test_unrestricted_key_cannot_continue_the_owners_session(self, endpoint):
+        from fastapi import HTTPException
+
+        api_user = {"id": "u1", "profile_ids": [], "project_id": None}
+        with pytest.raises(HTTPException) as exc_info:
+            await self._call(endpoint, {"id": "s1", "profile_id": "mine"}, api_user)
+        assert exc_info.value.status_code == 403
 
 
 # =============================================================================

@@ -82,3 +82,45 @@ def test_rolled_over_window_reports_fresh_quota(resets_at) -> None:
     assert rolled["remaining_percent"] == 100.0 and rolled["used_percent"] == 0.0
     assert rolled["rolled_over"] is True
     assert live["remaining_percent"] == 3.0 and "rolled_over" not in live
+
+
+def test_unread_provider_rows_are_reported_unavailable_not_empty(monkeypatch) -> None:
+    import fluid.tools.builtins.usage as usage
+
+    monkeypatch.setattr(usage, "_last_providers", None, raising=False)
+    out = _payload({"available": False, "fetched_at": None, "windows": [], "providers": None})
+    assert out["providers"] == []
+    assert out["providers_unavailable"] is True
+    assert "temporarily unavailable" in out["providers_reason"]
+    assert "does not mean no providers" in out["providers_reason"]
+    assert "temporarily unavailable" in out["reason"]
+
+
+def test_unread_provider_rows_keep_the_last_known_values(monkeypatch) -> None:
+    import fluid.tools.builtins.usage as usage
+
+    monkeypatch.setattr(usage, "_last_providers", None, raising=False)
+    good = _payload({
+        "available": False, "fetched_at": None, "windows": [],
+        "providers": [{
+            "provider_id": "codex", "status": "stale", "fetched_at": 2_000_000_000_000,
+            "windows": [{"type": "requests", "utilization": 40, "resets_at": "p"}],
+        }],
+    })
+    assert "providers_unavailable" not in good
+    out = _payload({"available": False, "fetched_at": None, "windows": [], "providers": None})
+    assert out["providers"] == good["providers"]
+    assert out["providers"][0]["windows"][0]["remaining_percent"] == 60
+    assert out["available"] is True
+    assert out["providers_unavailable"] is True
+    assert "last values read" in out["providers_reason"]
+
+
+def test_an_empty_provider_list_still_means_none_configured(monkeypatch) -> None:
+    import fluid.tools.builtins.usage as usage
+
+    monkeypatch.setattr(usage, "_last_providers", [{"provider_id": "old"}], raising=False)
+    out = _payload({"available": False, "fetched_at": None, "windows": [], "providers": []})
+    assert out["providers"] == []
+    assert "providers_unavailable" not in out
+    assert out["reason"] == "no cached subscription usage is available"

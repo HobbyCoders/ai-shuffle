@@ -253,6 +253,7 @@ class TestResumeSession:
     ):
         submit, _ = submit_seam
         fluid_session["project_id"] = None
+        fluid_session["api_user_id"] = "api-user-1"  # the key's own session
         mock_api_user.return_value = {"id": "api-user-1", "project_id": None}
         mock_database.get_session.return_value = fluid_session
 
