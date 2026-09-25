@@ -12,6 +12,7 @@ Tests cover:
 
 import pytest
 from unittest.mock import MagicMock, patch
+from app.core.config import settings
 
 from app.core.audit_service import (
     AuditEventType,
@@ -110,10 +111,31 @@ class TestGetClientIp:
         mock_request.headers = {"X-Forwarded-For": "127.0.0.1", "X-Real-IP": "127.0.0.1"}
         assert get_client_ip(mock_request) == "8.8.4.4"
 
-    def test_get_client_ip_from_x_forwarded_for(self, mock_request_with_proxy_headers):
-        """Should extract first IP from X-Forwarded-For header."""
+    def test_get_client_ip_from_x_forwarded_for(self, mock_request_with_proxy_headers, monkeypatch):
+        """Behind a configured proxy, the nearest untrusted hop is the client.
+
+        Earlier entries were written by the client itself and are not believed.
+        """
+        monkeypatch.setattr(settings, "trusted_proxies", "10.0.0.0/8")
         ip = get_client_ip(mock_request_with_proxy_headers)
-        assert ip == "203.0.113.195"
+        assert ip == "150.172.238.178"
+
+    def test_get_client_ip_skips_every_trusted_proxy_hop(self, mock_request, monkeypatch):
+        monkeypatch.setattr(settings, "trusted_proxies", "10.0.0.0/8, 172.18.0.2")
+        mock_request.client.host = "172.18.0.2"
+        mock_request.headers = {"X-Forwarded-For": "1.2.3.4, 203.0.113.9, 10.1.1.1"}
+        assert get_client_ip(mock_request) == "203.0.113.9"
+
+    def test_private_peer_is_not_a_proxy_unless_configured(self, mock_request, monkeypatch):
+        """A LAN host cannot choose its own rate-limit key or audit address."""
+        monkeypatch.setattr(settings, "trusted_proxies", "")
+        for host in ("10.0.0.1", "192.168.1.66", "172.17.0.1", "fd00::5"):
+            mock_request.client.host = host
+            mock_request.headers = {"X-Forwarded-For": "203.0.113.1", "X-Real-IP": "203.0.113.2"}
+            assert get_client_ip(mock_request) == host
+        monkeypatch.setattr(settings, "trusted_proxies", "not-an-address,192.168.1.0/24")
+        mock_request.client.host = "192.168.1.66"
+        assert get_client_ip(mock_request) == "203.0.113.1"
 
     def test_get_client_ip_from_x_forwarded_for_single(self, mock_request):
         """Should handle single IP in X-Forwarded-For."""
@@ -123,7 +145,7 @@ class TestGetClientIp:
 
     def test_get_client_ip_from_x_forwarded_for_with_spaces(self, mock_request):
         """Should trim whitespace from X-Forwarded-For."""
-        mock_request.headers = {"X-Forwarded-For": "  192.168.1.100  , 10.0.0.1"}
+        mock_request.headers = {"X-Forwarded-For": "  192.168.1.100  ,  127.0.0.1 "}
         ip = get_client_ip(mock_request)
         assert ip == "192.168.1.100"
 

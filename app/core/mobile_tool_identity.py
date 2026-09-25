@@ -42,7 +42,14 @@ def validate(value):
         account_hub.require_active(owner)
         if (owner['account_id'] if owner else None) != value.get('account_id'):
             raise PermissionError('Account membership changed')
-    elif value['kind'] != 'api_user':
+    elif value['kind'] == 'api_user':
+        # The key that authenticated must still be this user's live key: a
+        # disabled, deleted or rotated key no longer matches.
+        from app.db import database
+        user = database.get_api_user_by_key_hash(value['credential_hash'])
+        if not user or user['id'] != value['principal_id']:
+            raise PermissionError('API key disabled, deleted or rotated')
+    else:
         raise PermissionError('Unknown principal')
 
 

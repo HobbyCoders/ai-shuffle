@@ -353,3 +353,51 @@ async def test_token_renewal_reconnect_does_not_report_worker_outage(monkeypatch
     await remote.forward_websocket(ws, "remote", "session")
     ws.send_json.assert_not_awaited()
     assert ws.close.await_args.kwargs["code"] == 1013
+
+
+@pytest.mark.asyncio
+async def test_removing_the_owning_device_ends_the_viewer_relay(monkeypatch):
+    """The viewer side re-checks the owner's membership as the peer side re-checks the token."""
+    from app.network import engine
+
+    link = SimpleNamespace(token="device", base_url="http://peer", authenticate=AsyncMock())
+    monkeypatch.setattr(remote, "peer_link", AsyncMock(return_value=(object(), link)))
+    monkeypatch.setattr(remote, "AUTH_CHECK_SECONDS", 0.01)
+    member = SimpleNamespace(status="active")
+    monkeypatch.setattr(engine, "context", lambda **_: SimpleNamespace(
+        member=lambda device_id: member if device_id == "remote" else None))
+    idle = asyncio.Event()
+    closed = []
+
+    class Socket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            closed.append(True)
+
+        async def send(self, payload):
+            pass
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await idle.wait()  # the owner keeps the stream open
+            raise StopAsyncIteration
+
+    monkeypatch.setattr(remote, "PeerConnect", lambda *args, **kwargs: Socket())
+
+    async def viewer_receive():
+        await idle.wait()  # the viewer keeps watching
+        return {"type": "websocket.disconnect"}
+
+    ws = SimpleNamespace(receive=viewer_receive, send_json=AsyncMock(), send_text=AsyncMock(),
+                         send_bytes=AsyncMock(), close=AsyncMock())
+    task = asyncio.create_task(remote.forward_websocket(ws, "remote", "session"))
+    await asyncio.sleep(0.05)
+    assert not task.done(), "an active owner keeps the relay open"
+    member.status = "revoked"
+    await asyncio.wait_for(task, 1)
+    assert closed == [True]
+    assert ws.close.await_args.kwargs["code"] == 1013

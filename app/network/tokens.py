@@ -32,20 +32,29 @@ from app.network import crypto, engine, membership
 
 TOKEN_TTL_SECONDS = 300
 CHALLENGE_TTL_SECONDS = 120
-# Outstanding challenges per member device. A member re-authenticates from
-# a handful of endpoints at most; anything beyond this is a flood and
-# evicts that device's own oldest challenge, never another member's.
+# Outstanding challenges per (requester address, member device). A member
+# re-authenticates from a handful of endpoints at most; anything beyond this is
+# a flood and evicts that requester's own oldest challenge for the device,
+# never one another requester (the member itself) is about to spend.
 CHALLENGES_PER_DEVICE = 8
+# Hard ceiling on all outstanding challenges (memory bound under a flood from
+# many addresses); past it the oldest overall is evicted.
+CHALLENGES_MAX = 4096
 _DOMAIN = b"shuffle-device-token-v1"
 
 _secret = secrets.token_bytes(32)
 _lock = threading.Lock()
-# challenge -> (expires_at_monotonic, device_id)
-_challenges: Dict[str, Tuple[float, str]] = {}
+# challenge -> (expires_at_monotonic, device_id, requester)
+_challenges: Dict[str, Tuple[float, str, str]] = {}
 
 
-def new_challenge(device_id: str) -> str:
-    """Issue a challenge for an active member; unknown devices get none."""
+def new_challenge(device_id: str, requester: str = "") -> str:
+    """Issue a challenge for an active member; unknown devices get none.
+
+    ``requester`` is the caller's address: the per-device bound applies per
+    requester, so naming a member's public device id from another host cannot
+    evict the challenge that member is about to spend.
+    """
     ctx = engine.context()
     if ctx is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "This worker has no network")
@@ -55,16 +64,19 @@ def new_challenge(device_id: str) -> str:
     challenge = crypto.b64u_encode(secrets.token_bytes(32))
     with _lock:
         now = time.monotonic()
-        for stale in [c for c, (exp, _d) in _challenges.items() if exp <= now]:
+        for stale in [c for c, (exp, _d, _r) in _challenges.items() if exp <= now]:
             _challenges.pop(stale, None)
         # Sort only by expiry: Python's stable sort preserves issuance order
         # when Windows gives several calls the same monotonic timestamp.
-        mine = sorted(((exp, c) for c, (exp, d) in _challenges.items() if d == device_id),
+        mine = sorted(((exp, c) for c, (exp, d, r) in _challenges.items() if d == device_id and r == requester),
                       key=lambda item: item[0])
         while len(mine) >= CHALLENGES_PER_DEVICE:
             _exp, oldest = mine.pop(0)
             _challenges.pop(oldest, None)
-        _challenges[challenge] = (now + CHALLENGE_TTL_SECONDS, device_id)
+        while len(_challenges) >= CHALLENGES_MAX:
+            # Dicts keep insertion order: the first key is the oldest issued.
+            _challenges.pop(next(iter(_challenges)), None)
+        _challenges[challenge] = (now + CHALLENGE_TTL_SECONDS, device_id, requester)
     return challenge
 
 
@@ -73,7 +85,7 @@ def _take_challenge(challenge: str, device_id: str) -> bool:
         entry = _challenges.pop(challenge, None)
     if entry is None:
         return False
-    expires, issued_to = entry
+    expires, issued_to, _requester = entry
     return expires > time.monotonic() and hmac.compare_digest(issued_to, device_id)
 
 

@@ -45,7 +45,9 @@ def world(monkeypatch):
     monkeypatch.setattr(identity.mobile, 'get_mobile_device', devices.get)
     monkeypatch.setattr(store, 'admin_active', lambda h: h == identity.digest('shr_admin-token') and 'admin' not in revoked)
     monkeypatch.setattr(database, 'get_auth_session', lambda t: {'token': t} if t == 'shr_admin-token' and 'admin' not in revoked else None)
-    monkeypatch.setattr(database, 'get_api_user_by_key_hash', lambda h: None)
+    # The API key 'key' is live for user 'api'; any other hash is not a key.
+    monkeypatch.setattr(database, 'get_api_user_by_key_hash',
+                        lambda h: {'id': 'api'} if h == identity.digest('key') and 'api' not in revoked else None)
     monkeypatch.setattr(database, 'get_paired_client_by_session_hash', client_by_hash)
     monkeypatch.setattr(database, 'touch_paired_client', lambda _: None)
     monkeypatch.setattr(mobile_tools.queue, 'state', lambda _: None)
@@ -109,6 +111,11 @@ def test_direct_desktop_and_api_never_gain_global_access(world):
     assert identity.authorized_device_ids('desktop') == []
     create('api', identity.principal('api_user', 'api', 'key'))
     assert identity.authorized_device_ids('api') == []
+    # A disabled, deleted or rotated key can no longer bind a session.
+    world[3].add('api')
+    with pytest.raises(PermissionError):
+        identity.bind_session('api-2', identity.principal('api_user', 'api', 'key'), new=True)
+    world[3].discard('api')
     world[1].pop('one')
     create('direct', identity.principal('paired', 'one', 'shc_one'))
     assert identity.authorized_device_ids('direct') == ['one']

@@ -269,8 +269,10 @@ async def revoke_member(device_id: str, _: str = Depends(require_admin)) -> dict
 
 
 @router.get("/conflicts")
-async def list_conflicts(_: str = Depends(require_auth)) -> dict:
-    return {"conflicts": await run_sync(store.list_conflicts)}
+async def list_conflicts(_: str = Depends(require_admin)) -> dict:
+    rows = await run_sync(store.list_conflicts)
+    # Stored rows are redacted at write and at startup; this is the last guard.
+    return {"conflicts": [{**row, "losing_record": engine.redact_secrets(row.get("losing_record"))} for row in rows]}
 
 
 @router.delete("/conflicts/{conflict_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -465,8 +467,10 @@ async def reject_join(join_id: str, _: str = Depends(require_admin)) -> dict:
 async def peer_challenge(body: ChallengeRequest, request: Request) -> dict:
     # Unauthenticated by nature; bounded per client address, issued only to
     # a named active member and spendable only by that member's key.
-    _challenge_limiter.check(get_client_ip(request))
-    return {"challenge": tokens.new_challenge(body.device_id), "expires_in": tokens.CHALLENGE_TTL_SECONDS}
+    requester = get_client_ip(request)
+    _challenge_limiter.check(requester)
+    return {"challenge": tokens.new_challenge(body.device_id, requester),
+            "expires_in": tokens.CHALLENGE_TTL_SECONDS}
 
 
 @router.post("/peer/auth/token")

@@ -333,6 +333,8 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
 # speaking the protocol, and the socket is closed with 1007 (invalid payload).
 MAX_MALFORMED_FRAMES = 10
 MALFORMED_FRAME_CLOSE_CODE = 1007
+# An API key disabled, deleted or rotated while its socket is open.
+REVOKED_PRINCIPAL_CLOSE_CODE = 4001
 RATE_LIMITED_MESSAGE = "Rate limited: too many messages. Please slow down."
 # The refusal for a session an API key may not act on, known or not.
 SESSION_ACCESS_DENIED = "Access denied to this session"
@@ -413,6 +415,7 @@ class ChatWebSocketHandler:
         # connection itself and closes the socket with that code on the way out.
         self._malformed_frames: int = 0
         self._close_code: Optional[int] = None
+        self._close_reason: str = ""
 
         # Message-type dispatch table
         self._handlers: Dict[str, Callable[[dict], Any]] = {
@@ -589,6 +592,12 @@ class ChatWebSocketHandler:
 
                         msg_type = data.get("type")
 
+                        # Every frame (including the 30 s pong) re-checks an
+                        # API key: disabling, deleting or rotating it ends
+                        # this socket before the frame is acted on.
+                        if not await self._principal_still_valid():
+                            break
+
                         # Rate-limit user-initiated messages (skip keepalive pongs)
                         if msg_type != "pong" and not self.rate_limiter.check():
                             logger.warning(
@@ -685,10 +694,31 @@ class ChatWebSocketHandler:
             if self._close_code is not None:
                 try:
                     await asyncio.wait_for(
-                        self.websocket.close(code=self._close_code), timeout=2.5
+                        self.websocket.close(code=self._close_code, reason=self._close_reason),
+                        timeout=2.5,
                     )
                 except Exception:  # the peer may already be gone
                     logger.debug("Chat WebSocket close failed", exc_info=True)
+
+    async def _principal_still_valid(self) -> bool:
+        """Re-validate an API-user principal; False (and a 4001 close) once revoked.
+
+        Authentication runs at connect only, so without this a key disabled or
+        rotated after connecting keeps its socket. Other principals are checked
+        where they bind a session.
+        """
+        principal = self.trusted_principal
+        if not isinstance(principal, dict) or principal.get("kind") != "api_user":
+            return True
+        from app.core.mobile_tool_identity import validate
+        try:
+            await run_sync(validate, principal)
+        except PermissionError as exc:
+            logger.info("Closing chat WebSocket of API user %s: %s", self.api_user_id, exc)
+            self._close_code = REVOKED_PRINCIPAL_CLOSE_CODE
+            self._close_reason = str(exc)
+            return False
+        return True
 
     async def _refuse_malformed_frame(self) -> bool:
         """Answer a frame that is not a JSON object.
@@ -1745,7 +1775,6 @@ class ChatWebSocketHandler:
 
         # Unified message resolution: DB -> JSONL -> SDK (V2: no live tier).
         sdk_session_id = session.get("sdk_session_id")
-        working_dir = resolve_working_dir(dict(session))
         worktree_id = session.get("worktree_id")
 
         def _resolve_history_blocking() -> Dict[str, Any]:
@@ -1761,6 +1790,9 @@ class ChatWebSocketHandler:
             coroutine, not yet published) or returns a value — no loop-bound
             work, so it is safe on a worker thread.
             """
+            # The cwd resolution self-heals the session's project_v2 binding
+            # (DB reads, possibly a write) — blocking, so it belongs in this hop.
+            working_dir = resolve_working_dir(dict(session))
             resolved = message_resolver.resolve(
                 session_id, sdk_session_id, working_dir
             )

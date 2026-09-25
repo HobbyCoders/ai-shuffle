@@ -284,6 +284,9 @@ class Settings(BaseSettings):
 
     # Security - Trusted Proxies (for getting real IP behind reverse proxy)
     trusted_proxy_headers: str = "X-Forwarded-For,X-Real-IP"  # Comma-separated
+    # Reverse proxies (comma-separated IPs or CIDRs) whose proxy headers are
+    # believed, in addition to loopback. Empty: only a proxy on this host is.
+    trusted_proxies: str = ""
 
     # Security - CORS (comma-separated origins, or "*" for development only)
     cors_origins: str = "http://localhost:8000,http://127.0.0.1:8000"

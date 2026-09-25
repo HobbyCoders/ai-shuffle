@@ -105,7 +105,21 @@ async def forward_http(
         raise HTTPException(503, UNAVAILABLE) from None
 
 
-async def relay(websocket: WebSocket, upstream) -> None:
+async def _until_not_member(device_id: str) -> None:
+    """Return once ``device_id`` stops being an active member (checked every few seconds).
+
+    The peer side re-checks the viewer's device token as often; this is the
+    viewer side's half, so removing the owning device ends the relay.
+    """
+    while True:
+        await asyncio.sleep(AUTH_CHECK_SECONDS)
+        ctx = engine.context()
+        member = ctx.member(device_id) if ctx is not None else None
+        if member is None or member.status != "active":
+            return
+
+
+async def relay(websocket: WebSocket, upstream, device_id: str | None = None) -> None:
     async def to_peer():
         while True:
             message = await websocket.receive()
@@ -130,6 +144,8 @@ async def relay(websocket: WebSocket, upstream) -> None:
                 await websocket.send_text(payload)
 
     tasks = [asyncio.create_task(to_peer()), asyncio.create_task(to_viewer())]
+    if device_id is not None:
+        tasks.append(asyncio.create_task(_until_not_member(device_id)))
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
@@ -168,7 +184,7 @@ async def forward_websocket(
                         max_queue=2,
                     ) as upstream:
                         transport.note_contact(device_id)
-                        await relay(websocket, upstream)
+                        await relay(websocket, upstream, device_id)
                     break
                 except InvalidStatusCode as exc:
                     if exc.status_code == 401 and attempt == 0:

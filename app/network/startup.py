@@ -61,6 +61,14 @@ def initialize() -> Optional[engine.NetworkContext]:
             blobs.backfill_attachment_hashes()
         except Exception:  # noqa: BLE001
             logger.debug("Attachment hash backfill failed", exc_info=True)
+    try:
+        # Older builds kept a losing remote write to an encrypted column in
+        # plaintext; scrub those rows (a no-op once they are redacted).
+        redacted = engine.redact_stored_conflicts()
+        if redacted:
+            logger.info("Redacted secrets in %d stored sync conflicts", redacted)
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not redact stored sync conflicts", exc_info=True)
     _install_resource_hook()
     return ctx
 

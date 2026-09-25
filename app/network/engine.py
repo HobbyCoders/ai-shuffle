@@ -941,6 +941,40 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     return outcome
 
 
+SECRET_PLACEHOLDER = "<secret>"
+
+
+def redact_secrets(record: Any) -> Any:
+    """A conflict's losing record with its encrypted columns replaced by a placeholder.
+
+    ``sync_conflicts`` is kept in plaintext JSON and listed through the API, so
+    a column that is encrypted at rest (``_enc``) must never be stored there.
+    """
+    if not isinstance(record, Mapping) or not record.get("_enc"):
+        return record
+    encrypted_columns = set(record["_enc"])
+    return {k: (SECRET_PLACEHOLDER if k in encrypted_columns else v) for k, v in record.items() if k != "_enc"}
+
+
+def redact_stored_conflicts() -> int:
+    """Redact conflicts stored before losing remote writes were redacted.
+
+    Idempotent: a redacted record has no ``_enc`` left. Returns rows rewritten.
+    """
+    rewritten = 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, losing_record FROM sync_conflicts")
+        for row in cursor.fetchall():
+            record = _parse_json(row["losing_record"])
+            redacted = redact_secrets(record)
+            if redacted is not record:
+                cursor.execute("UPDATE sync_conflicts SET losing_record = %s WHERE id = %s",
+                               (json.dumps(redacted, separators=(",", ":"), ensure_ascii=False, default=str), row["id"]))
+                rewritten += 1
+    return rewritten
+
+
 def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
     """Apply the next op of a stream; classify what cannot be applied.
 
@@ -980,7 +1014,7 @@ def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, resu
         existing = store.get_record(cursor, env.collection, env.record_id)
         store.add_conflict(cursor, collection=env.collection, record_id=env.record_id, losing_clock=env.clock,
                            losing_device_id=env.origin_device_id,
-                           losing_record=plaintext if env.op == OP_UPSERT else {"_deleted": True},
+                           losing_record=redact_secrets(plaintext) if env.op == OP_UPSERT else {"_deleted": True},
                            winning_clock=int(existing["clock"]) if existing else env.clock,
                            winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
         result.reasons.append(reason)
@@ -1024,7 +1058,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         if incoming_hash == (existing["content_hash"] or "") and bool(existing["deleted"]) == (env.op == OP_DELETE):
             store.insert_op(cursor, env.to_dict(), _lane(coll))
             return "lost"
-        losing_record = plaintext if env.op == OP_UPSERT else {"_deleted": True}
+        losing_record = redact_secrets(plaintext) if env.op == OP_UPSERT else {"_deleted": True}
         store.add_conflict(cursor, collection=env.collection, record_id=env.record_id, losing_clock=env.clock,
                            losing_device_id=env.origin_device_id, losing_record=losing_record,
                            winning_clock=int(existing["clock"]), winning_device_id=existing["origin_device_id"])
@@ -1044,11 +1078,9 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                 local_plain = None
             incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
             if local_plain is not None and content_hash(coll, local_plain) != incoming_hash:
-                if local_plain.get("_enc"):
-                    local_plain = {k: ("<secret>" if k in local_plain["_enc"] else v) for k, v in local_plain.items() if k != "_enc"}
                 store.add_conflict(cursor, collection=env.collection, record_id=env.record_id,
                                    losing_clock=int(existing["clock"]), losing_device_id=existing["origin_device_id"],
-                                   losing_record=local_plain, winning_clock=env.clock,
+                                   losing_record=redact_secrets(local_plain), winning_clock=env.clock,
                                    winning_device_id=env.origin_device_id)
 
     if env.op == OP_DELETE:
@@ -1424,9 +1456,7 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
                         losing_record = serialize_row(coll, local_row) if local_row else {}
                     else:
                         losing_record = dict(item["record"] or {})
-                    if losing_record and losing_record.get("_enc"):
-                        losing_record = {k: ("<secret>" if k in losing_record["_enc"] else v)
-                                         for k, v in losing_record.items() if k != "_enc"}
+                    losing_record = redact_secrets(losing_record)
                     store.add_conflict(cursor, collection=coll.name, record_id=item["record_id"],
                                        losing_clock=int(loser["clock"]), losing_device_id=loser["origin_device_id"],
                                        losing_record=losing_record, winning_clock=int(winner["clock"]),
