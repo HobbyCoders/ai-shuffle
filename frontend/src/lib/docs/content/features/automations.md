@@ -12,14 +12,14 @@ Automations let you create AI workflows that run on a schedule, in response to e
 
 An automation consists of:
 
-- A **trigger** that determines when it runs (cron schedule, interval, webhook, or connector event)
-- A **prompt template** that defines what Claude should do
-- A **profile** that controls Claude's behavior (model, permissions, tools)
+- One or more **triggers** that determine when it runs (cron schedule, interval, webhook, connector event or connector trigger)
+- A **prompt template** that defines what the agent should do, and optional **action steps**
+- An **agent** that controls the behavior (prompt, tools). API fields still say `profile_id`.
 - **Budget controls** that cap cost and usage
 - An optional **approval workflow** for human-in-the-loop oversight
 - **Output configuration** that routes results to a connector, webhook, session, or nowhere
 
-Automations are admin-only. All CRUD operations require admin authentication.
+Automations are owner-only. All CRUD operations require the owner's sign-in.
 
 ## Trigger Types
 
@@ -33,7 +33,7 @@ Runs on a cron schedule using standard 5-field cron expressions.
 | Hour     | 0-23           | `9`              |
 | Day      | 1-31           | `*`              |
 | Month    | 1-12           | `*`              |
-| Weekday  | 0-6 (Sun=0)    | `1-5`            |
+| Weekday  | 0-7 (0 and 7 = Sun) | `1-5`       |
 
 **trigger_config:**
 
@@ -69,7 +69,7 @@ This example runs every 5 minutes.
 
 ### Webhook
 
-Triggered by an HTTP POST request. The automation generates a secret for authentication. Include the secret in the `X-Webhook-Signature` header when calling the trigger endpoint.
+Triggered by an HTTP POST request. The automation generates a secret when you create it (unless you set one). Sign each request with it: compute the HMAC-SHA256 of the JSON body, keyed by the secret, and send it as `X-Webhook-Signature: sha256=<hex digest>`. The body is signed with its keys sorted and no whitespace, as `json.dumps(body, separators=(',', ':'), sort_keys=True)` produces in Python. A wrong signature is refused with 403. Without the header, the call counts as a manual trigger and no payload reaches the prompt.
 
 **trigger_config:**
 
@@ -82,12 +82,16 @@ Triggered by an HTTP POST request. The automation generates a secret for authent
 To trigger a webhook automation:
 
 ```bash
+BODY='{"data":"your payload here"}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "THE_SECRET" | sed 's/^.* //')
 curl -X POST http://localhost:8000/api/v1/automations/{automation_id}/trigger \
   -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "X-Webhook-Signature: THE_SECRET" \
+  -H "X-Webhook-Signature: sha256=$SIG" \
   -H "Content-Type: application/json" \
-  -d '{"data": "your payload here"}'
+  -d "$BODY"
 ```
+
+Write the body already compact with sorted keys, as above, so the signature matches.
 
 The JSON payload is available in the prompt template via `{{payload}}` variables.
 
@@ -113,6 +117,32 @@ Supported event types:
 | `session.started`      | A new session was started                 |
 | `permission.requested` | Claude is waiting for permission approval |
 | `input.needed`         | Claude is waiting for user input          |
+
+### Connector Trigger
+
+Fires when a connector reports one of its own triggers (pick the connector and trigger in the form).
+
+**trigger_config:**
+
+```json
+{
+  "connector_id": "connector-abc123",
+  "trigger_id": "the-connector-trigger-id"
+}
+```
+
+The trigger's data is available in the prompt template under `{{data}}`.
+
+### Multiple Triggers
+
+An automation can have several triggers. Send them as a `triggers` array instead of `trigger_type` and `trigger_config`:
+
+```json
+"triggers": [
+  {"type": "cron", "config": {"expression": "0 9 * * 1-5", "timezone": "UTC"}},
+  {"type": "webhook", "config": {}}
+]
+```
 
 ## Prompt Templates
 
@@ -141,6 +171,19 @@ curl -X POST http://localhost:8000/api/v1/automations/{automation_id}/test \
 
 This returns the rendered prompt and budget validation result without spending tokens.
 
+## Action Steps
+
+`action_steps` is an optional list of steps that run in order after the prompt (an automation needs a prompt, action steps, or both):
+
+| Step type          | Fields                                   | What it does                         |
+|--------------------|------------------------------------------|--------------------------------------|
+| `connector_action` | `connector_id`, `action_id`, `params`    | Runs a connector action              |
+| `send_prompt`      | `prompt`, optional `profile_id`, `max_turns` | Runs another prompt              |
+| `webhook_call`     | `url`, `method` (default `POST`), `headers`, `body` | Calls a URL               |
+| `delay`            | `seconds`                                | Waits, up to 300 seconds             |
+
+Text fields in steps can use the trigger data and `{{response}}`, the prompt's response.
+
 ## Output Configuration
 
 Control where automation results are sent.
@@ -161,6 +204,11 @@ Control where automation results are sent.
 }
 ```
 
+Two optional fields filter what gets delivered:
+
+- `suppress_pattern`: when the response is exactly this text (ignoring case and surrounding spaces), nothing is delivered. Useful for "nothing to report" replies.
+- `deduplicate_window_seconds`: when the response matches one delivered within this many seconds, it is not delivered again.
+
 ## Budget Controls
 
 Prevent runaway costs with granular budget limits.
@@ -178,13 +226,13 @@ When any limit is exceeded, the run is blocked and the automation reports the re
 
 ## Approval Workflow
 
-When `requires_approval` is `true`, automations pause before executing and wait for admin approval.
+When `requires_approval` is `true`, automations pause before executing and wait for the owner's approval.
 
 **Flow:**
 
 1. Trigger fires and creates a run with status `pending`
 2. An approval request is created with the rendered prompt preview
-3. Admin reviews and approves or denies via the API or UI
+3. The owner reviews and approves or denies via the API or UI
 4. If approved, the run executes; if denied, the run is cancelled
 
 ### List Pending Approvals
@@ -220,6 +268,8 @@ If approval is required: `pending` -> `approved` -> `running` -> `completed` or 
 
 If denied: `pending` -> `cancelled`
 
+If a budget limit blocks the run: `budget_exceeded` (the reason is stored in the automation's `last_error`).
+
 Each run records:
 
 - **cost_usd** -- Actual API cost
@@ -228,7 +278,7 @@ Each run records:
 - **prompt_rendered** -- The prompt after template variable substitution
 - **response** -- Claude's output
 - **error** -- Error message if the run failed
-- **output_status** -- Whether the output was successfully delivered
+- **output_status** -- What happened to the output: `delivered`, `failed`, `suppressed` or `deduplicated`
 
 ### View Run History
 
@@ -250,6 +300,8 @@ Returns aggregate data: total runs, success/failure counts, total cost, average 
 
 ### Create an Automation
 
+Use the id of one of your agents for `profile_id` (`GET /api/v1/agents` lists them).
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/automations \
   -H "Authorization: Bearer YOUR_TOKEN" \
@@ -263,7 +315,7 @@ curl -X POST http://localhost:8000/api/v1/automations \
       "timezone": "America/New_York"
     },
     "prompt": "Summarize all git commits from the past 24 hours in project {{project_name}}. Include a brief description of each change and highlight anything that needs attention.",
-    "profile_id": "default",
+    "profile_id": "YOUR_AGENT_ID",
     "project_id": "my-project",
     "output_config": {"type": "session"},
     "max_turns": 3,
@@ -306,7 +358,7 @@ Generate a morning summary of recent activity across all sessions:
   "trigger_type": "cron",
   "trigger_config": {"expression": "0 9 * * 1-5", "timezone": "US/Pacific"},
   "prompt": "Review all sessions from the past 24 hours. Summarize what was accomplished, what's in progress, and flag any errors or blockers.",
-  "profile_id": "default",
+  "profile_id": "YOUR_AGENT_ID",
   "max_turns": 5,
   "max_cost_per_run": 1.00
 }
@@ -325,7 +377,7 @@ Automatically respond when a session encounters an error:
     "event_type": "session.error"
   },
   "prompt": "Session {{event.session_id}} failed with an error. Analyze the error, suggest a fix, and post a summary to the connector.",
-  "profile_id": "default",
+  "profile_id": "YOUR_AGENT_ID",
   "output_config": {"type": "connector", "connector_id": "connector-slack-001"},
   "requires_approval": true
 }
@@ -341,7 +393,7 @@ Run a weekly code review on recent changes:
   "trigger_type": "cron",
   "trigger_config": {"expression": "0 14 * * 5", "timezone": "UTC"},
   "prompt": "Review all git commits from the past week. Identify potential issues, suggest improvements, and summarize code quality trends.",
-  "profile_id": "code-reviewer",
+  "profile_id": "YOUR_REVIEWER_AGENT_ID",
   "project_id": "main-app",
   "max_turns": 10,
   "timeout_seconds": 600,

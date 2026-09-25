@@ -1,23 +1,93 @@
 <!--
 title: Authentication
-description: Local access, Claude CLI, and GitHub endpoints
+description: Owner access, Claude CLI, and GitHub endpoints
 order: 1
 -->
 
 # Authentication API
 
-Endpoints for local installation setup and development-tool authentication. Shuffle is not hosted on the internet and never asks its owner to sign in. Claude and GitHub tool credentials are separate from the Shuffle account a worker may be linked to for phone access.
+Endpoints for owner sign-in, local installation setup and development-tool authentication. Claude and GitHub tool credentials are separate from the Shuffle account a worker may be linked to for phone access.
 
 ## Local setup and owner access
 
-The normal local listener grants owner access to direct trusted localhost/LAN requests. There is no login page: first setup does not require a username, password, or Shuffle account. The authenticated remote listener accepts only existing paired devices. API users retain their scoped integration roles, including when used on the local network.
+Requests from the same machine (loopback) on the local listener get owner access without signing in. Other devices on the LAN sign in with the owner password, unless the owner turns on **Trusted LAN**. The authenticated remote listener accepts only existing paired devices. API users keep their scoped integration roles on every network.
+
+Passwordless owner requests that change something (anything but `GET`) must be same-origin: send an `Origin` header that matches the host, as a browser does. Scripts can instead sign in and send the owner token as a Bearer (see [Owner password](#owner-password)).
+
+## Owner password
+
+The owner password is created in the first-run wizard. Sign-in is only available on the local listener. Password checks are rate limited per client address and in total.
+
+### GET /api/v1/owner/status
+
+What the web UI needs to choose between sign-in, first-run setup and the app. No auth required.
+
+**Response:**
+```json
+{
+  "password_set": true,
+  "setup_allowed": false,
+  "required": false,
+  "trusted_lan": false,
+  "login_available": true,
+  "desktop_handoff": false,
+  "min_length": 12
+}
+```
+
+### POST /api/v1/owner/password
+
+Create the first owner password, or change it. Creating it needs a browser on the local network (or owner access). Changing it needs owner access and `current_password`. Changing the password signs out every other owner browser.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/owner/password \
+  -H "Origin: http://localhost:8000" \
+  -H "Content-Type: application/json" \
+  -d '{"password": "new-password", "current_password": "old-password"}'
+```
+
+### POST /api/v1/owner/login
+
+Sign in with the owner password. By default it sets the `session` cookie (same-origin browser requests only). Send `"bearer": true` to get the token in the response instead, for scripts.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/owner/login \
+  -H "Content-Type: application/json" \
+  -d '{"password": "your-owner-password", "bearer": true}'
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "token": "...",
+  "expires_at": "2025-01-15T10:30:00+00:00"
+}
+```
+
+Send the token as `Authorization: Bearer <token>` on owner-only endpoints. Returns `409` if no owner password is set yet, and `403` on the remote listener.
+
+### PUT /api/v1/owner/trusted-lan
+
+Turn **Trusted LAN** on or off. When it is on, every device on the LAN gets owner access without signing in.
+
+**Auth:** Owner only
+
+```json
+{
+  "enabled": true
+}
+```
 
 ### POST /api/v1/auth/setup
 
-Mark the local installation as configured after choosing its workspace. Requires owner access and a same-origin browser request. A direct localhost command can also use the enabled local listener.
+Mark the local installation as configured after choosing its workspace. Requires owner access and a same-origin browser request.
+
+**Auth:** Owner only
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/auth/setup \
+  -H "Origin: http://localhost:8000" \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
@@ -31,7 +101,7 @@ curl -X POST http://localhost:8000/api/v1/auth/setup \
 
 ### POST /api/v1/auth/logout
 
-Invalidate the current paired browser session and clear its cookie. Browser requests must be same-origin. Signing out does not disable automatic owner access on a trusted local listener.
+Sign out: clear the browser's `session` cookie and end the current paired-browser session. Browser requests must be same-origin. Signing out does not end passwordless owner access from loopback or a Trusted LAN.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/auth/logout \
@@ -62,7 +132,7 @@ curl http://localhost:8000/api/v1/auth/status
 
 ### Removed login endpoints
 
-`POST /api/v1/auth/login`, `/change-password`, `/account/start`, `/account/poll`, and `/recovery` no longer exist and return 404. Worker passwords, browser account sign-in, and console recovery codes are gone: a browser is the owner on the trusted local listener or it is not authenticated at all. Stored credentials use persistent server-managed keys; restoring unavailable keys is a separate operator procedure.
+`POST /api/v1/auth/login`, `/change-password`, `/account/start`, `/account/poll`, and `/recovery` no longer exist and return 404. Owner sign-in lives under `/api/v1/owner` (see [Owner password](#owner-password)). Browser account sign-in and console recovery codes are gone. Stored credentials use persistent server-managed keys; restoring unavailable keys is a separate operator procedure.
 
 ## Claude Code CLI
 
@@ -74,7 +144,7 @@ The old in-app sign-in endpoints (`/api/v1/auth/claude/login`, `/login/poll`, `/
 
 What the CLI reports about its own login. Add `?refresh=true` to ask the CLI again instead of using the answer cached for up to a minute.
 
-**Auth:** Any signed-in caller
+**Auth:** Required
 
 ```bash
 curl http://localhost:8000/api/v1/auth/claude/cli?refresh=true \
@@ -110,19 +180,19 @@ curl http://localhost:8000/api/v1/auth/claude/cli?refresh=true \
 
 Run `claude auth login` in the in-app terminal (Docker and local runs; not the desktop app or Windows). Poll `GET /api/v1/auth/claude/cli-login?offset=N` for its output and the sign-in link, send the code Anthropic's page shows with `POST /api/v1/auth/claude/cli-login/input` (`{"text": "..."}`), and stop it with `POST /api/v1/auth/claude/cli-login/cancel`.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### POST /api/v1/auth/claude/logout
 
 Run `claude auth logout`. The CLI's files are never edited or deleted by AI Shuffle.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### POST /api/v1/auth/claude/relogin-notice/dismiss
 
 Hide the one-time notice, shown after upgrading from a version that ran its own Claude sign-in, asking to run `claude auth logout` and then `claude auth login`.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ## GitHub Integration
 
@@ -130,13 +200,13 @@ Hide the one-time notice, shown after upgrading from a version that ran its own 
 
 Get GitHub CLI authentication status.
 
-**Auth:** Admin only
+**Auth:** Required
 
 ### POST /api/v1/auth/github/login
 
 Login with a GitHub Personal Access Token.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/auth/github/login \
@@ -149,13 +219,13 @@ curl -X POST http://localhost:8000/api/v1/auth/github/login \
 
 Start web device flow for GitHub authentication.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### POST /api/v1/auth/github/logout
 
 Logout from GitHub.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ## Onboarding
 
@@ -163,10 +233,10 @@ Logout from GitHub.
 
 Mark the setup onboarding as complete.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### GET /api/v1/auth/diagnostics
 
 Run authentication diagnostic checks.
 
-**Auth:** Admin only
+**Auth:** Owner only

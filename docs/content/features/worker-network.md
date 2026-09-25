@@ -6,101 +6,50 @@ order: 11
 
 # Worker network
 
-Every worker runs by itself: its own database, its own device identity, no
-account required. Connecting workers into a **network** makes them feel like
-one app. Set a sidebar width once, add a provider key once, and every worker
-in the network has it. Every session shows up everywhere; it runs on the
-worker that owns it, and any worker can drive it.
+Every worker runs by itself: its own database, its own device identity, no account required. Connecting workers into a **network** makes them feel like one app. Set a sidebar width once, add a provider key once, and every worker in the network has it. Every session shows up everywhere; it runs on the worker that owns it, and any worker can drive it.
 
-Everything the network shares is encrypted with one network key that only the
-member devices hold. The Shuffle account service keeps an encrypted copy so a
-new device can restore when every worker is off; it cannot read anything.
+Everything the network shares is encrypted with one network key that only the member devices hold. The Shuffle account service keeps an encrypted copy so a new device can restore when every worker is off; it cannot read anything.
 
-## Three ways to start a worker
+## Connecting a worker
 
-On first run a worker offers three choices:
+Worker connections are managed in Settings > Providers > Devices (owner only). Until a worker joins a network, that section shows **Set up this worker**. The choices are:
 
-- **Clean install.** Fresh settings on this computer. You can sign in or
-  connect other devices at any time from Settings > Devices.
-- **Sign in to your Shuffle account.** Sign the worker into the same account
-  as your other workers. The first worker on an account founds its network;
-  every later worker is admitted by whichever of your workers is online, with
-  nothing to approve. If none is online, enter the recovery key. Phones signed
-  in to the account see and control every worker on it.
-- **Join with an invite.** On an existing worker open Settings > Devices >
-  *Add device* > *Worker*. Scan the QR code or paste the link on the new
-  worker. The one-time code is the authorization: the new worker joins as
-  soon as it reaches the inviter, copies a snapshot and starts syncing.
+- **Sign in to your Shuffle account.** Sign the worker into the same account as your other workers (the setup wizard's *Account & GitHub* step does the same). The first worker on an account founds its network; every later worker is admitted by whichever of your workers is online, with nothing to approve. Phones signed in to the account see and control every worker on it.
+- **Join with an invite.** On an existing worker open Settings > Providers > Devices > *Add device* > *Worker*. Scan the QR code or paste the link on the new worker. The one-time code is the authorization: the new worker joins as soon as it reaches the inviter, copies a snapshot and starts syncing.
+- **Keep separate settings.** The worker keeps its own settings. You can sign in or connect other devices later.
 
-Adding a phone or browser works the same way: *Add device* > *Phone or
-browser* shows a QR code and link that connect it immediately, and a phone
-signed in to your account needs no code at all.
+Adding a phone or browser works the same way: *Add device* > *Phone or browser* shows a QR code and link that connect it immediately, and a phone signed in to your account needs no code at all.
 
-Existing managed embedded installations join a network of one on upgrade;
-external/shared-database installations are not automatically converted. Preserve
-those deployments and backups until an explicit migration is approved.
+Existing managed embedded installations join a network of one on upgrade. External or shared-database installations are not converted automatically; keep those deployments and their backups.
 
 ## What syncs
 
-Shared across the network: preferences and UI state, system settings that are
-not bound to a host, provider keys and accounts, profiles, templates, tags,
-permission rules, hooks, MCP definitions, webhooks, project identities, notes
-and attachments, plugin state, memory facts and skills, automation and
-connector definitions, the session catalog and transcripts.
+Shared across the network: preferences and UI state, system settings that are not bound to a host, provider keys and accounts, agents, templates, tags, permission rules, hooks, MCP definitions, webhooks, project identities, notes and attachments, plugin state, memory facts and skills, automation and connector definitions, the session catalog and transcripts.
 
-Local to each worker: workspace paths, checkouts and worktrees, ports and
-advertise URLs, credential custody, the account binding, runs and queues,
-usage snapshots, logs.
+Local to each worker: workspace paths, checkouts and worktrees, ports and advertise URLs, credential custody, the account binding, runs and queues, usage snapshots, logs.
 
-Settings > Devices > *What syncs* lists the exact policy.
+The exact policy is available from `GET /api/v1/network/policy`.
 
 ## Running sessions on another worker
 
-The composer's runner chip lists every online worker in the network with its
-capabilities. Pick one and the session is born there. From any other worker
-the session is a live mirror: you can read it, send messages, answer
-permission prompts and stop it; the owner executes. If the owner is offline
-the mirror is read-only and offers **Fork here**, which starts a new session
-on the current worker with the transcript as context. The original is never
-changed.
+The composer's runner chip lists every online worker in the network with its capabilities. Pick one and the session is born there. From any other worker the session is a live mirror: you can read it, send messages, answer permission prompts and stop it; the owner executes. If the owner is offline the mirror is read-only and offers **Fork here**, which starts a new session on the current worker with the transcript as context. The original is never changed.
 
-Git controls work from any worker too: Commit, Push, Pull, Create PR, Finish
-and Ship It use your saved options and run against the owning worker’s
-checkout. Finish and Ship It show progress here and continue on the owner
-if you reload the page. If the owner is unreachable, reconnect it and use
-Retry; Git actions never fall back to a checkout on the viewing device.
-Both workers need a version that supports remote Git actions.
+Git controls work from any worker too: Commit, Push, Pull, Create PR, Finish and Ship It use your saved options and run against the owning worker’s checkout. Finish and Ship It show progress here and continue on the owner if you reload the page. If the owner is unreachable, reconnect it and use Retry; Git actions never fall back to a checkout on the viewing device. Both workers need a version that supports remote Git actions.
 
-Automations and connectors have one owner device too. A definition restored
-on a new worker stays inactive until you assign it.
+Automations and connectors have one owner device too. A definition restored on a new worker stays inactive until you assign it.
 
 ## Conflicts
 
-Two workers editing the same setting while disconnected both keep the higher
-write; the losing version is listed under Settings > Devices > Conflicts for
-30 days so nothing is silently lost.
+Two workers editing the same setting while disconnected both keep the higher write; the losing version is kept for 30 days so nothing is silently lost, and can be listed with `GET /api/v1/network/conflicts`.
 
 ## Removing a device
 
-Remove a worker, phone or browser from Settings > Devices. A removed worker
-stops receiving your settings and its later writes are rejected; the
-remaining workers switch to a fresh network key on their own. Any secret the
-worker had already received should be treated as compromised; rotate provider
-keys from Settings > Providers.
+Remove a worker, phone or browser from Settings > Providers > Devices. A removed worker stops receiving your settings and its later writes are rejected; the remaining workers switch to a fresh network key on their own. Any secret the worker had already received should be treated as compromised; rotate provider keys from Settings > Providers.
 
 ## The account always wins
 
-A worker set up with a clean install that later signs in to an account which
-already syncs other workers switches to the account's network on its own:
-settings the account already has replace the worker's copies, and anything
-only that worker has is added to the account. A worker signed in to an account
-is always in that account's network; there is no separate state to keep.
-*Join a different worker's network* under Settings > Devices > Advanced moves a
-worker between networks with an invite in the same way.
+A worker set up with separate settings that later signs in to an account which already syncs other workers switches to the account's network on its own: settings the account already has replace the worker's copies, and anything only that worker has is added to the account. A worker signed in to an account is always in that account's network; there is no separate state to keep. Joining another worker's network with its invite (Settings > Providers > Devices) moves a worker between networks the same way.
 
 ## Existing shared-database installations
 
-Each worker uses its own private managed PostgreSQL database. New installations
-do not attach to or import an existing shared database. Keep the existing
-deployment and its backups intact until a separately tested migration is
-approved. See `docs/network/migration.md` for preservation requirements.
+Each worker uses its own private managed PostgreSQL database. New installations do not attach to or import an existing shared database. Keep the existing deployment and its backups; they are not converted automatically.

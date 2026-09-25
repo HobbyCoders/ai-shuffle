@@ -16,7 +16,7 @@ This guide describes AI Shuffle's integration, not a guarantee that a model is a
 2. **Turn on voice mode** under Settings → Voice. Choose a voice, set **Max call minutes**, and adjust **Conversation prompts** if needed. The play button beside each voice generates a GPT Live sample using your OpenAI API account.
 3. **Choose the chat model for tasks** in the voice session's composer controls, along with its effort and permissions. GPT Live uses these selections for client delegation. You do not need to assign a per-agent Voice model for this path.
 
-Settings → Voice currently configures GPT Live for new calls; it does not offer an engine or provider dropdown. The separate **Voice input** settings control dictation into the composer, not the voice call engine. Existing sessions keep their saved voice configuration when settings change.
+Settings → Voice currently configures GPT Live for new calls; it does not offer an engine or provider dropdown. The separate **Voice transcription** settings (same page) and the **Voice input hotkey** (Settings → Chat & Input) control dictation into the composer, not the voice call engine. Existing sessions keep their saved voice configuration when settings change.
 
 ## Starting a call
 

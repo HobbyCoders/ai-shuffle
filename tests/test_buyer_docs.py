@@ -142,3 +142,55 @@ def test_contributor_material_lives_in_docs_internal_with_pointers():
         assert f"docs/internal/{pointer}" in text
         assert len(text.splitlines()) < 15, f"{pointer} should be a short pointer"
     assert not (BUYER / "architecture.md").exists()
+
+
+CONTENT = ROOT / "docs/content"
+MD_LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+
+
+def heading_ids(text: str) -> set[str]:
+    """Heading ids exactly as the in-app renderer (DocsContent.svelte) builds them."""
+    ids, in_code = set(), False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            in_code = not in_code
+            continue
+        match = None if in_code else re.match(r"^#{1,6}\s+(.*?)\s*#*$", line)
+        if match:
+            slug = re.sub(r"<[^>]*>", "", match.group(1).lower())
+            slug = re.sub(r"[^\w\s-]", "", slug)
+            ids.add(re.sub(r"-+", "-", re.sub(r"\s+", "-", slug)).strip())
+    return ids
+
+
+def test_every_in_app_link_opens_a_page_in_the_docs_panel():
+    """The Docs panel only resolves `/docs/<category>[/<slug>][#anchor]` and `#anchor` links.
+
+    Anything else relative (`./x.md`, `/api/...`) would leave the app and 404.
+    """
+    problems = []
+    for page in sorted(CONTENT.rglob("*.md")):
+        text, in_code = page.read_text(encoding="utf-8"), False
+        for number, line in enumerate(text.splitlines(), 1):
+            if line.startswith("```"):
+                in_code = not in_code
+                continue
+            if in_code:
+                continue
+            for url in MD_LINK.findall(line):
+                where = f"{page.relative_to(CONTENT)}:{number} {url}"
+                if re.match(r"^(https?:|mailto:)", url):
+                    continue
+                path, _, anchor = url.partition("#")
+                if not path:
+                    target = page
+                elif match := re.fullmatch(r"/docs/([\w-]+)(?:/([\w-]+))?/?", path):
+                    target = CONTENT / match.group(1) / f"{match.group(2) or '_index'}.md"
+                else:
+                    problems.append(f"not a /docs/ link: {where}")
+                    continue
+                if not target.is_file():
+                    problems.append(f"missing page: {where}")
+                elif anchor and anchor not in heading_ids(target.read_text(encoding="utf-8")):
+                    problems.append(f"missing heading: {where}")
+    assert not problems, "\n".join(problems)

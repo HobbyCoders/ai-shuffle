@@ -8,10 +8,9 @@ and the same change removes the `SYNC_BUCKET` binding and the deletion guard
 that blocked affected accounts.
 
 **Order matters.** `network_objects` is the only index of what the bucket
-holds. Empty the bucket first, then deploy the migration. Once the change is
-on `main`, any run of the *Deploy account hub* workflow applies 0017. So either
-merge only after step 4 below, or do not dispatch that workflow until the
-bucket is empty.
+holds. Empty the bucket first, then deploy the migration. 0017 is already on
+`main`, so any run of the *Deploy account hub* workflow applies it. Do not
+dispatch that workflow until step 4 confirms the bucket is empty.
 
 Every command below runs from an empty scratch directory, so Wrangler looks
 the database up by name instead of using the placeholder `database_id` in
@@ -101,10 +100,9 @@ Continue only when the object count is 0. If objects remain, go back to step
 
 ## 5. Deploy with the migration
 
-Merge the branch, then run *Deploy account hub* from GitHub Actions with the
-production `database_id`. The workflow applies pending migrations, including
-0015 to 0017, before it deploys the Worker, which no longer binds
-`SYNC_BUCKET`.
+Run *Deploy account hub* from GitHub Actions with the production
+`database_id`. The workflow applies every pending migration (0017 onward)
+before it deploys the Worker, which no longer binds `SYNC_BUCKET`.
 
 ## 6. Verify
 

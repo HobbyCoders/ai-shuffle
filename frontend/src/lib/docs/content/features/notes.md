@@ -15,6 +15,7 @@ Notes provide a simple, global space for capturing ideas, tracking bugs, and pla
 - **Pinning** — Pin important notes to the top
 - **Search** — Find notes by title or content
 - **Auto-save** — Changes save automatically with debouncing
+- **Attachments** — Attach files to a note (**Attach file**), then type `@` in the note to link one
 
 ## Using Notes
 

@@ -1,6 +1,6 @@
 <!--
 title: BlueBubbles
-description: Direct BlueBubbles connector for bridging iMessage to Claude
+description: Direct BlueBubbles connector for sending iMessages from AI Shuffle
 order: 9
 -->
 
@@ -8,9 +8,9 @@ order: 9
 
 ## Overview
 
-The BlueBubbles connector provides a direct integration between AI Shuffle and a [BlueBubbles](https://bluebubbles.app/) server. BlueBubbles is an open-source application that runs on macOS and exposes Apple's iMessage service through a REST API and WebSocket interface. This connector communicates directly with the BlueBubbles API, letting Claude send and receive iMessages.
+The BlueBubbles connector provides a direct integration between AI Shuffle and a [BlueBubbles](https://bluebubbles.app/) server. BlueBubbles is an open-source application that runs on macOS and exposes Apple's iMessage service through a REST API and WebSocket interface. This connector communicates directly with the BlueBubbles API, letting AI Shuffle send iMessages. It does not receive messages (see [Send a test message](#7-send-a-test-message)).
 
-While the [iMessage connector](./imessage.md) also uses BlueBubbles internally, this direct connector is intended for users who want more granular control over BlueBubbles-specific features or who are already familiar with the BlueBubbles ecosystem. For most users, the iMessage connector provides an equivalent experience with a simpler mental model.
+The [iMessage connector](/docs/connectors/imessage) is a separate option: it runs the `imsg` CLI on the Mac that hosts AI Shuffle, and it does not use BlueBubbles. Use BlueBubbles when AI Shuffle runs on a different machine from the Mac.
 
 ## Prerequisites
 
@@ -42,7 +42,7 @@ BlueBubbles needs several permissions to function. macOS will prompt for these o
 1. **Full Disk Access** -- Required to read the iMessage database
    - Go to **System Settings > Privacy & Security > Full Disk Access**
    - Click the `+` button and add BlueBubbles Server
-2. **Accessibility** (optional) -- Required only if you enable the BlueBubbles Private API (typing indicators, reactions). The AI Shuffle connector does not use these features.
+2. **Accessibility** (optional) -- Required only if you enable the BlueBubbles Private API. The Private API is needed for the AI Shuffle actions that send tapbacks, rename group chats or leave chats. Plain text sending works without it.
    - Go to **System Settings > Privacy & Security > Accessibility**
    - Click the `+` button and add BlueBubbles Server
 3. **Contacts** (optional) -- Allows BlueBubbles to resolve contact names
@@ -60,7 +60,7 @@ On first launch, BlueBubbles will walk you through a setup wizard:
    - **Cloudflare Tunnel** (recommended for remote access) -- Free, stable, and requires no port forwarding
    - **Dynamic DNS** -- Requires port forwarding on your router
    - **Local Network Only** -- Only works if AI Shuffle runs on the same network
-3. **Configure the Private API** (optional) -- The Private API enables BlueBubbles-side features such as typing indicators and tapback reactions. The AI Shuffle connector does not currently use these features, so this step is optional for AI Shuffle.
+3. **Configure the Private API** (optional) -- Required for the AI Shuffle actions that send tapbacks, rename group chats or leave chats. Plain text sending works without it.
 4. **Set the port** -- Default is `1234`. Change if needed.
 
 ### 4. Verify the server is running
@@ -83,34 +83,25 @@ curl "http://YOUR_BLUEBUBBLES_URL:1234/api/v1/chat?password=YOUR_PASSWORD&limit=
 
 ### 5. Create the BlueBubbles connector in AI Shuffle
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "BlueBubbles Direct",
-    "connector_type": "bluebubbles",
-    "config": {
-      "server_url": "http://192.168.1.50:1234",
-      "password": "your_bluebubbles_password"
-    }
-  }'
-```
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **BlueBubbles**.
+2. Click **Install BlueBubbles** if prompted, then click **Connect account**.
+3. Fill in the configuration fields:
+   - **Server URL**: Full URL of the BlueBubbles server including port (e.g., `http://192.168.1.50:1234`)
+   - **API Password**: The server password you set in BlueBubbles
+   - **Allowed Handles**: At least one phone number or email address. The connector will not start without one.
+4. Click **Create Connector**.
 
-Or use the AI Shuffle UI: **Settings > Connectors > Add Connector > BlueBubbles**.
+To create the connector through the API instead, see [API Management](/docs/connectors#api-management); the `config` object takes the fields in the table below.
 
 ### 6. Activate the connector
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors/{connector_id}/activate \
-  -H "Authorization: Bearer aih_your_key"
-```
+Turn on the connection's **Activate** switch.
 
 ### 7. Send a test message
 
-With the connector active, AI Shuffle can send outgoing iMessages through the BlueBubbles REST API. Trigger a send from an automation or tool and confirm the message arrives on the recipient's device.
+With the connector active, AI Shuffle can send outgoing iMessages through the BlueBubbles REST API. Trigger a send from an [automation](/docs/features/automations) with a **Connector Action** step (`send_message`) and confirm the message arrives on the recipient's device.
 
-> **Inbound limitation:** The connector implements inbound handling (it parses BlueBubbles "new-message" webhook payloads), but AI Shuffle does not currently expose an HTTP route that BlueBubbles can POST those webhooks to. As a result, incoming iMessages are not delivered to Claude through this connector yet. Outbound sending works today.
+> **Note:** The BlueBubbles connector does not receive messages. AI Shuffle has no URL that BlueBubbles can send its webhooks to, so incoming iMessages never reach your agent.
 
 ## Configuration Reference
 
@@ -118,7 +109,7 @@ With the connector active, AI Shuffle can send outgoing iMessages through the Bl
 |-------|------|----------|-------------|
 | `server_url` | string | Yes | Full URL of the BlueBubbles server including port (e.g., `http://192.168.1.50:1234` or `https://bb.yourdomain.com`) |
 | `password` | string | Yes | The server password set during BlueBubbles configuration |
-| `allowed_handles` | list | No | If set, only messages from these phone numbers or emails are processed. Leave empty to accept messages from any handle. |
+| `allowed_handles` | list | Yes (to enable) | Phone numbers or emails the connector is allowed to work with. At least one entry is required before the connector can be enabled. |
 
 ## Capabilities
 
@@ -136,16 +127,11 @@ The BlueBubbles connector supports the following capabilities:
 
 **Message length limit:** 4,000 characters per message. Longer messages are automatically split.
 
-## AI Actions (Action Gateway)
+## AI Actions
 
-Sessions bound to a BlueBubbles chat get two MCP tools instead of one tool per feature:
+BlueBubbles has 6 actions: send message, send tapback reaction, list chats, get chat info, rename chat and leave chat.
 
-- **`bluebubbles_actions`** — discovery. Returns the action catalog (6 actions: send message, send tapback reaction, list chats, get chat info, rename chat, leave chat), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
-- **`bluebubbles_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
-
-Safety rails:
-
-- The **destructive** action (`leave_chat`) refuses to run against the session's bound chat, and otherwise asks the user to reply **'approve' or 'deny'** in-chat before running (2-minute timeout denies) — BlueBubbles has no interactive button surface. Set `auto_approve_destructive: true` to skip the prompt.
+Your agent does not get these actions in its sessions, because no BlueBubbles chat ever reaches it. You can run them from an [automation](/docs/features/automations) with a **Connector Action** step. Actions run this way, including `leave_chat`, do not ask for approval.
 
 ## Troubleshooting
 
@@ -157,7 +143,7 @@ Safety rails:
 
 ### Private API not connecting
 
-The Private API is required for typing indicators and reactions. If it shows "Disconnected":
+The Private API is required for the tapback, rename chat and leave chat actions. If it shows "Disconnected":
 
 1. Ensure you have granted **Accessibility** permission to BlueBubbles
 2. Restart BlueBubbles Server
@@ -184,7 +170,3 @@ BlueBubbles caches message data. If memory usage grows large:
 1. In BlueBubbles, go to **Settings > Database > Clear Cache**
 2. Restart the BlueBubbles server
 3. If the Mac has limited RAM (8 GB or less), consider limiting the number of chats BlueBubbles syncs
-
-### Messages are duplicated
-
-- Ensure you do not have both the **iMessage** connector and the **BlueBubbles** connector active simultaneously in AI Shuffle, as both connect to the same BlueBubbles server and will process the same messages twice.

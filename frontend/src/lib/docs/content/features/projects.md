@@ -33,22 +33,16 @@ curl -X POST http://localhost:8000/api/v1/projects \
     "name": "My Web App",
     "path": "/home/user/projects/my-web-app",
     "settings": {
-      "default_profile_id": "default"
+      "default_profile_id": "YOUR_AGENT_ID"
     }
   }'
 ```
 
+Use the id of one of your agents (`GET /api/v1/agents`). API fields still say `profile`.
+
 ## File Management
 
-Each project provides a file browser:
-
-- **Browse** directories with show/hide hidden files
-- **Upload** files directly to the project
-- **Download** files from the project
-- **Create** new folders
-- **Rename** and **delete** files/folders
-
-Files are accessible to Claude during sessions.
+Browse, upload, download, rename and delete a project's files from the file browser. See [File Management](/docs/features/file-management). Files are accessible to the agent during sessions.
 
 ## Git Integration
 
@@ -89,21 +83,24 @@ curl -X POST http://localhost:8000/api/v1/sessions/with-worktree \
 
 ## Per-Project Configuration
 
-Projects can have their own:
+Each project has tabs for its own:
 - **MCP servers** — Project-scoped tool servers
-- **Plugins** — Project-specific extensions
+- **Agents** — Project-scoped agent files
 - **Hooks** — Project-specific event handlers
+- **Memory** — The project's memory
+
+Plugins can be installed to a project scope through the API.
 
 ## Session Import
 
 Import sessions from the Claude Code CLI:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/projects/proj_abc/sync-sessions \
+curl -X POST "http://localhost:8000/api/v1/projects/proj_abc/sync-sessions?profile_id=YOUR_AGENT_ID" \
   -H "Authorization: Bearer aih_your_key"
 ```
 
-This scans the project directory for Claude Code session files and imports them.
+This finds Claude Code CLI sessions recorded for this project's directory (in the CLI's own session store) and imports any not yet listed. `profile_id` is the agent the imported sessions use.
 
 ## Chat History
 

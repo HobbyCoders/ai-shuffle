@@ -27,7 +27,7 @@ Most releases can be installed from inside AI Shuffle:
 1. When a new release is available, the update button appears in the sidebar with its release notes.
 2. Choose **Download update**, then **Update and restart**. Agents stop, the worker installs the release and starts again.
 
-**Settings → General → Allow updates** turns in-app updates on or off for every worker on your account. With it off, nothing is checked, downloaded or installed.
+**Settings → Account → Application updates → Allow updates** turns in-app updates on or off for every worker on your account. With it off, nothing is checked, downloaded or installed.
 
 ### New image
 
@@ -51,10 +51,10 @@ Earlier versions ran their own Claude sign-in. That is gone: the Claude Code CLI
 ## What the update check sends
 
 - **What:** a plain `GET https://hobbycoders.com/v1/desktop/manifest`. No cookies, no account token, no license key, no device or install ID, and nothing about your projects, sessions or settings. Like any web request, it reveals your IP address and a generic HTTP client name.
-- **When:** about 15 seconds after the app starts, then once every 24 hours, and whenever you choose **Check for updates**.
+- **When:** about 15 seconds after the app starts, then once every 24 hours.
 - **What comes back:** a small signed file naming the newest release and its notes. Nothing is downloaded or installed until you choose to.
-- **Where it goes:** a Cloudflare Worker on hobbycoders.com, which keeps no record of update checks. Cloudflare's own request logging applies. Release files are stored with GitHub and delivered through hobbycoders.com, so your worker does not contact GitHub for an update.
-- **Turning it off:** **Settings → General → Allow updates**. New images still arrive only when you change the version yourself.
+- **Where it goes:** a Cloudflare Worker on hobbycoders.com, which keeps no record of update checks. Cloudflare's own request logging applies. Release files are stored with GitHub and delivered through hobbycoders.com, so your worker does not contact GitHub for an update. Installing an update downloads the pinned Python and JavaScript packages it lists from their public registries.
+- **Turning it off:** **Settings → Account → Application updates → Allow updates**. New images still arrive only when you change the version yourself.
 
 Once licensing is live, update requests will also carry the worker's signed license lease, because updates are part of what a license pays for. The lease names your license and this install, and nothing about your work. See [License](/docs/getting-started/license) and the [privacy policy](https://hobbycoders.com/privacy#updates).
 

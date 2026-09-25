@@ -13,38 +13,26 @@ Plugins extend AI Shuffle with additional hooks, commands, agents, and prompts. 
 The plugin system allows you to:
 
 - Add new capabilities to Claude sessions through plugin-contributed hooks
-- Install file-based agents that work alongside your subagents
+- Install file-based agents that work alongside your own agents
 - Extend the system with custom commands and skills
 - Share and reuse configurations across teams via marketplace repositories
 
 Key concepts:
 
 - **Marketplace-based distribution:** Plugins live in git repositories called marketplaces
-- **User-global install path:** Installed plugins and enablement live in `~/.fluid/plugins` and `~/.fluid/settings.json`
-- **Project scopes:** LOCAL installs go to `<project>/.fluid/plugins` (enablement in `.fluid/settings.local.json`). PROJECT installs go to `<project>/plugins` (enablement in `.fluid/settings.json`)
-- **Per-profile enablement:** Plugins are enabled through the `enabled_plugins` list in profile configuration
-- **Admin-only management:** Installing, uninstalling, and enabling/disabling plugins requires admin privileges
+- **User scope:** User-scope plugins are installed for the whole worker
+- **Project scopes:** LOCAL installs stay in the project and out of git. PROJECT installs go to `<project>/plugins` and are committed
+- **Global enablement:** Enabled plugins load in every session; an agent can add more through its `enabled_plugins` list
+- **Owner-only management:** Installing, uninstalling, updating and enabling/disabling plugins requires the owner
 - **Read-only hooks:** Plugin-contributed hooks are discoverable but not editable through the hooks UI
 
 ## Official connector runtimes
 
-Official apps such as Webhook, Discord Bot and Gmail appear in the
-`shuffle-connectors` marketplace. Their source snapshots ship with AI Shuffle
-and its application updates; **no GitHub account or private-repository access
-is needed** to install them. The normal application access/licensing rules
-still apply. This does not change access to third-party git marketplaces.
+Official apps such as Webhook, Discord Bot and Gmail appear in the `shuffle-connectors` marketplace. Their source snapshots ship with AI Shuffle and its application updates; **no GitHub account or private-repository access is needed** to install them. The normal application access/licensing rules still apply. This does not change access to third-party git marketplaces.
 
-Installation checks each source against the shipped catalog's pinned SHA-256
-and a per-file size limit, then creates a separate Python environment. It needs
-access to PyPI for dependencies, even though it does not download connector
-source. These runtimes have the host's OS permissions; process isolation is
-not a security sandbox.
+Installation checks each source against the shipped catalog's pinned SHA-256 and a per-file size limit, then creates a separate Python environment. It needs access to PyPI for dependencies, even though it does not download connector source. These runtimes have the host's OS permissions; process isolation is not a security sandbox.
 
-Update AI Shuffle to receive a newer connector catalog, then update the runtime
-in Plugins. Pause dependent automations and disable connections first. Their
-IDs/settings are preserved. Missing, corrupt or oversized shipped files fail
-closed without replacing an existing runtime; repair/update AI Shuffle rather
-than signing into GitHub. A previous installed runtime can be rolled back.
+Update AI Shuffle to receive a newer connector catalog, then update the runtime in Plugins. Pause dependent automations and disable connections first. Their IDs/settings are preserved. Missing, corrupt or oversized shipped files fail closed without replacing an existing runtime; repair/update AI Shuffle rather than signing into GitHub. A previous installed runtime can be rolled back.
 
 ## Plugin Capabilities
 
@@ -56,8 +44,9 @@ A plugin can contribute any combination of:
 | **Commands** | Custom commands available to the system                   |
 | **Agents**   | File-based subagents with their own prompts and tools     |
 | **Skills**   | Specialized skills that extend Claude's abilities          |
+| **MCP servers** | Tool servers bundled with the plugin                  |
 
-Each plugin in the API response includes boolean flags indicating which capabilities it provides: `has_hooks`, `has_commands`, `has_agents`, `has_skills`.
+Each plugin in the API response includes boolean flags indicating which capabilities it provides: `has_hooks`, `has_commands`, `has_agents`, `has_skills`, `has_mcp`.
 
 ## Plugin Structure
 
@@ -67,12 +56,14 @@ A plugin is a directory containing a `.claude-plugin/plugin.json` manifest file.
 my-plugin/
 ├── .claude-plugin/
 │   └── plugin.json       # Plugin manifest
-├── hooks/                 # Hook definitions
-│   └── pre-tool-use.sh
+├── hooks/
+│   └── hooks.json         # Hook definitions
 ├── agents/                # File-based agent definitions
 │   └── reviewer.md
-├── commands/              # Custom commands
-│   └── lint.sh
+├── commands/              # Slash commands (markdown)
+│   └── lint.md
+├── skills/
+│   └── <name>/SKILL.md    # One folder per skill
 └── README.md              # Plugin documentation
 ```
 
@@ -202,37 +193,48 @@ curl http://localhost:8000/api/v1/plugins/state/enabled \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-## Per-Profile Plugin Enablement
+## Per-Agent Plugins
 
-Beyond the global enable/disable state, plugins are also controlled through profile configuration. The `enabled_plugins` field in a profile's config lists the plugin paths to load for sessions using that profile.
+Globally enabled plugins load in every session. An agent's `enabled_plugins` list (API only) can add further plugins, by `name@marketplace` or by path, for that agent's sessions.
 
 ```json
 {
   "config": {
     "enabled_plugins": [
-      "/path/to/plugin-a",
+      "plugin-a@my-marketplace",
       "/path/to/plugin-b"
     ]
   }
 }
 ```
 
-This means a plugin must be both globally enabled and listed in the profile's `enabled_plugins` to be active during a session.
-
-## Plugin Hooks
-
-Hooks contributed by plugins are read-only. They appear in the hooks UI with their source plugin identified, but cannot be edited or deleted through the hooks API. They are managed by the plugin itself.
-
-To list all plugin-contributed hooks:
+## Updating Plugins
 
 ```bash
-curl http://localhost:8000/api/v1/hooks/plugins/all \
+# Plugins with a newer version in their marketplace
+curl http://localhost:8000/api/v1/plugins/updates \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Update one plugin
+curl -X POST http://localhost:8000/api/v1/plugins/update \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"plugin_id": "my-plugin@my-marketplace"}'
+
+# Update every plugin that has an update
+curl -X POST http://localhost:8000/api/v1/plugins/update/all \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
+Automatic updates are configured with `GET` and `PUT /api/v1/plugins/auto-update/settings` (`enabled`, `interval_hours`, `auto_sync_marketplaces`, `auto_update_plugins`). `POST /api/v1/plugins/auto-update/run` runs one check now.
+
+## Plugin Hooks
+
+Hooks contributed by plugins are read-only and managed by the plugin itself. See [Plugin-Contributed Hooks](/docs/features/hooks#plugin-contributed-hooks).
+
 ## File-Based Agents
 
-Plugins can contribute file-based agents that work alongside your subagents. These agents are automatically discovered from enabled plugins.
+Plugins can contribute file-based agents that work alongside your own agents. These agents are automatically discovered from enabled plugins.
 
 ```bash
 curl http://localhost:8000/api/v1/plugins/agents/file-based \

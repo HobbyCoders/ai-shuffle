@@ -60,6 +60,9 @@ Socket Mode allows the bot to receive events over a WebSocket connection instead
    | `reactions:read` | View emoji reactions |
    | `reactions:write` | Add emoji reactions |
    | `users:read` | View basic user info |
+   | `pins:read` | List pinned messages |
+   | `pins:write` | Pin and unpin messages |
+   | `channels:manage` | Create, archive, set topics and invite to channels (optional) |
 
 3. Scroll back to the top and click **Install to Workspace**, then **Allow**.
 4. Copy the **Bot User OAuth Token** that starts with `xoxb-`. Store it securely.
@@ -82,9 +85,9 @@ Socket Mode allows the bot to receive events over a WebSocket connection instead
 
 4. Click **Save Changes**.
 
-### Step 5: Get Channel IDs (Optional)
+### Step 5: Get Channel IDs
 
-To restrict the bot to specific channels:
+The bot only responds in channels you list, so you need at least one channel ID:
 
 1. In Slack, right-click on a channel name.
 2. Select **View channel details** (or **Copy link**).
@@ -94,14 +97,16 @@ Alternatively, you can right-click a channel, select **Copy link**, and extract 
 
 ### Step 6: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and navigate to **Settings > Connectors**.
-2. Click **Add Connector** and select **Slack**.
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Slack**.
+2. Click **Install Slack** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Bot Token**: Paste the `xoxb-` token from Step 3
    - **App Token**: Paste the `xapp-` token from Step 2
-   - **Allowed Channel IDs** (optional): Channel IDs to restrict the bot to
+   - **Allowed Channel IDs**: At least one channel ID. The bot only responds in these channels.
    - **Command Prefix** (optional): If set, the bot only responds to messages that start with this prefix
-4. Click **Save** and then **Enable** the connector.
+4. Click **Create Connector**, then turn on the connection's **Activate** switch.
+
+The connection needs an API user with an agent, or every message is refused. See [Common Setup Steps](/docs/connectors#common-setup-steps).
 
 ### Step 7: Invite the Bot to Channels
 
@@ -120,7 +125,7 @@ The bot must be invited to channels before it can read or send messages there:
 |-------|------|----------|-------------|
 | `bot_token` | string | Yes | The Bot User OAuth Token (starts with `xoxb-`). Used for all Slack API calls including sending messages, reading channels, and uploading files. |
 | `app_token` | string | Yes | The App-Level Token (starts with `xapp-`). Used exclusively for establishing the Socket Mode WebSocket connection. Must have the `connections:write` scope. |
-| `allowed_channel_ids` | array of strings | No | List of Slack channel IDs the bot is allowed to respond in. If empty, the bot responds in all channels it has been invited to. Channel IDs start with `C` (public) or `G` (private). |
+| `allowed_channel_ids` | array of strings | Yes (to enable) | Slack channel IDs the bot is allowed to respond in. At least one entry is required before the connector can be enabled. Channel IDs start with `C` (public) or `G` (private). |
 | `command_prefix` | string | No | If set, only messages that start with this prefix are processed. If empty, the bot processes all messages in allowed channels. |
 | `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `messages`, `reactions`, `pins`, `channels`, `users`, `files`, `workspace`. |
 | `auto_approve_destructive` | string | No | Set to `true` to skip the in-channel Approve/Deny prompt for destructive AI actions (message deletion, channel archiving). Default: prompts are required. |
@@ -140,18 +145,15 @@ The Slack connector supports the following capabilities:
 
 **Message Length Limit:** 4,000 characters per message. Messages exceeding this limit are automatically split. Slack has a hard limit of 40,000 characters but recommends keeping messages under 4,000 for readability.
 
-## AI Actions (Action Gateway)
+## AI Actions
 
-Sessions bound to a Slack channel get two MCP tools instead of one tool per feature:
+See [How AI actions work](/docs/connectors#how-ai-actions-work).
 
-- **`slack_actions`** — discovery. Returns the action catalog (~21 actions: send/read/edit/delete/schedule messages, threads, reactions, pins, channel management, user lookup, file upload, workspace info), each with its input schema and the OAuth scope it needs. The catalog is filtered by this install's `enabled_action_categories`.
-- **`slack_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
+Your agent can use about 21 actions: send, read, edit, delete and schedule messages, threads, reactions, pins, channel management, user lookup, file upload and workspace info. Each action lists the OAuth scope it needs.
 
-Safety rails:
-
-- Message-level actions only work in the session's bound channel and the connector's `allowed_channel_ids`.
-- Actions tagged **destructive** (`delete_message`, `archive_channel`) post an in-channel Block Kit **Approve/Deny** prompt and only run after a human clicks Approve (2-minute timeout denies). Set `auto_approve_destructive: true` to skip the prompt.
-- Slack enforces OAuth scopes itself: an action whose scope is missing from the bot token fails with `missing_scope` — add the scope under **OAuth & Permissions** and reinstall the app to light it up.
+- Message actions only work in the channel the session started from and the connector's `allowed_channel_ids`.
+- Destructive actions (`delete_message`, `archive_channel`) post an **Approve/Deny** button prompt in the channel and only run after a person clicks Approve.
+- Slack enforces OAuth scopes itself: an action whose scope is missing from the bot token fails with `missing_scope`. Add the scope under **OAuth & Permissions** and reinstall the app to make it available.
 
 ## Troubleshooting
 
@@ -167,7 +169,7 @@ Safety rails:
 
 ### Bot responds to every message (too noisy)
 
-- Configure `allowed_channel_ids` to restrict the bot to specific channels.
+- Remove channels from `allowed_channel_ids`.
 - Alternatively, set a `command_prefix` so the bot only processes messages that start with that prefix.
 
 ### "invalid_auth" or "token_revoked" errors
@@ -176,7 +178,7 @@ Safety rails:
 
 ### Messages appear out of order
 
-- Slack message delivery through Socket Mode is generally ordered, but during reconnections, messages may arrive out of sequence. The connector includes message deduplication and ordering logic, but if issues persist, check the AI Shuffle logs for WebSocket reconnection events.
+- Slack message delivery through Socket Mode is generally ordered, but during reconnections, messages may arrive out of sequence. The connector processes events in the order Slack delivers them; check the AI Shuffle logs for WebSocket reconnection events.
 
 ### Bot cannot upload files
 

@@ -103,7 +103,7 @@ If the run fails, the message says what is missing; see [Troubleshooting](/docs/
 
 ## 8. Optional: account and GitHub
 
-- **HobbyCoders account:** sign in to link this worker to the Android app, to your other workers and to remote access. Local use never needs an account. To join another worker's network with an invite instead, choose **Use a worker invite instead**. You can do either later in **Settings → Devices**.
+- **HobbyCoders account:** sign in to link this worker to the Android app, to your other workers and to remote access. Local use never needs an account. To join another worker's network with an invite instead, choose **Use a worker invite instead**. You can do either later in **Settings → Providers → Devices**.
 - **GitHub:** sign in to the GitHub CLI for repository features (pull requests, issues, CI). You can do this later in Settings.
 
 Then choose **Finish**. Continue with the [Quick start](/docs/getting-started/quick-start).

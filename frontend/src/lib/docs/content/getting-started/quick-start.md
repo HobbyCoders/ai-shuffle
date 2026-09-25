@@ -10,35 +10,33 @@ This guide walks you through the essential workflows once [First run](/docs/gett
 
 ## Start a Chat
 
-1. Click **New Session** (+ button) in the sidebar
-2. Select a **Profile** (or use Default) and a **Project**
+1. Click **New session** at the top of the sidebar
+2. Pick an **agent** and a **model** in the composer
 3. Type your message and press Enter
 4. The agent responds with streaming text, and you can see tool usage in real time
 
-## Create a Profile
+## Create an Agent
 
-Profiles control how the agent behaves. To create one:
+Agents control how the AI behaves. To create one:
 
-1. Navigate to **Profiles** in the sidebar
-2. Click **Create Profile**
+1. Open **Build > Agents** in the sidebar
+2. Click **New agent**
 3. Configure:
    - **Name**: a descriptive name
-   - **System Prompt**: instructions for the agent
-   - **Model**: any model offered by the providers you set up
-   - **Allowed Tools**: which tools the agent can use
-   - **Thinking Mode**: how deeply the model reasons
-4. Save the profile
+   - **Prompt**: instructions for the agent
+   - **Tools**: which tools the agent can use
+4. Save the agent
 
-You can also use **AI Generate** to create a profile from a description.
+The model, reasoning effort and permission mode are picked per session in the composer, not stored on the agent. You can also choose **Generate** to create an agent from a description.
 
 ## Set Up a Project
 
 Projects link to directories on your system:
 
 1. Navigate to **Projects** in the sidebar
-2. Click **Create Project**
-3. Set the **path** to your code directory
-4. Configure default profile and any project-specific settings
+2. Click **New project**
+3. Set the **Path** to your code directory
+4. Use the project's tabs (MCP Servers, Agents, Hooks, Memory) for project-specific settings
 5. New sessions created with this project will have access to those files
 
 ## Connect a Platform
@@ -47,21 +45,23 @@ To receive messages from Telegram, Discord, etc.:
 
 1. Navigate to the connector's setup guide in these docs
 2. Create the bot/app on the platform
-3. Go to **Settings > Connectors** in AI Shuffle
-4. Click **Add Connector**, select the type, and enter credentials
-5. Click **Activate** to start receiving messages
+3. Open **Build > Plugins > Apps** in AI Shuffle and choose the platform
+4. Install it if asked, click **Connect account**, enter credentials and click **Create Connector**
+5. Chat connectors need at least one allowed sender. Add yours, then turn on **Activate** to start receiving messages
 
 ## Create an API Key
 
 For programmatic access:
 
-1. Go to **Settings > API Users**
-2. Click **Create API User**
-3. Set a name and optionally restrict to a project/profile
+1. Go to **Settings > API**
+2. Click **Add API User**
+3. Set a name and optionally restrict it to a project and to specific agents
 4. Copy the generated API key (shown only once)
 5. Use it in the `Authorization: Bearer aih_...` header
 
 ## Example API Call
+
+Use the id of one of your agents. API fields still say `profile`.
 
 ```bash
 # One-shot query
@@ -70,7 +70,7 @@ curl -X POST http://localhost:8000/api/v1/query \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Explain the difference between let and const in JavaScript",
-    "profile": "your-profile-id"
+    "profile": "your-agent-id"
   }'
 ```
 
@@ -81,7 +81,7 @@ curl -X POST http://localhost:8000/api/v1/conversation/start \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Help me refactor this function",
-    "profile": "your-profile-id",
+    "profile": "your-agent-id",
     "project": "your-project-id"
   }'
 ```

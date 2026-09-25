@@ -1,12 +1,12 @@
 <!--
 title: Miscellaneous
-description: Tags, search, analytics, git, GitHub, files, settings, and other endpoints
+description: Tags, analytics, git, GitHub, files, settings, and other endpoints
 order: 13
 -->
 
 # Miscellaneous API
 
-Additional API endpoints for tags, search, analytics, git operations, settings, and more.
+Additional API endpoints for tags, analytics, git operations, settings, and more.
 
 ## Tags
 
@@ -42,12 +42,10 @@ Remove a tag from a session.
 
 ## Search
 
-### GET /api/v1/search
-
-Full-text search across all sessions.
+Session search lives under Sessions: `GET /api/v1/sessions/search/query?q=...` (see [Sessions](/docs/api-reference/sessions#search-sessions)). There is no `/api/v1/search` endpoint.
 
 ```bash
-curl "http://localhost:8000/api/v1/search?q=authentication&limit=10" \
+curl "http://localhost:8000/api/v1/sessions/search/query?q=authentication&limit=10" \
   -H "Authorization: Bearer aih_your_key"
 ```
 
@@ -57,13 +55,13 @@ curl "http://localhost:8000/api/v1/search?q=authentication&limit=10" \
 
 Get a usage summary (session counts, message counts, etc.).
 
-**Auth:** Admin only
+**Auth:** Required. API users see only their own usage.
 
 ### GET /api/v1/analytics/costs
 
-Get cost breakdown by profile, project, and time period.
+Get a cost breakdown. `group_by` is `profile` (by agent, the default), `user` or `date`; `start_date` and `end_date` (`YYYY-MM-DD`) narrow the range.
 
-**Auth:** Admin only
+**Auth:** Required. API users see only their own usage.
 
 ### GET /api/v1/analytics/trends
 
@@ -89,14 +87,17 @@ curl http://localhost:8000/api/v1/projects/proj_abc123/git/status \
 {
   "is_git_repo": true,
   "current_branch": "main",
+  "is_detached": false,
   "is_clean": false,
-  "staged": [{"file": "src/app.py", "status": "modified"}],
+  "staged": [{"file": "src/app.py", "status": "M"}],
   "modified": ["README.md"],
   "untracked": ["new-file.txt"],
   "ahead": 0,
   "behind": 0
 }
 ```
+
+A staged file's `status` is the git index code: `A` (added), `M` (modified), `D` (deleted), `R` (renamed) or `C` (copied). The response also carries `head_commit`, `remote_url` and `differs_from_base`.
 
 ### POST /api/v1/projects/{project_id}/git/commit
 
@@ -154,17 +155,17 @@ List GitHub Actions workflow runs for the project's repository.
 
 Get integration settings (API key status for various services).
 
-**Auth:** Admin only
+**Auth:** Required
 
 ### POST /api/v1/settings/integrations/fal-ai
 
 Save the fal.ai API key (used for all AI media tools: image, video, 3D, TTS, STT).
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/settings/integrations/fal-ai \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"api_key": "your_fal_key"}'
 ```
@@ -173,26 +174,23 @@ curl -X POST http://localhost:8000/api/v1/settings/integrations/fal-ai \
 
 Remove the fal.ai API key.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### POST /api/v1/settings/integrations/anthropic
 
 Save the Anthropic API key used by Claude Code.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### DELETE /api/v1/settings/integrations/anthropic
 
 Remove the Anthropic API key.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### GET /api/v1/settings/text-generation
 
-The model and effort behind every internal one-shot AI call: session titles,
-commit messages, PR descriptions, branch names, and generated agents. Agents do
-not carry a model, and generation runs outside any session, so this one setting
-governs all of it.
+The model and effort behind every internal one-shot AI call: session titles, commit messages, PR descriptions, branch names, and generated agents. Agents do not carry a model, and generation runs outside any session, so this one setting governs all of it.
 
 **Response:**
 
@@ -203,28 +201,24 @@ governs all of it.
 }
 ```
 
-`text_generation_model` is the raw picker value: a bare id or alias (`sonnet`),
-or a `prov:<providerId>:<modelId>` composite for a gateway model. Empty means
-unset, which resolves to the default model at call time. `text_generation_effort`
-is `low` | `medium` | `high` | `xhigh` | `max`, or empty for the provider's own
-default.
+`text_generation_model` is the raw picker value: a bare id or alias (`sonnet`), or a `prov:<providerId>:<modelId>` composite for a gateway model. Empty means unset, which resolves to the default model at call time. `text_generation_effort` is `low` | `medium` | `high` | `xhigh` | `max`, or empty for the provider's own default.
 
 ### PUT /api/v1/settings/text-generation
 
-Partial update — only the keys present in the body are written; an empty string
-clears one back to its default. A composite model is validated against the
-provider row, so a model that provider does not serve is refused here rather
-than failing every generation afterwards.
+Partial update — only the keys present in the body are written; an empty string clears one back to its default. A composite model is validated against the provider row, so a model that provider does not serve is refused here rather than failing every generation afterwards.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
-curl -X PUT http://localhost:8000/api/v1/settings/text-generation   -H "Authorization: Bearer aih_your_key"   -H "Content-Type: application/json"   -d '{"text_generation_model": "haiku", "text_generation_effort": "low"}'
+curl -X PUT http://localhost:8000/api/v1/settings/text-generation \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"text_generation_model": "haiku", "text_generation_effort": "low"}'
 ```
 
 ## Preferences
 
-User preferences are stored and accessed per key.
+User preferences are stored and accessed per key. The owner and each API user have their own preferences.
 
 ### GET /api/v1/preferences/all
 
@@ -242,8 +236,10 @@ Set a preference value. (`POST` is also accepted, primarily for `navigator.sendB
 curl -X PUT http://localhost:8000/api/v1/preferences/theme \
   -H "Authorization: Bearer aih_your_key" \
   -H "Content-Type: application/json" \
-  -d '{"value": "dark"}'
+  -d '{"key": "theme", "value": "dark"}'
 ```
+
+The body must include `key` as well as `value`. Send `expected_version` (the `version` from a previous read) to get `409` instead of overwriting a newer value. Add `?only_if_missing=true` to write only when no value is set.
 
 ### DELETE /api/v1/preferences/{key}
 
@@ -251,9 +247,7 @@ Delete a preference.
 
 ## Generated Media
 
-The listing and by-name routes read the shared workspace and return 403 for a
-project-scoped API key. Scoped keys use the `by-path` routes with a path inside
-their own project, worktree or checkout directories.
+The listing and by-name routes read the shared workspace and return 403 for a project-scoped API key. Scoped keys use the `by-path` routes with a path inside their own project, worktree or checkout directories.
 
 ### GET /api/generated-images/
 
@@ -281,8 +275,7 @@ Retrieve a served file by name. Unscoped keys only.
 
 ### GET /api/files/by-path?path=...
 
-Retrieve a served file by absolute path. This is the route the agent's chat
-download links use, and the only file route a project-scoped key can read.
+Retrieve a served file by absolute path. This is the route the agent's chat download links use, and the only file route a project-scoped key can read.
 
 ## Templates
 
@@ -310,9 +303,7 @@ Get system usage statistics.
 
 ### GET /api/v1/tools/surface
 
-Every tool a session can be given, grouped and discovered live from the running
-registries — the harness builtins, the app's bridge servers, and each configured
-MCP server. There is no hardcoded list.
+Every tool a session can be given, grouped and discovered live from the running registries — the harness builtins, the app's bridge servers, and each configured MCP server. There is no hardcoded list.
 
 **Query Parameters:**
 
@@ -343,16 +334,9 @@ MCP server. There is no hardcoded list.
 }
 ```
 
-`kind` is one of `harness`, `app`, `ai`, `computer_use`, `browser`, `app_config`
-or `mcp`; `server` names the MCP server for `mcp` groups and is null otherwise.
-A group whose tools are unusable in this install (an AI tool with no API key,
-computer use turned off) reports `available: false`, and admin-only groups carry
-`admin_only: true` rather than being hidden. A server that fails to answer still
-appears — with an empty `tools` list plus an entry in `errors` — so a broken
-server is visible instead of silently missing.
+`kind` is one of `harness`, `app`, `ai`, `computer_use`, `browser`, `app_config` or `mcp`; `server` names the MCP server for `mcp` groups and is null otherwise. A group whose tools are unusable in this install (an AI tool with no API key, computer use turned off) reports `available: false`, and owner-only groups carry `admin_only: true` rather than being hidden. A server that fails to answer still appears — with an empty `tools` list plus an entry in `errors` — so a broken server is visible instead of silently missing.
 
-This route replaced `GET /api/v1/tools`, `/api/v1/tools/builtin` and
-`/api/v1/tools/discover`, which are gone.
+This route replaced `GET /api/v1/tools`, `/api/v1/tools/builtin` and `/api/v1/tools/discover`, which are gone.
 
 ## Documentation
 

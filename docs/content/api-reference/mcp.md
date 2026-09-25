@@ -6,7 +6,7 @@ order: 10
 
 # MCP Servers API
 
-Endpoints for managing Model Context Protocol (MCP) servers — extending Claude's capabilities with external tools.
+Endpoints for managing Model Context Protocol (MCP) servers — extending your agents with external tools.
 
 ## Global MCP Servers
 
@@ -30,8 +30,10 @@ curl http://localhost:8000/api/v1/mcp/servers \
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
     "env": {},
+    "scope": "user",
     "enabled": true,
-    "description": "File system access"
+    "description": "File system access",
+    "builtin": false
   }
 ]
 ```
@@ -40,12 +42,12 @@ curl http://localhost:8000/api/v1/mcp/servers \
 
 Add a global MCP server.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 # stdio server
 curl -X POST http://localhost:8000/api/v1/mcp/servers \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "filesystem",
@@ -53,20 +55,18 @@ curl -X POST http://localhost:8000/api/v1/mcp/servers \
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
     "env": {},
-    "enabled": true,
     "description": "File system access"
   }'
 
 # SSE server
 curl -X POST http://localhost:8000/api/v1/mcp/servers \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "my-sse-server",
     "type": "sse",
     "url": "http://localhost:3001/sse",
-    "headers": { "Authorization": "Bearer token123" },
-    "enabled": true
+    "headers": { "Authorization": "Bearer token123" }
   }'
 ```
 
@@ -78,35 +78,59 @@ curl -X POST http://localhost:8000/api/v1/mcp/servers \
 | `sse` | `url` | Server-Sent Events endpoint |
 | `http` | `url` | HTTP API endpoint |
 
+New servers start enabled. Use the toggle endpoint below to turn one off.
+
 ### PUT /api/v1/mcp/servers/{name}
 
 Update a global MCP server.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### DELETE /api/v1/mcp/servers/{name}
 
 Remove a global MCP server.
 
-**Auth:** Admin only
+**Auth:** Owner only
+
+### PATCH /api/v1/mcp/servers/{name}/toggle
+
+Enable or disable a global MCP server.
+
+**Auth:** Owner only
+
+```json
+{ "enabled": false }
+```
 
 ## Project MCP Servers
 
 ### GET /api/v1/projects/{project_id}/mcp/servers
 
-List all MCP servers available to a project (combines user, local, and project scopes).
+List all MCP servers available to a project, grouped by scope.
 
 **Auth:** Required
+
+**Response:**
+```json
+{
+  "builtin": [],
+  "user": [],
+  "installed": [],
+  "local": [],
+  "project": [],
+  "total_count": 0
+}
+```
 
 ### POST /api/v1/projects/{project_id}/mcp/servers
 
 Add a project-scoped MCP server.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/projects/proj123/mcp/servers \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "project-db",
@@ -121,33 +145,40 @@ curl -X POST http://localhost:8000/api/v1/projects/proj123/mcp/servers \
 
 | Scope | Description |
 |-------|-------------|
-| `user` | Global servers (admin-only) |
-| `local` | Project-local servers (stored in project root) |
-| `project` | Project-scoped servers (in project root) |
+| `user` | Global servers. Managed through `/api/v1/mcp/servers`, not here |
+| `local` | This project only, kept out of git (`<project>/.claude/.mcp.json`). The default |
+| `project` | Shared with the repository (`<project>/.mcp.json`) |
+| `installed` | Servers Claude Code installed for this project directory |
 
 ### PUT /api/v1/projects/{project_id}/mcp/servers/{name}
 
 Update a project MCP server.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### DELETE /api/v1/projects/{project_id}/mcp/servers/{name}
 
-Remove a project MCP server.
+Remove a project MCP server. Pass `?scope=` (`local`, `project` or `installed`; default `local`).
 
-**Auth:** Admin only
+**Auth:** Owner only
+
+### PATCH /api/v1/projects/{project_id}/mcp/servers/{name}/toggle
+
+Enable or disable a server for this project. Body: `{"enabled": true}` or `{"enabled": false}`.
+
+**Auth:** Owner only
 
 ## Tool Discovery
 
 ### GET /api/v1/mcp/tools
 
-Discover tools from all configured MCP servers.
+Discover tools from all configured MCP servers. Tools are listed live from each server and cached per server for 10 minutes.
 
 **Query Parameters:**
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `refresh` | boolean | Force refresh from Claude CLI cache |
+| `refresh` | boolean | Bypass the per-server tool-list cache (10 minutes) |
 
 ```bash
 curl "http://localhost:8000/api/v1/mcp/tools?refresh=true" \
@@ -160,8 +191,7 @@ curl "http://localhost:8000/api/v1/mcp/tools?refresh=true" \
   {
     "name": "mcp__filesystem__read_file",
     "description": "Read a file from the filesystem",
-    "server": "filesystem",
-    "input_schema": {...}
+    "server": "filesystem"
   }
 ]
 ```

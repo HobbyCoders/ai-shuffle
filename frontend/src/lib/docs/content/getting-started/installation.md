@@ -29,4 +29,4 @@ Open the address in a browser and follow [First run](/docs/getting-started/first
 
 ## More than one worker
 
-One license covers up to 3 workers on one account. Install each worker the same way, with the same pull token, then activate your license on each one and link them under **Settings → Devices**. Every worker keeps its own database; never point two workers at the same data folder.
+One license covers up to 3 workers on one account. Install each worker the same way, with the same pull token, then activate your license on each one and link them under **Settings → Providers → Devices**. Every worker keeps its own database; never point two workers at the same data folder.

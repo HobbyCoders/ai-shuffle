@@ -21,6 +21,13 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - The app shows its real version everywhere, taken from the release.
 - Third-party license notices now ship with the app.
 
+### Setup and Claude Code
+
+- A new setup wizard: welcome, owner password, license, Claude Code mode, sign-in or API key, workspace and a first agent run. See [First run](/docs/getting-started/first-run).
+- Claude Code runs in the mode you choose (Claude subscription or API key) and never switches on its own.
+- In subscription mode, a loop guard limits unattended turns and background agent run time (**Settings → Providers → Loop guard**).
+- AI Shuffle no longer runs its own Claude sign-in. After upgrading, sign out and in again with `claude auth login` (see [Updates](/docs/getting-started/updates)).
+
 ### Updates
 
 - Customer installs follow a **stable** channel: only numbered releases that passed the full container checks and a clean install are offered. Development builds are never offered.
@@ -53,7 +60,6 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - The desktop app uses your normal Claude Code login instead of a separate one.
 - It tells you on first launch that agents run as your user account.
 - Each launch uses its own token between the window and its worker.
-- macOS and Linux builds get their own update feed.
 
 ### Android app
 
@@ -63,3 +69,4 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 
 - Remote access keeps working through short outages of the connection service.
 - The connection service no longer stores synced data. Sync between your workers stays end to end encrypted.
+- Account devices that ask for owner access must be approved on each worker (**Settings → Providers → Devices**).

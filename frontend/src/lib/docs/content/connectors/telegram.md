@@ -8,9 +8,9 @@ order: 1
 
 ## Overview
 
-The Telegram connector lets you interact with your AI Shuffle agents through a Telegram bot. Users can send messages directly to the bot or add it to group chats, and the agent will respond in real time with full support for rich text formatting, file uploads, and interactive buttons.
+The Telegram connector lets you interact with your AI Shuffle agents through a Telegram bot. Users can send messages directly to the bot or add it to group chats, and the agent will respond in real time with rich text formatting and interactive buttons.
 
-Telegram bots are created through the official **@BotFather** bot on Telegram. The process takes only a few minutes and gives you a bot token that AI Shuffle uses to send and receive messages via the Telegram Bot API. The connector supports both private (one-on-one) and group conversations, with optional restrictions to limit which chats the bot responds in.
+Telegram bots are created through the official **@BotFather** bot on Telegram. The process takes only a few minutes and gives you a bot token that AI Shuffle uses to send and receive messages via the Telegram Bot API. The connector supports both private (one-on-one) and group conversations, and you list the chats the bot is allowed to respond in.
 
 ## Prerequisites
 
@@ -52,9 +52,9 @@ While still in BotFather, you can customize your bot:
 - `/setuserpic` -- Upload a profile picture for the bot
 - `/setcommands` -- Define slash commands (e.g., `/start`, `/help`)
 
-### Step 3: Get Chat IDs (Optional)
+### Step 3: Get Chat IDs
 
-If you want to restrict the bot to specific chats, you need the chat IDs. There are several ways to find them:
+The connector only responds in chats you list, so you need at least one chat ID. There are several ways to find them:
 
 **For private chats:**
 1. Send a message to your bot.
@@ -74,13 +74,14 @@ You can also temporarily set up a command handler that replies with the current 
 
 ### Step 4: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and navigate to **Settings > Connectors**.
-2. Click **Add Connector** and select **Telegram**.
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Telegram**.
+2. Click **Install Telegram** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Bot Token**: Paste the token from BotFather
-   - **Allowed Chat IDs** (optional): Enter specific chat IDs to restrict where the bot responds
-   - **Welcome Message** (optional): A message to greet users
-4. Click **Save** and then **Enable** the connector.
+   - **Allowed Chat IDs**: Enter at least one chat ID. The bot only responds in these chats.
+4. Click **Create Connector**, then turn on the connection's **Activate** switch.
+
+The connection needs an API user with an agent, or every message is refused. See [Common Setup Steps](/docs/connectors#common-setup-steps).
 
 ### Step 5: Configure Group Chat Privacy (If Using Groups)
 
@@ -100,8 +101,7 @@ With privacy mode disabled, the bot receives all messages in group chats. If you
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `bot_token` | string | Yes | The bot token obtained from @BotFather. Format: `<numeric_id>:<alphanumeric_string>`. |
-| `allowed_chat_ids` | array of integers | No | List of Telegram chat IDs the bot is allowed to respond in. If empty or omitted, the bot responds in all chats. Private chats have positive IDs; groups have negative IDs. |
-| `welcome_message` | string | No | Optional message to greet users. |
+| `allowed_chat_ids` | array of strings | Yes (to enable) | Telegram chat IDs the bot is allowed to respond in. At least one entry is required before the connector can be enabled. Private chats have positive IDs; groups have negative IDs. |
 | `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `messages`, `reactions`, `pins`, `polls`, `media`, `chat`, `moderation`. |
 | `auto_approve_destructive` | string | No | Set to `true` to skip the in-channel Approve/Deny prompt for destructive AI actions (message deletion, bans, unpinning, leaving a chat). Default: prompts are required. |
 
@@ -113,24 +113,21 @@ The Telegram connector supports the following capabilities:
 |------------|-----------|-------|
 | Typing indicator | Yes | Shows "typing..." status in the chat while the agent is processing |
 | Reactions | Yes | Can react to messages with emoji |
-| Rich text | Yes | Supports Telegram's MarkdownV2 and HTML formatting |
-| File upload | Yes | Send images, documents, audio, and video up to Telegram's size limits (50 MB for most files, 20 MB for photos) |
-| Buttons | Yes | Supports inline keyboard buttons and reply keyboard markup |
+| Rich text | Yes | Telegram MarkdownV2 formatting |
+| File upload | Yes | Your agent can send photos and documents through actions |
+| Buttons | Yes | Inline keyboard buttons |
 | Threads | No | Telegram does not have a native thread model (topic groups are handled as separate chats) |
 
 **Message Length Limit:** 4,096 characters per message. Messages exceeding this limit are automatically split into multiple messages.
 
-## AI Actions (Action Gateway)
+## AI Actions
 
-Sessions bound to a Telegram chat get two MCP tools instead of one tool per feature:
+See [How AI actions work](/docs/connectors#how-ai-actions-work).
 
-- **`telegram_actions`** — discovery. Returns the action catalog (19 actions: send/edit/delete/forward messages, reactions, pin/unpin, polls, photos/documents, chat info, chat title/description, member bans), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
-- **`telegram_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
+Your agent can use 19 actions: send, edit, delete and forward messages, reactions, pin/unpin, polls, photos and documents, chat info, chat title and description, and member bans.
 
-Safety rails:
-
-- Message-level actions only work in the session's bound chat and the connector's `allowed_chat_ids`.
-- Actions tagged **destructive** (`delete_message`, `unpin_all_messages`, `ban_chat_member`, `leave_chat`) post an in-channel **Approve/Deny** inline-keyboard prompt and only run after a human taps Approve (2-minute timeout denies). Set `auto_approve_destructive: true` to skip the prompt.
+- Message actions only work in the chat the session started from and in the connector's `allowed_chat_ids`.
+- Destructive actions (`delete_message`, `unpin_all_messages`, `ban_chat_member`, `leave_chat`) post an **Approve/Deny** button prompt in the chat and only run after a person taps Approve.
 - Group-admin actions (chat title/description, bans, leaving) require the bot to actually be an admin in that chat; Telegram's Bot API rejects the call otherwise and the error is surfaced verbatim.
 
 ## Troubleshooting
@@ -138,8 +135,8 @@ Safety rails:
 ### Bot is not responding to messages
 
 - **Check the bot token.** Verify that the token in AI Shuffle matches the one from BotFather exactly. Regenerate the token with `/token` in BotFather if needed.
-- **Check connector status.** In the AI Shuffle UI, verify the Telegram connector shows as "Connected" on the Connectors page.
-- **Check allowed chat IDs.** If you configured `allowed_chat_ids`, make sure the chat you are messaging from is in the list. Use the `getUpdates` method to confirm the correct chat ID.
+- **Check connector status.** In the AI Shuffle UI, verify the Telegram connection shows as "Connected" under **Build > Plugins > Telegram**.
+- **Check allowed chat IDs.** Make sure the chat you are messaging from is in the list. Use the `getUpdates` method to confirm the correct chat ID.
 - **Check the backend logs.** The connector uses Telegram long-polling, so the backend must be running and able to reach `api.telegram.org`. Look for polling errors in the logs and confirm the connector shows as "Connected".
 
 ### Bot does not see messages in group chats
@@ -157,4 +154,4 @@ Safety rails:
 
 ### Rate limiting (429 errors)
 
-- Telegram rate-limits bots to approximately 30 messages per second globally and 1 message per second per chat. If your bot sends messages too quickly, the connector will automatically retry with backoff. For high-traffic bots, consider spacing out responses or using the `allowed_chat_ids` restriction to limit scope.
+- Telegram rate-limits bots to approximately 30 messages per second globally and 1 message per second per chat. The connector does not retry: a rate-limited message fails and the error is logged. Reduce message volume, or limit the bot to fewer chats with `allowed_chat_ids`.

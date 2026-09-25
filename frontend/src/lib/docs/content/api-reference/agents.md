@@ -6,9 +6,9 @@ order: 5
 
 # Agents API
 
-> **Renamed from `/profiles`.** As of schema v71 ("agents unification"), this router moved from `/api/v1/profiles` to `/api/v1/agents`. Handlers and response shapes are unchanged — only the mount path moved. There is no alias or redirect: `/api/v1/profiles` paths return `404` as of this release. The standalone `/api/v1/subagents` router was removed in the same release; see [Former `/subagents` API](#former-subagents-api) below.
+> **Renamed from `/profiles`.** Agent endpoints live at `/api/v1/agents`. Response shapes did not change. The old `/api/v1/profiles` and `/api/v1/subagents` paths return `404`; see [Former `/subagents` API](#former-subagents-api) below.
 
-Endpoints for managing agents — configuration containers that control Claude's behavior, prompt, and tool access. Every session runs under an agent.
+Endpoints for managing agents — configurations that control an agent's behavior, prompt, and tool access. Every session runs under an agent. Paths and fields that say `profile` hold an agent id.
 
 An agent does not pin a model: the model, reasoning effort, and permission mode are chosen when a session is created and stored on the session, not on the agent.
 
@@ -29,19 +29,17 @@ curl http://localhost:8000/api/v1/agents \
 ```json
 [
   {
-    "id": "default",
-    "name": "Default",
-    "description": "Default agent",
-    "is_builtin": true,
+    "id": "assistant",
+    "name": "Assistant",
+    "description": "General-purpose agent",
+    "is_builtin": false,
     "is_modified": false,
     "session_count": 3,
     "config": {
-      "model": "sonnet",
       "system_prompt": {
-        "type": "preset",
-        "preset": "claude_code"
+        "type": "custom",
+        "content": "You are a helpful assistant."
       },
-      "permission_mode": "default",
       "thinking_mode": "default",
       "allowed_tools": [],
       "enabled_plugins": [],
@@ -62,62 +60,58 @@ Get a specific agent.
 
 Create a new agent.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/agents \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Code Reviewer",
     "description": "Reviews code for quality and bugs",
     "config": {
-      "model": "opus",
       "system_prompt": {
         "type": "custom",
         "content": "You are an expert code reviewer. Focus on bugs, security issues, and code quality."
       },
-      "permission_mode": "plan",
       "thinking_mode": "think_harder",
+      "tool_selection_mode": "allow",
       "allowed_tools": ["Read", "Grep", "Glob"]
     }
   }'
 ```
 
-If `id` is omitted, it is derived from the name.
+If `id` is omitted, it is derived from the name (lowercase letters, digits and hyphens).
 
 ### PUT /api/v1/agents/{agent_id}
 
 Update an existing agent. All agents (including built-ins) are editable.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl -X PUT http://localhost:8000/api/v1/agents/agent_abc123 \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Updated Name",
-    "config": {
-      "system_prompt": {
-        "type": "custom",
-        "content": "Updated instructions..."
-      }
-    }
+    "description": "Updated description"
   }'
 ```
+
+`config` replaces the whole stored config. It is not merged: any field you leave out is removed. To change one setting, read the agent with `GET /api/v1/agents/{agent_id}`, change that field, and send the complete `config` object back. `name` and `description` can be sent on their own.
 
 ### DELETE /api/v1/agents/{agent_id}
 
 Delete an agent. Built-in agents cannot be deleted.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### POST /api/v1/agents/{agent_id}/restore
 
 Restore a built-in agent to its original seed defaults (name, description, and config). Only works for built-in agents with known defaults; custom agents have no defaults to restore to. No agent ships as built-in today, so this currently applies to nothing.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ## Agent Config Fields
 
@@ -126,8 +120,8 @@ The top-level object has `id`, `name`, `description`, `is_builtin`, `is_modified
 | Field | Type | Description |
 |-------|------|-------------|
 | `system_prompt` | object | `{type: "preset"\|"custom", preset, content, append, inject_env_details}` |
-| `thinking_mode` | string | `default`, `think`, `think_harder`, `ultra_think` |
-| `provider_models` | object | Model to run this agent on when another agent dispatches it as a subagent, keyed by the **caller's** provider (`__native__` for Claude). Values are a Claude alias or a `prov:<providerId>:<modelId>` composite and may name any leg. Missing key = unavailable to callers on that provider. The one model binding an agent still owns |
+| `thinking_mode` | string | `default`, `disabled`, `adaptive`, `think`, `think_harder`, `ultra_think` |
+| `provider_models` | object | Model to run this agent on when another agent dispatches it as a subagent, keyed by the **caller's** provider (`__native__` for Claude). Values are a Claude alias or a `prov:<providerId>:<modelId>` composite and may name any configured provider. Missing key = unavailable to callers on that provider. The one model binding an agent still owns |
 | `tool_selection_mode` | string | `all`, `none`, `allow`, or `disallow` — decides what the two lists below mean. `all` and `none` carry no list |
 | `allowed_tools` | string[] | The tool surface in `allow` mode. Exact names or `fnmatch` patterns (a whole MCP server saves as `mcp__<server>__*`) |
 | `disallowed_tools` | string[] | The block list in `disallow` mode. Same entry shapes |
@@ -139,24 +133,11 @@ The top-level object has `id`, `name`, `description`, `is_builtin`, `is_modified
 | `cwd` | string | Override working directory |
 | `add_dirs` | string[] | Additional accessible directories |
 
-`model`, `permission_mode` and `effort` are no longer agent fields. They are
-accepted on write and returned on read for backward compatibility, and an agent
-that still carries them uses them only as a fallback for sessions created before
-those settings moved onto the session row (a top-level `model` also still seeds
-the agent's native subagent binding). The model behind internal one-shot
-generation is a separate setting — see `GET/PUT /api/v1/settings/text-generation`.
+`model`, `permission_mode` and `effort` are no longer agent fields. They are accepted on write and returned on read for backward compatibility, and an agent that still carries them uses them only as a fallback for sessions created before those settings moved onto the session row (a top-level `model` also still seeds the agent's native subagent binding). The model behind internal one-shot generation is a separate setting — see `GET/PUT /api/v1/settings/text-generation`.
 
-The tool names that may appear in `allowed_tools` / `disallowed_tools` are not a
-fixed set. `GET /api/v1/tools/surface` discovers them live from the running
-registries — harness builtins, the app's bridged servers, AI tools, browser,
-computer use, app configuration, and every configured MCP server — grouped, with
-a `discovered_at` stamp and an `errors` entry for any server that failed to
-answer. Add `?refresh=true` to bust the per-server enumeration cache. The agent
-editor's Tools tab is exactly that response; nothing anywhere hardcodes a list.
+The tool names that may appear in `allowed_tools` / `disallowed_tools` are not a fixed set. `GET /api/v1/tools/surface` discovers them live from the running registries — harness builtins, the app's bridged servers, AI tools, browser, computer use, app configuration, and every configured MCP server — grouped, with a `discovered_at` stamp and an `errors` entry for any server that failed to answer. Add `?refresh=true` to bust the per-server enumeration cache. The agent editor's Tools tab is exactly that response; nothing anywhere hardcodes a list.
 
-`ai_tools` and `app_config_tools` are legacy: those tools are now granted through
-the same list as everything else. Both fields are still accepted so older exports
-import cleanly.
+`ai_tools` and `app_config_tools` are legacy: those tools are now granted through the same list as everything else. Both fields are still accepted so older exports import cleanly.
 
 
 ## Nested Agents (formerly "subagents")
@@ -206,21 +187,21 @@ Each result includes `source` (`profile`, `project`, `user`, or `plugin` — the
 
 Create a new nested agent and enable it for this agent.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 **Request Body:**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | Yes | Nested agent display name (also used to derive its id) |
-| `description` | string | Yes | When to use this nested agent (shown to Claude) |
+| `description` | string | Yes | When to use this nested agent (shown to the parent agent) |
 | `prompt` | string | Yes | System prompt for the nested agent |
 | `tools` | string[] | No | Allowed tools (null = inherit all from parent). Names come from `GET /api/v1/tools/surface` |
 | `model` | string | No | Model override, or null to inherit |
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/agents/agent_abc123/agents \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Test Writer",
@@ -235,13 +216,13 @@ curl -X POST http://localhost:8000/api/v1/agents/agent_abc123/agents \
 
 Update a nested agent. `agent_name` may be the nested agent's id or name.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### DELETE /api/v1/agents/{agent_id}/agents/{agent_name}
 
 Delete a nested agent and remove it from the owning agent's enabled list.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ## Enabled Agents Management
 
@@ -253,11 +234,11 @@ Get the list of enabled nested-agent IDs.
 
 Replace the entire enabled agents list.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
-curl -X PUT http://localhost:8000/api/v1/agents/default/enabled-agents \
-  -H "Authorization: Bearer aih_your_key" \
+curl -X PUT http://localhost:8000/api/v1/agents/agent_abc123/enabled-agents \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"enabled_agents": ["Explore", "my-custom-agent"]}'
 ```
@@ -266,13 +247,13 @@ curl -X PUT http://localhost:8000/api/v1/agents/default/enabled-agents \
 
 Enable a single nested agent.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### DELETE /api/v1/agents/{agent_id}/enabled-agents/{subagent_id}
 
 Disable a single nested agent.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ## Export & Import
 
@@ -290,18 +271,18 @@ curl http://localhost:8000/api/v1/agents/agent_abc123/export \
 
 Import an agent from JSON. Creates a new agent; a unique id is generated if `new_id` is omitted or conflicts.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/agents/import \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d @agent.json
 ```
 
 ## Former `/subagents` API
 
-Before v71, global subagents also had their own standalone router: `GET/POST /api/v1/subagents`, `GET/PUT/DELETE /api/v1/subagents/{subagent_id}`, and `POST /api/v1/subagents/{subagent_id}/revert`. That router was deleted with no alias — all of those paths now return `404`.
+Previously, global subagents also had their own standalone router: `GET/POST /api/v1/subagents`, `GET/PUT/DELETE /api/v1/subagents/{subagent_id}`, and `POST /api/v1/subagents/{subagent_id}/revert`. That router was deleted with no alias — all of those paths now return `404`.
 
 What replaced it:
 

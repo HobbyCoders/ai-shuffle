@@ -17,11 +17,11 @@ database's credential key. Remote account sign-in does not unlock encryption.
    or run `python -m scripts.credential_keys adopt` while the app is stopped and
    enter the original password at its private terminal prompt.
 3. Verify `python -m scripts.credential_keys status` reports `ready: true`.
-   The migration checks every encrypted value in settings, both automation
-   columns, connectors, API-user credentials, provider tokens,
-   and provider OAuth access/refresh tokens, including inactive/orphaned rows.
-   New pending browser sign-in requests also participate in verification.
-   No credential, login hash, provider metadata or ciphertext is rewritten.
+   The migration checks the encrypted values in settings, both automation
+   columns, connectors, API-user credentials, provider gateway tokens, Codex
+   OAuth access/refresh tokens and the OpenAI Admin key, including
+   inactive/orphaned rows. Encrypted mobile key-renewal receipts are not
+   checked. No credential, login hash, provider metadata or ciphertext is rewritten.
 4. Make a new complete backup and encrypted portable export. Remove the legacy
    ADMIN_PASSWORD from the container configuration and verify restart. Keep the
    old password privately only while retaining older, unadopted backups.

@@ -8,17 +8,19 @@ order: 7
 
 Endpoints for managing platform connectors — creating, configuring, testing, and controlling connections to external messaging platforms and services.
 
+Every endpoint on this page except the inbound webhooks needs owner access. API-user keys (`aih_...`) get `403`. The examples send an owner token from `POST /api/v1/owner/login` (see [Owner password](/docs/api-reference/authentication#owner-password)).
+
 ## Discovery
 
 ### GET /api/v1/connectors/types
 
-List all available connector types with their configuration schemas.
+List all available connector types with their configuration fields.
 
-**Auth:** Required
+**Auth:** Owner only
 
 ```bash
 curl http://localhost:8000/api/v1/connectors/types \
-  -H "Authorization: Bearer aih_your_key"
+  -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
 **Response:**
@@ -27,47 +29,42 @@ curl http://localhost:8000/api/v1/connectors/types \
   {
     "type": "telegram",
     "name": "Telegram",
-    "description": "Telegram Bot connector",
-    "config_schema": {
-      "bot_token": { "type": "string", "required": true, "description": "Bot token from @BotFather" },
-      "allowed_chat_ids": { "type": "array", "required": false, "description": "Restrict to specific chat IDs" }
-    },
-    "capabilities": ["typing_indicator", "reactions", "rich_text", "file_upload", "buttons"]
+    "description": "Telegram bot via Bot API",
+    "config_fields": [
+      { "key": "bot_token", "label": "Bot Token", "type": "password", "required": true },
+      { "key": "allowed_chat_ids", "label": "Allowed Chat IDs", "type": "list", "required": false }
+    ]
   }
 ]
 ```
 
 ### GET /api/v1/connectors/events
 
-List valid connector event types.
+List valid connector event types (for a connector's `events`).
+
+**Auth:** Owner only
 
 ```bash
 curl http://localhost:8000/api/v1/connectors/events \
-  -H "Authorization: Bearer aih_your_key"
+  -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
 ## Discord Guided Setup
 
 ### POST /api/v1/connectors/discord/discover
 
-Log into Discord with a bot token and return the bot's identity plus the guilds
-(servers) and text channels it can see. Powers the guided Discord setup UI so
-admins can pick guilds/channels from a list instead of copying IDs. This performs
-an HTTP-only login (no Gateway connection) and does not modify anything.
+Log into Discord with a bot token and return the bot's identity plus the guilds (servers) and text channels it can see. Powers the guided Discord setup UI so the owner can pick guilds/channels from a list instead of copying IDs. This performs an HTTP-only login (no Gateway connection) and does not modify anything.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 Provide **exactly one** of the following in the request body:
 
-- `bot_token` -- a plaintext bot token to validate. A masked value (starting with
-  `****`) is rejected.
-- `connector_id` -- the ID of an existing Discord connector; its stored token is
-  decrypted server-side and used. Useful when editing (the token stays masked in
-  the UI).
+- `bot_token` -- a plaintext bot token to validate. A masked value (starting with `****`) is rejected.
+- `connector_id` -- the ID of an existing Discord connector; its stored token is decrypted server-side and used. Useful when editing (the token stays masked in the UI).
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/connectors/discord/discover \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"bot_token": "YOUR_BOT_TOKEN"}'
 ```
@@ -90,10 +87,7 @@ curl -X POST http://localhost:8000/api/v1/connectors/discord/discover \
 }
 ```
 
-All IDs are returned as strings (Discord snowflakes exceed JavaScript's safe
-integer range). Only text channels are listed. If the bot cannot read a guild's
-channels, that guild's `error` field describes the problem and its `channels`
-array is empty; the guild is still returned so it can be selected.
+All IDs are returned as strings (Discord snowflakes exceed JavaScript's safe integer range). Only text channels are listed. If the bot cannot read a guild's channels, that guild's `error` field describes the problem and its `channels` array is empty; the guild is still returned so it can be selected.
 
 **Errors:**
 
@@ -112,11 +106,11 @@ The token is never logged or echoed in the response.
 
 List all connectors.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer aih_your_key"
+  -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
 **Response:**
@@ -125,14 +119,20 @@ curl http://localhost:8000/api/v1/connectors \
   {
     "id": "conn_abc123",
     "name": "My Telegram Bot",
-    "connector_type": "telegram",
-    "enabled": true,
+    "type": "telegram",
+    "is_active": true,
     "status": "connected",
+    "status_message": null,
     "config": {
       "bot_token": "****MASKED",
-      "allowed_chat_ids": []
+      "allowed_chat_ids": ["12345678"]
     },
-    "created_at": "2025-01-15T10:00:00Z"
+    "events": [],
+    "api_user_id": "a1b2c3d4",
+    "plugin_id": "telegram@shuffle-connectors",
+    "failure_count": 0,
+    "created_at": "2025-01-15T10:00:00Z",
+    "updated_at": "2025-01-15T10:00:00Z"
   }
 ]
 ```
@@ -141,52 +141,67 @@ Note: Sensitive config fields are masked in responses (showing only last 4 chara
 
 ### POST /api/v1/connectors
 
-Create a new connector. Automatically creates an associated API user.
+Create a new connector. The app's runtime must be installed and enabled first (**Build → Plugins → Apps**). Unless you pass `api_user_id`, an API user is created for the connector; `profile_ids` sets which agents it may run. Incoming messages are refused while that API user has no agent.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "My Telegram Bot",
-    "connector_type": "telegram",
+    "type": "telegram",
     "config": {
-      "bot_token": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+      "bot_token": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+      "allowed_chat_ids": ["12345678"]
     },
-    "profile_id": "default",
+    "profile_ids": ["your-agent-id"],
     "project_id": "my-project"
   }'
 ```
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Display name |
+| `type` | string | Yes | Connector type from `GET /api/v1/connectors/types` |
+| `config` | object | No | Values for the type's `config_fields` |
+| `events` | string[] | No | Event types to deliver (from `GET /api/v1/connectors/events`) |
+| `profile_ids` | string[] | No | Agents the auto-created API user may run |
+| `project_id` | string | No | Project for the auto-created API user |
+| `api_user_id` | string | No | Link an existing API user instead of creating one |
 
 ### GET /api/v1/connectors/{connector_id}
 
 Get connector details.
 
+**Auth:** Owner only
+
 ### PATCH /api/v1/connectors/{connector_id}
 
-Update connector configuration.
+Update a connector. Every field is optional: `name`, `config`, `events`, `is_active`.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/connectors/conn_abc123 \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Renamed Bot",
     "config": {
-      "allowed_chat_ids": [12345678]
+      "allowed_chat_ids": ["12345678"]
     }
   }'
 ```
 
 ### DELETE /api/v1/connectors/{connector_id}
 
-Delete a connector and its associated API user.
+Delete a connector. An API user that was created for it is deleted too.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ## Lifecycle Management
 
@@ -194,9 +209,11 @@ Delete a connector and its associated API user.
 
 Test the connector's connection without activating it.
 
+**Auth:** Owner only
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/test \
-  -H "Authorization: Bearer aih_your_key"
+  -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
 **Response:**
@@ -209,20 +226,26 @@ curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/test \
 
 ### POST /api/v1/connectors/{connector_id}/activate
 
-Enable and start the connector. Begins receiving messages.
+Enable and start the connector. Chat connectors need at least one allowed sender first; otherwise this returns `400` "Add at least one allowed sender before enabling this connector".
+
+**Auth:** Owner only
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/activate \
-  -H "Authorization: Bearer aih_your_key"
+  -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
 ### POST /api/v1/connectors/{connector_id}/deactivate
 
 Stop and disable the connector.
 
+**Auth:** Owner only
+
 ### POST /api/v1/connectors/{connector_id}/restart
 
 Restart the connector (deactivate then activate).
+
+**Auth:** Owner only
 
 ## Status & Inspection
 
@@ -230,11 +253,11 @@ Restart the connector (deactivate then activate).
 
 Get the runtime status of a connector, including whether its instance is currently running.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl http://localhost:8000/api/v1/connectors/conn_abc123/status \
-  -H "Authorization: Bearer aih_your_key"
+  -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
 **Response:**
@@ -254,11 +277,11 @@ curl http://localhost:8000/api/v1/connectors/conn_abc123/status \
 
 Get the recent event logs for a connector.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl http://localhost:8000/api/v1/connectors/conn_abc123/logs \
-  -H "Authorization: Bearer aih_your_key"
+  -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
 **Response:**
@@ -281,29 +304,29 @@ curl http://localhost:8000/api/v1/connectors/conn_abc123/logs \
 
 List the triggers exposed by the connector's type.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### GET /api/v1/connectors/{connector_id}/actions
 
 List the actions exposed by the connector's type.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### GET /api/v1/connectors/{connector_id}/tools
 
 List the tools exposed by the connector's type.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ### POST /api/v1/connectors/{connector_id}/actions/{action_id}/execute
 
 Execute a connector action directly against a running connector instance. The JSON request body is passed through as the action parameters. Returns `409` if the connector is not running and `400` for an unknown action.
 
-**Auth:** Admin only
+**Auth:** Owner only
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/actions/send_message/execute \
-  -H "Authorization: Bearer aih_your_key" \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "chat_id": 12345678, "text": "Hello" }'
 ```
@@ -321,27 +344,19 @@ curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/actions/send_me
 
 ### GET /api/v1/connectors/whatsapp/webhook
 
-WhatsApp (Meta) webhook verification endpoint. Meta calls this with the
-`hub.mode`, `hub.verify_token`, and `hub.challenge` query parameters; the
-challenge is echoed back when the verify token matches a configured WhatsApp
-connector.
+WhatsApp (Meta) webhook verification endpoint. Meta calls this with the `hub.mode`, `hub.verify_token`, and `hub.challenge` query parameters; the challenge is echoed back when the verify token matches a configured WhatsApp connector.
 
 **Auth:** None (public — verified via the connector's verify token)
 
 ### POST /api/v1/connectors/whatsapp/webhook
 
-Receive incoming WhatsApp messages. Requests are matched to a running WhatsApp
-connector by `phone_number_id` and verified via the Meta `X-Hub-Signature-256`
-header when an app secret is configured.
+Receive incoming WhatsApp messages. Requests are matched to a running WhatsApp connector by `phone_number_id`. Every request must carry a valid Meta `X-Hub-Signature-256` header made with the connector's app secret; a connector without an app secret accepts nothing.
 
 **Auth:** None (public — verified via Meta signature)
 
 ### POST /api/v1/connectors/hooks/{webhook_slug}
 
-Generic inbound webhook endpoint. External services POST JSON here to trigger AI
-processing; the `webhook_slug` must match a webhook connector's configured
-`inbound_path`. Authenticated via a Bearer token (`Authorization` header or
-`X-Webhook-Token`) or an HMAC signature (`X-Webhook-Signature` header).
+Generic inbound webhook endpoint. External services POST JSON here to trigger AI processing; the `webhook_slug` must match a webhook connector's configured `inbound_path`. Authenticated via a Bearer token (`Authorization` header or `X-Webhook-Token`) or an HMAC signature (`X-Webhook-Signature` header).
 
 **Auth:** None (public — verified via the connector's token or HMAC signature)
 

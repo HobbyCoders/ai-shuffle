@@ -6,7 +6,7 @@ order: 3
 
 # Query & Execution API
 
-Endpoints for sending prompts to Claude and receiving responses. Supports one-shot queries, stateful conversations, streaming, and background execution.
+Endpoints for sending prompts to an agent and receiving responses. Supports one-shot queries, stateful conversations, streaming, and background execution.
 
 ## One-Shot Query
 
@@ -22,7 +22,7 @@ curl -X POST http://localhost:8000/api/v1/query \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Explain async/await in Python",
-    "profile": "claude-code",
+    "profile": "your-agent-id",
     "project": "my-project"
   }'
 ```
@@ -31,9 +31,9 @@ curl -X POST http://localhost:8000/api/v1/query \
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `prompt` | string | Yes | The message to send to Claude |
-| `profile` | string | No | Profile to use. Optional — uses the API user's configured profile when omitted; rejected with 400 if neither supplies one |
-| `project` | string | No | Project context |
+| `prompt` | string | Yes | The message to send to the agent |
+| `profile` | string | No | Agent id to run (from `GET /api/v1/agents`). If the API user has a configured agent, that agent is always used and this field is ignored. Otherwise it is required (400 if missing). |
+| `project` | string | No | Project context. If the API user has a configured project, that project is always used. |
 | `overrides` | object | No | Optional per-query overrides (see below) |
 
 **Overrides object:**
@@ -41,8 +41,8 @@ curl -X POST http://localhost:8000/api/v1/query \
 | Field | Type | Description |
 |-------|------|-------------|
 | `model` | string | Model override (e.g. `sonnet`, or a custom model id) |
-| `permission_mode` | string | `default`, `auto`, `acceptEdits`, `plan`, `bypassPermissions` |
-| `system_prompt_append` | string | Text appended to the profile's system prompt |
+| `permission_mode` | string | `default`, `auto`, `acceptEdits`, `bypassPermissions` |
+| `system_prompt_append` | string | Text appended to the agent's system prompt |
 | `max_turns` | integer | Maximum conversation turns |
 | `thinking_mode` | string | `default`, `disabled`, `adaptive`, `think`, `think_harder`, `ultra_think` |
 | `effort` | string | `low`, `medium`, `high`, `max`, `xhigh` |
@@ -73,18 +73,31 @@ curl -X POST http://localhost:8000/api/v1/query/stream \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Write a Python function to sort a list",
-    "profile": "claude-code"
+    "profile": "your-agent-id"
   }'
 ```
 
 **SSE Event Format:**
+
+Each frame names its type on an `event:` line and carries the JSON on a `data:` line. The stream starts with `init` and ends with `done`, `interrupted` or `error`.
 ```
+event: init
+data: {"type": "init", "session_id": "sess_abc123"}
+
+event: text
 data: {"type": "text", "content": "Here's a "}
-data: {"type": "text", "content": "sorting function..."}
+
+event: tool_use
 data: {"type": "tool_use", "name": "Write", "input": {...}}
-data: {"type": "tool_result", "output": "File created"}
-data: {"type": "done", "session_id": "sess_abc123"}
+
+event: tool_result
+data: {"type": "tool_result", "name": "Write", "output": "File created"}
+
+event: done
+data: {"type": "done", "session_id": "sess_abc123", "metadata": {...}}
 ```
+
+On failure the stream sends `event: error` with `{"type": "error", "message": "..."}`.
 
 ## Conversation Mode
 
@@ -92,9 +105,7 @@ Stateful conversations that maintain context across multiple exchanges.
 
 ### POST /api/v1/conversation
 
-Send a conversation turn. If `session_id` is provided in the body, the existing
-session is continued; otherwise a new session is created. Profile and project are
-only used when creating a new session.
+Send a conversation turn. If `session_id` is provided in the body, the existing session is continued; otherwise a new session is created. Agent and project are only used when creating a new session.
 
 **Auth:** API key required
 
@@ -105,7 +116,7 @@ curl -X POST http://localhost:8000/api/v1/conversation \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Help me build a REST API with FastAPI",
-    "profile": "claude-code",
+    "profile": "your-agent-id",
     "project": "my-project"
   }'
 
@@ -123,9 +134,9 @@ curl -X POST http://localhost:8000/api/v1/conversation \
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `prompt` | string | Yes | The message to send to Claude |
+| `prompt` | string | Yes | The message to send to the agent |
 | `session_id` | string | No | If provided, continues that session |
-| `profile` | string | No | Profile for a new session. Optional — uses the API user's configured profile when omitted; rejected with 400 if neither supplies one |
+| `profile` | string | No | Agent id for a new session. If the API user has a configured agent, that agent is always used and this field is ignored. Otherwise it is required (400 if missing). |
 | `project` | string | No | Project context for a new session |
 | `overrides` | object | No | Optional per-query overrides (see One-Shot Query) |
 
@@ -133,8 +144,7 @@ curl -X POST http://localhost:8000/api/v1/conversation \
 
 ### POST /api/v1/conversation/stream
 
-Same as `POST /api/v1/conversation`, but streams the response via Server-Sent
-Events. Pass `session_id` in the body to continue an existing conversation.
+Same as `POST /api/v1/conversation`, but streams the response via Server-Sent Events. Pass `session_id` in the body to continue an existing conversation.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/conversation/stream \
@@ -148,11 +158,7 @@ curl -X POST http://localhost:8000/api/v1/conversation/stream \
 
 ### POST /api/v1/conversation/start
 
-Start a conversation that runs in the background. Returns immediately after
-launching the query; the actual response is streamed over the session WebSocket
-(`/ws/sessions/{session_id}`). Work continues even if the HTTP connection drops,
-the phone is locked, or the browser tab is backgrounded. Use the interrupt
-endpoint below to stop it.
+Start a conversation that runs in the background. Returns immediately after launching the query; follow the response on the session's event stream (`GET /api/v1/sessions/{session_id}/events`, see [Sessions](/docs/api-reference/sessions)). Work continues even if the HTTP connection drops, the phone is locked, or the browser tab is backgrounded. Use the interrupt endpoint below to stop it.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/conversation/start \
@@ -160,7 +166,7 @@ curl -X POST http://localhost:8000/api/v1/conversation/start \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Refactor the entire auth module",
-    "profile": "claude-code",
+    "profile": "your-agent-id",
     "project": "my-project"
   }'
 ```
@@ -209,12 +215,13 @@ curl http://localhost:8000/api/v1/streaming/active \
 
 ## Usage Notes
 
-### Profile Selection
-- If `profile` is not specified, the API user's configured profile is used; if neither the request nor the API user supplies one, the request is rejected with a 400
-- API users may be restricted to specific profiles
+### Agent Selection
+- If the API user has a configured agent, it is always used and `profile` is ignored
+- Otherwise `profile` is required; a request without one is rejected with a 400
+- API users may be restricted to specific agents
 
 ### Project Context
-- If `project` is specified, Claude has access to that project's files
+- If `project` is specified, the agent has access to that project's files
 - API users may be restricted to a specific project
 
 ### Cost Tracking

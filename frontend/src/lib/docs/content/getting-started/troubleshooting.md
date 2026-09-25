@@ -19,7 +19,9 @@ In the commands below, the container is called `ai-shuffle` with Docker Compose 
 
 **`denied: This pull token is not valid`**: the token is mistyped, was replaced by a newer one, or its license was revoked. Copy it again from your license email or your account page on hobbycoders.com. A token you rotated stops working within a minute.
 
-**`manifest unknown` for a version that exists**: after a license ends, the pull token still downloads exact versions (`0.9.1`), but not `latest` or short versions (`0.9`). Use an exact version. Development tags are never available.
+**`denied: Your AI Shuffle license has ended`**: after a license ends, the pull token still downloads exact versions (`0.9.1`), but not `latest` or short versions (`0.9`). Use an exact version, or renew.
+
+**`manifest unknown`**: only release versions are published; check the version number. Development tags are never available.
 
 **A temporary error or `503` from `registry.hobbycoders.com`**: the license service could not be reached. Try again in a few minutes. Containers already running are not affected.
 
@@ -58,7 +60,7 @@ Changing **Owner password** in the Unraid template (or `OWNER_PASSWORD` in `.env
 
 - **A browser keeps asking for the password:** its sign-in expired (after 30 days) or the password was changed, which signs every browser out. Sign in again.
 - **"Too many wrong passwords":** after five wrong passwords from one device, sign-in pauses for up to 15 minutes. Wait, then try again.
-- **A phone or linked device stopped working:** it does not use the owner password; check **Settings → Devices** for the device.
+- **A phone or linked device stopped working:** it does not use the owner password; check **Settings → Providers → Devices** for the device.
 - **Desktop app:** the desktop app never asks for a password. If a browser you opened some other way shows "Desktop listener token required", use **Open in Browser** from the app's menu instead.
 
 ## Agents do not start
@@ -99,7 +101,7 @@ Pages crash or the browser closes when the container has too little shared memor
 
 **`This source update needs a newer container release`**: this release changes the container itself. Change the version in `.env` (Compose) or **Repository** (Unraid) and recreate the container. See [Updates](/docs/getting-started/updates).
 
-**No update is offered:** check **Settings → General → Allow updates**, and choose **Check for updates**. Unraid's "update ready" notice only covers the tag you already run; a new release always means changing the version.
+**No update is offered:** check **Settings → Account → Application updates → Allow updates**. The worker checks about 15 seconds after it starts and once a day, so restarting the container runs a check. Unraid's "update ready" notice only covers the tag you already run; a new release always means changing the version.
 
 ## Stopping and the database
 

@@ -41,7 +41,7 @@ AI Shuffle is an independent product. Anthropic makes Claude Code, but it does n
 ## Everything else
 
 - [Overview](/docs/getting-started/overview): what AI Shuffle can do.
-- [Features](/docs/features/profiles): profiles, projects, automations, hooks, MCP servers, plugins, voice and the worker network.
+- [Features](/docs/features/profiles): agents, projects, automations, hooks, MCP servers, plugins, voice and the worker network.
 - [Connectors](/docs/connectors): Telegram, Discord, Slack, WhatsApp, Home Assistant and more.
 - [API reference](/docs/api-reference): the REST and WebSocket API for your own integrations.
 

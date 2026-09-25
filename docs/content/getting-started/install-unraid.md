@@ -6,7 +6,7 @@ order: 4
 
 # Install on Unraid
 
-You need an Unraid server with a 64-bit Intel or AMD processor and 8 GB of memory or more, and your **pull token** from your license email. See [Requirements](/docs/getting-started/requirements).
+You need an Unraid server with a 64-bit Intel or AMD processor and at least 4 GB of free memory (8 GB or more recommended), and your **pull token** from your license email. See [Requirements](/docs/getting-started/requirements).
 
 ## 1. Add the template
 

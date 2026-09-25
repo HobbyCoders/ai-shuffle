@@ -13,17 +13,18 @@ AI Shuffle is a self-hosted workspace for AI agents, made by HobbyCoders. It run
 ### Chat Interface
 A real-time chat workspace for the model and provider you choose. Features include:
 - Streaming responses with tool use visualization
-- Session management with search, tags, and an Active group: sessions you're working in stay in Active until you mark them Complete, which moves them to Recent
+- Session management with search, tags, and an Active group: sessions you're working in stay in Active until you settle them, which moves them to Settled
 - Session forking to branch conversations
 - Git worktree integration for isolated development
 - File sharing and media generation
-- Thinking mode control (default, think, think harder, ultra think)
+- Model and reasoning effort chosen per session
+- Permission modes per session (Ask, Accept Edits, Bypass, and Auto where available)
 
 ### Connectors
 Connect AI Shuffle to external platforms so an agent can respond to messages from:
 - **Messaging:** Telegram, Discord, WhatsApp, Slack, Line, Signal, MS Teams, iMessage, BlueBubbles
 - **Smart Home:** Home Assistant, Philips Hue
-- **Other:** Spotify, Gmail, Webhooks
+- **Other:** Spotify, Gmail, Plaid (read-only bank data), Webhooks
 
 Each connector creates a bridge: messages from the platform flow to the agent, and responses flow back.
 
@@ -36,11 +37,10 @@ Schedule and trigger AI workflows:
 - Budget controls, approval gates, and output routing
 
 ### Hooks
-Execute custom bash scripts or webhook calls at key points in the AI workflow:
-- Before/after tool use
-- Session start/end
-- On user prompt submission
-- On notifications
+Run custom bash scripts or webhook calls at key points in the AI workflow:
+- Before a tool runs, with the option to block it
+- When the agent finishes its turn
+- After a tool runs, when a prompt is sent, when a session starts or ends, and at other points, in the background
 
 ### MCP Servers
 Extend what agents can do by connecting Model Context Protocol (MCP) servers:
@@ -49,25 +49,18 @@ Extend what agents can do by connecting Model Context Protocol (MCP) servers:
 - **HTTP** servers
 - Global and project-scoped configurations
 
-### Subagents
-Define specialized AI agents for specific tasks:
-- Custom system prompts and tool restrictions
-- Model selection from the providers you set up
-- Per-profile agent enablement
-
-### Profiles
-Configuration containers that control an agent's behavior:
+### Agents
+Configurations that control how an agent behaves, under **Build → Agents**:
 - System prompt and tool permissions
-- Model selection and thinking mode
-- MCP servers, plugins, and subagents
-- Execution mode (default, accept edits, plan, bypass)
+- Durable memory the agent keeps across sessions
+- Agents can call other agents (the **Agents** tab's roster), each on the model you pick for it
 
 ### Projects
 Organize work into project directories:
 - File browsing and uploads
 - Git integration with branch management
 - Worktree support for parallel development
-- Per-project MCP and plugin configuration
+- Per-project MCP servers, agents, hooks and memory
 
 ### API
 Full REST API for external integrations:
@@ -88,11 +81,11 @@ Full REST API for external integrations:
                     ▼         ▼         ▼
               ┌──────────┐ ┌──────────┐ ┌──────────┐
               │Connectors│ │PostgreSQL│ │MCP Servers│
-              │(14 types)│ │    DB    │ │(stdio/sse)│
+              │(15 types)│ │    DB    │ │(stdio/sse)│
               └──────────┘ └──────────┘ └──────────┘
 ```
 
 - **Frontend:** SvelteKit with Svelte 5, Tailwind CSS, TipTap editor
 - **Backend:** FastAPI with WebSocket support, PostgreSQL database
 - **Agents:** the Fluid harness runs sessions, streaming and tool execution against the configured provider; Claude Code sessions run the standard Claude Code CLI with your own sign-in or API key
-- **Storage:** PostgreSQL for metadata, JSONL files for message history
+- **Storage:** PostgreSQL for sessions, message history and settings; your projects stay as ordinary files in the workspace

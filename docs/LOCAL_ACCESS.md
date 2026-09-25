@@ -61,18 +61,14 @@ login: the local owner boundary above is unchanged.
 
 ## Upgrading an existing installation
 
-1. Validate a matching database, configuration and durable-key backup. Stop old
-   application writers sharing the database before the first key adoption.
-2. Start the new build with `SHUFFLE_LOCAL_ACCESS=false`. Keep the legacy
-   encryption password only for the first successful key adoption.
-3. The connector verifies that its protected local listener is live, requests
+1. Adopt the credential key first; see
+   [credential key recovery](credential-key-recovery.md#upgrade-an-existing-installation).
+   Run that first start with `SHUFFLE_LOCAL_ACCESS=false`.
+2. The connector verifies that its protected local listener is live, requests
    the hub's monotonic upgrade to that origin, and verifies the public route
    reaches the same worker through protected ingress. Existing tunnel identity
    and device authorization are retained.
-4. Verify existing phone access. Enable local access, remove
-   the legacy password from deployment configuration, and verify a fresh-process
-   restart reads the stored credentials through its persistent key.
-5. Retain a matched recovery set. See [restore and key recovery](RESTORE.md).
+3. Verify existing phone access, then enable local access.
 
 Keep the old backup/configuration matched to its old data generation. Do not
 launch an old application image against the migrated live database to test

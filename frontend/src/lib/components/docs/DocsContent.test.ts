@@ -34,3 +34,44 @@ describe('DocsContent code copy', () => {
 		expect(button.textContent).toBe('Copied!');
 	});
 });
+
+describe('DocsContent in-app links', () => {
+	it('opens a /docs/<category>/<slug> link inside the Docs panel instead of leaving the app', async () => {
+		const { layout } = await import('$lib/stores/layout.svelte');
+		const open = vi.spyOn(layout, 'openFeaturePage').mockImplementation(() => {});
+		const { container } = render(DocsContent, { content: 'See [the guide](/docs/features/x).' });
+		const link = container.querySelector('a') as HTMLAnchorElement;
+		expect(link.getAttribute('href')).toBe('/docs/features/x');
+		const event = new MouseEvent('click', { bubbles: true, cancelable: true });
+		link.dispatchEvent(event);
+		expect(event.defaultPrevented).toBe(true);
+		expect(open).toHaveBeenCalledExactlyOnceWith('docs', 'features/x');
+		open.mockRestore();
+	});
+
+	it('maps a bare /docs/<category> link to that category index', async () => {
+		const { layout } = await import('$lib/stores/layout.svelte');
+		const open = vi.spyOn(layout, 'openFeaturePage').mockImplementation(() => {});
+		const { container } = render(DocsContent, { content: '[Connectors](/docs/connectors#setup)' });
+		const event = new MouseEvent('click', { bubbles: true, cancelable: true });
+		container.querySelector('a')!.dispatchEvent(event);
+		expect(event.defaultPrevented).toBe(true);
+		expect(open).toHaveBeenCalledExactlyOnceWith('docs', 'connectors/_index');
+		open.mockRestore();
+	});
+
+	it('leaves external links alone', async () => {
+		const { layout } = await import('$lib/stores/layout.svelte');
+		const open = vi.spyOn(layout, 'openFeaturePage').mockImplementation(() => {});
+		const { container } = render(DocsContent, { content: '[Site](https://example.com/docs/features/x)' });
+		let preventedByDocs: boolean | null = null;
+		// Record what the docs panel did, then stop jsdom from attempting the navigation.
+		const spy = (e: Event) => { preventedByDocs = e.defaultPrevented; e.preventDefault(); };
+		document.addEventListener('click', spy);
+		container.querySelector('a')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+		document.removeEventListener('click', spy);
+		expect(preventedByDocs).toBe(false);
+		expect(open).not.toHaveBeenCalled();
+		open.mockRestore();
+	});
+});

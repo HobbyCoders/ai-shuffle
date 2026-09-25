@@ -15,7 +15,7 @@ network of one: a device identity is created under `.credential-keys`, the
 `network_state` row is written, every session, automation, connector and
 artifact this install ran is stamped with its device id, and the local
 attachment bytes get their content hashes. Settings > Devices shows the new
-device with its fingerprint and offers to create a recovery key.
+device.
 
 Each browser imports nothing: UI state already lived in `user_preferences`
 and keeps its keys.
