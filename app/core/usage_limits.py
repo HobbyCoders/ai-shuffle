@@ -26,13 +26,6 @@ from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
-# How long a cached snapshot is considered fresh for on-demand REST reads.
-_SNAPSHOT_TTL_SECONDS = 300
-
-# Minimum spacing between background refreshes (a persist and a broadcast of
-# the in-memory windows) started by ordinary reads.
-_ATTEMPT_SPACING_SECONDS = 60
-
 # Short TTL for the assembled cluster view (peer snapshot rows + installs map).
 # Hot GETs/broadcasts within this window reuse the cached DB reads; the cache is
 # invalidated whenever THIS process persists its own row so a local change
@@ -45,8 +38,11 @@ class UsageLimitsMonitor:
 
     def __init__(self) -> None:
         self._windows: List[Dict[str, Any]] = []
+        # Time of the last CLI observation (changed or not), epoch seconds.
         self._fetched_at: float = 0.0
         self._available: bool = False
+        # Whether this install's persisted row has been adopted after startup.
+        self._seeded: bool = False
         # Monotonic tag on every snapshot so clients can drop out-of-order
         # snapshots.
         #
@@ -59,8 +55,6 @@ class UsageLimitsMonitor:
         # Short-TTL cache of the assembled cluster view: (expires_at, snapshots).
         # Invalidated on our own persist so local changes are never masked.
         self._cluster_cache: Optional[tuple[float, List[Dict[str, Any]]]] = None
-        # Last background refresh; spaces the refreshes ordinary reads start.
-        self._attempted_at: float = 0.0
         self._refresh_task: asyncio.Task | None = None
 
     def current_generation(self) -> int:
@@ -123,36 +117,51 @@ class UsageLimitsMonitor:
         except Exception as e:  # noqa: BLE001 — persistence must never break the poll
             logger.debug("Usage-snapshot persist skipped: %s", e)
 
+    def _seed(self, rows: List[Dict[str, Any]], self_id: str) -> None:
+        """Adopt this install's persisted reading once after startup.
+
+        Without this a restarted process would serve, and persist, an empty
+        snapshot over the last windows the CLI reported.
+        """
+        if self._seeded:
+            return
+        self._seeded = True
+        row = next((r for r in rows if r.get("instance_id") == self_id), None)
+        if row and row.get("windows") and not self._windows:
+            self._windows = list(row["windows"])
+            self._available = bool(row.get("available"))
+            self._fetched_at = (row.get("fetched_at") or 0) / 1000
+
+    def _seed_from_db(self) -> None:
+        if self._seeded:
+            return
+        try:
+            from app.core.config import settings
+            from app.db import database as db
+            self._seed(db.get_all_usage_snapshots(), settings.effective_instance_id)
+        except Exception as e:  # noqa: BLE001 — seeding is best-effort
+            logger.debug("Usage-snapshot seed skipped: %s", e)
+
     async def fetch(self) -> Dict[str, Any]:
         """Persist the current windows and return the snapshot. Never raises.
 
         Makes no request: the Claude windows come only from the rate-limit
         events the CLI reports in its own stream (``apply_live_event``).
         """
-        self._attempted_at = time.time()
+        await run_sync(self._seed_from_db)
         if not self._windows:
             self._available = False
         await run_sync(self._persist_snapshot)
         return self._snapshot()
 
-    async def get_snapshot(self, max_age: float = _SNAPSHOT_TTL_SECONDS) -> Dict[str, Any]:
-        """Return the cached snapshot; start a background refresh when stale.
-
-        Concurrent stale reads share one refresh task, and attempts are spaced by ``_ATTEMPT_SPACING_SECONDS``.
-        """
-        now = time.time()
-        stale = not self._fetched_at or (now - self._fetched_at) > max_age
-        if stale and now - self._attempted_at >= _ATTEMPT_SPACING_SECONDS:
-            self.request_refresh()
+    async def get_snapshot(self) -> Dict[str, Any]:
+        """Return the in-memory snapshot; Claude usage is passive, so reads never refresh."""
         return self._snapshot()
 
-    async def get_cluster_snapshot(
-        self, max_age: float = _SNAPSHOT_TTL_SECONDS
-    ) -> Dict[str, Any]:
+    async def get_cluster_snapshot(self) -> Dict[str, Any]:
         """Return the LOCAL snapshot plus every install's persisted snapshot.
 
-        Starts a background refresh of this install's own reading when stale
-        (see :meth:`get_snapshot`), then reads all persisted snapshots and joins the installs registry for
+        Reads all persisted snapshots and joins the installs registry for
         ``device_name``/``online``. Keeps the legacy top-level fields
         (``windows``/``fetched_at``/``available``/``generation``) intact for old
         clients, and adds:
@@ -166,8 +175,6 @@ class UsageLimitsMonitor:
         UNLESS the row is self (so a brand-new install with no registry row yet
         still reports its own numbers).
         """
-        # Schedule (never await) a refresh of our own reading when stale.
-        await self.get_snapshot(max_age)
         # Assembly reads the DB — offload it so it never blocks the event loop.
         return await run_sync(self._cluster_snapshot)
 
@@ -232,17 +239,30 @@ class UsageLimitsMonitor:
         legacy single-install fold instead of wiping its buckets on an empty
         list. Synchronous — call via ``run_sync`` from async paths.
         """
-        base = self._snapshot()
-
         from app.core.config import settings
         self_id = settings.effective_instance_id
 
         snapshots = self._read_cluster_rows(self_id)
+        if snapshots is not None:
+            self._seed(snapshots, self_id)
+        base = self._snapshot()
         if snapshots is None:
             # DB read failed — return the plain legacy snapshot only.
             return base
 
-        base["snapshots"] = snapshots
+        # Memory is authoritative for our own entry: the (cached) DB row can
+        # lag a just-applied live event.
+        own = next((s for s in snapshots if s["instance_id"] == self_id), None)
+        own = {
+            "instance_id": self_id,
+            "device_name": own["device_name"] if own else None,
+            "online": own["online"] if own else False,
+            "windows": base["windows"],
+            "fetched_at": int(self._fetched_at * 1000) if self._fetched_at else None,
+            "available": self._available,
+            "generation": self._generation,
+        }
+        base["snapshots"] = [s for s in snapshots if s["instance_id"] != self_id] + [own]
         base["self_instance_id"] = self_id
         return base
 
@@ -269,12 +289,9 @@ class UsageLimitsMonitor:
             return None
         if not math.isfinite(util):
             return None
-        # CLI rate_limit events report utilization as a 0.0-1.0 fraction; the
-        # snapshot uses 0-100 percent.
-        if util <= 1:
-            util *= 100
-        # Events carry quota USED; the snapshot carries quota REMAINING.
-        util = 100.0 - util
+        # CLI rate_limit events report utilization as a 0.0-1.0 USED fraction
+        # (above 1 when over the limit); the snapshot carries 0-100 REMAINING.
+        util = 100.0 - min(100.0, max(0.0, util * 100))
 
         updated = {"type": rate_limit_type, "utilization": util, "resets_at": resets_at}
         replaced = False
@@ -290,9 +307,10 @@ class UsageLimitsMonitor:
         if not replaced:
             self._windows.append(updated)
         self._available = True
+        self._fetched_at = time.time()
         if not changed:
             return None
-        self._fetched_at = time.time()
+        self._generation = max(self._generation + 1, int(time.time()))
         return self._snapshot()
 
     async def _broadcast(self, snapshot: Dict[str, Any]) -> None:

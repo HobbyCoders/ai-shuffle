@@ -918,6 +918,21 @@ describe('ContextUsageBar — plan usage limits', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('100% left');
+		expect(container.textContent).not.toContain('resets in now');
+		expect(container.querySelector('.popover-row .row-reset-inline')?.textContent?.trim()).toBe(
+			'reset · awaiting next report'
+		);
+	});
+
+	it('says when a stale Claude reading was last updated', async () => {
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [{ instance_id: 'self', available: true, fetched_at: Date.now() - 2 * 86_400_000,
+				windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }] }],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Updated 2d ago');
 	});
 
 	it('lists all windows with humanised labels on open', async () => {

@@ -167,6 +167,22 @@ describe('rateLimit.applySnapshot — modern (per-install snapshots)', () => {
 		expect(resolveBucket(rateLimit.current, 'primary')!.windows.five_hour.utilization).toBe(25);
 		expect(resolveBucket(rateLimit.current, 'worker')!.windows.five_hour.utilization).toBe(40);
 	});
+
+	it('keeps a newer live reading when a same-generation snapshot arrives', () => {
+		const snapshot = {
+			available: true, windows: [], generation: 100, self_instance_id: 'self',
+			snapshots: [{ instance_id: 'self', available: true, generation: 100, fetched_at: Date.now() - 60_000,
+				windows: [{ type: 'five_hour', utilization: 50, resets_at: future() }] }],
+		};
+		rateLimit.applySnapshot(snapshot);
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.9, resets_at: future(), instance_id: 'self' });
+		// An in-flight GET assembled before the event persisted (same generation).
+		rateLimit.applySnapshot(snapshot);
+		expect(Math.round(rateLimit.current.buckets.self.windows.five_hour.utilization)).toBe(10);
+		// A newer generation is authoritative again.
+		rateLimit.applySnapshot({ ...snapshot, snapshots: [{ ...snapshot.snapshots[0], generation: 101 }] });
+		expect(rateLimit.current.buckets.self.windows.five_hour.utilization).toBe(50);
+	});
 });
 
 describe('rateLimit.applySnapshot — snapshot robustness', () => {
@@ -424,9 +440,9 @@ describe('rateLimit.applyLiveEvent — routing by instance_id', () => {
 		// 0.25 used → 75 left, matching the polled Claude feed's convention.
 		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.25, resets_at: future() });
 		expect(selfBucket()!.windows.five_hour.utilization).toBe(75);
-		// A value already in percent (>1) skips the fraction scaling but still flips.
-		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 40, resets_at: future() });
-		expect(selfBucket()!.windows.five_hour.utilization).toBe(60);
+		// Over the limit (1.05 used) leaves nothing, not ~99% (it is not a percent).
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 1.05, resets_at: future() });
+		expect(selfBucket()!.windows.five_hour.utilization).toBe(0);
 	});
 });
 

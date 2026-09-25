@@ -86,7 +86,7 @@ class TestGetDefaultDateRange:
         start_date, end_date = get_default_date_range()
 
         assert end_date == "2024-02-15"
-        assert start_date == "2024-01-16"
+        assert start_date == "2024-01-17"
 
     @freeze_time("2024-01-15")
     def test_get_default_date_range_crosses_year(self):
@@ -96,7 +96,7 @@ class TestGetDefaultDateRange:
         start_date, end_date = get_default_date_range()
 
         assert end_date == "2024-01-15"
-        assert start_date == "2023-12-16"
+        assert start_date == "2023-12-17"
 
 
 # =============================================================================
@@ -180,6 +180,9 @@ class TestAnalyticsSummaryEndpoint:
 
             # Verify database was called with correct dates
             mock_db.get_analytics_usage_stats.assert_called_with("2024-01-01", "2024-01-31", api_user_id=None)
+            # "Last 7 days" with inclusive bounds is Jan 25..31.
+            mock_db.get_analytics_usage_trends.assert_called_with(
+                "2024-01-25", "2024-01-31", interval="day", api_user_id=None)
 
     def test_get_summary_with_only_start_date(self, authenticated_client):
         """Should use default end date when only start date provided."""
@@ -227,8 +230,8 @@ class TestAnalyticsSummaryEndpoint:
 
             assert response.status_code == 200
             data = response.json()
-            # Start date should be 30 days before current date when not provided
-            assert data["start_date"] == "2024-01-16"
+            # Start date defaults to the first day of the 30-day window ending today
+            assert data["start_date"] == "2024-01-17"
             assert data["end_date"] == "2024-02-10"
 
     def test_get_summary_invalid_date_format(self, authenticated_client):

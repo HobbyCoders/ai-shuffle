@@ -72,6 +72,9 @@
 		reportedRemainingPct,
 		remainingFromUsedPct,
 		formatCountdown,
+		formatAsOf,
+		isBucketStale,
+		parseResetMs,
 		resolveBucket,
 		resolveBucketKey,
 		selfBucketKey,
@@ -342,6 +345,7 @@
 		label: string;
 		countdown: string;
 		hasReset: boolean;
+		rolledOver: boolean;
 	}
 
 	/** Mirror the used-quota thresholds against a remaining-quota value. */
@@ -363,6 +367,11 @@
 		};
 	}
 
+	function isRolledOver(usageWindow: UsageWindow, nowMs: number): boolean {
+		const resetMs = parseResetMs(usageWindow.resets_at);
+		return resetMs != null && resetMs <= nowMs;
+	}
+
 	function itemsFor(bucket: UsageBucket): WindowItem[] {
 		return displayWindows(bucket.windows).map((usageWindow) => {
 			const pct = reportedRemainingPct(usageWindow, now);
@@ -373,6 +382,7 @@
 				label: windowLabel(usageWindow.type),
 				countdown: formatCountdown(usageWindow.resets_at, now),
 				hasReset: usageWindow.resets_at != null,
+				rolledOver: isRolledOver(usageWindow, now),
 			};
 		});
 	}
@@ -811,6 +821,8 @@
 										<span class="row-reset-inline">
 											{#if item.countdown}
 												resets in {item.countdown}
+											{:else if item.rolledOver}
+												reset · awaiting next report
 											{:else if item.hasReset}
 												resets soon
 											{:else}
@@ -825,6 +837,9 @@
 								</div>
 							</div>
 						{/each}
+						{#if resolvedBucket && isBucketStale(resolvedBucket, now)}
+							<div class="row-reset usage-as-of">Updated {formatAsOf(resolvedBucket.fetchedAt, now)}</div>
+						{/if}
 					{:else}
 						<div class="row-reset no-data">No usage data yet. Claude Code reports it while an agent runs.</div>
 					{/if}
@@ -917,6 +932,8 @@
 									<span class="row-reset-inline">
 										{#if countdown}
 											resets in {countdown}
+										{:else if isRolledOver(w, now)}
+											reset · awaiting next report
 										{:else if w.resets_at != null}
 											resets soon
 										{:else}
@@ -936,6 +953,9 @@
 					{@const credits = creditsSummary(pb.credits, pb.providerType)}
 					{#if credits}
 						<div class="row-reset usage-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits`, text: credits }}></div>
+					{/if}
+					{#if pb.status === 'stale' && pb.fetchedAt != null}
+						<div class="row-reset usage-as-of">Updated {formatAsOf(pb.fetchedAt, now)}</div>
 					{/if}
 				{/if}
 			{/each}

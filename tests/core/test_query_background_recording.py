@@ -22,6 +22,8 @@ import pytest
 
 from app.core.provider.events import (
     AssistantMessage,
+    RateLimitEvent,
+    RateLimitInfo,
     ResultMessage,
     SystemMessage,
     TextBlock,
@@ -169,6 +171,20 @@ async def test_background_options_change_preserves_session_ownership(mock_db):
         with pytest.raises(RuntimeError, match="fixture connection boundary"):
             await _run("bg-replace")
     pool.remove.assert_awaited_once_with("bg-replace", preserve_session=True)
+
+
+async def test_background_rate_limit_event_updates_usage_snapshot(mock_db):
+    sid = "bg-rate-limit"
+    sessions_db.create_session(sid, "default")
+    info = RateLimitInfo(status="allowed", rate_limit_type="five_hour", utilization=0.4)
+    pool = _StubPool(_fake_state(messages=[RateLimitEvent(rate_limit_info=info), _result_message()]))
+    with ExitStack() as stack:
+        _bg_patches(stack, pool)
+        apply = stack.enter_context(patch(
+            "app.core.query_engine._apply_rate_limit_live_event", new=AsyncMock()
+        ))
+        await _run(sid)
+    apply.assert_awaited_once_with(info)
 
 
 async def test_background_turn_records_full_event_sequence(mock_db):

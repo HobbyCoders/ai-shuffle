@@ -59,9 +59,9 @@ def validate_date_format(date_str: Optional[str], param_name: str) -> Optional[s
 
 
 def get_default_date_range() -> tuple[str, str]:
-    """Get default date range (last 30 days)"""
+    """Get default date range (last 30 days, both ends inclusive)"""
     end_date = datetime.now(timezone.utc).date()
-    start_date = end_date - timedelta(days=30)
+    start_date = end_date - timedelta(days=29)
     return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
 
@@ -93,9 +93,9 @@ async def get_analytics_summary(
     # Get user filter (None for admin, user_id for API users)
     api_user_id = get_user_filter(request)
 
-    # Get recent trend window (last 7 days of the range) up front so the three
-    # aggregations can share ONE thread hop.
-    trend_start = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+    # Get recent trend window (last 7 days of the range, both ends inclusive)
+    # up front so the three aggregations can share ONE thread hop.
+    trend_start = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=6)).strftime("%Y-%m-%d")
 
     def _load_summary():
         """All three `usage_log` aggregations in ONE off-loop hop.

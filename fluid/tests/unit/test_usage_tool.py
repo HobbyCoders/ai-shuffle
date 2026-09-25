@@ -1,9 +1,11 @@
 import json
+import time
+from datetime import datetime, timezone
 
 import pytest
 
 from fluid.tools.builtins import register_builtins
-from fluid.tools.builtins.usage import handler
+from fluid.tools.builtins.usage import _payload, handler
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
 
@@ -61,3 +63,22 @@ async def test_provider_snapshot_can_be_available_when_claude_is_unavailable() -
     assert payload["available"] is True
     assert payload["claude_available"] is False
     assert payload["freshness"] == "stale"
+
+
+@pytest.mark.parametrize("resets_at", [
+    lambda now: str(int(now) - 60),
+    lambda now: int(now * 1000) - 60_000,
+    lambda now: datetime.fromtimestamp(now - 60, timezone.utc).isoformat(),
+])
+def test_rolled_over_window_reports_fresh_quota(resets_at) -> None:
+    out = _payload({
+        "available": True,
+        "fetched_at": time.time() - 3600,
+        "windows": [{"type": "five_hour", "utilization": 3.0, "resets_at": resets_at(time.time())},
+                    {"type": "seven_day", "utilization": 3.0, "resets_at": str(int(time.time()) + 600)}],
+    })
+    # The UI shows 100% left once resets_at passes; the tool must agree.
+    rolled, live = out["windows"]
+    assert rolled["remaining_percent"] == 100.0 and rolled["used_percent"] == 0.0
+    assert rolled["rolled_over"] is True
+    assert live["remaining_percent"] == 3.0 and "rolled_over" not in live

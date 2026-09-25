@@ -18,9 +18,8 @@ the dashboard link.
 The usage API (`GET /api/v1/usage/limits`) returns the registry entry with each
 provider row (`source_info`) and with the local Claude reading
 (`claude_source`). Rows also carry `last_success_at` and `last_attempt_at`; a
-failed attempt moves only the second. The usage popover shows the source, the
-support label, the scope, what the figure measures, both timestamps and the
-dashboard link.
+failed attempt moves only the second. The usage popover shows the dashboard
+link and, once a reading is stale, when it was last updated.
 
 ### Matrix
 

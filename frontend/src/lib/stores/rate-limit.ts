@@ -297,9 +297,9 @@ function _clampPct(u: number): number {
 	return Math.min(100, Math.max(0, u));
 }
 
-/** Normalise an SDK fraction (0–1, defensively 0–100) to a 0–100 percent. */
+/** Normalise an SDK used fraction (0–1, above 1 when over the limit) to a 0–100 percent. */
 function _fractionToPct(u: number): number {
-	return _clampPct(u <= 1 ? u * 100 : u);
+	return _clampPct(u * 100);
 }
 
 /** Parse `resets_at` (ISO string, epoch seconds, or epoch ms) into epoch ms. */
@@ -339,12 +339,12 @@ export function remainingFromUsedPct(w: UsageWindow, nowMs: number): number {
 	return Math.round(100 - w.utilization);
 }
 
-/** Format a countdown like "3h 12m" / "12m 4s" / "now". */
+/** Format a countdown like "3h 12m" / "12m 4s"; '' once the reset has passed. */
 export function formatCountdown(resetsAt: string | null | undefined, nowMs: number): string {
 	const target = parseResetMs(resetsAt);
 	if (target == null) return '';
 	const diffMs = target - nowMs;
-	if (diffMs <= 0) return 'now';
+	if (diffMs <= 0) return '';
 	const totalSec = Math.ceil(diffMs / 1000);
 	const d = Math.floor(totalSec / 86400);
 	const h = Math.floor((totalSec % 86400) / 3600);
@@ -672,11 +672,13 @@ export const rateLimit = {
 					// null generation is accepted but must NOT lower the high-water
 					// mark (that would re-admit older out-of-order snapshots).
 					const gen = entry.generation;
+					let sameGeneration = false;
 					if (gen != null) {
 						if (gen < (_lastGenByInstance[key] ?? -1)) {
 							if (prev) buckets[key] = prev;
 							continue;
 						}
+						sameGeneration = gen === _lastGenByInstance[key];
 						_lastGenByInstance[key] = gen;
 					}
 
@@ -699,11 +701,15 @@ export const rateLimit = {
 							available: false,
 						};
 					} else {
-						buckets[key] = {
-							...meta,
-							windows: _windowsFromSnapshot(entry.windows, now),
-							available: true,
-						};
+						const windows = _windowsFromSnapshot(entry.windows, now);
+						// An unchanged generation means nothing changed server-side since
+						// the last snapshot, so a live window received since is newer.
+						if (sameGeneration) {
+							for (const w of Object.values(prev?.windows ?? {})) {
+								if (w.source === 'live') windows[w.type] = w;
+							}
+						}
+						buckets[key] = { ...meta, windows, available: true };
 					}
 				}
 

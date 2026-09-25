@@ -1266,9 +1266,22 @@ class ProviderUsageMonitor:
             failures = [r for r in results if isinstance(r, BaseException) and not isinstance(r, UsageDeferred)]
             if failures:
                 raise failures[0]
-            if any(isinstance(r, UsageDeferred) for r in results):
+            fetched = [r for r in results if isinstance(r, dict)]
+            if not fetched:
                 return False
-            credits = {**results[0], **results[1]}
+            credits = {**fetched[0], **fetched[-1]}
+            if len(fetched) == 1:
+                # The two endpoints' budgets drift out of phase; merge the half
+                # that was fetched into the stored reading instead of discarding it.
+                stored = next((r for r in await run_sync(db.get_all_provider_usage_snapshots)
+                               if r.get("provider_id") == provider_id), None) or {}
+                previous = stored.get("credits") or {}
+                if ((stored.get("raw") or {}).get("organization_id") != org
+                        or previous.get("period_start") != credits.get("period_start")):
+                    previous = {}
+                credits = {**previous, **credits}
+                if "spend_month" not in credits:
+                    return False
             return await run_sync(
                 db.upsert_provider_usage_snapshot, provider_id, "openai", None, [], credits,
                 {"source": "openai_admin", "organization_id": org}, int(time.time() * 1000),

@@ -677,9 +677,12 @@ class StreamJsonMapper:
 
     def _on_rate_limit(self, frame: dict[str, Any]) -> Mapped:
         info = frame.get("rate_limit_info", {}) or {}
+        # Without a window type there is nothing to key the reading on.
+        if not info.get("rateLimitType"):
+            return Mapped()
         return Mapped(events=[RateLimit(
             session_id=self.session_id, turn_id=self.turn_id,
-            kind=info.get("rateLimitType") or info.get("status") or "unknown",
+            kind=info["rateLimitType"],
             resets_at=info.get("resetsAt"),
             utilization=info.get("utilization"),
         )])

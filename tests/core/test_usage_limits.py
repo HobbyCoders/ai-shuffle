@@ -5,7 +5,7 @@ Covers:
   * UsageLimitsMonitor.fetch — makes no request; keeps live windows.
   * apply_live_event — update an existing window vs append a new one, and the
     used → remaining flip that keeps live events on the snapshot's convention.
-  * get_snapshot — background refresh when stale.
+  * get_snapshot — a read never refreshes (Claude usage is passive).
 """
 
 import time
@@ -78,27 +78,28 @@ class TestGenerationGuard:
 class TestLiveEvents:
     def test_updates_existing_window(self, monitor):
         monitor._windows = [{"type": "five_hour", "utilization": 10.0, "resets_at": "a"}]
-        snap = monitor.apply_live_event("five_hour", 55.0, "b")
+        snap = monitor.apply_live_event("five_hour", 0.55, "b")
         assert snap is not None
         w = next(w for w in snap["windows"] if w["type"] == "five_hour")
         # 55% used → 45% remaining, the convention every snapshot window carries.
-        assert w["utilization"] == 45.0 and w["resets_at"] == "b"
+        assert w["utilization"] == pytest.approx(45.0) and w["resets_at"] == "b"
         assert len(snap["windows"]) == 1  # replaced, not appended
 
     def test_appends_new_window(self, monitor):
-        snap = monitor.apply_live_event("seven_day_opus", 30.0, "c")
+        snap = monitor.apply_live_event("seven_day_opus", 0.30, "c")
         assert [w["type"] for w in snap["windows"]] == ["seven_day_opus"]
-        assert snap["windows"][0]["utilization"] == 70.0
+        assert snap["windows"][0]["utilization"] == pytest.approx(70.0)
         assert snap["available"] is True
 
     def test_normalizes_fraction_utilization_to_remaining_percent(self, monitor):
         # SDK sends a 0.0-1.0 USED fraction; the snapshot stores 0-100 REMAINING.
         snap = monitor.apply_live_event("five_hour", 0.25, "a")
         assert snap["windows"][0]["utilization"] == 75.0
-        # A value already in percent (>1) skips the fraction scaling but still flips.
-        snap2 = monitor.apply_live_event("seven_day", 17.0, "b")
-        w = next(w for w in snap2["windows"] if w["type"] == "seven_day")
-        assert w["utilization"] == 83.0
+
+    def test_over_limit_fraction_is_not_read_as_percent(self, monitor):
+        # 105% of the window used -> nothing left (clamped), not ~99% left.
+        snap = monitor.apply_live_event("five_hour", 1.05, "1900000000")
+        assert snap["windows"][0]["utilization"] == 0.0
 
     def test_ignores_incomplete_event(self, monitor):
         assert monitor.apply_live_event(None, 5.0, "x") is None
@@ -106,12 +107,11 @@ class TestLiveEvents:
         assert monitor.apply_live_event("five_hour", "nan", "x") is None
 
     @pytest.mark.asyncio
-    async def test_get_snapshot_uses_cache_when_fresh(self, monitor):
-        import time as _t
+    async def test_get_snapshot_never_refreshes(self, monitor):
         monitor._windows = [{"type": "five_hour", "utilization": 1.0, "resets_at": None}]
-        monitor._fetched_at = _t.time()
+        monitor._fetched_at = time.time() - 3600
         monitor._available = True
-        snap = await monitor.get_snapshot(max_age=300)
+        snap = await monitor.get_snapshot()
         assert not monitor.refreshing
         assert snap["windows"][0]["utilization"] == 1.0
 
@@ -150,6 +150,33 @@ class TestPersistence:
         assert rows[0]["windows"][0]["utilization"] == 75.0
         monitor._broadcast.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_restart_does_not_wipe_persisted_claude_windows(self, mock_db):
+        from app.db import database as db
+        before = UsageLimitsMonitor()
+        before._broadcast = AsyncMock()
+        await before.apply_live_event_and_broadcast("seven_day", 0.40, "1900000000")
+
+        # Process restart: a fresh monitor has no in-memory windows.
+        after = UsageLimitsMonitor()
+        await after.fetch()
+
+        row = next(r for r in db.get_all_usage_snapshots()
+                   if r["instance_id"] == settings.effective_instance_id)
+        assert row["available"] is True
+        assert [w["type"] for w in row["windows"]] == ["seven_day"]
+        cluster = UsageLimitsMonitor()._cluster_snapshot()
+        assert cluster["available"] is True and cluster["windows"][0]["type"] == "seven_day"
+
+    def test_cluster_self_entry_reflects_memory_over_cached_row(self, monitor, mock_db):
+        self_id = settings.effective_instance_id
+        monitor._persist_snapshot()
+        monitor._cluster_snapshot()  # warm the cache with the empty row
+        monitor.apply_live_event("five_hour", 0.25, "a")
+        own = next(s for s in monitor._cluster_snapshot()["snapshots"] if s["instance_id"] == self_id)
+        assert own["available"] is True and own["windows"][0]["utilization"] == 75.0
+        assert own["generation"] == monitor.current_generation()
+
     def test_apply_live_event_is_in_memory_only(self, monitor, mock_db):
         # The sync refiner must NOT touch the DB — persistence is the async
         # wrapper's job now (Fix 3: no sync DB on the event loop).
@@ -170,15 +197,22 @@ class TestPersistence:
         assert monitor._persist_snapshot.call_count == 1
         assert monitor._broadcast.await_count == 1
 
-        # Identical repeat → no-op.
+        # Identical repeat → no persist/broadcast, but the observation time and
+        # generation semantics hold: fetched_at advances, generation does not.
+        monitor._fetched_at -= 600
+        generation = monitor.current_generation()
         await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
         assert monitor._persist_snapshot.call_count == 1
         assert monitor._broadcast.await_count == 1
+        assert time.time() - monitor._fetched_at < 5
+        assert monitor.current_generation() == generation
 
-        # A materially changed reading → persists + broadcasts immediately.
+        # A materially changed reading → persists + broadcasts immediately
+        # under a newer generation, so clients drop older in-flight snapshots.
         await monitor.apply_live_event_and_broadcast("five_hour", 0.55, "a")
         assert monitor._persist_snapshot.call_count == 2
         assert monitor._broadcast.await_count == 2
+        assert monitor.current_generation() > generation
 
     def test_cluster_cache_invalidated_on_own_persist(self, monitor, mock_db):
         from app.db import database as db

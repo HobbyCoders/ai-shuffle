@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import time
+from datetime import datetime
 from typing import Any
 
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
@@ -36,6 +37,23 @@ def _percent(value: Any) -> float | None:
     return round(max(0.0, min(100.0, value)), 2)
 
 
+def _reset_passed(resets_at: Any) -> bool:
+    """True when ``resets_at`` (epoch s, epoch ms or ISO 8601) is in the past."""
+    if resets_at is None or isinstance(resets_at, bool):
+        return False
+    try:
+        stamp = float(resets_at)
+    except (TypeError, ValueError):
+        try:
+            stamp = datetime.fromisoformat(str(resets_at).strip().replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return False
+    else:
+        if stamp >= 1e12:
+            stamp /= 1000.0
+    return stamp <= time.time()
+
+
 def _window(raw: Any, *, source: str, remaining_input: bool) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -43,13 +61,19 @@ def _window(raw: Any, *, source: str, remaining_input: bool) -> dict[str, Any] |
     if value is None:
         return None
     remaining = value if remaining_input else 100.0 - value
-    return {
+    rolled_over = _reset_passed(raw.get("resets_at"))
+    if rolled_over:
+        remaining = 100.0
+    window = {
         "type": str(raw.get("type") or "unknown"),
         "used_percent": round(100.0 - remaining, 2),
         "remaining_percent": round(remaining, 2),
         "resets_at": raw.get("resets_at"),
         "source": source,
     }
+    if rolled_over:
+        window["rolled_over"] = True
+    return window
 
 
 def _freshness(fetched_at: Any, *, available: bool = True) -> str:

@@ -524,6 +524,8 @@ async def _run_background_query_impl(
 
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"[Background] Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
+                from app.core.query_engine import _apply_rate_limit_live_event
+                await _apply_rate_limit_live_event(message.rate_limit_info)
 
             elif isinstance(message, HookEventMessage):
                 logger.debug(f"[Background] Hook event: {getattr(message, 'hook_event_name', None)}")
