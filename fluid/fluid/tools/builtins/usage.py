@@ -163,7 +163,18 @@ def _payload(raw: Any) -> dict[str, Any]:
             }
         providers.append(entry)
     if providers_unread:
-        providers = [dict(entry) for entry in _last_providers or ()]
+        # Replayed rows are what was read last time, not what the host holds
+        # now: never label them fresh (their fetched_at still says when).
+        providers = []
+        for cached in _last_providers or ():
+            entry = dict(cached)
+            entry["source"] = "last_known_provider_snapshot"
+            entry["last_known"] = True
+            if entry.get("freshness") == "fresh":
+                entry["freshness"] = "stale"
+            if entry.get("status") == "fresh":
+                entry["status"] = "stale"
+            providers.append(entry)
     else:
         _last_providers = [dict(entry) for entry in providers]
 

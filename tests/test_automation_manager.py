@@ -2476,6 +2476,39 @@ class TestRunConcurrency:
         assert manager._running == {}
         assert database.get_automation_run("run-appr")["status"] == "completed"
 
+    async def test_approved_run_waiting_behind_the_latch_is_cancelled_by_shutdown(
+        self, manager, mock_db, runner
+    ):
+        """R6-3: shutdown cancelled the in-flight run, the waiting approved run
+        then woke to a free latch and started while the app was going down."""
+        from app.db import database
+
+        g_first = asyncio.Event()
+        runner.gates = [g_first]
+        _make_automation("auto-sd", triggers=_WEBHOOK_NO_SECRET)
+        database.create_automation_run(run_id="run-sd", automation_id="auto-sd",
+                                       status="approved", prompt_rendered="approved prompt")
+        database.create_automation_approval(approval_id="appr-sd", run_id="run-sd", automation_id="auto-sd")
+        database.update_automation_approval("appr-sd", status="approved")
+        tasks = _capture_tasks(manager)
+
+        first = asyncio.create_task(manager._execute("auto-sd", {"trigger": "manual"}))
+        await _until(lambda: len(runner.calls) == 1)
+        assert (await manager.execute_approved_run("appr-sd"))["id"] == "run-sd"
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert len(runner.calls) == 1
+
+        await manager.shutdown()
+        await asyncio.gather(first, return_exceptions=True)
+        await _drain(tasks)
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert len(runner.calls) == 1, "the approved run must not start during shutdown"
+        assert all(t.done() for t in tasks)
+        assert manager._running == {}
+        assert database.get_automation_run("run-sd")["status"] == "approved"
+
 
 # =============================================================================
 # Webhook signature verification

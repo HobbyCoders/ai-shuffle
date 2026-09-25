@@ -15,7 +15,7 @@ import secrets
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 from app.core import turn_outcome
@@ -95,6 +95,10 @@ class AutomationManager:
         self._initialized = False
         self._scheduled_versions: Dict[str, str] = {}  # automation_id → trigger fingerprint
         self._reconcile_task: Optional[asyncio.Task] = None
+        # Approved runs queued behind another run of the same automation.
+        # They hold no latch entry, so shutdown cancels them from here.
+        self._waiting_approved: Set[asyncio.Task] = set()
+        self._shutting_down = False
 
     def _create_tracked_task(self, coro, *, name: str) -> asyncio.Task:
         """Create a background task with error logging on failure."""
@@ -118,6 +122,7 @@ class AutomationManager:
         """Initialize scheduler and load enabled automations."""
         if self._initialized:
             return
+        self._shutting_down = False
 
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -149,12 +154,17 @@ class AutomationManager:
             self._reconcile_task.cancel()
             self._reconcile_task = None
 
-        # Cancel running tasks
+        # Cancel running tasks, and the approved runs queued behind them: a
+        # queued run would otherwise wake to a free latch and start now.
         async with self._lock:
+            self._shutting_down = True
             for auto_id, task in self._running.items():
                 task.cancel()
                 logger.debug(f"Cancelled running automation {auto_id}")
             self._running.clear()
+            for task in self._waiting_approved:
+                task.cancel()
+            self._waiting_approved.clear()
 
         if self._scheduler:
             self._scheduler.shutdown(wait=False)
@@ -1327,10 +1337,17 @@ class AutomationManager:
             # pop) that run's latch entry.
             while True:
                 async with self._lock:
+                    if self._shutting_down:
+                        self._waiting_approved.discard(me)
+                        return
                     holder = self._running.get(auto_id)
                     if holder is None or holder.done():
+                        self._waiting_approved.discard(me)
                         self._running[auto_id] = me
                         break
+                    if me not in self._waiting_approved:
+                        self._waiting_approved.add(me)
+                        me.add_done_callback(self._waiting_approved.discard)
                 await asyncio.wait({holder})
             try:
                 await self._execute_run(

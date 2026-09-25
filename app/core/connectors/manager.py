@@ -5,6 +5,7 @@ ConnectorManager — lifecycle management, event dispatch, and message routing.
 import asyncio
 import logging
 import secrets
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,6 +24,10 @@ logger = logging.getLogger(__name__)
 # A connector turn runs as the connector's API user: its profile, project and
 # model. Without one there is no owner-chosen agent to run, so the message is
 # refused instead of falling back to whichever profile happens to be first.
+# A client still CONNECTING this long after it was registered has a handshake
+# that is not going to finish; a repeated start replaces it.
+CONNECTING_STALE_SECONDS = 120.0
+
 CONNECTOR_NEEDS_API_USER_MESSAGE = (
     "This connector has no API user bound, so it cannot run the agent. "
     "The owner needs to bind an API user in the connector settings."
@@ -39,6 +44,7 @@ class ConnectorManager:
 
     def __init__(self):
         self._connectors: Dict[str, BaseConnector] = {}
+        self._registered_at: Dict[str, float] = {}  # connector_id -> time.monotonic()
         self._lock = asyncio.Lock()
         self._event_relay = None
 
@@ -144,21 +150,22 @@ class ConnectorManager:
         """Instantiate, connect, and register a single connector.
 
         Idempotent for a live client: starting a connector that is already
-        connected (or connecting) returns ``True`` without building a second
-        client, so a repeated POST /activate or MCP ``toggleConnector`` cannot
-        leave two clients each handling every inbound message. A registered
-        client that has errored or disconnected is torn down and replaced.
+        connected (or still connecting) returns ``True`` without building a
+        second client, so a repeated POST /activate or MCP ``toggleConnector``
+        cannot leave two clients each handling every inbound message. A
+        registered client that has errored or disconnected, or that is stuck
+        connecting (its client task ended, or its handshake has run past
+        ``CONNECTING_STALE_SECONDS``), is torn down and replaced.
         Config changes go through ``restart_connector``, which stops first.
         """
         async with self._lock:
             existing = self._connectors.get(connector_id)
-            if existing is not None and existing.status in (
-                ConnectorStatus.CONNECTED, ConnectorStatus.CONNECTING,
-            ):
+            if existing is not None and self._is_live(connector_id, existing):
                 logger.info(f"Connector already running: {connector_id}")
                 return True
             if existing is not None:
                 del self._connectors[connector_id]
+                self._registered_at.pop(connector_id, None)
         if existing is not None:
             await self._disconnect_quietly(connector_id, existing)
 
@@ -259,6 +266,7 @@ class ConnectorManager:
             async with self._lock:
                 displaced = self._connectors.get(connector_id)
                 self._connectors[connector_id] = instance
+                self._registered_at[connector_id] = time.monotonic()
             # A concurrent start that registered while this one was connecting
             # would otherwise stay live, unreferenced, and double-handle input.
             if displaced is not None and displaced is not instance:
@@ -275,6 +283,18 @@ class ConnectorManager:
             )
             return False
 
+    def _is_live(self, connector_id: str, instance: BaseConnector) -> bool:
+        """A registered client worth keeping: connected, or connecting in time."""
+        if instance.status == ConnectorStatus.CONNECTED:
+            return True
+        if instance.status != ConnectorStatus.CONNECTING:
+            return False
+        task = getattr(instance, "_task", None)
+        if task is not None and task.done():
+            return False
+        since = self._registered_at.get(connector_id)
+        return since is None or time.monotonic() - since < CONNECTING_STALE_SECONDS
+
     @staticmethod
     async def _disconnect_quietly(connector_id: str, instance: BaseConnector) -> None:
         try:
@@ -286,6 +306,7 @@ class ConnectorManager:
         """Disconnect and unregister a running connector."""
         async with self._lock:
             instance = self._connectors.pop(connector_id, None)
+            self._registered_at.pop(connector_id, None)
 
         if instance:
             await self._disconnect_quietly(connector_id, instance)

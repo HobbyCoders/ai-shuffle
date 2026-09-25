@@ -1498,3 +1498,76 @@ class TestVoiceSessionOwnership:
         assert db.get_session(sid)["effort"] == "high"
         assert client.post(f"{VOICE_ROOT}/sessions/{sid}/hangup",
                            headers=KEY_A).status_code == 200
+
+
+DISPATCH_ONLY_TOOLS = [
+    "dispatch_agent", "check_agent", "list_agents", "message_agent",
+    "stop_agent", "respond_approval", "WebSearch", "WebFetch",
+]
+
+
+class TestVoiceKeyToolSurface:
+    """R6-1 residual: whatever row a key reaches, its call gets dispatch only."""
+
+    @staticmethod
+    def _tool_names(sock):
+        return [t["name"] for t in sock.sent[0]["session"]["tools"]]
+
+    def test_key_attaching_its_own_session_gets_dispatch_tools_only(
+        self, client, mock_db, sidebands
+    ):
+        # New calls run on the live model's audio stream, which exposes no
+        # tools; a session pinned to a Realtime model is the sideband path.
+        _enable_voice()
+        _make_provider()
+        _make_keys()
+        sid = _mk_owned_voice_session("voice-key-own", "key-a")
+        resp = client.post(f"{VOICE_ROOT}/sessions/{sid}/call", headers=KEY_A,
+                           json={"call_id": "rtc_key"})
+        assert resp.status_code == 200, resp.text
+        assert self._tool_names(sidebands[0]) == DISPATCH_ONLY_TOOLS
+        assert voice_bridge.APP_TOOLS_INSTRUCTIONS not in sidebands[0].sent[0]["session"]["instructions"]
+        client.post(f"{VOICE_ROOT}/sessions/{sid}/hangup", headers=KEY_A)
+
+    def test_key_reaching_an_unattributed_worker_row_gets_dispatch_tools_only(
+        self, client, mock_db, sidebands
+    ):
+        """A worker row carries no api_user_id and belongs to its parent's key;
+        the grant follows the caller, not the row's empty column."""
+        _enable_voice()
+        _make_provider()
+        _make_keys()
+        db.create_session(session_id="parent-a", profile_id="default", api_user_id="key-a")
+        db.create_session(
+            session_id="voice-worker-a", profile_id="default", title="Voice worker",
+            provider_id="prov-openai", mode="voice", api_user_id=None,
+            parent_session_id="parent-a", is_worker=True,
+            voice_config={"model": "gpt-realtime-2.1", "voice": "marin",
+                          "provider_id": "prov-openai"},
+        )
+        resp = client.post(f"{VOICE_ROOT}/sessions/voice-worker-a/call", headers=KEY_A,
+                           json={"call_id": "rtc_worker"})
+        assert resp.status_code == 200, resp.text
+        assert self._tool_names(sidebands[0]) == DISPATCH_ONLY_TOOLS
+        client.post(f"{VOICE_ROOT}/sessions/voice-worker-a/hangup", headers=KEY_A)
+
+    @pytest.mark.parametrize("owner", [None, "key-b"], ids=["owner", "other-key"])
+    def test_key_cannot_join_a_foreign_session_audio_stream(self, client, mock_db, owner):
+        """The live-model audio socket is the path new calls take."""
+        from starlette.websockets import WebSocketDisconnect
+
+        _enable_voice()
+        _make_provider()
+        _make_keys()
+        db.create_session(
+            session_id="voice-live-foreign", profile_id="default", title="Voice session",
+            provider_id="prov-openai", mode="voice", api_user_id=owner,
+            voice_config={"model": "gpt-live-1", "voice": "marin", "provider_id": "prov-openai"},
+        )
+        with pytest.raises(WebSocketDisconnect) as refused:
+            with client.websocket_connect(
+                f"{VOICE_ROOT}/sessions/voice-live-foreign/audio?token=aih_voice_key_a"
+            ):
+                pass
+        assert refused.value.code == 4403
+        assert refused.value.reason == "Access denied to this session"

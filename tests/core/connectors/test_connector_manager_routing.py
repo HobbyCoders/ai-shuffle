@@ -277,6 +277,37 @@ class TestStartConnector:
         first.disconnect.assert_not_awaited()
         assert statuses(db) == ["connecting"]
 
+    @pytest.mark.parametrize("stuck", ["handshake_timed_out", "connect_task_ended"])
+    async def test_client_stuck_connecting_is_replaced_by_activate(
+        self, mgr, db, not_enrolled, fake_registry, stuck,
+    ):
+        """R6-5: a gateway handshake that never completes left the client
+        CONNECTING for good, and /activate treated it as live."""
+        db.get_connector.return_value = connector_row()
+        assert await mgr.start_connector("c1") is True
+        first = mgr.get_running_instance("c1")
+        first._status = ConnectorStatus.CONNECTING
+        if stuck == "handshake_timed_out":
+            mgr._registered_at["c1"] -= manager_module.CONNECTING_STALE_SECONDS + 1
+        else:
+            first._task = asyncio.get_running_loop().create_future()
+            first._task.set_result(None)
+        assert await mgr.start_connector("c1") is True
+        second = mgr.get_running_instance("c1")
+        assert second is not first and FakeConnector.instances == [first, second]
+        first.disconnect.assert_awaited_once()
+
+    async def test_client_still_within_its_handshake_is_left_alone(self, mgr, db, not_enrolled, fake_registry):
+        db.get_connector.return_value = connector_row()
+        assert await mgr.start_connector("c1") is True
+        first = mgr.get_running_instance("c1")
+        first._status = ConnectorStatus.CONNECTING
+        first._task = asyncio.get_running_loop().create_future()  # still running
+        assert await mgr.start_connector("c1") is True
+        assert mgr.get_running_instance("c1") is first
+        first.disconnect.assert_not_awaited()
+        first._task.cancel()
+
     @pytest.mark.parametrize("dead", [ConnectorStatus.ERROR, ConnectorStatus.DISCONNECTED])
     async def test_dead_registered_instance_is_disconnected_and_replaced(
         self, mgr, db, not_enrolled, fake_registry, dead,

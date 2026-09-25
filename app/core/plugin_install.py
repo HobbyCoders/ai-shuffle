@@ -188,8 +188,9 @@ def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> None:
     if not subdir_path:
         raise ValueError("git-subdir source: path is empty")
 
-    # Normalize URL: GitHub shorthand (org/repo) -> full URL
-    if not url.startswith(("http://", "https://", "git@")):
+    # Normalize URL: GitHub shorthand (org/repo) -> full URL. Every URL form
+    # the clone guard accepts (https, http, ssh://, git@) is kept as given.
+    if not url.startswith(_ALLOWED_CLONE_URL_PREFIXES):
         url = f"https://github.com/{url}.git"
     elif not url.endswith(".git"):
         url = f"{url}.git"

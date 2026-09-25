@@ -969,9 +969,8 @@ async def attach_voice_call(
     from app.core import voice_bridge
 
     voice_settings = await _require_voice_enabled()
-    session_row = await _require_voice_session(
-        session_id, api_user=get_api_user_from_request(http_request)
-    )
+    api_user = get_api_user_from_request(http_request)
+    session_row = await _require_voice_session(session_id, api_user=api_user)
     _reject_when_capped(session_id)
 
     call_id = (request.call_id or "").strip()
@@ -1038,8 +1037,10 @@ async def attach_voice_call(
     # API-key user. Always available to the owner, independent of legacy
     # settings. Admin is asserted for write tools as chat does (``is_admin=True``)
     # because the caller has already passed the same cookie/pairing gate.
+    # Both the caller and the row must be the owner's: a worker row carries no
+    # ``api_user_id`` yet belongs to its parent's key, which may attach to it.
     app_tools: List[Any] = []
-    if not session_row.get("api_user_id"):
+    if api_user is None and not session_row.get("api_user_id"):
         app_tools = await run_sync(
             _voice_app_tools, session_row.get("project_id"),
         )

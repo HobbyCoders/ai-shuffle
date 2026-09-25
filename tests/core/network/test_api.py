@@ -240,7 +240,11 @@ def test_fork_here_and_hydrate_enforce_api_user_session_scope(workers):
         assert a.sql("SELECT COUNT(*) AS n FROM sessions")[0]["n"] == 1  # nothing was forked
         database.create_api_user(user_id="u-in", name="Insider", api_key_hash="h" * 64, project_id="proj-a")
         insider = _client_as_api_user({"id": "u-in", "project_id": "proj-a"})
-        forked = insider.post("/api/v1/network/sessions/s-scoped/fork-here")
+        # In scope is not enough: a key reaches only the sessions it owns (e90f7808).
+        assert insider.post("/api/v1/network/sessions/s-scoped/fork-here").status_code == 403
+        database.create_session(session_id="s-insider", profile_id="default", project_id="proj-a",
+                                title="Insider's", api_user_id="u-in", is_active=True)
+        forked = insider.post("/api/v1/network/sessions/s-insider/fork-here")
         assert forked.status_code == 201, forked.text
         assert database.get_session(forked.json()["session_id"])["api_user_id"] == "u-in"
 

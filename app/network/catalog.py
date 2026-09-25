@@ -315,6 +315,14 @@ def prepare_session_mirror(cursor, record: Dict[str, Any]) -> Dict[str, Any]:
         cursor.execute("SELECT 1 FROM api_users WHERE id = %s", (api_user_id,))
         if cursor.fetchone() is None:
             record["api_user_id"] = None
+    if not record.get("api_user_id") and record.get("id"):
+        # A copy that names no API key never erases the key this worker holds
+        # for the session (a hub placing a key's session on a runner that did
+        # not keep it). Deleting the key clears the column locally (SET NULL).
+        cursor.execute("SELECT api_user_id FROM sessions WHERE id = %s", (record["id"],))
+        local = cursor.fetchone()
+        if local is not None and local["api_user_id"]:
+            record["api_user_id"] = local["api_user_id"]
     parent = record.get("parent_session_id")
     if parent:
         cursor.execute("SELECT 1 FROM sessions WHERE id = %s", (parent,))

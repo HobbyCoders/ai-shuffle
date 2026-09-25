@@ -109,11 +109,41 @@ def test_unread_provider_rows_keep_the_last_known_values(monkeypatch) -> None:
     })
     assert "providers_unavailable" not in good
     out = _payload({"available": False, "fetched_at": None, "windows": [], "providers": None})
-    assert out["providers"] == good["providers"]
+    assert out["providers"][0]["provider_id"] == "codex"
+    assert out["providers"][0]["windows"] == good["providers"][0]["windows"]
     assert out["providers"][0]["windows"][0]["remaining_percent"] == 60
     assert out["available"] is True
     assert out["providers_unavailable"] is True
     assert "last values read" in out["providers_reason"]
+
+
+def test_replayed_provider_rows_are_not_reported_fresh(monkeypatch) -> None:
+    """R6-6: rows the host just failed to read are last-known, not fresh."""
+    import fluid.tools.builtins.usage as usage
+
+    monkeypatch.setattr(usage, "_last_providers", None, raising=False)
+    now_ms = time.time() * 1000
+    good = _payload({
+        "available": False, "fetched_at": None, "windows": [],
+        "providers": [{
+            "provider_id": "codex", "fetched_at": now_ms,
+            "windows": [{"type": "requests", "utilization": 40, "resets_at": None}],
+        }],
+    })
+    assert good["providers"][0]["freshness"] == "fresh"
+    assert good["providers"][0]["status"] == "fresh"
+    assert good["freshness"] == "fresh"
+
+    out = _payload({"available": False, "fetched_at": None, "windows": [], "providers": None})
+    (replayed,) = out["providers"]
+    assert replayed["freshness"] == "stale"
+    assert replayed["status"] == "stale"
+    assert replayed["source"] == "last_known_provider_snapshot"
+    assert replayed["last_known"] is True
+    assert replayed["fetched_at"] == now_ms
+    assert out["freshness"] == "stale"
+    # The cache itself keeps the values as read.
+    assert usage._last_providers[0]["freshness"] == "fresh"
 
 
 def test_an_empty_provider_list_still_means_none_configured(monkeypatch) -> None:

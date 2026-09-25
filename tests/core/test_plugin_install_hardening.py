@@ -249,6 +249,24 @@ def test_git_subdir_path_cannot_escape_clone(svc, tmp_path, monkeypatch):
     assert not dest.exists()
 
 
+@pytest.mark.parametrize("url, cloned", [
+    ("ssh://git.example.com/team/repo", "ssh://git.example.com/team/repo.git"),
+    ("ssh://git@git.example.com:2222/team/repo.git", "ssh://git@git.example.com:2222/team/repo.git"),
+    ("git@github.com:o/r.git", "git@github.com:o/r.git"),
+    ("https://gitlab.example.com/o/r", "https://gitlab.example.com/o/r.git"),
+    ("o/r", "https://github.com/o/r.git"),
+])
+def test_git_subdir_keeps_each_url_form(svc, tmp_path, monkeypatch, url, cloned):
+    """R6-7: an ssh:// URL used to be rewritten into https://github.com/ssh://..."""
+    git = FakeGit(populate=lambda dest: _plugin_dir(dest, "sub", "1.0.0"))
+    monkeypatch.setattr(plugin_install.subprocess, "run", git)
+    plugin_install._clone_git_subdir_source(
+        svc, {"source": "git-subdir", "url": url, "path": "sub"}, tmp_path / "dest")
+    clone = git.calls[0]
+    assert clone[:2] == ["git", "clone"]
+    assert clone[-2] == cloned
+
+
 # ── symlinks ────────────────────────────────────────────────────────────────
 
 
