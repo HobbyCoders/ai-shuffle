@@ -181,7 +181,7 @@ Get connector details.
 
 ### PATCH /api/v1/connectors/{connector_id}
 
-Update a connector. Every field is optional: `name`, `config`, `events`, `is_active`.
+Update a connector. Every field is optional: `name`, `config`, `events`, `is_active`. Setting `is_active` also starts or stops the running connector, like `activate` and `deactivate`.
 
 **Auth:** Owner only
 
