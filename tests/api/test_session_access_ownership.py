@@ -293,7 +293,12 @@ async def test_load_and_query_on_a_foreign_session_are_refused(ws_world, frame_t
     handler = _handler("key-a")
     with _Effects() as fx:
         await _send(handler, frame_type, data)
-    assert _refused(handler)
+    if frame_type == "load_session":
+        # Answered like an unknown id, so the reply does not reveal the session.
+        assert sent_frames(handler, "session_not_found") == [
+            {"type": "session_not_found", "session_id": "foreign"}]
+    else:
+        assert _refused(handler)
     assert not sent_frames(handler, "history")
     fx.sync.register_device.assert_not_awaited()
     fx.turns.submit_async.assert_not_awaited()

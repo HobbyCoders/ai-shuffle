@@ -1081,6 +1081,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'pending_permissions': {
+				// `session_id: null` is the server's empty reply for a socket with no
+				// session selected (no load_session / watch_session yet). It says
+				// nothing about the active session, so it must not clear its modal.
+				if (data.session_id === null) break;
 				const pendingSessionId = data.session_id as string | undefined;
 				// A cross-install relay-read failure replies with `stale: true` and a
 				// non-authoritative (local, empty) list. Replacing pendingPermissions /
@@ -1186,6 +1190,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'pending_questions': {
+				// See pending_permissions: a null session_id is the no-session reply.
+				if (data.session_id === null) break;
 				const pendingSessionId = data.session_id as string | undefined;
 				// A cross-install relay-read failure replies with `stale: true` and a
 				// non-authoritative (local, empty) list. Replacing pendingQuestions with

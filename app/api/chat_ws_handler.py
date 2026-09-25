@@ -328,6 +328,16 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     })
 
 
+# A frame that is not a JSON object is answered with an ``error`` frame and the
+# socket stays open. Past this many on one connection the client is not
+# speaking the protocol, and the socket is closed with 1007 (invalid payload).
+MAX_MALFORMED_FRAMES = 10
+MALFORMED_FRAME_CLOSE_CODE = 1007
+RATE_LIMITED_MESSAGE = "Rate limited: too many messages. Please slow down."
+# The refusal for a session an API key may not act on, known or not.
+SESSION_ACCESS_DENIED = "Access denied to this session"
+
+
 class WebSocketRateLimiter:
     """Sliding-window rate limiter for WebSocket messages per connection.
 
@@ -397,6 +407,12 @@ class ChatWebSocketHandler:
         # (polling recovers the data, but this gives us observability).
         self._ws_seq: int = 0
         self._ws_drops: int = 0
+
+        # Frames on this connection that were not a JSON object; bounded by
+        # MAX_MALFORMED_FRAMES. ``_close_code`` is set when ``run`` ends the
+        # connection itself and closes the socket with that code on the way out.
+        self._malformed_frames: int = 0
+        self._close_code: Optional[int] = None
 
         # Message-type dispatch table
         self._handlers: Dict[str, Callable[[dict], Any]] = {
@@ -557,10 +573,19 @@ class ChatWebSocketHandler:
             try:
                 while True:
                     try:
-                        data = await asyncio.wait_for(
-                            self.websocket.receive_json(),
-                            timeout=60.0
-                        )
+                        try:
+                            data = await asyncio.wait_for(
+                                self.websocket.receive_json(),
+                                timeout=60.0
+                            )
+                        except (ValueError, KeyError, TypeError):
+                            # The frame was consumed but is not JSON text: bad
+                            # JSON or UTF-8 (ValueError), or a binary frame.
+                            data = None
+                        if not isinstance(data, dict):
+                            if not await self._refuse_malformed_frame():
+                                break
+                            continue
 
                         msg_type = data.get("type")
 
@@ -572,13 +597,25 @@ class ChatWebSocketHandler:
                             )
                             await self.send_json({
                                 "type": "error",
-                                "error": "Rate limited: too many messages. Please slow down.",
+                                "message": RATE_LIMITED_MESSAGE,
                             })
                             continue
 
-                        handler = self._handlers.get(msg_type)
+                        handler = (
+                            self._handlers.get(msg_type)
+                            if isinstance(msg_type, str) else None
+                        )
                         if handler is not None:
                             await handler(data)
+                        else:
+                            await self.send_json({
+                                "type": "error",
+                                "message": (
+                                    f"Unknown message type: {msg_type}"
+                                    if isinstance(msg_type, str) and msg_type
+                                    else "Missing message type"
+                                ),
+                            })
 
                     except asyncio.TimeoutError:
                         if self.websocket.client_state != WebSocketState.CONNECTED:
@@ -645,6 +682,35 @@ class ChatWebSocketHandler:
             writer = self._writer
             if writer is not None:
                 await writer.aclose()
+            if self._close_code is not None:
+                try:
+                    await asyncio.wait_for(
+                        self.websocket.close(code=self._close_code), timeout=2.5
+                    )
+                except Exception:  # the peer may already be gone
+                    logger.debug("Chat WebSocket close failed", exc_info=True)
+
+    async def _refuse_malformed_frame(self) -> bool:
+        """Answer a frame that is not a JSON object.
+
+        Sends an ``error`` frame and returns True so the loop keeps serving.
+        Past :data:`MAX_MALFORMED_FRAMES` on this connection returns False
+        instead, and ``run`` ends the connection with close code
+        :data:`MALFORMED_FRAME_CLOSE_CODE`.
+        """
+        self._malformed_frames += 1
+        if self._malformed_frames > MAX_MALFORMED_FRAMES:
+            logger.warning(
+                f"Closing chat WebSocket after {MAX_MALFORMED_FRAMES} malformed "
+                f"frames: device={self.device_id}"
+            )
+            self._close_code = MALFORMED_FRAME_CLOSE_CODE
+            return False
+        await self.send_json({
+            "type": "error",
+            "message": "Invalid message: expected a JSON object",
+        })
+        return True
 
     # ------------------------------------------------------------------
     # handle_query
@@ -875,42 +941,22 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "error", "message": exc.detail})
             return False, None
 
-    async def _restrict_session_agent(self, session_id):
-        """Refuse a restricted API user's turn into a session whose agent is
-        outside its assigned agents (the session's agent runs when the frame
-        names none, so a profile check alone would not cover it). Sends the
-        error frame and returns False on refusal."""
-        if not (self.api_user_id and session_id):
-            return True
-        user = await run_sync(database.get_api_user, self.api_user_id)
-        allowed = (user or {}).get("profile_ids") or []
-        if not allowed:
-            return True
-        session = await run_sync(database.get_session, session_id)
-        agent = (session or {}).get("profile_id")
-        if session and agent not in allowed:
-            await self.send_json({
-                "type": "error",
-                "message": f"This API key is not allowed to use agent '{agent}'.",
-            })
-            return False
-        return True
-
-    async def _may_act_on_session(self, session_id, *, refusal_type="error") -> bool:
-        """The shared gate for every frame that names a session.
+    async def _session_refusal(self, session_id) -> Optional[str]:
+        """Why this socket may not act on ``session_id``, or None when it may.
 
         The owner's socket (no ``api_user_id``) is unrestricted. An API-user
         socket may act only on a session it owns that is inside its project
         and agent scope: :func:`check_session_access_for_api_user`, the rule
-        the REST session routes apply. A missing or unknown id is refused the
-        same way, so the reply never tells whether another principal's session
-        exists. On refusal this sends one ``refusal_type`` frame
-        (``session_id`` + ``message``) and returns False; the caller then
-        returns without touching any state or sending any session data.
+        the REST session routes apply (its agent check is what keeps a key's
+        turn out of a session whose agent it may not use). A missing or
+        unknown id gets the same :data:`SESSION_ACCESS_DENIED` as another
+        principal's session, so the answer never tells whether that session
+        exists. Only for the key's OWN session outside its agents is the agent
+        named, which reveals nothing.
         """
         if not self.api_user_id:
-            return True
-        message = "Access denied to this session"
+            return None
+        message = SESSION_ACCESS_DENIED
         if session_id:
             from app.api.sessions_helpers import (
                 api_user_may_use_profile,
@@ -923,13 +969,27 @@ class ChatWebSocketHandler:
             if user and session:
                 try:
                     await run_sync(check_session_access_for_api_user, user, session)
-                    return True
+                    return None
                 except HTTPException:
                     agent = session.get("profile_id")
                     if (not api_user_may_use_profile(user, agent)
                             and await run_sync(api_user_owns_session, user, session)):
                         # Its own session: naming the agent reveals nothing.
                         message = f"This API key is not allowed to use agent '{agent}'."
+        return message
+
+    async def _may_act_on_session(self, session_id, *, refusal_type="error") -> bool:
+        """The shared gate for every frame that names a session.
+
+        Applies :meth:`_session_refusal`. On refusal this sends one
+        ``refusal_type`` frame (``session_id`` + ``message``) and returns
+        False; the caller then returns without touching any state or sending
+        any session data. ``load_session`` answers a refusal differently (see
+        :meth:`handle_load_session`).
+        """
+        message = await self._session_refusal(session_id)
+        if message is None:
+            return True
         await self.send_json({
             "type": refusal_type,
             "session_id": session_id,
@@ -947,9 +1007,10 @@ class ChatWebSocketHandler:
         if session_id and not await self._authorize_mobile_session(
                 session_id, claim=data.get("claim_mobile_authority") is True):
             return
+        # An existing session's own agent was checked by the gate above.
         allowed, profile_id = await self._restrict_profile(
             data.get("profile"), data.get("profile", "claude-code"))
-        if not allowed or not await self._restrict_session_agent(session_id):
+        if not allowed:
             return
         project_id = data.get("project") or None
         if isinstance(project_id, str):
@@ -1638,6 +1699,7 @@ class ChatWebSocketHandler:
         session_id = data.get("session_id")
         if not session_id:
             return
+        requested_id = session_id
 
         # Try direct lookup by AI Shuffle session ID first (non-blocking)
         session = await run_sync(database.get_session, session_id)
@@ -1655,7 +1717,15 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "session_not_found", "session_id": session_id})
             return
 
-        if not await self._may_act_on_session(session_id):
+        refusal = await self._session_refusal(session_id)
+        if refusal == SESSION_ACCESS_DENIED:
+            # Another principal's session is answered exactly like an unknown
+            # id (the REST 404 artifact access gives a foreign session), so
+            # load_session cannot be used to probe which session ids exist.
+            await self.send_json({"type": "session_not_found", "session_id": requested_id})
+            return
+        if refusal is not None:
+            await self.send_json({"type": "error", "session_id": session_id, "message": refusal})
             return
         if not await self._authorize_mobile_session(session_id):
             return
@@ -1855,7 +1925,11 @@ class ChatWebSocketHandler:
     # ------------------------------------------------------------------
 
     async def handle_close_session(self, data: dict) -> None:
-        """Handle 'close_session' message type."""
+        """Handle 'close_session' message type.
+
+        Always replies ``session_closed``; with no session selected there is
+        nothing to close and ``session_id`` is null.
+        """
         old_session_id = self.current_session_id
         if old_session_id and not await self._may_act_on_session(old_session_id):
             return
@@ -1869,9 +1943,9 @@ class ChatWebSocketHandler:
 
             self.current_session_id = None
             logger.debug(f"Device {self.device_id} closed session {old_session_id}")
-            # Try to send confirmation, but don't worry if WebSocket is already closed
-            # (common when frontend sends close_session right before disconnecting)
-            await self.send_json({"type": "session_closed", "session_id": old_session_id})
+        # Try to send confirmation, but don't worry if WebSocket is already closed
+        # (common when frontend sends close_session right before disconnecting)
+        await self.send_json({"type": "session_closed", "session_id": old_session_id})
 
     # ------------------------------------------------------------------
     # handle_permission_response
@@ -1944,19 +2018,28 @@ class ChatWebSocketHandler:
     # ------------------------------------------------------------------
 
     async def handle_get_pending_permissions(self, data: dict) -> None:
-        """Handle 'get_pending_permissions' message type."""
+        """Handle 'get_pending_permissions' message type.
+
+        With no session selected on this socket the reply is empty and its
+        ``session_id`` is null.
+        """
         if self.current_session_id and not await self._may_act_on_session(self.current_session_id):
             return
-        if self.current_session_id:
-            # Pending/deferred are read straight from the shared
-            # ``pending_interactions`` table, which every install sees — no
-            # relay, so the reply is always authoritative (never `stale`).
+        if not self.current_session_id:
             await self.send_json({
-                "type": "pending_permissions",
-                "session_id": self.current_session_id,
-                "pending": permission_handler.get_pending_requests(self.current_session_id),
-                "deferred": permission_handler.get_deferred_requests(self.current_session_id),
+                "type": "pending_permissions", "session_id": None,
+                "pending": [], "deferred": [],
             })
+            return
+        # Pending/deferred are read straight from the shared
+        # ``pending_interactions`` table, which every install sees — no
+        # relay, so the reply is always authoritative (never `stale`).
+        await self.send_json({
+            "type": "pending_permissions",
+            "session_id": self.current_session_id,
+            "pending": permission_handler.get_pending_requests(self.current_session_id),
+            "deferred": permission_handler.get_deferred_requests(self.current_session_id),
+        })
 
     # ------------------------------------------------------------------
     # handle_requeue_deferred_permissions
@@ -2058,20 +2141,26 @@ class ChatWebSocketHandler:
     # ------------------------------------------------------------------
 
     async def handle_get_pending_questions(self, data: dict) -> None:
-        """Handle 'get_pending_questions' message type."""
-        if self.current_session_id and not await self._may_act_on_session(self.current_session_id):
+        """Handle 'get_pending_questions' message type.
+
+        With no session selected on this socket the reply is empty and its
+        ``session_id`` is null.
+        """
+        if not self.current_session_id:
+            await self.send_json({"type": "pending_questions", "session_id": None, "questions": []})
             return
-        if self.current_session_id and not await self._authorize_mobile_session(self.current_session_id):
+        if not await self._may_act_on_session(self.current_session_id):
             return
-        if self.current_session_id:
-            # Pending questions are read straight from the shared
-            # ``pending_interactions`` table, which every install sees — no
-            # relay, so the reply is always authoritative (never `stale`).
-            await self.send_json({
-                "type": "pending_questions",
-                "session_id": self.current_session_id,
-                "questions": user_question_handler.get_pending_questions(self.current_session_id),
-            })
+        if not await self._authorize_mobile_session(self.current_session_id):
+            return
+        # Pending questions are read straight from the shared
+        # ``pending_interactions`` table, which every install sees — no
+        # relay, so the reply is always authoritative (never `stale`).
+        await self.send_json({
+            "type": "pending_questions",
+            "session_id": self.current_session_id,
+            "questions": user_question_handler.get_pending_questions(self.current_session_id),
+        })
 
     # ------------------------------------------------------------------
     # handle_tabs_update
@@ -2138,13 +2227,12 @@ class ChatWebSocketHandler:
         if not await self._authorize_mobile_session(session_id):
             return
         # An omitted profile keeps the session's own agent; a named one must
-        # be among an API user's assigned agents, and so must the session's.
+        # be among an API user's assigned agents. The session's own agent was
+        # checked by the gate above.
         if profile_id:
             allowed, profile_id = await self._restrict_profile(profile_id, profile_id)
             if not allowed:
                 return
-        if not await self._restrict_session_agent(session_id):
-            return
 
         # V2 placement: the durable queued turn IS the hand-off (see
         # handle_query) — enqueue locally with no kick and wake the owner's
@@ -2251,7 +2339,7 @@ class ChatWebSocketHandler:
                 await self.send_json({
                     "type": "error",
                     "session_id": session_id,
-                    "message": "Access denied to this session",
+                    "message": SESSION_ACCESS_DENIED,
                 })
                 return
 
@@ -2302,10 +2390,18 @@ class ChatWebSocketHandler:
         # history); the queue view then re-sources to empty. Internal
         # failover/auto_continue/unpark turns are never user queue chips, so they
         # are left untouched.
-        def _clear_v2_queue():
-            for turn in turns_db.get_queued_turns(session_id):
-                if turn.get("source") in _V2_QUEUE_SOURCES:
-                    turn_manager.remove_queued(turn["id"])
-        await run_sync(_clear_v2_queue)
+        #
+        # Clearing is × on every chip, so it obeys the same steering rule as
+        # ``handle_remove_queued_message``: recall a submitted steer before its
+        # row goes (or the model still reads the text), and leave a row the
+        # running turn already read for its delivery receipt to absorb.
+        from app.core.session_runtime import try_cancel_steer
+
+        for turn in await run_sync(turns_db.get_queued_turns, session_id):
+            if turn.get("source") not in _V2_QUEUE_SOURCES:
+                continue
+            if await try_cancel_steer(session_id, turn["id"]) == "delivered":
+                continue
+            await run_sync(turn_manager.remove_queued, turn["id"])
         await self._v2_broadcast_queue(session_id)
         return

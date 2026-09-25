@@ -445,11 +445,13 @@ async def test_get_pending_permissions_carries_deferred_even_when_empty():
     assert frame["deferred"] == []
 
 
-async def test_get_pending_permissions_without_session_is_silent():
+async def test_get_pending_permissions_without_session_replies_empty():
     with _HandlerHarness() as h:
         await h.make_handler().handle_get_pending_permissions({})
 
-    assert h.ws.sent == []
+    assert _frames(h.ws, "pending_permissions") == [{
+        "type": "pending_permissions", "session_id": None, "pending": [], "deferred": [],
+    }]
     h.perm.get_pending_requests.assert_not_called()
 
 

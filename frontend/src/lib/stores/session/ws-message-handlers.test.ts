@@ -1210,6 +1210,29 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('pending_* reply for a socket with no session selected', () => {
+		// The backend answers get_pending_permissions / get_pending_questions with
+		// an empty list and `session_id: null` when the socket has no session
+		// selected; that must not wipe the active session's open modals.
+		it('leaves the permission and question queues untouched', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingPermissions = [
+				{ session_id: 'session-1', request_id: 'perm-open', tool_name: 'Bash', tool_input: {} } as never,
+			];
+			state.pendingQuestions = [
+				{ session_id: 'session-1', request_id: 'q-open', tool_use_id: 't', questions: [] } as never,
+			];
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'pending_permissions', session_id: null, pending: [], deferred: [] });
+			handlers.handleMessage({ type: 'pending_questions', session_id: null, questions: [] });
+
+			expect(deps.update).not.toHaveBeenCalled();
+		});
+	});
+
 	describe('pending_questions handler (reconnect replay)', () => {
 		it('replaces the active question queue with the server set', () => {
 			const state = mockState();

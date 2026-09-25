@@ -326,46 +326,82 @@ async def test_connect_sends_the_streaming_sessions_snapshot_first(ws_env):
 
 
 async def test_every_documented_client_type_is_in_the_dispatch_table(ws_env):
-    """The client -> server table in the docs, plus the undocumented tabs_update."""
-    documented = {
-        "query", "queue_message", "remove_queued_message", "clear_queued_messages",
-        "load_session", "watch_session", "close_session", "stop",
-        "permission_response", "get_pending_permissions",
-        "requeue_deferred_permissions", "user_question_response",
-        "get_pending_questions", "interrupt_for_query", "pong",
-    }
+    """The client -> server table in the docs, read from the docs themselves."""
+    import re
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parents[2]
+           / "docs/content/api-reference/websocket.md").read_text()
+    table = doc.split("### Message Types (Client → Server)", 1)[1].split("\n\n", 2)[1]
+    documented = set(re.findall(r"^\| `([a-z_]+)` \|", table, re.MULTILINE))
+    assert "tabs_update" in documented
     async with _connect(ws_env) as conn:
-        assert set(conn.handler._handlers) == documented | {"tabs_update"}
+        assert set(conn.handler._handlers) == documented
 
 
 @pytest.mark.parametrize(
-    "frame",
-    [{"type": "no_such_frame", "session_id": "x"}, {"no_type": True}, {"type": None}],
-    ids=["unknown-type", "missing-type", "null-type"],
+    "frame, message",
+    [
+        ({"type": "no_such_frame", "session_id": "x"}, "Unknown message type: no_such_frame"),
+        ({"no_type": True}, "Missing message type"),
+        ({"type": None}, "Missing message type"),
+        ({"type": ""}, "Missing message type"),
+        ({"type": ["query"]}, "Missing message type"),
+    ],
+    ids=["unknown-type", "missing-type", "null-type", "empty-type", "non-string-type"],
 )
-async def test_unknown_frame_types_are_ignored_and_the_socket_stays_open(ws_env, frame):
+async def test_unknown_frame_types_get_an_error_and_the_socket_stays_open(ws_env, frame, message):
     async with _connect(ws_env) as conn:
-        assert await conn.roundtrip(frame) == []
+        assert await conn.roundtrip(frame) == [{"type": "error", "message": message}]
         # Still serving: a later frame is answered normally.
-        assert await conn.roundtrip({"type": "close_session"}) == []
+        assert await conn.roundtrip({"type": "close_session"}) == [
+            {"type": "session_closed", "session_id": None}]
         assert not conn.task.done()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: a frame that is not a JSON object (bad JSON, or a JSON array/"
-    "string) raises out of ChatWebSocketHandler.run's receive loop "
-    "(json.JSONDecodeError / AttributeError on data.get) and ends the whole "
-    "connection, instead of being refused with an error frame while the socket "
-    "stays open.",
-)
-@pytest.mark.parametrize("text", ["{not json", "[1, 2]", '"just a string"'])
+@pytest.mark.parametrize("text", ["{not json", "[1, 2]", '"just a string"', "null", "42"])
 async def test_a_malformed_frame_gets_an_error_and_the_socket_stays_open(ws_env, text):
     async with _connect(ws_env) as conn:
         replies = await conn.roundtrip(text, timeout=1.0)
-        assert [f["type"] for f in replies] == ["error"]
-        assert isinstance(replies[0]["message"], str) and replies[0]["message"]
+        assert replies == [
+            {"type": "error", "message": "Invalid message: expected a JSON object"}]
+        # Still serving: a later frame is answered normally.
+        assert await conn.roundtrip({"type": "close_session"}) == [
+            {"type": "session_closed", "session_id": None}]
         assert not conn.task.done()
+
+
+async def test_a_binary_frame_gets_an_error_and_the_socket_stays_open(ws_env):
+    async with _connect(ws_env) as conn:
+        start = len(conn.wire.sent)
+        conn.wire.inbound.put_nowait({"type": "websocket.receive", "bytes": b"{}"})
+        await conn.wait_for(lambda fs: len(fs) > start)
+        assert conn.frames()[start:] == [
+            {"type": "error", "message": "Invalid message: expected a JSON object"}]
+        assert not conn.task.done()
+
+
+async def test_a_flood_of_malformed_frames_closes_the_socket(ws_env):
+    """Each malformed frame is answered, up to MAX_MALFORMED_FRAMES on one
+    connection; the next one ends it with close code 1007 (invalid payload)."""
+    async with _connect(ws_env) as conn:
+        for _ in range(cwh.MAX_MALFORMED_FRAMES + 1):
+            conn.wire.push_text("{not json")
+        await asyncio.wait_for(conn.task, 3.0)
+        errors = conn.frames("error")
+        assert len(errors) <= cwh.MAX_MALFORMED_FRAMES
+        assert conn.wire.close_code == 1007
+    ws_env.sync.unregister_user_device.assert_awaited_once()
+
+
+async def test_malformed_frames_below_the_bound_keep_the_socket(ws_env):
+    async with _connect(ws_env) as conn:
+        for _ in range(cwh.MAX_MALFORMED_FRAMES):
+            conn.wire.push_text("[]")
+        await conn.roundtrip({"type": "close_session"})
+        assert len(conn.frames("error")) == cwh.MAX_MALFORMED_FRAMES
+        assert not conn.task.done()
+        assert conn.wire.close_code is None
 
 
 async def test_rate_limited_frames_are_refused_without_dispatch(ws_env, monkeypatch):
@@ -381,28 +417,22 @@ async def test_rate_limited_frames_are_refused_without_dispatch(ws_env, monkeypa
             {"type": "session_not_found", "session_id": f"s-{i}"} for i in range(3)
         ]
         assert replies[3]["type"] == "error"
-        assert "Rate limited" in (replies[3].get("message") or replies[3].get("error"))
+        assert "Rate limited" in replies[3]["message"]
         # The refusal does not end the connection.
         assert not conn.task.done()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: the rate-limit refusal is {'type': 'error', 'error': ...}; the "
-    "documented error frame (and the frontend's 'error' handler, which reads "
-    "data.message) needs the text under 'message', so the user sees no reason.",
-)
 async def test_rate_limit_error_frame_has_the_documented_shape(ws_env, monkeypatch):
     monkeypatch.setattr(settings, "ws_rate_limit_messages", 1)
     monkeypatch.setattr(settings, "ws_rate_limit_window_seconds", 60.0)
     async with _connect(ws_env) as conn:
         conn.wire.push({"type": "close_session"})
         conn.wire.push({"type": "close_session"})
-        await conn.wait_for(lambda fs: len(fs) >= 2)
-        assert conn.frames()[1] == {
-            "type": "error",
-            "message": "Rate limited: too many messages. Please slow down.",
-        }
+        await conn.wait_for(lambda fs: len(fs) >= 3)
+        assert conn.frames()[1:] == [
+            {"type": "session_closed", "session_id": None},
+            {"type": "error", "message": "Rate limited: too many messages. Please slow down."},
+        ]
 
 
 async def test_pong_is_exempt_from_the_rate_limit_and_has_no_reply(ws_env, monkeypatch):
@@ -442,7 +472,8 @@ async def test_idle_timeout_keeps_a_healthy_socket_and_drops_a_dead_one(ws_env):
     async with _connect(ws_env) as conn:
         # The 60 s receive timeout on a healthy, connected socket just loops.
         conn.wire.inbound.put_nowait(asyncio.TimeoutError())
-        assert await conn.roundtrip({"type": "close_session"}) == []
+        assert await conn.roundtrip({"type": "close_session"}) == [
+            {"type": "session_closed", "session_id": None}]
         assert not conn.task.done()
 
         # Once a send has declared the socket dead, the next idle tick exits
@@ -561,19 +592,41 @@ async def test_close_session_replies_session_closed_and_forgets_the_session(ws_e
         assert replies == [{"type": "session_closed", "session_id": sid}]
         assert conn.handler.current_session_id is None
         # get_pending_permissions acts on the selected session; none is left.
-        assert await conn.roundtrip({"type": "get_pending_permissions"}) == []
+        assert await conn.roundtrip({"type": "get_pending_permissions"}) == [{
+            "type": "pending_permissions", "session_id": None,
+            "pending": [], "deferred": [],
+        }]
     ws_env.sync.unregister_device.assert_any_await("dev-1", sid, conn.wire.ws)
     ws_env.sync.broadcast_session_closed.assert_awaited_once_with(
         session_id=sid, device_id="dev-1",
     )
 
 
-async def test_close_session_with_no_session_selected_sends_no_reply(ws_env):
-    """Docs: close_session "replies session_closed" — only when a session was
-    selected; with none there is nothing to close and nothing is sent."""
+async def test_close_session_with_no_session_selected_replies_a_null_session(ws_env):
+    """Docs: close_session "replies session_closed". With no session selected
+    there is nothing to close: the reply's session_id is null and no other
+    device is told anything."""
     async with _connect(ws_env) as conn:
-        assert await conn.roundtrip({"type": "close_session"}) == []
+        assert await conn.roundtrip({"type": "close_session"}) == [
+            {"type": "session_closed", "session_id": None}]
     ws_env.sync.broadcast_session_closed.assert_not_awaited()
+    ws_env.sync.unregister_device.assert_not_awaited()
+
+
+async def test_pending_lists_with_no_session_selected_are_empty(ws_env):
+    """Docs: get_pending_permissions / get_pending_questions act on the
+    selected session; with none selected each replies empty, session_id null."""
+    sid = _make_session("sess-none")
+    _pending_permission(sid, "req-none")
+    _pending_question(sid, "q-none", [{"question": "A?"}])
+    async with _connect(ws_env) as conn:
+        assert await conn.roundtrip({"type": "get_pending_permissions"}) == [{
+            "type": "pending_permissions", "session_id": None,
+            "pending": [], "deferred": [],
+        }]
+        assert await conn.roundtrip({"type": "get_pending_questions"}) == [{
+            "type": "pending_questions", "session_id": None, "questions": [],
+        }]
 
 
 async def test_disconnect_deregisters_the_watched_session(ws_env):
@@ -698,15 +751,15 @@ async def test_deferred_request_is_listed_then_requeued_as_a_new_prompt(ws_env):
             "queue_position": 2,
             "queue_total": 2,
         }]
-        # The permission handler announces the requeue and the WS handler then
-        # replies with the same frame, so the client receives it twice today.
-        updates = [f for f in replies if f["type"] == "permission_queue_update"]
-        assert updates and all(u == {
+        # One confirmation, after the re-sent requests.
+        assert [f["type"] for f in replies] == [
+            "permission_request", "permission_queue_update"]
+        assert replies[-1] == {
             "type": "permission_queue_update",
             "session_id": sid,
             "requeued_ids": ["req-later"],
             "remaining_count": 2,
-        } for u in updates)
+        }
 
         [after] = await conn.roundtrip({"type": "get_pending_permissions"})
         assert sorted(p["request_id"] for p in after["pending"]) == ["req-later", "req-open"]
@@ -929,8 +982,9 @@ async def test_get_pending_questions_lists_the_watched_sessions_questions(ws_env
     sid = _make_session("sess-q7")
     _pending_question(sid, "q-7", QUESTIONS)
     async with _connect(ws_env) as conn:
-        # Nothing is selected yet: no reply.
-        assert await conn.roundtrip({"type": "get_pending_questions"}) == []
+        # Nothing is selected yet: an empty reply.
+        assert await conn.roundtrip({"type": "get_pending_questions"}) == [
+            {"type": "pending_questions", "session_id": None, "questions": []}]
         await conn.roundtrip({"type": "watch_session", "session_id": sid})
         [reply] = await conn.roundtrip({"type": "get_pending_questions"})
     assert reply["type"] == "pending_questions"
@@ -1258,20 +1312,24 @@ async def test_api_key_queue_message_into_its_own_session_queues(ws_env, monkeyp
 
 ACCESS_DENIED = "Access denied to this session"
 
+# Every frame that names a session and answers a refusal with an ``error``
+# frame (load_session answers session_not_found; interrupt_for_query
+# interrupt_failed).
+SESSION_FRAMES = [
+    {"type": "watch_session"},
+    {"type": "stop"},
+    {"type": "permission_response", "request_id": "req-f", "decision": "allow"},
+    {"type": "requeue_deferred_permissions"},
+    {"type": "user_question_response", "request_id": "q-f", "answers": {"A?": "B"}},
+    {"type": "queue_message", "content": "later"},
+    {"type": "query", "prompt": "hi"},
+    {"type": "clear_queued_messages"},
+]
+
 
 @pytest.mark.parametrize(
     "frame",
-    [
-        {"type": "watch_session"},
-        {"type": "load_session"},
-        {"type": "stop"},
-        {"type": "permission_response", "request_id": "req-f", "decision": "allow"},
-        {"type": "requeue_deferred_permissions"},
-        {"type": "user_question_response", "request_id": "q-f", "answers": {"A?": "B"}},
-        {"type": "queue_message", "content": "later"},
-        {"type": "query", "prompt": "hi"},
-        {"type": "clear_queued_messages"},
-    ],
+    SESSION_FRAMES,
     ids=lambda f: f["type"],
 )
 async def test_api_key_frames_naming_another_principals_session_are_refused(
@@ -1293,6 +1351,62 @@ async def test_api_key_frames_naming_another_principals_session_are_refused(
     assert _interaction(question["id"])["state"] == "pending"
     assert [t["id"] for t in turns_db.get_queued_turns(sid)] == [chip["id"]]
     ws_env.sync.register_device.assert_not_awaited()
+
+
+async def test_api_key_load_session_cannot_tell_a_foreign_session_from_an_unknown_one(
+    ws_env, monkeypatch,
+):
+    """load_session answers another principal's session exactly like an id
+    that does not exist (``session_not_found``, the REST 404 artifact access
+    gives), so a key cannot probe which session ids exist."""
+    _api_env(monkeypatch, None)
+    sid = _make_session("sess-owner-l")  # the owner's
+    database.create_api_user("api-2", "Key 2", "hash-api-2")
+    other = _own_session("sess-other-key", api_user_id="api-2")  # another key's
+    async with _connect(ws_env, api_user=API_USER) as conn:
+        foreign = await conn.roundtrip({"type": "load_session", "session_id": sid})
+        other_key = await conn.roundtrip({"type": "load_session", "session_id": other})
+        unknown = await conn.roundtrip({"type": "load_session", "session_id": "sess-none"})
+        assert conn.handler.current_session_id is None
+    assert foreign == [{"type": "session_not_found", "session_id": sid}]
+    assert other_key == [{"type": "session_not_found", "session_id": other}]
+    assert unknown == [{"type": "session_not_found", "session_id": "sess-none"}]
+    ws_env.sync.register_device.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "frame",
+    SESSION_FRAMES,
+    ids=lambda f: f["type"],
+)
+async def test_api_key_frames_answer_a_foreign_and_an_unknown_session_alike(
+    ws_env, monkeypatch, frame,
+):
+    """Every other frame refuses an unknown id with the same error frame it
+    gives another principal's session."""
+    _api_env(monkeypatch, None)
+    sid = _make_session("sess-owner-u")
+    async with _connect(ws_env, api_user=API_USER) as conn:
+        foreign = await conn.roundtrip(dict(frame, session_id=sid))
+        unknown = await conn.roundtrip(dict(frame, session_id="sess-none"))
+    assert foreign == [{"type": "error", "session_id": sid, "message": ACCESS_DENIED}]
+    assert unknown == [{"type": "error", "session_id": "sess-none", "message": ACCESS_DENIED}]
+
+
+async def test_api_key_load_session_of_its_own_session_outside_its_agents_names_the_agent(
+    ws_env, monkeypatch,
+):
+    _api_env(monkeypatch, ["default"])
+    database.create_profile(profile_id="other-agent", name="Other", description=None, config={})
+    sid = _own_session("sess-own-agent", profile_id="other-agent")
+    async with _connect(ws_env, api_user=API_USER) as conn:
+        replies = await conn.roundtrip({"type": "load_session", "session_id": sid})
+        assert conn.handler.current_session_id is None
+    assert replies == [{
+        "type": "error",
+        "session_id": sid,
+        "message": "This API key is not allowed to use agent 'other-agent'.",
+    }]
 
 
 async def test_api_key_interrupt_for_query_on_a_foreign_session_fails(ws_env, monkeypatch):

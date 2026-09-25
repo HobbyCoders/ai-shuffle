@@ -731,7 +731,9 @@ class PermissionHandler:
         if requeued_ids:
             interaction_wait.notify_changed(session_id)
 
-        # Re-broadcast each requeued request + the queue update.
+        # Re-broadcast each requeued request. The caller (the chat socket's
+        # requeue_deferred_permissions) confirms with the one
+        # permission_queue_update frame, sent even when nothing was requeued.
         if broadcast_func:
             for payload in new_payloads:
                 queue_position = self._v2_pending_count(session_id)
@@ -751,14 +753,6 @@ class PermissionHandler:
                     provider_agent=payload.get("provider_agent"),
                 )
                 await self._broadcast_permission_request(request, queue_position, broadcast_func)
-
-            if requeued_ids:
-                await broadcast_func({
-                    "type": "permission_queue_update",
-                    "session_id": session_id,
-                    "requeued_ids": requeued_ids,
-                    "remaining_count": self._v2_pending_count(session_id),
-                })
 
         # Durable lifecycle events: a requeue mints a fresh pending row
         # with a NEW interaction_id (same FE request_id), so emitting a second
@@ -956,9 +950,11 @@ class PermissionHandler:
         broadcast_func: Optional[callable] = None,
     ) -> List[str]:
         """
-        Move all deferred requests for a session back to pending and re-broadcast.
+        Move all deferred requests for a session back to pending and re-broadcast
+        each one as a ``permission_request``.
 
-        Returns the list of requeued request_ids.
+        Returns the list of requeued request_ids; the caller reports them (the
+        chat socket's ``permission_queue_update``).
         """
         return await self._requeue_deferred_v2(session_id, broadcast_func)
 
