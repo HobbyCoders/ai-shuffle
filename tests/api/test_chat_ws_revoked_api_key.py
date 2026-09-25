@@ -1,7 +1,8 @@
 """An API key disabled, deleted or rotated while its chat WebSocket is open loses the socket.
 
 Authentication runs at connect; the handler re-validates an API-user principal
-on every inbound frame (the client's 30 s pong included), closes with 4001 and
+on every inbound frame, every PRINCIPAL_RECHECK_SECONDS without client traffic and at once
+when the key's admin routes signal it; it closes with 4001 and
 never acts on the frame that arrived after the key changed.
 """
 import asyncio
@@ -101,3 +102,85 @@ async def test_live_key_keeps_its_socket(ws_env):
         await _close(wire, task)
     assert [t["prompt"] for t in turns_db.get_queued_turns(sid)] == ["still live"]
     assert wire.close_code in (None, 1000)
+
+
+# ---------------------------------------------------------------------------
+# A client that sends nothing: the server re-checks on its own (R9-10)
+# ---------------------------------------------------------------------------
+
+from app.api import api_users as api_users_routes  # noqa: E402
+from app.api import chat_ws_handler as cwh  # noqa: E402
+from app.core.models import ApiUserUpdate  # noqa: E402
+
+
+async def _wait_done(task, timeout):
+    await asyncio.wait_for(asyncio.shield(task), timeout)
+
+
+@pytest.mark.parametrize("revoke", [_disable, _rotate, _delete], ids=["disabled", "rotated", "deleted"])
+async def test_idle_socket_closes_within_the_recheck_interval(ws_env, revoke):
+    ws_env.monkeypatch.setattr(cwh, "PRINCIPAL_RECHECK_SECONDS", 0.05)
+    database.create_api_user("api-1", "Key", _hash(KEY))
+    wire = _RecordingWire()
+    task = await _open(wire)
+    try:
+        # A live key survives several re-checks with no client traffic.
+        await asyncio.sleep(0.3)
+        assert not task.done()
+        revoke()  # straight in the database: no route signals the socket
+        await _wait_done(task, 2.0)
+    finally:
+        await _close(wire, task)
+    assert wire.close_code == 4001
+    assert "API key" in (wire.close_reason or "")
+    assert not cwh._api_user_sockets.get("api-1")
+
+
+async def _route_disable():
+    await api_users_routes.update_api_user_endpoint("api-1", ApiUserUpdate(is_active=False), token="t", request=None)
+
+
+async def _route_rotate():
+    await api_users_routes.rotate_api_user_key("api-1", token="t", request=None)
+
+
+async def _route_delete():
+    await api_users_routes.delete_api_user_endpoint("api-1", token="t", request=None)
+
+
+@pytest.mark.parametrize("route", [_route_disable, _route_rotate, _route_delete],
+                         ids=["disable", "rotate", "delete"])
+async def test_admin_route_closes_an_idle_socket_immediately(ws_env, route):
+    # The periodic re-check is far away: only the route's signal can close it.
+    ws_env.monkeypatch.setattr(cwh, "PRINCIPAL_RECHECK_SECONDS", 3600.0)
+
+    async def _run_sync(fn, *a, **k):
+        return fn(*a, **k)
+
+    ws_env.monkeypatch.setattr(api_users_routes, "run_sync", _run_sync)
+    database.create_api_user("api-1", "Key", _hash(KEY))
+    wire = _RecordingWire()
+    task = await _open(wire)
+    try:
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        await route()
+        await _wait_done(task, 1.0)
+    finally:
+        await _close(wire, task)
+    assert wire.close_code == 4001
+
+
+async def test_route_signal_keeps_a_socket_whose_key_is_still_live(ws_env):
+    ws_env.monkeypatch.setattr(cwh, "PRINCIPAL_RECHECK_SECONDS", 3600.0)
+    database.create_api_user("api-1", "Key", _hash(KEY))
+    wire = _RecordingWire()
+    task = await _open(wire)
+    try:
+        assert cwh.recheck_api_user_sockets("api-1") == 1
+        await asyncio.sleep(0.2)
+        assert not task.done()
+    finally:
+        await _close(wire, task)
+    assert wire.close_code in (None, 1000)
+    assert not cwh._api_user_sockets.get("api-1")

@@ -469,7 +469,14 @@ async def peer_challenge(body: ChallengeRequest, request: Request) -> dict:
     # a named active member and spendable only by that member's key.
     requester = get_client_ip(request)
     _challenge_limiter.check(requester)
-    return {"challenge": tokens.new_challenge(body.device_id, requester),
+    member_address = False
+    if tokens.at_capacity():
+        # Past the global ceiling only member addresses get a challenge: one
+        # the member advertises as its own endpoint is recognised here (one
+        # that has spent a challenge before, inside ``tokens``).
+        row = await run_sync(store.get_member, body.device_id)
+        member_address = tokens.is_member_endpoint(requester, (row or {}).get("endpoints") or [])
+    return {"challenge": tokens.new_challenge(body.device_id, requester, member_address=member_address),
             "expires_in": tokens.CHALLENGE_TTL_SECONDS}
 
 

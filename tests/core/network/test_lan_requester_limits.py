@@ -1,5 +1,6 @@
 """LAN hosts cannot pick their own rate-limit key, nor evict a member's challenge."""
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.api import network as network_api
@@ -75,7 +76,7 @@ def test_challenge_flood_from_another_host_does_not_evict_a_members_challenge(wo
                         json={"device_id": b.device_id, "challenge": mine, "signature": sig})
         assert r.status_code == 200, r.text
         # The attacker's own outstanding challenges stay bounded per device.
-        held = [c for c, (_e, d, req) in tokens._challenges.items() if d == b.device_id and req == "192.168.1.66"]
+        held = [c for c, (_e, d, req, _r) in tokens._challenges.items() if d == b.device_id and req == "192.168.1.66"]
         assert len(held) == tokens.CHALLENGES_PER_DEVICE
     network_api._challenge_limiter.reset()
 
@@ -87,6 +88,9 @@ def test_outstanding_challenges_have_a_global_ceiling(workers, monkeypatch):
     join(a, b)
     monkeypatch.setattr(tokens, "CHALLENGES_MAX", 5)
     with a.active():
-        issued = [tokens.new_challenge(b.device_id, f"10.0.0.{i}") for i in range(8)]
-    assert len(tokens._challenges) == 5
-    assert list(tokens._challenges) == issued[-5:]
+        issued = [tokens.new_challenge(b.device_id, f"10.0.0.{i}") for i in range(5)]
+        # Past the ceiling new addresses are refused; nothing pending is evicted.
+        with pytest.raises(HTTPException) as refused:
+            tokens.new_challenge(b.device_id, "10.0.0.99")
+    assert refused.value.status_code == 429
+    assert list(tokens._challenges) == issued

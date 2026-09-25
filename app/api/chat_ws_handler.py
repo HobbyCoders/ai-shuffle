@@ -11,6 +11,7 @@ import json
 import logging
 import time
 import uuid
+import weakref
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import HTTPException
@@ -335,6 +336,9 @@ MAX_MALFORMED_FRAMES = 10
 MALFORMED_FRAME_CLOSE_CODE = 1007
 # An API key disabled, deleted or rotated while its socket is open.
 REVOKED_PRINCIPAL_CLOSE_CODE = 4001
+# An API-user socket re-validates its key this often even when the client sends
+# nothing (no pong, idle tab), and at once when the key's admin routes signal it.
+PRINCIPAL_RECHECK_SECONDS = 30.0
 RATE_LIMITED_MESSAGE = "Rate limited: too many messages. Please slow down."
 # The refusal for a session an API key may not act on, known or not.
 SESSION_ACCESS_DENIED = "Access denied to this session"
@@ -363,6 +367,29 @@ class WebSocketRateLimiter:
             return False
         self._timestamps.append(now)
         return True
+
+
+# Open API-user sockets by api_user_id, so the key's disable/rotate/delete
+# routes can make them re-check at once. Weak: a handler that never ran, or one
+# whose teardown was skipped, is not kept alive by the registry.
+_api_user_sockets: Dict[str, "weakref.WeakSet[ChatWebSocketHandler]"] = {}
+
+
+def recheck_api_user_sockets(api_user_id: str) -> int:
+    """Make every open chat socket of ``api_user_id`` re-validate its key now.
+
+    Called after the key is disabled, rotated or deleted. The sockets decide for
+    themselves (a PATCH that leaves the key live closes nothing). Safe from any
+    thread; returns how many sockets were signalled.
+    """
+    handlers = list(_api_user_sockets.get(api_user_id, ()))
+    for handler in handlers:
+        handler._request_principal_recheck()
+    return len(handlers)
+
+
+class _Revoked:
+    """Sentinel from ``_receive_frame``: the watchdog found the key revoked."""
 
 
 class ChatWebSocketHandler:
@@ -416,6 +443,19 @@ class ChatWebSocketHandler:
         self._malformed_frames: int = 0
         self._close_code: Optional[int] = None
         self._close_reason: str = ""
+
+        # API-user sockets only: a watchdog re-validates the key every
+        # PRINCIPAL_RECHECK_SECONDS and on ``_recheck`` (set by the key's admin
+        # routes), and sets ``_revoked`` so ``run`` stops waiting for a frame
+        # that an idle client may never send.
+        self._recheck: Optional[asyncio.Event] = None
+        self._revoked: Optional[asyncio.Event] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        if (isinstance(trusted_principal, dict) and trusted_principal.get("kind") == "api_user"
+                and api_user_id):
+            self._recheck = asyncio.Event()
+            self._revoked = asyncio.Event()
+            _api_user_sockets.setdefault(api_user_id, weakref.WeakSet()).add(self)
 
         # Message-type dispatch table
         self._handlers: Dict[str, Callable[[dict], Any]] = {
@@ -550,6 +590,7 @@ class ChatWebSocketHandler:
         """Main connection loop — replaces the body of chat_websocket."""
         from app.api.websocket import ping_loop
 
+        self._loop = asyncio.get_running_loop()
         # Register user device for tab sync
         await sync_engine.register_user_device(self.user_id, self.device_id, self.websocket)
 
@@ -572,19 +613,20 @@ class ChatWebSocketHandler:
         try:
             # Start ping task
             ping_task = asyncio.create_task(ping_loop(self.websocket, send_fn=self.send_json))
+            watchdog_task = (asyncio.create_task(self._principal_watchdog())
+                             if self._revoked is not None else None)
 
             try:
                 while True:
                     try:
                         try:
-                            data = await asyncio.wait_for(
-                                self.websocket.receive_json(),
-                                timeout=60.0
-                            )
+                            data = await self._receive_frame(timeout=60.0)
                         except (ValueError, KeyError, TypeError):
                             # The frame was consumed but is not JSON text: bad
                             # JSON or UTF-8 (ValueError), or a binary frame.
                             data = None
+                        if data is _Revoked:
+                            break
                         if not isinstance(data, dict):
                             if not await self._refuse_malformed_frame():
                                 break
@@ -638,11 +680,14 @@ class ChatWebSocketHandler:
                         continue
 
             finally:
-                ping_task.cancel()
-                try:
-                    await ping_task
-                except asyncio.CancelledError:
-                    pass
+                for task in (ping_task, watchdog_task):
+                    if task is None:
+                        continue
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
                 # Unregister user device from tab sync
                 await sync_engine.unregister_user_device(self.user_id, self.device_id, self.websocket)
@@ -688,6 +733,12 @@ class ChatWebSocketHandler:
             # The connection is poisoned first so a late send from the still
             # running query task fast-fails instead of resurrecting a writer.
             self.connection_healthy = False
+            if self._revoked is not None:
+                sockets = _api_user_sockets.get(self.api_user_id)
+                if sockets is not None:
+                    sockets.discard(self)
+                    if not sockets:
+                        _api_user_sockets.pop(self.api_user_id, None)
             writer = self._writer
             if writer is not None:
                 await writer.aclose()
@@ -719,6 +770,66 @@ class ChatWebSocketHandler:
             self._close_reason = str(exc)
             return False
         return True
+
+    def _request_principal_recheck(self) -> None:
+        """Wake the watchdog now (thread-safe: routes may call from a worker thread)."""
+        if self._recheck is None:
+            return
+        loop = self._loop
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if loop is None or loop is running:
+            self._recheck.set()
+        elif not loop.is_closed():
+            loop.call_soon_threadsafe(self._recheck.set)
+
+    async def _principal_watchdog(self) -> None:
+        """Re-validate the key without waiting for a client frame; set ``_revoked`` once it fails."""
+        assert self._recheck is not None and self._revoked is not None
+        while True:
+            try:
+                await asyncio.wait_for(self._recheck.wait(), timeout=PRINCIPAL_RECHECK_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            self._recheck.clear()
+            try:
+                valid = await self._principal_still_valid()
+            except Exception:  # noqa: BLE001 — a DB hiccup must not end a live socket
+                logger.warning("API key re-check failed; retrying", exc_info=True)
+                continue
+            if not valid:
+                self._revoked.set()
+                return
+
+    async def _receive_frame(self, timeout: float) -> Any:
+        """The next inbound JSON frame, or ``_Revoked`` once the watchdog revokes the key.
+
+        Raises ``asyncio.TimeoutError`` after ``timeout`` seconds without a
+        frame, like ``wait_for`` on the receive alone.
+        """
+        if self._revoked is None:
+            return await asyncio.wait_for(self.websocket.receive_json(), timeout=timeout)
+        if self._revoked.is_set():
+            return _Revoked
+        receive = asyncio.ensure_future(self.websocket.receive_json())
+        revoked = asyncio.ensure_future(self._revoked.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {receive, revoked}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (revoked, receive):
+                if not task.done():
+                    task.cancel()
+        if revoked in done:
+            # Any frame that raced in is never acted on: the key is gone.
+            if receive.done() and not receive.cancelled():
+                receive.exception()  # retrieved, so asyncio does not log it
+            return _Revoked
+        if receive in done:
+            return receive.result()
+        raise asyncio.TimeoutError
 
     async def _refuse_malformed_frame(self) -> bool:
         """Answer a frame that is not a JSON object.
