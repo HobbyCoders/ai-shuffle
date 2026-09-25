@@ -4,7 +4,7 @@
  * "always for this tool" checkbox that applies to whichever button is pressed.
  * Defer was removed from the UI entirely (the backend still supports it).
  */
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/svelte';
 import PermissionRequest, { type PermissionRequestData } from './PermissionRequest.svelte';
 
@@ -104,20 +104,98 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 
 });
 
+/** Make the prompt's shortcuts live: a keyup after it appeared, and the
+ *  visibility window elapsed. */
+async function arm() {
+	await fireEvent.keyUp(document.body, { key: 'Shift' });
+	vi.advanceTimersByTime(500);
+}
+
 describe('PermissionRequest — page-wide keyboard shortcuts', () => {
-	it('Enter with nothing focused approves and Escape denies', async () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('once armed, Enter with nothing focused approves and Escape denies', async () => {
 		const onRespond = vi.fn();
 		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		await arm();
 
 		await fireEvent.keyDown(document.body, { key: 'Enter' });
+		await fireEvent.keyUp(document.body, { key: 'Enter' });
 		await fireEvent.keyDown(document.body, { key: 'Escape' });
 
 		expect(onRespond.mock.calls.map(([r]) => r.decision)).toEqual(['allow', 'deny']);
 	});
 
+	it('Enter within the visibility window does nothing, even after a keyup', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+
+		await fireEvent.keyUp(document.body, { key: 'o' });
+		vi.advanceTimersByTime(499);
+		await fireEvent.keyDown(document.body, { key: 'Enter' });
+		expect(onRespond).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(1);
+		await fireEvent.keyUp(document.body, { key: 'Enter' });
+		await fireEvent.keyDown(document.body, { key: 'Enter' });
+		expect(onRespond).toHaveBeenCalledTimes(1);
+		expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ decision: 'allow' }));
+	});
+
+	it('Enter after the window but with no keyup since the prompt appeared does nothing', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		vi.advanceTimersByTime(2000);
+
+		await fireEvent.keyDown(document.body, { key: 'Enter' });
+		await fireEvent.keyDown(document.body, { key: 'Escape' });
+		expect(onRespond).not.toHaveBeenCalled();
+	});
+
+	it('a held key (auto-repeat) never approves or denies', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		await arm();
+
+		for (let i = 0; i < 20; i++) {
+			await fireEvent.keyDown(document.body, { key: 'Enter', repeat: true });
+			await fireEvent.keyDown(document.body, { key: 'Escape', repeat: true });
+			vi.advanceTimersByTime(50);
+		}
+		expect(onRespond).not.toHaveBeenCalled();
+	});
+
+	it('a deliberate Escape denies as soon as a keyup was seen, without waiting out the window', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+
+		await fireEvent.keyDown(document.body, { key: 'Escape' });
+		expect(onRespond).not.toHaveBeenCalled();
+
+		await fireEvent.keyUp(document.body, { key: 'Escape' });
+		await fireEvent.keyDown(document.body, { key: 'Escape' });
+		expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ decision: 'deny' }));
+	});
+
+	it('one press answers once: a second Enter needs its own keyup', async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		await arm();
+
+		await fireEvent.keyDown(document.body, { key: 'Enter' });
+		await fireEvent.keyDown(document.body, { key: 'Enter' });
+		expect(onRespond).toHaveBeenCalledTimes(1);
+	});
+
 	it('Enter on the focused Deny button does not approve', async () => {
 		const onRespond = vi.fn();
 		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		await arm();
 
 		const deny = screen.getByRole('button', { name: 'Deny' });
 		deny.focus();
@@ -132,11 +210,24 @@ describe('PermissionRequest — page-wide keyboard shortcuts', () => {
 		expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ decision: 'deny' }));
 	});
 
+	it("holds back a held Enter's native activation of the prompt's own buttons", async () => {
+		const onRespond = vi.fn();
+		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
+		await arm();
+
+		const approve = screen.getByRole('button', { name: 'Approve' });
+		approve.focus();
+		const notPrevented = await fireEvent.keyDown(approve, { key: 'Enter', repeat: true });
+		expect(notPrevented).toBe(false);
+		expect(onRespond).not.toHaveBeenCalled();
+	});
+
 	it('Enter and Escape typed into a text field elsewhere on the page are ignored', async () => {
 		const onRespond = vi.fn();
 		render(PermissionRequest, { props: { request: makeRequest(), onRespond } });
 		const composer = document.createElement('textarea');
 		document.body.appendChild(composer);
+		await arm();
 
 		await fireEvent.keyDown(composer, { key: 'Enter' });
 		await fireEvent.keyDown(composer, { key: 'Escape' });

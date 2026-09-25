@@ -199,6 +199,35 @@
 	// focused control owns: Enter on a focused Deny / Details button activates
 	// that button, and Enter / Escape while typing (the chat composer, a form
 	// field) stay with the field instead of approving or denying.
+	//
+	// They are also armed, per request, so a key meant for something else never
+	// answers a prompt the user has not seen. Focus moves onto the prompt as it
+	// appears, so without this an Enter typed a moment later to send a chat
+	// message would approve, and a held Enter would approve a whole queue.
+	// - A key only counts once a keyup has been seen since this request appeared
+	//   (a key already down when it opened never counts), and auto-repeats never
+	//   count.
+	// - Enter additionally waits until the request has been visible for
+	//   SHORTCUT_ARM_DELAY_MS. Escape does not: denying early is the safe side.
+	// - A new request replacing this one (the queue advancing) re-arms both.
+	const SHORTCUT_ARM_DELAY_MS = 500;
+	let timeArmedFor: string | null = null;
+	let keyupSeenFor: string | null = null;
+	let panelEl: HTMLElement | undefined = $state();
+
+	const requestId = $derived(request.request_id);
+	$effect(() => {
+		const id = requestId;
+		const timer = setTimeout(() => {
+			timeArmedFor = id;
+		}, SHORTCUT_ARM_DELAY_MS);
+		return () => clearTimeout(timer);
+	});
+
+	function handleKeyup() {
+		keyupSeenFor = request.request_id;
+	}
+
 	function isTextEntry(target: HTMLElement): boolean {
 		if (target.isContentEditable || target.closest('textarea, select, [contenteditable="true"], [role="textbox"]')) return true;
 		return target instanceof HTMLInputElement && !['checkbox', 'radio', 'button', 'submit', 'reset'].includes(target.type);
@@ -211,14 +240,26 @@
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
-		if (e.defaultPrevented || e.isComposing || ownsKey(e.target, e.key)) return;
-		if (e.key === 'Enter' && !e.shiftKey) {
-			e.preventDefault();
-			handleAllow();
-		} else if (e.key === 'Escape') {
-			e.preventDefault();
-			handleDeny();
+		if (e.defaultPrevented || e.isComposing) return;
+		const isEnter = e.key === 'Enter' && !e.shiftKey;
+		if (!isEnter && e.key !== 'Escape') return;
+		if (e.target instanceof HTMLElement && isTextEntry(e.target)) return;
+
+		const id = request.request_id;
+		const fresh = !e.repeat && keyupSeenFor === id;
+		const armed = fresh && (!isEnter || timeArmedFor === id);
+		if (!armed) {
+			// A native Enter activation of this prompt's own buttons (e.g. a
+			// focused Approve after a click, then a held Enter) is held back too.
+			if (isEnter && e.target instanceof Node && panelEl?.contains(e.target)) e.preventDefault();
+			return;
 		}
+		if (ownsKey(e.target, e.key)) return;
+		e.preventDefault();
+		// One press, one answer: the next shortcut needs a new keyup.
+		keyupSeenFor = null;
+		if (isEnter) handleAllow();
+		else handleDeny();
 	}
 
 	const config = $derived(getToolConfig(request.tool_name));
@@ -247,11 +288,12 @@
 
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onkeyup={handleKeyup} />
 
 
 <!-- Permission Request Panel -->
 <div
+	bind:this={panelEl}
 	class="card-system permission-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-xs"
 	style="
 		border-color: var(--border);

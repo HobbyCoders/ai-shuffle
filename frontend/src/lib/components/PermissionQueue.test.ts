@@ -16,12 +16,14 @@ async function settle() {
 }
 
 afterEach(() => {
+	vi.useRealTimers();
 	cleanup();
 	document.body.innerHTML = '';
 });
 
 describe('PermissionQueue focus handling', () => {
 	it('focuses the prompt on arrival and restores focus to the composer when the queue empties', async () => {
+		vi.useFakeTimers();
 		const composer = document.createElement('textarea');
 		document.body.appendChild(composer);
 		composer.focus();
@@ -29,14 +31,98 @@ describe('PermissionQueue focus handling', () => {
 		const onRespond = vi.fn();
 		const view = render(PermissionQueue, { props: { requests: [request], onRespond } });
 		await settle();
-		expect(document.activeElement).toBe(screen.getByRole('dialog', { name: /Bash|Permission/ }));
+		const panel = screen.getByRole('dialog', { name: /Bash|Permission/ });
+		expect(document.activeElement).toBe(panel);
 
-		// With focus on the prompt, the advertised Enter shortcut approves.
-		await fireEvent.keyDown(document.activeElement!, { key: 'Enter' });
+		// The Enter the user was typing into the composer lands on the prompt a
+		// moment later; it must not approve a request they have not read.
+		await fireEvent.keyUp(panel, { key: 'o' });
+		await fireEvent.keyDown(panel, { key: 'Enter' });
+		expect(onRespond).not.toHaveBeenCalled();
+
+		// Once the prompt has been visible long enough, a fresh Enter approves.
+		vi.advanceTimersByTime(500);
+		await fireEvent.keyUp(panel, { key: 'Enter' });
+		await fireEvent.keyDown(panel, { key: 'Enter' });
 		expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ request_id: 'req-1', decision: 'allow' }));
 
 		await view.rerender({ requests: [], onRespond });
 		await settle();
 		expect(document.activeElement).toBe(composer);
+	});
+});
+
+describe('PermissionQueue keyboard shortcuts across queued requests', () => {
+	const req1 = { request_id: 'req-1', tool_name: 'Bash', tool_input: { command: 'ls' } };
+	const req2 = { request_id: 'req-2', tool_name: 'Bash', tool_input: { command: 'rm -rf build' } };
+
+	/** Render the queue and drop the head each time it is answered, as the chat store does. */
+	async function renderQueue() {
+		const onRespond = vi.fn();
+		let requests = [req1, req2];
+		const view = render(PermissionQueue, { props: { requests, onRespond } });
+		onRespond.mockImplementation(({ request_id }: { request_id: string }) => {
+			requests = requests.filter((r) => r.request_id !== request_id);
+			void view.rerender({ requests, onRespond });
+		});
+		await settle();
+		return onRespond;
+	}
+
+	it('a held Enter approves at most the first request, never the one that replaces it', async () => {
+		vi.useFakeTimers();
+		const onRespond = await renderQueue();
+		const panel = () => screen.getByRole('dialog', { name: /Bash|Permission/ });
+
+		vi.advanceTimersByTime(500);
+		await fireEvent.keyUp(panel(), { key: 'Shift' });
+		await fireEvent.keyDown(panel(), { key: 'Enter' });
+		await settle();
+		expect(onRespond.mock.calls.map(([r]) => r.request_id)).toEqual(['req-1']);
+		expect(screen.getByText(/rm -rf build/)).toBeTruthy();
+
+		// The key stays down: auto-repeat keeps firing for well past the window.
+		for (let i = 0; i < 30; i++) {
+			await fireEvent.keyDown(panel(), { key: 'Enter', repeat: true });
+			vi.advanceTimersByTime(50);
+		}
+		expect(onRespond).toHaveBeenCalledTimes(1);
+	});
+
+	it('two queued requests need two presses, a keyup between them, and the window re-armed for the second', async () => {
+		vi.useFakeTimers();
+		const onRespond = await renderQueue();
+		const panel = () => screen.getByRole('dialog', { name: /Bash|Permission/ });
+
+		vi.advanceTimersByTime(500);
+		await fireEvent.keyUp(panel(), { key: 'Shift' });
+		await fireEvent.keyDown(panel(), { key: 'Enter' });
+		await settle();
+		expect(onRespond).toHaveBeenCalledTimes(1);
+
+		// Released and pressed again straight away: req-2 has only just appeared.
+		await fireEvent.keyUp(panel(), { key: 'Enter' });
+		vi.advanceTimersByTime(200);
+		await fireEvent.keyDown(panel(), { key: 'Enter' });
+		expect(onRespond).toHaveBeenCalledTimes(1);
+
+		// After req-2's own window and a fresh keyup, Enter approves it.
+		vi.advanceTimersByTime(300);
+		await fireEvent.keyUp(panel(), { key: 'Enter' });
+		await fireEvent.keyDown(panel(), { key: 'Enter' });
+		expect(onRespond.mock.calls.map(([r]) => [r.request_id, r.decision])).toEqual([
+			['req-1', 'allow'],
+			['req-2', 'allow']
+		]);
+	});
+
+	it('Escape after a keyup denies the current request', async () => {
+		vi.useFakeTimers();
+		const onRespond = await renderQueue();
+		const panel = screen.getByRole('dialog', { name: /Bash|Permission/ });
+
+		await fireEvent.keyUp(panel, { key: 'Shift' });
+		await fireEvent.keyDown(panel, { key: 'Escape' });
+		expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ request_id: 'req-1', decision: 'deny' }));
 	});
 });
