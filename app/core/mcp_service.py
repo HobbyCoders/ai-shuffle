@@ -16,7 +16,7 @@ import json
 import logging
 import threading
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 from enum import Enum
 
@@ -161,21 +161,6 @@ class McpServerConfig:
             enabled=True,  # Enabled by default if in config
             description=data.get("description"),
         )
-
-
-@dataclass
-class McpConfig:
-    """Full MCP configuration from a file"""
-    servers: Dict[str, McpServerConfig] = field(default_factory=dict)
-
-    def to_mcp_json(self) -> Dict[str, Any]:
-        """Convert to .mcp.json format"""
-        return {
-            "mcpServers": {
-                name: server.to_mcp_json_format()
-                for name, server in self.servers.items()
-            }
-        }
 
 
 def _get_claude_dir() -> Path:
@@ -771,11 +756,6 @@ class McpService:
         """
         return self.get_builtin_servers() + list(self.get_servers_for_scope(McpScope.USER))
 
-    def get_server_count(self) -> int:
-        """Get total count of MCP servers across all scopes"""
-        all_servers = self.get_all_servers()
-        return sum(len(servers) for servers in all_servers.values())
-
     def validate_server_config(self, config: McpServerConfig) -> List[str]:
         """
         Validate an MCP server configuration.
@@ -821,13 +801,6 @@ def get_mcp_service(project_dir: Optional[Path] = None) -> McpService:
         if cache_key not in _mcp_services:
             _mcp_services[cache_key] = McpService(project_dir=project_dir)
         return _mcp_services[cache_key]
-
-
-def clear_mcp_service_cache():
-    """Clear the MCP service cache (useful for testing)"""
-    global _mcp_services
-    with _mcp_services_lock:
-        _mcp_services = {}
 
 
 from app.core.resource_sync import install_service_mutations as _install_resource_sync

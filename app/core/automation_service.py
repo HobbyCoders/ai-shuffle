@@ -2,7 +2,6 @@
 Automation service — business logic for CRUD, budget checking, and prompt rendering.
 """
 
-import hashlib
 import logging
 import re
 import secrets
@@ -11,11 +10,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.core import encryption
 from app.core.config import settings
 from app.core.models import VALID_AUTOMATION_TRIGGER_TYPES
-from app.core.project_links import (  # noqa: F401 — re-exported for existing callers/tests
-    _link_group_siblings,
-    _local_candidate,
-    resolve_runnable_local_project,
-)
 from app.db import database
 from app.db.async_database import run_sync
 
@@ -105,10 +99,10 @@ def check_budget(automation: Dict[str, Any]) -> Tuple[bool, str]:
 # onto whatever clone THIS install has. The cross-install election helpers
 # (``_local_candidate`` / ``_link_group_siblings``, plus
 # ``resolve_runnable_local_project`` for the worktree-recreate rebind) live in
-# ``app/core/project_links.py`` and are re-imported above. NOTE: these serve
-# distributed runner election / worktree recreation, NOT cwd/adopt resolution
-# (which the origin resolver now owns) — that is why they survived PR-B's ladder
-# deletion (``resolve_local_project`` did not).
+# ``app/core/project_links.py``. NOTE: these serve distributed runner election
+# / worktree recreation, NOT cwd/adopt resolution (which the origin resolver
+# now owns) — that is why they survived PR-B's ladder deletion
+# (``resolve_local_project`` did not).
 # ---------------------------------------------------------------------------
 
 def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:

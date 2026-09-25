@@ -22,8 +22,6 @@ from app.db import mobile_hub as store
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HUB = 'https://hobbycoders.com'
-
 # Username rules mirror the hub's PATCH .../account validation.
 USERNAME_PATTERN = re.compile(r'^[a-z0-9][a-z0-9_.-]{2,63}$')
 USERNAME_HINT = 'Use 3–64 letters, numbers, underscores, periods or hyphens, starting with a letter or number.'
@@ -120,15 +118,6 @@ def _verdict_age(key):
     with _VERDICT_LOCK:
         confirmed_at = _verdicts.get(key)
     return None if confirmed_at is None else time.monotonic() - confirmed_at
-
-
-def _record_verdict(key):
-    with _VERDICT_LOCK:
-        _verdicts[key] = time.monotonic()
-        if len(_verdicts) > _VERDICT_CAP:
-            oldest = sorted(_verdicts.items(), key=lambda item: item[1])
-            for stale, _ in oldest[:len(_verdicts) - _VERDICT_CAP]:
-                _verdicts.pop(stale, None)
 
 
 def _forget_verdict(key):
@@ -286,10 +275,6 @@ def _parse_retry_after(value):
     if seconds != seconds or seconds < 0:
         return None
     return min(seconds, _MAX_RETRY_AFTER)
-
-
-def reset_pause():
-    _paused_until.clear()
 
 
 def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384, timeout=None):

@@ -1017,7 +1017,8 @@ def build_options_from_profile(
     # passes --disallowed-tools), so ``agents_dict`` is permanently None.
     #
     # ``enabled_agents``/``agent_invoke_mode`` are now a CONTEXT-DECLARATION
-    # concern (2026-08-17 ruling, superseding A10) — see app.core.agent_context.
+    # concern (2026-08-17 ruling, superseding A10) — see
+    # app.core.agent_provider_models.available_subagents.
     # The resolved name+description list is stamped onto the options object as
     # ``aih_declared_agents`` further down and projected by the fluid
     # HarnessAdapter onto the compiled prompt's agents index. Dispatch itself is

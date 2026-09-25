@@ -50,14 +50,12 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from typing import Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
 _TOOLS: Optional[List[str]] = None
-_SEEN_AT: float = 0.0
 
 
 def record_cli_tools(names: Optional[Iterable[str]]) -> None:
@@ -66,14 +64,13 @@ def record_cli_tools(names: Optional[Iterable[str]]) -> None:
     Ignores empty/None input: a frame without a tool list tells us nothing, and
     blanking a good cache would silently turn the surface wall back off.
     """
-    global _TOOLS, _SEEN_AT
+    global _TOOLS
     cleaned = [str(n).strip() for n in (names or ()) if str(n).strip()]
     if not cleaned:
         return
     with _LOCK:
         changed = cleaned != _TOOLS
         _TOOLS = cleaned
-        _SEEN_AT = time.time()
     if changed:
         logger.debug("recorded claude CLI tool surface: %d tool(s)", len(cleaned))
 
@@ -84,15 +81,8 @@ def cached_cli_tools() -> Optional[List[str]]:
         return list(_TOOLS) if _TOOLS else None
 
 
-def cli_tools_seen_at() -> Optional[float]:
-    """Unix time of the last observation, or None."""
-    with _LOCK:
-        return _SEEN_AT or None
-
-
 def reset_cli_tools() -> None:
     """Forget the cached surface (tests)."""
-    global _TOOLS, _SEEN_AT
+    global _TOOLS
     with _LOCK:
         _TOOLS = None
-        _SEEN_AT = 0.0

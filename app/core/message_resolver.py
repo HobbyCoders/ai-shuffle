@@ -25,9 +25,6 @@ logger = logging.getLogger(__name__)
 # Canonical message fields — the output contract of the resolver
 # =============================================================================
 
-# These are always present on every resolved message
-_CORE_FIELDS = ("id", "role", "type", "content", "streaming")
-
 # These are conditionally present (only included if truthy)
 _OPTIONAL_FIELDS = (
     "subtype", "systemSubtype", "systemData",

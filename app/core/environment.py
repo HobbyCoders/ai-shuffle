@@ -383,13 +383,10 @@ def inject_claude_code_auth(
     return env
 
 
-# NOTE (retired): ``apply_context_window_env`` used to force
-# ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` on every NATIVE spawn, derived from the
-# app's ``[1m]`` model-id suffix. The suffix mechanism is gone — current Claude
-# slugs run the 1M window natively — so native legs with no explicit user choice
-# set NO context-window env and inherit the CLI's own per-model defaults. The
-# composer can now send an explicit per-session window; that path uses the
-# helper below and is deliberately authoritative over profile/provider defaults.
+# Native legs with no explicit user choice set NO context-window env and
+# inherit the CLI's own per-model defaults. An explicit per-session window from
+# the composer uses the helper below and is deliberately authoritative over
+# profile/provider defaults.
 
 
 def apply_context_window_override(env: Dict[str, str], context_window: int) -> None:
@@ -972,7 +969,6 @@ def _in_container() -> bool:
 
 def generate_environment_details(
     working_dir: str,
-    ai_tools_config: Optional[Dict[str, Any]] = None,
     execution_mode: str = "local",
     worktree_info: Optional[Dict[str, str]] = None,
     include_volatile: bool = True,
@@ -984,8 +980,6 @@ def generate_environment_details(
 
     Args:
         working_dir: The working directory path
-        ai_tools_config: Deprecated, ignored. AI tools are registered as native MCP tools
-            with their own descriptions — no system prompt injection needed.
         execution_mode: Either "local" or "worktree"
         worktree_info: Dict with branch and base_branch info when in worktree mode
         include_volatile: Whether to render the facts that change WITHIN a

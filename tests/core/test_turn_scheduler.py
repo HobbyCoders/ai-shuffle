@@ -49,6 +49,13 @@ def mock_db(test_db):
 
 
 @pytest.fixture(autouse=True)
+def _short_terminal_batch_window(monkeypatch):
+    """The real 2s terminal-batch window made every on_task_terminal test wait
+    it out; keep a short (non-zero, so batching still happens) window."""
+    monkeypatch.setattr(turn_scheduler, "TERMINAL_BATCH_WINDOW_SECONDS", 0.1)
+
+
+@pytest.fixture(autouse=True)
 def _clean_module_state():
     from app.core import provider_agent_supervisor
     provider_agent_supervisor.reset()
@@ -427,80 +434,36 @@ async def test_aborted_empty_queue_no_spurious_turn(mock_db):
 
 
 # ---------------------------------------------------------------------------
-# (1) FAILOVER — order, attempts accumulation, cap, no re-append
+# (1) FAILOVER — rate-limited state only, no retry, drain still runs
 # ---------------------------------------------------------------------------
 
-async def test_failover_runs_before_queue_drain(mock_db):
-    # A 429 settlement with a non-empty queue must STILL enqueue the failover
-    # retry — if drain ran first it would return before the failover check —
-    # AND the retry must sort AHEAD of the previously-queued user turn (the
-    # retry continues the settled turn; it is not preempted by work a user
-    # queued during the failed turn).
+async def test_failover_surfaces_then_queue_drains(mock_db):
+    # A 429 settlement goes through attempt_failover (the rate-limited
+    # notification) but enqueues no retry (OC-1), so the queued user turn is
+    # the one the drain starts.
     settled = _settled_turn(
         "f1", prompt="retry me", api_error_status=429,
         payload={"api_user_id": "u1"},
-        profile_id="p1", project_id="proj-1", worktree_id="wt-1",
     )
     queued = turns_db.enqueue_turn("f1", "queue", prompt="queued behind")
 
-    async def fake_failover(session_id, api_user_id, attempted):
-        assert session_id == "f1"
-        assert api_user_id == "u1"
-        assert attempted == set()
-        attempted.update({"acc-1", "acc-2"})  # mutated like the real one
-        return FailoverDecision(retry=True, account_id="acc-2", switched=True)
-
     with ExitStack() as stack:
         execute = stack.enter_context(_patch_execute())
-        stack.enter_context(patch(
-            "app.core.account_failover.attempt_failover", new=fake_failover,
+        attempt = stack.enter_context(patch(
+            "app.core.account_failover.attempt_failover",
+            new=AsyncMock(return_value=FailoverDecision(retry=False)),
         ))
         await turn_scheduler.on_turn_settled("f1", settled["id"], "completed")
         await _drain_kicks()
 
-    retries = _by_source("f1", "failover")
-    assert len(retries) == 1
-    retry = retries[0]
-    assert retry["prompt"] == "retry me"
-    assert retry["parent_turn_id"] == settled["id"]
-    assert retry["payload"]["failover_attempted"] == ["acc-1", "acc-2"]
-    assert retry["payload"]["api_user_id"] == "u1"
-    assert retry["profile_id"] == "p1"
-    assert retry["project_id"] == "proj-1"
-    assert retry["worktree_id"] == "wt-1"
-    # Front-of-queue: the retry sorts strictly before the user turn queued
-    # during the failed turn, so the kick STARTS the retry, not that turn.
-    assert retry["position"] < queued["position"]
+    attempt.assert_awaited_once_with("f1", "u1", set())
+    assert _by_source("f1", "failover") == []
     execute.assert_awaited_once()
-    assert execute.await_args.args[0]["id"] == retry["id"]
+    assert execute.await_args.args[0]["id"] == queued["id"]
 
-    # No re-append: the retry adds NO message.user / no new events — the log
-    # still holds only the seeded terminal event.
+    # No re-append: the log still holds only the seeded terminal event.
     types = [r["event_type"] for r in se_db.get_events("f1")]
     assert types == ["turn.completed"]
-
-
-async def test_failover_attempts_accumulate_across_retries(mock_db):
-    settled = _settled_turn(
-        "f2", source="failover", prompt="retry me", api_error_status=429,
-        payload={"failover_attempted": ["acc-1"], "api_user_id": "u2"},
-    )
-
-    async def fake_failover(session_id, api_user_id, attempted):
-        assert attempted == {"acc-1"}  # prior attempts derived from payload
-        attempted.add("acc-2")
-        return FailoverDecision(retry=True, account_id="acc-2", switched=True)
-
-    with ExitStack() as stack:
-        stack.enter_context(_patch_execute())
-        stack.enter_context(patch(
-            "app.core.account_failover.attempt_failover", new=fake_failover,
-        ))
-        await turn_scheduler.on_turn_settled("f2", settled["id"], "completed")
-        await _drain_kicks()
-
-    (retry,) = _by_source("f2", "failover")
-    assert retry["payload"]["failover_attempted"] == ["acc-1", "acc-2"]
 
 
 async def test_failover_cap_exhausted_no_retry(mock_db):

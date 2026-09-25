@@ -9,10 +9,10 @@ auto-continue latch, the per-turn ``failover_attempted`` set, the
 in this order on every settlement:
 
 1. **FAILOVER** — a settled-``completed`` turn whose terminal ``turn.completed``
-   event carries a usage-limit ``api_error_status`` (429) enqueues a
-   ``source=failover`` retry of the same prompt with ``parent_turn_id`` set and
-   the accumulated attempted-account ids in ``payload.failover_attempted``,
-   then kicks. The scheduler appends NO ``message.user`` and persists NO
+   event carries a usage-limit ``api_error_status`` (429) surfaces the
+   rate-limited state through ``account_failover.attempt_failover``. Account
+   rotation is retired (OC-1), so no retry is enqueued and the remaining
+   policies run. The scheduler appends NO ``message.user`` and persists NO
    session message — user-visible message rows exist only for
    ``source in (user, queue)`` turns (enforced where messages are recorded),
    so the seed dedup stays deterministic.
@@ -390,11 +390,9 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
     # ``turn.completed`` payload to trip them.
     terminal = await asyncio.to_thread(_turn_terminal_payload, session_id, turn_id)
 
-    # (1) FAILOVER — stays FIRST: if it enqueued a retry the drain must NOT also
-    # fire (structural precedence guard; with OC-1 retired failover never fires
-    # on a non-completed outcome, but the order is preserved).
-    if await _maybe_failover(session_id, settled, terminal):
-        return
+    # (1) FAILOVER — surfaces the rate-limited state only; account rotation is
+    # retired (OC-1), so it never enqueues a retry and the drain below runs.
+    await _maybe_failover(session_id, settled, terminal)
 
     # (1b) WAKE RECOVERY — a source=unpark turn that died on a provider error
     # before making a single model call. Same precedence rule as failover: the
@@ -429,18 +427,16 @@ async def _maybe_failover(
     session_id: str,
     settled: Dict[str, Any],
     terminal: Dict[str, Any],
-) -> bool:
-    """Policy (1): usage-limit fail + not user-stopped → enqueue a
-    ``source=failover`` retry. Returns True when a retry was enqueued.
+) -> None:
+    """Policy (1): usage-limit fail + not user-stopped → surface the
+    rate-limited state via ``attempt_failover``. Account rotation is retired
+    (OC-1): ``attempt_failover`` always returns ``retry=False``, so no
+    ``source=failover`` retry is enqueued.
 
     "Not user-stopped" holds by construction: the usage-limit signal lives in a
     settled turn's terminal ``turn.completed`` payload, which a user stop
     (``aborted``) / park never carries — so ``is_usage_limit_error`` is False on
-    every non-completed settlement and this returns early. The attempted-account
-    set rides ``payload.failover_attempted`` across the retry chain, so
-    rotation terminates once every account has 429'd (``retry=False`` → fall
-    through to the remaining policies). No message append here — retries are
-    invisible to the message record (source-typed persistence).
+    every non-completed settlement and this returns early.
     """
     from app.core import account_failover
     from app.core.task_registry import task_registry
@@ -450,49 +446,21 @@ async def _maybe_failover(
         # ``aborted`` so the terminal payload never qualifies here, but a
         # turn that completed in the instant Stop landed must not respawn
         # the session either (2026-09-05 audit, Stop semantics).
-        return False
+        return
 
     if not account_failover.is_usage_limit_error(terminal):
-        return False
+        return
 
-    payload = dict(settled.get("payload") or {})
-    # attempt_failover MUTATES this set (adds the exhausted current account and
-    # the chosen target) — persist the union on the retry turn.
+    payload = settled.get("payload") or {}
     attempted: Set[str] = set(payload.get(FAILOVER_ATTEMPTED_KEY) or [])
-    decision = await account_failover.attempt_failover(
+    await account_failover.attempt_failover(
         session_id, payload.get("api_user_id"), attempted,
     )
-    if not decision.retry:
-        logger.info(
-            "turn_scheduler: failover exhausted for %s turn %s "
-            "(attempted=%s) — no retry",
-            session_id, settled.get("id"), sorted(attempted),
-        )
-        return False
-
-    payload[FAILOVER_ATTEMPTED_KEY] = sorted(attempted)
-    retry = await asyncio.to_thread(
-        _enqueue,
-        session_id,
-        "failover",
-        prompt=settled.get("prompt"),
-        profile_id=settled.get("profile_id"),
-        project_id=settled.get("project_id"),
-        worktree_id=settled.get("worktree_id"),
-        overrides=settled.get("overrides") or None,
-        payload=payload,
-        parent_turn_id=settled.get("id"),
-        # The retry continues the settled turn — it must run BEFORE any turn a
-        # user queued during the failed turn, not behind it (front of queue).
-        at_front=True,
-    )
     logger.info(
-        "turn_scheduler: usage-limit failover for %s — retry turn %s on "
-        "account %s (switched=%s)",
-        session_id, retry["id"], decision.account_id, decision.switched,
+        "turn_scheduler: usage limit for %s turn %s — no retry "
+        "(account failover retired)",
+        session_id, settled.get("id"),
     )
-    kick(session_id)
-    return True
 
 
 # ---------------------------------------------------------------------------

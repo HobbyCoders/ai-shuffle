@@ -9,13 +9,10 @@ import subprocess
 import json
 import logging
 import re
-import threading
-import time
-from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
-from app.core.ttl_cache import CACHE_MISS, TTLCache, _CacheEntry  # noqa: F401  (re-exported)
+from app.core.ttl_cache import CACHE_MISS, TTLCache  # noqa: F401  (re-exported)
 
 logger = logging.getLogger(__name__)
 

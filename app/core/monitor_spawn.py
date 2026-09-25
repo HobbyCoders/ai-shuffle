@@ -611,7 +611,6 @@ def settle_monitor_task(
     session_id: Optional[str],
     task_id: str,
     serves: bool,
-    ran_seconds: Optional[float] = None,
 ) -> Tuple[str, str]:
     """``(status, summary)`` for a Monitor shell that has come to rest.
 
@@ -624,7 +623,7 @@ def settle_monitor_task(
 
     Only recorded stop attribution establishes intent. Missing observations
     are unknown, signals alone are failures, and elapsed runtime does not
-    establish service health. ``ran_seconds`` is retained for caller compatibility.
+    establish service health.
     """
     recorded, reason, recorded_summary = _recorded_status(session_id, task_id)
     deliberate = recorded in _DELIBERATE_STATUSES and bool(reason)
@@ -1125,7 +1124,6 @@ def make_fluid_monitor_spawner(
                     session_id=caller_session_id,
                     task_id=task.task_id,
                     serves=serves,
-                    ran_seconds=time.monotonic() - started,
                 )
                 # One event, one status: the row is written from the settle and
                 # re-read, so the notification below cannot say "completed"

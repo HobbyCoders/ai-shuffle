@@ -15,12 +15,10 @@ from typing import Any, Callable, Dict, Optional
 import bcrypt
 
 from app.db import database
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Import server instance ID from auth API for consistent logging
-# Will be set by auth.py module initialization
+# Written by app/api/auth.py at import; nothing in this module reads it.
 _SERVER_INSTANCE_ID = "unknown"
 
 
@@ -28,27 +26,6 @@ def set_server_instance_id(instance_id: str):
     """Set the server instance ID for diagnostic logging"""
     global _SERVER_INSTANCE_ID
     _SERVER_INSTANCE_ID = instance_id
-
-
-def find_claude_executable() -> Optional[str]:
-    """Find the claude executable, handling Windows/npm installations"""
-    # First try shutil.which (works for PATH)
-    claude_path = shutil.which('claude')
-    if claude_path:
-        return claude_path
-
-    # On Windows, check common npm installation paths
-    if sys.platform == 'win32':
-        possible_paths = [
-            Path(os.environ.get('APPDATA', '')) / 'npm' / 'claude.cmd',
-            Path(os.environ.get('APPDATA', '')) / 'npm' / 'claude',
-            Path.home() / 'AppData' / 'Roaming' / 'npm' / 'claude.cmd',
-        ]
-        for p in possible_paths:
-            if p.exists():
-                return str(p)
-
-    return None
 
 
 def find_gh_executable() -> Optional[str]:
@@ -70,27 +47,6 @@ def find_gh_executable() -> Optional[str]:
                 return str(p)
 
     return None
-
-
-def run_subprocess_cmd(cmd: list, **kwargs) -> subprocess.CompletedProcess:
-    """
-    Run a subprocess command with proper Windows handling.
-
-    Security Note: This function should only be called with system-generated
-    commands (paths from shutil.which, known CLI arguments). Never pass
-    user-controlled input directly to this function.
-    """
-    # Security: Validate that command arguments don't contain shell metacharacters
-    # This is a defense-in-depth measure - callers should already sanitize input
-    shell_metacharacters = set(';&|$`\\"\'\n\r')
-    for arg in cmd:
-        if any(c in arg for c in shell_metacharacters):
-            raise ValueError(f"Command argument contains potentially dangerous characters: {arg[:50]}")
-
-    if sys.platform == 'win32' and cmd and cmd[0].endswith('.cmd'):
-        # On Windows, .cmd files need shell=True
-        return subprocess.run(' '.join(f'"{c}"' if ' ' in c else c for c in cmd), shell=True, **kwargs)
-    return subprocess.run(cmd, **kwargs)
 
 
 class AuthService:
@@ -131,14 +87,8 @@ class AuthService:
         from app.core.owner_auth import setup_required
         return setup_required()
 
-    def setup_admin(self, username, password):
-        raise ValueError('Worker passwords are retired; configure the local installation instead.')
-
     def login(self, username, password):
         return None
-
-    def create_session(self):
-        raise ValueError('Password sessions are retired.')
 
     def validate_session(self, token: str) -> bool:
         if not token or not token.startswith('shr_'):
@@ -175,21 +125,6 @@ class AuthService:
         """
         from app.core import claude_cli_status
         return claude_cli_status.is_signed_in_cached()
-
-    def validate_claude_credentials(self) -> Dict[str, Any]:
-        """Ask the CLI again, bypassing the cache."""
-        from app.core import claude_cli_status
-        status = claude_cli_status.get_status(force=True)
-        result: Dict[str, Any] = {
-            "valid": bool(status.signed_in),
-            "authenticated": bool(status.signed_in),
-            "version": status.cli_version,
-        }
-        if status.error:
-            result["error"] = status.error
-        elif not status.signed_in:
-            result["error"] = "The Claude Code CLI is not signed in"
-        return result
 
     def get_claude_token_status(self) -> Dict[str, Any]:
         """Token-shaped view of the CLI probe, for callers of the old fields.
@@ -655,7 +590,6 @@ class AuthService:
                 # global one that matches this machine (backward compat).
                 global_path = database.get_system_setting("workspace_path")
                 if global_path:
-                    import os
                     if os.path.exists(global_path):
                         # Legacy path exists on this machine — migrate it to instance-scoped
                         database.set_system_setting(instance_key, global_path)
@@ -679,25 +613,6 @@ class AuthService:
         """Mark the onboarding flow as complete"""
         database.set_system_setting("onboarding_complete", "true")
         logger.info("Onboarding marked as complete")
-
-    # =========================================================================
-    # Combined Status
-    # =========================================================================
-
-    def get_auth_status(self) -> Dict[str, Any]:
-        """Get complete authentication status"""
-        setup_required = self.is_setup_required()
-        claude_auth = self.is_claude_authenticated()
-        github_auth = self.is_github_authenticated()
-
-        return {
-            "setup_required": setup_required,
-            "authenticated": False,  # Set by middleware based on session
-            "claude_authenticated": claude_auth,
-            "github_authenticated": github_auth,
-            "onboarding_complete": self.is_onboarding_complete(),
-            "username": self.get_admin_username() if not setup_required else None
-        }
 
 
 # Global auth service instance

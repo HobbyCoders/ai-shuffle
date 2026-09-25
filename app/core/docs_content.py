@@ -7,7 +7,7 @@ and builds an in-memory index for the documentation API.
 
 import re
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 DOCS_DIR = Path(__file__).parent.parent.parent / "docs" / "content"
 

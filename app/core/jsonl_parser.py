@@ -42,16 +42,10 @@ logger = logging.getLogger(__name__)
 # Cache parsed JSONL results to avoid re-reading files on every poll/load.
 # Validated by file mtime + size - if file changes, cache entry is invalidated.
 #
-# Two things about these caches used to be wrong (finding B5):
-#   * entries were stored as JSON STRINGS, so every cache HIT paid a full
-#     ``json.loads`` of the whole transcript — megabytes, per request;
-#   * the only bound was a COUNT of 50 sessions, and a transcript entry is
-#     unbounded in size (inline base64 screenshots, untruncated tool inputs),
-#     so 50 entries could be hundreds of megabytes on a machine that is
-#     supposed to run in a small footprint.
-# Both caches are now :class:`ByteBoundedLRU`: they hold the transformed
-# message list itself (a hit costs one shallow copy, no deserialization) and
-# are bounded by ESTIMATED BYTES as well as by count.
+# Both caches are :class:`ByteBoundedLRU`: they hold the transformed message
+# list itself (a hit costs one shallow copy, no deserialization) and are bounded
+# by ESTIMATED BYTES as well as by count, since a transcript entry is unbounded
+# in size (inline base64 screenshots, untruncated tool inputs).
 _PARSE_CACHE_MAX_SIZE = 50
 
 #: Byte budget per cache namespace. Screenshot-heavy transcripts are what make
@@ -610,40 +604,6 @@ def get_hooks_jsonl_path(sdk_session_id: str, working_dir: str) -> Path:
     project_dir.mkdir(parents=True, exist_ok=True)
 
     return project_dir / f"{sdk_session_id}.hooks.jsonl"
-
-
-def write_hook_message(
-    sdk_session_id: str,
-    working_dir: str,
-    plugin: str,
-    message: str,
-    severity: str
-) -> None:
-    """
-    Append a plugin hook message to the session's main JSONL file.
-
-    This is a wrapper around write_system_message() that writes plugin warnings
-    to the main session JSONL instead of a separate hooks file. This ensures
-    hook messages are part of the chat history and persist with the session.
-
-    Args:
-        sdk_session_id: The Claude SDK session ID
-        working_dir: The working directory for the project
-        plugin: Name of the plugin that generated the message
-        message: The stderr output from the hook
-        severity: Severity level (warning, error, info)
-    """
-    write_system_message(
-        sdk_session_id=sdk_session_id,
-        working_dir=working_dir,
-        subtype="plugin_warning",
-        content=message,
-        data={
-            "plugin": plugin,
-            "message": message,
-            "severity": severity
-        }
-    )
 
 
 def write_system_message(

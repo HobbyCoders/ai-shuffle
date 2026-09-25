@@ -158,11 +158,11 @@ async def test_recorder_preserves_non_http_error(mock_db):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("policy", ["failover", "queue", "auto_continue", "none"])
+@pytest.mark.parametrize("policy", ["queue", "auto_continue", "none"])
 async def test_scheduler_precedence(mock_db, policy):
     from app.core import turn_scheduler as scheduler
     turn = _settled_turn("s")
-    with patch.object(scheduler, "_maybe_failover", AsyncMock(return_value=policy == "failover")), \
+    with patch.object(scheduler, "_maybe_failover", AsyncMock(return_value=None)), \
          patch.object(scheduler, "_maybe_auto_continue", AsyncMock(return_value=policy == "auto_continue")), \
          patch.object(scheduler.turns_db, "pop_ready", return_value={} if policy == "queue" else None), \
          patch.object(scheduler, "kick"), \

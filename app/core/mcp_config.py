@@ -255,7 +255,6 @@ def _build_mcp_servers_dict(
     Returns:
         Dictionary mapping server names to SDK MCP server configs, or None if empty.
     """
-    import json as _json
 
     from app.core.builtin_mcp_servers import BROWSER_SERVER_NAME
 

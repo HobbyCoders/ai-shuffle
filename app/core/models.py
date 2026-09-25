@@ -13,61 +13,12 @@ from app.core.session_modes import normalize_session_mode
 
 
 # ============================================================================
-# Authentication Models
-# ============================================================================
-
-class SetupRequest(BaseModel):
-    """First-run admin setup request"""
-    username: str = Field(..., min_length=3, max_length=50)
-    password: str = Field(..., min_length=8)
-
-
-class LoginRequest(BaseModel):
-    """Login request"""
-    username: str
-    password: str
-
-
-class ChangePasswordRequest(BaseModel):
-    """Admin password change request"""
-    current_password: str
-    new_password: str = Field(..., min_length=8)
-
-
-class AuthStatus(BaseModel):
-    """Authentication status response"""
-    authenticated: bool
-    is_admin: bool = True
-    setup_required: bool
-    claude_authenticated: bool
-    username: Optional[str] = None
-
-
-# ============================================================================
-# Subagent Models
-# ============================================================================
-
-class SubagentDefinition(BaseModel):
-    """Definition for a subagent that can be invoked by the main agent"""
-    description: str = Field(..., min_length=1, description="When to use this agent")
-    prompt: str = Field(..., min_length=1, description="System prompt for the agent")
-    tools: Optional[List[str]] = Field(None, description="Allowed tools (inherits all if not specified)")
-    model: Optional[str] = Field(None, description="Model override: sonnet, opus, haiku, or inherit")
-    skills: Optional[List[str]] = Field(None, description="Skills the agent can use")
-    memory: Optional[str] = Field(None, description="Memory scope: user, project, or local")
-    mcp_servers: Optional[List[Any]] = Field(None, description="MCP servers the agent can access (names or config dicts)")
-
-
-# ============================================================================
 # Profile Models
 # ============================================================================
 
 # AIToolsConfig is dynamically generated from the AI_TOOLS registry
 # This ensures the model always matches available tools - no manual sync needed
 from app.core.ai_tools import AIToolsConfig  # noqa: E402
-
-# Single source of truth for selectable Claude models.
-from app.core.model_registry import DEFAULT_MODEL  # noqa: E402
 
 
 class SystemPromptConfig(BaseModel):
@@ -178,7 +129,8 @@ class ProfileConfig(BaseModel):
     # superseding A10): they ride the compiled prompt's agents index as
     # name+description so the model knows they exist. Never an allowlist —
     # Task dispatch runs any agent that resolves, declared or not. Interpreted
-    # together with ``agent_invoke_mode`` below (see app.core.agent_context).
+    # together with ``agent_invoke_mode`` below (see
+    # app.core.agent_provider_models.available_subagents).
     enabled_agents: Optional[List[str]] = None
 
     # Context-declaration mode — "all" = declare every agent, "custom" =
@@ -356,11 +308,6 @@ class SessionBase(BaseModel):
     profile_id: Optional[str] = None  # Nullable: sessions persist after profile deletion
     project_id: Optional[str] = None
     title: Optional[str] = None
-
-
-class SessionCreate(SessionBase):
-    """Session creation - typically automatic"""
-    pass
 
 
 class SessionTag(BaseModel):
@@ -665,43 +612,6 @@ class QueryResponse(BaseModel):
 
 
 # ============================================================================
-# SSE Event Models
-# ============================================================================
-
-class SSETextEvent(BaseModel):
-    """SSE text content event"""
-    type: str = "text"
-    content: str
-
-
-class SSEToolUseEvent(BaseModel):
-    """SSE tool use event"""
-    type: str = "tool_use"
-    name: str
-    input: Dict[str, Any]
-
-
-class SSEToolResultEvent(BaseModel):
-    """SSE tool result event"""
-    type: str = "tool_result"
-    name: str
-    output: str
-
-
-class SSEDoneEvent(BaseModel):
-    """SSE completion event"""
-    type: str = "done"
-    session_id: str
-    metadata: QueryMetadata
-
-
-class SSEErrorEvent(BaseModel):
-    """SSE error event"""
-    type: str = "error"
-    message: str
-
-
-# ============================================================================
 # System Models
 # ============================================================================
 
@@ -768,12 +678,6 @@ class RewindExecuteResponse(BaseModel):
     checkpoint_index: Optional[int] = None
     restore_option: Optional[int] = None
     error: Optional[str] = None
-
-
-class RewindStatus(BaseModel):
-    """Current rewind status"""
-    has_pending: bool
-    pending_rewind: Optional[Dict[str, Any]] = None
 
 
 # ============================================================================
@@ -949,25 +853,6 @@ class Webhook(WebhookBase):
     failure_count: int = 0
 
 
-class WebhookEventData(BaseModel):
-    """Data payload within a webhook event"""
-    session_id: Optional[str] = None
-    title: Optional[str] = None
-    profile_id: Optional[str] = None
-    total_cost: Optional[float] = None
-    input_tokens: Optional[int] = None
-    output_tokens: Optional[int] = None
-    duration_seconds: Optional[float] = None
-    error_message: Optional[str] = None
-
-
-class WebhookEvent(BaseModel):
-    """Webhook event payload structure"""
-    event: str  # Event type: session.complete, session.error, etc.
-    timestamp: str  # ISO format timestamp
-    data: WebhookEventData
-
-
 class WebhookTestResponse(BaseModel):
     """Response from testing a webhook"""
     success: bool
@@ -1085,12 +970,6 @@ class GenerationResponseModel(BaseModel):
     generation_type: Optional[str] = Field(None, description="'profile' or 'subagent'")
 
 
-class ClarificationAnswersModel(BaseModel):
-    """User's answers to clarification questions"""
-    description: str = Field(..., min_length=10, max_length=2000, description="Original description")
-    answers: Dict[str, str] = Field(..., description="Map of question_id -> user's answer")
-
-
 class AuditLogEntry(BaseModel):
     """A single audit log entry"""
     id: str
@@ -1109,75 +988,6 @@ class AuditLogResponse(BaseModel):
     total: int
     limit: int
     offset: int
-
-
-# ============================================================================
-# Rate Limit Models
-# ============================================================================
-
-class RateLimitConfigBase(BaseModel):
-    """Base rate limit configuration fields"""
-    requests_per_minute: int = 20
-    requests_per_hour: int = 200
-    requests_per_day: int = 1000
-    concurrent_requests: int = 3
-    priority: int = 0
-    is_unlimited: bool = False
-
-
-class RateLimitConfigCreate(RateLimitConfigBase):
-    """Create a rate limit configuration"""
-    user_id: Optional[str] = None
-    api_key_id: Optional[str] = None
-
-
-class RateLimitConfigUpdate(BaseModel):
-    """Update a rate limit configuration"""
-    requests_per_minute: Optional[int] = None
-    requests_per_hour: Optional[int] = None
-    requests_per_day: Optional[int] = None
-    concurrent_requests: Optional[int] = None
-    priority: Optional[int] = None
-    is_unlimited: Optional[bool] = None
-
-
-class RateLimitConfig(RateLimitConfigBase):
-    """Full rate limit configuration response"""
-    id: str
-    user_id: Optional[str] = None
-    api_key_id: Optional[str] = None
-    created_at: datetime
-    updated_at: datetime
-
-
-class RateLimitStatus(BaseModel):
-    """Current rate limit status for a user"""
-    minute_count: int = 0
-    minute_limit: int = 20
-    minute_remaining: int = 20
-    minute_reset: datetime
-    hour_count: int = 0
-    hour_limit: int = 200
-    hour_remaining: int = 200
-    hour_reset: datetime
-    day_count: int = 0
-    day_limit: int = 1000
-    day_remaining: int = 1000
-    day_reset: datetime
-    concurrent_count: int = 0
-    concurrent_limit: int = 3
-    concurrent_remaining: int = 3
-    is_limited: bool = False
-    is_unlimited: bool = False
-    priority: int = 0
-
-
-class QueueStatus(BaseModel):
-    """Queue position and wait time"""
-    position: int = 0
-    estimated_wait_seconds: int = 0
-    total_queued: int = 0
-    is_queued: bool = False
 
 
 # ============================================================================
@@ -1378,14 +1188,6 @@ class MobileDevice(BaseModel):
     last_seen: Optional[datetime] = None
 
 
-class PendingActionStatus(BaseModel):
-    """Status values for pending actions"""
-    PENDING: str = "pending"
-    APPROVED: str = "approved"
-    REJECTED: str = "rejected"
-    EXPIRED: str = "expired"
-
-
 class PendingAction(BaseModel):
     """A pending action waiting for mobile confirmation"""
     id: str
@@ -1419,15 +1221,6 @@ class UnifiedPushEndpointRequest(BaseModel):
     """
     device_id: str
     endpoint: str = Field(..., min_length=1)
-
-
-class TrustedAction(BaseModel):
-    """A trusted action pattern for auto-approval"""
-    id: str
-    device_id: str
-    action_pattern: str
-    auto_approve: bool = True
-    require_preview: bool = False
 
 
 # ============================================================================
@@ -1519,36 +1312,6 @@ VALID_CONNECTOR_EVENTS = [
 ]
 
 
-class ConnectorConfigTelegram(BaseModel):
-    """Telegram-specific connector config"""
-    bot_token: str = Field(..., min_length=1)
-    allowed_chat_ids: Optional[List[str]] = None
-    welcome_message: Optional[str] = None
-
-
-class ConnectorConfigDiscord(BaseModel):
-    """Discord-specific connector config"""
-    bot_token: str = Field(..., min_length=1)
-    guild_ids: Optional[List[str]] = None
-    allowed_channel_ids: Optional[List[str]] = None
-    command_prefix: str = "!"
-
-
-class ConnectorConfigWhatsApp(BaseModel):
-    """WhatsApp Cloud API connector config"""
-    phone_number_id: str = Field(..., min_length=1)
-    access_token: str = Field(..., min_length=1)
-    verify_token: str = Field(..., min_length=1)
-    allowed_phone_numbers: Optional[List[str]] = None
-
-
-class ConnectorConfigWebhook(BaseModel):
-    """Generic webhook connector config (replaces old webhook system)"""
-    url: str = Field(..., min_length=1)
-    secret: Optional[str] = None
-    headers: Optional[Dict[str, str]] = None
-
-
 class ConnectorBase(BaseModel):
     """Base connector fields for creation/update"""
     name: str = Field(..., min_length=1, max_length=100)
@@ -1630,30 +1393,6 @@ class ConnectorEventLog(BaseModel):
     created_at: datetime
 
 
-class ConnectorTriggerInfo(BaseModel):
-    """Trigger definition from a connector type."""
-    id: str
-    name: str
-    description: str
-    payload_schema: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ConnectorActionInfo(BaseModel):
-    """Action definition from a connector type."""
-    id: str
-    name: str
-    description: str
-    input_schema: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ConnectorToolInfo(BaseModel):
-    """AI tool definition from a connector type."""
-    id: str
-    name: str
-    description: str
-    input_schema: Dict[str, Any] = Field(default_factory=dict)
-
-
 # ============================================================================
 # Automation Models
 # ============================================================================
@@ -1664,13 +1403,6 @@ class AutomationTriggerType(str, Enum):
     CONNECTOR_EVENT = "connector_event"
     WEBHOOK = "webhook"
     CONNECTOR_TRIGGER = "connector_trigger"
-
-
-class AutomationOutputType(str, Enum):
-    CONNECTOR = "connector"
-    WEBHOOK = "webhook"
-    SESSION = "session"
-    NONE = "none"
 
 
 VALID_AUTOMATION_TRIGGER_TYPES = [t.value for t in AutomationTriggerType]

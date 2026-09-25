@@ -20,22 +20,19 @@ import os
 import subprocess
 from typing import List, Dict, Any, Optional, Tuple
 
-# Re-export cache class, TTL constants, and native reader for backward compatibility
-from app.core.git_cache import (  # noqa: F401
-    _GitResultCache,
+# Cache primitives used below
+from app.core.git_cache import (
     _git_cache,
     _native_reader,
     STATUS_CACHE_TTL as _STATUS_CACHE_TTL,
-    DIFF_STATS_CACHE_TTL as _DIFF_STATS_CACHE_TTL,
-    DEFAULT_BRANCH_CACHE_TTL as _DEFAULT_BRANCH_CACHE_TTL,
     AHEAD_BEHIND_CACHE_TTL as _AHEAD_BEHIND_CACHE_TTL,
 )
 
-# Re-export mixin classes for backward compatibility
-from app.core.git_branch_ops import GitBranchMixin  # noqa: F401
-from app.core.git_worktree_ops import GitWorktreeMixin  # noqa: F401
-from app.core.git_diff_ops import GitDiffMixin  # noqa: F401
-from app.core.git_commit_ops import GitCommitMixin  # noqa: F401
+# Mixins composing GitService
+from app.core.git_branch_ops import GitBranchMixin
+from app.core.git_worktree_ops import GitWorktreeMixin
+from app.core.git_diff_ops import GitDiffMixin
+from app.core.git_commit_ops import GitCommitMixin
 
 logger = logging.getLogger(__name__)
 
