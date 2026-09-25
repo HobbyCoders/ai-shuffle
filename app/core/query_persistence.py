@@ -239,27 +239,14 @@ async def capture_usage_identity(session_id: str) -> str:
 async def _persist_turn_results(
     session_id: str,
     sdk_session_id: Optional[str],
-    tool_messages: list,
-    response_text: list,
     metadata: dict,
     profile_id: Optional[str],
     interrupted: bool = False,
     log_prefix: str = "",
-    thinking_blocks: Optional[list] = None,
-    system_messages: Optional[list] = None,
-    plugin_messages: Optional[list] = None,
-    turn_events: Optional[list] = None,
-    subagent_children: Optional[dict] = None,
-    prompt: Optional[str] = None,
-    working_dir: Optional[str] = None,
 ) -> None:
     """Persist a completed turn's session-row metadata and settle its usage.
 
     The transcript itself is written by the session store, not here.
-    ``tool_messages``, ``response_text``, ``thinking_blocks``,
-    ``system_messages``, ``plugin_messages``, ``turn_events``,
-    ``subagent_children``, ``prompt`` and ``working_dir`` are accepted for
-    caller compatibility and are not used.
     """
     # 1. Update session metadata (sdk_session_id, cost, tokens, turns)
     #

@@ -462,9 +462,6 @@ class SyncEngine:
         self._connections: Dict[str, Dict[str, DeviceConnection]] = {}
         # Lock for thread-safe connection management
         self._lock = asyncio.Lock()
-        # Never written; kept only because query_background's stream-end
-        # cleanup still pops from it.
-        self._session_locks: Dict[str, str] = {}
         # User connections for tab sync: user_id -> {device_id -> UserDeviceConnection}
         self._user_connections: Dict[str, Dict[str, UserDeviceConnection]] = {}
         # Lock for user connection management

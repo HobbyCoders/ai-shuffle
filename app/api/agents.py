@@ -359,7 +359,7 @@ async def get_all_available_subagents(
                     # Log but don't fail if project agents can't be loaded
                     logging.warning(f"Failed to load project agents for {project_id}: {e}")
 
-        # 3. User-global agents (~/.claude/agents/) - auto-loaded by the SDK at
+        # 3. User-global agents (~/.fluid/agents/) - loaded by Fluid at
         #    runtime via setting_sources "user", surfaced here for discovery.
         #    Claude Code precedence is project > user, so a project (or profile)
         #    agent of the same name shadows the user one: dedupe by name against

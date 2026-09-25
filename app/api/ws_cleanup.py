@@ -16,8 +16,8 @@ async def cleanup_session_handlers(session_id: str) -> None:
     """Clean up session-keyed data from global handler singletons.
 
     Called from session teardown paths (clear, eviction, worktree
-    termination) to prevent unbounded growth of _pending_requests,
-    _session_rules, and _pending_questions dicts over the process lifetime.
+    termination) so per-session permission rules and pending permission and
+    question requests do not accumulate over the process lifetime.
     """
     try:
         await permission_handler.cancel_all_requests(session_id)

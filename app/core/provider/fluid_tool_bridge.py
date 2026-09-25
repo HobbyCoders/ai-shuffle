@@ -130,9 +130,6 @@ def register_sdk_tools(
 #   computer-use    computer_use_sdk.py
 #   provider-agent  provider_agent_sdk.py
 #
-# (phone_tools.py exports raw definitions but is not wired into any SDK server,
-# so there is nothing to bridge for it.)
-#
 # Every server passes through sdk_compat.patch_sdk_server, which records the
 # raw @tool objects (see provider/sdk_tool_records.py);
 # ``register_recorded_sdk_servers`` below re-registers them on a fluid

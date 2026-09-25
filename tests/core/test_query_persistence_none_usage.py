@@ -42,8 +42,6 @@ async def _persist(metadata: dict) -> None:
     await qp._persist_turn_results(
         session_id="s1",
         sdk_session_id="sdk-1",
-        tool_messages=[],
-        response_text=[],
         metadata={"usage_settlement_key": "k1", **metadata},
         profile_id="p1",
     )

@@ -626,18 +626,10 @@ async def _run_background_query_impl(
         permission_handler.clear_session_rules(session_id)
         await permission_handler.cancel_all_requests(session_id)
 
-        # Release session lock in sync engine (in case not released by WS disconnect).
-        # Use the public API which checks ownership — but in the stream-end path
-        # there's no device_id, so directly pop under the lock.
-        async with sync_engine._lock:
-            sync_engine._session_locks.pop(session_id, None)  # noqa: SLF001
-
     # Persist session data to database in a batched write.
     await _persist_turn_results(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
-        tool_messages=tool_messages,
-        response_text=response_text,
         metadata=metadata,
         profile_id=profile_id,
         interrupted=interrupted,

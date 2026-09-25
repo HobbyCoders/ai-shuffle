@@ -5,7 +5,7 @@ This service discovers, creates, updates, and deletes agent .md files
 in a project's .fluid/agents/ directory, where Fluid's agent discovery
 (``fluid.context.agents.discover_agents``) finds them for both the native and
 the delegated leg. Fluid never reads ``.claude/agents``; legacy definitions
-there are migrated by the settings import (Claude project agents).
+there are moved into ``.fluid/agents`` when the project's agents are listed.
 
 Agent files use YAML frontmatter for metadata:
 ---
@@ -19,6 +19,7 @@ System prompt content here...
 
 import logging
 import re
+import shutil
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -83,6 +84,8 @@ class ProjectAgentService:
         """
         self.project_path = project_path
         self.agents_dir = project_path / ".fluid" / "agents"
+        # Where UI-created agents were written before they moved to .fluid.
+        self.legacy_agents_dir: Optional[Path] = project_path / ".claude" / "agents"
 
     def _ensure_agents_dir(self) -> Path:
         """Ensure the agents directory exists"""
@@ -197,14 +200,49 @@ class ProjectAgentService:
             return False
         return bool(re.match(r'^[a-zA-Z][a-zA-Z0-9_-]*$', name))
 
+    def _migrate_legacy_agents(self) -> None:
+        """Move legacy ``.claude/agents/*.md`` files into ``.fluid/agents``.
+
+        A file whose name already exists in ``.fluid/agents`` stays where it
+        is: the existing definition wins and is never overwritten. Symlinks
+        are left alone, matching the settings import.
+        """
+        legacy_dir = self.legacy_agents_dir
+        if legacy_dir is None or legacy_dir.is_symlink() or not legacy_dir.is_dir():
+            return
+        for legacy_file in sorted(legacy_dir.glob("*.md")):
+            target = self.agents_dir / legacy_file.name
+            if legacy_file.is_symlink() or not legacy_file.is_file() or target.exists():
+                continue
+            created = False
+            try:
+                data = legacy_file.read_bytes()
+                self._ensure_agents_dir()
+                with open(target, "xb") as out:  # exclusive: never overwrite
+                    created = True
+                    out.write(data)
+                shutil.copystat(legacy_file, target)
+                legacy_file.unlink()
+            except FileExistsError:
+                continue
+            except OSError as e:
+                if created:
+                    target.unlink(missing_ok=True)
+                logger.warning(f"Failed to migrate legacy agent {legacy_file}: {e}")
+                continue
+            logger.info(f"Migrated legacy project agent {legacy_file} to {target}")
+
     def get_agents(self) -> List[ProjectAgent]:
         """
         Discover all agents in the project's .fluid/agents/ directory.
+
+        Legacy ``.claude/agents`` definitions are migrated first.
 
         Returns:
             List of ProjectAgent objects
         """
         agents = []
+        self._migrate_legacy_agents()
 
         if not self.agents_dir.exists():
             return agents
@@ -478,6 +516,7 @@ class UserAgentService(ProjectAgentService):
         # <claude_dir>/agents.
         self.project_path = claude_dir
         self.agents_dir = claude_dir / "agents"
+        self.legacy_agents_dir = None
 
 
 # Service instance cache (keyed by project_path)
@@ -516,8 +555,8 @@ def get_user_agent_service() -> UserAgentService:
     with _agent_services_lock:
         if _user_agent_service is None:
             # Imported lazily to avoid pulling plugin machinery at module load.
-            from app.core.plugin_models import _get_claude_dir
-            _user_agent_service = UserAgentService(_get_claude_dir())
+            from app.core.plugin_models import _get_fluid_dir
+            _user_agent_service = UserAgentService(_get_fluid_dir())
         return _user_agent_service
 
 

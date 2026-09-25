@@ -20,7 +20,7 @@ async def test_normal_and_kill_share_claim(mock_db, kill_first):
     }])
     async def normal():
         await qp._persist_turn_results(
-            sid, "sdk", [], [], {"usage_settlement_key": key, "tokens_in": 17,
+            sid, "sdk", {"usage_settlement_key": key, "tokens_in": 17,
             "tokens_out": 4, "total_cost_usd": 0.01, "num_turns": 1},
             "default", interrupted=True,
         )
@@ -64,7 +64,7 @@ async def test_a_legitimate_continuation_books_separately(mock_db):
     key2 = await qp.capture_usage_identity(sid)
     assert key2 != qp.usage_settlement_key(sid, turn1)
     await qp._persist_turn_results(
-        sid, "sdk", [], [],
+        sid, "sdk",
         {"usage_settlement_key": key2, "tokens_in": 20, "tokens_out": 2,
          "total_cost_usd": 0.004, "num_turns": 1},
         "default", interrupted=False,
@@ -134,7 +134,7 @@ async def test_finalizer_without_terminal_leaves_coalesced_records_to_the_kill_p
         "payload": {"usage": {"input_tokens": 17, "output_tokens": 4}},
     }])
     await qp._persist_turn_results(
-        sid, "sdk", [], [], {"usage_settlement_key": key}, "default",
+        sid, "sdk", {"usage_settlement_key": key}, "default",
         interrupted=True,
     )
     assert mock_db.execute(
@@ -151,7 +151,7 @@ async def test_finalizer_without_terminal_or_turn_books_nothing(mock_db):
     key = await qp.capture_usage_identity(sid)
     assert qp.settlement_turn_id(key) is None
     await qp._persist_turn_results(
-        sid, "sdk", [], [], {"usage_settlement_key": key}, "default",
+        sid, "sdk", {"usage_settlement_key": key}, "default",
         interrupted=True,
     )
     assert mock_db.execute(

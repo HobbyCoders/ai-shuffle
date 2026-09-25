@@ -116,8 +116,6 @@ def _bg_patches(stack: ExitStack, pool: _StubPool, run_sync_calls=None):
     ))
     sync = MagicMock()
     sync.broadcast_message_added = AsyncMock()
-    sync._lock = asyncio.Lock()
-    sync._session_locks = {}
     stack.enter_context(patch.object(qb, "sync_engine", new=sync))
     options = MagicMock()
     options.cwd = None

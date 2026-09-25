@@ -189,7 +189,7 @@ Get the full nested-agent objects enabled for this agent.
 
 ### GET /api/v1/agents/{agent_id}/subagents/all
 
-Get all available nested agents for autocomplete, aggregated from multiple sources: this agent's enabled agents, project agents, user-global agents (`~/.claude/agents/`), and plugin file-based agents. Deduplication priority: agent > project > user > plugin.
+Get all available nested agents for autocomplete, aggregated from multiple sources: this agent's enabled agents, project agents, user-global agents (`~/.fluid/agents/`), and plugin file-based agents. Deduplication priority: agent > project > user > plugin.
 
 **Query Parameters:**
 

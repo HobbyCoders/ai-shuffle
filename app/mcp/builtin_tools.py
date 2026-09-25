@@ -1129,11 +1129,11 @@ def _discover_agent_registry(cwd: Optional[str]) -> Optional[Dict[str, Any]]:
     The shape ``app.core.task_dispatch.dispatch_task_tool`` expects for its
     ``agent_registry`` seam — identical to the mapping ``NativeLoop`` publishes
     on ``ctx.extra["agent_registry"]``, built from the same
-    ``fluid.context.agents.discover_agents`` walk (project ``.claude/agents``,
+    ``fluid.context.agents.discover_agents`` walk (project ``.fluid/agents``,
     the global dir, and enabled plugins, ruling CE6).
 
     This exists because the DELEGATED (claude CLI) leg runs no fluid engine:
-    its Task tool is this MCP one, so without a registry a ``.claude/agents``
+    its Task tool is this MCP one, so without a registry a ``.fluid/agents``
     definition is advertised in the prompt yet answers "Unknown agent" on
     dispatch. Best effort in every direction — no cwd, no fluid, or a bad
     definition returns None and dispatch falls back to DB agents only.

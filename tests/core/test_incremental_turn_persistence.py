@@ -521,25 +521,13 @@ async def test_persist_turn_results_gate_is_the_no_dupe_mechanism(test_db, monke
     crash-retry double call."""
     session_id = _new_session()
     sdk_sid = str(uuid.uuid4())
-    turn_events = [
-        {"kind": "text", "payload": {"content": "Hello", "uuid": "a-1"}},
-        {"kind": "tool_use", "payload": {
-            "type": "tool_use", "name": "Bash", "tool_id": "t-1",
-            "input": {"command": "ls"}, "parent_tool_id": None, "uuid": "a-2"}},
-        {"kind": "tool_result", "payload": {
-            "type": "tool_result", "name": "Bash", "tool_id": "t-1",
-            "output": "ok", "parent_tool_id": None, "uuid": "u-2"}},
-    ]
 
     async def _persist():
         await qp._persist_turn_results(
             session_id=session_id,
             sdk_session_id=sdk_sid,
-            tool_messages=[],
-            response_text=["Hello"],
             metadata={"model": "claude-test", "total_cost_usd": 0.01, "num_turns": 1},
             profile_id="default",
-            turn_events=turn_events,
         )
 
     # postgres_only: zero rows, twice (a crash-retry re-persist cannot dupe).

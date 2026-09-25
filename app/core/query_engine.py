@@ -1136,12 +1136,8 @@ async def execute_query(
     await _persist_turn_results(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
-        tool_messages=tool_messages,
-        response_text=response_text,
         metadata=metadata,
         profile_id=profile_id,
-        prompt=prompt,
-        working_dir=getattr(options, "cwd", None),
     )
 
     # Terminal history row for a turn that ran outside the scheduler, so its
@@ -1900,13 +1896,9 @@ async def stream_query(
     await _persist_turn_results(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
-        tool_messages=tool_messages,
-        response_text=response_text,
         metadata=metadata,
         profile_id=profile_id,
         interrupted=interrupted,
-        prompt=prompt,
-        working_dir=getattr(options, "cwd", None),
     )
 
     # Terminal history row for a turn that ran outside the scheduler — written
@@ -4292,26 +4284,13 @@ async def _stream_to_websocket_impl(
             logger.debug(f"[WS] Kept session {session_id} in pool for reuse")
 
     # Persist session data to database in a batched write.
-    # turn_events provides the stream-ordered sequence so rows are inserted
-    # in the same order the events arrived (fixes visual flow on reload).
-    # subagent_children embeds subagent internal tool usage into the parent's
-    # agent_children metadata so the UI can rebuild nested displays on reload.
     await _persist_turn_results(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
-        tool_messages=tool_messages,
-        response_text=response_text,
         metadata=metadata,
         profile_id=profile_id,
         interrupted=interrupted,
         log_prefix="[WS] ",
-        thinking_blocks=thinking_blocks,
-        system_messages=system_messages_acc,
-        plugin_messages=plugin_messages_acc,
-        turn_events=turn_events,
-        subagent_children=subagent_children,
-        prompt=prompt,
-        working_dir=getattr(options, "cwd", None),
     )
 
     # Capture the SDK context-usage breakdown. Runs DETACHED and self-guards on

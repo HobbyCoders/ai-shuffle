@@ -79,7 +79,7 @@ What this module adds on top of raw ``dispatch_worker``:
 
 File-defined agents (Claude-ecosystem compat, ruling CE6)
 ---------------------------------------------------------
-On a native (fluid) leg the engine reads the user's ``.claude/agents/**/*.md``
+On a native (fluid) leg the engine reads the user's ``.fluid/agents/**/*.md``
 definitions — project, global, and namespaced ``<plugin>:<agent>`` ones — and
 publishes them on ``ctx.extra["agent_registry"]``. fluid never spawns anything;
 this module is what makes those names dispatchable, as a FALLBACK behind the
