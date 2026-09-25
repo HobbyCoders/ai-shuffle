@@ -12,9 +12,31 @@ export type TriggerType = 'cron' | 'interval' | 'connector_event' | 'connector_t
 export type OutputType = 'connector' | 'webhook' | 'session' | 'none';
 export type ActionStepType = 'connector_action' | 'send_prompt' | 'webhook_call' | 'delay';
 
+/**
+ * Per-type trigger settings, as read by app/core/automation_manager.py and
+ * app/core/automation_service.py. Unlisted keys pass through untouched.
+ */
+export interface TriggerConfig {
+	/** cron */
+	expression?: string;
+	timezone?: string;
+	/** interval */
+	seconds?: number;
+	/** connector_event / connector_trigger */
+	connector_id?: string;
+	event_type?: string;
+	filter?: Record<string, unknown>;
+	trigger_id?: string;
+	/** webhook (generated server-side when absent) */
+	secret?: string;
+	/** Read by the edit form, but the backend never sets it. */
+	webhook_url?: string;
+	[key: string]: unknown;
+}
+
 export interface TriggerItem {
 	type: TriggerType;
-	config: Record<string, any>;
+	config: TriggerConfig;
 }
 
 export interface ActionStep {
@@ -22,7 +44,7 @@ export interface ActionStep {
 	// connector_action fields
 	connector_id?: string;
 	action_id?: string;
-	params?: Record<string, any>;
+	params?: Record<string, unknown>;
 	// send_prompt fields
 	prompt?: string;
 	profile_id?: string;
@@ -40,12 +62,12 @@ export interface AutomationCreate {
 	name: string;
 	description?: string | null;
 	trigger_type?: TriggerType;
-	trigger_config?: Record<string, any>;
+	trigger_config?: TriggerConfig;
 	triggers?: TriggerItem[];
 	prompt?: string | null;
 	profile_id: string;
 	project_id?: string | null;
-	output_config?: Record<string, any>;
+	output_config?: Record<string, unknown>;
 	action_steps?: ActionStep[] | null;
 	max_turns?: number | null;
 	timeout_seconds?: number | null;
@@ -60,12 +82,12 @@ export interface AutomationUpdate {
 	name?: string;
 	description?: string | null;
 	trigger_type?: TriggerType;
-	trigger_config?: Record<string, any>;
+	trigger_config?: TriggerConfig;
 	triggers?: TriggerItem[];
 	prompt?: string | null;
 	profile_id?: string;
 	project_id?: string | null;
-	output_config?: Record<string, any>;
+	output_config?: Record<string, unknown>;
 	max_turns?: number | null;
 	timeout_seconds?: number | null;
 	max_cost_per_run?: number | null;
@@ -82,12 +104,12 @@ export interface Automation {
 	name: string;
 	description: string | null;
 	trigger_type: TriggerType;
-	trigger_config: Record<string, any>;
+	trigger_config: TriggerConfig;
 	triggers: TriggerItem[] | null;
 	prompt: string | null;
 	profile_id: string;
 	project_id: string | null;
-	output_config: Record<string, any>;
+	output_config: Record<string, unknown>;
 	action_steps: ActionStep[] | null;
 	max_turns: number | null;
 	timeout_seconds: number | null;
@@ -113,7 +135,7 @@ export interface AutomationRun {
 	id: string;
 	automation_id: string;
 	status: 'pending' | 'approved' | 'running' | 'completed' | 'failed' | 'cancelled' | 'budget_exceeded';
-	trigger_data: Record<string, any> | null;
+	trigger_data: Record<string, unknown> | null;
 	session_id: string | null;
 	prompt_rendered: string | null;
 	response: string | null;
@@ -152,6 +174,12 @@ export interface AutomationStats {
 	today_cost_usd: number;
 }
 
+/** Manual-trigger acknowledgement (automation_manager.trigger_manual). */
+export interface AutomationTriggerResult {
+	automation_id: string;
+	status: 'triggered';
+}
+
 export interface AutomationTestResult {
 	prompt_rendered: string;
 	budget_ok: boolean;
@@ -186,8 +214,8 @@ export async function disableAutomation(id: string): Promise<Automation> {
 	return api.post<Automation>(`/automations/${id}/disable`);
 }
 
-export async function triggerAutomation(id: string): Promise<unknown> {
-	return api.post<unknown>(`/automations/${id}/trigger`);
+export async function triggerAutomation(id: string): Promise<AutomationTriggerResult> {
+	return api.post<AutomationTriggerResult>(`/automations/${id}/trigger`);
 }
 
 export async function getAutomationRuns(id: string, limit = 50, offset = 0): Promise<AutomationRun[]> {

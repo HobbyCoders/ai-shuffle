@@ -9,7 +9,7 @@ import { api } from './client';
 // ============================================================================
 
 export interface ConnectorConfig {
-	[key: string]: any;
+	[key: string]: unknown;
 }
 
 export interface ConnectorCreate {
@@ -63,21 +63,21 @@ export interface ConnectorTriggerInfo {
 	id: string;
 	name: string;
 	description: string;
-	payload_schema: Record<string, any>;
+	payload_schema: Record<string, unknown>;
 }
 
 export interface ConnectorActionInfo {
 	id: string;
 	name: string;
 	description: string;
-	input_schema: Record<string, any>;
+	input_schema: Record<string, unknown>;
 }
 
 export interface ConnectorToolInfo {
 	id: string;
 	name: string;
 	description: string;
-	input_schema: Record<string, any>;
+	input_schema: Record<string, unknown>;
 }
 
 export interface ConnectorTypeInfo {
@@ -130,7 +130,7 @@ export interface ConnectorEventLog {
 	connector_id: string;
 	event_type: string;
 	direction: string;
-	payload: any;
+	payload: Record<string, unknown> | null;
 	status: string;
 	error: string | null;
 	created_at: string;
