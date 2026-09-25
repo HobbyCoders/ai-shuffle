@@ -23,7 +23,7 @@ from app.core.permission_handler import permission_handler
 from app.core.session_modes import chat_mode_read_permitted, normalize_session_mode
 from app.core.session_title import derive_session_title
 from app.core.sync_engine import sync_engine
-# W2: the origin socket reuses sync_engine's bounded-queue writer.
+# The origin socket reuses sync_engine's bounded-queue writer.
 from app.core.sync_engine import ConnectionWriter
 from app.core.user_question_handler import user_question_handler
 from app.db import database
@@ -35,7 +35,7 @@ from app.api.ws_utils import WSPayloadEncodeError
 logger = logging.getLogger(__name__)
 
 
-# v2 core (Phase 2 A6b): the command layer + durable turns table the WS handlers
+# v2 core: the command layer + durable turns table the WS handlers
 # delegate to. The v2 turns path is now unconditional (the legacy pipeline and
 # its gating flag are gone). Lightweight modules (no import cycle: turn_manager
 # imports only app.db.turns).
@@ -44,7 +44,7 @@ from app.db import turns as turns_db  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Origin-socket outbound queue (W2)
+# Origin-socket outbound queue
 # ---------------------------------------------------------------------------
 # The device fan-out in ``sync_engine`` gives every connection a bounded queue
 # and a dedicated writer task, so no producer ever awaits a socket. The ORIGIN
@@ -114,13 +114,13 @@ def _encode_frame(data: Dict[str, Any]) -> str:
         raise WSPayloadEncodeError(str(e)) from e
 
 
-# Queue sources that render as user-visible queue chips (B3). Internal
+# Queue sources that render as user-visible queue chips. Internal
 # failover/auto_continue/unpark turns never appear in the queue UI.
 _V2_QUEUE_SOURCES = ("user", "queue")
 
 
 def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
-    """B3 — the user-visible queue for a session, re-sourced from the durable
+    """The user-visible queue for a session, re-sourced from the durable
     ``turns`` table (v2 path).
 
     Only ``source in ('user','queue')`` queued turns render as chips; the server
@@ -154,7 +154,7 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
 
 # How long the two-phase ``interrupt_for_query`` waits for the interrupted
 # streaming task to drain naturally before force-cancelling it. The frontend's
-# interrupt-confirm window must exceed this plus the SDK interrupt timeout
+# interrupt-confirm window must exceed this plus the adapter interrupt timeout
 # (see message-sender.ts).
 _INTERRUPT_DRAIN_TIMEOUT_SECONDS = 8.0
 
@@ -203,10 +203,8 @@ def _terminal_chip_text(task: Dict[str, Any], wire_status: str) -> str:
        what the user needs to recognise the row;
     3. a bare statement of the outcome, so the bubble still says something.
 
-    This is the fix for the audited empty bubbles: ``content=summary or ""``
-    persisted fifteen blank ``role=system`` rows in a single session because
-    shell tasks never populate ``summary``. The text existed the whole time on
-    the SubagentEvent the model received; only the user-facing copy was dropped.
+    Shell tasks never populate ``summary``, so ``content=summary or ""`` alone
+    would persist blank ``role=system`` rows.
     """
     summary = (task.get("summary") or "").strip()
     if summary:
@@ -230,18 +228,17 @@ def _terminal_chip_text(task: Dict[str, Any], wire_status: str) -> str:
 
 
 async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) -> None:
-    """Guaranteed terminal surface for an error/killed background task (4b).
+    """Guaranteed terminal surface for an error/killed background task.
 
-    1. LIVE chip: synthesize the same ``task_updated`` system chip the drain
-       pump renders, once per task lifetime (shared ``mark_chipped`` latch, so
-       a pump-rendered chip is never duplicated).
+    1. LIVE chip: emit the terminal ``task_updated`` system chip via
+       ``record_task_settle_frame``, once per task lifetime (the shared
+       ``mark_chipped`` latch, so no other settle path duplicates it).
     2. DURABLE row: persist the chip via ``database.add_session_message`` so
        the kill survives a reload (the live buffer may already be reaped — the
        force-eviction case — or be reset by the restart that caused the kill).
 
-    The legacy step 3 (the ``HeadlessChatHandler`` unpark handoff) is GONE (V2
-    A7, B5): the v2 scheduler (idle_reader -> turn_scheduler.on_task_terminal)
-    is the sole unpark producer, so this surface only records; it never spawns.
+    The v2 scheduler (idle_reader -> turn_scheduler.on_task_terminal) is the
+    sole unpark producer, so this surface only records; it never spawns.
 
     Two things the chip says are derived rather than copied straight off the
     record:
@@ -249,9 +246,8 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     * **Its text.** ``summary`` is populated for agent-kind tasks but not for
       shell ones — a Monitor shell settles through ``complete_task(...,
       "killed")`` with no summary at all — so ``content=summary or ""`` wrote a
-      BLANK system bubble into the transcript. One audited session had fifteen
-      of them; the user saw "a task errored" with no reason while the model's
-      own steer for the same event carried the full text.
+      BLANK system bubble into the transcript while the model's own steer for
+      the same event carried the full text.
       :func:`_terminal_chip_text` fills the gap from what the record does have.
     * **Its status.** ``killed`` is the registry vocabulary and stays on the row
       (``/live``, ``TaskGet``, retention all keep reading it), but a DELIBERATE
@@ -277,7 +273,7 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     }
     if reason:
         data["reason"] = reason
-    # The card join key (mirror of the #540 enrichment): the frontend settles a
+    # The card join key: the frontend settles a
     # subagent card only when the terminal chip carries the launch tool_use_id
     # (the card's toolId). This SAME data dict feeds both the live chip
     # (record_drained_event) and the durable row, so both carry it.
@@ -285,7 +281,7 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     if tool_use_id:
         data["tool_use_id"] = tool_use_id
 
-    # 1) LIVE chip (once per task lifetime — shared latch with pump chips).
+    # 1) LIVE chip (once per task lifetime — latch shared with the other settle paths).
     # V2: append the chip to the session event log so the SSE feed renders it.
     if task_registry.mark_chipped(session_id, task_id, "terminal"):
         task_registry.mark_chipped(session_id, task_id, "start")
@@ -388,7 +384,7 @@ class ChatWebSocketHandler:
             window_seconds=settings.ws_rate_limit_window_seconds,
         )
 
-        # Outbound queue + writer task for THIS socket (W2). Created lazily on
+        # Outbound queue + writer task for THIS socket. Created lazily on
         # the first send so a handler built outside a running loop costs
         # nothing, and never created at all on the headless path (no socket).
         # ``send_json`` is a synchronous enqueue, so sends from ping_loop, the
@@ -459,7 +455,7 @@ class ChatWebSocketHandler:
         connection's bounded queue, and the single bounded ``send_text`` await
         happens later on the writer task. That is what keeps one half-open
         client from stalling the turn pump, the recorder, or any other producer
-        (W2) — a dead peer now costs exactly one stalled task, its own.
+        — a dead peer costs exactly one stalled task, its own.
 
         Returns True when the frame was ACCEPTED. False means one of:
 
@@ -647,7 +643,7 @@ class ChatWebSocketHandler:
             logger.error(f"Chat WebSocket error: {e}")
 
         finally:
-            # W2: a writer task must never outlive its connection. ``aclose``
+            # A writer task must never outlive its connection. ``aclose``
             # cancels AND awaits it, so nothing is left pending on a socket that
             # is going away. Frames still queued at this point are dropped —
             # the peer is gone, and a reconnecting client resyncs from durable
@@ -669,8 +665,8 @@ class ChatWebSocketHandler:
         """Take ownership of a remotely-owned session so THIS send runs locally.
 
         Sending from a second device is the user saying "continue here", so a
-        session that merely INHERITED its owner (raw ``placement`` NULL — the
-        A11 implicit pin) follows them. Guards, all required:
+        session that merely INHERITED its owner (raw ``placement`` NULL — an
+        implicit pin) follows them. Guards, all required:
 
           * raw ``placement`` is NULL/blank — an explicit ``{"where": …}`` is a
             deliberate placement (composer device pick, /move, /adopt, a claim
@@ -821,7 +817,7 @@ class ChatWebSocketHandler:
         project_id: Optional[str],
         session_id: str,
     ) -> List[str]:
-        """Lift this send's staged uploads into durable blobs (D8).
+        """Lift this send's staged uploads into durable blobs.
 
         Raises ``UploadLiftError`` (or anything the DB layer raises) so the
         caller can refuse the send — never returns partial results.
@@ -898,7 +894,7 @@ class ChatWebSocketHandler:
         target_instance_id = (data.get("target_instance_id") or "").strip() or None
         if session_id or target_instance_id == settings.effective_instance_id:
             target_instance_id = None
-        # Staged upload paths referenced by this prompt (D8). They are absolute
+        # Staged upload paths referenced by this prompt. They are absolute
         # paths on THIS install's disk, so they only need carrying when the turn
         # ends up running somewhere else; a local turn ignores them entirely.
         upload_paths = [
@@ -945,7 +941,7 @@ class ChatWebSocketHandler:
         # queued turn (submitted with ``no_kick``) IS the whole hand-off; the
         # owning runner's turn_claim loop picks it up via the NOTIFY wake (or
         # its 5s poll) and rendering rides the shared SSE feed exactly like a
-        # local turn. No HTTP dispatch (OD-1). Headless handlers do neither
+        # local turn. No HTTP dispatch. Headless handlers do neither
         # (websocket is None) — a headless query always runs locally.
         placed_remote = False
         if session_id and self.websocket is not None:
@@ -1063,7 +1059,7 @@ class ChatWebSocketHandler:
                         is_active=True,
                         target_instance_id=target_instance_id,
                         project_v2_id=resolved_pv2_id,
-                        # The composer's pick IS the session's binding (v79) —
+                        # The composer's pick IS the session's binding —
                         # agents no longer pin a model, so stamp it at birth.
                         # A ``prov:`` composite also settles provider_id here,
                         # before anything reads the row.
@@ -1222,7 +1218,7 @@ class ChatWebSocketHandler:
         # a busy-session query queues durably, no cancel-and-requery). Rendering
         # rides SOLELY the SSE typed-event feed; new-session adoption is
         # authenticated by the ``session_created`` request_id echo already sent
-        # above (B4) — no origin-socket passthrough, no start-frame token.
+        # above — no origin-socket passthrough, no start-frame token.
         #
         # A turn already live for the session means this query queues behind
         # it (busy-write guard implicit). Checked BEFORE submit — submit's
@@ -1232,7 +1228,7 @@ class ChatWebSocketHandler:
             await run_sync(turns_db.get_live_turn, session_id) is not None
         )
 
-        # Persist + broadcast the user message (P3 session_messages dual-write
+        # Persist + broadcast the user message (the session_messages dual-write
         # survives — the recorder also logs ``message.user`` to the event
         # feed). New sessions persisted their first message atomically at
         # creation; existing sessions persist here. Ordered before submit is
@@ -1302,7 +1298,7 @@ class ChatWebSocketHandler:
         if placed_remote and submit_profile_id == "claude-code":
             submit_profile_id = None
 
-        # Uploads travel as durable blobs (D8) — but ONLY when the turn is
+        # Uploads travel as durable blobs — but ONLY when the turn is
         # actually leaving this install. A local turn's files are already on the
         # disk the agent will read, so lifting them would just duplicate bytes.
         # A lift failure FAILS THE SEND: submitting a turn whose prompt points at
@@ -1362,7 +1358,7 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "query_queued", "session_id": session_id})
             return
 
-        # W6: ``submit`` performs up to three DB writes (run binding, wakeup
+        # ``submit`` performs up to three DB writes (run binding, wakeup
         # supersede, enqueue). ``submit_async`` pays ONE thread hop for all
         # three and still fires the kick on this loop, so the send path never
         # blocks the worker's other sockets.
@@ -1393,7 +1389,7 @@ class ChatWebSocketHandler:
 
         if had_live:
             # Queued behind the live turn: surface the pending bubble
-            # (re-sourced from turns) and send the F5 query_queued ack so the
+            # (re-sourced from turns) and send the query_queued ack so the
             # client leaves its optimistic streaming state instead of spinning
             # forever.
             await self._v2_broadcast_queue(session_id)
@@ -1429,7 +1425,7 @@ class ChatWebSocketHandler:
             # session stopped, kills all background work and aborts queued turns
             # (see query_session_lifecycle.enter_user_stop). Typing mid-stream
             # uses ``interrupt_for_query``, not this path.
-            # #585: bind the stop to the turn the FE believed was live (optional
+            # Bind the stop to the turn the FE believed was live (optional
             # — older clients omit it). turn_manager threads it to the DB flip
             # (id=turn_id guard) and the runtime signal so a stop that arrives
             # after its target settled cannot interrupt the successor turn.
@@ -1467,7 +1463,7 @@ class ChatWebSocketHandler:
                 # Cross-runner wake: if the executing runtime lives on another
                 # install, its turn_claim observe pass reacts on this NOTIFY
                 # tick instead of its next 5s poll. Locally the executor
-                # already fired; the observe pass is a guarded no-op (O4).
+                # already fired; the observe pass is a guarded no-op.
                 from app.core import turn_claim
                 await run_sync(turn_claim.notify_turns_changed, session_id)
             return
@@ -1496,13 +1492,13 @@ class ChatWebSocketHandler:
         # runtime; our poll sees the row settle/drain).
         #
         # v2 turns cutover (two-phase send-now). Flip the live turn
-        # running->interrupting with mode=send_now and fire the executor (SDK
+        # running->interrupting with mode=send_now and fire the executor (adapter
         # interrupt + escalation in the runtime), then wait — with today's drain
         # timeout — until the live turn either SETTLES (clean stop) or ESCALATES
         # to ``draining`` (wedged CLI kept alive). Either outcome is safe to send
         # the replacement query after: the follow-up queued turn is held out of
-        # the live slot by the unique live index until the draining turn settles
-        # (F6), so it can never cross a mid-turn CLI. Confirm unconditionally so
+        # the live slot by the unique live index until the draining turn
+        # settles, so it can never cross a mid-turn CLI. Confirm unconditionally so
         # the frontend's replacement query is unblocked.
         try:
             owner_device = await self._network_owner(session_id)
@@ -1596,7 +1592,7 @@ class ChatWebSocketHandler:
         worktree_id = session.get("worktree_id")
 
         def _resolve_history_blocking() -> Dict[str, Any]:
-            """Every BLOCKING step of a session open, in ONE thread hop (W6).
+            """Every BLOCKING step of a session open, in ONE thread hop.
 
             Opening a session parses the whole JSONL transcript (sync file I/O
             + a JSON parse of potentially megabytes) and then makes three more
@@ -1733,7 +1729,7 @@ class ChatWebSocketHandler:
         if not session_id:
             return
 
-        # Headless guard (plan step 6): a handler with no websocket must never
+        # Headless guard: a handler with no websocket must never
         # register itself as a watcher — sync_engine registration keys on
         # (device_id, websocket) and a None socket would pollute the watcher
         # table with an unsendable connection.
@@ -1830,8 +1826,8 @@ class ChatWebSocketHandler:
                 return
             # The prompt is a shared ``pending_interactions`` row — ANY install
             # answers it directly against the table, no cloud_relay. The owning
-            # runner's awaiting SDK callback wakes via NOTIFY (or in-process fast
-            # path when we ARE the owner). Stamp the answering device (Q4-6).
+            # runner's awaiting callback wakes via NOTIFY (or in-process fast
+            # path when we ARE the owner). Stamp the answering device.
             result = await permission_handler.respond(
                 request_id=request_id,
                 session_id=response_session_id,
@@ -1925,8 +1921,7 @@ class ChatWebSocketHandler:
         if response_session_id and request_id and (answers or dismissed or skipped):
             # The question is a shared ``pending_interactions`` row — answer it
             # directly against the table (no cloud_relay); the owning runner's
-            # awaiting SDK callback wakes via NOTIFY. Stamp the answering device
-            # (Q4-6).
+            # awaiting callback wakes via NOTIFY. Stamp the answering device.
             owner_device = await self._network_owner(response_session_id)
             if owner_device:
                 from app.network import control
@@ -2007,7 +2002,7 @@ class ChatWebSocketHandler:
     # ------------------------------------------------------------------
 
     async def _v2_broadcast_queue(self, session_id: str) -> None:
-        """Build the B3 queue view from the durable turns table and emit the
+        """Build the queue view from the durable turns table and emit the
         ``queue_updated`` frame both to the other devices (via the sync engine)
         and directly to THIS socket (which is unregistered from the sync engine
         while streaming, so the broadcast alone would not reach it). Same wire
@@ -2082,7 +2077,7 @@ class ChatWebSocketHandler:
         # immediately when the session is idle, or leaves it queued behind the
         # live turn (busy-write guard implicit — the unique live index prevents a
         # double-start). The queue_updated frame is re-sourced from the turns
-        # table (B3). W6: the enqueue writes run in ONE worker-thread hop
+        # table. The enqueue writes run in ONE worker-thread hop
         # (``submit_async``) while the kick still fires on this loop, so it can
         # schedule.
         # Remote-placed: no kick (the owner's claim loop starts it) and the

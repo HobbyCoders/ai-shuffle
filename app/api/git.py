@@ -24,7 +24,6 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 
 from app.core.git_service import git_service
-from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.git_owner import session_git_action
@@ -32,37 +31,20 @@ from app.api.auth import require_auth, get_api_user_from_request
 from app.api.common import check_project_access
 
 # Import from sub-modules
-from app.api.git_helpers import (  # noqa: F401
-    _git_executor,
+from app.api.git_helpers import (
     run_git,
-    _RequestCoalescer,
     _coalescer,
     get_project_path,
-    get_working_dir,
     get_working_dir_async,
     SessionCheckoutUnavailable,
     stage_and_commit,
-    _repo_record_cache,
-    _REPO_RECORD_TTL,
     ensure_git_repository_record,
     peek_repo_record_cache,
     _CACHE_MISS,
 )
 
-from app.api.git_worktrees import (  # noqa: F401
-    _convert_worktree_to_info,
-)
-
-from app.api.git_ai import (  # noqa: F401
-    STOP_WORDS,
-    FIX_KEYWORDS,
-    CHORE_KEYWORDS,
-    DOCS_KEYWORDS,
-    REFACTOR_KEYWORDS,
-    TEST_KEYWORDS,
-    infer_prefix,
-    slugify_branch,
-)
+# Re-exported: tests/api/test_git.py imports it from here.
+from app.api.git_worktrees import _convert_worktree_to_info  # noqa: F401
 
 # Import sub-routers
 from app.api import git_worktrees as _git_worktrees_mod
@@ -109,8 +91,6 @@ from app.api.schemas.git import (  # noqa: E402
     StageRequest,
     UnstageRequest,
     DiscardRequest,
-    MigrateUploadsRequest,
-    MigrateUploadsResponse,
 )
 
 
@@ -1281,83 +1261,3 @@ async def pull_from_remote(
         status=inline_status,
         diff_stats=inline_diff,
     )
-
-
-# =============================================================================
-# Pending Upload Migration
-# =============================================================================
-
-@router.post("/migrate-uploads")
-async def migrate_uploads_to_worktree(
-    request: Request,
-    project_id: str,
-    body: MigrateUploadsRequest,
-    token: str = Depends(require_auth)
-):
-    """
-    Copy uploaded files from the main project to a worktree directory.
-
-    Used when files were uploaded before a worktree existed (auto-worktree flow).
-    """
-    import shutil
-
-    check_project_access(request, project_id)
-
-    def _load_project_and_worktree():
-        """Both existence probes in ONE hop, same order, same short-circuit:
-        an unknown project still 404s before the worktree row is ever read.
-        The HTTPExceptions propagate out of ``run_sync`` unchanged."""
-        project = database.get_project(project_id)
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-
-        worktree = database.get_worktree(body.worktree_id)
-        if not worktree:
-            raise HTTPException(status_code=404, detail="Worktree not found")
-
-        return project, worktree
-
-    project, worktree = await run_sync(_load_project_and_worktree)
-
-    worktree_dir = Path(get_worktree_working_dir(worktree))
-    if not worktree_dir.exists():
-        raise HTTPException(status_code=400, detail="Worktree directory does not exist")
-
-    project_dir = Path(get_project_working_dir(project_id))
-    migrated = []
-    errors = []
-
-    def _migrate_files() -> None:
-        # The WHOLE loop is offloaded, not each copy: N uploads would otherwise
-        # be N thread hops, and every copy2/stat/mkdir in between would run on
-        # the event loop. Per-file errors are still collected exactly as before,
-        # so one bad path does not abort the rest.
-        for file_path in body.file_paths:
-            try:
-                src = Path(file_path)
-                if not src.exists():
-                    errors.append(f"File not found: {file_path}")
-                    continue
-
-                # Ensure the file is within the project directory
-                try:
-                    rel = src.relative_to(project_dir)
-                except ValueError:
-                    errors.append(f"File not in project directory: {file_path}")
-                    continue
-
-                dest = worktree_dir / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(src), str(dest))
-
-                migrated.append({
-                    "original_path": str(src),
-                    "new_path": str(dest),
-                    "relative_path": rel.as_posix()
-                })
-            except Exception as e:
-                errors.append(f"Failed to copy {file_path}: {str(e)}")
-
-    await run_sync(_migrate_files)
-
-    return MigrateUploadsResponse(migrated=migrated, errors=errors)

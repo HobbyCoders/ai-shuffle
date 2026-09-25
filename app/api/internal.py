@@ -40,7 +40,7 @@ async def desktop_update_policy(request: Request):
 
 @router.get("/desktop/source-lease")
 async def desktop_source_lease(request: Request):
-    """The license lease for the hub's gated source feed (D8), as the
+    """The license lease for the hub's gated source feed, as the
     ``X-Shuffle-Lease`` header value, or null in beta mode or without a lease.
     Only the desktop that launched this worker may read it; the desktop sends
     it to the hub's manifest and archive requests and nowhere else."""

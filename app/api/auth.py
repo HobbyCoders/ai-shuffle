@@ -281,11 +281,6 @@ def require_api_key(request: Request) -> dict:
     )
 
 
-def is_admin_request(request: Request) -> bool:
-    """Check if the current request is from an admin user"""
-    return getattr(request.state, "is_admin", False)
-
-
 @router.get("/status")
 async def get_auth_status(request: Request, response: Response = None):
     """Get complete authentication status"""
@@ -348,7 +343,7 @@ async def get_auth_status(request: Request, response: Response = None):
 
     # ``gh auth status`` is a subprocess with a 10s timeout and this endpoint is
     # polled — run it off the event loop, and only when the shared TTL cache has
-    # expired (finding G1). Explicit logins/logouts below seed the cache, so the
+    # expired. Explicit logins/logouts below seed the cache, so the
     # signal is still immediate after a real auth change.
     github_authenticated = await run_sync(
         is_github_authenticated_cached, auth_service.is_github_authenticated
@@ -387,13 +382,12 @@ async def get_auth_status(request: Request, response: Response = None):
         } if pref_identity else None,
         "setup_required": auth_service.is_setup_required(),
         "claude_authenticated": claude_authenticated,
-        # PA10 (docs/PROVIDER_AGNOSTIC_PLAN.md): "does this install have ANY
-        # usable credential" — the claude subscription login OR at least one
-        # enabled model-provider row with a stored credential. The composer and
-        # first-run setup gate on THIS, not on claude auth alone; Claude-CLI
-        # auth remains required only for claude-subscription agents.
-        # The active Claude Code mode's credential (CLI sign-in, or the stored
-        # API key in api_key mode) or a configured provider row.
+        # "Does this install have ANY usable credential": the active Claude
+        # Code mode's credential (CLI sign-in, or the stored API key in api_key
+        # mode) OR at least one enabled model-provider row with a stored
+        # credential. The composer and first-run setup gate on THIS, not on
+        # claude auth alone; Claude-CLI auth remains required only for
+        # claude-subscription agents.
         "has_any_credential": bool(agent_gate["claude_credential_ready"]) or _has_provider_credential_safe(),
         # The one credential gate (license plus the active mode's credential):
         # when ``ready`` is false, new Claude agent runs are refused with

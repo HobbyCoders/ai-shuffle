@@ -210,11 +210,7 @@ def _find_open_pr_for_branch(repo: str, branch: str):
     ``None`` means "GitHub answered, and no open PR has this head". A failure to
     ask GitHub at all raises :class:`GitHubCliError` instead of degrading to
     ``None``: the two are different facts and the caller must not cache the
-    second as the first (finding G2).
-
-    (This replaces the old ``_find_open_pr_failed`` sentinel, which was
-    unreachable dead code because ``list_pulls`` swallowed every failure into an
-    empty list — and which callers would have mis-handled as a PullRequest.)
+    second as the first.
     """
     pulls = github_service.list_pulls(repo, state="open", limit=100)
     for pr in pulls:
@@ -237,7 +233,7 @@ def _gh_unavailable_error(branch: str, exc: Exception) -> HTTPException:
 
 
 def _session_is_busy(session_id: Optional[str]) -> bool:
-    """True if *session_id* is mid-SDK-turn OR has live background work.
+    """True if *session_id* is mid-turn OR has live background work.
 
     A parked session with a running sub-agent or backgrounded shell still counts
     as busy — the cleanup step must not yank its worktree/branch out from under
@@ -862,8 +858,7 @@ async def _prepare_operation(
     Runs the common synchronous guards (access, repo check), then registers a
     placeholder Operation BEFORE the awaited GitHub lookups so a second
     concurrent request sees the active op and 409s — closing the race between
-    the ``_has_active_op`` check and ``_register`` (which used to be separated
-    by several awaits). On ANY guard failure the placeholder is unregistered
+    the ``_has_active_op`` check and ``_register``. On ANY guard failure the placeholder is unregistered
     before the HTTPException propagates.
 
     Returns ``(working_dir, current_branch, repo, op)``.
@@ -1133,7 +1128,7 @@ async def get_pr_state(
     offered for shipping again. Degrades gracefully:
     no git repo or no GitHub remote just yields ``has_github=False``.
 
-    Failure is reported, never invented (finding G2). If GitHub cannot be
+    Failure is reported, never invented. If GitHub cannot be
     reached the response carries ``pr_lookup_failed=True`` and — when a recent
     known-good answer exists — that answer with ``stale=True``. A failed lookup
     is never written to the cache, so the next poll retries immediately.

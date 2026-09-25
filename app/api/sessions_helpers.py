@@ -49,14 +49,6 @@ class SessionActiveUpdate(BaseModel):
     is_active: bool
 
 
-class SessionImportData(BaseModel):
-    """Data structure for imported session"""
-    session: dict
-    messages: List[dict]
-    exported_at: Optional[str] = None
-    format_version: Optional[str] = None
-
-
 class SessionImportResponse(BaseModel):
     """Response for session import"""
     session_id: str
@@ -170,10 +162,10 @@ class CreateWorktreeSessionRequest(BaseModel):
     prompt: Optional[str] = None
     overrides: Optional[dict] = None
     pending_upload_paths: Optional[List[str]] = None
-    # Composer device pick (D4). When set to another install's id the session is
+    # Composer device pick. When set to another install's id the session is
     # created PINNED to it: no local checkout is materialized, a durable
     # ``ensure_worktree`` git op is queued for that install instead, and any
-    # ``pending_upload_paths`` travel as D8 upload blobs on the first turn. The
+    # ``pending_upload_paths`` travel as upload blobs on the first turn. The
     # response's ``worktree_path`` is None for a remote target — the path does
     # not exist on this machine and never will.
     target_instance_id: Optional[str] = None
@@ -199,7 +191,7 @@ class WorktreeSessionResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# SDK message transformation
+# Transcript parsing
 # ---------------------------------------------------------------------------
 
 def parse_session_history_via_store(
@@ -253,107 +245,6 @@ def parse_session_history_via_store(
         use_cache=use_cache,
         store_version_loader=_store_version_loader,
     )
-
-
-def _transform_sdk_messages(sdk_messages: list) -> list:
-    """Transform SDK SessionMessage objects into our frontend-compatible format.
-
-    The SDK's get_session_messages() returns SessionMessage objects with
-    type ("user"/"assistant"), uuid, session_id, and message (raw Anthropic API dict).
-    This transforms them into the same shape our frontend expects.
-    """
-    messages = []
-    tool_id_to_name: dict[str, str] = {}  # Track tool_use_id → tool_name
-
-    for i, sdk_msg in enumerate(sdk_messages):
-        raw = sdk_msg.message  # Raw Anthropic API message dict
-        role = raw.get("role", sdk_msg.type)
-        content = raw.get("content", "")
-
-        if role == "assistant" and isinstance(content, list):
-            # Assistant messages contain content blocks (text, tool_use, thinking, etc.)
-            for block in content:
-                block_type = block.get("type")
-
-                if block_type == "text":
-                    messages.append({
-                        "id": f"{sdk_msg.uuid}-text-{len(messages)}",
-                        "role": "assistant",
-                        "content": block.get("text", ""),
-                        "type": "text",
-                        "created_at": None,
-                    })
-
-                elif block_type == "tool_use":
-                    tool_id = block.get("id")
-                    tool_name = block.get("name", "unknown")
-                    if tool_id:
-                        tool_id_to_name[tool_id] = tool_name
-                    messages.append({
-                        "id": f"{sdk_msg.uuid}-tool-{tool_id}",
-                        "role": "assistant",
-                        "content": f"Using tool: {tool_name}",
-                        "type": "tool_use",
-                        "toolName": tool_name,
-                        "toolInput": block.get("input"),
-                        "toolId": tool_id,
-                        "tool_name": tool_name,
-                        "tool_input": block.get("input"),
-                        "created_at": None,
-                    })
-
-                elif block_type == "thinking":
-                    messages.append({
-                        "id": f"{sdk_msg.uuid}-thinking-{len(messages)}",
-                        "role": "assistant",
-                        "content": block.get("thinking", ""),
-                        "type": "thinking",
-                        "created_at": None,
-                    })
-
-        elif role == "user":
-            if isinstance(content, list):
-                # User messages with tool results
-                for block in content:
-                    block_type = block.get("type")
-                    if block_type == "tool_result":
-                        tool_use_id = block.get("tool_use_id", "")
-                        tool_name = tool_id_to_name.get(tool_use_id, "unknown")
-                        result_content = block.get("content", "")
-                        if isinstance(result_content, list):
-                            # Flatten content blocks to text
-                            result_content = "\n".join(
-                                b.get("text", "") for b in result_content
-                                if b.get("type") == "text"
-                            ) or str(result_content)
-                        messages.append({
-                            "id": f"{sdk_msg.uuid}-result-{tool_use_id}",
-                            "role": "tool_result",
-                            "content": str(result_content)[:2000],
-                            "type": "tool_result",
-                            "toolName": tool_name,
-                            "toolId": tool_use_id,
-                            "tool_name": tool_name,
-                            "created_at": None,
-                        })
-                    elif block_type == "text":
-                        messages.append({
-                            "id": f"{sdk_msg.uuid}-{len(messages)}",
-                            "role": "user",
-                            "content": block.get("text", ""),
-                            "type": "text",
-                            "created_at": None,
-                        })
-            elif isinstance(content, str):
-                messages.append({
-                    "id": sdk_msg.uuid,
-                    "role": "user",
-                    "content": content,
-                    "type": "text",
-                    "created_at": None,
-                })
-
-    return messages
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +389,7 @@ def is_session_degraded(
     claimable_ids: set,
     installs_map: Optional[dict] = None,
 ) -> bool:
-    """Derive the transient V2 Q7 ``degraded`` state for one session.
+    """Derive the transient ``degraded`` state for one session.
 
     ``degraded`` is True IFF ALL of:
       1. the session has a QUEUED turn and no live run — i.e. its id is in
@@ -649,7 +540,7 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         project_origins.values(),
     )
 
-    # V2 Q7 degraded derivation. Read the queued-with-no-live-run candidate set
+    # Degraded derivation. Read the queued-with-no-live-run candidate set
     # ONCE (batched — never a per-session query); each degraded derivation then
     # just tests membership + resolves placement.
     claimable_ids: set = set()
@@ -830,8 +721,8 @@ def enrich_search_results_with_tags(results: list) -> list:
 #
 # The listing query and the whole enrichment pipeline are both synchronous
 # psycopg2 work. Running them as two ``run_sync`` calls costs two thread hops
-# per request; running the enrichment on the event loop (as it used to be)
-# blocked EVERY concurrent request for the duration of 6-10 queries. These
+# per request; running the enrichment on the event loop would block EVERY
+# concurrent request for the duration of 6-10 queries. These
 # wrappers let a handler do the lot in ONE ``run_sync``.
 # ---------------------------------------------------------------------------
 
@@ -941,12 +832,11 @@ async def _apply_session_filters(
 
 
 # ---------------------------------------------------------------------------
-# Transcript payload shaping (B1)
+# Transcript payload shaping
 #
-# A session open used to return the ENTIRE transcript with untruncated tool
-# inputs (a Write call carries the whole file) and inline base64 screenshot
-# data URIs — multi-megabyte JSON per open and per legacy ``/live`` poll. The
-# helpers below add, in the API layer:
+# A raw transcript carries untruncated tool inputs (a Write call carries the
+# whole file) and inline base64 screenshot data URIs — multi-megabyte JSON per
+# open and per legacy ``/live`` poll. The helpers below add, in the API layer:
 #   * opt-in keyset pagination over the message list (newest window first,
 #     cursor for older) with a generous default cap so existing clients are
 #     unaffected;
@@ -1158,8 +1048,8 @@ def finalize_transcript(
 ) -> tuple[List[dict], dict]:
     """Attach cost/user metadata, paginate, and compact — ONE thread hop.
 
-    Every step here is synchronous DB or CPU work that used to run directly on
-    the event loop. Cost attachment walks the WHOLE transcript (turn indices
+    Every step here is synchronous DB or CPU work that must stay off the event
+    loop. Cost attachment walks the WHOLE transcript (turn indices
     must line up with ``usage_log`` rows), so it runs before the window is
     taken; the display caps then apply only to the messages being sent.
     """
@@ -1167,7 +1057,7 @@ def finalize_transcript(
 
     attach_cost_metadata(messages, session_id)
     # Store/JSONL transcripts drop the DB row's user-message metadata
-    # (e.g. automation_id/automation_run_id) — merge it back (PR #560 follow-up)
+    # (e.g. automation_id/automation_run_id) — merge it back.
     attach_user_message_metadata(messages, session_id)
 
     page, pagination = paginate_messages(messages, limit, before_seq)

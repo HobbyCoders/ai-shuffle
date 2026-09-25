@@ -62,7 +62,7 @@ KEEPALIVE_SECONDS = 15.0
 
 # Correctness re-sync cadence for a client whose live delivery is healthy (the
 # gateway LISTEN connection is up AND this session's shared reader is running).
-# The keepalive tick then costs a comment, not a DB read (F9); the moment either
+# The keepalive tick then costs a comment, not a DB read; the moment either
 # health signal drops, every tick reconciles again.
 LIVE_RESYNC_SECONDS = 120.0
 
@@ -251,7 +251,7 @@ def _frame(row: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Shared per-session tail reader (W4)
+# Shared per-session tail reader
 #
 # One reader per session, not per client: it holds the session's ONLY gateway
 # subscription, turns each notify tick into a single ``get_events`` read plus a
@@ -559,7 +559,7 @@ async def event_stream(session_id: str, from_seq: int = 0):
             cursor = seq
             replayed = True
 
-        # 1a. Legacy-history seeding, made LAZY (B6). ``ensure_backfilled``
+        # 1a. Legacy-history seeding, made LAZY. ``ensure_backfilled``
         #     re-materializes a whole legacy transcript into ``session_events``;
         #     it is needed only when this feed is the render authority AND the
         #     log has nothing to serve. A populated log (the overwhelmingly
@@ -637,7 +637,7 @@ async def event_stream(session_id: str, from_seq: int = 0):
         # A normal SSE client disconnect must end the stream cleanly, NOT bubble
         # a cancellation out of the generator where it collapses into an anyio
         # ExceptionGroup and surfaces as an unhandled 500 through the
-        # BaseHTTPMiddleware stack (issue #627). Anything that is not a pure
+        # BaseHTTPMiddleware stack. Anything that is not a pure
         # disconnect/cancellation is re-raised unchanged.
         if not is_client_disconnect(exc):
             raise

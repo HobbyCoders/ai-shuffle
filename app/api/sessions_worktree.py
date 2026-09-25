@@ -39,7 +39,6 @@ _SESSION_CREATE_OVERRIDE_KEYS = {
     "permission_mode",
     "context_window",
     "voice_config",
-    "derive_provider_from_profile",
     "fast",
     "mode",
     "hidden",
@@ -200,7 +199,7 @@ def _broadcast_session_created(session_id: str) -> None:
 async def _preflight_remote_target(
     target_instance_id: str, pv2: dict
 ) -> None:
-    """Refuse a device pick that cannot possibly run this branch session (D4).
+    """Refuse a device pick that cannot possibly run this branch session.
 
     DB-ONLY and BEFORE anything is created — a session pinned to a device that
     can't materialize its checkout is stranded, not merely slow. Two gates:
@@ -209,11 +208,11 @@ async def _preflight_remote_target(
       * the target has an ACTIVE **BASE** checkout of this project, asked via
         the shared ``checkouts.has_active_base_checkout`` predicate — the SAME
         function the cluster git-state API uses for its per-device ``eligible``
-        flag, so the composer badge and this gate can never disagree (W3-2).
+        flag, so the composer badge and this gate can never disagree.
         Deliberately NOT ``capable_runners``: that helper matches ANY active
         checkout row for the project, including a branch-only worktree row, and
-        Phase 3 never clones — creating a branch needs a base checkout to fork
-        from, so a branch-only match would queue an op that can only fail.
+        creating a branch needs a base checkout to fork from, so a branch-only
+        match would queue an op that can only fail.
 
     Raises HTTPException(409) with wording matching the local 409 family.
     """
@@ -260,13 +259,13 @@ async def _create_remote_branch_session(
     target_instance_id: str,
     session_create_overrides: Optional[dict] = None,
 ) -> WorktreeSessionResponse:
-    """Create a branch session that will materialize on ANOTHER install (D4).
+    """Create a branch session that will materialize on ANOTHER install.
 
     Nothing is written to this machine's disk: no ``ensure_checkout``, no upload
-    migration. Instead the session is created PINNED to the target (D1), a
-    durable ``ensure_worktree`` git op is queued for it (D5 — that row is the
+    migration. Instead the session is created PINNED to the target, a
+    durable ``ensure_worktree`` git op is queued for it (that row is the
     carrier of the ``create_new_branch`` intent), and any pending uploads are
-    lifted into D8 blobs attached to the first turn. The first turn is submitted
+    lifted into upload blobs attached to the first turn. The first turn is submitted
     ``no_kick`` + a claim-loop wake, exactly like the WS remote path.
 
     ``worktree_path`` comes back None — the path will exist on the target, not
@@ -286,7 +285,7 @@ async def _create_remote_branch_session(
     profile_id = _resolve_default_profile_id(project, body.profile_id)
     prompt = (body.prompt or "").strip()
 
-    # Blobs are carried BY A TURN (D8), so they are only lifted when this
+    # Blobs are carried BY A TURN, so they are only lifted when this
     # request also supplies the first prompt. The promptless compose flow
     # (createWorktree, which POSTs first and sends the message over the WS
     # afterwards) carries its paths on that follow-up query instead — lifting
@@ -309,7 +308,7 @@ async def _create_remote_branch_session(
                 ),
             ) from e
 
-    # 3. Create the session OWNED BY + PINNED TO the target (D1) and bind it to
+    # 3. Create the session OWNED BY + PINNED TO the target and bind it to
     #    the branch, exactly as the local path does.
     def _create() -> None:
         create_kwargs = {
@@ -347,7 +346,6 @@ async def _create_remote_branch_session(
     # 4. Queue the checkout work for the target. This row carries
     #    ``create_new_branch`` — a brand-new branch exists on no disk anywhere,
     #    so the intent has to travel durably or the session can never spawn.
-    from app.network import git as network_git
     await network_git.enqueue(
         target_instance_id,
         "ensure_worktree",
@@ -358,13 +356,6 @@ async def _create_remote_branch_session(
             "create_new_branch": bool(body.create_new_branch),
         },
     )
-    # Latency only (see cluster.py): claim a locally-targeted checkout now
-    # rather than on the next scheduled git-ops pass.
-    from app.core import git_ops_runner
-    from app.core.config import settings
-
-    if target_instance_id == settings.effective_instance_id:
-        git_ops_runner.kick()
 
     query_started = False
     if prompt:
@@ -409,7 +400,6 @@ async def _create_remote_branch_session(
 
 
 async def _create_v2_branch_session(
-    request: Request,
     body: CreateWorktreeSessionRequest,
     project: Optional[dict],
     api_user_id: Optional[str],
@@ -421,7 +411,7 @@ async def _create_v2_branch_session(
 
     The session records only its logical ``sessions.branch`` + origin-keyed
     ``project_v2_id``; the deterministic per-runner checkout
-    (``{workspace}/checkouts/{project}/{branch}``) is materialized here via
+    (``{base_checkout_dir}/.fluid/worktrees/{sanitized_branch}``) is materialized here via
     ``checkout_manager.ensure_checkout`` (so uploads can be migrated into it and
     the response can report the path), and re-materialized idempotently by the
     resolver at spawn. ``worktree_id``/``worktree_branch``/``worktree_path`` stay
@@ -433,16 +423,16 @@ async def _create_v2_branch_session(
 
     branch_name = body.branch_name
 
-    # Remote-only compose has no local project dir; D8 lift is project-dir-relative.
+    # Remote-only compose has no local project dir; the upload lift is project-dir-relative.
     if body.pending_upload_paths and not (body.project_id and project):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ATTACHMENTS_NEED_LOCAL_CHECKOUT,
         )
 
-    # 0. Composer device pick (D4). A target that is not us takes the remote
+    # 0. Composer device pick. A target that is not us takes the remote
     #    path: nothing is materialized here, a durable git op carries the
-    #    checkout work to the target, and uploads travel as D8 blobs.
+    #    checkout work to the target, and uploads travel as upload blobs.
     target_instance_id = (body.target_instance_id or "").strip() or None
     if target_instance_id == settings.effective_instance_id:
         target_instance_id = None
@@ -488,8 +478,8 @@ async def _create_v2_branch_session(
     #    mints ``branch_name`` from ``base_branch``; otherwise an existing branch is
     #    checked out (local) or recovered from origin, and a branch that exists
     #    nowhere yields None (never a silently-fabricated empty branch). None → the
-    #    branch isn't materializable on this runner (no base checkout — Phase 3
-    #    never clones — or a non-new branch absent locally and on origin).
+    #    branch isn't materializable on this runner (no base checkout, or a
+    #    non-new branch absent locally and on origin).
     checkout_path = await run_sync(
         checkout_manager.ensure_checkout,
         pv2,
@@ -615,10 +605,9 @@ async def create_session_with_worktree(
     Optionally submits a durable first turn when ``prompt`` is provided, so
     the user can disconnect during creation without cancelling the work.
 
-    Since Phase-3 PR-B this always takes the V2 branch-intake path (the
-    ``v2_projects`` kill switch was removed): the new session records only
+    This always takes the V2 branch-intake path: the new session records only
     ``sessions.branch`` + ``project_v2_id`` and materializes a deterministic
-    ``{workspace}/checkouts/{project}/{branch}`` checkout — no legacy
+    per-runner checkout (``checkout_manager.ensure_checkout``) — no legacy
     ``worktrees`` row / md5-hash dir. EXISTING legacy worktree sessions keep
     resolving through the resolver's legacy ladder in ``query_options``.
     """
@@ -640,5 +629,5 @@ async def create_session_with_worktree(
         )
 
     return await _create_v2_branch_session(
-        request, body, project, api_user_id, access["project_v2"]
+        body, project, api_user_id, access["project_v2"]
     )

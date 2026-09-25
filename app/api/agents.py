@@ -88,7 +88,7 @@ def _check_profile_modified(profile: dict) -> None:
 
 @router.get("/templates")
 async def list_agent_templates(token: str = Depends(require_auth)):
-    """System-prompt templates for agent creation (ruling A12).
+    """System-prompt templates for agent creation.
 
     New agents start with an EMPTY prompt; the built-in subagent prompts are
     offered as selectable starting points — templates are the ceiling, nothing
@@ -1017,7 +1017,7 @@ async def export_profile(
     system_prompt = config.get("system_prompt", {}) or {}
     ai_tools = config.get("ai_tools")
 
-    # Only the custom prompt content survives export (ruling A12) — a legacy
+    # Only the custom prompt content survives export — a legacy
     # preset-shaped config exports its append text as the custom content.
     if system_prompt.get("type") == "custom":
         prompt_content = system_prompt.get("content")
@@ -1179,7 +1179,7 @@ async def import_profile(
             if valid or not agent_data.setting_sources:
                 config["setting_sources"] = valid
 
-        # System prompt — custom content only (ruling A12). Legacy preset-shaped
+        # System prompt — custom content only. Legacy preset-shaped
         # exports map their append text onto the custom content.
         prompt_content = agent_data.system_prompt_content or agent_data.system_prompt_append
         if prompt_content:
@@ -1194,9 +1194,9 @@ async def import_profile(
             config["allowed_tools"] = agent_data.allowed_tools
         if agent_data.disallowed_tools:
             config["disallowed_tools"] = agent_data.disallowed_tools
-        # Ruling T2: an explicit mode in the file is authoritative. Absent, the
-        # runtime infers it from the lists exactly as the old editor did, so a
-        # pre-T2 export still imports with the intent its author saw.
+        # An explicit mode in the file is authoritative. Absent, the runtime
+        # infers it from the lists, so an older export still imports with the
+        # intent its author saw.
         from app.core.tool_access import TOOL_SELECTION_MODES
         if agent_data.tool_selection_mode in TOOL_SELECTION_MODES:
             config["tool_selection_mode"] = agent_data.tool_selection_mode

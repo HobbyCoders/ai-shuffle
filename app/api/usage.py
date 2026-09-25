@@ -303,13 +303,15 @@ async def get_usage_limits(
 ) -> UsageSnapshot:
     """Return the latest Claude usage snapshot for every install in the cluster.
 
-    Serves cached snapshots while coalesced background refreshes update stale
-    data; no read waits on an upstream usage endpoint. Pass ``refresh=true`` to
-    start a provider refresh; it cannot bypass the request budget. Read again
-    while ``provider_refreshing`` is true to receive progressive results.
-    Claude windows come only from the rate-limit events the Claude Code CLI
-    reports while it runs; ``available: false`` with empty windows means it has
-    reported none yet (never errors). The legacy top-level fields describe the
+    No read waits on an upstream usage endpoint. Claude windows are read
+    passively: they come only from the rate-limit events the Claude Code CLI
+    reports while it runs, and a plain GET never refreshes them;
+    ``refresh=true`` re-persists and re-broadcasts them. ``available: false``
+    with empty windows means the CLI has reported none yet (never errors).
+    Provider rows are served from cache and refreshed in the background when
+    due; ``refresh=true`` also forces a provider refresh, which cannot bypass
+    the request budget. Read again while ``provider_refreshing`` is true to
+    receive progressive results. The legacy top-level fields describe the
     LOCAL install; ``snapshots`` adds every install's windows so offloaded
     sessions render the owning install's reset time. ``providers`` adds every
     non-Claude provider's usage snapshot (best-effort).

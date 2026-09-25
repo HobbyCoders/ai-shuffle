@@ -464,6 +464,37 @@ def _get_project_session(session_id: str, project_id: str, api_user: Optional[di
     return session
 
 
+def _get_project_worktree(worktree_id: str, project_id: str) -> Optional[dict]:
+    """Load a worktree for a project-scoped route; 404 if it belongs to another project's repository."""
+    worktree = database.get_worktree(worktree_id)
+    if worktree:
+        repo = database.get_git_repository_by_project(project_id)
+        if not repo or worktree.get("repository_id") != repo["id"]:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Worktree not found in this project: {worktree_id}"
+            )
+    return worktree
+
+
+def _resolve_in_project(project: dict, rel: str) -> tuple[Path, Path]:
+    """Resolve ``rel`` inside the project's working dir; 400 if it escapes it.
+
+    Returns ``(full_path, base_path)``, both resolved. The workspace boundary
+    alone is not enough: ``../other-project`` stays inside the workspace. A
+    leading slash is project-relative, as it was when paths were string-joined.
+    """
+    base_path = get_project_working_dir_as_path(project).resolve()
+    rel = rel.lstrip("/\\")
+    full_path = (base_path / rel).resolve() if rel else base_path
+    if not is_path_safe(full_path, base_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Path escapes project directory"
+        )
+    return full_path, base_path
+
+
 @router.get("/{project_id}/files")
 async def list_project_files(
     request: Request,
@@ -543,17 +574,7 @@ async def list_project_files(
                 detail=f"Project not found: {project_id}"
             )
 
-        # Build the full path
-        base_path = get_project_working_dir_as_path(project)
-        if path:
-            full_path = validate_project_path(f"{project['path']}/{path}")
-            if not is_path_safe(full_path, base_path):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Path escapes project directory"
-                )
-        else:
-            full_path = base_path
+        full_path, base_path = _resolve_in_project(project, path)
 
         if not full_path.exists():
             raise HTTPException(
@@ -716,6 +737,7 @@ async def upload_file(
         )
 
     check_project_access(request, project_id)
+    api_user = get_api_user_from_request(request)
 
     def _load_project():
         project = database.get_project(project_id)
@@ -724,6 +746,12 @@ async def upload_file(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Project not found: {project_id}"
             )
+        # The destination may come from session_id / worktree_id; both must
+        # belong to this project, or the file lands in another project's checkout.
+        if session_id:
+            _get_project_session(session_id, project_id, api_user)
+        if worktree_id:
+            _get_project_worktree(worktree_id, project_id)
         return project
 
     # TWO hops here, deliberately: the 404 is decided before the body is read
@@ -770,8 +798,7 @@ async def download_file(
                 detail=f"Project not found: {project_id}"
             )
 
-        # Validate and build full path
-        full_path = validate_project_path(f"{project['path']}/{path}")
+        full_path, _ = _resolve_in_project(project, path)
 
         if not full_path.exists():
             raise HTTPException(
@@ -823,11 +850,9 @@ async def create_folder(
                 detail=f"Project not found: {project_id}"
             )
 
-        # Build the folder path
-        if path:
-            folder_path = validate_project_path(f"{project['path']}/{path}/{folder_name}")
-        else:
-            folder_path = validate_project_path(f"{project['path']}/{folder_name}")
+        folder_path, base_path = _resolve_in_project(
+            project, f"{path}/{folder_name}" if path else folder_name
+        )
 
         if folder_path.exists():
             raise HTTPException(
@@ -835,7 +860,7 @@ async def create_folder(
                 detail="Folder already exists"
             )
 
-        return folder_path, get_project_working_dir_as_path(project)
+        return folder_path, base_path
 
     # TWO hops on purpose: ``api_error_handler`` today wraps ONLY the mkdir, so
     # a DB failure keeps surfacing as itself rather than as "Failed to create
@@ -880,23 +905,32 @@ async def rename_file_or_folder(
                 detail=f"Project not found: {project_id}"
             )
 
-        # Get current path
-        current_path = validate_project_path(f"{project['path']}/{path}")
+        current_path, base_path = _resolve_in_project(project, path)
         if not current_path.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="File or folder not found"
             )
+        if current_path == base_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot rename project root directory"
+            )
 
         # Build new path
         new_path = current_path.parent / new_name
+        if not is_path_safe(new_path, base_path):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid name"
+            )
         if new_path.exists():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A file or folder with that name already exists"
             )
 
-        return current_path, new_path, get_project_working_dir_as_path(project)
+        return current_path, new_path, base_path
 
     # TWO hops: ``api_error_handler`` must keep wrapping only the rename, as it
     # does today, so a DB error is not relabelled as a rename failure.
@@ -935,8 +969,7 @@ async def delete_file_or_folder(
                 detail=f"Project not found: {project_id}"
             )
 
-        # Get the path to delete
-        target_path = validate_project_path(f"{project['path']}/{path}")
+        target_path, base_path = _resolve_in_project(project, path)
         if not target_path.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -944,8 +977,7 @@ async def delete_file_or_folder(
             )
 
         # Don't allow deleting the project root
-        base_path = get_project_working_dir_as_path(project)
-        if target_path.resolve() == base_path.resolve():
+        if target_path == base_path:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot delete project root directory"
@@ -1033,7 +1065,7 @@ async def list_chat_history(
         # Resolve working directory: worktree takes priority over project
         working_dir: str
         if worktree_id:
-            worktree = database.get_worktree(worktree_id)
+            worktree = _get_project_worktree(worktree_id, project_id)
             if worktree:
                 working_dir = get_worktree_working_dir(worktree)
             else:

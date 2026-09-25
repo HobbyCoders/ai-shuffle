@@ -74,18 +74,6 @@ async def get_model_schema(
     return {"found": True, "schema": schema.to_dict()}
 
 
-@router.get("/models/{endpoint_id:path}")
-async def get_model(
-    endpoint_id: str,
-    _: str = Depends(require_auth),
-):
-    """Get a specific model by its fal.ai endpoint ID."""
-    model = catalog_service.get_model(endpoint_id)
-    if not model:
-        return {"error": f"Model '{endpoint_id}' not found in catalog", "found": False}
-    return {"model": model.to_dict(), "found": True}
-
-
 @router.get("/categories")
 async def list_categories(
     _: str = Depends(require_auth),

@@ -420,7 +420,7 @@ class RewindRequestV2(BaseModel):
     """V2 Rewind request using message UUID instead of index"""
     target_uuid: str = ""  # UUID of the message to rewind to ("" when using target_content)
     restore_chat: bool = True  # Truncate JSONL (rewind conversation)
-    restore_files: bool = False  # Restore files to checkpoint state (requires file checkpointing enabled)
+    restore_files: bool = False  # Not supported: reported as an error; the chat rewind still runs
     include_response: bool = True  # Keep Claude's response to target message
     target_role: str = "user"  # Role of target message ("user" or "assistant")
     # v2 event-log affordance: a live v2 message rendered from the event log may
@@ -587,7 +587,7 @@ def _is_prompt_event(row: dict) -> bool:
     computed against the SAME population on both sides.
 
     Task-notification wake prompts (synthetic user rows containing a
-    ``<task-notification>`` block) are likewise excluded: since #658 the UI
+    ``<task-notification>`` block) are likewise excluded: the UI
     renders them as system Task cards, not user bubbles, so they must never
     resolve as rewind checkpoints. Reuses ``jsonl_parser._is_task_notification``
     — the shared ``<task-notification>`` substring convention used across
@@ -737,13 +737,13 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
 
     How it works:
     1. Truncates the JSONL file at the target message UUID
-    2. Optionally rewinds files via SDK (if enable_file_checkpointing was enabled)
+    2. Refuses file restore (file checkpoints are not supported)
     3. Syncs our local database
-    4. Next SDK resume will use truncated context
+    4. The next resume uses the truncated context
 
     Options:
     - restore_chat: Truncate JSONL (rewind conversation context)
-    - restore_files: Restore files to checkpoint state (requires file checkpointing)
+    - restore_files: Not supported; reported as an error while the chat rewind still runs
     - include_response: Keep Claude's response to target message
     """
     # Authorize and route before inspecting local provider state or resolving a
@@ -858,20 +858,18 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     files_rewound = False
     messages_removed = 0
     errors = []
-    # Set by the fluid branch below (ruling R5): the outcome of re-seeding the
+    # Set by the fluid branch below: the outcome of re-seeding the
     # delegated CLI from fluid's post-rewind context. None = never attempted.
     reseed_result = None
 
     # CRITICAL: evict any live pooled CLI subprocess for this session BEFORE we
-    # touch the transcript. A pooled ``ClaudeSDKClient`` keeps the JSONL file
-    # open and appends to it. If we truncate/rewrite the file underneath
+    # touch the transcript. A pooled adapter's CLI subprocess keeps the JSONL
+    # file open and appends to it. If we truncate/rewrite the file underneath
     # a live process, its next write lands past the new (shorter) EOF — leaving a
     # gap of NUL bytes — or flushes a stale buffer, producing duplicate/partial
-    # lines. That corrupts the JSONL, breaks the next resume, and (because the
-    # CLI runs with ``--session-mirror``) propagates the garbage into the
-    # Postgres session store the UI reads. Removing the pool entry first
-    # guarantees the transcript is quiescent; the next turn resumes a fresh
-    # client from the truncated file. Best-effort: an eviction hiccup must not
+    # lines. That corrupts the JSONL and breaks the next resume. Removing the
+    # pool entry first guarantees the transcript is quiescent; the next turn
+    # resumes a fresh client from the truncated file. Best-effort: an eviction hiccup must not
     # abort a rewind the user explicitly requested.
     if request.restore_chat or request.restore_files:
         try:
@@ -976,14 +974,14 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                     f"Fluid rewind DB sync skipped: no anchor row resolved for "
                     f"session={session_id} target={request.target_uuid}"
                 )
-            # Ruling R5: fluid owns the context, so the DELEGATED (claude CLI)
+            # Fluid owns the context, so the DELEGATED (claude CLI)
             # engine must not be left resuming its own pre-rewind history.
             # Materialize the post-rewind path as a CLI session file under a
             # fresh uuid and store it as the session's --resume handle; the
             # adapter's _resolve_cli_session_id picks it up on the next turn
             # with no further plumbing. A no-op for native-engine sessions
             # (nothing stored to re-seed). Best-effort: a failure downgrades to
-            # the #815 divergence warning below, it never fails the rewind.
+            # the divergence warning below, it never fails the rewind.
             reseed_result = await asyncio.to_thread(
                 reseed_delegated_cli_session, sdk_session_id, working_dir
             )
@@ -1213,10 +1211,10 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # Honesty guard for fluid sessions running the DELEGATED (claude CLI) engine.
     # The CLI keeps its OWN conversation history and fluid cannot truncate it
     # (``DelegatedLoop.caps`` declares rewind=False; ``--resume`` is its only
-    # history control), so before ruling R5 every fluid rewind carried a warning
-    # that the model might still recall the removed turns.
+    # history control), so without the re-seed above the model could still
+    # recall the removed turns.
     #
-    # The re-seed above now removes that divergence at the source: the session's
+    # The re-seed removes that divergence at the source: the session's
     # ``--resume`` handle points at a freshly materialized transcript that ends
     # at the checkpoint (or is dropped entirely when the rewind emptied the
     # conversation), and a native-engine session never had CLI history to begin

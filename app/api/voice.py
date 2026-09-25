@@ -1,12 +1,12 @@
-"""Voice-mode API routes (waves VW1 + VW3 of docs/VOICE_MODE_PLAN.md).
+"""Voice-mode API routes.
 
 Deliberately small surface:
 
 * ``GET  /api/v1/voice/providers`` — which ``model_providers`` rows can fund a
   realtime call. OpenAI Realtime is **API-key only**: a ChatGPT/Codex
-  subscription row (ruling VM3) can never be used, so those are filtered out
+  subscription row can never be used, so those are filtered out
   here rather than failing at mint time.
-* ``POST /api/v1/voice/sessions`` — create the session row (ruling VM5: a voice
+* ``POST /api/v1/voice/sessions`` — create the session row (a voice
   session is a REAL ``sessions`` row, created eagerly, ``mode='voice'``) and
   mint a short-lived OpenAI client secret for the browser's WebRTC leg, so the
   provider's API key never leaves this process. A declared
@@ -57,16 +57,11 @@ router = APIRouter(prefix="/api/v1/voice", tags=["Voice"])
 OPENAI_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 
 # How long a minted secret stays usable (OpenAI default 600s, max 7200s). The
-# secret is ALSO the sideband's primary credential (live-validated 2026-08-14:
-# an API-key sideband handshake 404s on browser-created calls, the call's own
-# secret connects), so it must outlive the whole call — cap is 60 minutes
-# (voice_max_call_minutes) plus reconnect headroom, hence the maximum.
+# secret is ALSO the sideband's primary credential (an API-key sideband
+# handshake can 404 on browser-created calls; the call's own secret connects),
+# so it must outlive the whole realtime session (OpenAI caps one at 60 minutes;
+# the FE reconnects with a fresh secret near that wall), hence the maximum.
 CLIENT_SECRET_TTL_SECONDS = 7200
-
-# Input-transcription model for the user's side of the conversation. Kept here
-# because VW1 mints with a MINIMAL session config — the VW3 sideband owns the
-# full ``session.update`` (instructions, tools, VAD, retention).
-INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 
 # Upstream mint is a single small request; fail fast rather than hanging the
 # user's "start call" click.
@@ -87,8 +82,7 @@ def _is_eligible_voice_provider(row: Dict[str, Any]) -> bool:
 
     Requires an enabled ``provider_type='openai'`` row carrying a stored API
     key. ChatGPT/Codex subscription rows are excluded via the same discriminator
-    the fluid credential layer uses — Realtime has no subscription-OAuth path
-    (ruling VM3).
+    the fluid credential layer uses — Realtime has no subscription-OAuth path.
     """
     from app.core.provider.fluid_credentials import _is_codex_subscription
 
@@ -155,7 +149,7 @@ class VoiceSessionCreateRequest(BaseModel):
     """Start a voice session. Every field is optional.
 
     ``session_mode`` ("command" | "chat") declared at creation lets a
-    wake-word "command" session be born hidden (``sessions.hidden``, v75) so
+    wake-word "command" session be born hidden (``sessions.hidden``) so
     the quick one-shot task never flashes into the sessions list. Chat and
     browser sessions (no mode) are created visible as before.
     """
@@ -210,7 +204,7 @@ class VoiceCallRequest(BaseModel):
     ``session_mode`` ("command" | "chat") is how a native client reports what
     kind of session this is; the route composes the matching instructions
     appendix (Settings-overridable) into the sideband's system prompt, and
-    "command" additionally hides the session from the sessions list (v75).
+    "command" additionally hides the session from the sessions list.
     Browser calls omit it and get the base prompt only.
     """
     call_id: str
@@ -220,7 +214,7 @@ class VoiceCallRequest(BaseModel):
 
 
 class VoicePreviewRequest(BaseModel):
-    """Which voice to synthesise a short sample for (VM21)."""
+    """Which voice to synthesise a short sample for."""
     voice: str
     provider_id: Optional[str] = None
 
@@ -567,7 +561,7 @@ async def _provider_api_key(provider_row: Dict[str, Any]) -> str:
 
 
 async def _require_voice_enabled() -> Dict[str, Any]:
-    """The voice settings, or a 403 when the mode is switched off (VM13)."""
+    """The voice settings, or a 403 when the mode is switched off."""
     from app.api.settings import get_voice_settings
 
     voice_settings = await run_sync(get_voice_settings)
@@ -580,7 +574,7 @@ async def _require_voice_enabled() -> Dict[str, Any]:
 
 
 def _reject_when_capped(session_id: str) -> None:
-    """409 while the session sits inside the post-cap grace window (VW5).
+    """409 while the session sits inside the post-cap grace window.
 
     The call-length cap is measured from the call's epoch, so the FE's silent
     re-handshake would otherwise just re-attach and keep going. Answering 409
@@ -605,7 +599,7 @@ async def _require_voice_session(session_id: str) -> Dict[str, Any]:
     """The session row, or a 404 when it is missing or is not a voice session.
 
     A chat session is 404 rather than 400 on purpose: the voice call surface
-    simply does not exist for it (ruling VM7 — modes never mix in V1).
+    simply does not exist for it (modes never mix).
     """
     row = await run_sync(database.get_session, session_id)
     if not row or row.get("mode") != "voice":
@@ -755,7 +749,6 @@ async def create_voice_session(
             target_instance_id=target_instance_id,
         )
         created = await _create_v2_branch_session(
-            http_request,
             branch_request,
             access.get("legacy"),
             (get_api_user_from_request(http_request) or {}).get("id"),
@@ -835,7 +828,7 @@ async def create_voice_session(
 
 
 # ============================================================================
-# Call surface (VW3) — re-mint, attach, hangup, state
+# Call surface — re-mint, attach, hangup, state
 # ============================================================================
 
 @router.post("/sessions/{session_id}/secret", response_model=VoiceSecretResponse)
@@ -846,7 +839,7 @@ async def mint_voice_session_secret(
     """Re-mint the browser's realtime credential for an EXISTING voice session.
 
     Two callers: reopening a voice session later, and the FE's reconnect as the
-    call approaches OpenAI's session wall (ruling VM15) — it re-handshakes with
+    call approaches OpenAI's session wall — it re-handshakes with
     a fresh secret, gets a new ``call_id``, and posts it to ``/call``, which
     replaces the sideband and reseeds context.
 
@@ -940,7 +933,7 @@ async def attach_voice_call(
     request: VoiceCallRequest,
     token: str = Depends(require_auth),
 ):
-    """Join the browser's realtime call from the backend (ruling VM2/VM8).
+    """Join the browser's realtime call from the backend.
 
     Idempotent in the useful sense: posting a NEW ``call_id`` for a session that
     already has a bridge replaces it (the old attachment is closed first), which
@@ -981,7 +974,7 @@ async def attach_voice_call(
             detail="session_mode must be 'command' or 'chat'.",
         )
 
-    # A "command" session is list-hidden (v75). Creation already stamps this
+    # A "command" session is list-hidden. Creation already stamps this
     # when the mode is declared up front; the shipped app only declares it
     # here at attach time, so backfill the flag for that client too — and
     # broadcast the flip, so a list that rendered the card during the
@@ -1107,7 +1100,7 @@ async def hangup_voice_call(
     """Detach and stop the session's bridge. ``ok`` even when there was none.
 
     Tears down ONLY the bridge and the realtime session — dispatched workers
-    deliberately survive the call ending (ruling VM12). No flag gate: ending a
+    deliberately survive the call ending. No flag gate: ending a
     call must keep working even if voice mode was switched off mid-call.
     """
     from app.core import voice_bridge
@@ -1146,8 +1139,8 @@ async def get_voice_call_state(
     """Whether this session has a live sideband, and whether it is connected.
 
     ``active`` without ``connected`` is the FE's cue that the sideband dropped:
-    the server never reconnects on its own (ruling VM15 puts reconnect on the
-    FE, with a fresh ``call_id``).
+    the server never reconnects on its own; reconnect is the FE's job, with a
+    fresh ``call_id``.
     """
     from app.core import voice_bridge
 

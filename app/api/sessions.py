@@ -15,11 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, R
 
 from app.core.cli_sessions import (
     rename_session as sdk_rename_session,
-    tag_session as sdk_tag_session,
-    get_session_info as sdk_get_session_info,
     delete_session as sdk_delete_session,
-    list_subagents as sdk_list_subagents,
-    get_subagent_messages as sdk_get_subagent_messages,
 )
 
 from app.core.models import (
@@ -350,7 +346,7 @@ async def move_session_endpoint(
     device = (install or {}).get("device_name") or target
 
     # Online + capability check, with NO checkout filter — the same validation
-    # `resolve_placement` applies to an explicit `runner:<id>` pin (A10).
+    # `resolve_placement` applies to an explicit `runner:<id>` pin.
     from app.core.placement import capable_runners
 
     if target not in await run_sync(capable_runners, None, {}):
@@ -362,8 +358,8 @@ async def move_session_endpoint(
         )
 
     # Project host gate — has_active_base_checkout, not capable_runners.
-    # capable_runners(project_v2_id) also matches branch-only worktrees, and
-    # Phase 3 never clones; a new branch needs a base to fork from.
+    # capable_runners(project_v2_id) also matches branch-only worktrees, but a
+    # new branch needs a base checkout to fork from.
     # Projectless sessions skip this. Fails OPEN on any non-409 error — a
     # preflight bug must never make a movable session impossible to move.
     if session.get("project_v2_id") or session.get("project_id"):
@@ -484,8 +480,8 @@ async def list_sessions(
     )
 
     # Query + enrichment in ONE thread hop: both are synchronous psycopg2 work,
-    # and the enrichment pipeline (6-10 queries) used to run on the event loop,
-    # stalling every concurrent request on every sidebar poll.
+    # and the enrichment pipeline (6-10 queries) on the event loop would stall
+    # every concurrent request on every sidebar poll.
     return await run_sync(
         fetch_and_enrich_sessions,
         database.get_sessions,
@@ -834,9 +830,9 @@ async def get_session(
                 )
             if jsonl_messages:
                 # Transform (incl. the DB-backed per-message profile
-                # resolution) in ONE thread hop — it used to run inline on the
-                # event loop, blocking every concurrent request for the length
-                # of the transcript.
+                # resolution) in ONE thread hop — inline on the event loop it
+                # would block every concurrent request for the length of the
+                # transcript.
                 messages = await run_sync(
                     build_detail_messages, session_id, jsonl_messages
                 )
@@ -1063,9 +1059,9 @@ async def get_live_session(
     session = await require_session(request, session_id)
 
     # Derived lifecycle snapshot; ``compute`` also logs any cross-source
-    # disagreement (pool, drain pump, parked marker) as ``lifecycle-drift``.
+    # disagreement (pool, idle reader, parked marker) as ``lifecycle-drift``.
     #
-    # active_tasks: SDK agent tasks + Monitor shell subprocesses PLUS any
+    # active_tasks: agent tasks + Monitor shell subprocesses PLUS any
     # recently-failed task still inside the retention window (``get_visible``,
     # the DISPLAY view — running-only control-flow predicates still use
     # ``get_active``). Attached fresh to EVERY local response, so a task
@@ -1073,7 +1069,7 @@ async def get_live_session(
     #
     # unpark_pending: an unpark follow-up turn is committed but has NOT yet
     # flipped ``is_streaming`` true — OR undrained queued messages exist (the
-    # keep-alive channel, forensic incident 2026-07-09). Surfaced on every
+    # keep-alive channel). Surfaced on every
     # response body so a polling client keeps its park-poll alive across the
     # gap instead of reading a transient (is_streaming=false, activeTasks=[])
     # and STOPPING.
@@ -1126,7 +1122,7 @@ async def get_live_session(
     # NOTE: the legacy DB fast path (load_messages_from_db) is deliberately
     # absent here: the legacy `session_messages` table only holds the USER rows
     # — assistant/system turns live exclusively in the session store
-    # (session_store_entries, written by the SDK mirror). Reading the legacy
+    # (session_store_entries). Reading the legacy
     # table first returned a user-only transcript (the "assistant replies
     # vanish on reopen" bug).
 
@@ -1161,7 +1157,7 @@ async def get_live_session(
                 )
             if jsonl_messages:
                 # Transform + per-message profile resolution in ONE thread hop
-                # (see GET /{id}); both used to run on the event loop.
+                # (see GET /{id}).
                 messages = await run_sync(
                     build_live_messages, session_id, jsonl_messages
                 )
@@ -1257,7 +1253,7 @@ async def get_live_session(
         "activeTasks": active_tasks,
         "unpark_pending": unpark_pending,
         "v2_stream": v2_stream,
-        # Transcript window (B1). Additive: `messages` still carries the newest
+        # Transcript window. Additive: `messages` still carries the newest
         # page (the whole transcript for any ordinary session), and this says
         # whether older messages exist and how to ask for them.
         "message_pagination": message_pagination,
@@ -1265,8 +1261,7 @@ async def get_live_session(
     if session_meta:
         result["session_meta"] = session_meta
 
-    # Live ProviderAgent worker attribution (multi-provider phase 3, plan §2
-    # C.4): per-turn worker token/spend grouped by the worker's PROVIDER, while
+    # Live ProviderAgent worker attribution: per-turn worker token/spend grouped by the worker's PROVIDER, while
     # the turn is still running. Attached ONLY when workers are actually live,
     # so the pinned /live wire shape is unchanged for every ordinary session.
     try:
@@ -1339,76 +1334,17 @@ async def update_session(
     return session
 
 
-@router.post("/{session_id}/sdk-tag")
-async def tag_sdk_session(
-    request: Request,
-    session_id: str,
-    tag: Optional[str] = Query(None, description="Tag to set (null to clear)"),
-    token: str = Depends(require_auth)
-):
-    """Tag a session in the Claude SDK. Requires the session to have an SDK session ID."""
-    existing = await require_session(request, session_id)
-
-    sdk_sid = existing.get("sdk_session_id")
-    if not sdk_sid:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Session has no SDK session ID"
-        )
-
-    async with api_error_handler("tag session"):
-        sdk_tag_session(session_id=sdk_sid, tag=tag)
-        return {"status": "ok", "session_id": session_id, "tag": tag}
-
-
-@router.get("/{session_id}/sdk-info")
-async def get_sdk_session_info(
-    request: Request,
-    session_id: str,
-    token: str = Depends(require_auth)
-):
-    """Get session metadata from the Claude SDK (tag, created_at, git_branch, etc.)."""
-    existing = await require_session(request, session_id)
-
-    sdk_sid = existing.get("sdk_session_id")
-    if not sdk_sid:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Session has no SDK session ID"
-        )
-
-    async with api_error_handler("get session info"):
-        info = sdk_get_session_info(session_id=sdk_sid)
-        if not info:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"SDK session not found: {sdk_sid}"
-            )
-        return {
-            "sdk_session_id": info.session_id,
-            "summary": info.summary,
-            "custom_title": info.custom_title,
-            "first_prompt": info.first_prompt,
-            "git_branch": info.git_branch,
-            "cwd": info.cwd,
-            "tag": info.tag,
-            "created_at": info.created_at,
-            "last_modified": info.last_modified,
-            "file_size": info.file_size,
-        }
-
-
 @router.get("/{session_id}/context-usage")
 async def get_session_context_usage(
     request: Request,
     session_id: str,
     token: str = Depends(require_auth)
 ):
-    """Get the live SDK context-window usage breakdown for a session.
+    """Get the live context-window usage breakdown for a session.
 
     Live path (session connected in the local pool, control call succeeds):
     ``{"available": True, "source": "live", "usage": <ContextUsageResponse>}``
-    with the SDK's breakdown passed through verbatim.
+    with the adapter's breakdown passed through verbatim.
 
     Persisted fallback applies ONLY when the session is not connected: the last
     breakdown persisted at turn end is served from ``sessions.context_usage_json``
@@ -1474,9 +1410,9 @@ async def stop_session_background_task(
     """Stop ONE in-flight background task (sub-agent or Monitor shell) by id.
 
     Powers the "x" on the live background-tasks strip. Shell tasks are
-    terminated directly; background sub-agents are stopped via the SDK, which
-    then reports the terminal status that drops the task from the next /live
-    poll. Returns ``{"ok": bool, ...}`` — a failed stop is a 200 with ok=False
+    terminated directly; a background sub-agent is stopped through the pooled
+    session when it offers a stop control, otherwise its registry row is reaped,
+    so either way the task drops from the next /live poll. Returns ``{"ok": bool, ...}`` — a failed stop is a 200 with ok=False
     (e.g. the task already finished) rather than an error.
     """
     await require_session(request, session_id)
@@ -1496,7 +1432,7 @@ async def list_provider_workers(
 ):
     """Live ProviderAgent workers for a session, with per-provider attribution.
 
-    The read side of plan §2 C.4's "live attribution + stop-all": worker
+    The read side of the live attribution + stop-all controls: worker
     token/spend attributed to the worker's provider, visible WHILE the parent
     turn runs rather than only once every tool call has returned. Returns
     ``{"workers": [], "providers": {}, "totals": {...}}`` when nothing is live.
@@ -1518,10 +1454,9 @@ async def stop_provider_workers(
     """Stop EVERY live ProviderAgent worker for this session — the stop-all control.
 
     Kills each worker's SESSION and subprocess tree, not just its registry row:
-    the 2026-07-22 forensics showed registry rows going terminal while 35 child
-    processes kept issuing upstream requests. Settles each worker's card and
-    leaves ONE coalesced note rather than a chip per worker (fan-out is uncapped
-    by ruling P12). Idempotent — stopping when nothing is live returns
+    a terminal registry row alone leaves child processes issuing upstream
+    requests. Settles each worker's card and leaves ONE coalesced note rather
+    than a chip per worker (worker fan-out is uncapped). Idempotent — stopping when nothing is live returns
     ``stopped: 0``.
     """
     await require_session(request, session_id)
@@ -1531,75 +1466,6 @@ async def stop_provider_workers(
     async with api_error_handler("stop provider workers"):
         result = await provider_agent_supervisor.stop_all_workers(session_id)
         return {"session_id": session_id, **result}
-
-
-@router.get("/{session_id}/subagents")
-async def list_session_subagents(
-    request: Request,
-    session_id: str,
-    token: str = Depends(require_auth)
-):
-    """List subagent IDs spawned during a session (SDK 0.1.60+)."""
-    existing = await require_session(request, session_id)
-
-    sdk_sid = existing.get("sdk_session_id")
-    if not sdk_sid:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Session has no SDK session ID"
-        )
-
-    async with api_error_handler("list session subagents"):
-        project = await run_sync(database.get_project, existing.get("project_id")) if existing.get("project_id") else None
-        working_dir = get_project_working_dir(project) if project else None
-        agent_ids = await run_sync(sdk_list_subagents, session_id=sdk_sid, directory=working_dir)
-        return {"session_id": session_id, "subagents": agent_ids}
-
-
-@router.get("/{session_id}/subagents/{agent_id}/messages")
-async def get_session_subagent_messages(
-    request: Request,
-    session_id: str,
-    agent_id: str,
-    limit: Optional[int] = None,
-    offset: int = 0,
-    token: str = Depends(require_auth)
-):
-    """Read a subagent's transcript messages in chronological order (SDK 0.1.60+)."""
-    existing = await require_session(request, session_id)
-
-    sdk_sid = existing.get("sdk_session_id")
-    if not sdk_sid:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Session has no SDK session ID"
-        )
-
-    async with api_error_handler("get subagent messages"):
-        project = await run_sync(database.get_project, existing.get("project_id")) if existing.get("project_id") else None
-        working_dir = get_project_working_dir(project) if project else None
-        messages = await run_sync(
-            sdk_get_subagent_messages,
-            session_id=sdk_sid,
-            agent_id=agent_id,
-            directory=working_dir,
-            limit=limit,
-            offset=offset,
-        )
-        return {
-            "session_id": session_id,
-            "agent_id": agent_id,
-            "messages": [
-                {
-                    "type": m.type,
-                    "uuid": m.uuid,
-                    "session_id": m.session_id,
-                    "message": m.message,
-                    "parent_tool_use_id": m.parent_tool_use_id,
-                }
-                for m in messages
-            ],
-        }
 
 
 async def _cleanup_session_artifacts(session_id: str, sdk_sid: Optional[str], project_id: Optional[str]):
@@ -1624,7 +1490,7 @@ async def _cleanup_session_artifacts(session_id: str, sdk_sid: Optional[str], pr
     if sdk_sid:
         # Purge the Postgres session store: sessions has NO FK into
         # session_store_entries/_summaries, so skipping this leaks the deleted
-        # session's full transcript forever (Bug E). session_id-only match —
+        # session's full transcript forever. session_id-only match —
         # the stored project_key cannot be reconstructed here. Runs in every
         # store mode (cheap no-op when the session has no rows).
         try:
@@ -1849,9 +1715,9 @@ async def resume_session(
     from app.db import turns as turns_db
 
     # ONE atomic read, not separate live/queued checks: a turn flipping
-    # queued→running between two reads is invisible to both (the
-    # wait_session_idle race, 2026-08-28), which here would leave the caller
-    # believing the resume starts now when it is really queued.
+    # queued→running between two reads is invisible to both, which here
+    # would leave the caller believing the resume starts now when it is
+    # really queued.
     busy = await run_sync(turns_db.session_has_unsettled_turns, session_id)
     if busy and if_busy == "conflict":
         raise HTTPException(
@@ -2078,7 +1944,7 @@ async def get_session_state(
     Get current session state for client reconnection.
 
     This endpoint is used by clients to check the session state when reconnecting,
-    including whether work is in progress and if there are buffered streaming messages.
+    including whether work is in progress.
 
     Returns:
         - session_id: The session ID
@@ -2086,7 +1952,6 @@ async def get_session_state(
         - status: Session status (active, archived, etc.)
         - is_streaming: Whether work is currently in progress
         - connected_devices: Number of devices watching this session
-        - streaming_messages: Buffered messages if streaming (for late-joiners)
     """
     session = await require_session(request, session_id)
 
@@ -2101,5 +1966,4 @@ async def get_session_state(
         "status": session.get("status"),
         "is_streaming": sync_state["is_streaming"],
         "connected_devices": sync_state["connected_devices"],
-        "streaming_messages": sync_state.get("streaming_messages", [])
     }

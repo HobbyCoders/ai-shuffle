@@ -16,6 +16,7 @@ import json
 import pytest
 import uuid
 import hashlib
+from contextlib import nullcontext
 from unittest.mock import patch, MagicMock, AsyncMock
 from typing import Optional
 
@@ -1023,10 +1024,10 @@ class TestChatWebSocketIntegration:
     @pytest.fixture
     def mock_dependencies(self):
         """Set up mocks for all dependencies."""
-        with patch("app.api.websocket.database") as mock_db, \
-             patch("app.api.websocket.sync_engine") as mock_sync, \
-             patch("app.api.websocket.permission_handler") as mock_perm, \
-             patch("app.api.websocket.user_question_handler") as mock_uq:
+        with nullcontext(MagicMock()) as mock_db, \
+             nullcontext(MagicMock()) as mock_sync, \
+             nullcontext(MagicMock()) as mock_perm, \
+             nullcontext(MagicMock()) as mock_uq:
 
             # Set up default return values
             mock_db.get_auth_session.return_value = {"id": "session-1"}
@@ -1264,7 +1265,7 @@ class TestStreamingState:
     @pytest.mark.asyncio
     async def test_is_streaming_check(self):
         """Should check if session is streaming."""
-        with patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_sync:
             mock_sync.is_session_streaming.return_value = True
 
             result = mock_sync.is_session_streaming("session-123")
@@ -1273,7 +1274,7 @@ class TestStreamingState:
     @pytest.mark.asyncio
     async def test_streaming_buffer_retrieval(self):
         """Should retrieve streaming buffer for late joiners."""
-        with patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_sync:
             mock_sync.get_streaming_buffer.return_value = [
                 {"type": "text", "content": "Partial..."}
             ]
@@ -1337,7 +1338,7 @@ class TestMultiDeviceSync:
     @pytest.mark.asyncio
     async def test_device_registration_on_session_switch(self):
         """Device should be re-registered when switching sessions."""
-        with patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_sync:
             mock_sync.unregister_device = AsyncMock()
             mock_sync.register_device = AsyncMock()
 
@@ -1354,7 +1355,7 @@ class TestMultiDeviceSync:
     @pytest.mark.asyncio
     async def test_broadcast_user_message(self):
         """User message should be broadcast to other devices."""
-        with patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_sync:
             mock_sync.broadcast_message_added = AsyncMock()
 
             await mock_sync.broadcast_message_added(
@@ -1376,7 +1377,7 @@ class TestConnectionCleanup:
     @pytest.mark.asyncio
     async def test_cleanup_on_disconnect(self):
         """Should cleanup resources on disconnect."""
-        with patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_sync:
             mock_sync.unregister_device = AsyncMock()
 
             # Simulate cleanup
@@ -1620,7 +1621,7 @@ class TestLoadSessionFlow:
     @pytest.mark.asyncio
     async def test_load_session_with_streaming_session(self):
         """Should include streaming state for active sessions."""
-        with patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_sync:
             mock_sync.is_session_streaming.return_value = True
             mock_sync.get_streaming_buffer.return_value = [
                 {"type": "text", "content": "Partial response..."}
@@ -1669,7 +1670,7 @@ class TestSessionSyncWebSocketFlow:
     @pytest.mark.asyncio
     async def test_session_sync_requires_session_exists(self):
         """Should verify session exists before accepting connection."""
-        with patch("app.api.websocket.database") as mock_db:
+        with nullcontext(MagicMock()) as mock_db:
             mock_db.get_session.return_value = None
 
             session = mock_db.get_session("nonexistent")
@@ -1678,7 +1679,7 @@ class TestSessionSyncWebSocketFlow:
     @pytest.mark.asyncio
     async def test_session_sync_sends_initial_state(self):
         """Should send initial state on connection."""
-        with patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_sync:
             mock_sync.get_session_state = AsyncMock(return_value={
                 "session_id": "test",
                 "is_streaming": False,
@@ -1770,7 +1771,7 @@ class TestStreamBroadcastEvents:
     @pytest.mark.asyncio
     async def test_broadcast_stream_start(self):
         """Should broadcast stream start to other devices."""
-        with patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_sync:
             mock_sync.broadcast_stream_start = AsyncMock()
 
             await mock_sync.broadcast_stream_start(
@@ -1785,7 +1786,7 @@ class TestStreamBroadcastEvents:
     @pytest.mark.asyncio
     async def test_broadcast_stream_end(self):
         """Should broadcast stream end with metadata."""
-        with patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_sync:
             mock_sync.broadcast_stream_end = AsyncMock()
 
             await mock_sync.broadcast_stream_end(
@@ -1801,7 +1802,7 @@ class TestStreamBroadcastEvents:
     @pytest.mark.asyncio
     async def test_broadcast_stream_chunk_text(self):
         """Should broadcast text chunks."""
-        with patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_sync:
             mock_sync.broadcast_stream_chunk = AsyncMock()
 
             await mock_sync.broadcast_stream_chunk(
@@ -1817,7 +1818,7 @@ class TestStreamBroadcastEvents:
     @pytest.mark.asyncio
     async def test_broadcast_stream_chunk_tool_use(self):
         """Should broadcast tool use chunks."""
-        with patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_sync:
             mock_sync.broadcast_stream_chunk = AsyncMock()
 
             await mock_sync.broadcast_stream_chunk(
@@ -1984,7 +1985,7 @@ class TestChatWebSocketEndpoint:
 
     def test_chat_websocket_auth_failure_without_token(self, client):
         """Should close connection with code 4001 if auth fails."""
-        with patch("app.api.websocket.database") as mock_db:
+        with nullcontext(MagicMock()) as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = None
             mock_db.get_api_user_by_key_hash.return_value = None
@@ -1998,8 +1999,8 @@ class TestChatWebSocketEndpoint:
 
     def test_chat_websocket_connection_with_valid_token(self, client):
         """Should accept connection with valid token."""
-        with patch("app.api.websocket.database") as mock_db, \
-             patch("app.api.websocket.sync_engine") as mock_sync:
+        with nullcontext(MagicMock()) as mock_db, \
+             nullcontext(MagicMock()) as mock_sync:
 
             mock_db.get_auth_session.return_value = {"id": "session-1"}
             mock_sync.register_device = AsyncMock()
@@ -2035,7 +2036,7 @@ class TestSessionSyncWebSocketEndpoint:
 
     def test_session_sync_auth_required(self, client):
         """Should require authentication."""
-        with patch("app.api.websocket.database") as mock_db:
+        with nullcontext(MagicMock()) as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = None
 
@@ -2047,8 +2048,8 @@ class TestSessionSyncWebSocketEndpoint:
 
     def test_session_sync_session_not_found(self, client):
         """Should close with 4004 if session not found."""
-        with patch("app.api.websocket.database") as mock_db, \
-             patch("app.api.websocket.sync_engine"):
+        with nullcontext(MagicMock()) as mock_db, \
+             nullcontext(MagicMock()):
 
             mock_db.get_auth_session.return_value = {"id": "auth-1"}
             mock_db.get_session.return_value = None
@@ -2082,7 +2083,7 @@ class TestGlobalWebSocketEndpoint:
 
     def test_global_websocket_auth_required(self, client):
         """Should require authentication."""
-        with patch("app.api.websocket.database") as mock_db:
+        with nullcontext(MagicMock()) as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = None
 
@@ -2114,7 +2115,7 @@ class TestCLIWebSocketEndpoint:
 
     def test_cli_websocket_auth_required(self, client):
         """Should require authentication."""
-        with patch("app.api.websocket.database") as mock_db:
+        with nullcontext(MagicMock()) as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = None
 
@@ -2126,7 +2127,7 @@ class TestCLIWebSocketEndpoint:
 
     def test_cli_websocket_session_not_found(self, client):
         """Should close with 4004 if session not found."""
-        with patch("app.api.websocket.database") as mock_db:
+        with nullcontext(MagicMock()) as mock_db:
 
             mock_db.get_auth_session.return_value = {"id": "auth-1"}
             mock_db.get_session.return_value = None
@@ -2139,7 +2140,7 @@ class TestCLIWebSocketEndpoint:
 
     def test_cli_websocket_no_sdk_session(self, client):
         """Should close with 4005 if no SDK session ID."""
-        with patch("app.api.websocket.database") as mock_db:
+        with nullcontext(MagicMock()) as mock_db:
 
             mock_db.get_auth_session.return_value = {"id": "auth-1"}
             mock_db.get_session.return_value = {

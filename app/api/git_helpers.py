@@ -163,7 +163,7 @@ def get_project_path(project_id: str, allow_missing: bool = False) -> Optional[s
 # ---------------------------------------------------------------------------
 # Resolving (project_id, worktree_id, session_id) -> checkout path costs 1-2
 # synchronous DB round trips plus a filesystem stat, and every hot git endpoint
-# does it on every poll (~2s cadence per open tab, finding G9). The mapping is
+# does it on every poll (~2s cadence per open tab). The mapping is
 # stable for the lifetime of a session, so it is cached with a short TTL and an
 # explicit invalidation hook for the flows that change it.
 _WORKING_DIR_TTL = 30.0

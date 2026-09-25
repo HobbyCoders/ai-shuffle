@@ -1613,7 +1613,6 @@ class TestGetSessionState:
             mock_sync.get_session_state = AsyncMock(return_value={
                 "is_streaming": False,
                 "connected_devices": 1,
-                "streaming_messages": []
             })
 
             response = client.get("/api/v1/sessions/test-session-id/state")

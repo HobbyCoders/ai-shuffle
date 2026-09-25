@@ -150,9 +150,8 @@ class PrStateResponse(BaseModel):
     """Response for the pr-state endpoint (PR lifecycle for the current branch).
 
     ``open_pr is None`` is only meaningful when ``pr_lookup_failed`` is False.
-    The two flags together give the client a tri-state instead of the old
-    lie-by-omission where an unreachable ``gh`` looked exactly like "this branch
-    has no pull request" (finding G2):
+    The two flags together give the client a tri-state, so an unreachable ``gh``
+    never looks like "this branch has no pull request":
 
     * ``pr_lookup_failed=False`` — the answer is authoritative.
     * ``pr_lookup_failed=True``, ``stale=True`` — the refresh failed and
@@ -414,21 +413,6 @@ class GenerateBranchNameResponse(BaseModel):
     """Generated branch name"""
     branch_name: str
     display_name: str  # Human-readable version
-
-
-# =============================================================================
-# Upload Migration Models
-# =============================================================================
-
-class MigrateUploadsRequest(BaseModel):
-    """Request to copy pending uploads from main project to worktree"""
-    worktree_id: str
-    file_paths: List[str] = Field(..., description="Absolute paths of files to copy to worktree")
-
-class MigrateUploadsResponse(BaseModel):
-    """Result of upload migration"""
-    migrated: List[Dict[str, str]]  # List of {original_path, new_path, relative_path}
-    errors: List[str]
 
 
 # =============================================================================

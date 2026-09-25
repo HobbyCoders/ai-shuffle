@@ -16,10 +16,6 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, Query
 
-from app.core.sync_engine import sync_engine  # noqa: F401
-from app.db import database  # noqa: F401
-from app.core.permission_handler import permission_handler  # noqa: F401
-from app.core.user_question_handler import user_question_handler  # noqa: F401
 from app.api.chat_ws_handler import ChatWebSocketHandler
 
 # Re-exported for chat_ws_handler, app.core.resource_monitor and tests.

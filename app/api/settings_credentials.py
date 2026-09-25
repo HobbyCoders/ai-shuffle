@@ -40,14 +40,6 @@ class AllCredentialPoliciesResponse(BaseModel):
     policies: list[CredentialPolicyResponse]
 
 
-class UserCredentialPolicyResponse(BaseModel):
-    """A user's credential policy override"""
-    api_user_id: str
-    credential_type: str
-    policy: str  # 'admin_provided', 'user_provided', 'optional'
-    source: str  # 'user' (override) or 'global' (fallback)
-
-
 class SetUserCredentialPolicyRequest(BaseModel):
     """Request to set a user's credential policy override"""
     policy: str  # 'admin_provided', 'user_provided', 'optional'

@@ -212,10 +212,8 @@ async def generate_with_claude(
     provider binding stamped onto the options by `build_generation_options`
     (`aih_provider_id` / `aih_provider_type` / `aih_provider_auth_mode` /
     `aih_provider_dialect`): a Claude-subscription binding takes the delegated
-    `claude.exe` leg, anything else (an OpenAI/OpenRouter/custom row, an
-    API-key Anthropic row) takes the fluid native leg. This function used to
-    call the SDK's `query()` directly, which always spawned `claude.exe` even
-    when the profile pointed at e.g. `gpt-5.6-terra` — a guaranteed hang.
+    CLI leg, anything else (an OpenAI/OpenRouter/custom row, an
+    API-key Anthropic row) takes the fluid native leg.
 
     Tools / MCP / agents / hooks are always forced off for one-shot generation,
     and nothing is persisted to the session store.
@@ -493,7 +491,7 @@ async def _generate_profile_internal(
         except Exception as e:
             logger.warning(f"Failed to parse ai_tools config: {e}")
 
-    # Build the export format — fluid-honored fields only (ruling A12). If a
+    # Build the export format — fluid-honored fields only. If a
     # model still emits the retired preset shape, fold its append text into
     # the custom prompt content; other SDK-era fields are dropped.
     prompt_content = (

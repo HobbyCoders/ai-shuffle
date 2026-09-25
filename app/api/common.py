@@ -415,8 +415,8 @@ async def api_error_handler(
     HTTPException. Existing HTTPExceptions pass through unchanged.
 
     Usage:
-        async with api_error_handler("tag session"):
-            sdk_tag_session(session_id=sdk_sid, tag=tag)
+        async with api_error_handler("rename session"):
+            sdk_rename_session(session_id=sdk_sid, title=title)
             return {"status": "ok"}
     """
     try:

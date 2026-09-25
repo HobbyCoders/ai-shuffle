@@ -541,10 +541,6 @@ async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = F
     return {"op": op}
 
 
-class ControlBody(BaseModel):
-    model_config = {"extra": "allow"}
-
-
 @router.post("/peer/control/{action}")
 async def peer_control(action: str, request: Request, device_id: str = Depends(tokens.require_device)) -> dict:
     """The owner side of the runner API: turns, sessions, interrupt, prompt answers, hydrate."""

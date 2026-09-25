@@ -539,7 +539,7 @@ class TestCreateVoiceSession:
         pv2 = project_resolver.resolve_project_v2({"project_id": "proj-auto"})
         captured = {}
 
-        async def _create(request, body, project, api_user_id, pv2_row, **kwargs):
+        async def _create(body, project, api_user_id, pv2_row, **kwargs):
             captured.update(body=body, project=project, pv2=pv2_row, kwargs=kwargs)
             return WorktreeSessionResponse(
                 session_id="voice-auto", branch_name=body.branch_name,

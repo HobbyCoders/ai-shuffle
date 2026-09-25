@@ -97,7 +97,6 @@ async def test_create_with_branch_persists_branch_and_no_worktree_row(monkeypatc
     m = _wire_v2(monkeypatch)
 
     resp = await worktree_api._create_v2_branch_session(
-        request=MagicMock(),
         body=_body(),
         project={"id": "proj-A", "settings": {}},
         api_user_id="user-9",
@@ -133,7 +132,6 @@ async def test_promptless_compose_migrates_pending_uploads(monkeypatch):
     monkeypatch.setattr(worktree_api, "_migrate_uploads_to_dir", migrate)
 
     resp = await worktree_api._create_v2_branch_session(
-        request=MagicMock(),
         body=_body(prompt=None, pending_upload_paths=["/ws/proj-A/a.png"]),
         project={"id": "proj-A", "settings": {}},
         api_user_id=None,
@@ -160,7 +158,6 @@ async def test_spawn_materializes_deterministic_checkout_and_submits_worktree_tu
     m = _wire_v2(monkeypatch)
 
     resp = await worktree_api._create_v2_branch_session(
-        request=MagicMock(),
         body=_body(prompt="build the feature"),
         project={"id": "proj-A", "settings": {}},
         api_user_id=None,
@@ -184,7 +181,6 @@ async def test_default_profile_falls_back_to_project_then_first(monkeypatch):
     m = _wire_v2(monkeypatch)
 
     await worktree_api._create_v2_branch_session(
-        request=MagicMock(),
         body=_body(profile_id=None),
         project={"id": "proj-A", "settings": {"default_profile_id": "proj-default"}},
         api_user_id=None,
@@ -198,7 +194,6 @@ async def test_unresolvable_project_raises_500(monkeypatch):
 
     with pytest.raises(HTTPException) as ei:
         await worktree_api._create_v2_branch_session(
-            request=MagicMock(),
             body=_body(),
             project={"id": "proj-A", "settings": {}},
             api_user_id=None,
@@ -215,7 +210,6 @@ async def test_missing_base_checkout_raises_409(monkeypatch):
 
     with pytest.raises(HTTPException) as ei:
         await worktree_api._create_v2_branch_session(
-            request=MagicMock(),
             body=_body(),
             project={"id": "proj-A", "settings": {}},
             api_user_id=None,
@@ -234,7 +228,6 @@ async def test_missing_base_checkout_raises_409(monkeypatch):
 async def test_ensure_checkout_receives_base_and_create_new_kwargs(monkeypatch):
     m = _wire_v2(monkeypatch)
     await worktree_api._create_v2_branch_session(
-        request=MagicMock(),
         body=_body(base_branch="develop", create_new_branch=True),
         project={"id": "proj-A", "settings": {}},
         api_user_id=None,
@@ -247,7 +240,6 @@ async def test_ensure_checkout_receives_base_and_create_new_kwargs(monkeypatch):
 async def test_response_base_branch_honest_for_new_branch(monkeypatch):
     _wire_v2(monkeypatch)
     resp = await worktree_api._create_v2_branch_session(
-        request=MagicMock(),
         body=_body(base_branch="develop", create_new_branch=True),
         project={"id": "proj-A", "settings": {}},
         api_user_id=None,
@@ -259,7 +251,6 @@ async def test_response_base_branch_honest_for_new_branch(monkeypatch):
 async def test_response_base_branch_honest_for_existing_branch(monkeypatch):
     _wire_v2(monkeypatch)
     resp = await worktree_api._create_v2_branch_session(
-        request=MagicMock(),
         body=_body(base_branch="develop", create_new_branch=False),
         project={"id": "proj-A", "settings": {}},
         api_user_id=None,
@@ -277,7 +268,6 @@ async def test_missing_branch_non_new_raises_409_with_branch_message(monkeypatch
 
     with pytest.raises(HTTPException) as ei:
         await worktree_api._create_v2_branch_session(
-            request=MagicMock(),
             body=_body(create_new_branch=False),
             project={"id": "proj-A", "settings": {}},
             api_user_id=None,
@@ -326,7 +316,6 @@ async def test_no_project_dict_falls_back_to_first_profile(monkeypatch):
     m = _wire_v2(monkeypatch)
 
     await worktree_api._create_v2_branch_session(
-        request=MagicMock(),
         body=_body(profile_id=None),
         project=None,
         api_user_id=None,

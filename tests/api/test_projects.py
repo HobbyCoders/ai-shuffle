@@ -986,6 +986,28 @@ class TestListProjectFilesSessionCheckout:
         assert response.status_code == 404
         listing.assert_not_called()
 
+    def test_chat_history_rejects_worktree_from_another_project(self, client, mock_database):
+        mock_database.get_worktree.return_value = {"id": "wt1", "repository_id": "repo-other", "worktree_path": "/elsewhere"}
+        mock_database.get_git_repository_by_project.return_value = {"id": "repo-mine"}
+
+        with patch("app.core.jsonl_parser.list_chat_history_sessions", return_value=[]) as listing:
+            response = client.get("/api/v1/projects/test-project/chat-history?worktree_id=wt1")
+
+        assert response.status_code == 404
+        mock_database.get_git_repository_by_project.assert_called_once_with("test-project")
+        listing.assert_not_called()
+
+    def test_chat_history_lists_worktree_of_this_project(self, client, mock_database):
+        mock_database.get_worktree.return_value = {"id": "wt1", "repository_id": "repo-mine", "worktree_path": "/wt"}
+        mock_database.get_git_repository_by_project.return_value = {"id": "repo-mine"}
+
+        with patch("app.api.projects.get_worktree_working_dir", return_value="/wt"), \
+             patch("app.core.jsonl_parser.list_chat_history_sessions", return_value=[]) as listing:
+            response = client.get("/api/v1/projects/test-project/chat-history?worktree_id=wt1")
+
+        assert response.status_code == 200
+        assert listing.call_args.kwargs["working_dir"] == "/wt"
+
 
 # =============================================================================
 # Test Upload File Endpoint
@@ -1393,6 +1415,154 @@ class TestDeleteFileOrFolder:
         response = client.delete("/api/v1/projects/nonexistent/files?path=file.txt")
 
         assert response.status_code == 404
+
+
+class TestProjectFileRoutesStayInProject:
+    """Download, create-folder, rename, delete and upload are confined to the project.
+
+    The workspace boundary alone lets ``../other-project`` through, so each route
+    must also reject paths that leave the project directory, and upload must reject
+    a session or worktree that belongs to another project.
+    """
+
+    TRAVERSALS = ["..", "../other-project", "sub/../../other-project"]
+
+    @pytest.fixture
+    def layout(self, mock_database, sample_project, temp_dir, mock_settings):
+        mock_database.get_project.return_value = sample_project
+        project_dir = temp_dir / "test-project"
+        (project_dir / "sub").mkdir(parents=True)
+        other = temp_dir / "other-project"
+        other.mkdir()
+        (other / "secret.txt").write_text("secret")
+        return project_dir, other
+
+    @pytest.mark.parametrize("path", ["../other-project/secret.txt", "sub/../../other-project/secret.txt"])
+    def test_download_rejects_traversal(self, client, layout, path):
+        response = client.get("/api/v1/projects/test-project/files/download", params={"path": path})
+
+        assert response.status_code == 400
+        assert "secret" not in response.text
+
+    def test_download_rejects_traversal_for_project_scoped_api_user(self, client, layout, mock_api_user):
+        mock_api_user.return_value = {"id": "u1", "project_id": "test-project"}
+
+        response = client.get(
+            "/api/v1/projects/test-project/files/download", params={"path": "../other-project/secret.txt"}
+        )
+
+        assert response.status_code == 400
+
+    def test_download_absolute_path_stays_in_project(self, client, layout):
+        _, other = layout
+
+        response = client.get(
+            "/api/v1/projects/test-project/files/download", params={"path": str(other / "secret.txt")}
+        )
+
+        assert response.status_code == 404
+        assert "secret" not in response.text
+
+    @pytest.mark.parametrize("path", TRAVERSALS)
+    def test_create_folder_rejects_traversal(self, client, layout, temp_dir, path):
+        response = client.post(
+            "/api/v1/projects/test-project/files/folder", params={"path": path}, json={"name": "planted"}
+        )
+
+        assert response.status_code == 400
+        assert not (temp_dir / "other-project" / "planted").exists()
+        assert not (temp_dir / "planted").exists()
+
+    def test_create_folder_rejects_dotdot_name(self, client, layout):
+        response = client.post("/api/v1/projects/test-project/files/folder", json={"name": ".."})
+
+        assert response.status_code == 400
+
+    @pytest.mark.parametrize("path", ["../other-project/secret.txt", "sub/../../other-project/secret.txt"])
+    def test_rename_rejects_traversal(self, client, layout, path):
+        _, other = layout
+
+        response = client.put(
+            "/api/v1/projects/test-project/files/rename", params={"path": path}, json={"new_name": "moved.txt"}
+        )
+
+        assert response.status_code == 400
+        assert (other / "secret.txt").exists()
+
+    @pytest.mark.parametrize("path", ["", "."])
+    def test_rename_rejects_project_root(self, client, layout, temp_dir, path):
+        response = client.put(
+            "/api/v1/projects/test-project/files/rename", params={"path": path}, json={"new_name": "renamed"}
+        )
+
+        assert response.status_code == 400
+        assert (temp_dir / "test-project").is_dir()
+        assert not (temp_dir / "renamed").exists()
+
+    @pytest.mark.parametrize("path", TRAVERSALS)
+    def test_delete_rejects_traversal(self, client, layout, path):
+        project_dir, other = layout
+
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": path})
+
+        assert response.status_code == 400
+        assert (other / "secret.txt").exists()
+        assert project_dir.is_dir()
+
+    def test_delete_absolute_path_stays_in_project(self, client, layout):
+        _, other = layout
+
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": str(other)})
+
+        assert response.status_code == 404
+        assert (other / "secret.txt").exists()
+
+    def test_delete_inside_project_still_works(self, client, layout):
+        project_dir, _ = layout
+        (project_dir / "sub" / "gone.txt").write_text("x")
+
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": "sub/gone.txt"})
+
+        assert response.status_code == 200
+        assert not (project_dir / "sub" / "gone.txt").exists()
+
+    def test_upload_rejects_session_from_another_project(self, client, mock_database, layout):
+        mock_database.get_session.return_value = {"id": "s1", "project_id": "other-project"}
+
+        response = client.post(
+            "/api/v1/projects/test-project/upload",
+            files={"file": ("a.txt", BytesIO(b"x"), "text/plain")},
+            data={"session_id": "s1"},
+        )
+
+        assert response.status_code == 404
+        mock_database.get_worktree_by_session.assert_not_called()
+
+    def test_upload_rejects_worktree_from_another_project(self, client, mock_database, layout):
+        mock_database.get_worktree.return_value = {"id": "wt1", "repository_id": "repo-other", "worktree_path": "wt"}
+        mock_database.get_git_repository_by_project.return_value = {"id": "repo-mine"}
+
+        response = client.post(
+            "/api/v1/projects/test-project/upload",
+            files={"file": ("a.txt", BytesIO(b"x"), "text/plain")},
+            data={"worktree_id": "wt1"},
+        )
+
+        assert response.status_code == 404
+
+    def test_upload_with_own_session_still_works(self, client, mock_database, layout):
+        project_dir, _ = layout
+        mock_database.get_session.return_value = {"id": "s1", "project_id": "test-project"}
+        mock_database.get_worktree_by_session.return_value = None
+
+        response = client.post(
+            "/api/v1/projects/test-project/upload",
+            files={"file": ("a.txt", BytesIO(b"x"), "text/plain")},
+            data={"session_id": "s1"},
+        )
+
+        assert response.status_code == 200
+        assert (project_dir / "uploads" / "a.txt").read_bytes() == b"x"
 
 
 # =============================================================================

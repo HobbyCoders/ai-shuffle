@@ -15,7 +15,6 @@ from pydantic import BaseModel
 
 from app.api.auth import require_auth
 from app.core.team_registry import team_registry
-from app.core.team_transcript_watcher import team_transcript_watcher
 from app.db import database
 
 router = APIRouter(prefix="/api/v1/teams", tags=["Teams"])
@@ -91,16 +90,3 @@ async def kill_teammate(
         )
     ok = await team_registry.kill_teammate(session_id, team_name, teammate_name)
     return {"success": ok, "pid": rec.pid}
-
-
-@router.post("/{session_id}/{team_name}/stop-watching")
-async def stop_watching(
-    session_id: str,
-    team_name: str,
-    token: str = Depends(require_auth),
-) -> Dict[str, Any]:
-    """Detach all transcript tailers for a team without killing processes."""
-    _verify_session_access(session_id, token)
-    await team_transcript_watcher.stop_session(session_id)
-    await team_registry.remove_team(session_id, team_name)
-    return {"success": True}

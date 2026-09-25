@@ -5,10 +5,9 @@ These endpoints power the **Devices UI** (``require_auth`` — the normal admin/
 user): list installs, rename/delete a device, inspect/rotate the cluster secret,
 and manage the address this install advertises to peers.
 
-History and live session state live in the shared DB; the legacy peer relay
-endpoints (send/interrupt/permission/question/intake/upload) were removed with
-the V2 placement cutover — cross-runner execution is now the ``runs`` lease
-claim loop and durable ``pending_interactions``, not HTTP relay.
+History and live session state live in the shared DB; cross-runner execution
+is the ``runs`` lease claim loop and durable ``pending_interactions``, not an
+HTTP relay.
 """
 
 from __future__ import annotations
@@ -265,13 +264,13 @@ async def git_state(
     project_v2_id: Optional[str] = Query(None, description="Origin-keyed project_v2 id"),
     token: str = Depends(require_auth),
 ) -> Dict[str, Any]:
-    """Per-device git state for one project — the read side of D6 (W3-1).
+    """Per-device git state for one project.
 
     Answers, for every registered install, "can this device run a worktree
     session for this project, and what does it already have checked out?".
     ``eligible`` is ``checkouts.has_active_base_checkout`` — the SAME predicate
     the with-worktree remote preflight enforces, so a device the composer shows
-    as eligible is exactly a device whose send will not 409 (W3-2).
+    as eligible is exactly a device whose send will not 409.
 
     Pass exactly one of ``project_id`` or ``project_v2_id`` (400 if both or
     neither). ``project_v2_id`` does not 404 just because this install has no

@@ -589,7 +589,7 @@ async def list_mcp_tools(
     """
     List every MCP tool a session can be given.
 
-    Discovered live from the configured servers (ruling T1) rather than from
+    Discovered live from the configured servers rather than from
     whatever the Claude CLI last reported: the same ``tools/list`` round-trip
     the tool-surface endpoint runs, cached per server for 10 minutes.
 

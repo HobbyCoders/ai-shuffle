@@ -16,7 +16,6 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_admin, require_auth
 from app.api.settings_updates import updates_router
-from app.core.ai_tools import AI_TOOLS
 from app.core.query_engine import DEFAULT_SECURITY_INSTRUCTIONS
 
 # Import from sub-modules
@@ -153,11 +152,10 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     Returns whether API keys are configured (without exposing the actual keys).
     """
     def _load() -> IntegrationSettingsResponse:
-        """Both key reads (+ decrypt) and all 19 setting reads in ONE hop.
+        """Both key reads (+ decrypt) and every setting read in ONE hop.
 
-        This endpoint made 21 blocking round trips on the event loop; the
-        whole body is straight-line synchronous work, so it collapses into a
-        single closure with the query order untouched.
+        The whole body is straight-line synchronous work, so it runs as a
+        single off-loop closure with the query order untouched.
         """
         fal_key = get_decrypted_api_key("fal_api_key")
         anthropic_key = get_decrypted_api_key("anthropic_api_key")
@@ -451,64 +449,6 @@ async def dismiss_loop_guard_turn(held_id: str, token: str = Depends(require_adm
 
 
 # ============================================================================
-# AI Tools Configuration (for Profile Management)
-# ============================================================================
-
-# AI_TOOLS imported at top of file from app.core.ai_tools
-
-
-@router.get("/ai-tools/available")
-async def get_available_ai_tools(token: str = Depends(require_auth)):
-    """
-    Get list of AI tools available based on configured providers.
-
-    Returns tools grouped by category with availability status.
-    Used by the profile management UI to show only available tools.
-    """
-    fal_key = await run_sync(get_decrypted_api_key, "fal_api_key")
-    available_providers = {"fal-ai"} if fal_key else set()
-
-    # Build tools list with availability
-    tools = []
-    categories = {}
-
-    for tool_id, tool_info in AI_TOOLS.items():
-        # Check if any of the tool's providers are available
-        tool_providers = tool_info["providers"]
-        is_available = any(p in available_providers for p in tool_providers)
-
-        # Active provider is fal-ai if available
-        active_provider = "fal-ai" if is_available else None
-
-        tool_data = {
-            "id": tool_id,
-            "name": tool_info["name"],
-            "description": tool_info["description"],
-            "category": tool_info["category"],
-            "available": is_available,
-            "providers": tool_providers,
-            "active_provider": active_provider
-        }
-        tools.append(tool_data)
-
-        # Group by category
-        cat = tool_info["category"]
-        if cat not in categories:
-            categories[cat] = {
-                "id": cat,
-                "name": f"{cat.title()} Tools",
-                "tools": []
-            }
-        categories[cat]["tools"].append(tool_data)
-
-    return {
-        "tools": tools,
-        "categories": list(categories.values()),
-        "available_providers": list(available_providers),
-    }
-
-
-# ============================================================================
 # Security Instructions (System Prompt)
 # ============================================================================
 
@@ -598,10 +538,10 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 
 
 # ============================================================================
-# Voice mode (ruling VM13/VM17 — docs/VOICE_MODE_PLAN.md)
+# Voice mode
 # ============================================================================
 #
-# Six runtime-editable knobs stored as plain ``system_settings`` values (they
+# Runtime-editable knobs stored as plain ``system_settings`` values (they
 # are NOT secrets — the OpenAI key itself lives encrypted on the model_providers
 # row the voice session is funded by, never here). Stored/read through the same
 # get_system_setting/set_system_setting helpers the security-instructions
@@ -614,17 +554,10 @@ from app.core.voice_models import (
 )
 DEFAULT_VOICE_MODEL = "gpt-live-1"
 
-# The voices the realtime models can speak with (ruling VM21). Same allowlist
-# discipline as the models: rejected on write, defaulted on read, so an unknown
-# name can never reach the mint. ``marin``/``cedar`` are the gpt-realtime
-# generation's recommended pair; the rest are the classic realtime set.
-VOICE_VOICES = (
-    "marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage",
-    "shimmer", "verse",
-)
+# Voice names are validated per model by ``voices_for(model)``.
 DEFAULT_VOICE_VOICE = "marin"
 # Total wall-clock budget for one call. OpenAI's own 60-minute session cap is
-# bridged by reconnect (VM15); this is the separate "don't leave a call running
+# bridged by reconnect; this is the separate "don't leave a call running
 # all week" ceiling.
 DEFAULT_VOICE_MAX_CALL_MINUTES = 240
 
@@ -902,7 +835,7 @@ async def update_text_generation_settings(
     """Update the text-generation model / effort. Admin only.
 
     A ``prov:<providerId>:<modelId>`` model is validated against the provider
-    row so a gateway model that the provider does not serve is refused here
+    row so a model that the provider does not serve is refused here
     rather than failing every commit-message generation afterwards. An empty
     string on either key clears it back to the default.
     """
