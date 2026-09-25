@@ -5,9 +5,6 @@ Primary endpoint: /api/v1/ws/chat (session id supplied per-message)
 - Handles all chat interactions via WebSocket
 - Streams Claude responses directly to client
 - Simple, reliable, no race conditions
-
-Additional endpoints:
-- /api/v1/ws/cli/{session_id} - Interactive CLI bridge for commands like /rewind
 """
 
 import logging
@@ -21,10 +18,6 @@ from app.api.chat_ws_handler import ChatWebSocketHandler
 # Re-exported for chat_ws_handler and tests.
 from app.api.ws_auth import authenticate_websocket  # noqa: F401
 from app.api.ws_utils import ping_loop  # noqa: F401
-from app.api.ws_cli import (  # noqa: F401
-    _active_cli_bridges,
-    router as _cli_router,
-)
 from app.api.ws_sync import router as _sync_router
 
 logger = logging.getLogger(__name__)
@@ -34,7 +27,6 @@ router = APIRouter(prefix="/api/v1", tags=["WebSocket"])
 # Include sub-routers so their endpoints are registered under the same prefix.
 # The sub-routers have no prefix of their own; they inherit the main router's
 # ``/api/v1`` prefix automatically.
-router.include_router(_cli_router)
 router.include_router(_sync_router)
 
 

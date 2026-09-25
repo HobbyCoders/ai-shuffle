@@ -1663,8 +1663,13 @@ def build_options_from_profile(
     # every possible working directory (workspace / project / worktree all live
     # under the workspace root). The CLI's file tools can only touch the cwd plus
     # add_dirs, so an @-referenced note path like /data/notes/foo.md would be
-    # unreachable. Always register the notes dir so referenced notes (and their
-    # attachments, stored beneath it) resolve from any session.
+    # unreachable. Register the notes dir so referenced notes (and their
+    # attachments, stored beneath it) resolve from any owner session.
+    # Not for an API key's session: the folder is shared (one flat directory of
+    # every note, the owner's included) and an add_dir is an auto-approved read
+    # root on the delegated leg, so the key's agent could Glob/Read every note
+    # the notes API hides from it. A key's own note is still readable through
+    # the notes API and the scoped ``@Notes/`` expansion.
     merged_add_dirs: list = list(config.get("add_dirs") or [])
     if session_mode != "chat":
         from app.core.workspace_folders import workspace_directories
@@ -1677,7 +1682,9 @@ def build_options_from_profile(
     try:
         from app.core.note_files import get_notes_dir
         notes_dir = str(get_notes_dir())
-        if notes_dir not in (str(d) for d in merged_add_dirs):
+        if api_user_id:
+            merged_add_dirs = [d for d in merged_add_dirs if str(d) != notes_dir]
+        elif notes_dir not in (str(d) for d in merged_add_dirs):
             merged_add_dirs.append(notes_dir)
     except Exception:
         logger.exception("Failed to register notes dir as an accessible directory")

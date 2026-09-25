@@ -87,6 +87,16 @@ def _session_coalesce_key(event_type: str, session_id: str) -> Optional[Tuple[An
     return None
 
 
+def _is_owner_user_id(user_id: str) -> bool:
+    """Whether a user-level socket registration belongs to the owner.
+
+    The chat socket registers as ``"admin"`` for the owner, ``"paired:<id>"``
+    for a device paired to the owner, and the API key's id for a key
+    (app/api/websocket.py). Owner-only broadcasts skip the last kind.
+    """
+    return user_id == "admin" or user_id.startswith("paired:")
+
+
 def _user_coalesce_key(message: Dict[str, Any]) -> Optional[Tuple[Any, ...]]:
     """Coalescing key for a user-scoped WS frame, or None if it must not drop."""
     mtype = message.get("type")
@@ -1172,9 +1182,15 @@ class SyncEngine:
         self,
         snapshot: Dict[str, Any],
     ):
-        """Fan a Claude usage-limits snapshot out to EVERY connected device.
+        """Fan a Claude usage-limits snapshot out to every OWNER device.
 
-        Cluster-level (not session- or user-scoped): the 5-hour Claude window is
+        Only the owner's sockets receive it: the web app/desktop (``"admin"``)
+        and devices paired to the owner (``"paired:<id>"``). An API key's chat
+        socket registers under the key's id and gets nothing: the snapshot is
+        the owner's Claude windows, install names and instance id, which REST
+        already refuses a key (``/usage/limits`` returns it an empty reading).
+
+        Cluster-level (not session-scoped): the 5-hour Claude window is
         PER-ACCOUNT, and on a shared database two installs may run different
         Claude accounts, so the numbers are NOT identical everywhere. The
         broadcast carries the enriched cluster shape — the local install's legacy
@@ -1190,6 +1206,7 @@ class SyncEngine:
             targets = [
                 (user_id, did, conn)
                 for user_id, devices in self._user_connections.items()
+                if _is_owner_user_id(user_id)
                 for did, conn in devices.items()
             ]
 

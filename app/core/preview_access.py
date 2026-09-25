@@ -11,7 +11,9 @@ its local network" / ``local_access: false``. This module is the narrow door.
 Threat model, and what the token is NOT:
 
 * The token is minted by the harness for ONE app session and carries that
-  session id; it is never accepted for a session that does not exist. It
+  session id; it is never accepted for a session that does not exist, nor
+  for one that runs as an API key (a grant is the owner, see
+  :func:`_session_exists`). It
   expires (``DEFAULT_TTL``), and nothing renews it silently.
 * It is an HMAC over ``session_id.expires`` under a per-install key kept in
   the data dir (``preview-access.key``, created 0600). Any process sharing the
@@ -173,7 +175,14 @@ def mint(session_id: str, ttl_seconds: int = DEFAULT_TTL, *, now: Optional[float
 
 
 def _session_exists(session_id: str) -> bool:
-    """Whether the bound session is a real row. Fail closed on lookup errors.
+    """Whether the bound session is a real row the OWNER runs. Fail closed on
+    lookup errors.
+
+    A grant authenticates as the owner (``is_admin``, no ``api_user``), so a
+    session that runs as an API key (its own ``api_user_id`` or a worker under
+    one) never gets one: its agent would otherwise sign in as the owner and
+    undo every key limit (MCP masking, usage refusal, notes scoping). The
+    harness does not mint for such sessions; this refuses any token that was.
 
     Without a managed database (unit tests, isolated runs) there is no row to
     check and the signature alone decides.
@@ -183,9 +192,11 @@ def _session_exists(session_id: str) -> bool:
 
         if not settings.managed_database_available():
             return True
+        from app.core.api_user_scope import session_api_user_id
         from app.db.sessions import get_session
 
-        return get_session(session_id) is not None
+        row = get_session(session_id)
+        return row is not None and session_api_user_id(row) is None
     except Exception:  # noqa: BLE001 — an unreadable DB is a denial, not a grant
         logger.debug("preview access: session lookup failed", exc_info=True)
         return False

@@ -5,7 +5,6 @@ This module tests the WebSocket routes in app/api/websocket.py including:
 - Primary chat WebSocket (/ws/chat)
 - Legacy session sync WebSocket (/ws/sessions/{session_id})
 - Global sync WebSocket (/ws/global)
-- CLI bridge WebSocket (/ws/cli/{session_id})
 - Authentication and authorization
 - Message handling and streaming
 - Error handling and edge cases
@@ -84,14 +83,19 @@ class TestWebSocketRoutesRegistration:
         url = router.url_path_for("global_sync_websocket").make_absolute_url("http://testserver")
         assert str(url) == "ws://testserver/api/v1/ws/global"
 
-    def test_cli_websocket_route_exists(self):
-        """CLI WebSocket route should be registered."""
+    def test_cli_bridge_websocket_route_is_gone(self):
+        """R10-1: /ws/cli/{session_id} authenticated any API key and then ran
+        ``claude --resume`` on any session (the owner's included) with the
+        owner's CLI login. No client used it, so the route was removed; make
+        sure nothing registers it again."""
+        from starlette.routing import NoMatchFound
+
         from app.api.websocket import router
 
-        url = router.url_path_for(
-            "cli_websocket", session_id="registration-test"
-        ).make_absolute_url("http://testserver")
-        assert str(url) == "ws://testserver/api/v1/ws/cli/registration-test"
+        with pytest.raises(NoMatchFound):
+            router.url_path_for("cli_websocket", session_id="registration-test")
+        # The same lookup still finds the sub-router's surviving routes.
+        assert router.url_path_for("global_sync_websocket") == "/api/v1/ws/global"
 
 
 # =============================================================================
@@ -273,19 +277,6 @@ class TestPingLoop:
 
             # Should exit gracefully without raising
             await ping_loop(mock_ws)
-
-
-# =============================================================================
-# Test Active Chat Sessions Tracking
-# =============================================================================
-
-class TestActiveChatSessions:
-    """Tests for active chat session tracking."""
-
-    def test_active_cli_bridges_dict_exists(self):
-        """Active CLI bridges dict should exist."""
-        from app.api.websocket import _active_cli_bridges
-        assert isinstance(_active_cli_bridges, dict)
 
 
 # =============================================================================
@@ -1615,38 +1606,6 @@ class TestGlobalWebSocketFlow:
         assert "session-2" in watched_sessions
 
 
-class TestCLIWebSocketFlow:
-    """Tests for CLI WebSocket flow."""
-
-    @pytest.mark.asyncio
-    async def test_cli_requires_sdk_session_id(self):
-        """CLI WebSocket should require SDK session ID."""
-        session = {
-            "id": "test-session",
-            "sdk_session_id": None
-        }
-
-        # Verify check
-        assert not session.get("sdk_session_id")
-
-    @pytest.mark.asyncio
-    async def test_cli_bridge_lifecycle(self):
-        """CLI bridge should be tracked and cleaned up."""
-        from app.api.websocket import _active_cli_bridges
-
-        session_id = "cli-test-session"
-
-        # Initially empty
-        assert session_id not in _active_cli_bridges
-
-    def test_cli_commands(self):
-        """CLI commands should be validated."""
-        valid_commands = ["/rewind", "/resume"]
-
-        for cmd in valid_commands:
-            assert cmd.startswith("/")
-
-
 class TestTimeoutAndDisconnectBehavior:
     """Tests for timeout and disconnect handling."""
 
@@ -1990,66 +1949,6 @@ class TestGlobalWebSocketEndpoint:
                     pass
             except Exception:
                 pass  # Expected to close with 4001
-
-
-class TestCLIWebSocketEndpoint:
-    """Integration tests for the /ws/cli/{session_id} endpoint."""
-
-    @pytest.fixture
-    def mock_app(self):
-        """Create a FastAPI app with the WebSocket router for testing."""
-        from fastapi import FastAPI
-        from app.api.websocket import router
-
-        app = FastAPI()
-        app.include_router(router)
-        return app
-
-    @pytest.fixture
-    def client(self, mock_app):
-        """Create TestClient for the app."""
-        from starlette.testclient import TestClient
-        return TestClient(mock_app)
-
-    def test_cli_websocket_auth_required(self, client):
-        """Should require authentication."""
-        with nullcontext(MagicMock()) as mock_db:
-            mock_db.get_auth_session.return_value = None
-
-            try:
-                with client.websocket_connect("/api/v1/ws/cli/test-session"):
-                    pass
-            except Exception:
-                pass  # Expected to close with 4001
-
-    def test_cli_websocket_session_not_found(self, client):
-        """Should close with 4004 if session not found."""
-        with nullcontext(MagicMock()) as mock_db:
-
-            mock_db.get_auth_session.return_value = {"id": "auth-1"}
-            mock_db.get_session.return_value = None
-
-            try:
-                with client.websocket_connect("/api/v1/ws/cli/nonexistent?token=valid"):
-                    pass
-            except Exception:
-                pass  # Expected to close
-
-    def test_cli_websocket_no_sdk_session(self, client):
-        """Should close with 4005 if no SDK session ID."""
-        with nullcontext(MagicMock()) as mock_db:
-
-            mock_db.get_auth_session.return_value = {"id": "auth-1"}
-            mock_db.get_session.return_value = {
-                "id": "test-session",
-                "sdk_session_id": None
-            }
-
-            try:
-                with client.websocket_connect("/api/v1/ws/cli/test-session?token=valid"):
-                    pass
-            except Exception:
-                pass  # Expected to close with 4005
 
 
 # =============================================================================
