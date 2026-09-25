@@ -65,8 +65,25 @@ const github = {
 """
 
 
+class UniqueKeyLoader(yaml.BaseLoader):
+    """Keep Actions scalar spellings, but reject keys GitHub would reject."""
+
+    def construct_mapping(self, node, deep=False):
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in mapping:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a workflow mapping", node.start_mark,
+                    f"duplicate mapping key {key!r}", key_node.start_mark,
+                )
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
+
+
 def workflow(name):
-    return yaml.load((WORKFLOWS / name).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    with (WORKFLOWS / name).open(encoding="utf-8") as source:
+        return yaml.load(source, Loader=UniqueKeyLoader)
 
 
 def uploads(job):
@@ -74,6 +91,45 @@ def uploads(job):
 
 
 class ArtifactPolicyTests(unittest.TestCase):
+    def test_all_workflow_mappings_have_unique_keys(self):
+        paths = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
+        self.assertGreater(len(paths), 0)
+        for path in paths:
+            with self.subTest(file=path.name):
+                workflow(path.name)
+
+    def test_duplicate_keys_are_rejected_at_each_mapping_depth(self):
+        cases = [
+            ("on: push\non: pull_request\n", "on"),
+            ("jobs:\n  build: {}\n  build: {}\n", "build"),
+            ("jobs:\n  verify:\n    env:\n      EXPECT_SIGNED: true\n"
+             "    runs-on: windows-latest\n    env:\n      RELEASE_TAG: v1.2.3\n", "env"),
+            ("jobs:\n  verify:\n    steps:\n      - env:\n          TOKEN: first\n"
+             "          TOKEN: second\n        run: check\n", "TOKEN"),
+        ]
+        for source, key in cases:
+            with self.subTest(key=key):
+                with self.assertRaises(yaml.constructor.ConstructorError) as failure:
+                    yaml.load(source, Loader=UniqueKeyLoader)
+                self.assertEqual(failure.exception.problem, f"duplicate mapping key {key!r}")
+                self.assertIsNotNone(failure.exception.problem_mark)
+                self.assertIn("line", str(failure.exception))
+
+    def test_keys_can_repeat_in_different_jobs_and_actions_on_stays_a_string(self):
+        source = ("on: push\njobs:\n  first:\n    env:\n      NAME: first\n"
+                  "  second:\n    env:\n      NAME: second\n")
+        parsed = yaml.load(source, Loader=UniqueKeyLoader)
+        self.assertEqual(parsed["on"], "push")
+        self.assertEqual(parsed["jobs"]["first"]["env"]["NAME"], "first")
+        self.assertEqual(parsed["jobs"]["second"]["env"]["NAME"], "second")
+
+    def test_windows_verifier_keeps_both_release_and_signing_inputs(self):
+        verify = workflow("desktop-installer.yml")["jobs"]["verify"]
+        self.assertEqual(verify["env"], {
+            "EXPECT_SIGNED": "${{ needs.build.outputs.signed }}",
+            "RELEASE_TAG": "${{ inputs.release_tag }}",
+        })
+
     def test_every_upload_has_a_short_explicit_retention(self):
         count = 0
         for path in WORKFLOWS.glob("*.yml"):

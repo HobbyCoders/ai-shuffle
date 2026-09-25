@@ -22,6 +22,13 @@ workflow gates plus environment ref restrictions are the owner-approved GitHub
 Team design, not Enterprise required-reviewer protection. See
 `docs/ci/release-channels.md` for the exact trigger/ref and secret-custody limits.
 
+CI's artifact-policy checks reject duplicate YAML keys across every workflow,
+including nested job and step mappings. Keep the Windows verification job's
+`EXPECT_SIGNED` and `RELEASE_TAG` together in one `env` mapping: a duplicate
+mapping is rejected by GitHub before jobs start, even if a permissive local
+YAML parser keeps the last value. The regression also asserts both inputs remain
+wired into that job.
+
 ## Which workflow builds what
 
 | Workflow | Trigger | Output | Signed |
