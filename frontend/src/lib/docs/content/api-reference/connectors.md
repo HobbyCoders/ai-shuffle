@@ -124,7 +124,7 @@ curl http://localhost:8000/api/v1/connectors \
     "status": "connected",
     "status_message": null,
     "config": {
-      "bot_token": "****MASKED",
+      "bot_token": "****",
       "allowed_chat_ids": ["12345678"]
     },
     "events": [],
@@ -137,7 +137,7 @@ curl http://localhost:8000/api/v1/connectors \
 ]
 ```
 
-Note: Sensitive config fields are masked in responses (showing only last 4 characters).
+Note: Sensitive config fields (tokens, secrets, passwords) are stored encrypted and returned as `****`; no characters of the secret are shown.
 
 ### POST /api/v1/connectors
 
@@ -181,7 +181,7 @@ Get connector details.
 
 ### PATCH /api/v1/connectors/{connector_id}
 
-Update a connector. Every field is optional: `name`, `config`, `events`, `is_active`. Setting `is_active` also starts or stops the running connector, like `activate` and `deactivate`.
+Update a connector. Every field is optional: `name`, `config`, `events`, `is_active`. `config` is merged into the stored config: keys you leave out, such as a saved token, keep their stored values, and a masked value (starting with `****`) keeps the stored secret. If the config changes while the connector is active, it restarts with the merged config. Setting `is_active` also starts or stops the running connector, like `activate` and `deactivate`.
 
 **Auth:** Owner only
 

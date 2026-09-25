@@ -382,6 +382,16 @@ class TestReadUpdateDelete:
             assert body["config"]["bot_token"].startswith("****")
             assert "secret-token" not in json.dumps(body)
 
+    def test_docs_describe_the_mask_the_api_returns(self, owner):
+        # Stored secrets are encrypted, so the mask is a bare "****", not the last 4 characters.
+        cid = create(owner, name="Tg", type_="telegram", config={"bot_token": "123:secret-token"})["id"]
+        assert owner.get(f"{BASE}/{cid}").json()["config"]["bot_token"] == "****"
+        from pathlib import Path
+        page = (Path(__file__).resolve().parents[2] / "docs/content/api-reference/connectors.md").read_text()
+        assert "last 4 characters" not in page
+        assert "returned as `****`" in page
+        assert '"bot_token": "****",' in page
+
     def test_get_unknown_is_404(self, owner):
         response = owner.get(BASE + "/conn-missing")
         assert response.status_code == 404
@@ -422,16 +432,41 @@ class TestReadUpdateDelete:
         assert fake_manager.calls == []
         assert decrypt_config(database.get_connector(cid)["config"], "webhook")["inbound_token"] == "hook-token"
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "connector_service.update_connector replaces the whole config: a PATCH that sends only "
-        "allowed_chat_ids (the docs example) drops the stored bot_token. app/core is out of scope here."))
     def test_partial_config_patch_keeps_the_stored_secret(self, owner):
+        # The docs' PATCH example sends only allowed_chat_ids.
         cid = create(owner, name="Tg", type_="telegram",
                      config={"bot_token": "123:secret-token", "allowed_chat_ids": ["1"]})["id"]
         response = owner.patch(f"{BASE}/{cid}", json={"name": "Renamed Bot", "config": {"allowed_chat_ids": ["12345678"]}})
         assert response.status_code == 200
+        assert response.json()["config"]["bot_token"] == "****"
+        assert response.json()["config"]["allowed_chat_ids"] == ["12345678"]
         stored = decrypt_config(database.get_connector(cid)["config"], "telegram")
         assert stored.get("bot_token") == "123:secret-token"
+        assert stored["allowed_chat_ids"] == ["12345678"]
+        assert stored["runtime_plugin_id"] == "telegram@shuffle-connectors"
+
+    def test_partial_config_patch_restarts_with_the_merged_config(self, owner, fake_manager):
+        cid = create(owner, name="Tg", type_="telegram",
+                     config={"bot_token": "123:secret-token", "allowed_chat_ids": ["1"]})["id"]
+        assert owner.post(f"{BASE}/{cid}/activate").status_code == 200
+        fake_manager.calls.clear()
+        seen = []
+
+        async def restart(connector_id):
+            fake_manager.calls.append(("restart", connector_id))
+            seen.append(decrypt_config(database.get_connector(connector_id)["config"], "telegram"))
+            return True
+
+        fake_manager.restart_connector = restart
+        response = owner.patch(f"{BASE}/{cid}", json={"config": {"allowed_chat_ids": "7, 8"}})
+        assert response.status_code == 200
+        assert fake_manager.calls == [("restart", cid)]
+        assert seen[0]["bot_token"] == "123:secret-token"
+        assert seen[0]["allowed_chat_ids"] == ["7", "8"]
+        # Sending the stored values again is no change: no second restart.
+        fake_manager.calls.clear()
+        assert owner.patch(f"{BASE}/{cid}", json={"config": {"allowed_chat_ids": ["7", "8"]}}).status_code == 200
+        assert fake_manager.calls == []
 
     def test_disable_through_patch_stops_the_live_client(self, owner, fake_manager):
         cid = create(owner, name="Hook")["id"]
@@ -1320,6 +1355,17 @@ class TestPlaid:
         response = https_owner.post(PLAID + "/start")
         assert response.status_code == 400
         assert response.json() == {"detail": "Plaid is unavailable"}
+        assert plaid._pending == {}
+
+    @pytest.mark.parametrize("reply", [{}, {"link_token": ""}, {"link_token": None}, {"request_id": "r"}, None])
+    def test_plaid_reply_without_link_token_is_502_and_frees_the_slot(self, https_owner, monkeypatch, reply):
+        monkeypatch.setattr(plaid, "plaid_request", AsyncMock(return_value=reply))
+        configure_plaid(https_owner)
+        response = https_owner.post(PLAID + "/start")
+        assert response.status_code == 502
+        assert response.json() == {
+            "detail": "Plaid did not return a link token. Check the Plaid app settings and try again."}
+        assert "set-cookie" not in response.headers
         assert plaid._pending == {}
 
     def test_too_many_pending_connections_is_429(self, https_owner, monkeypatch):

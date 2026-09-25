@@ -121,8 +121,10 @@ def decrypt_config(config: Dict, connector_type: str) -> Dict:
 def mask_config(config: Dict, connector_type: str) -> Dict:
     """Return a copy of *config* with sensitive fields masked.
 
-    Non-sensitive fields are passed through unchanged.  Sensitive values show
-    only the last four characters, prefixed with ``****``.
+    Non-sensitive fields are passed through unchanged. Stored secrets are
+    encrypted, and an encrypted value masks to a bare ``****`` (nothing of the
+    secret is decrypted just to show it). A plaintext value, which only occurs
+    before encryption, shows its last four characters after ``****``.
     """
     sensitive = get_sensitive_fields(connector_type)
     if not sensitive:
@@ -249,7 +251,10 @@ async def update_connector(connector_id: str, **kwargs) -> Optional[Dict]:
     Accepts keyword arguments matching ``ConnectorUpdate`` fields:
     ``name``, ``config``, ``events``, ``is_active``.
 
-    If config changes and the connector is active, it will be restarted.
+    ``config`` is a partial update: the provided keys are merged over the
+    stored config, so a PATCH that sends only ``allowed_chat_ids`` keeps the
+    stored ``bot_token``. If the merged config changes and the connector is
+    active, it will be restarted (the restart reads the merged row).
     Returns the updated connector with masked config, or ``None`` if not found.
     """
     def _update_blocking() -> Tuple[Optional[Dict], bool, bool, Optional[str]]:
@@ -279,18 +284,16 @@ async def update_connector(connector_id: str, **kwargs) -> Optional[Dict]:
         # real token stored in the database.
         config_changed = False
         if "config" in kwargs and kwargs["config"] is not None:
-            new_config = normalize_config(kwargs["config"], connector_type)
-            kwargs["config"] = new_config
             existing_config = existing.get("config", {}) or {}
             sensitive = get_sensitive_fields(connector_type)
-            # Runtime ownership and managed OAuth credentials are not erased
-            # when a UI submits only the visible, non-secret account settings.
-            protected = ["runtime_plugin_id", "oauth_managed", "email_address"]
-            if existing_config.get("oauth_managed"):
-                protected += ["client_id", *sensitive]
-            for key in protected:
-                if key not in new_config and key in existing_config:
-                    new_config[key] = existing_config[key]
+            # Partial update: provided keys win, every key the caller left out
+            # (stored secrets, runtime ownership, managed OAuth credentials)
+            # keeps its stored value.
+            new_config = {
+                **existing_config,
+                **normalize_config(kwargs["config"], connector_type),
+            }
+            kwargs["config"] = new_config
 
             for key in sensitive:
                 new_val = new_config.get(key, "")
