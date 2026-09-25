@@ -451,6 +451,37 @@ async def test_a_cli_crash_mid_turn_errors_it_and_the_next_turn_respawns(tmp_pat
         await run.aclose()
 
 
+async def test_a_cli_that_died_between_turns_behind_buffered_lines_is_respawned(tmp_path) -> None:
+    """R8-11: stdout still held lines ahead of EOF, so the dead CLI counted as
+    reusable; the between-turn drain read them, hit EOF, and the turn then
+    wrote into the closed pipe and failed instead of resuming."""
+    script = {
+        "turns": [[{"op": "text", "text": "first"}, {"op": "result"},
+                   {"op": "raw", "line": "stray output after the result"},
+                   {"op": "exit", "code": 0}]],
+        "resume_turns": [[{"op": "text", "text": "resumed"}, {"op": "result"}]],
+    }
+    run = Scripted(tmp_path, script)
+    try:
+        events = await run.turn("one")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        proc = run.loop._proc
+        for _ in range(200):  # the stray line and EOF are both buffered
+            if proc.stdout._eof:
+                break
+            await asyncio.sleep(0.01)
+        assert proc.stdout._eof and not proc.stdout.at_eof()
+        # Exited, but not reaped yet: returncode still reads None.
+        run.loop._proc = _NotYetReaped(proc)
+        events = await run.turn("two")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert "".join(e.text for e in _of(events, TextDelta)) == "resumed"
+        starts = run.records("start")
+        assert len(starts) == 2 and "--resume" in starts[1]["argv"]
+    finally:
+        await run.aclose()
+
+
 async def test_a_cli_that_exits_at_start_fails_the_turn_instead_of_hanging(tmp_path) -> None:
     run = Scripted(tmp_path, {"spawn_exit": {"code": 1, "stderr": "Invalid API key"}})
     try:

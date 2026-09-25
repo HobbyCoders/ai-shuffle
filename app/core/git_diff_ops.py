@@ -190,7 +190,7 @@ class GitDiffMixin:
                 # Check if binary
                 numstat = self._run_git(
                     working_dir,
-                    ["diff", "--no-index", "--numstat", "/dev/null", file_path],
+                    ["diff", "--no-index", "--numstat", "--", "/dev/null", file_path],
                     timeout=5,
                 )
                 if numstat.returncode in (0, 1) and numstat.stdout.strip():

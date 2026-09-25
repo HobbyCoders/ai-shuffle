@@ -217,6 +217,30 @@ def test_discard_target_refuses_ntfs_spellings_of_git_dir(tmp_path, alias):
     assert git_commit_ops._untracked_discard_target(root, root, alias) is None
 
 
+@pytest.mark.parametrize(
+    "alias",
+    [".g\u200cit/objects", ".G\u200dIT", "\u200e.git/config", ".git\ufeff", ".gi\u206at/HEAD",
+     "\u202a.Git\u202e"],
+)
+def test_discard_target_refuses_hfs_spellings_of_git_dir(tmp_path, alias):
+    """R8-15: HFS+ drops these code points and folds case when it compares
+    names, so each one opens .git there; realpath does not fold them, and
+    samefile only checked the whole target (``.g\u200cit/objects``)."""
+    root = str(tmp_path)
+    assert git_commit_ops._untracked_discard_target(root, root, alias) is None
+
+
+@pytest.mark.parametrize("name", ["git", ".gitignore", ".github", ".g\u00eft", "x.git", ".git\u0301"])
+def test_hfs_dotgit_check_leaves_other_names_alone(name):
+    assert not git_commit_ops._is_hfs_dotgit(name)
+
+
+def test_hfs_dotgit_check_folds_case_and_drops_only_hfs_ignorables():
+    assert git_commit_ops._is_hfs_dotgit(".GIT")
+    assert git_commit_ops._is_hfs_dotgit(".g\u200bit") is False  # ZWSP is not ignorable on HFS+
+    assert git_commit_ops._is_hfs_dotgit("\ufeff.git")
+
+
 def test_discard_refuses_an_alias_that_resolves_to_the_git_dir(svc, repo, monkeypatch):
     """The .git guard compares resolved identity, not spelling: an untracked
     entry whose real path is the repository's .git (as GetFinalPathNameByHandle

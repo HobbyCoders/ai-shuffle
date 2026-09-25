@@ -9,6 +9,7 @@ Catalog is persisted to PostgreSQL for instant availability on startup,
 and refreshed in the background periodically (default: every hour).
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -212,6 +213,7 @@ class FalCatalogService:
         self._cache_ttl = cache_ttl
         self._last_refresh: float = 0
         self._refreshing = False
+        self._refresh_task: Optional[asyncio.Task] = None
 
     @property
     def is_stale(self) -> bool:
@@ -270,8 +272,12 @@ class FalCatalogService:
         and persists to both memory and PostgreSQL.
 
         Returns the number of models in the catalog afterwards (the cached
-        count when the fetch fails; see ``refresh_with_status``).
+        count when the fetch fails; see ``refresh_with_status``). A call made
+        while another refresh runs returns the cached count at once.
         """
+        if self._refreshing:
+            logger.debug("Catalog refresh already in progress, skipping")
+            return len(self._cache)
         count, _error = await self.refresh_with_status(api_key)
         return count
 
@@ -279,13 +285,22 @@ class FalCatalogService:
         """``refresh`` that also says why it kept the cache.
 
         Returns ``(model count, error)``: ``error`` is ``None`` when fal.ai
-        answered with models (or another refresh is already running), else a
-        short reason with no key material, and the count is the cached one.
+        answered with models, else a short reason with no key material, and
+        the count is the cached one. A call made while another refresh runs
+        waits for that refresh and reports its outcome, so a caller is never
+        told the cache it already had was just fetched.
         """
-        if self._refreshing:
-            logger.debug("Catalog refresh already in progress, skipping")
-            return len(self._cache), None
+        task = self._refresh_task
+        if task is None or task.done() or task.get_loop() is not asyncio.get_running_loop():
+            task = asyncio.ensure_future(self._refresh_once(api_key))
+            self._refresh_task = task
+        else:
+            logger.debug("Catalog refresh already in progress, waiting for it")
+        # Shielded: a caller that goes away does not cancel the refresh the
+        # other callers are waiting on.
+        return await asyncio.shield(task)
 
+    async def _refresh_once(self, api_key: Optional[str]) -> tuple[int, Optional[str]]:
         self._refreshing = True
         try:
             models = await self._fetch_all_models(api_key)

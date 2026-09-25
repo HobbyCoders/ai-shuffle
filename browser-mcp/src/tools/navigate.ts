@@ -11,11 +11,13 @@ import {
   EGRESS_REFUSAL_HEADER,
   EGRESS_REFUSED_NET_ERRORS,
   RETRYABLE_NET_ERRORS,
+  behindEgressProxy,
   egressRefusal,
   isLoopbackUrl,
   loopbackGuidance,
   loopbackHost,
   rewriteLoopback,
+  tunnelRefusal,
 } from "../loopback.js";
 
 /** Extract the host from a URL string, or "" if it has none / is unparseable. */
@@ -61,7 +63,11 @@ function navigationFailure(session: Session, requested: string, err: unknown): E
   const message = err instanceof Error ? err.message : String(err);
   const host = hostOf(requested);
   if (EGRESS_REFUSED_NET_ERRORS.test(message)) {
-    return new Error(egressRefusal(requested, host ? session.ssrfBlockReason(host) : undefined));
+    return new Error(
+      behindEgressProxy()
+        ? egressRefusal(requested, host ? session.ssrfBlockReason(host) : undefined)
+        : tunnelRefusal(requested, message),
+    );
   }
   if (!RETRYABLE_NET_ERRORS.test(message)) return err instanceof Error ? err : new Error(message);
   const reason = host ? session.ssrfBlockReason(host) : undefined;
@@ -121,19 +127,35 @@ export async function runNavigate(
       : page.goForward({ waitUntil: "domcontentloaded" }));
   } else {
     const requested = normalizeUrl(input.url);
+    const refusal = (url: string) => {
+      const host = hostOf(url);
+      return new Error(egressRefusal(url, host ? session.ssrfBlockReason(host) : undefined));
+    };
+    // A refused tunnel is policy only behind the app's egress proxy; behind
+    // anything else it is one more way for nothing to answer.
+    const policyRefused = (message: string) =>
+      behindEgressProxy() && EGRESS_REFUSED_NET_ERRORS.test(message);
+    const retryable = (message: string) =>
+      RETRYABLE_NET_ERRORS.test(message) ||
+      (!behindEgressProxy() && EGRESS_REFUSED_NET_ERRORS.test(message));
     let response: Awaited<ReturnType<typeof page.goto>> | undefined;
     try {
       response = await page.goto(requested, { waitUntil: "domcontentloaded" });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const alternative = rewriteLoopback(requested, loopbackHost());
-      if (alternative && RETRYABLE_NET_ERRORS.test(message)) {
+      if (alternative && retryable(message)) {
         // The shell's loopback is not the browser's. One retry against the
         // address the app says this host answers on, then give up loudly.
         try {
-          await page.goto(alternative, { waitUntil: "domcontentloaded" });
+          response = await page.goto(alternative, { waitUntil: "domcontentloaded" });
           rewroteTo = alternative;
-        } catch {
+        } catch (retryErr) {
+          // The proxy refusing the alternative is the answer, not the first
+          // attempt's "nothing answered".
+          if (policyRefused(retryErr instanceof Error ? retryErr.message : String(retryErr))) {
+            throw refusal(alternative);
+          }
           throw navigationFailure(session, requested, err);
         }
       } else {
@@ -141,10 +163,10 @@ export async function runNavigate(
       }
     }
     // A plain-http refusal is the proxy's own 403 page, a "successful"
-    // navigation; its marker header says it is policy, not the site.
+    // navigation (the retry's included); its marker header says it is
+    // policy, not the site.
     if (response?.headers()[EGRESS_REFUSAL_HEADER] === "blocked") {
-      const host = hostOf(requested);
-      throw new Error(egressRefusal(requested, host ? session.ssrfBlockReason(host) : undefined));
+      throw refusal(rewroteTo ?? requested);
     }
   }
 

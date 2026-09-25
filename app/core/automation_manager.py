@@ -99,6 +99,7 @@ class AutomationManager:
         # They hold no latch entry, so shutdown cancels them from here.
         self._waiting_approved: Set[asyncio.Task] = set()
         self._shutting_down = False
+        self._requeue_task: Optional[asyncio.Task] = None
 
     def _create_tracked_task(self, coro, *, name: str) -> asyncio.Task:
         """Create a background task with error logging on failure."""
@@ -123,6 +124,11 @@ class AutomationManager:
         if self._initialized:
             return
         self._shutting_down = False
+        # Approved runs a shutdown cancelled while they waited kept their
+        # ``approved`` row; nothing else starts them again.
+        self._requeue_task = self._create_tracked_task(
+            self._requeue_approved_runs(), name="automation-requeue-approved"
+        )
 
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -153,6 +159,9 @@ class AutomationManager:
         if self._reconcile_task:
             self._reconcile_task.cancel()
             self._reconcile_task = None
+        if self._requeue_task:
+            self._requeue_task.cancel()
+            self._requeue_task = None
 
         # Cancel running tasks, and the approved runs queued behind them: a
         # queued run would otherwise wake to a free latch and start now.
@@ -1363,6 +1372,62 @@ class AutomationManager:
 
         self._create_tracked_task(_run(), name=f"auto-approved-{run['id']}")
         return run
+
+    async def _requeue_approved_runs(self) -> None:
+        """Start again the approved runs a previous shutdown cancelled.
+
+        ``execute_approved_run`` queues an approved run behind a run of the
+        same automation already in flight; shutdown cancels that wait and the
+        row stays ``approved`` (the approval itself is spent, so approving
+        again is refused). Every install sharing the database sees the row, so
+        the same runner election as a scheduled fire picks one install, and a
+        shared fire claim per run and ten-minute window keeps two installs that
+        start together from both running it.
+        """
+        def _claim_approved_blocking() -> List[str]:
+            from app.core.automation_service import should_run_scheduled_here
+            from app.db.base import get_db, rows_to_list
+
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """SELECT a.id AS approval_id, r.id AS run_id, r.automation_id
+                       FROM automation_approvals a
+                       JOIN automation_runs r ON r.id = a.run_id
+                       WHERE a.status = 'approved' AND r.status = 'approved'
+                       ORDER BY r.created_at"""
+                )
+                rows = rows_to_list(cursor.fetchall())
+            window = int(time.time() // 600)
+            claimed: List[str] = []
+            for row in rows:
+                automation = database.get_automation(row["automation_id"])
+                if not automation:
+                    continue
+                try:
+                    should_run, reason = should_run_scheduled_here(automation)
+                except Exception as e:  # noqa: BLE001 — same fail-open stance as a fire
+                    should_run, reason = True, f"election failed ({e})"
+                if not should_run:
+                    logger.info(f"Approved run {row['run_id']} left to another install ({reason})")
+                    continue
+                if database.claim_automation_fire(
+                    row["automation_id"], f"approved-run:{row['run_id']}:{window}"
+                ):
+                    claimed.append(row["approval_id"])
+            return claimed
+
+        try:
+            approval_ids = await run_sync(_claim_approved_blocking)
+        except Exception as e:  # noqa: BLE001 — a DB blip must not break start()
+            logger.warning(f"Could not re-queue approved automation runs: {e}")
+            return
+        for approval_id in approval_ids:
+            if self._shutting_down:
+                return
+            run = await self.execute_approved_run(approval_id)
+            if run is not None:
+                logger.info(f"Re-queued approved automation run {run['id']} after restart")
 
     # ------------------------------------------------------------------
     # Output delivery

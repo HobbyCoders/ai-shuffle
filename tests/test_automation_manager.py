@@ -2509,6 +2509,57 @@ class TestRunConcurrency:
         assert manager._running == {}
         assert database.get_automation_run("run-sd")["status"] == "approved"
 
+    async def test_approved_run_cancelled_by_shutdown_runs_after_the_next_start(
+        self, mock_db, paused_scheduler_class, monkeypatch
+    ):
+        """R8-12: the approved run shutdown cancelled stayed ``approved`` for
+        good (approving again is refused); the next start re-queues it."""
+        from app.db import database
+
+        monkeypatch.setattr(
+            "app.core.automation_service.should_run_scheduled_here", lambda a: (True, "elected"),
+        )
+        _make_automation("auto-rq", triggers=_WEBHOOK_NO_SECRET)
+        database.create_automation_run(run_id="run-rq", automation_id="auto-rq",
+                                       status="approved", prompt_rendered="approved prompt")
+        database.create_automation_approval(approval_id="appr-rq", run_id="run-rq", automation_id="auto-rq")
+        database.update_automation_approval("appr-rq", status="approved")
+        # A pending approval and a finished approved run are left alone.
+        database.create_automation_run(run_id="run-pend", automation_id="auto-rq", status="pending")
+        database.create_automation_approval(approval_id="appr-pend", run_id="run-pend", automation_id="auto-rq")
+        database.create_automation_run(run_id="run-done", automation_id="auto-rq", status="completed")
+        database.create_automation_approval(approval_id="appr-done", run_id="run-done", automation_id="auto-rq")
+        database.update_automation_approval("appr-done", status="approved")
+
+        restarted = AutomationManager()
+        fake = _FakeRunner()
+        restarted._run_prompt_as_session = fake
+        tasks = _capture_tasks(restarted)
+        await restarted.start()
+        try:
+            await _until(lambda: database.get_automation_run("run-rq")["status"] == "completed")
+        finally:
+            await restarted.shutdown()
+            await _drain(tasks)
+        assert [c["run_id"] for c in fake.calls] == ["run-rq"]
+        assert fake.calls[0]["prompt"] == "approved prompt"
+        assert database.get_automation_run("run-pend")["status"] == "pending"
+
+        # Started once: a second install starting in the same window, or this
+        # one restarting, does not run it again.
+        again = AutomationManager()
+        again._run_prompt_as_session = fake
+        database.update_automation_run("run-rq", status="approved")
+        await again.start()
+        try:
+            for _ in range(20):
+                await asyncio.sleep(0)
+            if again._requeue_task is not None:
+                await asyncio.gather(again._requeue_task, return_exceptions=True)
+        finally:
+            await again.shutdown()
+        assert len(fake.calls) == 1
+
 
 # =============================================================================
 # Webhook signature verification

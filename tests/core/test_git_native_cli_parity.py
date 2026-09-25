@@ -145,6 +145,25 @@ def test_worktree_rename_of_intent_to_add_file(svc, repo, backend):
         assert _staged(status) == {("new file.txt", "A")}
 
 
+def test_plain_intent_to_add_file_is_a_worktree_change(svc, repo, backend):
+    """R8-10: ``git add -N`` gives porcelain ``" A n.txt"``. The CLI parser
+    dropped a worktree ``A`` from every list, so the checkout read clean while
+    git_native listed the file."""
+    write(repo / "n.txt", "new\n")
+    git(repo, "add", "-N", "n.txt")
+
+    status = _fresh(svc, repo)
+
+    assert status["modified"] == ["n.txt"]
+    assert status["untracked"] == status["conflicts"] == []
+    assert status["is_clean"] is False
+    if backend == "cli":
+        assert _staged(status) == set()
+    else:
+        # libgit2 reports an intent-to-add entry as an index addition.
+        assert _staged(status) == {("n.txt", "A")}
+
+
 def test_cli_status_reports_copies_with_the_copy_destination(svc, repo, backend):
     if backend != "cli":
         pytest.skip("libgit2 status has no copy detection")
@@ -459,6 +478,20 @@ def test_file_diff_untracked_text_is_synthesized(svc, repo, backend):
     assert "--- /dev/null" in diff and "+++ b/fresh.txt" in diff
     assert "@@ -0,0 +1,2 @@" in diff
     assert "+alpha\n+beta\n" in diff
+
+
+def test_cli_untracked_diff_treats_an_option_like_name_as_a_path(svc, repo, backend):
+    """R8-9: the CLI fallback's numstat for an untracked file had no ``--``, so
+    a file named ``--output=<x>`` made ``git diff`` create or truncate <x>."""
+    if backend != "cli":
+        pytest.skip("the git CLI fallback only")
+    name = "--output=victim.txt"
+    write(repo / name, "alpha\n")
+
+    result = svc.get_file_diff(str(repo), name)
+
+    assert not (repo / "victim.txt").exists()
+    assert "+alpha" in result["diff"]
 
 
 def test_file_diff_large_file_is_truncated(svc, repo, backend):

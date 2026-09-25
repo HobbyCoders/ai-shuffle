@@ -928,17 +928,27 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         try:
             # The CLI comes up before the user node is written: a wake whose
             # spawn fails must stay undelivered so the lifecycle retries it.
+            async def spawned() -> bool:
+                try:
+                    await self._ensure_process()
+                except Exception as exc:
+                    await self._emit_terminal_with_park(ErrorEvent(
+                        session_id=sid, turn_id=turn_id, message=_spawn_failure_message(exc)
+                    ))
+                    return False
+                return True
+
             reused = self._proc_usable()
-            try:
-                await self._ensure_process()
-            except Exception as exc:
-                await self._emit_terminal_with_park(ErrorEvent(
-                    session_id=sid, turn_id=turn_id, message=_spawn_failure_message(exc)
-                ))
+            if not await spawned():
                 return
             if reused:
                 async with self._stdout_lock:
                     await self._discard_stale_stdout()
+                # Lines buffered ahead of EOF made a dead CLI look usable, and
+                # the drain has just read them. Resume on a fresh CLI, as for a
+                # dead pipe found mid-turn, rather than write into this one.
+                if not self._proc_usable() and not await spawned():
+                    return
             op, question_ids = await self._question_turn_content(op)
             content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
             user_node = SessionNode(

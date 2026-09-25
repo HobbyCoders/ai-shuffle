@@ -396,29 +396,30 @@ def _option_branch_ship(env):
     return wait_op(env.client, "p1", response.json()["operation_id"])
 
 
-def _assert_branch_pushed_as_a_ref(env, done):
-    assert steps(done)["push"]["status"] == "done", done
+def _assert_branch_refused_not_mirrored(env, done):
+    # ``git`` itself refuses a branch name that starts with "-"; the push step
+    # fails on the name and the remote is untouched.
+    assert steps(done)["push"]["status"] == "error", done
+    assert steps(done)["push"]["error"] == "Invalid branch name: '--mirror'"
     # A mirror push would have deleted every remote branch the checkout lacks.
     assert remote_has_branch(env.repo, "keep-me")
-    assert git(bare_of(env.repo), "rev-parse", "refs/heads/--mirror") == _head(env.repo)
+    assert git(bare_of(env.repo), "branch", "--list", "--", "--mirror") == ""
 
 
-def test_option_like_branch_is_pushed_as_a_ref_not_a_flag(env):
+def test_option_like_branch_is_refused_not_pushed_as_a_flag(env):
     done = _option_branch_ship(env)
-    _assert_branch_pushed_as_a_ref(env, done)
-    assert done["status"] == "done"
-    # gh receives the name as the value of --head, never as a flag.
-    [argv] = env.gh.argvs("pr", "create")
-    assert argv[argv.index("--head") + 1] == "--mirror"
+    _assert_branch_refused_not_mirrored(env, done)
+    assert done["status"] == "error"
 
 
 def test_option_like_branch_guard_bites_when_disabled(env, monkeypatch):
     from app.core import git_commit_ops
 
-    monkeypatch.setattr(git_commit_ops, "_push_branch_arg", lambda branch: branch)
+    monkeypatch.setattr(git_commit_ops, "_is_plain_branch_name", lambda branch: True)
+    monkeypatch.setattr(git_commit_ops, "_push_refspec", lambda branch: branch)
     done = _option_branch_ship(env)
     with pytest.raises(AssertionError):
-        _assert_branch_pushed_as_a_ref(env, done)
+        _assert_branch_refused_not_mirrored(env, done)
 
 
 def test_ship_not_a_repo_is_400(env, tmp_path):

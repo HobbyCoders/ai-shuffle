@@ -290,6 +290,45 @@ def test_catalog_refresh_failure_on_an_empty_cache_is_502(c, monkeypatch, handle
     assert FAL_KEY not in r.text
 
 
+async def test_catalog_refresh_during_another_refresh_reports_its_outcome(monkeypatch):
+    """R8-13: a refresh already running made the route answer 200 with the
+    cached count as ``models_fetched`` at once; it now waits for that refresh
+    and answers with what it fetched."""
+    import asyncio
+
+    service = fal_catalog.FalCatalogService()
+    monkeypatch.setattr(catalog_api, "catalog_service", service)
+    monkeypatch.setattr(catalog_api, "get_decrypted_api_key", lambda name: FAL_KEY)
+    monkeypatch.setattr(service, "_persist_to_db", lambda models: None)
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def handler(request):
+        calls.append(request)
+        entered.set()
+        await release.wait()
+        page = 1 if request.url.params.get("cursor") == "page2" else 0
+        return httpx.Response(200, json=CATALOG_PAGES[page])
+
+    monkeypatch.setattr(fal_catalog, "httpx", SimpleNamespace(
+        AsyncClient=lambda *a, **kw: mock_transport_client(handler)))
+
+    background = asyncio.create_task(service.refresh(FAL_KEY))  # e.g. the agent's search
+    await entered.wait()
+    # The agent's own refresh() call still returns the cache at once.
+    assert await service.refresh(FAL_KEY) == 0
+    route = asyncio.create_task(catalog_api.refresh_catalog(_="token"))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not route.done(), "answered before the refresh in flight finished"
+
+    release.set()
+    body = await asyncio.wait_for(route, 5)
+    assert await background == 3
+    assert body["success"] is True and body["models_fetched"] == 3
+    assert len(calls) == 2  # one fetch (two pages), shared by both callers
+
+
 def test_catalog_refresh_and_categories(c, catalog):
     r = c.post("/api/v1/catalog/refresh")
     assert r.status_code == 200

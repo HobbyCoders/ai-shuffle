@@ -94,7 +94,9 @@ async def refresh_catalog(
 
     When fal.ai cannot be read the cached catalog is kept and the answer is a
     502 with ``success: false``, the ``error`` and the ``cached_models`` count,
-    rather than a success that reports the stale cache as fetched.
+    rather than a success that reports the stale cache as fetched. A refresh
+    already running (the agent's catalog search starts one too) is waited for,
+    and its outcome is the answer.
     """
     api_key = get_decrypted_api_key("fal_api_key")
     count, error = await catalog_service.refresh_with_status(api_key)

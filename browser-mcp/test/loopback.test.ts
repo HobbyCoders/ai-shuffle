@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   EGRESS_REFUSED_NET_ERRORS,
   RETRYABLE_NET_ERRORS,
+  behindEgressProxy,
   egressRefusal,
   isLoopbackHost,
   isLoopbackUrl,
@@ -80,15 +81,16 @@ describe("browser_navigate loopback retry", () => {
   function navSession(
     accept: (url: string) => boolean,
     visited: string[],
-    failure = REFUSED,
-    responseHeaders: Record<string, string> = {},
+    failure: string | ((url: string) => string) = REFUSED,
+    responseHeaders: Record<string, string> | ((url: string) => Record<string, string>) = {},
   ): Session {
     const page = {
       url: () => visited[visited.length - 1] ?? "about:blank",
       goto: async (url: string) => {
-        if (!accept(url)) throw new Error(failure);
+        if (!accept(url)) throw new Error(typeof failure === "function" ? failure(url) : failure);
         visited.push(url);
-        return { headers: () => responseHeaders };
+        const headers = typeof responseHeaders === "function" ? responseHeaders(url) : responseHeaders;
+        return { headers: () => headers };
       },
       title: async () => "Dev server",
       locator: () => ({ first: () => ({ isVisible: async () => true }) }),
@@ -167,6 +169,7 @@ describe("browser_navigate loopback retry", () => {
 
   it("reports an egress-proxy refusal of an https URL without retrying", async () => {
     process.env.BROWSER_LOOPBACK_HOST = "172.17.0.5";
+    process.env.BROWSER_EGRESS_PROXY = "1";
     const attempts: string[] = [];
     try {
       const session = navSession((url) => (attempts.push(url), false), [], TUNNEL_REFUSED);
@@ -176,6 +179,82 @@ describe("browser_navigate loopback retry", () => {
       expect(attempts).toEqual(["https://localhost:5179"]);
     } finally {
       delete process.env.BROWSER_LOOPBACK_HOST;
+      delete process.env.BROWSER_EGRESS_PROXY;
+    }
+  });
+
+  it("does not call a refused tunnel policy when the browser is not known to be behind the egress proxy", async () => {
+    // R8-6: a browser reached without the launcher (or through a corporate
+    // proxy) also reports ERR_TUNNEL_CONNECTION_FAILED; that is not a verdict
+    // of the app's policy, and "retrying will not help" is not known.
+    delete process.env.BROWSER_EGRESS_PROXY;
+    const failure = "page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/";
+    const error = await runNavigate(navSession(() => false, [], failure), {
+      url: "https://example.com",
+    }).catch((e: Error) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toMatch(/^blocked by the browser's egress proxy/);
+    expect((error as Error).message).not.toContain("will not help");
+    expect((error as Error).message).toContain("ERR_TUNNEL_CONNECTION_FAILED");
+  });
+
+  it("retries a refused loopback tunnel when the proxy is not known to be the egress proxy", async () => {
+    delete process.env.BROWSER_EGRESS_PROXY;
+    process.env.BROWSER_LOOPBACK_HOST = "172.17.0.5";
+    const attempts: string[] = [];
+    try {
+      const res = await runNavigate(
+        navSession((url) => (attempts.push(url), url.includes("172.17.0.5")), [], TUNNEL_REFUSED),
+        { url: "https://localhost:5179" },
+      );
+      expect(attempts).toEqual(["https://localhost:5179", "https://172.17.0.5:5179/"]);
+      expect(body(res).rewrote_loopback_to).toBe("https://172.17.0.5:5179/");
+    } finally {
+      delete process.env.BROWSER_LOOPBACK_HOST;
+    }
+  });
+
+  it("reports the proxy's marked 403 on the loopback retry as a refusal", async () => {
+    // R8-6: the retry's response was discarded, so the proxy's 403 page for
+    // the alternative address read as a successful navigation.
+    process.env.BROWSER_LOOPBACK_HOST = "172.17.0.5";
+    try {
+      const session = navSession(
+        (url) => url.includes("172.17.0.5"),
+        [],
+        REFUSED,
+        (url) => (url.includes("172.17.0.5") ? { "x-browser-egress": "blocked" } : {}),
+      );
+      await expect(runNavigate(session, { url: "http://localhost:5179" })).rejects.toThrow(
+        /^blocked by the browser's egress proxy: http:\/\/172\.17\.0\.5:5179\//,
+      );
+    } finally {
+      delete process.env.BROWSER_LOOPBACK_HOST;
+    }
+  });
+
+  it("reports the egress proxy refusing the loopback retry's tunnel as a refusal", async () => {
+    // R8-6: over https the alternative's refusal was reported as the first
+    // attempt's "nothing answered".
+    process.env.BROWSER_LOOPBACK_HOST = "172.17.0.5";
+    process.env.BROWSER_EGRESS_PROXY = "1";
+    const attempts: string[] = [];
+    try {
+      const session = navSession(
+        (url) => (attempts.push(url), false),
+        [],
+        (url) =>
+          url.includes("172.17.0.5")
+            ? "page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://172.17.0.5:5179/"
+            : "page.goto: net::ERR_EMPTY_RESPONSE at https://localhost:5179/",
+      );
+      await expect(runNavigate(session, { url: "https://localhost:5179" })).rejects.toThrow(
+        /^blocked by the browser's egress proxy: https:\/\/172\.17\.0\.5:5179\//,
+      );
+      expect(attempts).toEqual(["https://localhost:5179", "https://172.17.0.5:5179/"]);
+    } finally {
+      delete process.env.BROWSER_LOOPBACK_HOST;
+      delete process.env.BROWSER_EGRESS_PROXY;
     }
   });
 
@@ -185,6 +264,13 @@ describe("browser_navigate loopback retry", () => {
         url: "http://127.0.0.1:5173/",
       }),
     ).rejects.toThrow(/^blocked by the browser's egress proxy: http:\/\/127\.0\.0\.1:5173\//);
+  });
+
+  it("reads BROWSER_EGRESS_PROXY as a flag", () => {
+    expect(behindEgressProxy({})).toBe(false);
+    expect(behindEgressProxy({ BROWSER_EGRESS_PROXY: "0" })).toBe(false);
+    expect(behindEgressProxy({ BROWSER_EGRESS_PROXY: "1" })).toBe(true);
+    expect(behindEgressProxy({ BROWSER_EGRESS_PROXY: " TRUE " })).toBe(true);
   });
 
   it("says a loopback refusal may be the fallback policy", () => {

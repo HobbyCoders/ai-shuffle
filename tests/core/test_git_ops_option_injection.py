@@ -36,24 +36,72 @@ def repo(tmp_path, monkeypatch):
     return repo
 
 
-def test_push_branch_arg_qualifies_only_option_like_names():
-    assert git_commit_ops._push_branch_arg("feat/x") == "feat/x"
-    assert git_commit_ops._push_branch_arg("--mirror") == "refs/heads/--mirror"
-    assert git_commit_ops._push_branch_arg("-x") == "refs/heads/-x"
+@pytest.mark.parametrize("name", ["main", "feat/x", "release-1.2", "user@host", "a+b", "\u00e9t\u00e9"])
+def test_plain_branch_names_are_accepted(name):
+    assert git_commit_ops._is_plain_branch_name(name)
+    assert git_commit_ops._push_refspec(name) == f"refs/heads/{name}:refs/heads/{name}"
 
 
-def test_push_of_a_branch_named_mirror_is_not_a_mirror_push(repo, tmp_path):
+@pytest.mark.parametrize("name", [
+    "", "@", ":main", "x:main", "+x:main", "+main", "HEAD:refs/tags/v1", "--mirror", "-x",
+    "a..b", "a@{1}", "a^", "a~1", "a?", "a*", "a[b", "a\\b", "a b", "a\tb", "a\x7f",
+    "/a", "a/", "a//b", "a.", ".a", "a/.b", "a.lock", "a/b.lock/c",
+])
+def test_refspecs_and_invalid_ref_names_are_not_branch_names(name):
+    assert not git_commit_ops._is_plain_branch_name(name)
+
+
+def test_push_pushes_the_named_branch_to_the_same_remote_branch(repo, tmp_path):
+    git(repo, "checkout", "-q", "-b", "feat/x")
+    commit_file(repo, "x.txt", "x\n", "feat")
+
+    ok, err = git_service.push(str(repo), branch="feat/x", set_upstream=True)
+
+    assert ok, err
+    bare = tmp_path / "origin.git"
+    assert git(bare, "rev-parse", "refs/heads/feat/x") == git(repo, "rev-parse", "HEAD")
+    assert git(repo, "rev-parse", "--abbrev-ref", "feat/x@{upstream}") == "origin/feat/x"
+
+
+def _refspec_pushes_leave_remote_refs_alone(repo, tmp_path):
+    """R8-4: ``branch`` reached ``git push`` as a refspec: ``:keep-me``
+    deleted the remote branch, ``HEAD:refs/tags/v1`` wrote any ref."""
+    bare = tmp_path / "origin.git"
+    keep = git(bare, "rev-parse", "refs/heads/keep-me")
+    for branch in (":keep-me", "HEAD:refs/tags/v1", "+main:keep-me"):
+        ok, err = git_service.push(str(repo), branch=branch)
+        assert (ok, err) == (False, f"Invalid branch name: {branch!r}")
+    assert git(bare, "rev-parse", "refs/heads/keep-me") == keep
+    assert git(bare, "tag", "--list") == ""
+
+
+def test_push_refuses_refspecs_in_the_branch(repo, tmp_path):
+    _refspec_pushes_leave_remote_refs_alone(repo, tmp_path)
+
+
+def test_push_refspec_guard_bites_when_disabled(repo, tmp_path, monkeypatch):
+    # The pre-fix argv: the caller's string verbatim in refspec position.
+    monkeypatch.setattr(git_commit_ops, "_is_plain_branch_name", lambda branch: True)
+    monkeypatch.setattr(git_commit_ops, "_push_refspec", lambda branch: branch)
+    with pytest.raises(AssertionError):
+        _refspec_pushes_leave_remote_refs_alone(repo, tmp_path)
+
+
+def test_push_of_a_branch_named_mirror_is_refused_not_a_mirror_push(repo, tmp_path):
+    """A branch literally named ``--mirror`` (``git update-ref`` can make one;
+    ``git branch`` cannot) is not a branch name git accepts, so it is refused
+    rather than pushed; it never reaches git as the ``--mirror`` flag."""
     git(repo, "update-ref", "refs/heads/--mirror", "HEAD")
     git(repo, "symbolic-ref", "HEAD", "refs/heads/--mirror")
     commit_file(repo, "x.txt", "x\n", "on the odd branch")
 
     ok, err = git_service.push(str(repo), branch="--mirror", set_upstream=True)
 
-    assert ok, err
+    assert (ok, err) == (False, "Invalid branch name: '--mirror'")
     bare = tmp_path / "origin.git"
-    assert git(bare, "rev-parse", "refs/heads/--mirror") == git(repo, "rev-parse", "HEAD")
     # --mirror would have deleted every remote ref the checkout lacks.
     assert git(bare, "branch", "--list", "keep-me") != ""
+    assert git(bare, "branch", "--list", "--", "--mirror") == ""
 
 
 @pytest.mark.parametrize("remote", ["--mirror", "-v", "--all"])

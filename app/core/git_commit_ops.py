@@ -7,6 +7,7 @@ commit, push, pull, stash, and conflict detection.
 
 import logging
 import os
+import unicodedata
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,35 @@ def _is_ntfs_dotgit(name: str) -> bool:
     return base in (".git", "git~1")
 
 
+# Code points HFS+ drops when it compares names (git's ``next_hfs_char``):
+# zero-width joiners and direction marks, the deprecated format characters and
+# the byte-order mark. ``.g\u200cit`` names the ``.git`` directory there.
+_HFS_IGNORED = frozenset(
+    [0x200C, 0x200D, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x206A, 0x2070), 0xFEFF]
+)
+
+
+def _is_hfs_dotgit(name: str) -> bool:
+    """Whether HFS+ reads path component *name* as ``.git``.
+
+    Mirrors git's ``is_hfs_dotgit``: the ignorable code points above are
+    dropped and the comparison folds case. The name is compared in both NFC
+    and NFD, since HFS+ stores decomposed names and the caller may not.
+    """
+    for form in ("NFC", "NFD"):
+        folded = "".join(
+            ch for ch in unicodedata.normalize(form, name) if ord(ch) not in _HFS_IGNORED
+        )
+        if folded.casefold() == ".git":
+            return True
+    return False
+
+
+def _is_dotgit_alias(name: str) -> bool:
+    """Whether NTFS or HFS+ reads path component *name* as ``.git``."""
+    return _is_ntfs_dotgit(name) or _is_hfs_dotgit(name)
+
+
 def _untracked_discard_target(
     working_dir: str, real_working_dir: str, rel_path: str
 ) -> Optional[str]:
@@ -47,8 +77,9 @@ def _untracked_discard_target(
     target must sit strictly inside the checkout and outside its ``.git``
     metadata: discarding ``.`` or ``.git`` would otherwise delete the whole
     checkout or its history. The ``.git`` check applies to the spelling (every
-    NTFS alias git itself refuses) and to the resolved identity, since
-    ``realpath`` expands an 8.3 short name that ``relpath`` leaves as written.
+    NTFS and HFS+ alias git itself refuses) and to the resolved identity, since
+    ``realpath`` expands an 8.3 short name that ``relpath`` leaves as written
+    and does not fold an HFS+ ignorable code point at all.
     """
     lexical = os.path.normpath(os.path.join(working_dir, rel_path))
     target = os.path.join(
@@ -57,13 +88,13 @@ def _untracked_discard_target(
     if not target.startswith(real_working_dir + os.sep):
         return None
     first = os.path.relpath(target, real_working_dir).split(os.sep)[0]
-    if _is_ntfs_dotgit(first):
+    if _is_dotgit_alias(first):
         return None
     if not _is_link_like(target):
         real = os.path.realpath(target)
         if not real.startswith(real_working_dir + os.sep):
             return None
-        if _is_ntfs_dotgit(os.path.relpath(real, real_working_dir).split(os.sep)[0]):
+        if _is_dotgit_alias(os.path.relpath(real, real_working_dir).split(os.sep)[0]):
             return None
         try:
             if os.path.samefile(target, os.path.join(real_working_dir, ".git")):
@@ -73,16 +104,39 @@ def _untracked_discard_target(
     return target
 
 
-def _push_branch_arg(branch: str) -> str:
-    """The refspec argv element for pushing *branch*.
+_REFNAME_FORBIDDEN = frozenset(" ~^:?*[\\")
 
-    ``git push`` parses a leading ``-`` as an option even in refspec position,
-    and a branch literally named ``--mirror`` (``git init --initial-branch``,
-    ``git update-ref``, or a cloned remote HEAD) or a caller-supplied
-    ``--receive-pack=<cmd>`` would otherwise reach git as a flag. The fully
-    qualified ref names the same branch and can never parse as an option.
+
+def _is_plain_branch_name(branch: str) -> bool:
+    """Whether *branch* is a plain branch name, never a refspec or an option.
+
+    ``git push <remote> <branch>`` takes a refspec there, so ``:main`` deletes
+    the remote branch, ``+x:main`` force-pushes past the lease and
+    ``HEAD:refs/tags/v1`` overwrites any ref; a leading ``-`` parses as an
+    option. The rules are ``git check-ref-format --branch``'s: no control
+    characters, space or ``~^:?*[\\``, no ``..`` or ``@{``, no leading ``-``,
+    no component that starts with ``.`` or ends with ``.lock``, and no leading,
+    trailing or doubled ``/``. A leading ``+`` (a forced refspec) is refused too.
     """
-    return f"refs/heads/{branch}" if branch.startswith("-") else branch
+    if not branch or branch == "@" or branch[0] in "-+" or branch.endswith((".", "/")):
+        return False
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F or ch in _REFNAME_FORBIDDEN for ch in branch):
+        return False
+    if ".." in branch or "@{" in branch:
+        return False
+    return all(
+        part and not part.startswith(".") and not part.endswith(".lock")
+        for part in branch.split("/")
+    )
+
+
+def _push_refspec(branch: str) -> str:
+    """The fully qualified refspec that pushes local *branch* to the same name.
+
+    Qualified on both sides, so the remote side cannot resolve to a tag or
+    another namespace, and nothing in it can parse as an option.
+    """
+    return f"refs/heads/{branch}:refs/heads/{branch}"
 
 
 class GitCommitMixin:
@@ -301,12 +355,12 @@ class GitCommitMixin:
         try:
             if remote.startswith("-"):
                 return False, f"Invalid remote name: {remote}"
-            if branch:
-                branch = _push_branch_arg(branch)
+            if branch is not None and not _is_plain_branch_name(branch):
+                return False, f"Invalid branch name: {branch!r}"
             if set_upstream and branch:
-                args = ["push", "--set-upstream", remote, branch]
+                args = ["push", "--set-upstream", remote, _push_refspec(branch)]
             elif branch:
-                args = ["push", remote, branch]
+                args = ["push", remote, _push_refspec(branch)]
             else:
                 args = ["push", remote]
 

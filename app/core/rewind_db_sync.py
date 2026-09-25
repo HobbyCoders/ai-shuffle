@@ -319,7 +319,25 @@ def _fallback_anchor_by_content(
                     session_id, target_uuid, len(db_matches), transcript_matches,
                 )
                 return None
-            return db_matches[-(later_matches + 1)]["id"]
+            anchor = db_matches[-(later_matches + 1)]
+            # Totals alone can balance out: one older identical reply the
+            # transcript no longer holds offsets one modern turn with no row,
+            # and the pick lands a turn early. The anchor must sit in the
+            # target's own turn, i.e. be followed by exactly as many prompts
+            # as the target is in the transcript; otherwise refuse.
+            later_prompts = sum(1 for e in entries[target_idx + 1:] if _is_user_prompt_entry(e))
+            later_prompt_rows = sum(
+                1 for r in db_rows if r.get("role") == "user" and r["id"] > anchor["id"]
+            )
+            if later_prompt_rows != later_prompts:
+                logger.warning(
+                    "Fallback anchor for session %s target %s: %d prompt rows "
+                    "follow the candidate row, %d prompts follow the target. "
+                    "Refusing to delete.",
+                    session_id, target_uuid, later_prompt_rows, later_prompts,
+                )
+                return None
+            return anchor["id"]
 
         return None
     except Exception as e:

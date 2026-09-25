@@ -1283,6 +1283,25 @@ class TestRewindDbSync:
         assert anchor is None
         assert anchor != ids[1]
 
+    def test_assistant_anchor_refused_when_an_old_row_offsets_a_missing_one(self, projects, db_session):
+        """R8-8: the totals guard balanced out. Transcript a1/a2/a3 are all
+        "Done." and modern a3 wrote no row, while the DB still holds an older
+        "Done." the transcript no longer has: three matches on each side. The
+        from-the-end pick for a2 then landed on a1's row, and the
+        include_response delete dropped turn 2, which the rewind keeps."""
+        transcript = self._transcript()
+        transcript[5] = assistant("a3", [text("Done.")], parent="u3", i=5)
+        write_entries(projects, transcript)
+        ids = [_add("user", "an older prompt"), _add("assistant", "Done."),
+               _add("user", "fix the bug"), _add("assistant", "Done."),
+               _add("user", "add tests"), _add("assistant", "Done."),
+               _add("user", "ship it")]  # modern turn 3: no assistant row
+
+        anchor = rds.resolve_rewind_anchor(APP_SID, SID, WD, "a2")
+
+        assert anchor is None
+        assert anchor != ids[3]
+
     def test_content_mismatch_refuses_anchor(self, projects, db_session):
         write_entries(projects, self._transcript())
         _add("user", "fix the bug")

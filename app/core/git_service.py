@@ -612,7 +612,9 @@ class GitService(
                     # Worktree changes (not staged): an unstaged deletion,
                     # type change or rename is a modification too, as in
                     # git_native; a renamed file's source is gone from disk.
-                    if worktree_status in ("M", "D", "T", "R"):
+                    # A worktree "A" is an intent-to-add entry (``git add -N``):
+                    # its content is not staged yet, so it is a worktree change.
+                    if worktree_status in ("M", "D", "T", "R", "A"):
                         status["modified"].append(filename)
                         if worktree_status == "R" and source:
                             status["modified"].append(source)

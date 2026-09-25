@@ -176,20 +176,58 @@ def _install_resource_hook() -> None:
     resource_sync._network_hooked = True
 
 
+# A connector start already past its eligibility check when a fence lands is
+# still CONNECTING: it is not registered yet, and it registers (and runs) once
+# its connect() returns. The fenced reconcile keeps sweeping this long for such
+# late registrations, until the worker is re-admitted.
+FENCE_SETTLE_SECONDS = 30.0
+FENCE_SWEEP_INTERVAL = 0.5
+
+_reconcile_lock: Optional[asyncio.Lock] = None
+_reconcile_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _connector_reconcile_lock() -> asyncio.Lock:
+    """One lock per event loop: reconciles run one at a time, in order."""
+    global _reconcile_lock, _reconcile_lock_loop
+    loop = asyncio.get_running_loop()
+    if _reconcile_lock is None or _reconcile_lock_loop is not loop:
+        _reconcile_lock, _reconcile_lock_loop = asyncio.Lock(), loop
+    return _reconcile_lock
+
+
+async def _stop_running_connectors(connector_manager) -> None:
+    for connector_id, _instance in list(connector_manager.get_running_connectors()):
+        try:
+            await connector_manager.stop_connector(connector_id)
+        except Exception:  # noqa: BLE001 - one failure must not keep the rest connected
+            logger.warning("Stopping fenced connector %s failed", connector_id, exc_info=True)
+
+
 async def _reconcile_owned_connectors() -> None:
-    """Close connections when committed membership changes fence this worker."""
+    """Close connections when committed membership changes fence this worker.
+
+    Serialised: a fence and the re-admission right after it are applied in
+    the order they were scheduled, so the later decision is the one that holds.
+    """
     from app.core.connectors.manager import connector_manager
     from app.network import ownership
-    if not ownership.can_execute_local():
+    async with _connector_reconcile_lock():
+        if ownership.can_execute_local():
+            await connector_manager.start_all()
+            return
         # Stop the running connectors but keep the lifecycle relay:
         # ``start_all`` does not restart it when execution is re-admitted.
-        for connector_id, _instance in list(connector_manager.get_running_connectors()):
-            try:
-                await connector_manager.stop_connector(connector_id)
-            except Exception:  # noqa: BLE001 - one failure must not keep the rest connected
-                logger.warning("Stopping fenced connector %s failed", connector_id, exc_info=True)
-    else:
-        await connector_manager.start_all()
+        # The manager's registry holds CONNECTING clients too; a start whose
+        # connect() is still in flight registers later, so keep sweeping.
+        await _stop_running_connectors(connector_manager)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + FENCE_SETTLE_SECONDS
+        while loop.time() < deadline:
+            await asyncio.sleep(FENCE_SWEEP_INTERVAL)
+            if ownership.can_execute_local():
+                break  # re-admitted: the reconcile queued behind this one starts them
+            await _stop_running_connectors(connector_manager)
 
 
 def _on_applied(touched) -> None:
