@@ -195,7 +195,7 @@ def test_api_user_session_access_is_enforced(context_client, monkeypatch):
     session_id = _session()
     monkeypatch.setattr(
         "app.api.sessions_helpers.get_api_user_from_request",
-        lambda request: {"id": "user-b", "profile_id": "other-profile"},
+        lambda request: {"id": "user-b", "profile_ids": ["other-profile"]},
     )
     response = context_client.patch(PATH.format(session_id), json={"fast": True})
     assert response.status_code == 403

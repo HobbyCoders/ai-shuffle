@@ -1723,7 +1723,8 @@ class TestCommandsSessionOwnership:
         """Build a mock FastAPI Request carrying an API user (non-admin)."""
         req = MagicMock()
         req.state = MagicMock()
-        req.state.api_user = {"project_id": project_id, "profile_id": profile_id}
+        req.state.api_user = {"project_id": project_id,
+                              "profile_ids": [profile_id] if profile_id else None}
         return req
 
     @pytest.mark.asyncio

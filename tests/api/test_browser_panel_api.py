@@ -50,8 +50,11 @@ class TestAccessHelper:
 
     def test_profile_mismatch_denied(self):
         with pytest.raises(HTTPException) as exc:
-            check_session_access_for_api_user({"profile_id": "a"}, {"profile_id": "b"})
+            check_session_access_for_api_user({"profile_ids": ["a"]}, {"profile_id": "b"})
         assert exc.value.status_code == 403
+
+    def test_profile_in_assigned_agents_ok(self):
+        check_session_access_for_api_user({"profile_ids": ["a", "b"]}, {"profile_id": "b"})
 
     def test_unrestricted_api_user_ok(self):
         # No project/profile restriction on the user -> allowed.

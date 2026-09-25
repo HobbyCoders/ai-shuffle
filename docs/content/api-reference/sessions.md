@@ -442,6 +442,8 @@ Create a session linked to a git worktree for isolated development.
 
 **Auth:** Required
 
+For an API key with assigned agents, `profile_id` must be one of them (403 otherwise). When it is omitted the key's only agent is used, or 400 if it has several; the project's default agent is not used.
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/sessions/with-worktree \
   -H "Authorization: Bearer aih_your_key" \

@@ -802,7 +802,7 @@ class TestGetProfileAgentsEndpoint:
             with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
-                    "profile_id": "other-profile"  # Different profile
+                    "profile_ids": ["other-profile"]  # Different profile
                 }
                 mock_db.get_profile.return_value = profile
 
@@ -1231,7 +1231,7 @@ class TestGetEnabledAgentsEndpoint:
             with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
-                    "profile_id": "other-profile"
+                    "profile_ids": ["other-profile"]
                 }
                 mock_db.get_profile.return_value = profile
 
@@ -1577,7 +1577,7 @@ class TestExportProfileEndpoint:
             with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
-                    "profile_id": "other-profile"
+                    "profile_ids": ["other-profile"]
                 }
                 mock_db.get_profile.return_value = profile
 
@@ -2405,3 +2405,24 @@ class TestAgentInvokeMode:
 
             assert "agent_invoke_mode" not in result["config"]
             assert "enabled_agents" not in result["config"]
+
+
+# =============================================================================
+# API users' assigned agents (profile_ids) on the per-agent endpoints
+# =============================================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["get_profile_agents", "get_enabled_agents", "export_profile"])
+async def test_assigned_agent_passes_the_access_check(endpoint):
+    """An agent in the API user's ``profile_ids`` is reachable (here the
+    missing profile then 404s — past the 403 gate)."""
+    from fastapi import HTTPException
+    from app.api import agents
+
+    with patch("app.api.agents.database") as mock_db, \
+            patch("app.api.agents.get_api_user_from_request",
+                  return_value={"id": "u1", "profile_ids": ["other", "test-profile"]}):
+        mock_db.get_profile.return_value = None
+        with pytest.raises(HTTPException) as exc_info:
+            await getattr(agents, endpoint)(create_mock_request(), "test-profile", token="t")
+    assert exc_info.value.status_code == 404

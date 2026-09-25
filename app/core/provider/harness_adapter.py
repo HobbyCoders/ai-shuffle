@@ -1797,6 +1797,11 @@ class HarnessAdapter(ProviderAdapter):
         self._event_cursor = max(self._event_cursor, head)
 
     @property
+    def permission_mode(self) -> Optional[str]:
+        """The session's live permission mode (tracks ``set_permission_mode``)."""
+        return self._options.permission_mode if self._options is not None else None
+
+    @property
     def has_permission_callback(self) -> bool:
         """True when permission prompts reach an app approver (the WS path)."""
         return self._can_use_tool is not None
@@ -1811,6 +1816,10 @@ class HarnessAdapter(ProviderAdapter):
                 "[HarnessAdapter] denying %s: no interactive approver on this path",
                 ev.name,
             )
+        elif self._permission_tool_name(ev.name) == "mcp__computer-use__request_access":
+            # The tool refuses a call no decision was recorded for.
+            from app.mcp.computer_use import access
+            access.approve_request(self._resolve_app_session_id())
         try:
             await self.respond_to_permission(
                 ev.tool_use_id, allow, message=None if allow else _NO_APPROVER_DENIAL,

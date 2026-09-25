@@ -56,6 +56,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     MAX_MESSAGE_PAGE_LIMIT,
     _annotate_cluster_fields,
     _apply_session_filters,
+    api_user_profile_filter,
     BatchDeleteRequest,
     SessionActiveUpdate,
     AdoptRequest,
@@ -622,8 +623,7 @@ async def search_sessions(
     if api_user:
         if api_user.get("project_id"):
             project_id = api_user["project_id"]
-        if api_user.get("profile_id"):
-            profile_id = api_user["profile_id"]
+        profile_id = api_user_profile_filter(api_user, profile_id)
         filter_api_user_id = api_user["id"]
         admin_only = False
     elif admin_only:
@@ -665,8 +665,7 @@ async def search_sessions_paginated(
     if api_user:
         if api_user.get("project_id"):
             project_id = api_user["project_id"]
-        if api_user.get("profile_id"):
-            profile_id = api_user["profile_id"]
+        profile_id = api_user_profile_filter(api_user, profile_id)
         filter_api_user_id = api_user["id"]
         admin_only = False
     elif admin_only:
@@ -1408,10 +1407,12 @@ async def stop_session_background_task(
     """Stop ONE in-flight background task (sub-agent or Monitor shell) by id.
 
     Powers the "x" on the live background-tasks strip. Shell tasks are
-    terminated directly; a background sub-agent is stopped through the pooled
-    session when it offers a stop control, otherwise its registry row is reaped,
-    so either way the task drops from the next /live poll. Returns ``{"ok": bool, ...}`` — a failed stop is a 200 with ok=False
-    (e.g. the task already finished) rather than an error.
+    terminated directly; a provider-lane sub-agent is torn down by its
+    supervisor, and any other sub-agent (the harness has no per-task stop) has
+    its registry row marked killed, so the task drops from the next /live poll.
+    Returns ``{"ok": bool, ...}`` — a failed stop is a 200 with ok=False
+    (a shell whose processes survived) rather than an error; a task that
+    already finished is ok=True with ``detail: "already finished"``.
     """
     await require_session(request, session_id)
 

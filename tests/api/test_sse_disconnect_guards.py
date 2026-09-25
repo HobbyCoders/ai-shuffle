@@ -139,7 +139,9 @@ async def _query_agen(route):
     request = MagicMock()
     request.prompt = "hi"
     request.overrides = None
-    api_user = {"id": "u1", "profile_id": "p1", "project_id": "proj1"}
+    request.profile = "p1"
+    request.session_id = None  # a new conversation: no session to check
+    api_user = {"id": "u1", "profile_ids": ["p1"], "project_id": "proj1"}
     with patch.object(
         query_mod,
         "_stream_query_with_failover",

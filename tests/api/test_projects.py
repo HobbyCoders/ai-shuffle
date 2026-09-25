@@ -959,7 +959,7 @@ class TestListProjectFilesSessionCheckout:
         mock_database.get_project.assert_not_called()
 
     def test_restricted_api_user_denied_foreign_profile_session(self, client, mock_database, mock_api_user, checkout):
-        mock_api_user.return_value = {"id": "u1", "project_id": "test-project", "profile_id": "mine"}
+        mock_api_user.return_value = {"id": "u1", "project_id": "test-project", "profile_ids": ["mine"]}
         mock_database.get_session.return_value = self._session(profile_id="theirs")
 
         response = client.get("/api/v1/projects/test-project/files?session_id=s1")

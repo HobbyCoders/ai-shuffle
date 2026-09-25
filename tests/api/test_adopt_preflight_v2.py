@@ -109,8 +109,8 @@ def test_v2_checkout_present_adopts_without_project_rewrite(client, mock_databas
     assert data["status"] == "adopted"
     assert data["instance_id"] == settings.effective_instance_id
     # project_id is NEVER rewritten under v2 — the legacy rebind must not run.
-    assert data["local_project_id"] is None
-    assert data["warning"] is None
+    assert "local_project_id" not in data
+    assert "warning" not in data
     mock_database.set_session_project.assert_not_called()
     legacy_preflight.assert_not_called()
     mock_database.adopt_session.assert_called_once_with(

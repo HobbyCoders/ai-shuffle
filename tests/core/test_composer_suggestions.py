@@ -783,7 +783,7 @@ async def test_saved_hint_authorization_and_rewind(mock_db):
     turn = _settled_turn("s")
     await cs._publish("s", turn["id"], "What next?")
     with pytest.raises(HTTPException) as denied:
-        await get_composer_suggestion(Request({"type": "http", "state": {"api_user": {"id": "other", "profile_id": "restricted"}}}), "s")
+        await get_composer_suggestion(Request({"type": "http", "state": {"api_user": {"id": "other", "profile_ids": ["restricted"]}}}), "s")
     assert denied.value.status_code == 403
     mock_db.execute("DELETE FROM session_events WHERE session_id = ?", ("s",))
     assert composer_suggestions.get("s") is None

@@ -88,6 +88,8 @@ Other devices watching the same session receive the same control frames. Content
 | `interrupt_for_query` | Interrupt the running turn so a new `query` can follow; replies `interrupt_confirmed` or `interrupt_failed` | `session_id` |
 | `pong` | Keep-alive response to a `ping` | — |
 
+For an API key with assigned agents, `query` and `queue_message` apply the same agent restriction as the REST endpoints: a `profile` outside the key's agents (or an omitted one when the key has several), or a `session_id` whose session runs an agent outside them, is refused with an `error` frame, the WebSocket equivalent of the REST 403/400, and nothing runs.
+
 ### Permission Handling
 
 When the agent wants to use a tool that requires approval:

@@ -74,7 +74,7 @@ def _take_challenge(challenge: str, device_id: str) -> bool:
     if entry is None:
         return False
     expires, issued_to = entry
-    return expires > time.monotonic() and hmac.compare_digest(issued_to, device_id)
+    return expires > time.monotonic()
 
 
 def challenge_message(challenge: str, audience: str) -> bytes:

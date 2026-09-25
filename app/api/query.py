@@ -239,6 +239,18 @@ async def stream_one_shot_query(
     )
 
 
+async def _check_continued_session(api_user: dict, session_id: str | None) -> None:
+    """403 when an API user names an existing session it may not access.
+
+    An id with no row is left to the engine, which refuses it.
+    """
+    if not session_id:
+        return
+    session = await run_sync(database.get_session, session_id)
+    if session:
+        check_session_access_for_api_user(api_user, session)
+
+
 @router.post("/conversation", response_model=QueryResponse)
 async def conversation(
     request: ConversationRequest,
@@ -288,11 +300,13 @@ async def conversation(
         # long-running endpoint sets up.
         session_id = request.session_id
         if session_id:
-            if await run_sync(database.get_session, session_id) is None:
+            existing = await run_sync(database.get_session, session_id)
+            if existing is None:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Unknown session_id",
                 )
+            check_session_access_for_api_user(api_user, existing)
         else:
             session_id = str(uuid.uuid4())
             title = derive_session_title(
@@ -421,6 +435,7 @@ async def stream_conversation(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No profile configured. Provide 'profile' in the request."
         )
+    await _check_continued_session(api_user, request.session_id)
 
     async def event_generator():
         try:
@@ -503,6 +518,7 @@ async def start_conversation(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No profile configured. Provide 'profile' in the request."
         )
+    await _check_continued_session(api_user, request.session_id)
 
     try:
         overrides = None

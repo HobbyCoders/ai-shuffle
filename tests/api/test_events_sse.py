@@ -348,7 +348,7 @@ async def test_endpoint_denies_api_user_outside_session_profile(mock_db, gw):
     from app.db import database
 
     database.create_session("sess-g", "default")
-    api_user = {"id": "u1", "project_id": None, "profile_id": "other-profile"}
+    api_user = {"id": "u1", "project_id": None, "profile_ids": ["other-profile"]}
     with pytest.raises(HTTPException) as exc:
         await stream_session_events(fake_request(api_user), "sess-g", 0, token="test-token")
     assert exc.value.status_code == 403

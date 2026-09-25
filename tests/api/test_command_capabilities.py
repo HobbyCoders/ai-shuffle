@@ -80,7 +80,7 @@ async def test_api_native_list_and_detail_share_profile_sources(source_tree, mon
     monkeypatch.setattr(context.database, "get_session", lambda sid: session)
     monkeypatch.setattr(context.database, "get_profile", lambda pid: {"config": {"setting_sources": sources}})
     monkeypatch.setattr("app.core.project_resolver.resolve_existing_cwd", lambda row: str(child))
-    req = caller({"id": "me", "project_id": "mine", "profile_id": "p"})
+    req = caller({"id": "me", "project_id": "mine", "profile_ids": ["p"]})
     listed = await commands.list_commands(session_id="s", http_request=req)
     allowed = sources is None or "user" in sources
     assert {entry.name for entry in listed.commands} == ({"greet"} if allowed else set())
@@ -119,9 +119,23 @@ def test_scoped_profile_cannot_override_sources_even_in_voice(monkeypatch):
     lookup = Mock(side_effect=AssertionError("unauthorized profile loaded"))
     monkeypatch.setattr(context.database, "get_profile", lookup)
     with pytest.raises(HTTPException) as exc:
-        context.command_provider_kind(caller({"profile_id": "mine"}), None, None, "other", "voice")
+        context.command_provider_kind(caller({"profile_ids": ["mine"]}), None, None, "other", "voice")
     assert exc.value.status_code == 403
     lookup.assert_not_called()
+
+
+def test_scoped_caller_defaults_to_its_only_agent_and_may_use_any_assigned(monkeypatch):
+    """``profile_ids`` (not the dead ``profile_id`` column) scopes commands."""
+    seen = []
+    monkeypatch.setattr(context.database, "get_profile",
+                        lambda pid: seen.append(pid) or {"config": {}})
+    context.command_setting_sources(caller({"profile_ids": ["only"]}), None, None)
+    context.command_setting_sources(caller({"profile_ids": ["a", "b"]}), None, "b")
+    assert seen == ["only", "b"]
+    with pytest.raises(HTTPException) as exc:
+        context.command_setting_sources(
+            caller({"profile_id": "legacy", "profile_ids": ["a"]}), None, "legacy")
+    assert exc.value.status_code == 403
 
 
 def caller(user=None):

@@ -256,8 +256,6 @@ export interface AdoptSessionResponse {
 	instance_id: string;
 	adopted: boolean;
 	status: 'adopted' | 'already_local' | 'unpinned' | (string & {});
-	warning?: string | null;
-	local_project_id?: string | null;
 }
 
 export interface MoveSessionResponse {

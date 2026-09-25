@@ -1,7 +1,7 @@
 """Per-session access on the sync socket, interrupt, streaming list and
 JSONL import routes.
 
-A restricted API user (project_id/profile_id set) may only reach sessions in
+A restricted API user (project_id/profile_ids set) may only reach sessions in
 its scope; importing a server-side JSONL file is owner-only and confined to
 the transcript roots.
 """
@@ -16,7 +16,7 @@ from app.api import ws_sync
 from app.api.sessions_export import ImportJSONLRequest, import_jsonl_session
 from tests.api.helpers import fake_request
 
-FOREIGN_USER = {"id": "u1", "project_id": None, "profile_id": "other-profile"}
+FOREIGN_USER = {"id": "u1", "project_id": None, "profile_ids": ["other-profile"]}
 
 
 # -- /ws/sessions/{id} --------------------------------------------------------
@@ -73,7 +73,7 @@ async def test_interrupt_allows_owner_and_in_scope_user(mock_db):
     from app.db import database
 
     database.create_session("sess-own", "default")
-    in_scope = {"id": "u2", "project_id": None, "profile_id": "default"}
+    in_scope = {"id": "u2", "project_id": None, "profile_ids": ["default"]}
     with patch.object(query_api, "interrupt_session", AsyncMock(return_value=True)):
         for request in (fake_request(None), fake_request(in_scope)):
             result = await query_api.interrupt(request, "sess-own", token="t")

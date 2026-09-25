@@ -114,11 +114,6 @@ class AdoptSessionResponse(BaseModel):
     instance_id: str
     adopted: bool
     status: str
-    # Cross-device rebind preflight (populated only when the session carries a
-    # project): a non-blocking advisory (e.g. an unpushed worktree branch) and
-    # the local clone the session was rebound onto, when a sibling was used.
-    warning: Optional[str] = None
-    local_project_id: Optional[str] = None
 
 
 class MoveSessionRequest(BaseModel):
@@ -280,6 +275,36 @@ def resolve_api_user_profile(api_user: Optional[dict], requested: Optional[str])
     )
 
 
+def api_user_may_use_profile(api_user: Optional[dict], profile_id: Optional[str]) -> bool:
+    """True when ``api_user`` may use agent ``profile_id``.
+
+    The owner (``None``) and an API user with no assigned agents are
+    unrestricted; otherwise the agent must be in ``api_user['profile_ids']``.
+    """
+    allowed = (api_user or {}).get("profile_ids") or []
+    return not allowed or profile_id in allowed
+
+
+def api_user_profile_filter(api_user: Optional[dict], requested: Optional[str]) -> Optional[str]:
+    """The profile filter for a restricted API user's session list/search.
+
+    A requested agent outside the assigned set is 403; with no request, a
+    single assigned agent becomes the filter (several leave it unset — the
+    list is already limited to the caller's own sessions).
+    """
+    allowed = (api_user or {}).get("profile_ids") or []
+    if not allowed:
+        return requested
+    if requested:
+        if requested not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this profile",
+            )
+        return requested
+    return allowed[0] if len(allowed) == 1 else None
+
+
 def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -> None:
     """Enforce an API user's project/profile access to a session.
 
@@ -299,13 +324,12 @@ def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -
                 detail="Access denied to this session"
             )
 
-    # Check profile restriction
-    if api_user.get("profile_id"):
-        if api_user["profile_id"] != session.get("profile_id"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this session"
-            )
+    # Check agent restriction (assigned agents, ``profile_ids``)
+    if not api_user_may_use_profile(api_user, session.get("profile_id")):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this session"
+        )
 
 
 def check_session_access(request: Request, session: dict) -> None:
@@ -805,8 +829,7 @@ async def _apply_session_filters(
     if api_user:
         if api_user.get("project_id"):
             project_id = api_user["project_id"]
-        if api_user.get("profile_id"):
-            profile_id = api_user["profile_id"]
+        profile_id = api_user_profile_filter(api_user, profile_id)
         # API users can only see their own sessions
         api_user_id = api_user["id"]
         admin_only = False

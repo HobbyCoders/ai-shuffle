@@ -1122,6 +1122,62 @@ class TestApiUserAgentRestriction:
 
 
 # =============================================================================
+# Continuing a session: the caller must be able to access it
+# =============================================================================
+
+_CONTINUING_ENDPOINTS = ["conversation", "stream_conversation", "start_conversation"]
+
+
+class TestContinuedSessionAccess:
+    """A ``session_id`` naming another scope's session is refused before any
+    turn runs; a session the caller can access continues as before."""
+
+    @staticmethod
+    async def _call(endpoint, session, api_user):
+        from app.api import query
+        from app.core.models import ConversationRequest
+        from app.db import database
+
+        request = ConversationRequest(prompt="Hi", profile="mine", session_id="s1")
+        with patch.object(database, "get_session", return_value=session), \
+                patch("app.api.query.start_background_query",
+                      new=AsyncMock(return_value={"session_id": "s1", "status": "started"})) as start, \
+                patch("app.api.query._stream_query_with_failover") as stream, \
+                patch("app.core.turn_manager.submit_async", new=AsyncMock()) as submit, \
+                patch("app.core.turn_manager.wait_session_idle", new=AsyncMock(return_value=True)), \
+                patch("app.core.turn_outcome.final_turn_outcome",
+                      return_value={"usage": {}, "error": None, "interrupted": False}), \
+                patch("app.core.turn_outcome.extract_final_assistant_text", return_value="ok"):
+            await getattr(query, endpoint)(request, api_user)
+        return start, stream, submit
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", _CONTINUING_ENDPOINTS)
+    @pytest.mark.parametrize("session", [
+        {"id": "s1", "profile_id": "someone-elses-agent"},  # agent outside the key's set
+        {"id": "s1", "profile_id": "mine", "project_id": "other-project"},  # other project
+    ])
+    async def test_foreign_session_is_403(self, endpoint, session):
+        from fastapi import HTTPException
+
+        api_user = {"id": "u1", "profile_ids": ["mine"], "project_id": "my-project"}
+        with pytest.raises(HTTPException) as exc_info:
+            await self._call(endpoint, session, api_user)
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", _CONTINUING_ENDPOINTS)
+    async def test_accessible_session_continues(self, endpoint):
+        api_user = {"id": "u1", "profile_ids": ["mine"], "project_id": "my-project"}
+        session = {"id": "s1", "profile_id": "mine", "project_id": "my-project"}
+        start, _stream, submit = await self._call(endpoint, session, api_user)
+        if endpoint == "start_conversation":
+            assert start.call_args.kwargs["session_id"] == "s1"
+        elif endpoint == "conversation":
+            assert submit.call_args.args[0] == "s1"
+
+
+# =============================================================================
 # Integration-style Tests with TestClient
 # =============================================================================
 

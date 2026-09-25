@@ -86,3 +86,42 @@ async def test_queue_message_with_disallowed_agent_is_refused(mock_db):
             {"content": "later", "session_id": "sess-1", "profile": "other-agent"})
     assert sent_frames(handler, "error")
     assert _queued_profiles("sess-1") == []
+
+
+# A session whose agent is outside the key's set cannot be driven through the
+# WS: the session's agent runs when the frame names none (queue_message), and
+# a named allowed agent does not make the session's own agent allowed.
+
+def _foreign_agent_session():
+    from app.db import database
+
+    database.create_profile(profile_id="other-agent", name="Other", description=None, config={})
+    return _make_session("sess-x", profile_id="other-agent")
+
+
+async def test_queue_message_without_profile_into_foreign_agent_session_is_refused(mock_db):
+    _foreign_agent_session()
+    handler, user = _api_handler(["default"])
+    with _Patches(), user:
+        await handler.handle_queue_message({"content": "later", "session_id": "sess-x"})
+    errors = sent_frames(handler, "error")
+    assert errors and "other-agent" in errors[0]["message"]
+    assert _queued_profiles("sess-x") == []
+
+
+async def test_query_into_foreign_agent_session_is_refused(mock_db):
+    _foreign_agent_session()
+    handler, user = _api_handler(["default"])
+    with _Patches(), user:
+        await handler.handle_query({"prompt": "hi", "session_id": "sess-x"})
+    assert sent_frames(handler, "error")
+    assert _queued_profiles("sess-x") == []
+
+
+async def test_queue_message_without_profile_into_own_agent_session_queues(mock_db):
+    _make_session("sess-1")
+    handler, user = _api_handler(["default"])
+    with _Patches(), user:
+        await handler.handle_queue_message({"content": "later", "session_id": "sess-1"})
+    assert not sent_frames(handler, "error")
+    assert len(turns_db.get_queued_turns("sess-1")) == 1

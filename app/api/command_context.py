@@ -83,8 +83,10 @@ def command_setting_sources(
 
 def _command_profile_config(request, session, profile_id):
     user = get_api_user_from_request(request) if request is not None else None
-    profile_id = profile_id or (session or {}).get("profile_id") or (user or {}).get("profile_id")
-    if user and user.get("profile_id") and profile_id != user["profile_id"]:
+    allowed = (user or {}).get("profile_ids") or []
+    profile_id = profile_id or (session or {}).get("profile_id") or (
+        allowed[0] if len(allowed) == 1 else None)
+    if allowed and profile_id and profile_id not in allowed:
         raise HTTPException(403, "Access denied to this profile")
     profile = database.get_profile(profile_id) if profile_id else None
     return (profile or {}).get("config") or {}

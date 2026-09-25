@@ -19,7 +19,7 @@ from app.core.models import ConversationRequest
 
 
 # ``id`` is None so the minted session row needs no api_users FK to exist.
-API_USER = {"id": None, "profile_id": "default", "project_id": None}
+API_USER = {"id": None, "profile_ids": ["default"], "project_id": None}
 
 
 # ---------------------------------------------------------------------------

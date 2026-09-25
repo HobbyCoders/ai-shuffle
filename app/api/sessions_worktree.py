@@ -20,6 +20,7 @@ from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT, require_origin_acces
 from app.api.sessions_helpers import (
     CreateWorktreeSessionRequest,
     WorktreeSessionResponse,
+    resolve_api_user_profile,
 )
 
 import logging
@@ -627,6 +628,12 @@ async def create_session_with_worktree(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ATTACHMENTS_NEED_LOCAL_CHECKOUT,
         )
+    # Assigned agents bind the agent before the project-default fallback, so a
+    # restricted key never lands on a default outside its set.
+    if api_user and api_user.get("profile_ids"):
+        body = body.model_copy(update={
+            "profile_id": resolve_api_user_profile(api_user, body.profile_id),
+        })
 
     return await _create_v2_branch_session(
         body, project, api_user_id, access["project_v2"]

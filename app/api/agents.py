@@ -182,9 +182,10 @@ async def get_profile_agents(
     """
     api_user = get_api_user_from_request(request)
 
-    # Check if API user is restricted to a specific profile
-    if api_user and api_user.get("profile_id"):
-        if api_user["profile_id"] != profile_id:
+    # Check if API user is restricted to its assigned agents
+    profile_ids = api_user.get("profile_ids") if api_user else None
+    if profile_ids:
+        if profile_id not in profile_ids:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this profile"
@@ -837,9 +838,10 @@ async def get_enabled_agents(
     """Get the list of enabled subagent IDs for a profile"""
     api_user = get_api_user_from_request(request)
 
-    # Check if API user is restricted to a specific profile
-    if api_user and api_user.get("profile_id"):
-        if api_user["profile_id"] != profile_id:
+    # Check if API user is restricted to its assigned agents
+    profile_ids = api_user.get("profile_ids") if api_user else None
+    if profile_ids:
+        if profile_id not in profile_ids:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this profile"
@@ -990,9 +992,10 @@ async def export_profile(
     """
     api_user = get_api_user_from_request(request)
 
-    # Check if API user is restricted to a specific profile
-    if api_user and api_user.get("profile_id"):
-        if api_user["profile_id"] != profile_id:
+    # Check if API user is restricted to its assigned agents
+    profile_ids = api_user.get("profile_ids") if api_user else None
+    if profile_ids:
+        if profile_id not in profile_ids:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this profile"
