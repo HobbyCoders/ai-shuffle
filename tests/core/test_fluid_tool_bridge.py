@@ -257,6 +257,8 @@ def test_every_static_risk_map_tool_name_is_current(monkeypatch):
             actual.update(entry.name for entry in _build_memory_bridge_tools(
                 tool, session_id="risk-map-probe", cwd=None,
             ))
+            from fluid.tools.builtins.session_orchestration import SPECS
+            actual.update(spec.name for spec, _ in SPECS)
         mapped = set(SERVER_RISK_MAPS[server])
         stale = mapped - actual
         assert not stale, f"{server}: risk map entries with no matching registered tool: {sorted(stale)}"

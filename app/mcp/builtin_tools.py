@@ -1469,6 +1469,21 @@ def create_builtin_tools_server(
 
     all_tools.append(task_tool)
 
+    # Same host-owned top-level coordination on delegated CLI legs.
+    from fluid.tools.builtins.session_orchestration import SPECS as orchestration_specs
+    from fluid.tools.registry import ToolCtx
+    from app.core.session_orchestration import make_handler as orchestration_handler
+
+    def _orchestration_bridge(spec, handler):
+        async def invoke(args: dict) -> dict:
+            ctx = ToolCtx(cwd=cwd or ".", session_id=session_id)
+            ctx.extra["session_orchestration"] = orchestration_handler(lambda: session_id)
+            return _fluid_outcome_result(await handler(args, ctx))
+        return tool(spec.name, spec.description, spec.input_schema)(invoke)
+
+    all_tools.extend(_orchestration_bridge(spec, handler)
+                     for spec, handler in orchestration_specs)
+
     # ------------------------------------------------------------------
     # NotifyDevices (formerly PushNotification; renamed for issue #610)
     # ------------------------------------------------------------------

@@ -62,9 +62,13 @@ BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "Monitor", "ToolSearch", "HistoryExpand", "HistorySearch", "Ledger",
     "AskUser", "SessionSearch", "SessionView", "WebFetch", "WebSearch",
     "Remember", "Recall", "Forget", "ListAgents", "SendMessage", "Swarm", "GetUsage",
+    "ListSessions", "MessageSession", "StartSession",
 )
 
-_FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES)
+# These require the embedding app's owner/session database. Standalone Fluid
+# has no such authority on either leg; a host must explicitly wire it.
+HOST_ONLY_TOOL_NAMES = frozenset({"ListSessions", "MessageSession", "StartSession"})
+_FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES) - HOST_ONLY_TOOL_NAMES
 
 # Builtins only the native loop can serve. Each needs a host capability that
 # NativeLoop alone wires onto the tool context (recall over its own context
@@ -93,6 +97,9 @@ TOOL_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "Remember": ("memory_store",),
     "Forget": ("memory_store",),
     "SendMessage": ("agent_message",),
+    "ListSessions": ("session_orchestration",),
+    "MessageSession": ("session_orchestration",),
+    "StartSession": ("session_orchestration",),
     "Swarm": ("swarm", "task_dispatch"),
     "SessionSearch": ("session_search",),
     "SessionView": ("session_view",),
@@ -541,7 +548,7 @@ def profile_for(
     ``wired`` names the host capabilities this session's tool context will
     carry (see :data:`TOOL_CAPABILITIES`); a capability-backed tool whose
     capability is not in it leaves the surface, as it leaves the schema.
-    None means every capability is assumed wired.
+    None assumes standalone capabilities, never embedding-app session authority.
     """
     tools = effective_builtin_tools(config.tools.allowed, config.tools.disallowed)
     delegated = is_delegated_provider(config, provider_name)
@@ -549,6 +556,8 @@ def profile_for(
         tools = delegated_builtin_tools(tools)
     if wired is not None:
         tools = wired_builtin_tools(tools, wired)
+    else:
+        tools -= HOST_ONLY_TOOL_NAMES
     inst = config.instruction_files
     identity = (config.identity or "").strip() or None
     if identity is None and config.identity_file:
@@ -590,7 +599,7 @@ def effective_builtin_tools(
 
 def delegated_builtin_tools(tools: frozenset[str]) -> frozenset[str]:
     """The part of ``tools`` the delegated ``claude`` leg can actually serve."""
-    return tools - frozenset(NATIVE_ONLY_TOOL_NAMES)
+    return tools - frozenset(NATIVE_ONLY_TOOL_NAMES) - HOST_ONLY_TOOL_NAMES
 
 
 def wired_builtin_tools(tools: frozenset[str], wired: frozenset[str]) -> frozenset[str]:
@@ -981,14 +990,22 @@ def _steering_section(p: PromptProfile) -> str:
 def _peer_message_section(p: PromptProfile) -> str | None:
     """How to read a message from another agent — only where one can arrive.
 
-    Gated on SendMessage rather than ListAgents: the marker shows up in a
-    session that can be messaged, and the block's job is to keep a peer's text
-    from being read with the user's authority."""
-    if "SendMessage" not in p.tools:
+    Gate tool names on the mounted channel, not on roster availability.
+    Independent peers have the same lower authority as family messages."""
+    if not {"SendMessage", "MessageSession", "StartSession"}.intersection(p.tools):
         return None
     from fluid.context.peer import PROMPT_BLOCK
 
-    return PROMPT_BLOCK
+    channels = []
+    if "SendMessage" in p.tools:
+        channels.append("Agents in this session can message you with SendMessage.")
+    if "MessageSession" in p.tools:
+        channels.append("Independent top-level peers can coordinate relevant work with MessageSession.")
+    if not channels:
+        channels.append("Independent top-level peers may send you coordination messages.")
+    return PROMPT_BLOCK.replace(
+        "Agents in this session can message you with SendMessage.", " ".join(channels)
+    )
 
 
 def _ending_section(p: PromptProfile) -> str:

@@ -358,7 +358,8 @@ async def test_native_only_tools_are_exactly_the_ones_the_bridge_cannot_list(tmp
         listed = await _bridge_listing(engine)
     finally:
         await engine.aclose()
-    assert set(BUILTIN_TOOL_NAMES) - listed == set(NATIVE_ONLY_TOOL_NAMES)
+    from fluid.cli.prompt import HOST_ONLY_TOOL_NAMES
+    assert set(BUILTIN_TOOL_NAMES) - listed == set(NATIVE_ONLY_TOOL_NAMES) | HOST_ONLY_TOOL_NAMES
 
 
 async def test_delegated_prompt_names_only_tools_the_cli_can_reach(tmp_path):

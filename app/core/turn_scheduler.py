@@ -83,7 +83,9 @@ FAILOVER_ATTEMPTED_KEY = "failover_attempted"
 # Transport-context payload keys copied from a settled/parked turn onto a
 # scheduler-enqueued successor so the retry/continuation/wake runs with the
 # same attribution the original turn had.
-_CONTEXT_PAYLOAD_KEYS = ("api_user_id", "user_id")
+_CONTEXT_PAYLOAD_KEYS = (
+    "api_user_id", "user_id", "orchestration_root", "orchestration_depth",
+)
 
 # Turn sources authored by a human (directly or via the send-queue). Used by
 # the #557 durable latch derivation: any of these settling re-arms

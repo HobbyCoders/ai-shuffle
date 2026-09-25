@@ -158,6 +158,9 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "Recall": "safe",
     "SessionSearch": "safe",
     "SessionView": "safe",
+    "ListSessions": "safe",
+    "MessageSession": "write",
+    "StartSession": "write",
     "ScheduleWakeup": "safe",
     "NotifyDevices": "safe",
     "Monitor": "safe",
@@ -286,6 +289,7 @@ DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
 NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
     "Task", "Monitor", "ToolSearch", "GetUsage",
     "Remember", "Recall", "Forget", "SessionSearch", "SessionView",
+    "ListSessions", "MessageSession", "StartSession",
 })
 
 

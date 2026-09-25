@@ -118,8 +118,17 @@ def mutation(resource, *, scope="admin", database=True):
             arguments = signature.bind(*args, **kwargs).arguments
             before = None
             if scope == "session" and arguments.get("session_id"):
-                from app.db.sessions import get_session
-                before = get_session(arguments["session_id"])
+                connection = arguments.get("_conn")
+                if connection is not None:
+                    # Caller-owned transactions must not borrow a second pool
+                    # slot while holding row locks (bounded fanout can exhaust
+                    # the pool). The caller owns post-commit publication too.
+                    cursor = connection.cursor()
+                    cursor.execute("SELECT * FROM sessions WHERE id=%s", (arguments["session_id"],))
+                    before = cursor.fetchone()
+                else:
+                    from app.db.sessions import get_session
+                    before = get_session(arguments["session_id"])
             return arguments, before
 
         def finish(frame, arguments, before, result):

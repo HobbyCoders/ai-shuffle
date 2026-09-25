@@ -656,6 +656,8 @@ class HarnessAdapter(ProviderAdapter):
                 native_ctx.extra["recover_background"] = make_recovery(self._resolve_app_session_id)
                 native_ctx.extra["agent_roster"] = make_roster(self._resolve_app_session_id)
                 native_ctx.extra["agent_message"] = make_message(self._resolve_app_session_id)
+                from app.core.session_orchestration import make_handler as session_orchestration_handler
+                native_ctx.extra["session_orchestration"] = session_orchestration_handler(self._resolve_app_session_id)
                 native_ctx.extra["task_dispatch"] = make_fluid_dispatcher(
                     self._resolve_app_session_id,
                     profile_id=(options.extra or {}).get("profile_id"),
