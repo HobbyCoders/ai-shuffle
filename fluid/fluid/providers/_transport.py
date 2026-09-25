@@ -40,7 +40,7 @@ from fluid.providers._retry import (
 DEFAULT_STREAM_DEADLINE_S = 900.0
 
 # How long a call may go without its first byte (response headers, then the
-# first SSE event) before it is abandoned and retried like a read timeout.
+# first SSE event) before it is abandoned (retried only when no headers came).
 # The per-read ``timeout`` is sized for gaps inside a long generation, so a
 # provider that accepts the connection and then says nothing would otherwise
 # hold the turn for the full read timeout (600 s) before anything happened.
@@ -129,7 +129,9 @@ class FirstByteTimeout(httpx.ReadTimeout):
     """No byte of the response arrived within the first-byte budget.
 
     A ``ReadTimeout`` so every client's transport handler treats it as one: a
-    failure before any content, retried on the transport budget.
+    failure before any content. It is retried on the transport budget only
+    while the response headers have not arrived; after a 200 the provider has
+    accepted (and may bill) the call, so the Anthropic client reports it.
     """
 
     def __init__(self, budget: float) -> None:
@@ -235,7 +237,8 @@ def refusal_payload(status: int, text: str) -> dict[str, Any]:
 
     Whether it is retried follows the status, except for a billing refusal:
     an ``insufficient_quota`` 429 (or any 402) is reported as 402 and is never
-    retried, because no wait clears it.
+    retried, because no wait clears it. Only a billing code in the body is
+    called "out of credit"; a bare 402 carries the provider's explanation.
     """
     summary = provider_error_summary(text)
     code = billing_error_code(text)
@@ -245,6 +248,19 @@ def refusal_payload(status: int, text: str) -> dict[str, Any]:
             "message": text[:2000],
             "provider_message": summary,
             "retriable": status in RETRIABLE_STATUSES,
+        }
+    if code is None:
+        # A bare 402 is not always about credit: OpenRouter sends one when the
+        # request asks for more ``max_tokens`` than the balance covers, which
+        # a smaller request fixes. Its own words say which.
+        return {
+            "status": BILLING_STATUS,
+            "message": (
+                "the provider refused the request with HTTP 402 (Payment "
+                "Required), so it was not retried. " + text[:2000]
+            ),
+            "provider_message": summary,
+            "retriable": False,
         }
     payload: dict[str, Any] = {
         "status": BILLING_STATUS,

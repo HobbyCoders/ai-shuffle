@@ -512,7 +512,34 @@ def test_workers_booting_together_on_one_postgres(tmp_path):
     Needs PostgreSQL 16 server binaries (as ``tests/smoke``: ``SMOKE_PG_BIN``,
     PATH or ``/usr/lib/postgresql/16/bin``); skips without them unless
     ``BOOT_SMOKE_REQUIRED=1``. Runs serially only (CI's boot smoke step): it
-    owns a real cluster and several processes, so it skips under xdist."""
+    owns a real cluster and several processes, so it skips under xdist.
+
+    The boot lock and the idempotent seeds each cover this race on their own,
+    so this test stays green with either removed; the two tests after it pin
+    each half."""
+    bindir, data, env = _postgres_env(tmp_path)
+
+    with lifecycle.private_postgres(bindir, data) as descriptor:
+        for round_no in range(PG_ROUNDS):
+            _empty_postgres(descriptor)
+            _run_released_together(tmp_path, env, "--postgres", f"go-{round_no}", round_no)
+
+            conn = lifecycle.pg_connect(descriptor)
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT version FROM schema_version")
+                assert [r["version"] for r in cur.fetchall()] == [database.SCHEMA_VERSION]
+                _assert_seeded_once(cur)
+                cur.execute("SELECT to_regclass('mobile_tool_commands') IS NOT NULL AS a, "
+                            "to_regclass('mobile_tool_identity') IS NOT NULL AS b")
+                assert dict(cur.fetchone()) == {"a": True, "b": True}
+            finally:
+                conn.close()
+
+
+def _postgres_env(tmp_path):
+    """(bindir, DATA_DIR, child env) for a real-PostgreSQL start-up test, or a
+    skip (a failure under ``BOOT_SMOKE_REQUIRED=1``) without PG 16 binaries."""
     if os.environ.get("PYTEST_XDIST_WORKER"):
         pytest.skip("real-PostgreSQL start-up race: runs serially in the boot smoke step")
     bindir = lifecycle.pg16_bindir()
@@ -523,15 +550,11 @@ def test_workers_booting_together_on_one_postgres(tmp_path):
             pytest.fail(message)
         pytest.skip(message)
 
-    from app.core.builtin_subagents import BUILTIN_SUBAGENTS
-    from app.core.profiles import DEFAULT_TEMPLATES
-
     data, workspace, home = tmp_path / "data", tmp_path / "workspace", tmp_path / "home"
     for path in (workspace, home):
         path.mkdir()
     env_file = tmp_path / "empty.env"
     env_file.write_text("")
-    child = os.path.join(os.path.dirname(__file__), "schema_init_child.py")
     # An allow-list, as the boot smoke test: the test process carries
     # TESTING=1 and a DATA_DIR from tests/conftest.py.
     inherited = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "LD_LIBRARY_PATH", "PYTHONPATH")
@@ -540,50 +563,136 @@ def test_workers_booting_together_on_one_postgres(tmp_path):
         "HOME": str(home), "DATA_DIR": str(data), "WORKSPACE_DIR": str(workspace),
         "AI_SHUFFLE_ENV_FILE": str(env_file), "TESTING": "0", "PYTHONDONTWRITEBYTECODE": "1",
     })
+    return bindir, data, env
+
+
+_CHILD = os.path.join(os.path.dirname(__file__), "schema_init_child.py")
+
+
+def _empty_postgres(descriptor):
+    admin = lifecycle.pg_connect(descriptor)
+    try:
+        admin.cursor().execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    finally:
+        admin.close()
+
+
+def _run_released_together(tmp_path, env, mode, flag_name, round_no, workers=PG_WORKERS):
+    """Start ``workers`` children in ``mode``, release them at once when all
+    have imported the app, and assert every one exited 0."""
+    flag = tmp_path / flag_name
+    procs = [
+        subprocess.Popen([sys.executable, _CHILD, mode, str(flag)], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(workers)
+    ]
+    try:
+        deadline = time.monotonic() + 120
+        while len(list(tmp_path.glob(f"{flag_name}.ready.*"))) < workers:
+            if any(p.poll() is not None for p in procs) or time.monotonic() > deadline:
+                break
+            time.sleep(0.05)
+        flag.write_text("go")
+        results = [p.communicate(timeout=180) for p in procs]
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+    failures = [f"worker {i} exit {p.returncode}:\n{err[-3000:]}"
+                for i, (p, (_out, err)) in enumerate(zip(procs, results))
+                if p.returncode != 0]
+    assert not failures, f"round {round_no}: " + "\n\n".join(failures)
+
+
+def _assert_seeded_once(cur):
+    from app.core.builtin_subagents import BUILTIN_SUBAGENTS
+    from app.core.profiles import DEFAULT_TEMPLATES
+
+    cur.execute("SELECT id FROM agents WHERE is_builtin ORDER BY id")
+    assert [r["id"] for r in cur.fetchall()] == sorted(d["id"] for d in BUILTIN_SUBAGENTS)
+    cur.execute("SELECT id FROM templates ORDER BY id")
+    assert [r["id"] for r in cur.fetchall()] == sorted(t["id"] for t in DEFAULT_TEMPLATES)
+
+
+@pytest.mark.boot_smoke
+@pytest.mark.timeout(300)
+def test_the_boot_lock_is_held_through_seeding_on_postgres(tmp_path):
+    """R11-11 (lock half): a worker stopped inside start-up, where it seeds
+    the built-in agents, still holds the boot lock, seen from a second
+    connection. The concurrent-start test above passed with the lock replaced
+    by a no-op, because the idempotent seeds covered for it; the migrations,
+    the mobile-tool DDL and the notes and attachment passes have only the
+    lock."""
+    bindir, data, env = _postgres_env(tmp_path)
+    flag = tmp_path / "hold"
+    seeding, release = tmp_path / "hold.seeding", tmp_path / "hold.release"
 
     with lifecycle.private_postgres(bindir, data) as descriptor:
-        for round_no in range(PG_ROUNDS):
-            admin = lifecycle.pg_connect(descriptor)
-            try:
-                admin.cursor().execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
-            finally:
-                admin.close()
+        proc = subprocess.Popen([sys.executable, _CHILD, "--postgres-hold", str(flag)], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 120
+            while not seeding.exists() and proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            reached = seeding.exists()
+            held_while_seeding = None
+            if reached:
+                conn = lifecycle.pg_connect(descriptor)
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT pg_try_advisory_xact_lock(%s) AS got",
+                                (database.BOOT_INIT_LOCK_KEY,))
+                    held_while_seeding = not cur.fetchone()["got"]
+                finally:
+                    conn.close()
+            release.write_text("go")
+            _out, err = proc.communicate(timeout=180)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        assert reached, f"the worker never reached seeding (exit {proc.returncode}):\n{err[-3000:]}"
+        assert proc.returncode == 0, err[-3000:]
+        assert held_while_seeding is True
 
-            flag = tmp_path / f"go-{round_no}"
-            procs = [
-                subprocess.Popen([sys.executable, child, "--postgres", str(flag)], env=env,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                for _ in range(PG_WORKERS)
-            ]
-            try:
-                deadline = time.monotonic() + 120
-                while len(list(tmp_path.glob(f"go-{round_no}.ready.*"))) < PG_WORKERS:
-                    if any(p.poll() is not None for p in procs) or time.monotonic() > deadline:
-                        break
-                    time.sleep(0.05)
-                flag.write_text("go")
-                results = [p.communicate(timeout=180) for p in procs]
-            finally:
-                for p in procs:
-                    if p.poll() is None:
-                        p.kill()
-            failures = [f"worker {i} exit {p.returncode}:\n{err[-3000:]}"
-                        for i, (p, (_out, err)) in enumerate(zip(procs, results))
-                        if p.returncode != 0]
-            assert not failures, f"round {round_no}: " + "\n\n".join(failures)
+        conn = lifecycle.pg_connect(descriptor)
+        try:
+            cur = conn.cursor()
+            # Released with the worker's start-up transaction.
+            cur.execute("SELECT pg_try_advisory_xact_lock(%s) AS got", (database.BOOT_INIT_LOCK_KEY,))
+            assert cur.fetchone()["got"] is True
+            _assert_seeded_once(cur)
+        finally:
+            conn.close()
 
+
+@pytest.mark.boot_smoke
+@pytest.mark.timeout(300)
+def test_seeders_racing_without_the_boot_lock_on_postgres(tmp_path):
+    """R11-11 (seed half): the start-up seeders run by several workers at
+    once with NO boot lock still create each built-in agent and template
+    exactly once, and none of them fails. The concurrent-start test above
+    passed with the seeds' ``ON CONFLICT DO NOTHING`` removed, because the
+    boot lock serialized them."""
+    bindir, data, env = _postgres_env(tmp_path)
+
+    with lifecycle.private_postgres(bindir, data) as descriptor:
+        _empty_postgres(descriptor)
+        # One ordinary start creates the schema (and seeds, removed below).
+        _run_released_together(tmp_path, env, "--postgres", "schema", "schema", workers=1)
+        for round_no in range(PG_ROUNDS + 1):
             conn = lifecycle.pg_connect(descriptor)
             try:
                 cur = conn.cursor()
-                cur.execute("SELECT version FROM schema_version")
-                assert [r["version"] for r in cur.fetchall()] == [database.SCHEMA_VERSION]
-                cur.execute("SELECT id FROM agents WHERE is_builtin ORDER BY id")
-                assert [r["id"] for r in cur.fetchall()] == sorted(d["id"] for d in BUILTIN_SUBAGENTS)
-                cur.execute("SELECT id FROM templates ORDER BY id")
-                assert [r["id"] for r in cur.fetchall()] == sorted(t["id"] for t in DEFAULT_TEMPLATES)
-                cur.execute("SELECT to_regclass('mobile_tool_commands') IS NOT NULL AS a, "
-                            "to_regclass('mobile_tool_identity') IS NOT NULL AS b")
-                assert dict(cur.fetchone()) == {"a": True, "b": True}
+                cur.execute("DELETE FROM agents WHERE is_builtin")
+                cur.execute("DELETE FROM templates")
+            finally:
+                conn.close()
+
+            _run_released_together(tmp_path, env, "--postgres-seed", f"seed-{round_no}", round_no)
+
+            conn = lifecycle.pg_connect(descriptor)
+            try:
+                _assert_seeded_once(conn.cursor())
             finally:
                 conn.close()
 

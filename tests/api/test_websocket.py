@@ -676,96 +676,6 @@ class TestGlobalSyncWebSocket:
 
 
 # =============================================================================
-# Test CLI WebSocket
-# =============================================================================
-
-class TestCLIWebSocket:
-    """Tests for CLI bridge WebSocket."""
-
-    def test_start_cli_message_format(self):
-        """Start CLI message should have correct format."""
-        message = {
-            "type": "start",
-            "command": "/rewind"
-        }
-
-        assert message["type"] == "start"
-        assert message["command"] == "/rewind"
-
-    def test_input_message_format(self):
-        """Input message should have correct format."""
-        message = {
-            "type": "input",
-            "data": "some text input"
-        }
-
-        assert message["type"] == "input"
-
-    def test_key_message_format(self):
-        """Key message should have correct format."""
-        message = {
-            "type": "key",
-            "key": "enter"
-        }
-
-        assert message["type"] == "key"
-
-    def test_resize_message_format(self):
-        """Resize message should have correct format."""
-        message = {
-            "type": "resize",
-            "cols": 80,
-            "rows": 24
-        }
-
-        assert message["type"] == "resize"
-
-    def test_cli_output_event_format(self):
-        """CLI output event should have correct format."""
-        event = {
-            "type": "output",
-            "data": "CLI output text"
-        }
-
-        assert event["type"] == "output"
-
-    def test_cli_ready_event_format(self):
-        """CLI ready event should have correct format."""
-        event = {
-            "type": "ready",
-            "command": "/rewind"
-        }
-
-        assert event["type"] == "ready"
-
-    def test_cli_exit_event_format(self):
-        """CLI exit event should have correct format."""
-        event = {
-            "type": "exit",
-            "exit_code": 0
-        }
-
-        assert event["type"] == "exit"
-
-    def test_rewind_complete_event_format(self):
-        """Rewind complete event should have correct format."""
-        event = {
-            "type": "rewind_complete",
-            "checkpoint_message": "Checkpoint at message 5",
-            "selected_option": 1,
-            "options": {
-                1: "Restore code and conversation",
-                2: "Restore conversation",
-                3: "Restore code",
-                4: "Never mind"
-            }
-        }
-
-        assert event["type"] == "rewind_complete"
-        assert "options" in event
-
-
-# =============================================================================
 # Test Worktree Validation
 # =============================================================================
 
@@ -1086,11 +996,6 @@ class TestTimeoutHandling:
         """Receive timeout should be 60 seconds for chat."""
         RECEIVE_TIMEOUT = 60.0
         assert RECEIVE_TIMEOUT == 60.0
-
-    def test_cli_receive_timeout_value(self):
-        """CLI receive timeout should be 300 seconds (5 minutes)."""
-        CLI_RECEIVE_TIMEOUT = 300.0
-        assert CLI_RECEIVE_TIMEOUT == 300.0
 
     def test_ping_interval_value(self):
         """Ping interval should be 30 seconds."""

@@ -290,11 +290,12 @@ test('NC-6: the worker bridge ticks every 30 s, not 2 s, and pushes a new phase 
  const { Updater, BRIDGE_INTERVAL_MS } = module.exports;
  assert.equal(BRIDGE_INTERVAL_MS, 30_000);
  // The worker's windows: the desktop updater is gone after DESKTOP_PRESENCE_SECONDS of silence
- // and a queued request lapses after DESKTOP_REQUEST_SECONDS. One tick must fit inside both.
+ // and a queued request lapses after DESKTOP_REQUEST_SECONDS. One missed report (two ticks of
+ // silence) must fit inside presence (R11-10), and a request must outlive presence.
  const worker = readFileSync(new URL('../../app/core/application_updates.py', import.meta.url), 'utf8');
  const seconds = name => Number(worker.match(new RegExp(`^${name} = (\\d+)$`, 'm'))[1]);
- assert(BRIDGE_INTERVAL_MS < seconds('DESKTOP_PRESENCE_SECONDS') * 1000);
- assert(BRIDGE_INTERVAL_MS < seconds('DESKTOP_REQUEST_SECONDS') * 1000);
+ assert(2 * BRIDGE_INTERVAL_MS < seconds('DESKTOP_PRESENCE_SECONDS') * 1000);
+ assert(seconds('DESKTOP_PRESENCE_SECONDS') <= seconds('DESKTOP_REQUEST_SECONDS'));
  const updater = new Updater(); const seen = [];
  let release; const gate = () => new Promise(resolve => { release = resolve; });
  updater.useApplications(source({ check: async () => { await gate(); return { kind: 'available', version: 'bbbbbbbbbbbb' }; } }));

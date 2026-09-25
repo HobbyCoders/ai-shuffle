@@ -19,10 +19,12 @@ _desktop_state = {}
 _desktop_seen = 0.0
 _desktop_request = None
 # The desktop shell reports every 30 s (BRIDGE_INTERVAL_MS in
-# desktop/src/main/updater.ts) and at once on a phase change. Presence spans
-# one missed report; a queued request outlives the wait for the next report.
-DESKTOP_PRESENCE_SECONDS = 45
-DESKTOP_REQUEST_SECONDS = 60
+# desktop/src/main/updater.ts) and at once on a phase change. One missed
+# report means about 60 s of silence, so presence spans two intervals plus
+# slack; a queued request outlives presence, so an accepted request is never
+# dropped while the updater still counts as present.
+DESKTOP_PRESENCE_SECONDS = 75
+DESKTOP_REQUEST_SECONDS = 90
 
 
 def _desktop_present():

@@ -34,8 +34,12 @@ A turn that ends on an ErrorEvent leaves the head on an unanswered user node —
 a text prompt, or the tool results the model never got to read — or on the
 interrupted partial reply to one. The Resume op picks the loop back up from
 that user node without appending anything, so the retry re-sends the same
-history the failed call saw; a kept partial reply is left on a side branch.
-Resume on a head that is a completed assistant reply has nothing to continue
+history the failed call saw. A kept partial reply with no closed tool call is
+the head itself: Resume steps back to the prompt under it, and the new reply
+branches beside the partial text. When a tool call closed before the error,
+the head is the user node holding that call's error result, so the partial
+reply (its text and tool calls) stays on the re-sent path and the model reads
+it, followed by the error results. Resume on a head that is a completed assistant reply has nothing to continue
 and ends the turn with an ErrorEvent saying so. Peer messages accepted during a
 failed call are retained as a new unanswered user-role node and included in an
 explicit later resume.

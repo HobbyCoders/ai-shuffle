@@ -435,7 +435,8 @@ class Settings(BaseSettings):
     provider_read_timeout: float = 600.0
     # Wall clock for one whole model call; 0 disables it.
     provider_stream_deadline: float = 900.0
-    # Wait for a call's first byte before retrying it (Anthropic API only); 0 disables it.
+    # Wait for a call's first byte (Anthropic dialect only); 0 disables it. Retried only
+    # when even the response headers never came; after a 200 the call is not re-sent.
     provider_first_byte_timeout: float = 60.0
 
     # Size limits

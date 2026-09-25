@@ -17,9 +17,10 @@ export interface UpdateState {
  * update button reads that state and queues check/download/install requests
  * there). Each exchange is a local request; the worker answers one with
  * nothing queued without a settings read. The worker treats the desktop
- * updater as present for 45 s after a report and keeps a queued request for
- * 60 s (DESKTOP_PRESENCE_SECONDS and DESKTOP_REQUEST_SECONDS in
- * app/core/application_updates.py), so this must stay under 45 s. Phase
+ * updater as present for 75 s after a report and keeps a queued request for
+ * 90 s (DESKTOP_PRESENCE_SECONDS and DESKTOP_REQUEST_SECONDS in
+ * app/core/application_updates.py), so two intervals must stay under 75 s:
+ * one missed report must not make the updater vanish. Phase
  * changes are pushed at once, so the button still follows a check or
  * download without waiting for a tick; a request queued from the web UI waits
  * up to one interval.

@@ -1435,10 +1435,9 @@ async def test_a_bare_402_is_fatal_and_carries_the_providers_words(server, kind,
     error = _terminal(events)
     assert isinstance(error, ErrorEvent) and not error.retriable
     assert error.status == 402
-    assert error.provider_message.startswith("Payment required (HTTP 402): ")
+    assert error.provider_message.startswith(message[:60])
     assert "Out of credit" not in error.provider_message
     assert "out of credit" not in error.message
-    assert message[:60] in error.provider_message
     assert len(server.requests) == 1
 
 

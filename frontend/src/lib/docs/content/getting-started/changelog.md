@@ -20,6 +20,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - If a chat connection you created in the app never answered, give its API user an agent in **Settings → API**.
 - If an integration uses an API key to read, continue or stop sessions that key did not start (for example sessions you started in the app, or ones started with another key), it is now refused. Start those sessions with the same key, or use an owner token.
 - If a reverse proxy in another container or on another host sits in front of AI Shuffle, add its address to the new `TRUSTED_PROXIES` setting. Forwarding headers are now read only from this computer and those addresses; without it, the audit log and the pairing limits see every visitor as the proxy. See [Behind a reverse proxy](/docs/getting-started/install-docker-compose#behind-a-reverse-proxy-optional).
+- If an integration connects to the CLI bridge WebSocket (`/api/v1/ws/cli/{session_id}`), move it off: that route is removed. Nothing in the app used it.
 
 ### Install and packaging
 
@@ -31,6 +32,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Third-party license notices now ship with the app.
 - A new setup wizard: welcome, owner password, license, Claude Code mode, sign-in or API key, workspace and a first agent run. See [First run](/docs/getting-started/first-run).
 - The compose file and the Unraid template list the optional `TRUSTED_PROXIES`, `CODE_MODE_OS_SANDBOX` and built-in browser network settings, with a commented option for the code-mode sandbox. Defaults are unchanged.
+- An empty on/off or number setting in the compose file or the Unraid template (for example `BROWSER_SSRF_ALLOW_LOOPBACK=""`) now means the default instead of stopping start-up with a parsing error. Text settings keep an empty value.
 - Every build now starts the real app against a real database, also with several workers starting together, and fails on any error in its logs.
 
 ### Updates
@@ -84,24 +86,33 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Pending device challenges are counted per requester, and a flood from unknown addresses is refused instead of pushing out a member's pending challenge.
 - Prompts, permission answers and Stop never go to a device that was removed from the network; its sessions stay read-only copies you can fork. A browser panel relayed from a removed device closes.
 - Agents' Python code (code mode) keeps its safety checks and its connection to the app out of the code's reach, including after a restore from a checkpoint.
-- On Linux, code mode now runs agents' Python inside a bubblewrap sandbox with no network and none of the server's files when the system allows it. The new `CODE_MODE_OS_SANDBOX` setting chooses `auto` (the default: sandbox when available), `required` (refuse to run code without it) or `off`. The Docker image includes bubblewrap; see [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox-optional) for the Docker option it needs.
+- On Linux, code mode now runs agents' Python inside a bubblewrap sandbox with no network and none of the server's files when the system allows it. The new `CODE_MODE_OS_SANDBOX` setting chooses `auto` (the default: sandbox when available), `required` (refuse to run code without it) or `off`. The Docker image includes bubblewrap; the sandbox needs the Docker security options `seccomp=unconfined` and `systempaths=unconfined` (plus `apparmor=unconfined` on AppArmor hosts), which the error message and the log name. See [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox-optional).
 - The permission prompt's Enter and Space shortcuts approve only once the prompt has been on screen for half a second, so a key meant for the message box or a held key no longer approves a request. Enter on a focused Deny button or in a text field no longer approves either.
 - Each permission request gets its own prompt: a ticked "Always do this" no longer carries over to the next request, a double-click answers only one request, and clicks right as a new request appears are ignored.
 - API keys of 10 or 11 characters are now fully masked instead of shown whole.
+- Code mode: when `required` finds no sandbox, saved skills are no longer marked broken; they are checked again once the sandbox works. A skill saved while its self-test could not run stays unused until the test passes. A sandbox that refuses a later start falls back to running without it in `auto` and fails the cell with the reason in `required`.
+- Code mode's checks inside the process also block a denied function started directly as a new thread.
+- On Windows, drive-letter and network (`\\server\share`) paths count as local folders when cloning, so an API key can no longer clone a local repository through them.
+- Passwords that contain `@`, and `ssh://user:password@` addresses, are now fully removed from clone addresses in logs and messages.
+- Forwarded addresses written with a port or in brackets, and IPv4 addresses written as IPv6, are matched against `TRUSTED_PROXIES` and counted per visitor.
+- Plugin names in a repository's own settings can no longer point outside the plugin folders.
 
 ### API keys
 
 - Subagents and voice workers started from an API key's session now run as that key, with its tools, credentials and agents, instead of as the owner.
-- Every turn on an API key's session runs as that key, including scheduled wake-ups, voice follow-ups, chat connector turns and turns sent through the REST conversation route.
+- Every turn on an API key's session runs as that key, including scheduled wake-ups, voice follow-ups, chat connector turns and turns sent through the REST conversation route. The one exception is a message the owner types or queues in that session's chat: it runs as the owner.
 - App logs and errors, the schedule tools and remote triggers are owner-only. Session search and session views return only the key's own sessions, and voice workers give the app's settings tools to the owner only.
 - Notes belong to the key that wrote them: a key sees and references only its own notes, on every synced worker too. Notes written before stay the owner's.
-- MCP server settings shown to API keys and non-owner devices mask environment values, headers, arguments and credentials in addresses.
+- MCP server settings shown to API keys and non-owner devices mask environment values, headers, arguments and credentials in addresses, including secrets inside argument values such as database connection strings.
 - Importing a session with an API key refuses agents and projects outside the key's scope and files the session under the key's project. A project-limited key's new chat sessions are filed under its project.
 - Usage is the owner's account data. Note: API keys now get an empty usage reading, and the usage tool refuses key sessions.
-- Disabling, rotating or deleting an API key closes its open chat connections at once, even idle ones.
+- Disabling, rotating or deleting an API key closes all its open connections at once, even idle ones: chat, session streams, the browser panel, voice calls and speech.
 - Transcription, read-aloud and voice calls use the fal.ai key that the API key's policy allows instead of the owner's. A key set to bring its own fal.ai key without one is refused before anything is sent.
 - A session an API key starts on another worker keeps its owner.
 - Team views are limited to sessions the caller may open.
+- Preview links belong to the owner: a key's sessions no longer get a preview address, and a preview token made for a key's session is refused.
+- Live usage updates go only to the owner's own connections and paired devices.
+- A key's sessions no longer get the shared notes folder in their workspace; the notes a key sees stay its own.
 
 ### Agents and providers
 
@@ -122,10 +133,15 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Claude subscription sessions: Stop ends the turn as Interrupted and keeps its cost instead of showing an error, works while Claude Code is still starting, and no longer makes a resumed session send the stopped message again.
 - Claude subscription sessions survive a Claude Code crash between turns and unusual output lines instead of failing every later turn.
 - Claude subscription sessions show Claude's real rate-limit status instead of always "allowed", and a rejected status marks the window as used up.
-- A model or permission-mode switch now counts only once Claude Code confirms it; a refused switch keeps the old setting and is tried again next turn. Switching back and forth (for example Ask, then Bypass, then Ask) now lands on the last choice with every provider.
+- A model or permission-mode switch now counts only once Claude Code confirms it; a refused switch keeps the old setting and is tried again next turn. Switching back and forth (for example Ask, then Bypass, then Ask) now lands on the last choice with every provider. A Stop or timeout while a switch waits for confirmation keeps the old value and the next turn sends the switch again; Claude Code is restarted on the recorded values if it still does not confirm.
+- Claude subscription sessions: Stop in the pause between turns ends the turn at once as Interrupted instead of after up to 30 seconds, and the next turn no longer takes the answer of Claude Code's own background turn as its reply.
 - Changing the effort mid-session now takes effect. Note: it restarts the session's engine; the conversation is kept.
 - Other providers: a reply cut off mid-stream is reported and retried instead of saved as a finished answer, and text already received is kept and marked as interrupted.
-- Other providers: errors show the provider's HTTP status and message, a 429 shows the rate-limit notice, and an Anthropic stream that sends nothing for 60 seconds is retried.
+- Other providers: errors show the provider's HTTP status and message. A 429 shows the usage-limit notice (wait for the window to reset) only on a subscription login (Claude, ChatGPT/Codex, SuperGrok); on an API key it shows a plain rate-limit notice. HTTP 504 and timeout errors are retried like other brief failures.
+- Other providers: an Anthropic-format provider that sends nothing for 60 seconds is retried only when not even the response headers arrived; once it has answered, the turn ends with an error instead of sending the request again.
+- New settings for sessions on other providers: `PROVIDER_READ_TIMEOUT` (600 seconds between two reads of a reply), `PROVIDER_STREAM_DEADLINE` (900 seconds for one whole call) and `PROVIDER_FIRST_BYTE_TIMEOUT` (60 seconds for the first byte, Anthropic format only). 0 turns off the last two.
+- Other providers: an out-of-credit refusal (such as OpenAI's `insufficient_quota`, which arrives as a 429) is reported as HTTP 402, is not retried and no longer shows the usage-limit notice. Any other 402 shows the provider's own message, for example OpenRouter asking for fewer `max_tokens`.
+- Other providers: an OpenRouter reply that carries an error mid-stream is reported as an error, with its partial text kept and marked, instead of saved as a finished answer. **Resume** works after a reply interrupted by a provider error and sends the failed request again.
 - Other providers: tool calls sent without an id each get their own, a tool call cut off by an error shows the error, and replies without usage figures are accepted and estimated instead of dropped or counted as free.
 - OpenRouter-only request fields are sent only to OpenRouter.
 - Sessions on other providers still set to the retired Auto mode now run as Ask everywhere; before, their prompts were approved automatically.
@@ -157,6 +173,8 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Rewinding a session whose history is out of step no longer deletes replies you kept.
 - Note autocomplete and the chat history list load faster in large projects.
 - The notification tool reports a push as delivered only when a device confirmed it, and points to the in-app notification center otherwise.
+- **Allow All** and **Deny All** in the permission queue wait for the same short delay as the single-request buttons, so they no longer answer a request that just appeared, and focus moves to the next prompt or back to the message box.
+- On a phone-sized screen, opening a session from a notification in the menu drawer closes the drawer.
 
 ### Accessibility
 
@@ -185,13 +203,14 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Only AI Shuffle's own pages get microphone, clipboard and fullscreen access, and sign-in or payment pop-ups get none. The launch token is sent only to the worker.
 - **Quit** from the tray stops the worker cleanly and forces it after 60 seconds; closing the window offers **Quit Anyway** if stopping fails again.
 - The unused `aishuffle://` link handler is removed, so web pages can no longer launch the app.
-- Update progress refreshes more often.
+- The desktop app reports update status to the web interface every 30 seconds, and at once when the phase changes (checking, available, downloading, ready), with less load on the worker. Download percentages in the web interface move in 30-second steps. One missed report no longer makes the update button say the updater is unavailable.
 
 ### Android app
 
 - You can delete your HobbyCoders account from inside the app.
 - **Settings → About** no longer crashes.
 - App and website text points to **Settings → Providers → Devices** and the **Sign in** button that exists.
+- Devices still registered by older Android builds with a UnifiedPush address are treated as unable to receive push, so notifications to them are no longer counted as delivered.
 
 ### Remote access and accounts
 
@@ -204,12 +223,13 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Upgrading from a build before 19 September (database schema 88 or older) no longer fails at start.
 - Several workers sharing one PostgreSQL database can start at the same time without failing on setup.
 - The app's own log lines appear in `docker logs` again.
-- An approved automation run waiting at shutdown is re-queued on the next start and runs once. Runs of disabled or deleted automations are skipped, approvals older than 24 hours expire, and events that arrive during shutdown no longer create runs.
+- An approved automation run waiting at shutdown is re-queued on the next start and runs once. Runs of disabled or deleted automations are skipped, approvals older than 24 hours expire, and events that arrive during shutdown no longer create runs. Once shutdown has begun, no approved or scheduled run starts by any path.
 - A catalog refresh started while another one runs waits for it, and a refresh gives up after two minutes instead of hanging.
 
 ### Removed
 
 - The voice "command" session mode. No app used it; voice sessions are always chat.
+- The CLI bridge WebSocket (`/api/v1/ws/cli/{session_id}`). No app used it, and it accepted any API key for any session. See Action needed.
 - Code that nothing used any more. No change in behaviour.
 
 ### Fixed
@@ -224,4 +244,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Speech: fal.ai and OpenAI failures are reported as provider errors instead of server errors, and saving a blank voice keeps the saved one.
 - Saving a fal.ai or Anthropic key while credential storage is locked says so instead of failing, and a fal.ai outage saves the key without checking it.
 - MCP server names over 64 characters get the same clear error as other invalid names.
+- WebFetch stops downloading at its 5 MiB limit instead of reading the whole page first, and a page with an unknown character set is read as UTF-8 instead of failing.
+- An Edit with empty old text is refused unless the file is empty; before, it inserted the new text between every character.
+- One malformed MCP server address no longer breaks the whole settings import preview.
 - Documentation: a second pass against the app corrected many pages (permission modes, API users, voice, usage, settings import, hooks, connectors), and new sections cover reverse proxies and the code-mode sandbox.

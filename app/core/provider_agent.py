@@ -2021,8 +2021,11 @@ async def dispatch_worker(
             project_id=project_id,
             worktree_id=worktree_id,
             overrides=overrides,
-            # SessionRuntime reads the turn's principal from its payload; with
-            # none it runs an owner turn (is_admin tools, owner credentials).
+            # SessionRuntime runs the turn as the payload's principal; with
+            # none it runs as the key that owns the worker session (walking
+            # worker parents, ``api_user_scope.turn_api_user_id``), and only as
+            # the owner when no key owns it. Stamped explicitly anyway, so the
+            # worker never depends on that fallback.
             payload={"api_user_id": api_user_id} if api_user_id else None,
         )
 

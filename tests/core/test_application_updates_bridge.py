@@ -35,6 +35,27 @@ def test_desktop_stays_present_between_30_second_reports(bridge, monkeypatch):
     assert updates._desktop_request["action"] == "check"
 
 
+def test_desktop_stays_present_through_one_missed_report(bridge, monkeypatch):
+    """R11-10: presence was 45 s, shorter than the ~60 s of silence one missed
+    30 s report leaves, so for ~15 s the web UI lost the desktop updater and
+    ``enqueue`` refused with "application updater is unavailable"."""
+    updates.desktop_exchange({"phase": "idle"})
+    monkeypatch.setattr(updates, "_desktop_seen", time.monotonic() - 2 * DESKTOP_INTERVAL - 5)
+    assert updates.status()["kind"] == "desktop"
+    updates.enqueue("check")
+    assert updates._desktop_request["action"] == "check"
+    assert updates.DESKTOP_REQUEST_SECONDS >= updates.DESKTOP_PRESENCE_SECONDS
+
+
+def test_desktop_interval_matches_the_desktop_shell():
+    from pathlib import Path
+    import re
+
+    source = (Path(__file__).resolve().parents[2] / "desktop/src/main/updater.ts").read_text()
+    interval_ms = int(re.search(r"BRIDGE_INTERVAL_MS = ([\d_]+);", source)[1].replace("_", ""))
+    assert interval_ms == DESKTOP_INTERVAL * 1000
+
+
 def test_desktop_is_gone_after_the_presence_window(bridge, monkeypatch):
     updates.desktop_exchange({"phase": "idle"})
     monkeypatch.setattr(updates, "_desktop_seen", time.monotonic() - updates.DESKTOP_PRESENCE_SECONDS - 1)

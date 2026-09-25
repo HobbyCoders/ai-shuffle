@@ -8,8 +8,9 @@ subprocess), not this client.
 Timeouts: ``timeout`` (600 s) is per read; ``stream_deadline`` (900 s) bounds
 one whole call; ``first_byte_timeout`` (60 s,
 ``fluid.providers._transport.DEFAULT_FIRST_BYTE_TIMEOUT_S``) bounds the wait
-for the headers plus the first SSE event, after which the call is abandoned
-and retried like a pre-content read timeout. The last two are per-provider
+for the headers plus the first SSE event, after which the call is abandoned.
+It is retried like a pre-content read timeout only when the headers never
+came; once the provider answered 200 it is reported, not re-sent. The last two are per-provider
 settings (``[providers.<name>] stream_deadline`` / ``first_byte_timeout`` in
 config.toml, read by ``fluid.config.loader._build_provider_client``); ``0``
 disables either. Raise ``first_byte_timeout`` for a gateway that sends nothing
@@ -34,6 +35,7 @@ from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
     DEFAULT_FIRST_BYTE_TIMEOUT_S,
     DEFAULT_STREAM_DEADLINE_S,
+    FirstByteTimeout,
     StreamDiagnostics,
     StreamDeadlineExceeded,
     deadline_error_payload,
@@ -82,9 +84,9 @@ class AnthropicClient:
         self._stream_deadline = stream_deadline
         # Wall clock from sending the request to its first SSE event (headers
         # included). The API sends message_start as soon as it accepts a
-        # call, so a stream silent this long is dead: it is abandoned and
-        # retried like a read timeout before content, instead of holding the
-        # turn for the whole per-read ``timeout``. None or 0 disables it.
+        # call, so a stream silent this long is dead: it is abandoned instead
+        # of holding the turn for the whole per-read ``timeout`` (retried only
+        # when even the headers never came). None or 0 disables it.
         self._first_byte_timeout = first_byte_timeout
         self._http = http_client
         self._retry = retry or RetryPolicy()
@@ -229,13 +231,25 @@ class AnthropicClient:
                     )
                     return
                 except httpx.TransportError as exc:
-                    evidence = diagnostics.failure(
-                        exc, yielded=yielded,
-                        retrying=not yielded and attempt < self._retry.transport_retries,
-                    )
                     # Pre-stream connection failures retry; mid-stream ones
-                    # don't (chunks were already delivered downstream).
-                    if not yielded and attempt < self._retry.transport_retries:
+                    # don't (chunks were already delivered downstream). A
+                    # first-byte timeout that fired after the 200 headers is
+                    # not retried either: the provider accepted the call and
+                    # may bill it, and a gateway that holds the first event
+                    # until its upstream answers would only cost another full
+                    # budget per attempt. Raise ``first_byte_timeout`` for it.
+                    retrying = (
+                        not yielded
+                        and attempt < self._retry.transport_retries
+                        and not (
+                            isinstance(exc, FirstByteTimeout)
+                            and diagnostics.response is not None
+                        )
+                    )
+                    evidence = diagnostics.failure(
+                        exc, yielded=yielded, retrying=retrying,
+                    )
+                    if retrying:
                         await asyncio.sleep(self._retry.delay(attempt))
                         attempt += 1
                         continue
