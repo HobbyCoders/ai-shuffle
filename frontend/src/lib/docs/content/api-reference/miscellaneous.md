@@ -273,7 +273,13 @@ curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/clone \
 
 `clone_url` (required, up to 500 characters) is an HTTPS or SSH URL. Returns `success`, `message` and `repository_id`; `400` if the folder is already a repository, `500` if the clone fails.
 
-Credentials in an HTTPS URL (`https://user:token@host/...`) are redacted from the message, from error text and from the logs, and the repository's stored `remote_url` (shown by `git/status`) leaves them out. The clone's own git remote keeps them, so fetch and push go on working. The user in an SSH URL (`git@host:...`) is kept.
+Which sources a caller may clone (`400` otherwise, before anything is cloned):
+
+- **API keys** may clone only HTTP(S) or SSH remotes (`ssh://...` or `git@host:path`). A local path or `file://` URL answers `400` with `API keys can clone only HTTPS or SSH remotes`.
+- **The owner** may also clone a local path or a `file:///absolute/path` URL, but only when it resolves inside the workspace or a project folder (`400`: `A local clone source must be inside the workspace or a project folder`). A relative path is read from the clone's target folder.
+- **Everyone** is refused a `git://` URL or any other scheme (`Unsupported clone URL: use an HTTPS or SSH URL`), any `<transport>::` remote helper such as `ext::` or `fd::` (`Refusing unsafe clone URL scheme ...`), a value starting with `-`, and a `file://` URL with a host or `%`-encoding.
+
+Credentials in an HTTPS URL (`https://user:token@host/...`) are redacted from the message, from error text and from the logs. No `remote_url` the server stores or returns includes them, neither the repository record nor `git/status`. Only the clone's own git remote in `.git/config` keeps them, so fetch and push go on working. The user in an SSH URL (`git@host:...` or `ssh://git@host/...`) is kept.
 
 ### POST /api/v1/projects/{project_id}/git/generate-commit-message
 

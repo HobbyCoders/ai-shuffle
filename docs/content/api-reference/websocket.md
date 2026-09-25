@@ -171,19 +171,6 @@ A `query` queued behind a running turn is also offered to that turn, which can r
 5. **Handle permissions** — approve/deny tool use as needed
 6. **Reconnect** — send `load_session` to receive a fresh `history`, and reopen the event feed from the last `seq` you saw
 
-## CLI Bridge WebSocket
-
-### WS /api/v1/ws/cli/{session_id}
-
-Interactive CLI bridge for special commands like `/rewind`.
-
-**Connection:**
-```javascript
-const ws = new WebSocket('ws://localhost:8000/api/v1/ws/cli/sess_abc123');
-```
-
-Legacy interactive CLI bridge. The web UI no longer uses it.
-
 ## Sync WebSockets
 
 Two additional endpoints power multi-device synchronization:
@@ -197,7 +184,7 @@ Two additional endpoints power multi-device synchronization:
 |-----------|-------------|
 | `token` | Query parameter — API key (e.g. `?token=aih_your_key`) or owner token. Optional with cookie auth on `/ws/chat` and `/ws/global`; required on `/ws/sessions/{session_id}` |
 | `device_id` | Query parameter — unique device identifier for multi-device sync. Optional on `/ws/chat`; required on `/ws/sessions/{session_id}` and `/ws/global` |
-| `session_id` | Path parameter on the CLI and sync endpoints (not on `/ws/chat`) |
+| `session_id` | Path parameter on `/ws/sessions/{session_id}` (not on `/ws/chat` or `/ws/global`) |
 
 Authentication is performed via:
 - Session cookie (for the owner's web UI)
@@ -215,4 +202,3 @@ WebSocket close codes:
 - `4001` — Authentication failed, or (`/ws/chat`) the API key was disabled, deleted or rotated while connected
 - `4003` — Access denied: for an API key, the session is not one it started, or it belongs to another project or agent (`/ws/sessions/{session_id}`)
 - `4004` — Session not found
-- `4005` — No CLI session to bridge (CLI bridge)
