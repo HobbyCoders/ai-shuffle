@@ -96,6 +96,9 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Passwords that contain `@`, and `ssh://user:password@` addresses, are now fully removed from clone addresses in logs and messages.
 - Forwarded addresses written with a port or in brackets, and IPv4 addresses written as IPv6, are matched against `TRUSTED_PROXIES` and counted per visitor.
 - Plugin names in a repository's own settings can no longer point outside the plugin folders.
+- Code mode no longer treats a Python cell as safe while the kernel runs without the sandbox, as it does with the stock compose file. Note: in Ask mode, each cell then asks first. With the sandbox active, cells run without a prompt; its self-test now runs when the app starts, so a host where it works never asks.
+- On Linux, the app now hides its own process memory and start-up settings from the programs agents start, which run as the same user. Note: this also blocks core dumps and debuggers on the app process; `ALLOW_PROCESS_INTROSPECTION=true` allows them again (see [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox-optional)).
+- A team name written by an agent can no longer make the app read files outside the teams folder or signal an unrelated process.
 - Unpairing a device or signing it out closes its open connections at once; before, they stayed open until it next used a session. A device whose session token was replaced loses them within about 30 seconds. An outage of the connection service never drops a live connection.
 
 ### API keys
@@ -220,6 +223,10 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Remote access keeps working through short outages of the connection service.
 - The connection service no longer stores synced data. Sync between your workers stays end to end encrypted.
 - Account devices that ask for owner access must be approved on each worker (**Settings → Providers → Devices**).
+- Two workers with different versions of the same plugin no longer send each other updates forever. Adding a plugin or turning one on or off is shared; each worker keeps the version it has.
+- Addresses and capabilities that other workers and your account's device list report are checked before they are kept: credentials and link-local addresses are dropped, lists are capped, and a malformed value no longer breaks a sync.
+- A damaged file part from another worker no longer stops the rest of the missing files from arriving, and an artifact download reports it instead of a server error.
+- Network recovery and loading an older transcript from another worker answer 409 on a worker that is not in a network, instead of a server error.
 
 ### Reliability
 
@@ -258,5 +265,9 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Uninstalling a plugin asks first, and the API user list stays usable while it shows an error.
 - Files: a refused new folder or rename keeps what you typed, and pressing Enter twice no longer creates the folder twice.
 - Clearing an API user's description or project restriction now saves.
+- A Claude settings file that holds `null`, a list or text that is not UTF-8 no longer breaks every MCP server request. MCP server names must use plain ASCII characters.
+- One agent file that is not UTF-8 no longer hides all of a plugin's agents, and hooks written in a plugin's `plugin.json` in the standard object form now load.
+- A documentation page with a non-numeric order no longer breaks the whole documentation index.
+- The phone's open-URL tool reports a malformed address or a stored expiry without a time zone instead of failing.
 - Documentation: device unpairing, provider timeout settings and errors, Resume after an interrupted reply, and session import errors are described as the app behaves.
 - Documentation: a second pass against the app corrected many pages (permission modes, API users, voice, usage, settings import, hooks, connectors), and new sections cover reverse proxies and the code-mode sandbox.

@@ -114,6 +114,13 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
    bytes are fetched in encrypted 2 MiB parts from any online holder at
    `/peer/blob/{hash}/parts/{index}` and stored locally after a content-hash
    check. An artifact download on a mirror fetches on demand.
+8. **Plugins.** `network_plugins_desired` carries each plugin's id, version,
+   enabled flag and config; binaries never travel. A worker's scan publishes a
+   row only for a plugin the table does not have yet or when its enabled flag
+   differs. Versions are not enforced across workers: `apply_desired` never
+   reinstalls to match one, so publishing on a version difference made two
+   workers on different versions overwrite the row on every scan and send
+   each other a new operation forever.
 
 ## Trust
 

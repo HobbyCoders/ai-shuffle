@@ -316,13 +316,15 @@ These lines turn off Docker's default seccomp and AppArmor filters for the whole
 
 `CODE_MODE_OS_SANDBOX` chooses how the sandbox is used. Set it under `environment:` in `compose.yaml` (a line in `.env` alone does not reach the container):
 
-- `auto` (the default): use the sandbox when its self-test (run when the first code-mode kernel starts) passes, otherwise run without it after the one log line above.
+- `auto` (the default): use the sandbox when its self-test (run in the background when AI Shuffle starts) passes, otherwise run without it after the one log line above.
 - `required`: never run code without the sandbox. When it is unavailable, every Python cell fails with the reason.
 - `off`: never use it.
 
-While the kernel runs without the sandbox, Ask mode asks before each Python cell runs; with the sandbox active, cells run without a prompt.
+With the sandbox active, Python cells run without a prompt in Ask mode. While the kernel runs without it, Ask mode asks before each cell.
 
 The kernel's own checks inside the process stay on in every mode, as a second layer; the sandbox is the boundary that holds.
+
+On Linux, AI Shuffle also hides its own process memory and start-up settings from every program agents start, which run as the same user. `ALLOW_PROCESS_INTROSPECTION` is off by default; set it to `"true"` under `environment:` only while you debug AI Shuffle with tools that read the app process's `/proc` entries, such as a debugger or a core dump.
 
 ## Behind a reverse proxy (optional)
 
