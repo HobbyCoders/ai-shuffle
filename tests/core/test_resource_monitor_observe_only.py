@@ -243,8 +243,8 @@ def test_record_terminated_subprocess_is_bounded():
     """The terminated-tree registry never grows unbounded."""
     for i in range(sp._TERMINATED_TREES_MAX + 50):
         # Use a fake descendant list so it actually records.
-        sp.record_terminated_subprocess(1_000_000 + i, descendants=[2_000_000 + i])
-    assert len(sp._terminated_trees) <= sp._TERMINATED_TREES_MAX
+        sp.record_terminated_subprocess(1_000_000 + i, descendants=[(2_000_000 + i, 0.0)])
+    assert len(sp._terminated_trees) == sp._TERMINATED_TREES_MAX
 
 
 # ─── (c) Admission backpressure refuses past the ceiling ────────────────────

@@ -339,14 +339,19 @@ async def graceful_disconnect(
 # tree of a subprocess that has ALREADY terminated — it never signals a live
 # session. (Note: once the parent PID is gone the OS reparents orphans, so we
 # snapshot the descendant set at record time and reap by that snapshot.)
+#
+# Each descendant is recorded with its process start time, and the reaper only
+# signals a pid whose start time still matches: the snapshot can sit here for a
+# whole resource-monitor interval, long enough for the kernel to hand a dead
+# descendant's pid to an unrelated process (a hook shell, git, an MCP server).
 
-# Bounded set of (pid, [descendant_pids]) snapshots awaiting reaping.
-_terminated_trees: "OrderedDict[int, list[int]]" = OrderedDict()
+# Bounded set of (pid, [(descendant_pid, create_time)]) snapshots awaiting reaping.
+_terminated_trees: "OrderedDict[int, list[tuple[int, float]]]" = OrderedDict()
 _TERMINATED_TREES_MAX = 256
 
 
-def snapshot_descendants(pid: Optional[int]) -> list[int]:
-    """Return the PIDs of all live descendants of `pid` (recursive), or [].
+def snapshot_descendants(pid: Optional[int]) -> list[tuple[int, float]]:
+    """Return ``(pid, create_time)`` for every live descendant of `pid`, or [].
 
     Must be called WHILE the parent is still alive — once the parent exits the
     OS reparents orphans and they can no longer be discovered via the parent.
@@ -359,22 +364,57 @@ def snapshot_descendants(pid: Optional[int]) -> list[int]:
     except ImportError:
         return []
     try:
-        return [c.pid for c in psutil.Process(pid).children(recursive=True)]
+        children = psutil.Process(pid).children(recursive=True)
     except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
         return []
+    snapshot: list[tuple[int, float]] = []
+    for child in children:
+        try:
+            snapshot.append((child.pid, child.create_time()))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+            continue
+    return snapshot
 
 
-def record_terminated_subprocess(pid: Optional[int], descendants: Optional[list[int]] = None) -> None:
+def _with_create_times(descendants: list) -> list[tuple[int, float]]:
+    """Normalise a descendant list to ``(pid, create_time)`` pairs.
+
+    A bare pid gets the start time of whatever holds it now; a pid that is
+    already gone (or unreadable) is dropped.
+    """
+    pairs: list[tuple[int, float]] = []
+    bare: list[int] = []
+    for entry in descendants:
+        if isinstance(entry, tuple):
+            pairs.append(entry)
+        else:
+            bare.append(entry)
+    if bare:
+        try:
+            import psutil
+        except ImportError:
+            return pairs
+        for dpid in bare:
+            try:
+                pairs.append((dpid, psutil.Process(dpid).create_time()))
+            except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+                continue
+    return pairs
+
+
+def record_terminated_subprocess(pid: Optional[int], descendants: Optional[list] = None) -> None:
     """Record a now-terminated CLI subprocess's descendant tree for reaping.
 
     Pass `descendants` captured via snapshot_descendants() BEFORE the parent
     exited; if omitted we try to snapshot now (only useful if the parent is
-    still resolvable). Safe to call with None / without psutil — no-ops.
+    still resolvable). Bare pids are accepted and stamped with their current
+    start time. Safe to call with None / without psutil — no-ops.
     """
     if not pid:
         return
     if descendants is None:
         descendants = snapshot_descendants(pid)
+    descendants = _with_create_times(descendants or [])
     if not descendants:
         return
     _terminated_trees[pid] = descendants
@@ -387,8 +427,10 @@ def reap_terminated_process_trees() -> int:
     """Kill orphaned descendants of subprocesses that have already terminated.
 
     Walks each recorded terminated-subprocess descendant snapshot and, for any
-    descendant PID that is BOTH still alive AND no longer has a live ancestor
-    inside our own server process, sends SIGTERM (then SIGKILL on stragglers).
+    descendant PID that is still alive, is still the SAME process (its start
+    time matches the snapshot, so a recycled pid is never signalled) AND no
+    longer has a live ancestor inside our own server process, sends SIGTERM
+    (then SIGKILL on stragglers).
 
     This is process hygiene only — it operates exclusively on the recorded
     descendants of subprocesses that have already exited, so it can never kill
@@ -453,9 +495,11 @@ def reap_terminated_process_trees() -> int:
                 continue
         except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
             pass
-        for dpid in descendant_pids:
+        for dpid, created in descendant_pids:
             try:
                 proc = psutil.Process(dpid)
+                if proc.create_time() != created:
+                    continue  # pid reused by an unrelated process
             except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
                 continue
             if _has_live_protected_ancestor(proc):

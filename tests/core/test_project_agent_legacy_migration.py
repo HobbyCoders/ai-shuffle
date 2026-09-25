@@ -96,12 +96,16 @@ def _subagents_all(project_dir: Path, worktree_dir: Path, worktree_id):
     db = MagicMock()
     db.get_profile.return_value = {"id": "p", "name": "P", "config": {}}
     db.get_project.return_value = {"id": "proj", "name": "Proj", "path": str(project_dir)}
-    db.get_worktree.return_value = {"id": "wt", "worktree_path": str(worktree_dir)}
+    db.get_worktree.return_value = {
+        "id": "wt", "worktree_path": str(worktree_dir), "repository_id": "repo",
+    }
+    db.get_git_repository_by_project.return_value = {"id": "repo"}
     plugin_service = MagicMock()
     plugin_service.get_file_based_agents.return_value = []
     user_service = MagicMock()
     user_service.get_agents.return_value = []
     with patch.object(agents_api, "database", db), \
+         patch("app.api.git_worktrees.database", db), \
          patch.object(agents_api, "get_api_user_from_request", return_value=None), \
          patch.object(agents_api, "get_project_working_dir_as_path", return_value=project_dir), \
          patch.object(agents_api, "get_worktree_working_dir_as_path", return_value=worktree_dir), \
@@ -139,3 +143,34 @@ def test_composer_autocomplete_copies_for_the_base_path(tmp_path):
     assert [item.id for item in result] == ["project:reviewer"]
     assert legacy.read_text(encoding="utf-8") == _LEGACY
     assert (project_dir / ".fluid" / "agents" / "reviewer.md").exists()
+
+
+def _symlinked_fluid(tmp_path, link_target):
+    project = tmp_path / "project"
+    _write(project / ".claude" / "agents" / "evil.md", _LEGACY)
+    (project / ".fluid").symlink_to(link_target, target_is_directory=True)
+    return project
+
+
+def test_symlinked_fluid_dir_is_never_written_through(tmp_path):
+    # A cloned repo ships ``.fluid -> <user-global agents home>``.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    project = _symlinked_fluid(tmp_path, outside)
+
+    ProjectAgentService(project).get_agents(migrate_legacy=True)
+
+    assert list(outside.rglob("*")) == []
+
+
+def test_symlinked_agents_dir_inside_the_project_is_refused(tmp_path):
+    project = tmp_path / "project"
+    _write(project / ".claude" / "agents" / "evil.md", _LEGACY)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (project / ".fluid").mkdir()
+    (project / ".fluid" / "agents").symlink_to(elsewhere, target_is_directory=True)
+
+    ProjectAgentService(project).get_agents(migrate_legacy=True)
+
+    assert list(elsewhere.iterdir()) == []

@@ -46,7 +46,8 @@ Delegated leg:
     (``--settings``) and partial messages pass through. In-proc app tools reach
     the CLI through fluid's bundled bridge (``mcp__fluid_bundled__``).
   * ``--disallowed-tools`` = ``_delegated_disallowed``; ``--allowed-tools`` =
-    ``_delegated_allowed`` plus the MCP grants from ``_delegated_permission_grants``.
+    ``_delegated_allowed`` plus ``_delegated_permission_grants``, which grants
+    only the in-proc tools the native leg rates ``safe`` (none in plan mode).
   * prompts reach ``can_use_tool`` via ``_bridge_permission``; with no callback,
     ``_answer_without_approver`` denies in ``default``/``plan`` and allows otherwise.
     PreToolUse applies ``_delegated_tool_policy`` in every mode.
@@ -466,8 +467,9 @@ class HarnessAdapter(ProviderAdapter):
                 # On the chat lane the CLI's Read is banned outright and reads
                 # go through the bundled attachment reader.
                 allowed_tools=_delegated_allowed(options),
-                # The app's MCP tools run unprompted: the SDK permission
-                # allowlist's MCP entries, in the CLI's spelling.
+                # The app's safe MCP tools run unprompted: the SDK permission
+                # allowlist's in-proc entries the native leg rates ``safe``,
+                # in the CLI's spelling.
                 permission_grants=_delegated_permission_grants(options),
                 claude_cmd=claude_cmd,
                 # The CLI's hooks, forwarded into the same bus the native leg
@@ -3737,22 +3739,41 @@ def _delegated_allowed(options: SessionOptions) -> Optional[list]:
 def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
     """The SDK permission allowlist's in-proc MCP entries, spelled for the CLI.
 
+    Only tools the native leg classifies ``safe`` are granted: the risk comes
+    from ``fluid_tool_bridge.SERVER_RISK_MAPS`` / ``SERVER_DEFAULT_RISK``, the
+    same tables ``register_recorded_sdk_servers`` hands the PermissionEngine.
+    ``write`` and ``destructive`` tools (createHook, addMcpServer,
+    request_access, CronCreate, Remember, Task, generation tools, ...) stay
+    ungranted, so Ask mode prompts for them exactly as on the native leg.
+    Plan mode grants nothing.
+
     Only the app's own in-proc servers (``type == "sdk"`` in
     ``options.mcp_servers``) are granted. The bundled bridge serves them, so
-    the CLI calls their tools ``mcp__fluid_bundled__mcp__<server>__<tool>``;
-    a server-level entry becomes ``mcp__fluid_bundled__mcp__<server>__*``
+    the CLI calls their tools ``mcp__fluid_bundled__mcp__<server>__<tool>``.
+    A server-level entry becomes ``mcp__fluid_bundled__mcp__<server>__*``
     (the CLI glob-matches the tool part of an MCP allow rule; verified against
-    claude 2.1.280). External servers (the browser server, user MCP servers)
-    are never granted, so Ask mode prompts for them as the native leg does,
-    where external tools default to ``write``. Bare CLI tool names are left
-    out, so Ask mode still prompts for the CLI's own tools. In ``allow`` mode
-    only entries on the surface are granted, as ``_delegated_allowed`` does.
+    claude 2.1.280) only when every tool the server serves is safe; otherwise
+    it is expanded to its safe tools. External servers (the browser server,
+    user MCP servers) are never granted, and neither are bare CLI tool names,
+    so Ask mode still prompts for them. In ``allow`` mode only entries on the
+    surface are granted, as ``_delegated_allowed`` does.
     """
+    if (options.permission_mode or "default") == "plan":
+        return None
+    from app.core.provider.fluid_tool_bridge import (
+        SERVER_DEFAULT_RISK,
+        SERVER_RISK_MAPS,
+    )
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
     from app.core.tool_access import tool_permitted
+
+    def _safe(server: str, tool: str) -> bool:
+        risk_map = SERVER_RISK_MAPS.get(server) or {}
+        return risk_map.get(tool, SERVER_DEFAULT_RISK.get(server, "write")) == "safe"
 
     surface = _tool_allowlist(options)
     inproc = {
-        name
+        name: cfg
         for name, cfg in (options.mcp_servers or {}).items()
         if isinstance(cfg, dict) and cfg.get("type") == "sdk"
     }
@@ -3766,9 +3787,23 @@ def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
         if server not in inproc:
             continue
         if tool:
-            grants.append(_BUNDLED_CLI_PREFIX + entry)
-        else:
+            if _safe(server, tool):
+                grants.append(_BUNDLED_CLI_PREFIX + entry)
+            continue
+        recorded = recorded_sdk_server_tools(inproc[server])
+        names = (
+            [str(getattr(t, "name", "")) for t in recorded]
+            if recorded
+            else list(SERVER_RISK_MAPS.get(server) or ())
+        )
+        if recorded and all(_safe(server, name) for name in names):
             grants.append(f"{_BUNDLED_CLI_PREFIX}{entry}__*")
+            continue
+        grants.extend(
+            f"{_BUNDLED_CLI_PREFIX}{entry}__{name}"
+            for name in names
+            if name and _safe(server, name)
+        )
     return list(dict.fromkeys(grants)) or None
 
 

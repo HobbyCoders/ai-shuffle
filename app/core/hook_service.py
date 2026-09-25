@@ -37,6 +37,8 @@ from app.db.async_database import run_sync
 from app.core.hook_executor import (
     execute_hook,
     execute_hooks_for_event,
+    hook_base_env,
+    hook_env_value,
     kill_hook_process,
     spawn_hook_shell,
 )
@@ -195,8 +197,8 @@ async def execute_plugin_hook(
     # Fix python3 -> python on Windows
     command = _fix_python_command_for_windows(command)
 
-    # Prepare environment with plugin root
-    env = os.environ.copy()
+    # Prepare environment with plugin root (host secrets scrubbed)
+    env = hook_base_env()
     env["CLAUDE_PLUGIN_ROOT"] = plugin_path
 
     # Add Python jq shim to PATH (cross-platform)
@@ -588,12 +590,14 @@ async def _execute_db_bash_hook(
     legacy `execute_bash_hook` path are also supplied for backward compatibility.
 
     Returns a tuple (status, returncode, stdout, stderr):
-        status == "ok"      → process ran to completion; returncode/stdout/stderr set
-        status == "timeout" → process exceeded its timeout (killed)
-        status == "error"   → process could not be spawned or crashed while reading
-    On timeout/error the returncode/stdout/stderr are None. Callers MUST treat
-    both as "no opinion" (do not block) — a broken/slow user hook must never
-    hard-fail a tool call.
+        status == "ok"          → process ran to completion; returncode/stdout/stderr set
+        status == "timeout"     → process exceeded its timeout (killed)
+        status == "error"       → no command, or it crashed while reading
+        status == "spawn_error" → the process could not be started; stderr
+                                  carries the reason
+    Callers treat timeout/error as "no opinion", but spawn_error as a block:
+    the guard never saw the call, and anything the model controls (an
+    oversized or NUL-bearing tool input) must not switch a guard off.
     """
     command = hook.get("command") or ""
     if not command:
@@ -607,10 +611,12 @@ async def _execute_db_bash_hook(
 
     # Env vars mirror the legacy execute_bash_hook contract (HOOK_* keys) so
     # existing bash hooks that read env still work; stdin JSON is the primary path.
-    env = os.environ.copy()
+    # Values are capped/NUL-stripped (hook_env_value) so a padded tool input
+    # cannot make execve fail; the full input is on stdin.
+    env = hook_base_env()
     env["HOOK_EVENT"] = "PreToolUse"
-    env["HOOK_TOOL_NAME"] = str(script_input.get("tool_name", "") or "")
-    env["HOOK_DATA"] = json.dumps(script_input)
+    env["HOOK_TOOL_NAME"] = hook_env_value(script_input.get("tool_name", "") or "")
+    env["HOOK_DATA"] = hook_env_value(json.dumps(script_input))
 
     stdin_data = json.dumps(script_input)
 
@@ -625,7 +631,7 @@ async def _execute_db_bash_hook(
         )
     except Exception as e:
         logger.warning(f"DB PreToolUse hook failed to spawn ({command[:80]}): {e}")
-        return ("error", None, None, None)
+        return ("spawn_error", None, None, str(e))
 
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -823,6 +829,18 @@ def create_db_pretooluse_hook_handler(
                 except Exception as e:
                     logger.debug(f"Failed to update hook triggered status: {e}")
 
+            if status == "spawn_error":
+                # Fail closed: a guard that could not start never judged the call.
+                reason = (
+                    f"PreToolUse hook {hook_id or '<unknown>'} could not run "
+                    f"({stderr_str}); blocking the tool call"
+                )
+                logger.warning(reason)
+                return SyncHookJSONOutput(hookSpecificOutput={
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                })
             if status != "ok":
                 # timeout/error → no opinion for this hook; try the next one.
                 continue

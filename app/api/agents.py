@@ -18,10 +18,10 @@ from app.core.models import (
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
+from app.api.common import check_project_access
 from app.core.plugin_service import get_plugin_service
 from app.core.project_utils import get_project_working_dir_as_path, get_worktree_working_dir_as_path
 from app.core.project_agent_service import get_project_agent_service, get_user_agent_service
-from app.core.profiles import get_builtin_profile_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -68,18 +68,9 @@ def _check_profile_modified(profile: dict) -> None:
     """Set is_modified on a built-in agent by comparing to its defaults.
 
     Built-in subagents (general-purpose, Explore, Plan, frontend-designer)
-    compare against their code definitions in BUILTIN_SUBAGENTS; the
-    profile-defaults seam is kept for any future built-in profile.
+    compare against their code definitions in BUILTIN_SUBAGENTS.
     """
     if not profile.get("is_builtin"):
-        return
-    defaults = get_builtin_profile_defaults(profile["id"])
-    if defaults:
-        profile["is_modified"] = (
-            profile.get("name") != defaults["name"]
-            or profile.get("description") != defaults["description"]
-            or profile.get("config") != defaults["config"]
-        )
         return
     modified = database.builtin_subagent_is_modified(profile)
     if modified is not None:
@@ -271,6 +262,11 @@ async def get_all_available_subagents(
                 detail="Access denied to this profile"
             )
 
+    # A project-scoped API user may only read (and, through the legacy-agent
+    # migration, write into) its own project.
+    if project_id:
+        check_project_access(request, project_id)
+
     def _load() -> list[UnifiedSubagentItem]:
         """Every source of the autocomplete list, in ONE hop.
 
@@ -320,7 +316,14 @@ async def get_all_available_subagents(
         if project_id:
             project = database.get_project(project_id)
             if project:
-                worktree = database.get_worktree(worktree_id) if worktree_id else None
+                worktree = None
+                if worktree_id:
+                    # Only a worktree of this project; a foreign one is ignored.
+                    from app.api.git_worktrees import _require_worktree_for_project
+                    try:
+                        worktree = _require_worktree_for_project(worktree_id, project_id)
+                    except HTTPException:
+                        worktree = None
                 if worktree:
                     project_path = get_worktree_working_dir_as_path(worktree)
                 else:
@@ -786,14 +789,11 @@ async def restore_profile_defaults(
 ):
     """Restore a built-in profile to its original default settings.
 
-    Only works for built-in profiles that have known seed defaults.
+    Only built-in subagents (defined in BUILTIN_SUBAGENTS) can be restored.
     Custom profiles cannot be restored (they have no defaults to restore to).
     """
     def _load() -> dict:
-        """Existence/built-in checks and the restoring update in ONE hop.
-
-        ``get_builtin_profile_defaults`` is pure (in-repo seed data).
-        """
+        """Existence/built-in checks and the restoring update in ONE hop."""
         existing = database.get_profile(profile_id)
         if not existing:
             raise HTTPException(
@@ -807,16 +807,7 @@ async def restore_profile_defaults(
                 detail="Only built-in profiles can be restored to defaults"
             )
 
-        defaults = get_builtin_profile_defaults(profile_id)
-        if defaults:
-            profile = database.update_profile(
-                profile_id=profile_id,
-                name=defaults["name"],
-                description=defaults["description"],
-                config=defaults["config"],
-                allow_builtin=True
-            )
-        elif database.revert_subagent_to_defaults(profile_id):
+        if database.revert_subagent_to_defaults(profile_id):
             # Built-in subagent: restore name/description/prompt/tools/model
             # from BUILTIN_SUBAGENTS, keeping user-owned skills/memory/MCP.
             profile = database.get_profile(profile_id)

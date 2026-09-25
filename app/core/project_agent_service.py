@@ -204,6 +204,16 @@ class ProjectAgentService:
             return False
         return bool(re.match(r'^[a-zA-Z][a-zA-Z0-9_-]*$', name))
 
+    def _agents_dir_confined(self) -> bool:
+        """True when ``.fluid/agents`` is a real directory path inside the project."""
+        if self.agents_dir.parent.is_symlink() or self.agents_dir.is_symlink():
+            return False
+        try:
+            root = Path(self.project_path).resolve()
+            return self.agents_dir.resolve().is_relative_to(root)
+        except (OSError, RuntimeError):
+            return False
+
     def _migrate_legacy_agents(self) -> None:
         """Copy legacy ``.claude/agents/*.md`` files into ``.fluid/agents``.
 
@@ -213,9 +223,18 @@ class ProjectAgentService:
         wins and is never overwritten. Symlinks are left alone, matching the
         settings import. A marker in ``.fluid/agents`` makes this run once per
         project, so an agent deleted from ``.fluid/agents`` is not copied back.
+        Nothing is written when ``.fluid`` or ``.fluid/agents`` is a symlink or
+        resolves outside the project: a cloned repo could otherwise point it at
+        the user-global agents folder and plant agents in every project.
         """
         legacy_dir = self.legacy_agents_dir
         if legacy_dir is None or legacy_dir.is_symlink() or not legacy_dir.is_dir():
+            return
+        if not self._agents_dir_confined():
+            logger.warning(
+                f"Skipping legacy agent copy: {self.agents_dir} is a symlink or "
+                f"resolves outside {self.project_path}"
+            )
             return
         marker = self.agents_dir / _LEGACY_MIGRATED_MARKER
         if marker.exists():

@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 
+from app.core.scrub import scrub_url_credentials
 from app.db import database
 from app.db.async_database import run_sync
 
@@ -76,6 +77,39 @@ def _resolve_windows_bash() -> Optional[str]:
                 return str(candidate)
 
     return None
+
+
+# Linux caps one environment string at MAX_ARG_STRLEN (128 KiB); a larger
+# value (or one with a NUL byte) makes execve fail, and the hook never runs.
+# Tool input and output reach HOOK_* values, so the model could otherwise
+# silence a hook by padding a command or emitting a NUL. The full payload
+# still goes on stdin wherever the hook contract uses it.
+HOOK_ENV_VALUE_MAX_BYTES = 64 * 1024
+HOOK_ENV_TRUNCATED_MARKER = "...[truncated]"
+
+
+def hook_env_value(value: Any) -> str:
+    """``value`` as a HOOK_* env value that execve always accepts.
+
+    NUL bytes are stripped and the UTF-8 form is capped at
+    ``HOOK_ENV_VALUE_MAX_BYTES``, with ``HOOK_ENV_TRUNCATED_MARKER`` appended
+    when it was cut. Unencodable characters (lone surrogates) become ``?``.
+    """
+    text = "" if value is None else str(value)
+    data = text.replace("\x00", "").encode("utf-8", errors="replace")
+    if len(data) <= HOOK_ENV_VALUE_MAX_BYTES:
+        return data.decode("utf-8")
+    cut = data[:HOOK_ENV_VALUE_MAX_BYTES].decode("utf-8", errors="ignore")
+    return cut + HOOK_ENV_TRUNCATED_MARKER
+
+
+def hook_base_env() -> Dict[str, str]:
+    """The environment a hook subprocess inherits: the app's own, without
+    host secrets (DATABASE_URL, OWNER_PASSWORD, SECRET_KEY, *_TOKEN, ...),
+    scrubbed exactly as the delegated CLI child's environment is."""
+    from fluid.tools.child_env import scrub_child_env
+
+    return scrub_child_env(os.environ)
 
 
 async def spawn_hook_shell(
@@ -191,19 +225,19 @@ async def execute_bash_hook(
             data = event_data["data"]
             for key, value in data.items():
                 env_key = f"HOOK_{key.upper()}"
-                env[env_key] = str(value) if value is not None else ""
+                env[env_key] = hook_env_value(value)
 
         # Set last so a data key such as "event" cannot overwrite them.
         env.update({
-            "HOOK_EVENT": event_data.get("event", ""),
-            "HOOK_TIMESTAMP": event_data.get("timestamp", ""),
-            "HOOK_DATA": json.dumps(event_data.get("data", {})),
+            "HOOK_EVENT": hook_env_value(event_data.get("event", "")),
+            "HOOK_TIMESTAMP": hook_env_value(event_data.get("timestamp", "")),
+            "HOOK_DATA": hook_env_value(json.dumps(event_data.get("data", {}))),
         })
 
         # Execute the command
         process = await spawn_hook_shell(
             command,
-            env={**dict(os.environ), **env},  # Merge with current env
+            env={**hook_base_env(), **env},
         )
 
         try:
@@ -279,8 +313,9 @@ async def execute_webhook_hook(
     start_time = time.time()
 
     try:
-        # Prepare payload
-        payload = json.dumps(event_data)
+        # Prepare payload. Tool input/output rides in it, so URL-embedded
+        # credentials (a pasted DATABASE_URL) are redacted before it leaves.
+        payload = json.dumps(scrub_url_credentials(event_data))
 
         # Prepare headers
         headers = {

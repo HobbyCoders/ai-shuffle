@@ -248,7 +248,7 @@ async def test_reap_terminated_trees_snapshots_pool(monkeypatch):
         return None
 
     monkeypatch.setattr(sp, "subprocess_pid", _mutating_pid)
-    sp._terminated_trees[99999] = [99998]  # non-empty so the walk runs
+    sp._terminated_trees[99999] = [(99998, 0.0)]  # non-empty so the walk runs
 
     # Must not raise despite the pool shrinking during the values() walk.
     sp.reap_terminated_process_trees()
