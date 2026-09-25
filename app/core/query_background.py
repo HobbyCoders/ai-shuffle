@@ -243,6 +243,9 @@ async def _run_background_query_impl(
                 # into the live subprocess here. Never raise: an exception between
                 # the is_streaming claim and the main try/finally would strand the
                 # flag and brick the pooled client.
+                # The adapter writes each applied model / permission-mode change
+                # back to these options (HarnessAdapter._record_applied), so they
+                # hold the live values, not the connect-time ones.
                 old_opts = state.connect_options
                 if old_opts:
                     new_model = getattr(options, 'model', None)

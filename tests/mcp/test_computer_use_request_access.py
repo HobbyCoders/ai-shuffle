@@ -140,20 +140,22 @@ def _adapter(permission_mode="default"):
 
 
 async def test_headless_auto_approval_records_only_at_the_gate():
-    """No interactive approver + a mode that approves on its own: the answer
-    itself records nothing; the gate's report (under the bundled alias the
-    delegated CLI uses) records one."""
+    """No interactive approver + a mode that approves the screen-control
+    request on its own (only Bypass does): the answer itself records nothing;
+    the gate's report (under the bundled alias the delegated CLI uses) records
+    one."""
     from unittest.mock import AsyncMock
 
     from app.core.provider.types import PermissionRequestEvent
 
-    adapter = _adapter("acceptEdits")
+    adapter = _adapter("bypassPermissions")
     adapter._engine = SimpleNamespace(_registry_spec=lambda name: SimpleNamespace(name=TOOL))
     adapter.respond_to_permission = AsyncMock()
     try:
         await adapter._answer_without_approver(PermissionRequestEvent(
             tool_use_id="t", input={}, name="mcp__fluid_bundled__" + TOOL))
         adapter.respond_to_permission.assert_awaited_once()
+        assert adapter.respond_to_permission.await_args.args[1] is True
         assert not access.consume_request_approval(SID)
         await adapter._hooks.tool_allowed(
             {"name": "mcp__fluid_bundled__" + TOOL, "input": {}, "tool_use_id": None})

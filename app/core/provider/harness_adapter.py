@@ -213,11 +213,13 @@ class HarnessAdapter(ProviderAdapter):
         self._options: Optional[SessionOptions] = None
         # The SDK-shaped options this adapter was connected with. The session
         # pool keeps the same object as ``SessionState.connect_options``, and a
-        # reused client's turn compares its permission mode against it to
-        # decide whether to call ``set_permission_mode``. So every applied mode
-        # change is written back here: left at the connect-time value, a switch
-        # Ask -> Bypass -> Ask would compare the final Ask against the original
-        # Ask, skip the call, and leave the engine in Bypass.
+        # reused client's turn compares its model and permission mode against
+        # it to decide whether to call ``set_model`` / ``set_permission_mode``
+        # (the only two options hot-swapped there). So every applied change is
+        # written back here (``_record_applied``): left at the connect-time
+        # value, a switch Ask -> Bypass -> Ask (or model A -> B -> A) would
+        # compare the final value against the original one, skip the call,
+        # and leave the engine on the middle value.
         self._sdk_options: Optional[Any] = None
         self._sdk_session_id: Optional[str] = None
         # Fluid turn source for the next send_query/send_resume; see
@@ -2069,7 +2071,22 @@ class HarnessAdapter(ProviderAdapter):
 
     # ─── Runtime Configuration ────────────────────────────────────────
 
+    def _record_applied(self, field: str, value: Any) -> None:
+        """Write an applied runtime change back to the connect options, the
+        record a reused client's next turn compares against. See
+        ``_sdk_options`` in ``__init__``."""
+        if self._sdk_options is None:
+            return
+        try:
+            setattr(self._sdk_options, field, value)
+        except Exception:  # noqa: BLE001 — a frozen options object
+            logger.warning(
+                "[HarnessAdapter] could not record %s=%s on the connect options",
+                field, value, exc_info=True,
+            )
+
     async def set_model(self, model: str) -> None:
+        requested = model
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
         if self._provider_kind == "anthropic":
@@ -2081,6 +2098,9 @@ class HarnessAdapter(ProviderAdapter):
         except NotImplementedError:
             # NativeLoop reads self.model per request; hot-swap by attribute.
             self._engine.model = model
+        # The id as the caller sent it (before canonicalization), since that
+        # is what its next turn compares against.
+        self._record_applied("model", requested)
 
     async def set_permission_mode(self, mode: str) -> None:
         requested = mode
@@ -2097,17 +2117,9 @@ class HarnessAdapter(ProviderAdapter):
                 perms.approval_policy = policy
         if self._options is not None:
             self._options.permission_mode = mode
-        if self._sdk_options is not None:
-            # The mode as the caller asked for it (before ``auto`` -> Ask on a
-            # native leg), since that is what its next turn compares against.
-            # See ``_sdk_options`` in ``__init__``.
-            try:
-                self._sdk_options.permission_mode = requested
-            except Exception:  # noqa: BLE001 — a frozen options object
-                logger.warning(
-                    "[HarnessAdapter] could not record permission mode %s on the "
-                    "connect options", requested, exc_info=True,
-                )
+        # The mode as the caller asked for it (before ``auto`` -> Ask on a
+        # native leg), since that is what its next turn compares against.
+        self._record_applied("permission_mode", requested)
 
     async def get_context_usage(self) -> Optional[Dict[str, Any]]:
         """Context-window usage by category, or None when unavailable.

@@ -1072,6 +1072,9 @@ async def stream_query(
                 # compensation at all). Never raise: an exception between the
                 # is_streaming claim and the main try/finally would strand the
                 # flag and brick the pooled client.
+                # The adapter writes each applied model / permission-mode change
+                # back to these options (HarnessAdapter._record_applied), so they
+                # hold the live values, not the connect-time ones.
                 old_opts = state.connect_options
                 if old_opts:
                     new_model = getattr(options, 'model', None)
@@ -1836,6 +1839,9 @@ async def _stream_to_websocket_impl(
                 })
 
                 # Handle runtime-changeable options via adapter methods
+                # The adapter writes each applied model / permission-mode change
+                # back to these options (HarnessAdapter._record_applied), so they
+                # hold the live values, not the connect-time ones.
                 old_opts = state.connect_options
                 if old_opts:
                     new_model = getattr(options, 'model', None)
