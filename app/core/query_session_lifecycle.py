@@ -52,34 +52,6 @@ def _reap_task_killed(session_id: str, task_id: str) -> None:
         task_registry.complete_task(session_id, task_id, "killed")
 
 
-def _mark_task_stopped_by_user(session_id: str, task_id: str, *, source: str = "user_stop") -> None:
-    """Mark a background task ``killed`` in the registry on an EXPLICIT user stop.
-
-    Called after the client ``stop_task`` control request is issued for a LIVE
-    background sub-agent. Records the terminal transition (with user attribution)
-    directly instead of relying on a CLI ``stopped`` frame — the row must reach a
-    terminal status exactly once even when no such frame flows back. ``killed``
-    (not ``completed``) so the durable retention window shows the deliberate stop
-    and the guaranteed terminal-surface callback fires (it is gated on
-    error/killed). Idempotent via ``complete_task`` + ``mark_terminal_notified``.
-    """
-    from app.core.task_registry import (
-        task_registry,
-        USER_STOP_SUMMARY,
-        USER_STOP_REASON,
-    )
-
-    if source == "user_stop":
-        source = USER_STOP_REASON
-    task_registry.complete_task(
-        session_id,
-        task_id,
-        "killed",
-        summary=USER_STOP_SUMMARY if source == USER_STOP_REASON else f"Stopped by host: {source}",
-        reason=source,
-    )
-
-
 async def interrupt_session(session_id: str) -> bool:
     """Interrupt an active streaming session.
 
@@ -109,9 +81,6 @@ async def interrupt_session(session_id: str) -> bool:
     # mid-flight abandons its pending response, which can wedge the client for
     # every subsequent control call. Shielding lets the wait_for time out while the
     # underlying interrupt keeps running to completion in the background.
-    # Interrupt via the ADAPTER interface: state.client resolves through the
-    # legacy-only ``sdk_client`` attribute and raises AttributeError on the
-    # fluid HarnessAdapter. All active providers implement interrupt().
     interrupt_task = asyncio.create_task(state.adapter.interrupt())
     # Attach the swallow/log done-callback AT CREATION: if the CALLER of
     # this coroutine is cancelled while awaiting the shielded wait below, the
@@ -248,14 +217,10 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
 
     - **shell** (Monitor subprocess): terminated directly via its tracked
       process and marked ``killed`` in the registry immediately.
-    - **agent** (background sub-agent): stopped through the pooled client's
-      ``stop_task()`` (``SessionState.client``). The CLI then emits a
-      ``task_notification`` with status ``stopped`` which the streaming loop
-      maps to ``killed`` in the registry —
-      so the task drops off the next ``/live`` poll without us pre-marking it.
-      A PROVIDER-LANE worker is an agent task too, but it has no CLI task to
-      stop — it runs as its own session under the ProviderAgent supervisor, so
-      it is torn down there instead (checked before the client path).
+    - **agent**: a PROVIDER-LANE worker runs as its own session under the
+      ProviderAgent supervisor and is torn down there. The harness adapter has
+      no per-task stop for any other agent task, so its registry row is reaped
+      (marked ``killed``) as below.
 
     "Ghost" tasks — ones already terminated by outside forces (idle eviction,
     process death, session teardown) but still parked ``running`` in the
@@ -334,78 +299,32 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
         )
         return {"ok": True, "kind": "agent", "task_id": task_id}
 
-    # 3) Background sub-agent — ask the pooled client to stop it.
+    # 3) Any other agent task — the adapter has no per-task stop, so settle the
+    # registry row (a ghost the UI would otherwise show forever) and report it.
     state = get_session_pool().peek(session_id)
-    # Fluid/harness adapters expose no ``sdk_client``, so the client stop_task
-    # path is simply unavailable there. Treat that exactly like a torn-down
-    # client (reap the registry row / report honestly) instead of letting the
-    # missing attribute blow up the stop request.
-    client = state.client if state is not None else None
-    if state is not None and state.is_connected and client is None:
-        logger.warning(
-            "stop_task unavailable: no sdk client on this adapter "
-            f"[session={session_id} task={task_id}]"
-        )
-    if not state or not state.is_connected or not client:
-        # Outside forces tore down the live session / client, but the task
-        # can still be parked "running" in the registry — a ghost the UI shows
-        # forever with no client left to stop it. Reap it so the close button
-        # works: mark it killed (drops off the next /live poll) and report
-        # success.
-        if existing is not None:
-            _reap_task_killed(session_id, task_id)
-            return {
-                "ok": True,
-                "kind": existing.get("kind") or "agent",
-                "task_id": task_id,
-                "detail": "reaped (session gone)",
-            }
-        # The registry never knew the task — but after a restart the in-memory
-        # registry is EMPTY, so a task the UI still shows "running" has no
-        # registry row to reap even though the durable truth (a background_tasks
-        # row, or a subagent.started event in the log) is still rendering it.
-        # Force-settle from that durable truth before reporting the dead session.
-        reaped = await _durable_force_settle(session_id, task_id)
-        if reaped is not None:
-            return reaped
-        # Nothing durable to settle and no live session — there is nothing to
-        # reap and nothing the UI is showing. Report the dead session honestly
-        # (distinguishing gone-from-pool vs disconnected).
-        if not state:
-            return {"ok": False, "kind": "agent", "detail": "session not active"}
+    if existing is not None:
+        _reap_task_killed(session_id, task_id)
+        return {
+            "ok": True,
+            "kind": existing.get("kind") or "agent",
+            "task_id": task_id,
+            "detail": "reaped (session gone)",
+        }
+    # The registry never knew the task — but after a restart the in-memory
+    # registry is EMPTY, so a task the UI still shows "running" has no
+    # registry row to reap even though the durable truth (a background_tasks
+    # row, or a subagent.started event in the log) is still rendering it.
+    # Force-settle from that durable truth before reporting the dead session.
+    reaped = await _durable_force_settle(session_id, task_id)
+    if reaped is not None:
+        return reaped
+    # Nothing durable to settle — there is nothing to reap and nothing the UI
+    # is showing.
+    if not state:
+        return {"ok": False, "kind": "agent", "detail": "session not active"}
+    if not state.is_connected:
         return {"ok": False, "kind": "agent", "detail": "session not connected"}
-
-    try:
-        await client.stop_task(task_id)
-        logger.debug(f"Requested SDK stop_task for {task_id} in session {session_id}")
-        # Record the terminal transition on the registry row OURSELVES rather than
-        # waiting for a CLI "stopped" frame to flow back through the streaming loop
-        # to ``query_engine._record_task_message``: a parked session (its turn's
-        # receive_events already returned) has no in-stream reader, and the
-        # scoped ``stop_task`` may emit no terminal frame at all, so the row would
-        # stay ``running`` forever (a "phantom running" agent until restart). This
-        # mirrors the shell / ghost-reap branches above, which already mark the
-        # registry immediately. Idempotent: any later CLI ``stopped`` frame that
-        # DOES arrive re-completes to the same terminal state as a harmless no-op,
-        # and the guaranteed terminal-surface callback fires exactly once
-        # (``mark_terminal_notified`` latch), so this never double-surfaces.
-        _mark_task_stopped_by_user(session_id, task_id, source=source)
-        return {"ok": True, "kind": "agent", "task_id": task_id}
-    except Exception as e:
-        logger.error(
-            f"Failed to stop task {task_id} in session {session_id}: {e}",
-            exc_info=True,
-        )
-        # A FAILED stop still has to leave a terminal row. The
-        # control request is the only thing that failed here — the caller
-        # (Stop, an interrupt, the strip's "x") is tearing the session's work
-        # down either way, and a client that refused ``stop_task`` is usually
-        # a client that is already being evicted. Leaving the row ``running``
-        # would leave no terminal SubagentEvent, no notification, and a model
-        # that keeps reporting the dead worker as its outstanding delegated
-        # task. The shell branch marks its row unconditionally too.
-        _mark_task_stopped_by_user(session_id, task_id, source=source)
-        return {"ok": False, "kind": "agent", "task_id": task_id, "detail": str(e)}
+    return {"ok": False, "kind": "agent", "detail": "task not found"}
 
 
 async def enter_user_stop(session_id: str) -> dict:

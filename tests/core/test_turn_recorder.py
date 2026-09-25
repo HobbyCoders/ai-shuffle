@@ -19,9 +19,6 @@ import pytest
 from app.core import turn_recorder as tr
 from app.core.turn_recorder import (
     TurnRecorder,
-    record_cli_wake_event,
-    record_cli_wake_turn_completed,
-    record_cli_wake_turn_started,
     record_drained_event,
     record_interrupting,
     record_parked,
@@ -376,9 +373,9 @@ async def test_task_event_explicit_status_wins(mock_db):
 ])
 async def test_system_task_updated_maps_to_task_updated(mock_db, data, state):
     # A background task's terminal status crossing a turn boundary arrives as a
-    # {"type": "system", "subtype": "task_updated"} chip (see
-    # _task_status_events_from_message). It must land as task.updated — a
-    # system.note here leaves the replayed task strip stuck on "running".
+    # {"type": "system", "subtype": "task_updated"} chip. It must land as
+    # task.updated — a system.note here leaves the replayed task strip stuck on
+    # "running".
     _mk_session()
     rec = await _recorder()
     await rec.on_event({"type": "system", "subtype": "task_updated", "data": data})
@@ -1267,84 +1264,6 @@ async def test_record_drained_event_logs_dropped_type(mock_db, caplog):
         "record_drained_event dropped" in r.message and "chunk" in r.message
         for r in caplog.records
     )
-
-
-# ---------------------------------------------------------------------------
-# CLI-wake taps (#691): record_cli_wake_event + turn.started/turn.completed
-# ---------------------------------------------------------------------------
-
-async def test_record_cli_wake_event_translates_render_surface(mock_db):
-    # The wide entry point accepts chunk/tool_use/tool_result — the render
-    # surface record_drained_event drops — and appends them UNFENCED, stamped
-    # with the supplied synthetic wake turn_id.
-    _mk_session()
-    n1 = await record_cli_wake_event(SID, {"type": "chunk", "content": "hi"}, turn_id="w1")
-    n2 = await record_cli_wake_event(
-        SID, {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "ls"}},
-        turn_id="w1",
-    )
-    n3 = await record_cli_wake_event(
-        SID, {"type": "tool_result", "tool_use_id": "t", "output": "done"}, turn_id="w1",
-    )
-    assert (n1, n2, n3) == (1, 1, 1)
-    assert _types() == ["assistant.text_delta", "tool.use", "tool.result"]
-    rows = _rows()
-    assert all(r["run_id"] is None for r in rows)          # unfenced
-    assert all(r["turn_id"] == "w1" for r in rows)         # stamped wake turn
-    assert rows[0]["payload"]["text"] == "hi"
-
-
-async def test_record_cli_wake_event_also_accepts_drained_types(mock_db):
-    # It is a SUPERSET of record_drained_event's filter: subagent_*/task_*/system
-    # still translate.
-    _mk_session()
-    await record_cli_wake_event(
-        SID, {"type": "subagent_chunk", "agent_id": "task_1", "content": "x"}, turn_id="w1",
-    )
-    await record_cli_wake_event(SID, {"type": "task_progress", "task_id": "t1"}, turn_id="w1")
-    assert _types() == ["subagent.progress", "task.updated"]
-
-
-async def test_record_cli_wake_event_filters_unknown_type(mock_db):
-    # A non-render, non-drained type (thinking is never forwarded here, but any
-    # unknown type) is filtered and reports 0 appended.
-    _mk_session()
-    n = await record_cli_wake_event(SID, {"type": "thinking_block", "content": "x"}, turn_id="w1")
-    assert n == 0
-    assert _rows() == []
-
-
-async def test_record_cli_wake_turn_started_and_completed_bracket(mock_db):
-    # The synthetic turn brackets mirror the fenced recorder's turn.started /
-    # turn.completed shape, keyed by the synthesized wake turn_id.
-    _mk_session()
-    await record_cli_wake_turn_started(SID, "w9")
-    await record_cli_wake_event(SID, {"type": "chunk", "content": "resp"}, turn_id="w9")
-    await record_cli_wake_turn_completed(
-        SID, "w9", usage={"tokens_out": 5}, stop_reason="end_turn",
-    )
-    rows = _rows()
-    assert [r["event_type"] for r in rows] == [
-        "turn.started", "assistant.text_delta", "turn.completed",
-    ]
-    assert all(r["turn_id"] == "w9" for r in rows)
-    assert all(r["run_id"] is None for r in rows)          # unfenced
-    completed = rows[-1]["payload"]
-    assert completed["usage"] == {"tokens_out": 5}
-    assert completed["stop_reason"] == "end_turn"
-
-
-async def test_record_cli_wake_taps_never_propagate(mock_db, monkeypatch):
-    _mk_session()
-
-    def _boom(*args, **kwargs):
-        raise RuntimeError("db down")
-
-    monkeypatch.setattr(tr.session_events_db, "append_events", _boom)
-    # None may raise; the wide entry point returns 0 on failure.
-    assert await record_cli_wake_event(SID, {"type": "chunk", "content": "x"}, turn_id="w") == 0
-    await record_cli_wake_turn_started(SID, "w")
-    await record_cli_wake_turn_completed(SID, "w")
 
 
 async def test_record_parked_appends_turn_parked(mock_db):

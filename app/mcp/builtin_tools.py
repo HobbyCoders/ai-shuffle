@@ -2012,10 +2012,10 @@ def create_builtin_tools_server(
                 record = task_registry.get_task(session_id, tid)
                 if record is not None:
                     return _err(
-                        "Background agent tasks are managed by the SDK and cannot "
-                        "be stopped from here; they finish on their own and notify "
-                        "via <task-notification>. Only Monitor shell tasks support "
-                        "TaskStop.",
+                        "Agent tasks are run by the harness and tracked in the "
+                        "app's task registry; TaskStop cannot stop them. They "
+                        "finish on their own and notify via <task-notification>. "
+                        "Only Monitor shell tasks support TaskStop.",
                         task_id=tid,
                         kind=record.get("kind"),
                         status=record.get("status"),

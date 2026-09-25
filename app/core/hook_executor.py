@@ -383,10 +383,11 @@ async def execute_message_hook(
         variables = {
             "event": event_data.get("event", ""),
             "timestamp": event_data.get("timestamp", ""),
-            "session_id": session_id,
             "tool_name": data.get("tool_name", ""),
             "hook_name": hook.get("name", ""),
-            **{k: str(v) for k, v in data.items() if v is not None}
+            **{k: str(v) for k, v in data.items() if v is not None},
+            # The app session, not the engine id the hook input carries.
+            "session_id": session_id,
         }
 
         # Render template — replace {variable} placeholders

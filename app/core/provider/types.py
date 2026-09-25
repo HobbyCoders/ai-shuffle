@@ -99,9 +99,6 @@ class SessionOptions:
     # Stderr callback
     stderr: Optional[Any] = None
 
-    # Maximum buffer size
-    max_buffer_size: Optional[int] = None
-
     # User identifier
     user: Optional[str] = None
 
@@ -119,12 +116,6 @@ class SessionOptions:
 
     # Session store flush mode (SDK 0.1.65+) — "eager" | None
     session_store_flush: Optional[str] = None
-
-    # Hook event forwarding (SDK 0.1.81+) — emit HookEventMessage to stream
-    include_hook_events: bool = True
-
-    # Strict MCP config validation (SDK 0.1.81+) — raise on unknown MCP fields
-    strict_mcp_config: bool = False
 
     # Arbitrary extra options (for forward-compatibility with new SDK fields)
     extra: Dict[str, Any] = field(default_factory=dict)

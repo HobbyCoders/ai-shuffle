@@ -19,13 +19,7 @@ from unittest.mock import patch
 import pytest
 
 import app.core.query_options as qo
-
-
-def _profile(config=None):
-    cfg = {"model": "opus", "tools_preset": "claude_code"}
-    if config:
-        cfg.update(config)
-    return {"id": "t", "config": cfg}
+from tests.core.helpers import query_profile
 
 
 def test_nonexistent_project_path_raises_with_path_and_name(tmp_path):
@@ -33,7 +27,7 @@ def test_nonexistent_project_path_raises_with_path_and_name(tmp_path):
     project = {"id": "p1", "name": "other-install", "path": str(missing)}
     with patch.object(qo, "get_security_instructions", return_value=""):
         with pytest.raises(ValueError) as exc_info:
-            qo.build_options_from_profile(profile=_profile(), project=project)
+            qo.build_options_from_profile(profile=query_profile(), project=project)
     msg = str(exc_info.value)
     assert str(missing) in msg
     assert "other-install" in msg
@@ -43,13 +37,13 @@ def test_nonexistent_profile_config_cwd_raises(tmp_path):
     missing = tmp_path / "gone-cwd"
     with patch.object(qo, "get_security_instructions", return_value=""):
         with pytest.raises(ValueError) as exc_info:
-            qo.build_options_from_profile(profile=_profile({"cwd": str(missing)}))
+            qo.build_options_from_profile(profile=query_profile({"cwd": str(missing)}))
     assert str(missing) in str(exc_info.value)
 
 
 def test_valid_profile_config_cwd_accepted(tmp_path):
     with patch.object(qo, "get_security_instructions", return_value=""):
-        opts, _ = qo.build_options_from_profile(profile=_profile({"cwd": str(tmp_path)}))
+        opts, _ = qo.build_options_from_profile(profile=query_profile({"cwd": str(tmp_path)}))
     assert str(opts.cwd) == str(tmp_path)
 
 
@@ -58,7 +52,7 @@ def test_missing_default_workspace_is_created(tmp_path, monkeypatch):
     assert not ws.exists()
     monkeypatch.setattr(qo.settings, "workspace_dir", ws)
     with patch.object(qo, "get_security_instructions", return_value=""):
-        opts, _ = qo.build_options_from_profile(profile=_profile())
+        opts, _ = qo.build_options_from_profile(profile=query_profile())
     assert ws.is_dir()
     assert str(opts.cwd) == str(ws)
 
@@ -86,7 +80,7 @@ def test_session_spawn_cwd_from_resolver_base(tmp_path):
         "app.core.project_resolver.resolve_cwd", return_value=str(base)
     ) as rc:
         opts, _ = qo.build_options_from_profile(
-            profile=_profile(), session_id="ses-1"
+            profile=query_profile(), session_id="ses-1"
         )
 
     assert str(opts.cwd) == str(base)
@@ -108,7 +102,7 @@ def test_session_spawn_cwd_from_resolver_branch(tmp_path):
         "app.core.project_resolver.resolve_cwd", return_value=str(feat)
     ) as rc:
         opts, _ = qo.build_options_from_profile(
-            profile=_profile(), session_id="ses-1"
+            profile=query_profile(), session_id="ses-1"
         )
 
     assert str(opts.cwd) == str(feat)
@@ -130,7 +124,7 @@ def test_v2_project_not_materialized_here_raises(tmp_path):
         return_value={"id": "pv2-1", "name": "MyRepo", "origin": "git:abc"},
     ):
         with pytest.raises(ValueError) as exc_info:
-            qo.build_options_from_profile(profile=_profile(), session_id="ses-1")
+            qo.build_options_from_profile(profile=query_profile(), session_id="ses-1")
     assert "not checked out on this device" in str(exc_info.value)
 
 
@@ -149,7 +143,7 @@ def test_v2_worktree_not_materialized_here_raises_worktree_error(tmp_path):
         return_value={"id": "pv2-1", "name": "MyRepo"},
     ):
         with pytest.raises(qo.WorktreeUnavailableError) as exc_info:
-            qo.build_options_from_profile(profile=_profile(), session_id="ses-1")
+            qo.build_options_from_profile(profile=query_profile(), session_id="ses-1")
     assert exc_info.value.branch_name == "feat/x"
 
 
@@ -168,7 +162,7 @@ def test_orphan_session_falls_to_workspace(tmp_path, monkeypatch):
         "app.core.project_resolver.resolve_project_v2", return_value=None
     ):
         opts, _ = qo.build_options_from_profile(
-            profile=_profile(), session_id="ses-1"
+            profile=query_profile(), session_id="ses-1"
         )
 
     assert str(opts.cwd) == str(ws)
@@ -188,7 +182,7 @@ def test_orphan_session_uses_profile_config_cwd(tmp_path):
         "app.core.project_resolver.resolve_project_v2", return_value=None
     ):
         opts, _ = qo.build_options_from_profile(
-            profile=_profile({"cwd": str(cfg_dir)}), session_id="ses-1"
+            profile=query_profile({"cwd": str(cfg_dir)}), session_id="ses-1"
         )
 
     assert str(opts.cwd) == str(cfg_dir)
@@ -212,7 +206,7 @@ def test_sync_builder_lost_claim_does_not_wait(tmp_path):
         "time.sleep", side_effect=lambda s: slept.append(s)
     ):
         with pytest.raises(qo.WorktreeUnavailableError):
-            qo.build_options_from_profile(profile=_profile(), session_id="ses-1")
+            qo.build_options_from_profile(profile=query_profile(), session_id="ses-1")
 
     assert slept == []
     assert claim.called

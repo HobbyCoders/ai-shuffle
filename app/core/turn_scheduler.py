@@ -28,7 +28,7 @@ is the record"). Four policies, evaluated in this order on every settlement:
    last ``source in (user, queue)`` turn — was ``auto_continue``. Reset-on-user-
    message is automatic (the next user/queue turn settles closer in history).
 4. **PARK/UNPARK** — a parked settlement is left alone; the wake arrives via
-   the idle reader's terminal task notification (:func:`on_task_terminal`),
+   a background task's terminal notification (:func:`on_task_terminal`),
    which synthesizes ONE consolidated ``<task-notification>`` prompt, enqueues
    it as ``source=unpark`` (context copied from the parked turn), and kicks.
    When the parent is MID-TURN rather than at rest, that same prompt is instead
@@ -822,8 +822,8 @@ PROVIDER_AGENT_ORIGIN = "provider_agent"
 
 # The CLI-native duplicate. When a TOP-LEVEL backgrounded Task/Agent
 # comes to rest while the parent turn is PARKED, the CLI itself starts a follow-up
-# turn injecting the rich ``[SYSTEM NOTIFICATION] … <task-notification>`` string
-# (query_engine ``_cli_turn_events_from_message``). The app's own consolidated
+# turn injecting the rich ``[SYSTEM NOTIFICATION] … <task-notification>`` string.
+# The app's own consolidated
 # ``source=unpark`` wake, built from the content-poor bare TaskUpdated frame, is a
 # SECOND (empty) delivery of the same completion. When the CLI owns the at-rest
 # wake we suppress the app's enqueue entirely so the model sees ONE (rich) wake.
@@ -930,9 +930,7 @@ def _dedupe_frames_by_task_id(
 #   (:func:`_try_steer_terminal_notification`); a steer the turn never
 #   delivers puts them back for the wake that replaces it;
 # * a CLI-owned wake on the delegated leg: the CLI writes that wake's prompt
-#   itself, so the app cannot add to it. The messages are queued the moment
-#   that wake comes to rest (:func:`on_cli_wake_rested`) instead of waiting
-#   for the deadline;
+#   itself, so the app cannot add to it; the messages wait for the deadline;
 # * an urgent message takes them along into its own wake;
 # * the deadline fires: the wakeup service promotes them to a
 #   ``source="promotion"`` turn (:func:`promote_held_peer_messages`).
@@ -1237,36 +1235,6 @@ def held_peer_block(held: str) -> str:
 def restore_held_peer_messages(session_id: str, held: str) -> None:
     """Public form of :func:`_restore_held_peer_messages` for the pump."""
     _restore_held_peer_messages(session_id, held)
-
-
-async def on_cli_wake_rested(session_id: str) -> Optional[str]:
-    """A CLI-owned wake on the delegated leg came to rest: deliver held
-    messages now.
-
-    The CLI writes that wake's prompt itself, so held messages cannot ride
-    it. Without this they waited for the promotion deadline although the
-    parent had just been awake. Queues one context wake carrying them and
-    kicks it; returns its id, or None when nothing was held.
-    """
-    async with _terminal_delivery_lock(session_id):
-        held = await _take_held_peer_messages(session_id)
-        if not held:
-            return None
-        try:
-            turn = await _enqueue_context_wake(
-                session_id, "promotion", [], [], _held_peer_block(held),
-                extra_payload={"held_peer_messages": held},
-            )
-        except Exception:
-            _restore_held_peer_messages(session_id, held)
-            raise
-    if turn.get("id"):
-        logger.info(
-            "turn_scheduler: held peer messages for %s queued after its "
-            "CLI-owned wake as turn %s", session_id, turn["id"],
-        )
-        kick(session_id)
-    return turn.get("id")
 
 
 _message_resume_locks: WeakValueDictionary = WeakValueDictionary()
@@ -1814,14 +1782,12 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
 
 
 async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Optional[str]:
-    """Idle-reader hook: a background task reached a terminal state between
-    turns. Fold the terminal task into ONE consolidated ``source=unpark`` wake.
+    """A background task reached a terminal state between turns. Fold the
+    terminal task into ONE consolidated ``source=unpark`` wake.
 
-    Returns ``idle_reader.CLI_OWNED_WAKE_SIGNAL`` ("cli-owned-wake") when it
-    takes the CLI-owned-wake suppression branch (the CLI owns this completion's at-rest
-    wake and will deliver it itself); the idle reader uses that to arm a grace
-    window so it keeps draining until the CLI's wake turn lands instead of
-    exiting on its next poll. Every other path returns ``None``.
+    Returns ``"cli-owned-wake"`` when it takes the CLI-owned-wake suppression
+    branch (the CLI owns this completion's at-rest wake and will deliver it
+    itself). Every other path returns ``None``.
 
     Near-simultaneous completions must batch into a single turn (the builder's
     consolidation only fires when it sees all pending frames at once), and a
@@ -1921,10 +1887,6 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
                     "the at-rest wake (parent parked), suppressing app enqueue",
                     session_id, task_id,
                 )
-                # Signal the idle reader to arm its CLI-wake grace window: the
-                # CLI delivers this wake itself 7-60s later, so the reader must
-                # keep draining instead of exiting on its next poll (see
-                # idle_reader.CLI_OWNED_WAKE_SIGNAL).
                 return "cli-owned-wake"
             existing = await asyncio.to_thread(_queued_unpark_turn, session_id)
             if existing is not None:
@@ -2079,10 +2041,9 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
 # ---------------------------------------------------------------------------
 
 def install() -> None:
-    """Wire the scheduler into the three seams. Called once at boot."""
-    from app.core import idle_reader, session_runtime, turn_manager
+    """Wire the scheduler into its seams. Called once at boot."""
+    from app.core import session_runtime, turn_manager
     session_runtime.register_scheduler(on_turn_settled)
-    idle_reader.register_on_task_terminal(on_task_terminal)
     turn_manager.register_kick(kick)
     logger.info("turn_scheduler installed (settlement policies active)")
 

@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core import idle_reader, session_runtime, turn_manager, turn_scheduler
+from app.core import session_runtime, turn_manager, turn_scheduler
 from app.core.task_registry import task_registry
 from app.core.account_failover import FailoverDecision
 from app.core.compact_continue import AUTO_CONTINUE_PROMPT
@@ -45,12 +45,10 @@ def _clean_module_state():
     from app.core import provider_agent_supervisor
     provider_agent_supervisor.reset()
     session_runtime.register_scheduler(None)
-    idle_reader.register_on_task_terminal(None)
     turn_manager.register_kick(None)
     turn_scheduler._kick_tasks.clear()
     yield
     session_runtime.register_scheduler(None)
-    idle_reader.register_on_task_terminal(None)
     turn_manager.register_kick(None)
     turn_scheduler._kick_tasks.clear()
 
@@ -1719,10 +1717,9 @@ async def test_unpark_enqueue_survives_shutdown_kick_suppression(mock_db):
 # Wiring
 # ---------------------------------------------------------------------------
 
-async def test_install_registers_all_three_seams(mock_db):
+async def test_install_registers_both_seams(mock_db):
     turn_scheduler.install()
     assert session_runtime._on_turn_settled is turn_scheduler.on_turn_settled
-    assert idle_reader._on_task_terminal is turn_scheduler.on_task_terminal
     assert turn_manager._kick_hook is turn_scheduler.kick
 
 

@@ -466,7 +466,6 @@ class Settings(BaseSettings):
     # Size limits
     max_tool_output_chars: int = 500_000  # ~500KB, well under 1MB WS buffer
     max_display_output_chars: int = 2_000  # What we show in the UI
-    sdk_buffer_size: int = 50 * 1024 * 1024  # 50MB for base64 images/PDFs
 
     # ─── SDK Session Pool sizing + TIERED idle policy ───────────────────────
     #
@@ -584,18 +583,6 @@ class Settings(BaseSettings):
     # ``user_question_timeout_seconds`` instead). 0 disables the watchdog.
     # Override via TURN_PROGRESS_TIMEOUT_SECONDS.
     turn_progress_timeout_seconds: int = 1800  # 30 minutes of total silence
-
-    # Between-turns idle reader — CLI-owned wake grace window (seconds). When the
-    # LAST background task completes while the parent is parked, the scheduler
-    # SUPPRESSES the app's own unpark wake because the CLI delivers the wake
-    # itself — but that CLI wake turn arrives 7-60s later, after the idle reader
-    # would otherwise exit on its next 2s poll (has_active_background_work now
-    # False). The reader then never reads the wake, so its frames stay buffered
-    # and the UI never sees it. This grace keeps the reader draining for up to
-    # this long after a CLI-owned suppression, so it captures the wake when it
-    # lands. Refreshed on every frame while waiting; cleared when the wake turn
-    # completes. Override via CLI_WAKE_GRACE_SECONDS.
-    cli_wake_grace_seconds: float = 300.0
 
     # Admission backpressure for the subagent fan-out. A single orchestrator
     # session can spawn dozens of subagent node subprocesses; rather than letting

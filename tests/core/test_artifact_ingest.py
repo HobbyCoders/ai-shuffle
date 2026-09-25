@@ -28,13 +28,6 @@ SID = "sess-q5"
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def artifacts_dir(tmp_path, monkeypatch):
-    d = tmp_path / "artifacts"
-    monkeypatch.setattr(artifact_store, "ARTIFACTS_DIR", d)
-    return d
-
-
 def _mk_session(session_id: str = SID) -> None:
     sessions_db.create_session(session_id, "default")
 
@@ -284,7 +277,7 @@ async def test_subagent_without_screenshot_payload_unchanged(mock_db, artifacts_
 
 
 # ---------------------------------------------------------------------------
-# unfenced paths — drain pump + CLI wake turns ingest too
+# unfenced path — between-turns drained events ingest too
 # ---------------------------------------------------------------------------
 
 
@@ -309,24 +302,3 @@ async def test_drained_subagent_tool_result_ingests(mock_db, artifacts_dir):
     on_disk = artifacts_dir / digest[:2] / digest
     assert on_disk.read_bytes() == payload
     assert artifacts_db.get_artifact(digest) is not None
-
-
-async def test_cli_wake_tool_result_ingests(mock_db, artifacts_dir):
-    from app.core import turn_recorder as tr
-
-    _mk_session()
-    payload = b"wake-turn-screenshot"
-    digest = artifact_ingest.content_hash(payload)
-
-    count = await tr.record_cli_wake_event(
-        SID, _tool_result_event(_data_uri(payload, "image/png")), turn_id="wake-1"
-    )
-    assert count == 2  # artifact.created + tool.result
-
-    rows = _rows()
-    assert [r["event_type"] for r in rows] == ["artifact.created", "tool.result"]
-    assert rows[0]["turn_id"] == "wake-1"
-    assert rows[-1]["payload"]["artifact_hashes"] == [digest]
-
-    on_disk = artifacts_dir / digest[:2] / digest
-    assert on_disk.read_bytes() == payload

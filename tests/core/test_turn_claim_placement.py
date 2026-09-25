@@ -51,6 +51,8 @@ from app.core.config import settings
 from app.db import database
 from app.db import runs as runs_db
 from app.db import turns as turns_db
+from tests.core.helpers import make_pump
+from tests.helpers import sent_frames
 
 RUNNER_ME = "runner-me"
 OTHER = "runner-other"
@@ -134,13 +136,6 @@ def kicks(monkeypatch):
 
 
 # --- execute() surround (modeled on test_session_runtime._runtime_env) ------
-
-def _make_pump(events):
-    async def _impl(**kwargs):
-        for e in events:
-            yield e
-    return _impl
-
 
 def _blocking_pump(pump_entered: asyncio.Event, release: asyncio.Event):
     async def _impl(**kwargs):
@@ -351,7 +346,7 @@ async def test_first_winner_sticky_pins_anywhere_session(mock_db, monkeypatch):
     _seed_session("s-pin", placement_val={"where": "anywhere"}, instance_id=OTHER)
     turn = turns_db.enqueue_turn("s-pin", "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "completed"
@@ -373,7 +368,7 @@ async def test_null_placement_is_never_pinned(mock_db, monkeypatch):
     _seed_session("s-nullpin", placement_val=None, instance_id=RUNNER_ME)
     turn = turns_db.enqueue_turn("s-nullpin", "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "completed"
@@ -391,7 +386,7 @@ async def test_existing_runner_pin_is_never_rewritten(mock_db, monkeypatch):
     )
     turn = turns_db.enqueue_turn("s-repin", "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "completed"
@@ -407,7 +402,7 @@ async def test_execute_gate_leaves_foreign_placed_turn_queued(mock_db, monkeypat
     _seed_session("s-gate", placement_val={"where": f"runner:{OTHER}"})
     turn = turns_db.enqueue_turn("s-gate", "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome is None
@@ -557,14 +552,6 @@ def _handler_env():
         yield sync
 
 
-def _sent(handler, ftype):
-    return [
-        c.args[0]
-        for c in handler.send_json.call_args_list
-        if c.args and isinstance(c.args[0], dict) and c.args[0].get("type") == ftype
-    ]
-
-
 async def test_flag_on_remote_placed_query_enqueues_durably_no_kick(
     mock_db, monkeypatch, kicks
 ):
@@ -592,7 +579,7 @@ async def test_flag_on_remote_placed_query_enqueues_durably_no_kick(
     assert queued[0]["instance_id"] is None  # stamped only by start_turn (Q3-E1)
     assert kicks == []  # no_kick: the owner's claim loop starts it
     assert notifies == ["s-place"]
-    assert _sent(handler, "query_queued") == [
+    assert sent_frames(handler, "query_queued") == [
         {"type": "query_queued", "session_id": "s-place"}
     ]
 
@@ -628,8 +615,8 @@ async def test_flag_on_own_instance_null_placement_query_runs_local(
     assert queued[0]["profile_id"] == "claude-code"  # local turns keep the sentinel
     assert kicks == ["s-own"]  # no_kick=False — the local path kicks
     assert notifies == []  # no placed-remote NOTIFY wake
-    assert _sent(handler, "query_queued") == []  # idle local session: no placed ack
-    assert _sent(handler, "error") == []
+    assert sent_frames(handler, "query_queued") == []  # idle local session: no placed ack
+    assert sent_frames(handler, "error") == []
 
 
 async def test_flag_on_query_errors_honestly_when_no_capable_runner(
@@ -648,7 +635,7 @@ async def test_flag_on_query_errors_honestly_when_no_capable_runner(
             "project": None,
         })
 
-    errors = _sent(handler, "error")
+    errors = sent_frames(handler, "error")
     assert errors and "No capable device online" in errors[0]["message"]
     assert turns_db.get_queued_turns("s-off") == []
     assert kicks == []

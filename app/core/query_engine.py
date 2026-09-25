@@ -33,7 +33,7 @@ from app.core.agent_types import AgentOptions
 # the dispatch below never sees a claude_agent_sdk message class. Version skew
 # is absorbed inside the translation layer.
 from app.core.provider.events import (
-    AssistantMessage, UserMessage, TextBlock, ThinkingBlock, ToolUseBlock,
+    AssistantMessage, UserMessage, TextBlock, ToolUseBlock,
     ToolResultBlock, ResultMessage, SystemMessage, StreamEvent,
     ServerToolUseBlock, ServerToolResultBlock,
     TaskStartedMessage, TaskProgressMessage, TaskNotificationMessage,
@@ -71,7 +71,6 @@ from app.core.query_streaming import (  # noqa: F401 — re-exports
     truncate_large_payload,
     MAX_TOOL_OUTPUT_SIZE,
     MAX_DISPLAY_OUTPUT_SIZE,
-    DEFAULT_SDK_BUFFER_SIZE,
 )
 from app.core.query_options import (  # noqa: F401 — re-exports
     THINKING_TOKEN_BUDGETS,
@@ -250,8 +249,7 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
             #     TaskNotificationMessage on the SAME pooled adapter — exactly
             #     like a background sub-agent. mark_sdk_background_task pins the
             #     parked session in the pool (else idle eviction kills the pooled
-            #     client and drops the completion → frontend never unparks) and
-            #     keeps the idle reader running via get_active_background_work.
+            #     client and drops the completion → frontend never unparks).
             #     CLI shells are tracked SEPARATELY from the app's own Monitor-tool
             #     shells (mcp/builtin_tools.py), which are app-managed, independent
             #     of the pooled client, and must NOT pin.
@@ -351,60 +349,8 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
 # queue and never self-dequeues a SUBAGENT-owned one — unlike TOP-LEVEL Monitors, whose wakes
 # the CLI owns end-to-end (enqueue + self-dequeue) and which therefore must
 # keep being suppressed by the app. So this name sniff applies to SIDECHAIN
-# tool_uses only (both recorders below already gate on parent_tool_use_id).
+# tool_uses only (the streaming loop gates it on parent_tool_use_id).
 _IMPLICIT_BACKGROUND_TOOL_NAMES = ("Monitor",)
-
-
-def _record_subagent_lane_launches(session_id: Optional[str], message: Any) -> None:
-    """Record SUBAGENT-lane run_in_background launches that arrive BETWEEN turns.
-
-    In-stream, the ToolUseBlock branch of ``stream_to_websocket`` records these
-    (``mark_subagent_background_launch``); but a backgrounded sub-agent keeps
-    running after the parent parks, and its inner tool_use blocks then arrive on
-    the pooled client with only the idle reader reading them. The idle reader
-    calls this per message (right before ``_record_task_message``, so the launch mark is
-    always recorded before the task's TaskStarted is processed). Sidechain
-    messages only (``parent_tool_use_id`` set) — a top-level between-turns
-    launch belongs to ``_cli_turn_events_from_message``. Side-effect-only and
-    fully defensive, like ``_record_task_message``.
-    """
-    if not session_id or not getattr(message, "parent_tool_use_id", None):
-        return
-    try:
-        if not isinstance(message, AssistantMessage):
-            return
-        content = message.content or []
-        if isinstance(content, str):
-            return
-        for block in content:
-            if not isinstance(block, ToolUseBlock):
-                continue
-            tool_id = getattr(block, "id", None)
-            tool_input = block.input or {}
-            _flagged = bool(
-                tool_input.get("run_in_background")
-                or tool_input.get("runInBackground")
-            )
-            # Flag-less always-background builtins (Monitor) — see
-            # _IMPLICIT_BACKGROUND_TOOL_NAMES.
-            _implicit = getattr(block, "name", None) in _IMPLICIT_BACKGROUND_TOOL_NAMES
-            if tool_id and (_flagged or _implicit):
-                task_registry.mark_subagent_background_launch(session_id, tool_id)
-                # Link the child launch to its owner (this sub-agent's own
-                # launch id = message.parent_tool_use_id, gated non-null above).
-                task_registry.link_child_to_owner(
-                    session_id, tool_id,
-                    getattr(message, "parent_tool_use_id", None),
-                )
-                logger.info(
-                    "task-launch-classification session=%s tool_id=%s "
-                    "classification=%s (pump)",
-                    session_id, tool_id,
-                    "background-flag-subagent-lane" if _flagged
-                    else "background-builtin-subagent-lane",
-                )
-    except Exception:
-        logger.debug("subagent-lane launch recording failed", exc_info=True)
 
 
 # Phrases that identify a backgrounded sub-agent's launch-ACK ToolResult — the
@@ -512,233 +458,6 @@ def _should_defer_subagent_done(
         return "suppress"
     # (d) ambiguous — DEFER.
     return "defer"
-
-
-def _subagent_events_from_message(message: Any) -> List[Dict[str, Any]]:
-    """Convert a drained sub-agent inner message into ``subagent_*`` events.
-
-    A SLOW background sub-agent's inner activity (assistant text + tool calls)
-    arrives on the pooled adapter AFTER the parent turn's ``receive_events``
-    has already returned, so the in-stream conversion in ``stream_to_websocket``
-    never sees it. The idle reader calls this to convert those
-    messages (identified by ``parent_tool_use_id``) into the SAME events the
-    in-stream path yields, so the subagent inner group fills in instead of
-    rendering "no activity recorded". Returns ``[]`` for anything that is not a
-    sub-agent inner message.
-    """
-    parent_tool_id = getattr(message, "parent_tool_use_id", None)
-    if not parent_tool_id:
-        return []
-    content = getattr(message, "content", None) or []
-    if isinstance(content, str):
-        return []
-
-    events: List[Dict[str, Any]] = []
-    for block in content:
-        if isinstance(block, TextBlock):
-            if block.text:
-                events.append({
-                    "type": "subagent_chunk",
-                    "agent_id": parent_tool_id,
-                    "content": block.text,
-                })
-        elif isinstance(block, ToolUseBlock):
-            events.append({
-                "type": "subagent_tool_use",
-                "agent_id": parent_tool_id,
-                "name": block.name,
-                "id": getattr(block, "id", None),
-                "input": block.input or {},
-            })
-        elif isinstance(block, ToolResultBlock):
-            screenshot = extract_mcp_image(block.content)
-            events.append({
-                "type": "subagent_tool_result",
-                "agent_id": parent_tool_id,
-                "name": "unknown",
-                "tool_use_id": getattr(block, "tool_use_id", None),
-                "output": truncate_large_payload(block.content) if block.content else "",
-                "is_error": getattr(block, "is_error", False),
-                **({"screenshot": screenshot} if screenshot else {}),
-            })
-    return events
-
-
-def _cli_turn_events_from_message(
-    session_id: str,
-    message: Any,
-    tool_id_to_name: Dict[str, str],
-) -> List[Dict[str, Any]]:
-    """Convert a TOP-LEVEL message of a CLI-driven (autonomous) turn into the
-    SAME main-lane events the in-stream loop yields.
-
-    THE AT-REST WAKE CLASS: when a
-    top-level backgrounded Task/Agent comes to rest while the parent is PARKED
-    (between turns), the CLI itself starts a follow-up turn — it injects a
-    ``[SYSTEM NOTIFICATION - NOT USER INPUT] … <task-notification>`` user-lane
-    string and the model answers it. Those messages arrive on the pooled client
-    with only the idle reader reading them; without this converter the
-    assistant's answer would reach ONLY the durable CLI transcript mirror (so it
-    appears after a page refresh) but no live render path. The idle reader
-    records these events to the session event log (``record_cli_wake_event``);
-    ``thinking_block`` surfaces on reload via the CLI transcript.
-
-    Parity rules (mirrors ``stream_to_websocket`` + the reload parser):
-    - The injected user-lane STRING (and any top-level user TextBlock) yields NO
-      event — in-stream these steering messages are never rendered, and the
-      reload path (``jsonl_parser._is_task_notification``) hides them too.
-    - Assistant ``TextBlock`` → ``chunk`` (same event the non-partial in-stream
-      path yields); ``ThinkingBlock`` → a ``thinking_block`` marker (not a
-      recordable drained type — the idle reader skips it; it surfaces on reload
-      via the CLI transcript).
-    - ``ToolUseBlock`` named Task/Agent → ``subagent_start`` (same shape as
-      in-stream) so a sub-agent launched BY the CLI-driven turn gets its node;
-      any other tool → ``tool_use``. Launch classification side-effects mirror
-      in-stream: a ``run_in_background`` input arms ``mark_background_launch``,
-      and a Task/Agent ToolResult that reads like the async launch-ACK arms it
-      too (``_looks_like_subagent_launch_ack``) — otherwise a wake for an agent
-      chained from a CLI-driven turn would be misclassified as foreground.
-    - User ``ToolResultBlock`` → ``tool_result`` (names resolved through the
-      shared ``tool_id_to_name`` map the caller threads across messages).
-
-    Returns ``[]`` for sub-agent inner messages (``parent_tool_use_id`` set —
-    those belong to ``_subagent_events_from_message``) and for any non
-    Assistant/User message type.
-    """
-    if getattr(message, "parent_tool_use_id", None):
-        return []
-
-    events: List[Dict[str, Any]] = []
-
-    if isinstance(message, AssistantMessage):
-        for block in message.content or []:
-            if isinstance(block, TextBlock):
-                if block.text and block.text.strip():
-                    events.append({"type": "chunk", "content": block.text})
-            elif isinstance(block, ThinkingBlock):
-                if block.thinking:
-                    events.append({
-                        "type": "thinking_block",
-                        "content": block.thinking,
-                    })
-            elif isinstance(block, ToolUseBlock):
-                tool_id = getattr(block, "id", None)
-                tool_input = block.input or {}
-                if tool_id:
-                    tool_id_to_name[tool_id] = block.name
-                    # Mirror the in-stream launch classification: an explicit
-                    # run_in_background flag arms the background-launch gate for
-                    # this launch's eventual terminal notification.
-                    if tool_input.get("run_in_background") or tool_input.get("runInBackground"):
-                        task_registry.mark_background_launch(session_id, tool_id)
-                        logger.info(
-                            "task-launch-classification session=%s tool_id=%s "
-                            "classification=background-flag (cli-driven turn)",
-                            session_id, tool_id,
-                        )
-                if block.name in ("Task", "Agent"):
-                    agent_type = (
-                        tool_input.get("subagent_type")
-                        or tool_input.get("description")
-                        or "Agent"
-                    )
-                    # Same shape gate as the streaming loop: fluid's bare-named
-                    # "Task" dispatch builtin ({agent, prompt, mode, label}) is
-                    # app-dispatched and announced canonically by WorkerFeed, so
-                    # a generic subagent_start here would duplicate it. The
-                    # condition cannot be true on today's CLI-wake path (the CLI's
-                    # Task/Agent tools carry subagent_type, never "agent") — the
-                    # gate is here for consistency with the streaming loop.
-                    is_app_dispatch = (
-                        isinstance(tool_input, dict)
-                        and "agent" in tool_input
-                        and "subagent_type" not in tool_input
-                    )
-                    if not is_app_dispatch:
-                        events.append({
-                            "type": "subagent_start",
-                            "tool_id": tool_id,
-                            "agent_type": agent_type,
-                            "description": tool_input.get("description", ""),
-                            "prompt": tool_input.get("prompt", ""),
-                            "agent_id": tool_id,
-                        })
-                else:
-                    events.append({
-                        "type": "tool_use",
-                        "name": block.name,
-                        "id": tool_id,
-                        "input": tool_input,
-                    })
-        return events
-
-    if isinstance(message, UserMessage):
-        content = message.content
-        if isinstance(content, str):
-            # The CLI's injected user-lane steering text (the [SYSTEM
-            # NOTIFICATION] wrapper around <task-notification>) — never rendered.
-            return []
-        for block in content or []:
-            if isinstance(block, ToolResultBlock):
-                tool_use_id = getattr(block, "tool_use_id", None)
-                tool_name = tool_id_to_name.get(tool_use_id, "unknown")
-                output = truncate_large_payload(block.content) if block.content else ""
-                # Async Task/Agent launches (CLI 2.1.195+) omit run_in_background
-                # and reveal backgroundness only in the launch-ACK ToolResult —
-                # mirror the in-stream ACK sniff so the gate arms.
-                if (
-                    tool_use_id
-                    and tool_name in ("Task", "Agent")
-                    and _looks_like_subagent_launch_ack(output)
-                ):
-                    task_registry.mark_background_launch(session_id, tool_use_id)
-                    logger.info(
-                        "task-launch-classification session=%s tool_id=%s "
-                        "classification=background-ack (cli-driven turn)",
-                        session_id, tool_use_id,
-                    )
-                screenshot = extract_mcp_image(block.content)
-                events.append({
-                    "type": "tool_result",
-                    "name": tool_name,
-                    "tool_use_id": tool_use_id,
-                    "output": output,
-                    "is_error": bool(getattr(block, "is_error", False)),
-                    **({"screenshot": screenshot} if screenshot else {}),
-                })
-        return events
-
-    return []
-
-
-def _task_status_events_from_message(message: Any) -> List[Dict[str, Any]]:
-    """Convert a drained task-status SystemMessage into the SAME ``system`` event
-    the in-stream loop yields for it.
-
-    Parked-state "Task Updated" chip: in-stream, a ``TaskUpdatedMessage``
-    (a SystemMessage subclass) falls through to the generic SystemMessage branch
-    in ``stream_to_websocket`` and yields
-    ``{"type": "system", "subtype": <subtype>, "data": <data>}``, which the
-    recorder appends to the event log → the chip renders. This mirrors the
-    in-stream shape so the idle reader can record a status patch that arrives
-    while the session is PARKED (``record_drained_event``).
-
-    Only NON-init task-status system frames are converted (``init`` carries the SDK
-    session id and is handled specially in-stream — never forwarded as a chip).
-    ``TaskNotificationMessage`` / ``TaskProgressMessage`` / ``TaskStartedMessage``
-    are NOT SystemMessage-shaped chips and are handled by their own reader branches,
-    so they are excluded here. Returns ``[]`` for anything else.
-    """
-    if not isinstance(message, TaskUpdatedMessage):
-        return []
-    subtype = getattr(message, "subtype", None)
-    if subtype == "init":
-        return []
-    return [{
-        "type": "system",
-        "subtype": subtype,
-        "data": getattr(message, "data", None),
-    }]
 
 
 def _read_task_output_file(output_file: str, max_chars: int = 60_000) -> str:
@@ -919,7 +638,6 @@ async def execute_query(
 
     # Execute query and collect response
     response_text = []
-    tool_messages = []  # Collect tool use/result messages for storage
     metadata = {"usage_settlement_key": await capture_usage_identity(session_id)}
     sdk_session_id = None
     sdk_link_persisted = False
@@ -993,41 +711,6 @@ async def execute_query(
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         response_text.append(block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        tool_messages.append({
-                            "type": "tool_use",
-                            "name": block.name,
-                            "tool_id": getattr(block, 'id', None),
-                            "input": block.input
-                        })
-                    elif isinstance(block, ToolResultBlock):
-                        output = truncate_large_payload(block.content)
-                        tool_messages.append({
-                            "type": "tool_result",
-                            "name": getattr(block, 'name', 'unknown'),
-                            "tool_id": getattr(block, 'tool_use_id', None),
-                            "output": output
-                        })
-                    elif _SERVER_TOOL_TYPES and isinstance(block, _SERVER_TOOL_TYPES):
-                        # Server-executed tool call (advisor, web_search, web_fetch).
-                        # Caller never runs these; we still surface them so the UI
-                        # can badge "server tool" and the transcript is complete.
-                        tool_messages.append({
-                            "type": "tool_use",
-                            "name": block.name,
-                            "tool_id": block.id,
-                            "input": block.input,
-                            "server_side": True,
-                        })
-                    elif _SERVER_TOOL_RESULT_TYPES and isinstance(block, _SERVER_TOOL_RESULT_TYPES):
-                        # Server-tool result — content is an opaque dict, not str.
-                        tool_messages.append({
-                            "type": "tool_result",
-                            "name": "server_tool",
-                            "tool_id": getattr(block, 'tool_use_id', None),
-                            "output": truncate_large_payload(block.content),
-                            "server_side": True,
-                        })
                 metadata["model"] = message.model
 
                 # Track per-API-call usage so we can persist the LAST call's
@@ -1047,18 +730,6 @@ async def execute_query(
                         metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
                         metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                         metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
-
-            elif isinstance(message, UserMessage):
-                # UserMessage contains tool results from Claude's tool executions
-                for block in message.content:
-                    if isinstance(block, ToolResultBlock):
-                        output = truncate_large_payload(block.content) if block.content else ""
-                        tool_messages.append({
-                            "type": "tool_result",
-                            "name": "unknown",
-                            "tool_id": block.tool_use_id,
-                            "output": output
-                        })
 
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
@@ -1567,8 +1238,6 @@ async def stream_query(
         )
 
         # Execute query
-        response_text = []
-        tool_messages = []  # Collect tool use/result messages for storage
         tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
         metadata = {"usage_settlement_key": await capture_usage_identity(session_id)}
         sdk_session_id = resume_id  # Start with existing SDK session ID if resuming
@@ -1653,7 +1322,6 @@ async def stream_query(
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
-                        response_text.append(block.text)
                         yield {"type": "text", "content": block.text}
 
                     elif isinstance(block, ToolUseBlock):
@@ -1669,14 +1337,6 @@ async def stream_query(
                             "input": block.input
                         }
 
-                        # Collect tool use for storage
-                        tool_messages.append({
-                            "type": "tool_use",
-                            "name": block.name,
-                            "tool_id": tool_id,
-                            "input": block.input
-                        })
-
                     elif isinstance(block, ToolResultBlock):
                         # Truncate large outputs
                         output = truncate_large_payload(block.content)
@@ -1687,14 +1347,6 @@ async def stream_query(
                             "name": tool_name,
                             "output": output
                         }
-
-                        # Collect tool result for storage
-                        tool_messages.append({
-                            "type": "tool_result",
-                            "name": tool_name,
-                            "tool_id": tool_use_id,
-                            "output": output
-                        })
 
                     elif _SERVER_TOOL_TYPES and isinstance(block, _SERVER_TOOL_TYPES):
                         # Server-executed tool call (advisor, web_search, web_fetch).
@@ -1707,13 +1359,6 @@ async def stream_query(
                             "input": block.input,
                             "server_side": True,
                         }
-                        tool_messages.append({
-                            "type": "tool_use",
-                            "name": block.name,
-                            "tool_id": tool_id,
-                            "input": block.input,
-                            "server_side": True,
-                        })
 
                     elif _SERVER_TOOL_RESULT_TYPES and isinstance(block, _SERVER_TOOL_RESULT_TYPES):
                         tool_use_id = getattr(block, 'tool_use_id', None)
@@ -1725,13 +1370,6 @@ async def stream_query(
                             "output": output,
                             "server_side": True,
                         }
-                        tool_messages.append({
-                            "type": "tool_result",
-                            "name": tool_name,
-                            "tool_id": tool_use_id,
-                            "output": output,
-                            "server_side": True,
-                        })
 
                 metadata["model"] = message.model
 
@@ -1770,14 +1408,6 @@ async def stream_query(
                             "tool_use_id": block.tool_use_id,
                             "output": output
                         }
-
-                        # Collect tool result for storage
-                        tool_messages.append({
-                            "type": "tool_result",
-                            "name": tool_name,
-                            "tool_id": block.tool_use_id,
-                            "output": output
-                        })
 
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
@@ -2744,11 +2374,6 @@ async def _stream_to_websocket_impl(
             # Check if the CLI subprocess is still alive
             if adapter.is_alive():
                 logger.error("[WS] CLI process is still running (hung during initialization)")
-            elif getattr(adapter, "sdk_client", None):
-                from app.core.sdk_process_handle import SdkProcessHandle
-                handle = SdkProcessHandle(adapter.sdk_client)
-                if handle.available and handle.returncode is not None:
-                    logger.error(f"[WS] CLI process exited with code {handle.returncode} during initialization")
             error_msg = _extract_connection_error(e, cli_stderr_lines)
             logger.error(f"[WS] User-facing error: {error_msg}")
             yield {"type": "error", "message": error_msg}
@@ -2774,14 +2399,6 @@ async def _stream_to_websocket_impl(
     # hasn't started yet — any exit in between must clear the flag or the
     # pooled client is bricked (busy error forever, never idle-evicted).
     try:
-        # Make this session's node subprocess (and the subagents it is about to fork,
-        # which inherit the score) the kernel's preferred OOM-kill target. If the HOST
-        # runs out of memory mid-fan-out, the global OOM-killer then reaps one session's
-        # disposable, auto-recoverable subprocess instead of the Python orchestrator
-        # (which runs every session) or the database. Best-effort; set every turn,
-        # before the query() below triggers the fan-out. No-op if disabled/unprivileged.
-        mark_subprocess_oom_killable(state)
-
         # Initialize sdk_session_id - use resume_id if resuming, otherwise None until we get it from SDK
         sdk_session_id = resume_id
         # Persist-on-init guard: a brand-new session's sdk_session_id is only known
@@ -2794,21 +2411,6 @@ async def _stream_to_websocket_impl(
 
         # Execute query
         # Note: CLI built-in commands like /context and /compact are passed directly to the engine
-        response_text = []
-        tool_messages = []  # Collect tool use/result messages for storage
-        thinking_blocks = []  # Collect thinking blocks for DB persistence
-        system_messages_acc = []  # Collect system messages for DB persistence
-        plugin_messages_acc = []  # Collect plugin/hook warnings for DB persistence
-        # Preserve stream order for DB persistence. Each entry is tagged with a
-        # `kind` field so query_persistence can emit rows in the exact sequence
-        # they arrived, instead of bucketing all-thinking→all-tools→all-text.
-        turn_events: list = []
-        # Subagent (Task/Agent) child tool invocations keyed by parent_tool_id.
-        # These are embedded into the parent subagent's agent_children metadata
-        # at persistence time so reloading a session reconstructs the subagent's
-        # internal tool usage. Child tool_use entries are NOT persisted as
-        # top-level rows (they'd be orphaned without their parent context).
-        subagent_children: Dict[str, List[Dict[str, Any]]] = {}
         task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
         # Turn-local set of Task/Agent tool_use ids whose spawn is APP-DISPATCHED
         # (fluid's bare-named "Task" builtin, routed through the host dispatcher).
@@ -2850,8 +2452,7 @@ async def _stream_to_websocket_impl(
         # catch a launch whose tool_use_id both arming heuristics missed (the
         # run_in_background input flag AND the ACK text-sniff) but which is still a
         # RUNNING task. Seeded entries carry run_in_background=True and _cross_turn
-        # so late children are NOT re-persisted as this turn's subagent metadata
-        # (their parent row was persisted in a prior turn — see subagent_children).
+        # (their launch was seen in a prior turn).
         _seed_bg_ids = set(task_registry.get_background_launches(session_id))
         for _work in task_registry.get_active_background_work(session_id):
             _work_tool_id = _work.get("toolUseId")
@@ -2899,13 +2500,6 @@ async def _stream_to_websocket_impl(
         include_partial = options.include_partial_messages  # Track if streaming events are enabled
         has_visible_content = False  # Track if any content was yielded to the frontend
         is_slash_command = not resume and prompt.strip().startswith("/")
-        _current_thinking = []  # Accumulate thinking deltas into blocks
-        # The open thinking block's subtype (fluid BlockStart.subtype:
-        # "reasoning_summary" for the provider's own summary, "reasoning" for
-        # the reasoning text). A one-slot holder so the closures below can
-        # update it; None when the provider draws no distinction.
-        _thinking_subtype: List[Optional[str]] = [None]
-        _current_text_parts: list = []  # Accumulate asst text between blocks for ordered persistence
 
         # Helper to drain stderr queue and yield plugin messages
         async def drain_stderr_queue():
@@ -2963,14 +2557,18 @@ async def _stream_to_websocket_impl(
             # completing any in-progress operations.
 
             _event_count += 1
+            if _event_count == 1:
+                # The delegated CLI is running by its turn's first event (the
+                # first turn spawns it). Make it, and the subagents it forks
+                # (they inherit the score), the kernel's preferred OOM-kill
+                # target, so a host OOM reaps one disposable session subprocess
+                # instead of the orchestrator or the database. Best-effort; a
+                # no-op for native sessions or when disabled.
+                mark_subprocess_oom_killable(state)
 
             # Drain stderr queue and yield any plugin messages
             for stderr_msg in await drain_stderr_queue():
                 logger.debug(f"[WS] Yielding plugin message to websocket: {stderr_msg.get('type')}")
-                # Accumulate for DB persistence
-                if stderr_msg.get("type") == "plugin_message":
-                    plugin_messages_acc.append(stderr_msg)
-                    turn_events.append({"kind": "plugin", "payload": stderr_msg})
                 yield stderr_msg
 
             # Check typed task messages before generic SystemMessage
@@ -3141,17 +2739,6 @@ async def _stream_to_websocket_impl(
                     elif message.subtype not in SUPPRESSED_SUBTYPES:
                         has_visible_content = True
                         logger.debug(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")
-                        # Accumulate for DB persistence
-                        sys_content = ""
-                        if isinstance(message.data, dict) and "content" in message.data:
-                            sys_content = str(message.data["content"])
-                        sys_entry = {
-                            "content": sys_content,
-                            "subtype": message.subtype,
-                            "data": message.data,
-                        }
-                        system_messages_acc.append(sys_entry)
-                        turn_events.append({"kind": "system", "payload": sys_entry})
                         yield {
                             "type": "system",
                             "subtype": message.subtype,
@@ -3190,15 +2777,6 @@ async def _stream_to_websocket_impl(
                     delta_type = delta.get("type")
 
                     if delta_type == "text_delta" and delta.get("text"):
-                        # Finalize any accumulated thinking block
-                        if _current_thinking:
-                            thinking_entry = {"content": "".join(_current_thinking)}
-                            if _thinking_subtype[0]:
-                                thinking_entry["subtype"] = _thinking_subtype[0]
-                            thinking_blocks.append(thinking_entry)
-                            turn_events.append({"kind": "thinking", "payload": thinking_entry})
-                            _current_thinking.clear()
-                            _thinking_subtype[0] = None
                         # Real-time text streaming chunk
                         text = delta["text"]
                         has_visible_content = True
@@ -3210,21 +2788,10 @@ async def _stream_to_websocket_impl(
                             "index": event.get("index", 0)
                         }
                     elif delta_type == "thinking_delta" and delta.get("thinking"):
-                        # Thinking block streaming — accumulate for DB persistence.
-                        # A subtype change (the provider's summary block giving
-                        # way to the reasoning text, or the reverse) closes the
-                        # open block first: the two are different voices and
-                        # persist as separate rows.
+                        # Thinking block streaming. ``subtype`` (fluid
+                        # BlockStart.subtype) tells the provider's own summary
+                        # ("reasoning_summary") from the reasoning text.
                         subtype = delta.get("subtype") or None
-                        if _current_thinking and subtype != _thinking_subtype[0]:
-                            thinking_entry = {"content": "".join(_current_thinking)}
-                            if _thinking_subtype[0]:
-                                thinking_entry["subtype"] = _thinking_subtype[0]
-                            thinking_blocks.append(thinking_entry)
-                            turn_events.append({"kind": "thinking", "payload": thinking_entry})
-                            _current_thinking.clear()
-                        _thinking_subtype[0] = subtype
-                        _current_thinking.append(delta["thinking"])
                         yield {
                             "type": "stream_delta",
                             "delta_type": "thinking",
@@ -3360,23 +2927,7 @@ async def _stream_to_websocket_impl(
                         else:
                             # When include_partial_messages=True, text was already streamed via stream_delta
                             # Only send chunk when partial messages is disabled
-                            response_text.append(block.text)
                             has_visible_content = True
-                            # Record this text block in ordered turn events so it
-                            # persists in the exact stream position relative to
-                            # tool_use blocks. Without this, all text was bucketed
-                            # into a single merged assistant row appended AFTER the
-                            # tools, which made reloads (DB fast-path) render the
-                            # tool card above the text and merge separate text
-                            # blocks of a text→tool→text turn into one bubble.
-                            if block.text and block.text.strip():
-                                turn_events.append({
-                                    "kind": "text",
-                                    "payload": {
-                                        "content": block.text,
-                                        "uuid": asst_uuid,
-                                    },
-                                })
                             if not include_partial:
                                 logger.debug(f"[WS] Text chunk len={len(block.text)} for session={session_id}")
                                 yield {"type": "chunk", "content": block.text}
@@ -3388,21 +2939,6 @@ async def _stream_to_websocket_impl(
                         # Track tool_id → name for ToolResultBlock lookup
                         if tool_id:
                             tool_id_to_name[tool_id] = block.name
-
-                        # Tag tool_messages entries with parent_tool_id so persistence
-                        # can identify subagent children and embed them into the parent
-                        # subagent's agent_children metadata instead of emitting them
-                        # as orphaned top-level rows.
-                        tool_entry = {
-                            "type": "tool_use",
-                            "name": block.name,
-                            "tool_id": tool_id,
-                            "input": tool_input,
-                            # non-null parent = subagent child; persistence skips top-level emission
-                            "parent_tool_id": parent_tool_id,
-                            "uuid": asst_uuid,
-                        }
-                        tool_messages.append(tool_entry)
 
                         # Gate for the spurious-unpark fix: record the launch
                         # tool_use_id IFF the parent launched this tool with
@@ -3419,7 +2955,7 @@ async def _stream_to_websocket_impl(
                         # yielded.
                         if (
                             tool_id
-                            and not tool_entry["parent_tool_id"]
+                            and not parent_tool_id
                             and (
                                 tool_input.get("run_in_background")
                                 or tool_input.get("runInBackground")
@@ -3431,7 +2967,7 @@ async def _stream_to_websocket_impl(
                                 "classification=background-flag",
                                 session_id, tool_id,
                             )
-                        elif tool_id and not tool_entry["parent_tool_id"] and block.name in ("Task", "Agent"):
+                        elif tool_id and not parent_tool_id and block.name in ("Task", "Agent"):
                             # A top-level Agent/Task launch WITHOUT the input flag: it
                             # is provisionally foreground here. The CLI (2.1.195+) may
                             # still reveal it as async via its launch-ACK ToolResult,
@@ -3443,7 +2979,7 @@ async def _stream_to_websocket_impl(
                             )
                         elif (
                             tool_id
-                            and tool_entry["parent_tool_id"]
+                            and parent_tool_id
                             and (
                                 tool_input.get("run_in_background")
                                 or tool_input.get("runInBackground")
@@ -3461,7 +2997,7 @@ async def _stream_to_websocket_impl(
                             # Link the child launch to its owner (the
                             # sub-agent's own launch id = parent_tool_id).
                             task_registry.link_child_to_owner(
-                                session_id, tool_id, tool_entry["parent_tool_id"]
+                                session_id, tool_id, parent_tool_id
                             )
                             logger.info(
                                 "task-launch-classification session=%s tool_id=%s "
@@ -3470,7 +3006,7 @@ async def _stream_to_websocket_impl(
                             )
                         elif (
                             tool_id
-                            and tool_entry["parent_tool_id"]
+                            and parent_tool_id
                             and block.name in _IMPLICIT_BACKGROUND_TOOL_NAMES
                         ):
                             # SUBAGENT-lane FLAG-LESS background builtin
@@ -3486,7 +3022,7 @@ async def _stream_to_websocket_impl(
                             # Link the child launch to its owner (the
                             # sub-agent's own launch id = parent_tool_id).
                             task_registry.link_child_to_owner(
-                                session_id, tool_id, tool_entry["parent_tool_id"]
+                                session_id, tool_id, parent_tool_id
                             )
                             logger.info(
                                 "task-launch-classification session=%s tool_id=%s "
@@ -3535,10 +3071,6 @@ async def _stream_to_websocket_impl(
                                     or tool_input.get("runInBackground")
                                 ),
                             }
-                            # Initialize children collector for this subagent
-                            subagent_children[tool_id] = []
-                            # Record subagent in ordered turn events for persistence
-                            turn_events.append({"kind": "subagent", "payload": tool_entry})
 
                             if is_app_dispatch:
                                 # WorkerFeed owns the announcement for this spawn.
@@ -3558,30 +3090,9 @@ async def _stream_to_websocket_impl(
                         elif is_subagent_lane:
                             if parent_tool_id not in task_tool_uses:
                                 logger.debug(f"[WS] Routing event with unknown parent_tool_use_id={parent_tool_id} to subagent lane (not in task_tool_uses)")
-                            # Record as child of the parent subagent (not top-level).
-                            # For a CROSS-TURN background parent (seeded at turn
-                            # start, flagged _cross_turn), the parent's subagent row
-                            # was already persisted in a PRIOR turn, so there is no
-                            # "subagent" turn_event this turn to embed these children
-                            # into. That is intentional: this child is tagged with
-                            # parent_tool_id below, so persistence SKIPS it as a
-                            # top-level row (no orphan), and its collector is never
-                            # embedded (dropped from persistence) — the live/registry
-                            # subagent_tool_use event below is the only surface it
-                            # needs. It must NEVER reach the main-lane tool handler.
-                            child_entry = {
-                                "id": tool_id,
-                                "type": "tool_use",
-                                "content": "",
-                                "streaming": False,
-                                "tool_name": block.name,
-                                "tool_id": tool_id,
-                                "tool_input": tool_input,
-                                "tool_result": None,
-                                "tool_status": "running",
-                            }
-                            subagent_children.setdefault(parent_tool_id, []).append(child_entry)
-
+                            # A subagent's child tool (including one under a
+                            # CROSS-TURN background parent seeded at turn start):
+                            # it must NEVER reach the main-lane tool handler.
                             # Tool use from subagent - send as subagent_tool_use
                             yield {
                                 "type": "subagent_tool_use",
@@ -3591,8 +3102,7 @@ async def _stream_to_websocket_impl(
                                 "input": tool_input
                             }
                         else:
-                            # Regular top-level tool — record in ordered turn events
-                            turn_events.append({"kind": "tool_use", "payload": tool_entry})
+                            # Regular top-level tool
                             yield {
                                 "type": "tool_use",
                                 "name": block.name,
@@ -3618,19 +3128,6 @@ async def _stream_to_websocket_impl(
                                 f"content_type={content_type}, content_repr={content_repr}"
                             )
 
-                        # Tag with parent_tool_id when this result belongs to a
-                        # subagent child so persistence can skip top-level emission.
-                        result_entry = {
-                            "type": "tool_result",
-                            "name": tool_name,
-                            "tool_id": tool_use_id,
-                            "output": output,
-                            # non-null parent = subagent child (see tool_use tag).
-                            "parent_tool_id": parent_tool_id,
-                            "uuid": asst_uuid,
-                        }
-                        tool_messages.append(result_entry)
-
                         # Check if this is a result for a Task tool (subagent)
                         if tool_use_id in task_tool_uses:
                             task_info = task_tool_uses[tool_use_id]
@@ -3647,7 +3144,7 @@ async def _stream_to_websocket_impl(
                             # semantics.
                             _is_top_level_launch = (
                                 tool_use_id
-                                and not result_entry.get("parent_tool_id")
+                                and not parent_tool_id
                             )
                             if (
                                 _is_top_level_launch
@@ -3663,7 +3160,7 @@ async def _stream_to_websocket_impl(
                                 )
                             elif (
                                 tool_use_id
-                                and result_entry.get("parent_tool_id")
+                                and parent_tool_id
                                 and not task_info.get("run_in_background")
                                 and _looks_like_subagent_launch_ack(output)
                             ):
@@ -3718,8 +3215,7 @@ async def _stream_to_websocket_impl(
                                 del task_tool_uses[tool_use_id]
                             elif _decision == "defer":
                                 # Park it; keep the node RUNNING and task_tool_uses
-                                # intact. The durable tool_result row already flowed
-                                # to tool_messages above.
+                                # intact.
                                 deferred_subagent_done[tool_use_id] = {
                                     "output": output,
                                     "is_error": getattr(block, 'is_error', False),
@@ -3727,16 +3223,6 @@ async def _stream_to_websocket_impl(
                                 }
                         # Check if this tool result is from a subagent.
                         elif is_subagent_lane:
-                            # Merge result into the matching child entry under the parent subagent
-                            children = subagent_children.get(parent_tool_id, [])
-                            for child in children:
-                                if child.get("tool_id") == tool_use_id:
-                                    child["tool_result"] = output
-                                    child["tool_status"] = (
-                                        "error" if getattr(block, 'is_error', False) else "complete"
-                                    )
-                                    break
-
                             # Tool result from subagent - send as subagent_tool_result
                             yield {
                                 "type": "subagent_tool_result",
@@ -3751,8 +3237,7 @@ async def _stream_to_websocket_impl(
                                 **({"screenshot": screenshot} if screenshot else {}),
                             }
                         else:
-                            # Regular top-level tool_result — record in ordered events
-                            turn_events.append({"kind": "tool_result", "payload": result_entry})
+                            # Regular top-level tool_result
                             event = {
                                 "type": "tool_result",
                                 "name": tool_name,
@@ -3774,17 +3259,6 @@ async def _stream_to_websocket_impl(
                         if tool_id:
                             tool_id_to_name[tool_id] = block.name
                         has_visible_content = True
-                        tool_entry = {
-                            "type": "tool_use",
-                            "name": block.name,
-                            "tool_id": tool_id,
-                            "input": block.input,
-                            "parent_tool_id": None,
-                            "uuid": asst_uuid,
-                            "server_side": True,
-                        }
-                        tool_messages.append(tool_entry)
-                        turn_events.append({"kind": "tool_use", "payload": tool_entry})
                         yield {
                             "type": "tool_use",
                             "name": block.name,
@@ -3798,17 +3272,6 @@ async def _stream_to_websocket_impl(
                         tool_name = tool_id_to_name.get(tool_use_id, "server_tool")
                         output = truncate_large_payload(block.content)
                         has_visible_content = True
-                        result_entry = {
-                            "type": "tool_result",
-                            "name": tool_name,
-                            "tool_id": tool_use_id,
-                            "output": output,
-                            "parent_tool_id": None,
-                            "uuid": asst_uuid,
-                            "server_side": True,
-                        }
-                        tool_messages.append(result_entry)
-                        turn_events.append({"kind": "tool_result", "payload": result_entry})
                         yield {
                             "type": "tool_result",
                             "name": tool_name,
@@ -3862,8 +3325,6 @@ async def _stream_to_websocket_impl(
                 # Check if this message is from a subagent using parent_tool_use_id
                 parent_tool_id = message.parent_tool_use_id
                 is_subagent_lane = parent_tool_id is not None
-                # JSONL transcript uuid — shared by every block in this UserMessage.
-                user_msg_uuid = getattr(message, "uuid", None)
                 logger.debug(f"[WS] UserMessage received: content_type={type(message.content).__name__}, parent_tool_id={parent_tool_id}")
 
                 # Suppress local command output from subagent UserMessages.
@@ -3879,8 +3340,7 @@ async def _stream_to_websocket_impl(
                     # Task/Agent class when the CLI owns the wake (see
                     # turn_scheduler._cli_owns_at_rest_wake), so there is no
                     # duplicate to suppress at this source. At-rest injections
-                    # never pass through stream_to_websocket (the idle reader
-                    # consumes them between turns).
+                    # never pass through stream_to_websocket.
                     # Check for local command output
                     if "<local-command-stdout>" in content:
                         match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
@@ -3953,19 +3413,6 @@ async def _stream_to_websocket_impl(
                                 f"block.content falsy={not block.content}"
                             )
 
-                        # Collect tool result for storage (tagged with parent_tool_id
-                        # if it's a subagent child so persistence skips top-level emission)
-                        result_entry = {
-                            "type": "tool_result",
-                            "name": tool_name,
-                            "tool_id": tool_use_id,
-                            "output": output,
-                            # non-null parent = subagent child (see tool_use tag).
-                            "parent_tool_id": parent_tool_id,
-                            "uuid": user_msg_uuid,
-                        }
-                        tool_messages.append(result_entry)
-
                         # Check if this is a result for a Task tool (subagent)
                         if tool_use_id in task_tool_uses:
                             task_info = task_tool_uses[tool_use_id]
@@ -3980,7 +3427,7 @@ async def _stream_to_websocket_impl(
                             # preserving foreground semantics.
                             _is_top_level_launch = (
                                 tool_use_id
-                                and not result_entry.get("parent_tool_id")
+                                and not parent_tool_id
                             )
                             if (
                                 _is_top_level_launch
@@ -3996,7 +3443,7 @@ async def _stream_to_websocket_impl(
                                 )
                             elif (
                                 tool_use_id
-                                and result_entry.get("parent_tool_id")
+                                and parent_tool_id
                                 and not task_info.get("run_in_background")
                                 and _looks_like_subagent_launch_ack(output)
                             ):
@@ -4013,8 +3460,7 @@ async def _stream_to_websocket_impl(
                             # Backgrounded sub-agent: this ToolResult is only the launch
                             # ACK ("Async agent launched successfully …"), not the real
                             # result. Keep the node RUNNING — its inner activity streams
-                            # via parent_tool_use_id (in-stream and, after the parent
-                            # parks, via the idle reader) and it completes on the terminal
+                            # via parent_tool_use_id and it completes on the terminal
                             # TaskNotificationMessage. Do NOT emit subagent_done / delete
                             # tracking, or the node renders "completed / no activity".
                             # Defer-don't-terminate gate (UserMessage lane): emit
@@ -4048,8 +3494,7 @@ async def _stream_to_websocket_impl(
                                 del task_tool_uses[tool_use_id]
                             elif _decision == "defer":
                                 # Park it; keep the node RUNNING and task_tool_uses
-                                # intact. The durable tool_result row already flowed
-                                # to tool_messages above.
+                                # intact.
                                 deferred_subagent_done[tool_use_id] = {
                                     "output": output,
                                     "is_error": block.is_error,
@@ -4057,13 +3502,6 @@ async def _stream_to_websocket_impl(
                                 }
                         # Check if this tool result is from a subagent.
                         elif is_subagent_lane:
-                            # Merge result into the matching child entry under the parent subagent
-                            children = subagent_children.get(parent_tool_id, [])
-                            for child in children:
-                                if child.get("tool_id") == tool_use_id:
-                                    child["tool_result"] = output
-                                    child["tool_status"] = "error" if block.is_error else "complete"
-                                    break
                             # Tool result from subagent - send as subagent_tool_result
                             yield {
                                 "type": "subagent_tool_result",
@@ -4078,8 +3516,7 @@ async def _stream_to_websocket_impl(
                                 **({"screenshot": screenshot_b64} if screenshot_b64 else {}),
                             }
                         else:
-                            # Regular top-level tool_result — record in ordered events
-                            turn_events.append({"kind": "tool_result", "payload": result_entry})
+                            # Regular top-level tool_result
                             event = {
                                 "type": "tool_result",
                                 "name": tool_name,
@@ -4198,21 +3635,8 @@ async def _stream_to_websocket_impl(
                 task_tool_uses.pop(_tuid, None)
         deferred_subagent_done.clear()
 
-        # Finalize any trailing thinking block
-        if _current_thinking:
-            thinking_entry = {"content": "".join(_current_thinking)}
-            if _thinking_subtype[0]:
-                thinking_entry["subtype"] = _thinking_subtype[0]
-            thinking_blocks.append(thinking_entry)
-            turn_events.append({"kind": "thinking", "payload": thinking_entry})
-            _current_thinking.clear()
-            _thinking_subtype[0] = None
-
         # Final drain of stderr queue after streaming loop completes
         for stderr_msg in await drain_stderr_queue():
-            if stderr_msg.get("type") == "plugin_message":
-                plugin_messages_acc.append(stderr_msg)
-                turn_events.append({"kind": "plugin", "payload": stderr_msg})
             yield stderr_msg
 
     except asyncio.CancelledError:

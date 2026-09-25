@@ -62,13 +62,8 @@ class BreakerTrip:
     until: float
     status_code: int = 429
 
-    def remaining_seconds(self, now: Optional[float] = None) -> float:
-        """Seconds left on the cooldown (never negative)."""
-        current = time.time() if now is None else now
-        return max(0.0, self.until - current)
-
     def until_iso(self) -> str:
-        """``until`` as an ISO-8601 UTC timestamp (for user-facing messages)."""
+        """``until`` as an ISO-8601 UTC timestamp (for the trip log)."""
         return (
             datetime.fromtimestamp(self.until, tz=timezone.utc)
             .isoformat(timespec="seconds")
@@ -213,8 +208,7 @@ class ProviderCircuitBreaker:
             self._state[provider_id] = candidate
         logger.warning(
             "provider circuit breaker OPEN: provider=%s cooldown=%.0fs until=%s "
-            "(upstream returned 429; refusing all gateway requests to this "
-            "provider install-wide until then)",
+            "(upstream returned 429; provider workers on it fail fast until then)",
             provider_id,
             cooldown,
             candidate.until_iso(),
@@ -293,21 +287,3 @@ def is_tripped(provider_id: Optional[str], *, now: Optional[float] = None) -> bo
 
 def reset(provider_id: Optional[str] = None) -> None:
     _BREAKER.reset(provider_id)
-
-
-# ─── User-facing refusal text ────────────────────────────────────────────────
-
-def refusal_message(trip: BreakerTrip, *, now: Optional[float] = None) -> str:
-    """The message surfaced to a caller whose request is refused.
-
-    States the provider, that it is rate-limited, and exactly when it clears —
-    and says the request was NOT sent upstream, so a human reading the output
-    knows no further quota was spent.
-    """
-    remaining = trip.remaining_seconds(now)
-    return (
-        f"Provider '{trip.provider_id}' is rate limited: the upstream returned "
-        f"HTTP 429, so this install has stopped sending it requests. This "
-        f"request was NOT sent upstream. The block clears in "
-        f"{remaining:.0f}s (at {trip.until_iso()}); retry after that."
-    )

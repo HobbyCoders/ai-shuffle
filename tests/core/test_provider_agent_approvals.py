@@ -27,10 +27,16 @@ from unittest.mock import AsyncMock
 
 from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
 
-from app.core import interaction_wait, provider_agent_approvals as approvals
+from app.core import provider_agent_approvals as approvals
 from app.core.permission_handler import PermissionHandler
 import app.core.permission_handler as ph
 from app.db import interactions
+from tests.core.interaction_harness import (  # noqa: F401  (autouse fixtures)
+    no_gateway_listener,
+    no_push,
+    reset_backfill_memo_on_setup,
+    reset_interaction_wait_state,
+)
 
 
 PARENT = "parent-session"
@@ -41,31 +47,6 @@ WORKER_B = "worker-bbbb-2222"
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def _no_gateway_listener(monkeypatch):
-    monkeypatch.setattr(interaction_wait, "_ensure_listener", lambda: None)
-
-
-@pytest.fixture(autouse=True)
-def _no_push(monkeypatch):
-    import app.services.push_notification as pn
-
-    monkeypatch.setattr(pn, "fire_and_forget_notify", lambda *a, **k: None)
-
-
-@pytest.fixture(autouse=True)
-def _reset_interaction_wait_state():
-    interaction_wait._waiters.clear()
-    interaction_wait._listener_registered = False
-
-
-@pytest.fixture(autouse=True)
-def _reset_backfill_memo():
-    from app.core import history_backfill
-
-    history_backfill._reset_memo()
-
 
 @pytest.fixture(autouse=True)
 def _clean_routes():

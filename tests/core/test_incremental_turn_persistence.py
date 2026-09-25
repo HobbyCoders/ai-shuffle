@@ -70,6 +70,7 @@ import app.core.query_persistence as qp
 from app.core import jsonl_parser as jp
 from app.db import database
 from tests.core.engine_harness import StubPool, collect, make_state
+from tests.core.helpers import new_session
 
 
 # ─── mode + cache hygiene ───────────────────────────────────────────────────
@@ -228,12 +229,6 @@ def _engine_patches(stack: ExitStack, pool: StubPool, cwd: str):
     return options
 
 
-def _new_session(profile_id="default"):
-    session_id = f"sess-{uuid.uuid4()}"
-    database.create_session(session_id=session_id, profile_id=profile_id)
-    return session_id
-
-
 def _stream_response(test_db, sdk_sid, script):
     """Build a receive_response factory that mirrors entries as it yields.
 
@@ -290,9 +285,9 @@ async def test_mid_turn_death_preserves_flushed_blocks_via_real_read_path(test_d
     blocks must be readable through the real postgres_only reload path, the
     in-flight (never-mirrored) block absent, sdk_session_id already linked,
     and no crash artifacts / duplicate rows anywhere."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
-    state = make_state(sdk_client=MagicMock())
+    state = make_state()
     pool = StubPool(state)
 
     script = [
@@ -350,9 +345,9 @@ async def test_mid_turn_death_preserves_flushed_blocks_via_real_read_path(test_d
 async def test_mid_turn_death_before_any_flush_loses_only_that_turn(test_db, store_read, tmp_path):
     """Crash before the first mirrored block: the read path returns empty (not
     an error), the session row survives, and nothing is fabricated."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
-    state = make_state(sdk_client=MagicMock())
+    state = make_state()
     pool = StubPool(state)
 
     script = [
@@ -381,9 +376,9 @@ async def test_normal_turn_end_no_dupes_and_aggregates(test_db, store_read, tmp_
     the durable transcript holds exactly one copy of every block (the mirror's),
     turn-end persistence adds only the sessions-row aggregates, and a reload
     (cached or fresh) returns the identical transcript."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
-    state = make_state(sdk_client=MagicMock())
+    state = make_state()
     pool = StubPool(state)
 
     script = [
@@ -444,9 +439,9 @@ async def test_normal_turn_end_no_dupes_and_aggregates(test_db, store_read, tmp_
 async def test_interrupt_mid_turn_no_dupes(test_db, store_read, tmp_path):
     """Interrupt (CancelledError from the stream) after a flushed block: the
     interrupted persist path must not duplicate the mirrored block either."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
-    state = make_state(sdk_client=MagicMock())
+    state = make_state()
     pool = StubPool(state)
 
     script = [
@@ -475,7 +470,7 @@ async def test_persist_turn_results_gate_is_the_no_dupe_mechanism(test_db, monke
     """Pin the MECHANISM: _persist_turn_results never writes the legacy message
     batch (the store mirror is the single writer) and is idempotent across a
     crash-retry double call."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
 
     async def _persist():
@@ -557,7 +552,7 @@ def test_first_turn_discard_wipes_incremental_writes(test_db, store_read):
     """Stop-before-output on a brand-new session: discard_orphan_first_turn
     must erase the eagerly-mirrored rows AND the early-linked sdk_session_id,
     so the real read path shows a clean session."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
     # The turn got as far as: early link + the mirrored user line.
     database.update_session(session_id, sdk_session_id=sdk_sid)
@@ -583,7 +578,7 @@ def test_followup_turn_discard_keeps_prior_history(test_db, store_read):
     user line of the discarded turn stays in the store — follow-up discard is
     legacy-table-only by design (wiping the shared transcript would destroy
     real history)."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
     database.update_session(session_id, sdk_session_id=sdk_sid)
     # Prior completed turn, incrementally mirrored.

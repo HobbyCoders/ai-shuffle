@@ -1,8 +1,7 @@
 """Durable end-of-turn side effects.
 
-Every turn-END path (``SessionRuntime._finalize``, the background query runner,
-the idle reader's CLI-wake finalize) calls this to perform the
-DURABLE write a finished turn owes the session row:
+Every turn-END path (``SessionRuntime._finalize``, the background query runner)
+calls this to perform the DURABLE write a finished turn owes the session row:
 
 1. Parked marker — if the turn ends with live background work (a running
    sub-agent or a background shell), record the pinning kind on the

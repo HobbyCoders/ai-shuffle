@@ -1,11 +1,8 @@
 """
 AI Tools Registry - Single source of truth for all AI tool definitions.
 
-All AI tools are powered by fal.ai through a single API key.
-Add new AI tools here and they will automatically be available in:
-- Settings API (available tools endpoint)
-- Profile configuration (AIToolsConfig model)
-- Provider availability checks
+All AI tools are powered by fal.ai through a single API key. Each tool id here
+becomes a boolean field of the profile's ``AIToolsConfig`` model.
 """
 
 from typing import Dict, Any
@@ -103,14 +100,6 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
 }
 
 # ============================================================================
-# Provider to API Key Mapping
-# ============================================================================
-
-PROVIDER_KEY_MAP: Dict[str, str] = {
-    "fal-ai": "fal_api_key",
-}
-
-# ============================================================================
 # Dynamic Model Generation
 # ============================================================================
 
@@ -140,26 +129,3 @@ def _create_ai_tools_config_class():
 
 # Export the dynamically created model
 AIToolsConfig = _create_ai_tools_config_class()
-
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-def get_tool_ids() -> list[str]:
-    """Get list of all tool IDs"""
-    return list(AI_TOOLS.keys())
-
-
-def get_tools_by_category(category: str) -> Dict[str, Dict[str, Any]]:
-    """Get all tools in a specific category"""
-    return {
-        tool_id: tool_info
-        for tool_id, tool_info in AI_TOOLS.items()
-        if tool_info["category"] == category
-    }
-
-
-def get_categories() -> list[str]:
-    """Get list of all unique categories"""
-    return list(set(tool["category"] for tool in AI_TOOLS.values()))

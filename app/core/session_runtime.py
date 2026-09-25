@@ -13,8 +13,8 @@ A :class:`SessionRuntime` executes exactly one ``turns`` row end-to-end:
    delivery path) and a broadcast adapter carries the WS frames;
 6. **finalize** (always, in a ``finally``): decide ``completed | aborted |
    parked`` — the park gate is ``task_registry.get_active_background_work`` OR
-   ``get_background_launches`` — settle/park the turn, release the reader token,
-   and start the idle reader iff background work survives;
+   ``get_background_launches`` — settle/park the turn and release the reader
+   token;
 7. release the run lease in the outer ``finally`` and fire the injectable
    ``on_turn_settled`` scheduler seam (``turn_scheduler`` registers it) — but
    ONLY when finalize actually performed the DB transition (a racer that
@@ -249,13 +249,12 @@ def get_reader_lock(session_id: str) -> asyncio.Lock:
     return lock
 
 
-def start_idle_reader(session_id: str, *, drain_turn_id: Optional[str] = None) -> None:
-    """Start the between-turns idle reader for a session (replacing any existing).
+def start_idle_reader(session_id: str, *, drain_turn_id: str) -> None:
+    """Start the drain reader that settles ``drain_turn_id`` (a wedged runner
+    escalated to ``draining``) ``aborted`` once its client is safe to evict.
 
-    ``drain_turn_id`` puts the reader in *drain mode*: a stale ``ResultMessage``
-    for that turn settles it ``aborted`` (a wedged runner that was escalated to
-    ``draining``). The reader acquires the reader token itself, so it can never
-    race a turn pump.
+    Does nothing while one is already running. The reader acquires the reader
+    token itself, so it can never race a turn pump.
     """
     from app.core import idle_reader
 
@@ -2257,9 +2256,6 @@ class SessionRuntime:
                     await record_parked(sid, task_ids)
                 except Exception:
                     logger.debug("SessionRuntime: record_parked failed for %s", sid, exc_info=True)
-            # Reader token already released (pump's ``async with`` exited); start
-            # the idle reader to catch surviving background work's terminals.
-            start_idle_reader(sid)
             return "parked", parked is not None
 
         # A runner that lost its lease settles the row only while it is still

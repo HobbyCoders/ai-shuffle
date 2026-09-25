@@ -115,7 +115,7 @@ async def list_project_agents(
     project_path = get_project_path_from_dict(project)
 
     service = get_project_agent_service(project_path)
-    agents = service.get_agents()
+    agents = service.get_agents(migrate_legacy=True)
 
     return [_agent_to_response(a) for a in agents]
 

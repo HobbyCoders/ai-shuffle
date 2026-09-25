@@ -13,13 +13,7 @@ attribute, and building options must not create memory dirs as a side effect.
 from unittest.mock import patch
 
 import app.core.query_options as qo
-
-
-def _profile(config=None):
-    cfg = {"model": "opus", "tools_preset": "claude_code"}
-    if config:
-        cfg.update(config)
-    return {"id": "t", "config": cfg}
+from tests.core.helpers import query_profile
 
 
 def test_memory_dir_is_not_stamped(tmp_path, monkeypatch):
@@ -32,7 +26,7 @@ def test_memory_dir_is_not_stamped(tmp_path, monkeypatch):
 
     with patch.object(qo, "get_security_instructions", return_value=""):
         opts, _ = qo.build_options_from_profile(
-            profile=_profile(), project={"id": "p1", "path": str(checkout)}
+            profile=query_profile(), project={"id": "p1", "path": str(checkout)}
         )
 
     assert getattr(opts, "aih_memory_dir", None) is None
@@ -51,7 +45,7 @@ def test_building_options_creates_no_memory_dir(tmp_path, monkeypatch):
 
     with patch.object(qo, "get_security_instructions", return_value=""):
         qo.build_options_from_profile(
-            profile=_profile(), project={"id": "p1", "path": str(checkout)}
+            profile=query_profile(), project={"id": "p1", "path": str(checkout)}
         )
 
     assert not projects_root.exists()

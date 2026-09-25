@@ -45,7 +45,6 @@ from tests.core.engine_harness import StubPool, collect
 def _fake_state(messages, **overrides) -> SessionState:
     adapter = MagicMock()
     adapter.is_alive = MagicMock(return_value=True)
-    adapter.sdk_client = MagicMock()
     adapter.send_query = AsyncMock()
 
     async def _response():

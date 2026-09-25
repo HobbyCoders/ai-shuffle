@@ -170,9 +170,7 @@ def adapter_lane(adapter: Any) -> str:
 class SessionState:
     """Track state for an active provider session.
 
-    The adapter field holds the provider-agnostic interface. The `client`
-    property exposes an adapter's optional ``sdk_client`` (None for
-    ``HarnessAdapter``).
+    The adapter field holds the provider-agnostic interface.
 
     - callback_refs: Mutable dict for indirect callback references (broadcast_func, etc.)
       These are updated at the start of each query so the can_use_tool callback
@@ -185,16 +183,13 @@ class SessionState:
     is_connected: bool = False
     is_streaming: bool = False
     interrupt_requested: bool = False
-    # True while the between-turns idle reader (app/core/idle_reader.py) holds
-    # this pooled client. Set at reader start and cleared in the reader's exit
-    # ``finally`` (run_idle_reader), so a crashed or cancelled reader can never
-    # leave it stuck. Checked by the LRU/idle eviction guards: during the
-    # CLI-wake grace window the reader legitimately holds the client with
-    # ``is_streaming`` False and ZERO running background work (it is waiting up
-    # to ``cli_wake_grace_seconds`` for the CLI's own delayed wake turn), and it
-    # reads via ``peek`` (no LRU promote) so ``last_activity`` never bumps —
-    # without this flag either eviction path would tear the subprocess down
-    # mid-wait and kill the wake.
+    # True while the drain reader (app/core/idle_reader.py) holds this pooled
+    # client. Set at reader start and cleared in the reader's exit ``finally``
+    # (run_idle_reader), so a crashed or cancelled reader can never leave it
+    # stuck. Checked by the LRU/idle eviction guards: the reader holds the
+    # client with ``is_streaming`` False and reads via ``peek`` (no LRU
+    # promote), so ``last_activity`` never bumps; the reader does its own
+    # eviction once the wedge resolves.
     idle_reader_active: bool = False
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     # When the LAST device (browser/app) watching this session disconnected, or
@@ -242,16 +237,6 @@ class SessionState:
         """
         return adapter_lane(self.adapter)
 
-    @property
-    def client(self) -> Optional[object]:
-        """The adapter's optional ``sdk_client``.
-
-        HarnessAdapter has none, so its callers use the adapter interface and
-        get None here.
-        """
-        # Fluid adapters have no sdk_client; callers must handle None.
-        return getattr(self.adapter, "sdk_client", None)
-
 
 def is_subprocess_alive(state: SessionState) -> bool:
     """Check if the subprocess for a session state is still running."""
@@ -259,20 +244,17 @@ def is_subprocess_alive(state: SessionState) -> bool:
 
 
 def subprocess_pid(state: SessionState) -> Optional[int]:
-    """Best-effort PID of the adapter's ``sdk_client`` subprocess, or None.
+    """PID of the session's CLI subprocess (``adapter.subprocess_pid()``), or None.
 
-    Read through ``adapter.sdk_client``, which ``HarnessAdapter`` does not
-    expose, so this is None for it. Used by the dead-tree reaper to record
-    which process tree to reap once the subprocess has terminated. Never raises.
+    None for native sessions (in-process) and for a delegated session whose CLI
+    has not spawned yet. Used by the dead-tree reaper and the OOM-score
+    adjustment. Never raises.
     """
     try:
-        client = state.adapter.sdk_client
-        if client is None:
-            return None
-        from app.core.sdk_process_handle import SdkProcessHandle
-        return SdkProcessHandle(client).pid
+        pid = state.adapter.subprocess_pid()
     except Exception:
         return None
+    return pid if isinstance(pid, int) and pid > 0 else None
 
 
 def _host_available_mb() -> Optional[float]:

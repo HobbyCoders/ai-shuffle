@@ -24,7 +24,6 @@ from app.core.config import settings
 from app.core.platform import detect_deployment_mode, DeploymentMode
 
 from app.core.project_utils import get_project_working_dir
-from app.core.query_streaming import DEFAULT_SDK_BUFFER_SIZE
 from app.core.model_registry import context_window_choices
 
 # --- Re-exports for backward compatibility ---
@@ -681,8 +680,7 @@ def build_options_from_profile(
         session_id: Optional our session ID (for worktree lookup)
 
     Note: Agents are always passed programmatically via options.agents for tool
-    enforcement. On Windows local mode, callers also write agent files to
-    .claude/agents/ for supplemental CLI discovery.
+    enforcement.
     """
     config = profile["config"]
     overrides = overrides or {}
@@ -1584,7 +1582,7 @@ def build_options_from_profile(
         max_turns=overrides.get("max_turns") or config.get("max_turns"),
 
         # Tool configuration. The harness adapter ignores 'tools'. The delegated
-        # leg reads 'allowed_tools' as CLI permission grants (its MCP entries,
+        # leg reads 'allowed_tools' as CLI permission grants (its in-proc MCP entries,
         # via harness_adapter._delegated_permission_grants); native legs read
         # the tool_allowlist stamped below instead. 'disallowed_tools' is the
         # blocklist on both legs.
@@ -1615,9 +1613,6 @@ def build_options_from_profile(
         # Pass api_user_id for policy-based credential resolution
         env=full_env,
         extra_args=_build_extra_args(config.get("extra_args") or {}, hooks, detect_deployment_mode()),
-
-        # SDK-shaped buffer size (the harness adapter ignores it).
-        max_buffer_size=config.get("max_buffer_size") or DEFAULT_SDK_BUFFER_SIZE,
 
         # User identification
         user=config.get("user"),
@@ -1732,11 +1727,6 @@ def build_options_from_profile(
     # Resume existing session
     if resume_session_id:
         options.resume = resume_session_id
-
-    # SDK-shaped fields the harness adapter ignores.
-    options.include_hook_events = True
-
-    options.strict_mcp_config = bool(getattr(config, "strict_mcp_config", False) or config.get("strict_mcp_config", False))
 
     # Session store wiring — attach PgSessionStore when available. The harness
     # adapter ignores ``session_store*`` and ``enable_file_checkpointing``, so

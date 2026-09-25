@@ -1,7 +1,7 @@
 """TurnRecorder — typed event-log appender tapped into the stream pump.
 
 This module translates every pump event (``stream_to_websocket`` yields, plus
-the idle reader's between-turns re-dispatches) into typed contract events
+between-turns re-dispatches) into typed contract events
 (`app.contract.events`) appended to the append-only ``session_events`` log
 (`app.db.session_events`) under a fenced run lease (`app.db.runs`).
 
@@ -130,9 +130,9 @@ def _stamp_screenshot(event: Dict[str, Any]) -> Optional[tuple]:
 
 
 async def _ingest_screenshot_unfenced(
-    session_id: str, event: Dict[str, Any], *, turn_id: Optional[str] = None
+    session_id: str, event: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
-    """Unfenced-path screenshot ingest (idle-reader re-dispatch / CLI wake turns).
+    """Unfenced-path screenshot ingest (between-turns re-dispatch).
 
     Mirrors ``TurnRecorder._maybe_ingest_screenshot`` for callers with no live
     recorder: stamp ``artifact_hashes`` onto the pump event, store the bytes
@@ -161,7 +161,7 @@ async def _ingest_screenshot_unfenced(
                 session_id, digest, exc_info=True,
             )
         return [_build_event(
-            contract.ArtifactCreated, session_id, turn_id=turn_id,
+            contract.ArtifactCreated, session_id,
             hash=digest, mime=mime, filename=filename, size=len(data),
         )]
     except Exception:
@@ -400,9 +400,8 @@ def _translate_shared(
     if etype == "system":
         subtype = event.get("subtype") or ""
         if subtype == "task_updated":
-            # Background-task status chip (TaskUpdatedMessage in-stream, or the
-            # idle reader's mirrored/synthesized shape — see
-            # _task_status_events_from_message). Recording it as a generic
+            # Background-task status chip (a TaskUpdatedMessage from the
+            # stream). Recording it as a generic
             # system.note loses the terminal state: a replay then shows the
             # task stuck on its last in-turn "running" update forever.
             data = _as_dict(event.get("data"))
@@ -1352,7 +1351,7 @@ class TurnRecorder:
 
 
 # ----------------------------------------------------------------------
-# Module-level taps (idle reader / stop / park) — all unfenced appends.
+# Module-level taps (between turns / stop / park) — all unfenced appends.
 # ----------------------------------------------------------------------
 
 # Last recorder per session (set by ``TurnRecorder.maybe_create``). Lets the
@@ -1394,10 +1393,10 @@ async def _append_unfenced(session_id: str, events: List[Dict[str, Any]]) -> Non
 
 
 async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
-    """Record an idle-reader re-dispatch: subagent_*/task_*/system only.
+    """Record a between-turns event: subagent_*/task_*/system only.
 
-    Unfenced append (run_id=None, turn_id=None) — the idle reader runs between
-    turns with no owning run. Never raises.
+    Unfenced append (run_id=None, turn_id=None) — callers run between turns with
+    no owning run. Never raises.
     """
     try:
         if not isinstance(event, dict):
@@ -1409,9 +1408,7 @@ async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
             or etype == "system"
         ):
             # Deliberately narrow (other drain callers depend on it). Log the
-            # dropped type so a silently-unrendered drain event is diagnosable —
-            # the CLI-wake render surface (chunk/tool_use/tool_result) is served
-            # by record_cli_wake_event, NOT by widening this filter.
+            # dropped type so a silently-unrendered drain event is diagnosable.
             logger.debug(
                 "[TurnRecorder] record_drained_event dropped type=%r for %s",
                 etype, session_id,
@@ -1427,97 +1424,6 @@ async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
         logger.warning(
             "[TurnRecorder] record_drained_event failed for %s", session_id,
             exc_info=True,
-        )
-
-
-async def record_cli_wake_event(
-    session_id: str, event: Dict[str, Any], *, turn_id: Optional[str] = None
-) -> int:
-    """Record ONE forwarded CLI-owned wake-turn event to the session log.
-
-    The between-turns CLI wake turn (``idle_reader``) renders assistant TEXT and
-    top-level tool activity that :func:`record_drained_event` deliberately drops
-    (its filter accepts only ``subagent_*``/``task_*``/``system``). This entry
-    point widens the accepted set to the full render surface — ``chunk`` /
-    ``tool_use`` / ``tool_result`` PLUS everything ``record_drained_event``
-    accepts — and stamps the synthesized wake ``turn_id`` so each row ties to the
-    ``turn.started``/``turn.completed`` the reader brackets around the wake.
-
-    Unfenced append (run_id=None): the CLI wake runs between turns under the idle
-    reader's reader token, so no fenced ``TurnRecorder`` can be live for the same
-    session concurrently. Returns the number of contract rows appended (``0`` =
-    filtered out or untranslatable). Never raises.
-    """
-    try:
-        if not isinstance(event, dict):
-            return 0
-        etype = event.get("type") or ""
-        if not (
-            etype in ("chunk", "tool_use", "tool_result")
-            or etype.startswith("subagent_")
-            or etype.startswith("task_")
-            or etype == "system"
-        ):
-            return 0
-        # Screenshot ingest BEFORE translation (mirrors the fenced record()
-        # order) so a wake-turn browser/computer-use screenshot renders too.
-        rows = await _ingest_screenshot_unfenced(session_id, event, turn_id=turn_id)
-        rows.extend(_translate_shared(event, session_id, turn_id=turn_id))
-        await _append_unfenced(session_id, rows)
-        return len(rows)
-    except Exception:
-        logger.warning(
-            "[TurnRecorder] record_cli_wake_event failed for %s", session_id,
-            exc_info=True,
-        )
-        return 0
-
-
-async def record_cli_wake_turn_started(session_id: str, turn_id: str) -> None:
-    """Append a synthetic ``turn.started`` opening a CLI-owned wake turn.
-
-    Brackets the between-turns wake as a first-class turn so the FE reducer flips
-    its streaming indicator (``turn.started`` → ``isStreaming``) and — on the
-    paired ``turn.completed`` — settles any speculative subagent card. ``turn_id``
-    is a synthesized id with NO ``turns``-table row; the scheduler keys its
-    terminal reads by turns-table ids, so a synthetic wake turn is invisible to
-    the parked-turn state machine. Unfenced. Never raises.
-    """
-    try:
-        await _append_unfenced(session_id, [_build_event(
-            contract.TurnStarted, session_id, turn_id=turn_id,
-        )])
-    except Exception:
-        logger.warning(
-            "[TurnRecorder] record_cli_wake_turn_started failed for %s",
-            session_id, exc_info=True,
-        )
-
-
-async def record_cli_wake_turn_completed(
-    session_id: str,
-    turn_id: str,
-    *,
-    usage: Optional[Dict[str, Any]] = None,
-    stop_reason: Optional[str] = None,
-) -> None:
-    """Append a synthetic ``turn.completed`` closing a CLI-owned wake turn.
-
-    Mirrors the fenced recorder's ``done`` terminal shape (``stop_reason`` +
-    ``usage`` summary) so the FE reducer treats the wake like a normal turn:
-    ``isStreaming`` off + ``settleStaleBackgroundWork``. Paired with
-    :func:`record_cli_wake_turn_started` (same ``turn_id``). Unfenced. Never
-    raises.
-    """
-    try:
-        await _append_unfenced(session_id, [_build_event(
-            contract.TurnCompleted, session_id, turn_id=turn_id,
-            stop_reason=stop_reason, usage=usage or {},
-        )])
-    except Exception:
-        logger.warning(
-            "[TurnRecorder] record_cli_wake_turn_completed failed for %s",
-            session_id, exc_info=True,
         )
 
 

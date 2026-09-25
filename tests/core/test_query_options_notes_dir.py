@@ -19,19 +19,13 @@ from unittest.mock import patch
 
 import app.core.query_options as qo
 from app.core.note_files import get_notes_dir
-
-
-def _profile(config=None):
-    cfg = {"model": "opus", "tools_preset": "claude_code"}
-    if config:
-        cfg.update(config)
-    return {"id": "t", "config": cfg}
+from tests.core.helpers import query_profile
 
 
 def test_notes_dir_added_when_profile_has_no_add_dirs():
     notes_dir = str(get_notes_dir())
     with patch.object(qo, "get_security_instructions", return_value=""):
-        opts, _ = qo.build_options_from_profile(profile=_profile())
+        opts, _ = qo.build_options_from_profile(profile=query_profile())
     assert opts.add_dirs is not None
     assert notes_dir in [str(d) for d in opts.add_dirs]
 
@@ -40,7 +34,7 @@ def test_notes_dir_merged_with_profile_add_dirs():
     notes_dir = str(get_notes_dir())
     with patch.object(qo, "get_security_instructions", return_value=""):
         opts, _ = qo.build_options_from_profile(
-            profile=_profile({"add_dirs": ["/workspace/some-project"]})
+            profile=query_profile({"add_dirs": ["/workspace/some-project"]})
         )
     dirs = [str(d) for d in opts.add_dirs]
     assert "/workspace/some-project" in dirs
@@ -51,7 +45,7 @@ def test_notes_dir_not_duplicated_when_already_present():
     notes_dir = str(get_notes_dir())
     with patch.object(qo, "get_security_instructions", return_value=""):
         opts, _ = qo.build_options_from_profile(
-            profile=_profile({"add_dirs": [notes_dir]})
+            profile=query_profile({"add_dirs": [notes_dir]})
         )
     dirs = [str(d) for d in opts.add_dirs]
     assert dirs.count(notes_dir) == 1

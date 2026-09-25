@@ -297,7 +297,7 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
                 session_id, task_id, exc_info=True,
             )
 
-    # 2) DURABLE row — survives reload / restart (mirrors _row_for_system).
+    # 2) DURABLE row — survives reload / restart.
     try:
         await run_sync(
             database.add_session_message,

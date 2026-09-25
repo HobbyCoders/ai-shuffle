@@ -71,6 +71,13 @@ class ProviderAdapter(ABC):
     def is_connected(self) -> bool:
         """Whether connect() has been called and the backend is ready for queries."""
 
+    def subprocess_pid(self) -> Optional[int]:
+        """PID of the backend's live child process, or None when it runs in-process.
+
+        The session pool uses it to reap the process tree and set its OOM score.
+        """
+        return None
+
     # ─── Query Execution ──────────────────────────────────────────────
 
     @abstractmethod

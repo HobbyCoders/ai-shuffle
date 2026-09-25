@@ -39,14 +39,14 @@ def _make_state(
 ) -> SessionState:
     """Build a SessionState backed by a mock adapter with an awaitable disconnect.
 
-    The adapter's subprocess PID resolves to None (sdk_client=None), so no real
-    process is ever touched. `idle_seconds` backdates last_activity so
+    The adapter's subprocess PID resolves to None, so no real process is ever
+    touched. `idle_seconds` backdates last_activity so
     evict_idle can be exercised without sleeping.
     """
     adapter = MagicMock()
     adapter.is_alive.return_value = alive
     adapter.is_connected.return_value = connected
-    adapter.sdk_client = None
+    adapter.subprocess_pid.return_value = None
     adapter.disconnect = AsyncMock()
 
     last_activity = datetime.now(timezone.utc) - timedelta(seconds=idle_seconds)

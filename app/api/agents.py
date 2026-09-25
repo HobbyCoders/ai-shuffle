@@ -253,7 +253,7 @@ async def get_all_available_subagents(
     Get all available subagents for autocomplete from multiple sources:
     1. Profile-enabled subagents (from database)
     2. Project agents (if project_id provided)
-    3. User-global agents (~/.claude/agents/, auto-loaded by the SDK)
+    3. User-global agents (~/.fluid/agents/, loaded by Fluid at runtime)
     4. Plugin file-based agents (from enabled plugins)
 
     Returns a unified list with source information for each agent.
@@ -320,14 +320,16 @@ async def get_all_available_subagents(
         if project_id:
             project = database.get_project(project_id)
             if project:
-                if worktree_id:
-                    worktree = database.get_worktree(worktree_id)
-                    project_path = get_worktree_working_dir_as_path(worktree) if worktree else get_project_working_dir_as_path(project)
+                worktree = database.get_worktree(worktree_id) if worktree_id else None
+                if worktree:
+                    project_path = get_worktree_working_dir_as_path(worktree)
                 else:
                     project_path = get_project_working_dir_as_path(project)
                 try:
                     project_agent_service = get_project_agent_service(project_path)
-                    for agent in project_agent_service.get_agents():
+                    # Legacy .claude/agents copies run for the base path only,
+                    # never inside a session worktree.
+                    for agent in project_agent_service.get_agents(migrate_legacy=worktree is None):
                         agent_id = f"project:{agent.name}"
 
                         # Skip if already seen
@@ -395,7 +397,7 @@ async def get_all_available_subagents(
                     tools=agent.tools,
                     model=agent.model,
                     source="user",
-                    source_name="User (~/.claude)"
+                    source_name="User (~/.fluid)"
                 ))
         except Exception as e:
             # Log but don't fail if user-global agents can't be loaded

@@ -386,12 +386,8 @@ def build_generation_options(
     # still loads if present, but `enabledPlugins` is forcibly emptied.
     kwargs["settings"] = _GEN_SETTINGS_OVERRIDE
 
-    # SDK-shaped fields the harness adapter ignores. session_store is not set:
-    # generation sessions are one-shot and never persisted.
-    kwargs["include_hook_events"] = True
-
-    kwargs["strict_mcp_config"] = False
-
+    # session_store is not set: generation sessions are one-shot and never
+    # persisted.
     options = AgentOptions(**kwargs)
 
     # ── Provider binding stamp ───────────────────────────────────────────────

@@ -384,17 +384,6 @@ class FalCatalogService:
     # Query Methods
     # =========================================================================
 
-    def get_all(self) -> list[CatalogModel]:
-        """Get all cached models."""
-        return self._cache
-
-    def get_model(self, endpoint_id: str) -> Optional[CatalogModel]:
-        """Get a specific model by endpoint ID."""
-        for model in self._cache:
-            if model.endpoint_id == endpoint_id:
-                return model
-        return None
-
     def search(
         self,
         q: Optional[str] = None,
@@ -436,10 +425,6 @@ class FalCatalogService:
             {"category": cat, "count": count, "tool_type": resolve_tool_type(cat)}
             for cat, count in sorted(category_counts.items(), key=lambda x: -x[1])
         ]
-
-    def get_models_for_tool(self, tool_type: str) -> list[CatalogModel]:
-        """Get all models that map to a specific tool type."""
-        return [m for m in self._cache if m.tool_type == tool_type]
 
 
 # Singleton instance
