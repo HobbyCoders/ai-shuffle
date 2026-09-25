@@ -3,14 +3,7 @@
 import uuid
 
 from app.db import database
-
-
-def _column_names(conn, table):
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-
-
-def _schema_version(conn):
-    return conn.execute("SELECT version FROM schema_version").fetchone()[0]
+from tests.db.migration_helpers import column_names, schema_version
 
 
 def _mk(session_id=None, **kwargs):
@@ -21,11 +14,11 @@ def _mk(session_id=None, **kwargs):
 
 def test_fresh_db_has_pr_columns_and_version(mock_db):
     conn = mock_db
-    cols = _column_names(conn, "sessions")
+    cols = column_names(conn, "sessions")
     assert "pr_number" in cols
     assert "pr_url" in cols
     assert "pr_state" in cols
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_init_upgrades_pre_v85_db(mock_db):
@@ -40,15 +33,15 @@ def test_init_upgrades_pre_v85_db(mock_db):
     )
     conn.commit()
 
-    assert "pr_state" not in _column_names(conn, "sessions")
+    assert "pr_state" not in column_names(conn, "sessions")
 
     database.init_database()
 
-    cols = _column_names(conn, "sessions")
+    cols = column_names(conn, "sessions")
     assert "pr_number" in cols
     assert "pr_url" in cols
     assert "pr_state" in cols
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert schema_version(conn) == database.SCHEMA_VERSION
     row = conn.execute(
         "SELECT pr_number, pr_url, pr_state FROM sessions WHERE id = 's-legacy-pr'"
     ).fetchone()

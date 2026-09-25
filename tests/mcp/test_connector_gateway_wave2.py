@@ -8,7 +8,6 @@ network, no MCP transport.
 
 import asyncio
 import base64
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,14 +17,12 @@ from app.core.connectors.gmail import GmailConnector
 from app.core.connectors.homeassistant import HomeAssistantConnector
 from app.core.connectors.slack import SlackConnector
 from app.mcp.connector_gateway_sdk import build_gateway_tools, get_gateway_tool_names
+from tests.fakes.http import fake_response
+from tests.mcp.tool_helpers import tool_result_json
 
 BOUND_CHAT = "C0000000001"
 FORBIDDEN_CHAT = "C9999999999"
 CTX = {"session_id": "ai-1", "connector_id": "c1", "bound_chat_id": BOUND_CHAT}
-
-
-def _payload(result):
-    return json.loads(result["content"][0]["text"])
 
 
 # ---------------------------------------------------------------------------
@@ -207,14 +204,6 @@ class TestSlackApprovalFlow:
 # Home Assistant
 # ---------------------------------------------------------------------------
 
-def _resp(status=200, body=None, text=""):
-    r = MagicMock()
-    r.status_code = status
-    r.json = MagicMock(return_value=body if body is not None else {})
-    r.text = text or json.dumps(body or {})
-    return r
-
-
 def make_ha(config=None):
     conn = HomeAssistantConnector(
         connector_id="c1",
@@ -224,8 +213,8 @@ def make_ha(config=None):
         on_permission_response=AsyncMock(),
     )
     conn._http_client = MagicMock()  # truthy — real calls go through mocked helpers
-    conn._api_get = AsyncMock(return_value=_resp())
-    conn._api_post = AsyncMock(return_value=_resp())
+    conn._api_get = AsyncMock(return_value=fake_response())
+    conn._api_post = AsyncMock(return_value=fake_response())
     return conn
 
 
@@ -235,7 +224,7 @@ class TestHomeAssistantHandlers:
         conn = make_ha(config={
             "url": "u", "access_token": "t", "entity_filter": "light.,switch.",
         })
-        conn._api_get = AsyncMock(return_value=_resp(body=[
+        conn._api_get = AsyncMock(return_value=fake_response(body=[
             {"entity_id": "light.kitchen", "state": "on", "attributes": {"friendly_name": "Kitchen"}},
             {"entity_id": "switch.fan", "state": "off", "attributes": {}},
             {"entity_id": "climate.house", "state": "heat", "attributes": {}},
@@ -287,7 +276,7 @@ class TestHomeAssistantHandlers:
     @pytest.mark.asyncio
     async def test_http_error_surfaces(self):
         conn = make_ha()
-        conn._api_post = AsyncMock(return_value=_resp(status=401, text="unauthorized"))
+        conn._api_post = AsyncMock(return_value=fake_response(status=401, text="unauthorized"))
         res = await conn.execute_action("turn_on", {"entity_id": "light.x"}, context={})
         assert res["success"] is False
         assert "401" in res["error"]
@@ -444,7 +433,7 @@ class TestRegistration:
     @pytest.mark.asyncio
     async def test_global_invoke_resolves_first_running_instance(self):
         ha = make_ha()
-        ha._api_post = AsyncMock(return_value=_resp())
+        ha._api_post = AsyncMock(return_value=fake_response())
 
         def fake_running(ctype=None):
             return [("ha1", ha)] if ctype in (None, "homeassistant") else []
@@ -454,7 +443,7 @@ class TestRegistration:
             side_effect=fake_running,
         ):
             tools = {t.name: t.handler for t in build_gateway_tools("ai-1")}
-            res = _payload(await tools["homeassistant_invoke"]({
+            res = tool_result_json(await tools["homeassistant_invoke"]({
                 "action": "turn_on", "params": {"entity_id": "light.x"},
             }))
         assert res["success"] is True
@@ -472,7 +461,7 @@ class TestRegistration:
             side_effect=fake_running,
         ):
             tools = {t.name: t.handler for t in build_gateway_tools("ai-1")}
-            res = _payload(await tools["gmail_actions"]({}))
+            res = tool_result_json(await tools["gmail_actions"]({}))
         assert res["success"] is True
         ids = {a["id"] for a in res["actions"]}
         assert {"send_email", "search_messages", "trash_message"} <= ids

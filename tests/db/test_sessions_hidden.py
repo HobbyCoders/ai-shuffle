@@ -14,14 +14,7 @@ precedent this column follows exactly).
 import uuid
 
 from app.db import database
-
-
-def _column_names(conn, table):
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-
-
-def _schema_version(conn):
-    return conn.execute("SELECT version FROM schema_version").fetchone()[0]
+from tests.db.migration_helpers import column_names, schema_version
 
 
 def _mk(session_id=None, **kwargs):
@@ -38,8 +31,8 @@ def test_fresh_db_has_hidden_column_and_version(mock_db):
     """A freshly built DB (create_postgres_schema) carries sessions.hidden and
     the current schema version."""
     conn = mock_db
-    assert "hidden" in _column_names(conn, "sessions")
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert "hidden" in column_names(conn, "sessions")
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_init_upgrades_pre_v75_db(mock_db):
@@ -56,12 +49,12 @@ def test_init_upgrades_pre_v75_db(mock_db):
     )
     conn.commit()
 
-    assert "hidden" not in _column_names(conn, "sessions")
+    assert "hidden" not in column_names(conn, "sessions")
 
     database.init_database()
 
-    assert "hidden" in _column_names(conn, "sessions")
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert "hidden" in column_names(conn, "sessions")
+    assert schema_version(conn) == database.SCHEMA_VERSION
     row = conn.execute(
         "SELECT hidden FROM sessions WHERE id = 's-legacy-hidden'"
     ).fetchone()

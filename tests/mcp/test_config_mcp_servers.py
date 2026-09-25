@@ -16,13 +16,7 @@ import pytest
 from unittest.mock import patch
 
 from app.mcp.config_mcp_servers import _create_mcp_tools
-
-
-def _get_tool(tools: list, name: str):
-    for t in tools:
-        if t.name == name:
-            return t
-    raise KeyError(f"Tool '{name}' not found in tool list")
+from tests.mcp.tool_helpers import get_tool
 
 
 # =============================================================================
@@ -74,7 +68,7 @@ class TestListMcpServers:
         # time, so patch the source before building the tools.
         with patch("app.core.mcp_service.get_mcp_service", fake_get):
             tools = _create_mcp_tools(is_admin=True, project_dir="/tmp/proj")
-            tool = _get_tool(tools, "listMcpServers")
+            tool = get_tool(tools, "listMcpServers")
             result = await tool.handler({})
 
         import json

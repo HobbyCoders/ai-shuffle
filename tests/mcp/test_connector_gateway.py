@@ -8,7 +8,6 @@ client — no network, no MCP transport.
 """
 
 import asyncio
-import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,6 +21,7 @@ from app.mcp.connector_gateway_sdk import (
     build_gateway_tools,
     get_gateway_tool_names,
 )
+from tests.mcp.tool_helpers import tool_result_json
 
 BOUND_CHAT = 1472821837229723766
 EXTRA_CHAT = 2222222222222222222
@@ -123,10 +123,6 @@ def make_connector(client=None, config=None):
 
 
 CTX = {"session_id": "ai-1", "connector_id": "c1", "bound_chat_id": str(BOUND_CHAT)}
-
-
-def _payload(result):
-    return json.loads(result["content"][0]["text"])
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +297,7 @@ class TestActionsTool:
         conn = make_connector(FakeClient(channel))
         handlers = _handlers()
         with _patched_db(), _run_ctx(conn):
-            res = _payload(await handlers["discord_actions"]({}))
+            res = tool_result_json(await handlers["discord_actions"]({}))
         assert res["success"] is True
         ids = {a["id"] for a in res["actions"]}
         assert "send_message" in ids
@@ -321,7 +317,7 @@ class TestActionsTool:
         conn = make_connector(FakeClient(channel))
         handlers = _handlers()
         with _patched_db(), _run_ctx(conn):
-            res = _payload(await handlers["discord_actions"]({"category": "roles"}))
+            res = tool_result_json(await handlers["discord_actions"]({"category": "roles"}))
         assert res["success"] is True
         assert {a["category"] for a in res["actions"]} == {"roles"}
 
@@ -329,7 +325,7 @@ class TestActionsTool:
     async def test_connector_not_running(self):
         handlers = _handlers()
         with _patched_db(), _run_ctx(None, running=False):
-            res = _payload(await handlers["discord_actions"]({}))
+            res = tool_result_json(await handlers["discord_actions"]({}))
         assert res["success"] is False
         assert "not running" in res["error"]
 
@@ -342,7 +338,7 @@ class TestInvokeTool:
         conn = make_connector(FakeClient(channel))
         handlers = _handlers()
         with _patched_db(), _run_ctx(conn):
-            res = _payload(await handlers["discord_invoke"]({
+            res = tool_result_json(await handlers["discord_invoke"]({
                 "action": "send_message", "params": {"text": "hello"},
             }))
         assert res["success"] is True
@@ -354,7 +350,7 @@ class TestInvokeTool:
         conn = make_connector(FakeClient(FakeChannel(guild=FakeGuild())))
         handlers = _handlers()
         with _patched_db(), _run_ctx(conn):
-            res = _payload(await handlers["discord_invoke"]({"action": "explode"}))
+            res = tool_result_json(await handlers["discord_invoke"]({"action": "explode"}))
         assert res["success"] is False
         assert "Unknown action" in res["error"]
 
@@ -365,7 +361,7 @@ class TestInvokeTool:
         conn = make_connector(FakeClient(channel))
         handlers = _handlers()
         with _patched_db(), _run_ctx(conn):
-            res = _payload(await handlers["discord_invoke"]({
+            res = tool_result_json(await handlers["discord_invoke"]({
                 "action": "send_message", "params": {},
             }))
         assert res["success"] is False
@@ -380,7 +376,7 @@ class TestInvokeTool:
         conn = make_connector(FakeClient({BOUND_CHAT: bound, FORBIDDEN_CHAT: other}))
         handlers = _handlers()
         with _patched_db(), _run_ctx(conn):
-            res = _payload(await handlers["discord_invoke"]({
+            res = tool_result_json(await handlers["discord_invoke"]({
                 "action": "send_message",
                 "params": {"text": "hi", "channel": str(FORBIDDEN_CHAT)},
             }))
@@ -396,7 +392,7 @@ class TestInvokeTool:
         conn.request_action_approval = AsyncMock(return_value=(False, "Denied by user."))
         handlers = _handlers()
         with _patched_db(), _run_ctx(conn):
-            res = _payload(await handlers["discord_invoke"]({
+            res = tool_result_json(await handlers["discord_invoke"]({
                 "action": "purge_messages", "params": {"limit": 5},
             }))
         assert res["success"] is False
@@ -412,7 +408,7 @@ class TestInvokeTool:
         conn.request_action_approval = AsyncMock(return_value=(True, "Approved by user."))
         handlers = _handlers()
         with _patched_db(), _run_ctx(conn):
-            res = _payload(await handlers["discord_invoke"]({
+            res = tool_result_json(await handlers["discord_invoke"]({
                 "action": "purge_messages", "params": {"limit": 5},
             }))
         assert res["success"] is True
@@ -428,7 +424,7 @@ class TestInvokeTool:
         conn.request_action_approval = AsyncMock()
         handlers = _handlers()
         with _patched_db(), _run_ctx(conn):
-            res = _payload(await handlers["discord_invoke"]({
+            res = tool_result_json(await handlers["discord_invoke"]({
                 "action": "purge_messages", "params": {"limit": 2},
             }))
         assert res["success"] is True
@@ -444,7 +440,7 @@ class TestInvokeTool:
         conn.request_action_approval = AsyncMock(return_value=(False, "Denied by user."))
         handlers = _handlers()
         with _patched_db(), _run_ctx(conn):
-            res = _payload(await handlers["discord_invoke"]({
+            res = tool_result_json(await handlers["discord_invoke"]({
                 "action": "purge_messages", "params": {"limit": 2},
             }))
         assert res["success"] is False
@@ -459,7 +455,7 @@ class TestInvokeTool:
         conn = make_connector(FakeClient(channel))
         handlers = _handlers()
         with _patched_db(), _run_ctx(conn):
-            res = _payload(await handlers["discord_invoke"]({
+            res = tool_result_json(await handlers["discord_invoke"]({
                 "action": "kick_member", "params": {"user_id": "77"},
             }))
         assert res["success"] is False

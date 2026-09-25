@@ -13,19 +13,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.core import git_ops_runner
-from app.core.config import settings
 from app.db import git_ops as git_ops_db
+from tests.shared_fixtures import LOCAL_ME as ME, pin_runner  # noqa: F401  (autouse fixture)
 
-ME = "local-me"
 PEER = "peer-1"
 PV2 = "pv2-abc"
-
-
-@pytest.fixture(autouse=True)
-def pin_runner(monkeypatch):
-    monkeypatch.setattr(
-        type(settings), "effective_instance_id", property(lambda self: ME)
-    )
 
 
 @pytest.fixture

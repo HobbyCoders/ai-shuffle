@@ -20,14 +20,7 @@ from unittest.mock import patch
 
 from app.core import jsonl_parser as jp
 from app.core.jsonl_parser import ByteBoundedLRU, estimate_size
-
-
-def setup_function(_func):
-    jp.invalidate_parse_cache()
-
-
-def teardown_function(_func):
-    jp.invalidate_parse_cache()
+from tests.core.jsonl_cache_helpers import sdk_entries, setup_function, teardown_function  # noqa: F401  (module hooks)
 
 
 # ---------------------------------------------------------------------------
@@ -112,33 +105,6 @@ def test_estimate_size_tracks_payload_growth():
 # The store parse cache: a hit deserializes nothing and cannot be poisoned
 # ---------------------------------------------------------------------------
 
-def _entries(pairs):
-    out = []
-    for i, (u, a) in enumerate(pairs):
-        out.append(
-            {
-                "type": "user",
-                "message": {"role": "user", "content": u},
-                "uuid": f"u{i}",
-                "timestamp": f"2024-01-01T00:00:{i * 2:02d}Z",
-            }
-        )
-        out.append(
-            {
-                "type": "assistant",
-                "message": {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": a}],
-                    "usage": {"input_tokens": 5, "output_tokens": 3},
-                    "model": "claude-x",
-                },
-                "uuid": f"a{i}",
-                "timestamp": f"2024-01-01T00:00:{i * 2 + 1:02d}Z",
-            }
-        )
-    return out
-
-
 def _loader(entries):
     calls = {"n": 0}
 
@@ -153,7 +119,7 @@ def _loader(entries):
 
 def test_store_cache_hit_returns_equal_but_independent_messages():
     sid = "cache-shape-1"
-    loader, calls = _loader(_entries([("Q", "A")]))
+    loader, calls = _loader(sdk_entries([("Q", "A")]))
 
     first, _ = jp.parse_session_history_from_store(
         sid, "/workspace", loader, store_version_loader=lambda _s: (2, 2)
@@ -171,7 +137,7 @@ def test_store_cache_hit_returns_equal_but_independent_messages():
 
 def test_mutating_a_returned_message_does_not_poison_the_cache():
     sid = "cache-poison-1"
-    loader, _ = _loader(_entries([("Q", "A")]))
+    loader, _ = _loader(sdk_entries([("Q", "A")]))
     version = lambda _s: (2, 2)  # noqa: E731
 
     served, _ = jp.parse_session_history_from_store(
@@ -190,7 +156,7 @@ def test_mutating_a_returned_message_does_not_poison_the_cache():
 def test_store_cache_value_holds_structures_not_json_strings():
     """A hit must cost no deserialization — the whole point of B5."""
     sid = "cache-struct-1"
-    loader, _ = _loader(_entries([("Q", "A")]))
+    loader, _ = _loader(sdk_entries([("Q", "A")]))
     jp.parse_session_history_from_store(
         sid, "/workspace", loader, store_version_loader=lambda _s: (2, 2)
     )
@@ -206,7 +172,7 @@ def test_store_cache_is_byte_bounded(monkeypatch):
     grow without bound (and never serves a stale copy of it either)."""
     monkeypatch.setattr(jp._store_parse_cache, "max_entry_bytes", 2000)
     sid = "cache-huge-1"
-    big = _entries([("Q", "A" * 50_000)])
+    big = sdk_entries([("Q", "A" * 50_000)])
     loader, calls = _loader(big)
     version = lambda _s: (2, 2)  # noqa: E731
 

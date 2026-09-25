@@ -11,11 +11,9 @@ head node to continue from).
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.auth import require_auth
-from app.api.sessions import router
+from tests.api.helpers import app  # noqa: F401  (fixture)
 
 
 # =============================================================================
@@ -41,14 +39,6 @@ def mock_api_user():
             patch("app.api.common.get_api_user_from_request", new=mock):
         mock.return_value = None  # admin (no API user)
         yield mock
-
-
-@pytest.fixture
-def app(mock_database, mock_api_user):
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[require_auth] = lambda: "test-session-token"
-    yield app
 
 
 @pytest.fixture

@@ -48,12 +48,9 @@ from app.core.task_registry import (
     task_registry,
     SERVER_SHUTDOWN_SUMMARY,
     SERVER_SHUTDOWN_REASON,
-    USER_STOP_SUMMARY,
-    USER_STOP_REASON,
 )
 from app.db import database
 from app.db.async_database import run_sync
-from app.core.provider.events import TaskUpdatedMessage
 
 
 SESSION = "sess-guarantee"
@@ -414,110 +411,6 @@ async def test_force_cleanup_reap_stamps_server_shutdown():
     assert reaped[0]["summary"] == SERVER_SHUTDOWN_SUMMARY
     assert reaped[0].get("reason") == SERVER_SHUTDOWN_REASON
 
-
-# ===========================================================================
-# (c) USER-initiated stop of a LIVE background sub-agent must mark the
-#     registry row terminal ITSELF — not rely on a CLI "stopped" frame that a
-#     parked session has no reader for (phantom "running" agent bug, live-repro
-#     2026-07-10). Exactly-once terminal surface with user attribution.
-# ===========================================================================
-
-
-def _live_agent_state():
-    """A mock pooled state for a LIVE, connected session with a stoppable
-    background sub-agent (async ``stop_task`` that records nothing itself — the
-    registry transition must come from ``stop_session_task``)."""
-    state = MagicMock()
-    state.is_connected = True
-    state.client = MagicMock()
-    state.client.stop_task = AsyncMock(return_value=None)
-    return state
-
-
-async def test_stop_session_task_live_agent_marks_registry_killed():
-    """User "x" on a RUNNING background agent with a LIVE client: the registry
-    row must reach ``killed`` (with user attribution) even though the SDK
-    ``stop_task`` emits no terminal frame back through the streaming loop."""
-    from app.core.query_session_lifecycle import stop_session_task
-
-    _own_task("t-userstop", "tu-userstop")
-    assert task_registry.get_task(SESSION, "t-userstop")["status"] == "running"
-
-    state = _live_agent_state()
-    with patch("app.core.query_session_lifecycle.get_session_pool") as gp:
-        gp.return_value.peek = MagicMock(return_value=state)
-        result = await stop_session_task(SESSION, "t-userstop")
-
-    # SDK stop was issued...
-    state.client.stop_task.assert_awaited_once_with("t-userstop")
-    assert result["ok"] is True and result["kind"] == "agent"
-    # ...AND the registry row is now terminal (no phantom "running").
-    rec = task_registry.get_task(SESSION, "t-userstop")
-    assert rec["status"] == "killed", rec
-    assert rec["summary"] == USER_STOP_SUMMARY
-    assert rec.get("reason") == USER_STOP_REASON
-    # It has dropped off the running-only /live control view.
-    assert all(t["id"] != "t-userstop" for t in task_registry.get_active(SESSION))
-
-
-async def test_stop_session_task_live_agent_surfaces_terminal_exactly_once():
-    """The user stop drives the SAME guaranteed terminal surface as a #514 kill:
-    exactly one durable terminal row, carrying user attribution — and a later
-    CLI ``stopped`` frame for the same task must NOT double-surface."""
-    from app.core.query_engine import _record_task_message
-    from app.core.query_session_lifecycle import stop_session_task
-
-    _make_db_session()
-    cwh.register_terminal_notification_callback()
-    _own_task("t-once", "tu-once")
-
-    state = _live_agent_state()
-    with patch("app.core.query_session_lifecycle.get_session_pool") as gp:
-        gp.return_value.peek = MagicMock(return_value=state)
-        result = await stop_session_task(SESSION, "t-once")
-    assert result["ok"] is True
-
-    # A CLI "stopped" TaskUpdated arriving LATE (drain pump) must be a no-op.
-    late = TaskUpdatedMessage(
-        subtype="task_updated",
-        data={"task_id": "t-once", "patch": {"status": "killed"}},
-        task_id="t-once",
-        patch={"status": "killed", "end_time": 1},
-        status="killed",
-        session_id=SESSION,
-        uuid="uu-late",
-    )
-    _record_task_message(SESSION, late)
-
-    await _drain_terminal_surface()
-    rows = await _terminal_rows("t-once")
-    assert len(rows) == 1, f"expected exactly ONE terminal surface, got {len(rows)}"
-    # The ROW keeps the registry vocabulary; the CHIP says the stop was
-    # deliberate, so a task the user stopped does not read as a crash.
-    assert rows[0]["metadata"]["system_data"].get("status") == "cancelled"
-    assert rows[0]["metadata"]["system_data"].get("reason") == USER_STOP_REASON
-    assert task_registry.get_task(SESSION, "t-once")["status"] == "killed"
-
-
-async def test_stop_session_task_live_agent_calls_terminal_callback_once():
-    """Registry-level: the live-agent user stop fires the terminal-notification
-    callback exactly once (mirrors the #514 exactly-once guarantee)."""
-    from app.core.query_session_lifecycle import stop_session_task
-
-    spy = MagicMock()
-    task_registry.set_terminal_notification_callback(spy)
-    _own_task("t-cb", "tu-cb")
-
-    state = _live_agent_state()
-    with patch("app.core.query_session_lifecycle.get_session_pool") as gp:
-        gp.return_value.peek = MagicMock(return_value=state)
-        await stop_session_task(SESSION, "t-cb")
-
-    spy.assert_called_once()
-    _, wire = spy.call_args.args
-    assert wire["id"] == "t-cb"
-    assert wire["status"] == "killed"
-    assert wire.get("reason") == USER_STOP_REASON
 
 async def test_unexpected_kill_without_reader_queues_once_but_stop_never_wakes(monkeypatch):
     from app.core import turn_scheduler

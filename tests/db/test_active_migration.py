@@ -12,16 +12,9 @@ Modeled on tests/db/test_placement_migration.py — it exercises the FULL
 `_run_column_migrations` pipeline against a shim-wrapped SQLite connection.
 """
 
-import pytest
 
 from app.db import database
-
-
-@pytest.fixture(autouse=True)
-def _foreign_keys_off(test_db):
-    """Run on the shared conftest DB with foreign keys off: these tests
-    seed rows without their FK parents."""
-    test_db.execute("PRAGMA foreign_keys = OFF")
+from tests.shared_fixtures import foreign_keys_off  # noqa: F401  (autouse fixture)
 
 
 def _revert_to_pre_v63(shim):

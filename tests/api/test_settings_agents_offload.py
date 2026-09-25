@@ -16,7 +16,6 @@ one hop per query.
 
 import asyncio
 import threading
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -26,6 +25,7 @@ import app.api.settings as settings_api
 import app.api.settings_audio as audio_api
 import app.api.settings_credentials as creds_api
 import app.api.settings_media as media_api
+from tests.api.helpers import fake_request
 
 
 class _ThreadSpy:
@@ -38,17 +38,6 @@ class _ThreadSpy:
     def __call__(self, *args, **kwargs):
         self.threads.append(threading.get_ident())
         return self._fn(*args, **kwargs)
-
-
-@pytest.fixture
-def loop_thread():
-    """The thread the test's event loop runs on — nothing blocking may run here."""
-    return threading.get_ident()
-
-
-def _request(api_user=None):
-    """The bare shape ``get_api_user_from_request`` reads off a Request."""
-    return SimpleNamespace(state=SimpleNamespace(api_user=api_user))
 
 
 def _assert_one_worker_hop(loop_thread, *spies):
@@ -70,7 +59,7 @@ async def test_list_profiles_reads_off_the_loop_in_one_hop(mock_db, loop_thread)
 
     with patch.object(agents_api.database, "get_all_profile_session_counts", counts), \
          patch.object(agents_api.database, "get_all_profiles", listing):
-        profiles = await agents_api.list_profiles(_request(), token="t")
+        profiles = await agents_api.list_profiles(fake_request(), token="t")
 
     assert any(p["id"] == "default" for p in profiles), "the seeded profile is still returned"
     _assert_one_worker_hop(loop_thread, counts, listing)
@@ -86,7 +75,7 @@ async def test_list_profiles_for_a_restricted_api_user_is_still_one_hop(
     with patch.object(agents_api.database, "get_all_profile_session_counts", counts), \
          patch.object(agents_api.database, "get_profile", get_profile):
         profiles = await agents_api.list_profiles(
-            _request({"profile_ids": ["default", "default", "default"]}), token="t"
+            fake_request({"profile_ids": ["default", "default", "default"]}), token="t"
         )
 
     assert [p["id"] for p in profiles] == ["default"] * 3
@@ -100,7 +89,7 @@ async def test_get_profile_reads_row_and_count_off_the_loop(mock_db, loop_thread
 
     with patch.object(agents_api.database, "get_profile", row), \
          patch.object(agents_api.database, "get_profile_session_count", count):
-        profile = await agents_api.get_profile(_request(), "default", token="t")
+        profile = await agents_api.get_profile(fake_request(), "default", token="t")
 
     assert profile["id"] == "default"
     assert profile["session_count"] == 0
@@ -112,7 +101,7 @@ async def test_get_profile_still_404s_from_inside_the_offload(mock_db):
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
-        await agents_api.get_profile(_request(), "no-such-profile", token="t")
+        await agents_api.get_profile(fake_request(), "no-such-profile", token="t")
     assert exc.value.status_code == 404
 
 
@@ -135,7 +124,7 @@ async def test_get_profile_agents_fans_out_in_one_hop(mock_db, loop_thread):
 
     with patch.object(agents_api.database, "get_profile", row), \
          patch.object(agents_api.database, "get_subagent", sub):
-        agents = await agents_api.get_profile_agents(_request(), "default", token="t")
+        agents = await agents_api.get_profile_agents(fake_request(), "default", token="t")
 
     assert [a.id for a in agents] == ["a", "b", "c"]
     _assert_one_worker_hop(loop_thread, row, sub)

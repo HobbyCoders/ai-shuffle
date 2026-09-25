@@ -34,18 +34,12 @@ from app.core.task_registry import task_registry
 from app.db import database
 from app.db import turns as turns_db
 from app.db import wakeups as wakeups_db
+from tests.shared_fixtures import clean_task_registry  # noqa: F401  (autouse fixture)
 
 SESSION = "stopped-stays-stopped"
 SHELL = "shell-dev-server"
 WORKER = "worker-top"
 NESTED = "worker-nested"
-
-
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    task_registry.reset_all()
-    yield
-    task_registry.reset_all()
 
 
 def _make_session(session_id: str = SESSION) -> str:

@@ -17,7 +17,6 @@ frames are collected (no SSE endpoint — that buffers infinite bodies and
 deadlocks pytest).
 """
 
-import uuid
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,8 +27,8 @@ from app.core.provider.events import (
 )
 
 import app.core.query_engine as qe
-from app.db import database
 from tests.core.engine_harness import StubPool, make_state, stream_response
+from tests.core.helpers import new_session
 
 
 # ─── minimal engine harness (subprocess/profile boundaries only) ─────────────
@@ -60,12 +59,6 @@ def _engine_patches(stack: ExitStack, pool: StubPool, cwd: str) -> AsyncMock:
     return persist
 
 
-def _new_session(profile_id="default"):
-    session_id = f"sess-{uuid.uuid4()}"
-    database.create_session(session_id=session_id, profile_id=profile_id)
-    return session_id
-
-
 def _init(sdk_sid="sdk-1"):
     return SystemMessage(subtype="init", data={"session_id": sdk_sid})
 
@@ -94,7 +87,7 @@ SUBAGENT_USAGE = {
 
 async def _run(messages, tmp_path):
     """Drive the streaming loop; return (yielded events, persist mock)."""
-    session_id = _new_session()
+    session_id = new_session()
     state = make_state()
     pool = StubPool(state)
     state.adapter.receive_events = stream_response(messages)

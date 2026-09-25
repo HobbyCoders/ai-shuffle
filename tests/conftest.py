@@ -648,6 +648,25 @@ def mock_encryption():
                 }
 
 
+@pytest.fixture
+def artifacts_dir(tmp_path, monkeypatch):
+    """Point ``artifact_store.ARTIFACTS_DIR`` at a per-test directory."""
+    from app.core import artifact_store
+
+    d = tmp_path / "artifacts"
+    monkeypatch.setattr(artifact_store, "ARTIFACTS_DIR", d)
+    return d
+
+
+@pytest.fixture
+def loop_thread():
+    """The thread the test's event loop runs on — every DB call must land
+    somewhere else (used by the ``*_offload`` tests)."""
+    import threading
+
+    return threading.get_ident()
+
+
 # ---------------------------------------------------------------------------
 # turn_manager async twins
 # ---------------------------------------------------------------------------

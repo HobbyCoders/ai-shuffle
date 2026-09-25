@@ -22,21 +22,13 @@ from fastapi.testclient import TestClient
 
 from app.api.auth import require_auth
 from app.api.cluster import router
-from app.core.config import settings
 from app.db import checkouts as checkouts_db
 from app.db import database
 from app.db import git_ops as git_ops_db
+from tests.shared_fixtures import LOCAL_ME as ME, pin_runner  # noqa: F401  (autouse fixture)
 
-ME = "local-me"
 PEER = "peer-install-1"
 BARE = "peer-install-2"  # registered, but never checked this project out
-
-
-@pytest.fixture(autouse=True)
-def pin_runner(monkeypatch):
-    monkeypatch.setattr(
-        type(settings), "effective_instance_id", property(lambda self: ME)
-    )
 
 
 @pytest.fixture

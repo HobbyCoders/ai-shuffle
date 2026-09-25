@@ -57,14 +57,14 @@ def _make_state(*, is_streaming: bool, streaming_age_seconds: float = 0.0,
                 connected: bool = True, alive: bool = True) -> SessionState:
     """Build a SessionState backed by a mock adapter.
 
-    The mock adapter reports is_alive()/is_connected() and exposes a sdk_client
-    whose SdkProcessHandle PID resolution returns None (so no real process is
-    touched unless a test wires one up explicitly).
+    The mock adapter reports is_alive()/is_connected() and a None
+    subprocess_pid() (so no real process is touched unless a test wires one up
+    explicitly).
     """
     adapter = MagicMock()
     adapter.is_alive.return_value = alive
     adapter.is_connected.return_value = connected
-    adapter.sdk_client = None  # subprocess_pid() -> None by default
+    adapter.subprocess_pid.return_value = None
 
     started = datetime.now(timezone.utc) - timedelta(seconds=streaming_age_seconds)
     return SessionState(

@@ -24,29 +24,15 @@ import json
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 import app.api.chat_ws_handler as cwh
 from app.core import placement as placement_mod
-from app.core.config import settings
 from app.db import database
+from tests.api.helpers import not_streaming  # noqa: F401  (autouse fixture)
+from tests.helpers import sent_frames
+from tests.shared_fixtures import LOCAL_ME as ME, pin_runner  # noqa: F401  (autouse fixture)
 
-ME = "local-me"
 PEER = "peer-install-1"
-
-
-@pytest.fixture(autouse=True)
-def pin_runner(monkeypatch):
-    monkeypatch.setattr(
-        type(settings), "effective_instance_id", property(lambda self: ME)
-    )
-
-
-@pytest.fixture(autouse=True)
-def _not_streaming():
-    """No lease-valid active run unless a test says otherwise."""
-    with patch("app.core.streaming_status.has_active_run", return_value=False):
-        yield
 
 
 def _stub_installs(monkeypatch, online_ids):
@@ -109,14 +95,6 @@ def _make_handler():
     )
     handler.send_json = AsyncMock(return_value=True)
     return handler
-
-
-def _sent(handler, ftype):
-    return [
-        c.args[0]
-        for c in handler.send_json.call_args_list
-        if c.args and isinstance(c.args[0], dict) and c.args[0].get("type") == ftype
-    ]
 
 
 def _row(session_id):
@@ -195,8 +173,8 @@ async def test_new_session_with_unknown_target_refuses_before_creating(
             "target_instance_id": "nope-1",
         })
 
-    assert _sent(handler, "error"), "the refusal must reach the client"
-    assert _sent(handler, "session_created") == []
+    assert sent_frames(handler, "error"), "the refusal must reach the client"
+    assert sent_frames(handler, "session_created") == []
     p.submit.assert_not_called()
     rows = mock_db.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()
     assert rows["n"] == 0
@@ -222,8 +200,8 @@ async def test_new_session_with_offline_target_refuses_before_creating(
             "target_instance_id": PEER,
         })
 
-    assert "Studio is offline" in _sent(handler, "error")[0]["message"]
-    assert _sent(handler, "session_created") == []
+    assert "Studio is offline" in sent_frames(handler, "error")[0]["message"]
+    assert sent_frames(handler, "session_created") == []
     p.submit.assert_not_called()
     assert mock_db.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"] == 0
 
@@ -252,7 +230,7 @@ async def test_new_session_with_online_target_pins_and_dispatches(
             "target_instance_id": PEER,
         })
 
-    created = _sent(handler, "session_created")
+    created = sent_frames(handler, "session_created")
     assert len(created) == 1
     row = _row(created[0]["session_id"])
     assert row["instance_id"] == PEER
@@ -263,7 +241,7 @@ async def test_new_session_with_online_target_pins_and_dispatches(
     # the install-local no-profile sentinel never rides a remote turn
     assert p.submit.call_args.kwargs["profile_id"] is None
     p.notify.assert_called_once()
-    assert _sent(handler, "query_queued")
+    assert sent_frames(handler, "query_queued")
 
 
 async def test_new_session_with_branch_only_checkout_refuses_before_creating(
@@ -304,8 +282,8 @@ async def test_new_session_with_branch_only_checkout_refuses_before_creating(
             "target_instance_id": PEER,
         })
 
-    assert "isn't checked out on Studio" in _sent(handler, "error")[0]["message"]
-    assert _sent(handler, "session_created") == []
+    assert "isn't checked out on Studio" in sent_frames(handler, "error")[0]["message"]
+    assert sent_frames(handler, "session_created") == []
     p.submit.assert_not_called()
     assert mock_db.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"] == 0
 
@@ -348,8 +326,8 @@ async def test_new_session_with_active_base_checkout_pins_and_dispatches(
             "target_instance_id": PEER,
         })
 
-    assert _sent(handler, "error") == []
-    created = _sent(handler, "session_created")
+    assert sent_frames(handler, "error") == []
+    created = sent_frames(handler, "session_created")
     assert len(created) == 1
     row = _row(created[0]["session_id"])
     assert row["instance_id"] == PEER
@@ -358,7 +336,7 @@ async def test_new_session_with_active_base_checkout_pins_and_dispatches(
     }
     assert p.submit.call_args.kwargs["no_kick"] is True
     p.notify.assert_called_once()
-    assert _sent(handler, "query_queued")
+    assert sent_frames(handler, "query_queued")
 
 
 async def test_new_session_with_project_v2_id_pins_and_stamps(
@@ -394,8 +372,8 @@ async def test_new_session_with_project_v2_id_pins_and_stamps(
             "target_instance_id": PEER,
         })
 
-    assert _sent(handler, "error") == []
-    created = _sent(handler, "session_created")
+    assert sent_frames(handler, "error") == []
+    created = sent_frames(handler, "session_created")
     assert len(created) == 1
     row = _row(created[0]["session_id"])
     assert row["project_id"] is None
@@ -432,8 +410,8 @@ async def test_ws_scoped_user_projectless_create_is_not_400(mock_db, monkeypatch
             "project": None,
         })
 
-    assert _sent(handler, "error") == []
-    assert _sent(handler, "session_created")
+    assert sent_frames(handler, "error") == []
+    assert sent_frames(handler, "session_created")
 
 
 async def test_ws_scoped_user_other_origin_is_denied(
@@ -466,8 +444,8 @@ async def test_ws_scoped_user_other_origin_is_denied(
             "project_v2_id": other["id"],
         })
 
-    assert "Access denied" in _sent(handler, "error")[0]["message"]
-    assert _sent(handler, "session_created") == []
+    assert "Access denied" in sent_frames(handler, "error")[0]["message"]
+    assert sent_frames(handler, "session_created") == []
     p.submit.assert_not_called()
 
 
@@ -492,8 +470,8 @@ async def test_ws_projectless_create_is_not_400(mock_db, monkeypatch):
             "target_instance_id": PEER,
         })
 
-    assert _sent(handler, "error") == []
-    assert _sent(handler, "session_created")
+    assert sent_frames(handler, "error") == []
+    assert sent_frames(handler, "session_created")
 
 
 async def test_ws_both_project_ids_are_400(mock_db, monkeypatch, tmp_path):
@@ -516,8 +494,8 @@ async def test_ws_both_project_ids_are_400(mock_db, monkeypatch, tmp_path):
             "project_v2_id": pv2["id"],
         })
 
-    assert "exactly one" in _sent(handler, "error")[0]["message"]
-    assert _sent(handler, "session_created") == []
+    assert "exactly one" in sent_frames(handler, "error")[0]["message"]
+    assert sent_frames(handler, "session_created") == []
     p.submit.assert_not_called()
     assert mock_db.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"] == 0
 
@@ -546,8 +524,8 @@ async def test_new_session_v2_only_refuses_attachments(
             "upload_paths": ["/tmp/a.txt"],
         })
 
-    assert _sent(handler, "error")[0]["message"] == ATTACHMENTS_NEED_LOCAL_CHECKOUT
-    assert _sent(handler, "session_created") == []
+    assert sent_frames(handler, "error")[0]["message"] == ATTACHMENTS_NEED_LOCAL_CHECKOUT
+    assert sent_frames(handler, "session_created") == []
     p.submit.assert_not_called()
 
 
@@ -601,7 +579,7 @@ async def test_send_auto_adopts_implicitly_pinned_idle_session(mock_db, monkeypa
     assert placement_mod._normalize_placement(row["placement"]) is None
     assert p.submit.call_args.kwargs["no_kick"] is False
     p.notify.assert_not_called()
-    assert _sent(handler, "query_queued") == []
+    assert sent_frames(handler, "query_queued") == []
 
 
 async def test_explicitly_pinned_session_is_never_auto_adopted(mock_db, monkeypatch):
@@ -721,7 +699,7 @@ async def test_a_failed_lift_refuses_the_send(mock_db, monkeypatch, tmp_path):
             "upload_paths": ["/etc/passwd"],
         })
 
-    assert "outside the project directory" in _sent(handler, "error")[0]["message"]
+    assert "outside the project directory" in sent_frames(handler, "error")[0]["message"]
     p.submit.assert_not_called()
 
 
@@ -746,7 +724,7 @@ async def test_remote_turn_without_local_project_refuses_attachments(
             "upload_paths": ["/tmp/a.txt"],
         })
 
-    assert _sent(handler, "error")[0]["message"] == ATTACHMENTS_NEED_LOCAL_CHECKOUT
+    assert sent_frames(handler, "error")[0]["message"] == ATTACHMENTS_NEED_LOCAL_CHECKOUT
     p.submit.assert_not_called()
 
 

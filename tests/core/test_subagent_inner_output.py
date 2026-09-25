@@ -6,11 +6,8 @@ ToolResult was treated as the subagent's FINAL result (firing ``subagent_done``)
 and the real inner activity — which arrives later on the pooled client, after the
 parent turn's ``receive_response`` has returned — was never re-dispatched.
 
-These cover the two pure helpers behind the fix:
-- ``_looks_like_subagent_launch_ack``: content-sniff fallback for the launch ACK.
-- ``_subagent_events_from_message``: converts a drained inner message into the
-  ``subagent_*`` events the live store / FE understand (keyed by the parent
-  ``tool_use_id`` so they land in the right inner group).
+These cover ``_looks_like_subagent_launch_ack`` (the content-sniff fallback for
+the launch ACK) and the task-message bookkeeping around it.
 """
 
 from typing import Optional
@@ -24,14 +21,12 @@ from app.core.provider.events import (
     TaskUpdatedMessage,
     ToolResultBlock,
     ToolUseBlock,
-    TextBlock,
     UserMessage,
 )
 
 from app.core.query_engine import (
     _looks_like_subagent_launch_ack,
     _record_task_message,
-    _subagent_events_from_message,
     _task_update_terminal_status,
 )
 from app.core.task_registry import task_registry
@@ -63,77 +58,6 @@ class TestLooksLikeLaunchAck:
             )
             is True
         )
-
-
-class TestSubagentEventsFromMessage:
-    def test_no_parent_tool_id_returns_empty(self):
-        msg = AssistantMessage(
-            content=[TextBlock("hi")], model="claude", parent_tool_use_id=None
-        )
-        assert _subagent_events_from_message(msg) == []
-
-    def test_assistant_text_becomes_subagent_chunk(self):
-        msg = AssistantMessage(
-            content=[TextBlock("STEP-1 done")],
-            model="claude",
-            parent_tool_use_id="tu-task",
-        )
-        assert _subagent_events_from_message(msg) == [
-            {"type": "subagent_chunk", "agent_id": "tu-task", "content": "STEP-1 done"}
-        ]
-
-    def test_assistant_tool_use_becomes_subagent_tool_use(self):
-        msg = AssistantMessage(
-            content=[ToolUseBlock(id="t1", name="Bash", input={"command": "echo hi"})],
-            model="claude",
-            parent_tool_use_id="tu-task",
-        )
-        assert _subagent_events_from_message(msg) == [
-            {
-                "type": "subagent_tool_use",
-                "agent_id": "tu-task",
-                "name": "Bash",
-                "id": "t1",
-                "input": {"command": "echo hi"},
-            }
-        ]
-
-    def test_user_tool_result_becomes_subagent_tool_result(self):
-        msg = UserMessage(
-            content=[ToolResultBlock(tool_use_id="t1", content="hi\n", is_error=False)],
-            parent_tool_use_id="tu-task",
-        )
-        evs = _subagent_events_from_message(msg)
-        assert len(evs) == 1
-        ev = evs[0]
-        assert ev["type"] == "subagent_tool_result"
-        assert ev["agent_id"] == "tu-task"
-        assert ev["tool_use_id"] == "t1"
-        assert ev["is_error"] is False
-        assert "hi" in ev["output"]
-
-    def test_mixed_blocks_preserve_order(self):
-        msg = AssistantMessage(
-            content=[TextBlock("running"), ToolUseBlock(id="t2", name="Read", input={})],
-            model="claude",
-            parent_tool_use_id="tu-task",
-        )
-        assert [e["type"] for e in _subagent_events_from_message(msg)] == [
-            "subagent_chunk",
-            "subagent_tool_use",
-        ]
-
-    def test_empty_text_skipped(self):
-        msg = AssistantMessage(
-            content=[TextBlock("")], model="claude", parent_tool_use_id="tu-task"
-        )
-        assert _subagent_events_from_message(msg) == []
-
-    def test_string_content_user_message_returns_empty(self):
-        # A backgrounded sub-agent inner message with string content has no blocks
-        # to convert — must not raise.
-        msg = UserMessage(content="plain string", parent_tool_use_id="tu-task")
-        assert _subagent_events_from_message(msg) == []
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +395,6 @@ _ACK_TEXT = (
 def _ack_state(messages, **overrides) -> _SessionState:
     adapter = _MagicMock()
     adapter.is_alive = _MagicMock(return_value=True)
-    adapter.sdk_client = _MagicMock()
     adapter.send_query = _AsyncMock()
 
     async def _response():
@@ -770,34 +693,6 @@ class TestLaunchAckArmsBackgroundGate:
         assert task_registry.was_subagent_background_launch(session_id, monitor_id) is False
 
 
-class TestRecordSubagentLaneLaunchesMonitor:
-    """Pump-side half of the 2026-07-10 Monitor-builtin gap: in the live repro
-    the sub-agent armed its Monitor BETWEEN turns (parent turn ended 21:19:51,
-    the Monitor tool_use streamed ~21:19:58 with only the drain pump reading),
-    so ``_record_subagent_lane_launches`` — not the in-stream branch — is the
-    recorder that must sniff the flag-less builtin by tool name."""
-
-    def setup_method(self):
-        task_registry.reset_all()
-
-    def teardown_method(self):
-        task_registry.reset_all()
-
-    def test_sidechain_monitor_marks_subagent_launch(self):
-        msg = _monitor_launch_msg("tu-mon", parent_tool_use_id="tu-parent")
-        _qe._record_subagent_lane_launches("sess-rec-mon", msg)
-        assert task_registry.was_subagent_background_launch("sess-rec-mon", "tu-mon") is True
-        assert task_registry.was_background_launch("sess-rec-mon", "tu-mon") is False
-
-    def test_top_level_monitor_is_ignored_by_recorder(self):
-        # A top-level between-turns launch belongs to _cli_turn_events_from_message
-        # (which must keep NOT arming for Monitor — its wake is CLI-owned).
-        msg = _monitor_launch_msg("tu-mon-top")
-        _qe._record_subagent_lane_launches("sess-rec-mon", msg)
-        assert task_registry.was_subagent_background_launch("sess-rec-mon", "tu-mon-top") is False
-        assert task_registry.was_background_launch("sess-rec-mon", "tu-mon-top") is False
-
-
 # ---------------------------------------------------------------------------
 # #660: defer-don't-terminate gate — end-to-end over stream_to_websocket.
 #
@@ -831,7 +726,6 @@ def _raising_state(messages, exc) -> _SessionState:
     models a mid-stream interrupt/crash after the launch result was parked."""
     adapter = _MagicMock()
     adapter.is_alive = _MagicMock(return_value=True)
-    adapter.sdk_client = _MagicMock()
     adapter.send_query = _AsyncMock()
 
     async def _response():

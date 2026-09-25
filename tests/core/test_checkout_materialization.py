@@ -17,6 +17,7 @@ import pytest
 from app.core import checkout_manager
 from app.db import checkouts as checkouts_db
 from app.db import projects_v2
+from tests.shared_fixtures import foreign_keys_off  # noqa: F401  (autouse fixture)
 
 RUNNER = "runnerA"
 
@@ -24,13 +25,6 @@ RUNNER = "runnerA"
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def _foreign_keys_off(test_db):
-    """Run on the shared conftest DB with foreign keys off: these tests
-    seed rows without their FK parents."""
-    test_db.execute("PRAGMA foreign_keys = OFF")
-
 
 @pytest.fixture
 def workspace_root(tmp_path, monkeypatch):

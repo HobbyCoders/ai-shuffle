@@ -97,98 +97,12 @@ async def test_unknown_session_is_survivable(mock_db):
 
 
 # ---------------------------------------------------------------------------
-# The terminal-task callback path
-# ---------------------------------------------------------------------------
-
-async def test_terminal_task_callback_settles_the_marker(mock_db, test_db):
-    """The audited strand: the last worker reaches a terminal status, the
-    scheduler schedules no wake, and nothing else would ever clear the row."""
-    from app.core import idle_reader
-
-    session_id = _parked_session(test_db)
-    idle_reader.register_on_task_terminal(lambda sid, frame: None)
-    try:
-        with patch("app.core.task_registry.task_registry", new=_registry([])), \
-                patch("app.core.sync_engine.sync_engine") as sync:
-            sync.broadcast_user_session_updated = AsyncMock()
-            await idle_reader._fire_on_task_terminal(
-                session_id, {"task_id": "worker", "status": "killed"}
-            )
-    finally:
-        idle_reader.register_on_task_terminal(None)
-
-    assert _marker(test_db, session_id) is None
-
-
-async def test_terminal_settle_runs_even_with_no_hook_registered(mock_db, test_db):
-    from app.core import idle_reader
-
-    session_id = _parked_session(test_db)
-    idle_reader.register_on_task_terminal(None)
-
-    with patch("app.core.task_registry.task_registry", new=_registry([])), \
-            patch("app.core.sync_engine.sync_engine") as sync:
-        sync.broadcast_user_session_updated = AsyncMock()
-        result = await idle_reader._fire_on_task_terminal(
-            session_id, {"task_id": "worker", "status": "completed"}
-        )
-
-    assert result is None
-    assert _marker(test_db, session_id) is None
-
-
-async def test_a_failing_hook_still_leaves_the_marker_settled(mock_db, test_db):
-    from app.core import idle_reader
-
-    session_id = _parked_session(test_db)
-
-    def _boom(sid, frame):
-        raise RuntimeError("scheduler exploded")
-
-    idle_reader.register_on_task_terminal(_boom)
-    try:
-        with patch("app.core.task_registry.task_registry", new=_registry([])), \
-                patch("app.core.sync_engine.sync_engine") as sync:
-            sync.broadcast_user_session_updated = AsyncMock()
-            result = await idle_reader._fire_on_task_terminal(
-                session_id, {"task_id": "worker", "status": "error"}
-            )
-    finally:
-        idle_reader.register_on_task_terminal(None)
-
-    assert result is None
-    assert _marker(test_db, session_id) is None
-
-
-async def test_the_scheduler_signal_still_reaches_the_reader(mock_db, test_db):
-    """The CLI-owned-wake signal is what arms the reader's grace window; the
-    added settle must not swallow it."""
-    from app.core import idle_reader
-
-    session_id = _parked_session(test_db)
-    idle_reader.register_on_task_terminal(
-        lambda sid, frame: idle_reader.CLI_OWNED_WAKE_SIGNAL
-    )
-    try:
-        with patch("app.core.task_registry.task_registry", new=_registry([])), \
-                patch("app.core.sync_engine.sync_engine") as sync:
-            sync.broadcast_user_session_updated = AsyncMock()
-            result = await idle_reader._fire_on_task_terminal(
-                session_id, {"task_id": "worker", "status": "completed"}
-            )
-    finally:
-        idle_reader.register_on_task_terminal(None)
-
-    assert result == idle_reader.CLI_OWNED_WAKE_SIGNAL
-
-
-# ---------------------------------------------------------------------------
 # The periodic backstop
 # ---------------------------------------------------------------------------
 #
-# A task can also be settled by stop_session_task, by force cleanup, or by a
-# worker supervisor — none of which pass through the idle reader. The 5-minute
-# sweep catches whatever marker those leave behind.
+# A task can be settled by stop_session_task, by force cleanup, or by a worker
+# supervisor with no turn end behind it. The 5-minute sweep catches whatever
+# marker those leave behind.
 
 async def test_sweep_clears_a_marker_with_nothing_left_to_park_on(mock_db, test_db):
     from app.core.startup_reconcile import sweep_stale_parked_markers

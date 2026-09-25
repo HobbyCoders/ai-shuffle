@@ -13,22 +13,15 @@ provider_id precedent this column follows exactly).
 """
 
 from app.db import database
-
-
-def _column_names(conn, table):
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-
-
-def _schema_version(conn):
-    return conn.execute("SELECT version FROM schema_version").fetchone()[0]
+from tests.db.migration_helpers import column_names, schema_version
 
 
 def test_fresh_db_has_mode_column_and_version(mock_db):
     """A freshly built DB (create_postgres_schema) carries sessions.mode and the
     current schema version."""
     conn = mock_db
-    assert "mode" in _column_names(conn, "sessions")
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert "mode" in column_names(conn, "sessions")
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_init_upgrades_pre_v74_db(mock_db):
@@ -45,12 +38,12 @@ def test_init_upgrades_pre_v74_db(mock_db):
     )
     conn.commit()
 
-    assert "mode" not in _column_names(conn, "sessions")
+    assert "mode" not in column_names(conn, "sessions")
 
     database.init_database()
 
-    assert "mode" in _column_names(conn, "sessions")
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert "mode" in column_names(conn, "sessions")
+    assert schema_version(conn) == database.SCHEMA_VERSION
     row = conn.execute(
         "SELECT mode FROM sessions WHERE id = 's-legacy-mode'"
     ).fetchone()
@@ -61,10 +54,10 @@ def test_column_migration_is_idempotent(mock_db):
     """The guarded ADD COLUMN re-runs cleanly when the column already exists."""
     conn = mock_db
     database.init_database()
-    assert "mode" in _column_names(conn, "sessions")
+    assert "mode" in column_names(conn, "sessions")
     database.init_database()
-    assert "mode" in _column_names(conn, "sessions")
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert "mode" in column_names(conn, "sessions")
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_create_session_stores_mode_and_defaults_null(mock_db):

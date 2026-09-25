@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from app.api.auth import require_auth
 from app.api.sessions import router
 from app.core import provider_agent_supervisor as sup
+from tests.api.helpers import mock_api_user  # noqa: F401  (fixture)
 
 
 SESSION = "parent-session"
@@ -35,14 +36,6 @@ def mock_database():
         mock_db.get_installs_map.return_value = {}
         mock_db.get_project.return_value = None
         yield mock_db
-
-
-@pytest.fixture
-def mock_api_user():
-    with patch("app.api.sessions.get_api_user_from_request") as mock, \
-            patch("app.api.sessions_helpers.get_api_user_from_request", new=mock):
-        mock.return_value = None  # admin
-        yield mock
 
 
 @pytest.fixture

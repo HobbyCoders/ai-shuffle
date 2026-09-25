@@ -25,6 +25,7 @@ without raising. Fresh-DB init tests are included too.
 """
 
 from app.db import database
+from tests.db.migration_helpers import column_names, schema_version
 
 
 # The seven columns v65 adds to model_providers.
@@ -51,25 +52,17 @@ def _index_exists(conn, name):
     ).fetchone() is not None
 
 
-def _column_names(conn, table):
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-
-
-def _schema_version(conn):
-    return conn.execute("SELECT version FROM schema_version").fetchone()[0]
-
-
 def test_fresh_db_has_model_providers_table_index_and_version(mock_db):
     """A freshly built DB (create_postgres_schema) carries the table, its index,
     the v65 Codex columns, and the current schema version."""
     conn = mock_db
     assert _table_exists(conn, "model_providers")
     assert _index_exists(conn, "idx_model_providers_enabled")
-    cols = _column_names(conn, "model_providers")
+    cols = column_names(conn, "model_providers")
     for col in _CODEX_COLUMNS:
         assert col in cols, col
     assert "api_dialect" in cols  # 2026-08-14 custom-row dialect column
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_init_upgrades_pre_v64_db(mock_db):
@@ -92,11 +85,11 @@ def test_init_upgrades_pre_v64_db(mock_db):
 
     assert _table_exists(conn, "model_providers")
     assert _index_exists(conn, "idx_model_providers_enabled")
-    cols = _column_names(conn, "model_providers")
+    cols = column_names(conn, "model_providers")
     for col in _CODEX_COLUMNS:
         assert col in cols, col
     assert "api_dialect" in cols  # 2026-08-14 custom-row dialect column
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_init_adds_codex_columns_to_existing_v64_table(mock_db):
@@ -140,17 +133,17 @@ def test_init_adds_codex_columns_to_existing_v64_table(mock_db):
     conn.execute("INSERT INTO schema_version (version) VALUES (64)")
     conn.commit()
 
-    cols = _column_names(conn, "model_providers")
+    cols = column_names(conn, "model_providers")
     assert "codex_access_token" not in cols  # precondition: pre-v65 shape
 
     # Real init path (64 < 65) — must add the columns without raising.
     database.init_database()
 
-    cols = _column_names(conn, "model_providers")
+    cols = column_names(conn, "model_providers")
     for col in _CODEX_COLUMNS:
         assert col in cols, col
     assert "api_dialect" in cols  # 2026-08-14 custom-row dialect column
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert schema_version(conn) == database.SCHEMA_VERSION
     # Existing row survived the ALTERs (new columns default NULL/FALSE).
     row = conn.execute(
         "SELECT name, codex_access_token, needs_reauth "

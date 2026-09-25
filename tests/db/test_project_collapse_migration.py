@@ -7,19 +7,11 @@ legacy project, then rebinds sessions onto their project_v2 — additively,
 idempotently, and without touching any legacy column. Modeled on the v59
 turns<-queued_messages migration test."""
 
-import pytest
 
 from app.db import database
 from app.db import projects_v2 as pv2
 from app.db.projects_v2 import project_v2_id_for_origin as origin_id
-
-
-@pytest.fixture(autouse=True)
-def _foreign_keys_off(test_db):
-    """Run on the shared conftest DB with foreign keys off: the collapse
-    seeds freely across projects/sessions; the sessions FK to projects is
-    irrelevant to this unit test."""
-    test_db.execute("PRAGMA foreign_keys = OFF")
+from tests.shared_fixtures import foreign_keys_off  # noqa: F401  (autouse fixture)
 
 
 def _seed_project(shim, pid, name, path, instance_id=None, link_group_id=None):

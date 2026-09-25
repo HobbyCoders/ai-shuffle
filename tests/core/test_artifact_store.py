@@ -2,16 +2,8 @@
 
 import hashlib
 
-import pytest
 
 from app.core import artifact_store
-
-
-@pytest.fixture
-def artifacts_dir(tmp_path, monkeypatch):
-    d = tmp_path / "artifacts"
-    monkeypatch.setattr(artifact_store, "ARTIFACTS_DIR", d)
-    return d
 
 
 def test_store_writes_sharded_file_and_db_row(mock_db, artifacts_dir):

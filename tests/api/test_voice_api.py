@@ -28,6 +28,7 @@ import pytest
 from app.core import encryption
 from app.core import voice_bridge
 from app.db import database as db
+from tests.helpers import unlock_encryption
 
 
 VOICE_SETTINGS = "/api/v1/settings/voice"
@@ -44,10 +45,6 @@ def _isolate_native_services(monkeypatch):
 
     monkeypatch.setattr(native_chrome, "ensure_started", AsyncMock())
     monkeypatch.setattr(cluster, "_primary_lan_ip", lambda: "127.0.0.1")
-
-
-def _unlock(mock_db):
-    encryption.set_encryption_key("test-password", db)
 
 
 def _make_provider(
@@ -372,7 +369,7 @@ class TestVoicePreview:
     def test_happy_path_streams_live_audio_without_enable_flag(self, authenticated_client, mock_db, monkeypatch, voice):
         from app.core import voice_preview
         from unittest.mock import AsyncMock
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         generate = AsyncMock(return_value=b"RIFF-live-wave")
         monkeypatch.setattr(voice_preview, "generate_live_preview", generate)
@@ -709,7 +706,7 @@ class TestVoiceSecretRemint:
     def test_remint_uses_the_sessions_own_provider(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _enable_voice(voice_model="gpt-realtime-2.1-mini")
         _make_provider("prov-a", name="A", auth_token=encryption.encrypt_value(RAW_KEY))
         _make_provider("prov-b", name="B", auth_token=encryption.encrypt_value("sk-other"))
@@ -772,7 +769,7 @@ class TestVoiceCallAttach:
     def test_attach_opens_the_sideband_and_configures_it(
         self, authenticated_client, mock_db, sidebands
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _enable_voice()
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         _mk_voice_session()
@@ -906,7 +903,7 @@ class TestVoiceCallAttach:
         "command" attach backfills hidden=TRUE on the already-visible row AND
         broadcasts the flip, so a list that rendered the card during the
         create→attach window drops it live."""
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _enable_voice()
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         _mk_voice_session()
@@ -954,7 +951,7 @@ class TestVoiceCallAttach:
     def test_chat_attach_leaves_the_session_visible(
         self, authenticated_client, mock_db, sidebands
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _enable_voice()
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         _mk_voice_session()
@@ -979,7 +976,7 @@ class TestVoiceCallAttach:
         """
         from app.api import voice as voice_api
 
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _enable_voice()
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         _mk_voice_session()
@@ -1289,7 +1286,7 @@ class TestStreamingVoiceModels:
         from app.api import voice
         from app.core.voice_models import FAL_PROVIDER_ID, PERSONAPLEX_MODEL
         from unittest.mock import AsyncMock
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         db.set_system_setting("fal_api_key", encryption.encrypt_value("test-fal-key"))
         _enable_voice(voice_model=PERSONAPLEX_MODEL, voice_provider_id=FAL_PROVIDER_ID, voice_voice="NATF2")
         current = authenticated_client.get(VOICE_SETTINGS).json()
@@ -1306,7 +1303,7 @@ class TestStreamingVoiceModels:
     def test_live_uses_client_delegation_and_persists_selected_model(self, authenticated_client, mock_db, monkeypatch):
         from app.api import voice
         from unittest.mock import AsyncMock
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         _enable_voice(voice_model="gpt-live-1", voice_voice="marin")
         mint = AsyncMock(side_effect=AssertionError("Live is not Realtime"))
@@ -1323,7 +1320,7 @@ class TestStreamingVoiceModels:
 
     def test_invalid_cross_provider_pair_does_not_write(self, authenticated_client, mock_db):
         from app.core.voice_models import FAL_PROVIDER_ID
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         db.set_system_setting("fal_api_key", encryption.encrypt_value("test-fal-key"))
         before = authenticated_client.get(VOICE_SETTINGS).json()
         response = authenticated_client.put(VOICE_SETTINGS, json={"voice_provider_id": FAL_PROVIDER_ID, "voice_model": "gpt-live-1"})

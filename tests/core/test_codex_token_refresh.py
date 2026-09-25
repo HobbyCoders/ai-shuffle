@@ -19,17 +19,12 @@ import pytest
 from app.core import codex_token_refresh, encryption
 from app.core.config import settings
 from app.db import database as db
+from tests.fakes.http import mock_transport_client
+from tests.helpers import unlock_encryption
 
 
 PROVIDER_ID = "prov-codex-1"
 PEER_INSTALL = "peer-install-xyz"
-
-
-def _unlock(mock_db):
-    # mock_db activates the SQLite shim as app.db.database; set_encryption_key
-    # wants the database MODULE (it calls get_system_setting on it), not the
-    # raw connection the fixture yields.
-    encryption.set_encryption_key("test-password", db)
 
 
 def _iso(dt):
@@ -55,10 +50,6 @@ def _seed_provider(*, access="access-old", refresh="refresh-old",
         last_refresh=last_refresh,
         needs_reauth=False,
     )
-
-
-def _client(handler):
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 @pytest.fixture(autouse=True)
@@ -108,7 +99,7 @@ def _jwt_with_exp(dt) -> str:
 
 class TestRefreshRotation:
     async def test_rotated_bundle_persisted_encrypted(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)))
 
         def handler(request):
@@ -116,7 +107,7 @@ class TestRefreshRotation:
                 "access_token": "access-new", "refresh_token": "refresh-new",
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await codex_token_refresh.refresh_provider(PROVIDER_ID, client=c)
         assert did is True
 
@@ -132,7 +123,7 @@ class TestRefreshRotation:
         assert stored["codex_last_refresh"] is not None
 
     async def test_not_due_skips(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_iso(datetime.now(timezone.utc)))
         posted = []
 
@@ -141,7 +132,7 @@ class TestRefreshRotation:
             return httpx.Response(200, json={
                 "access_token": "x", "refresh_token": "y"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await codex_token_refresh.refresh_provider(PROVIDER_ID, client=c)
         assert did is False
         assert posted == []  # no HTTP at all
@@ -153,7 +144,7 @@ class TestRefreshRotation:
 
 class TestConcurrencySerialization:
     async def test_two_concurrent_refreshes_do_one_post(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)))
 
         post_count = 0
@@ -168,7 +159,7 @@ class TestConcurrencySerialization:
                 "access_token": "access-rot", "refresh_token": "refresh-rot",
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             results = await asyncio.gather(
                 codex_token_refresh.refresh_provider(PROVIDER_ID, client=c),
                 codex_token_refresh.refresh_provider(PROVIDER_ID, client=c),
@@ -194,7 +185,7 @@ class TestPermanentFailure:
     async def test_permanent_failure_sets_needs_reauth_preserves_bundle(
         self, mock_db, code, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(
             access="access-keep", refresh="refresh-keep",
             last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)),
@@ -210,7 +201,7 @@ class TestPermanentFailure:
         def handler(request):
             return httpx.Response(400, json={"error": code})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await codex_token_refresh.refresh_provider(PROVIDER_ID, client=c)
         assert did is False
 
@@ -222,7 +213,7 @@ class TestPermanentFailure:
         assert notified == [PROVIDER_ID]
 
     async def test_flagged_provider_not_refreshed_again(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)))
         # Mark dead.
         stored = db.get_codex_tokens(PROVIDER_ID)
@@ -239,7 +230,7 @@ class TestPermanentFailure:
             posted.append(1)
             return httpx.Response(200, json={"access_token": "x", "refresh_token": "y"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await codex_token_refresh.refresh_provider(
                 PROVIDER_ID, force=True, client=c
             )
@@ -253,7 +244,7 @@ class TestPermanentFailure:
 
 class TestRefreshOn401:
     async def test_forces_exactly_one_refresh(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         # last_refresh recent → NOT due by policy, but 401 forces it anyway.
         _seed_provider(last_refresh=_iso(datetime.now(timezone.utc)))
         posted = []
@@ -263,7 +254,7 @@ class TestRefreshOn401:
             return httpx.Response(200, json={
                 "access_token": "a2", "refresh_token": "r2"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             ok = await codex_token_refresh.refresh_on_401_once(PROVIDER_ID, client=c)
         assert ok is True
         assert len(posted) == 1
@@ -271,7 +262,7 @@ class TestRefreshOn401:
         assert encryption.decrypt_value(stored["codex_refresh_token"]) == "r2"
 
     async def test_stale_token_guard_skips_redundant_post(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(access="current-access", last_refresh=_iso(datetime.now(timezone.utc)))
         posted = []
 
@@ -281,7 +272,7 @@ class TestRefreshOn401:
 
         # The caller's 401 was on an OLD access token; a peer already rotated to
         # "current-access" → we must NOT POST again.
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             ok = await codex_token_refresh.refresh_on_401_once(
                 PROVIDER_ID, stale_access_token="old-access", client=c
             )
@@ -312,7 +303,7 @@ def _due_iso():
 
 class TestCrossInstallClaim:
     async def test_claim_lost_skips_refresh_entirely(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_due_iso())
         # A peer install holds a LIVE lease on this row.
         assert db.try_claim_codex_refresh(PROVIDER_ID, PEER_INSTALL, 300) is True
@@ -322,7 +313,7 @@ class TestCrossInstallClaim:
             posted.append(1)
             return httpx.Response(200, json={"access_token": "x", "refresh_token": "y"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await codex_token_refresh.refresh_provider(PROVIDER_ID, client=c)
 
         assert did is False
@@ -331,14 +322,14 @@ class TestCrossInstallClaim:
         assert _lease_owner(mock_db) == PEER_INSTALL
 
     async def test_lease_released_after_successful_refresh(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_due_iso())
 
         def handler(request):
             return httpx.Response(200, json={
                 "access_token": "a-new", "refresh_token": "r-new"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await codex_token_refresh.refresh_provider(PROVIDER_ID, client=c)
         assert did is True
         assert _lease_owner(mock_db) is None
@@ -346,7 +337,7 @@ class TestCrossInstallClaim:
         assert db.try_claim_codex_refresh(PROVIDER_ID, PEER_INSTALL, 300) is True
 
     async def test_lease_released_after_failed_refresh(self, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_due_iso())
 
         async def _fake_notify(pid):
@@ -357,7 +348,7 @@ class TestCrossInstallClaim:
         def handler(request):
             return httpx.Response(400, json={"error": "refresh_token_expired"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await codex_token_refresh.refresh_provider(PROVIDER_ID, client=c)
         assert did is False
         # A failure must not strand the lease — a retry (here or on a peer) has
@@ -369,7 +360,7 @@ class TestCrossInstallClaim:
     ):
         """A peer may refresh between our due-check and our claim; the re-read
         after winning the claim is what catches that."""
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_due_iso())
         posted = []
 
@@ -393,7 +384,7 @@ class TestCrossInstallClaim:
 
         monkeypatch.setattr(db, "try_claim_codex_refresh", _claim_then_peer_refresh)
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await codex_token_refresh.refresh_provider(PROVIDER_ID, client=c)
 
         assert did is False
@@ -407,7 +398,7 @@ class TestPeerRotationDuringPermanentFailure:
     ):
         """``refresh_token_reused`` right after a PEER rotated the bundle means
         our POST used a superseded token — self-inflicted, credential fine."""
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_due_iso())
 
         notified = []
@@ -428,7 +419,7 @@ class TestPeerRotationDuringPermanentFailure:
             )
             return httpx.Response(400, json={"error": "refresh_token_reused"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await codex_token_refresh.refresh_provider(
                 PROVIDER_ID, force=True, client=c
             )
@@ -444,7 +435,7 @@ class TestPeerRotationDuringPermanentFailure:
         self, mock_db, monkeypatch
     ):
         """The existing behaviour is unchanged when nobody else rotated."""
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_due_iso())
 
         notified = []
@@ -457,7 +448,7 @@ class TestPeerRotationDuringPermanentFailure:
         def handler(request):
             return httpx.Response(400, json={"error": "refresh_token_reused"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await codex_token_refresh.refresh_provider(PROVIDER_ID, client=c)
 
         assert did is False
@@ -470,7 +461,7 @@ class TestRefreshOn401ClaimContention:
     async def test_claim_lost_then_peer_rotation_returns_true_without_post(
         self, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         # The stored access token is STILL the one that got the 401, so the
         # pre-claim guard does not short-circuit — we must go through the claim.
         _seed_provider(access="stale-access", last_refresh=_iso(datetime.now(timezone.utc)))
@@ -503,7 +494,7 @@ class TestRefreshOn401ClaimContention:
 
         monkeypatch.setattr(db, "try_claim_codex_refresh", _losing_claim)
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             ok = await codex_token_refresh.refresh_on_401_once(
                 PROVIDER_ID, stale_access_token="stale-access", client=c
             )
@@ -513,7 +504,7 @@ class TestRefreshOn401ClaimContention:
         assert _lease_owner(mock_db) == PEER_INSTALL  # peer's lease untouched
 
     async def test_all_claim_attempts_lost_returns_false(self, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(access="stale-access", last_refresh=_iso(datetime.now(timezone.utc)))
         assert db.try_claim_codex_refresh(PROVIDER_ID, PEER_INSTALL, 300) is True
         monkeypatch.setattr(codex_token_refresh, "CLAIM_RETRY_SLEEP_SECONDS", 0)
@@ -524,7 +515,7 @@ class TestRefreshOn401ClaimContention:
             posted.append(1)
             return httpx.Response(200, json={"access_token": "x", "refresh_token": "y"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             ok = await codex_token_refresh.refresh_on_401_once(
                 PROVIDER_ID, stale_access_token="stale-access", client=c
             )
@@ -534,7 +525,7 @@ class TestRefreshOn401ClaimContention:
         assert _lease_owner(mock_db) == PEER_INSTALL
 
     async def test_winning_the_claim_still_refreshes_and_releases(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(access="stale-access", last_refresh=_iso(datetime.now(timezone.utc)))
         posted = []
 
@@ -543,7 +534,7 @@ class TestRefreshOn401ClaimContention:
             return httpx.Response(200, json={
                 "access_token": "a401", "refresh_token": "r401"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             ok = await codex_token_refresh.refresh_on_401_once(
                 PROVIDER_ID, stale_access_token="stale-access", client=c
             )

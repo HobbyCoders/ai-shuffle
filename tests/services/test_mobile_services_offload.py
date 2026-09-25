@@ -11,7 +11,6 @@ creation, APScheduler job registration) stays where it is.
 import threading
 from unittest.mock import patch
 
-import pytest
 
 from app.services.fal_catalog import CatalogModel, FalCatalogService
 
@@ -28,11 +27,6 @@ class _ThreadSpy:
         self.threads.append(threading.get_ident())
         self.calls.append((args, kwargs))
         return self._return_value
-
-
-@pytest.fixture
-def loop_thread():
-    return threading.get_ident()
 
 
 # ═══ fal_catalog — a get_db() write the blocking-DB scanner cannot see ══════

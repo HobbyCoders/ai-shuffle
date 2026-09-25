@@ -18,19 +18,12 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
-import pytest
 
 from app.core.query_session_lifecycle import stop_all_background_tasks
 from app.core.task_registry import task_registry
+from tests.shared_fixtures import clean_task_registry  # noqa: F401  (autouse fixture)
 
 # asyncio_mode = auto (pytest.ini) runs the coroutines below; no marker needed.
-
-
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    task_registry.reset_all()
-    yield
-    task_registry.reset_all()
 
 
 def _seed(session_id: str, rows: list[tuple[str, str]]) -> None:

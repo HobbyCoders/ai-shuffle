@@ -11,8 +11,6 @@ is exercised by calling ``_dispatch`` by hand.
 """
 
 import asyncio
-import json
-from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -22,53 +20,13 @@ from starlette.requests import ClientDisconnect
 import app.api.events as events_mod
 from app.api.events import event_stream, stream_session_events
 from app.api.sse_utils import is_client_disconnect as _is_client_disconnect
-from app.core.event_gateway import EventGateway
 from app.db import session_events as se
-
-
-@pytest.fixture
-def gw(monkeypatch):
-    """Fresh gateway with the PG listener stubbed, wired into the events module."""
-    g = EventGateway()
-    monkeypatch.setattr(g, "_ensure_listener", lambda: None)
-    monkeypatch.setattr(events_mod, "get_gateway", lambda: g)
-    return g
-
-
-def _parse(frame: str) -> dict:
-    parsed = {}
-    for line in frame.splitlines():
-        if line.startswith("id: "):
-            parsed["id"] = int(line[4:])
-        elif line.startswith("event: "):
-            parsed["event"] = line[len("event: "):]
-        elif line.startswith("data: "):
-            parsed["data"] = json.loads(line[len("data: "):])
-    return parsed
-
-
-async def _collect(agen, n, timeout=5.0):
-    """Read ``n`` event frames (skipping keepalive comments and the ``caught_up``
-    history/live boundary sentinel) from the stream."""
-    frames = []
-
-    async def _pump():
-        async for chunk in agen:
-            if chunk.startswith(":"):
-                continue
-            parsed = _parse(chunk)
-            if parsed.get("event") == "caught_up":
-                continue
-            frames.append(parsed)
-            if len(frames) >= n:
-                return
-
-    await asyncio.wait_for(_pump(), timeout=timeout)
-    return frames
+from tests.api.helpers import fake_request
+from tests.api.sse_helpers import collect_frames, parse_frame
 
 
 async def _collect_raw(agen, n, timeout=5.0):
-    """Like ``_collect`` but keeps the ``caught_up`` sentinel (still skips
+    """Like ``collect_frames`` but keeps the ``caught_up`` sentinel (still skips
     keepalive comments) so sentinel placement can be asserted."""
     frames = []
 
@@ -76,7 +34,7 @@ async def _collect_raw(agen, n, timeout=5.0):
         async for chunk in agen:
             if chunk.startswith(":"):
                 continue
-            frames.append(_parse(chunk))
+            frames.append(parse_frame(chunk))
             if len(frames) >= n:
                 return
 
@@ -93,7 +51,7 @@ async def test_backfill_frames_arrive_in_order(mock_db, gw):
 
     agen = event_stream("sess-a", 0)
     try:
-        frames = await _collect(agen, 3)
+        frames = await collect_frames(agen, 3)
     finally:
         await agen.aclose()
 
@@ -118,7 +76,7 @@ async def test_from_seq_skips_already_seen(mock_db, gw):
 
     agen = event_stream("sess-b", 2)
     try:
-        frames = await _collect(agen, 1)
+        frames = await collect_frames(agen, 1)
     finally:
         await agen.aclose()
 
@@ -133,10 +91,10 @@ async def test_poll_fallback_delivers_without_dispatch(mock_db, gw, monkeypatch)
 
     agen = event_stream("sess-c", 0)
     try:
-        first = await _collect(agen, 1)
+        first = await collect_frames(agen, 1)
         assert first[0]["id"] == 1
         se.append_events("sess-c", [{"type": "turn.completed"}])
-        more = await _collect(agen, 1, timeout=3.0)
+        more = await collect_frames(agen, 1, timeout=3.0)
     finally:
         await agen.aclose()
 
@@ -151,11 +109,11 @@ async def test_notify_wakes_stream_before_poll(mock_db, gw, monkeypatch):
 
     agen = event_stream("sess-d", 0)
     try:
-        first = await _collect(agen, 1)
+        first = await collect_frames(agen, 1)
         assert first[0]["id"] == 1
         _, last_seq = se.append_events("sess-d", [{"type": "turn.completed"}])
         gw._dispatch("sess-d", last_seq)
-        more = await _collect(agen, 1, timeout=3.0)
+        more = await collect_frames(agen, 1, timeout=3.0)
     finally:
         await agen.aclose()
 
@@ -264,7 +222,7 @@ async def test_close_unsubscribes(mock_db, gw):
     se.append_events("sess-e", [{"type": "turn.started"}])
 
     agen = event_stream("sess-e", 0)
-    await _collect(agen, 1)
+    await collect_frames(agen, 1)
     assert "sess-e" in gw._subscribers
     await agen.aclose()
     assert gw._subscribers == {}
@@ -286,7 +244,7 @@ async def test_client_disconnect_cancellederror_ends_cleanly(mock_db, gw):
     """A plain CancelledError (client disconnect) ends the stream, not raises."""
     se.append_events("sess-cd", [{"type": "turn.started"}])
     agen = event_stream("sess-cd", 0)
-    await _collect(agen, 1)  # drain backfill -> generator parked mid-stream
+    await collect_frames(agen, 1)  # drain backfill -> generator parked mid-stream
     assert "sess-cd" in gw._subscribers
 
     # Generator swallows the cancellation and returns -> athrow raises StopAsyncIteration.
@@ -300,7 +258,7 @@ async def test_client_disconnect_exceptiongroup_ends_cleanly(mock_db, gw):
     """The anyio ExceptionGroup-wrapped cancellation is handled the same way."""
     se.append_events("sess-eg", [{"type": "turn.started"}])
     agen = event_stream("sess-eg", 0)
-    await _collect(agen, 1)
+    await collect_frames(agen, 1)
     assert "sess-eg" in gw._subscribers
 
     grp = BaseExceptionGroup("disconnect", [asyncio.CancelledError()])
@@ -314,7 +272,7 @@ async def test_client_disconnect_clientdisconnect_ends_cleanly(mock_db, gw):
     """A starlette ClientDisconnect thrown into the stream also ends cleanly."""
     se.append_events("sess-cld", [{"type": "turn.started"}])
     agen = event_stream("sess-cld", 0)
-    await _collect(agen, 1)
+    await collect_frames(agen, 1)
 
     with pytest.raises(StopAsyncIteration):
         await agen.athrow(ClientDisconnect())
@@ -326,7 +284,7 @@ async def test_real_error_still_propagates(mock_db, gw):
     """A genuine mid-stream error is NOT swallowed — it must still surface."""
     se.append_events("sess-err", [{"type": "turn.started"}])
     agen = event_stream("sess-err", 0)
-    await _collect(agen, 1)
+    await collect_frames(agen, 1)
     assert "sess-err" in gw._subscribers
 
     with pytest.raises(RuntimeError, match="boom"):
@@ -339,7 +297,7 @@ async def test_exceptiongroup_with_real_error_propagates(mock_db, gw):
     """An ExceptionGroup carrying a real error is re-raised, not swallowed."""
     se.append_events("sess-egr", [{"type": "turn.started"}])
     agen = event_stream("sess-egr", 0)
-    await _collect(agen, 1)
+    await collect_frames(agen, 1)
 
     grp = BaseExceptionGroup("mixed", [asyncio.CancelledError(), RuntimeError("boom")])
     with pytest.raises(BaseExceptionGroup):
@@ -367,15 +325,11 @@ def test_is_client_disconnect_classifier():
     )
 
 
-def _request(api_user=None):
-    return SimpleNamespace(state=SimpleNamespace(api_user=api_user))
-
-
 async def test_endpoint_returns_sse_response(mock_db, gw):
     from app.db import database
 
     database.create_session("sess-f", "default")
-    response = await stream_session_events(_request(), "sess-f", 0, token="test-token")
+    response = await stream_session_events(fake_request(), "sess-f", 0, token="test-token")
     try:
         assert response.media_type == "text/event-stream"
         assert response.headers["cache-control"] == "no-cache"
@@ -386,7 +340,7 @@ async def test_endpoint_returns_sse_response(mock_db, gw):
 
 async def test_endpoint_unknown_session_is_404(mock_db, gw):
     with pytest.raises(HTTPException) as exc:
-        await stream_session_events(_request(), "sess-missing", 0, token="test-token")
+        await stream_session_events(fake_request(), "sess-missing", 0, token="test-token")
     assert exc.value.status_code == 404
 
 
@@ -396,5 +350,5 @@ async def test_endpoint_denies_api_user_outside_session_profile(mock_db, gw):
     database.create_session("sess-g", "default")
     api_user = {"id": "u1", "project_id": None, "profile_id": "other-profile"}
     with pytest.raises(HTTPException) as exc:
-        await stream_session_events(_request(api_user), "sess-g", 0, token="test-token")
+        await stream_session_events(fake_request(api_user), "sess-g", 0, token="test-token")
     assert exc.value.status_code == 403

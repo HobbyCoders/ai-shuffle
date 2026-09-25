@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,6 +17,7 @@ from app.core import monitor_spawn as ms
 from app.core.config import settings
 from app.core.task_registry import task_registry
 from app.mcp import builtin_tools as bt
+from tests.mcp.tool_helpers import tool_result_json
 
 SESSION = "sess-r9"
 
@@ -46,10 +46,6 @@ def _handlers(session_id=SESSION):
     return {t.name: t.handler for t in captured["tools"]}
 
 
-def _body(result):
-    return json.loads(result["content"][0]["text"])
-
-
 def _shell(task_id="t-live", lines=None, running=True):
     task = bt._BackgroundTask(task_id, "npm test", "/work", SESSION)
     task.lines = list(lines or [])
@@ -71,7 +67,7 @@ async def test_task_stop_and_get_name_the_running_tasks():
     task_registry.start_task(SESSION, "agent-77", "agent", "Review the diff")
     handlers = _handlers()
     for tool in ("TaskStop", "TaskGet"):
-        body = _body(await handlers[tool]({"task_id": "6dc76e90"}))
+        body = tool_result_json(await handlers[tool]({"task_id": "6dc76e90"}))
         assert body["success"] is False
         assert body["error"].startswith("task not found.")
         assert "a1b2c3d4" in body["error"] and "npm test" in body["error"]
@@ -81,7 +77,7 @@ async def test_task_stop_and_get_name_the_running_tasks():
 
 
 async def test_not_found_with_nothing_running_says_so():
-    body = _body(await _handlers()["TaskStop"]({"task_id": "ghost"}))
+    body = tool_result_json(await _handlers()["TaskStop"]({"task_id": "ghost"}))
     assert body["error"] == "task not found. No tasks are running in this session."
     assert body["running_tasks"] == []
 
@@ -91,7 +87,7 @@ async def test_not_found_with_nothing_running_says_so():
 
 async def test_task_output_defaults_to_the_last_150_lines():
     _shell(lines=[f"line {i}" for i in range(400)], running=False)
-    body = _body(await _handlers()["TaskOutput"]({"task_id": "t-live"}))
+    body = tool_result_json(await _handlers()["TaskOutput"]({"task_id": "t-live"}))
     assert body["total_lines"] == 400
     assert body["shown_lines"] == bt._TASK_OUTPUT_DEFAULT_LINES == 150
     assert body["lines"][0] == "line 250" and body["lines"][-1] == "line 399"
@@ -101,14 +97,14 @@ async def test_task_output_defaults_to_the_last_150_lines():
 async def test_task_output_lines_and_full_opt_in():
     _shell(lines=[f"line {i}" for i in range(400)], running=False)
     handlers = _handlers()
-    body = _body(await handlers["TaskOutput"]({"task_id": "t-live", "lines": 10}))
+    body = tool_result_json(await handlers["TaskOutput"]({"task_id": "t-live", "lines": 10}))
     assert body["lines"] == [f"line {i}" for i in range(390, 400)]
-    body = _body(await handlers["TaskOutput"]({"task_id": "t-live", "full": True}))
+    body = tool_result_json(await handlers["TaskOutput"]({"task_id": "t-live", "full": True}))
     assert body["shown_lines"] == 400 and "note" not in body
     # The older spelling still works, and since_line composes with the tail.
-    body = _body(await handlers["TaskOutput"]({"task_id": "t-live", "tail": 5}))
+    body = tool_result_json(await handlers["TaskOutput"]({"task_id": "t-live", "tail": 5}))
     assert len(body["lines"]) == 5
-    body = _body(await handlers["TaskOutput"]({"task_id": "t-live", "since_line": 395}))
+    body = tool_result_json(await handlers["TaskOutput"]({"task_id": "t-live", "since_line": 395}))
     assert body["lines"] == [f"line {i}" for i in range(395, 400)] and "note" not in body
 
 

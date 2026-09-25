@@ -20,6 +20,7 @@ from app.core.grok_rate_limit_resets import (
     frame_grpc_web,
 )
 from app.db import database as db
+from tests.helpers import unlock_encryption
 
 ROOT = "/api/v1/model-providers"
 PROVIDER_ID = "prov-grok-banked-reset"
@@ -36,10 +37,6 @@ def _async_client_shutdown_compat(monkeypatch):
         monkeypatch.setattr(
             httpx.AsyncClient, "close", httpx.AsyncClient.aclose, raising=False
         )
-
-
-def _unlock(mock_db):
-    encryption.set_encryption_key("test-password", db)
 
 
 def _seed_provider(
@@ -146,18 +143,18 @@ class TestAdminAndProviderValidation:
         assert response.status_code in (401, 403)
 
     def test_missing_provider_is_404(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         response = authenticated_client.get(GET_PATH)
         assert response.status_code == 404
 
     def test_chatgpt_row_on_grok_route_is_400(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(provider_type="chatgpt", auth_mode="chatgpt")
         response = authenticated_client.get(GET_PATH)
         assert response.status_code == 400
 
     def test_xai_api_key_row_is_400(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         db.create_model_provider(
             provider_id=PROVIDER_ID,
             name="xAI",
@@ -183,7 +180,7 @@ class TestAdminAndProviderValidation:
         provider_type,
         auth_mode,
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(provider_type=provider_type, auth_mode=auth_mode)
         _install_transport(monkeypatch, _success_handler)
 
@@ -196,7 +193,7 @@ class TestAdminAndProviderValidation:
     def test_missing_access_token_is_reconnect_conflict(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(access_token=None)
 
         def _must_not_call(request):
@@ -212,7 +209,7 @@ class TestAdminAndProviderValidation:
     def test_needs_reauth_is_reconnect_conflict(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(needs_reauth=True)
 
         def _must_not_call(request):
@@ -228,7 +225,7 @@ class TestRequestContract:
     def test_get_uses_grpc_web_url_headers_and_five_second_timeout(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         captured = {}
 
@@ -257,7 +254,7 @@ class TestRequestContract:
     def test_post_uses_redeem_url_body_headers_and_ten_second_timeout(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         captured = {}
 
@@ -289,7 +286,7 @@ class TestRequestContract:
 
 class TestConsumeHappyPath:
     def test_consume_happy_path(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         _install_transport(monkeypatch, lambda request: _consume_response())
         response = authenticated_client.post(
@@ -304,7 +301,7 @@ class TestUpstreamFailureSanitization:
     def test_upstream_502_is_sanitized(
         self, authenticated_client, mock_db, monkeypatch, caplog
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         raw_body = "RAW-UPSTREAM-SECRET-BODY"
 
@@ -327,7 +324,7 @@ class TestUpstreamFailureSanitization:
     def test_normalizes_inventory_timestamps(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         _install_transport(monkeypatch, lambda request: _inventory_response())
         response = authenticated_client.get(GET_PATH)
@@ -343,7 +340,7 @@ class TestRefreshOnUnauthorized:
     def test_401_without_refresh_is_reconnect(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         _install_transport(
             monkeypatch,
@@ -366,7 +363,7 @@ class TestRefreshOnUnauthorized:
     def test_first_401_refreshes_and_retries_once(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         requests = []
         refresh_calls = []

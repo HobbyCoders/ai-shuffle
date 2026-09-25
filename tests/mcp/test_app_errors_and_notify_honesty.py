@@ -15,10 +15,10 @@ Two audited failures, one shape:
 from __future__ import annotations
 
 import asyncio
-import json
 from unittest.mock import AsyncMock, patch
 
 from app.mcp import builtin_tools as bt
+from tests.mcp.tool_helpers import tool_result_json
 
 
 def _builtin_handlers(session_id="session-under-test"):
@@ -35,10 +35,6 @@ def _builtin_handlers(session_id="session-under-test"):
         bt.create_builtin_tools_server(session_id=session_id)
 
     return {tool.name: tool for tool in captured["tools"]}
-
-
-def _body(result):
-    return json.loads(result["content"][0]["text"])
 
 
 def _row(idx: int, level: str = "ERROR", detail: str = "trace") -> dict:
@@ -65,7 +61,7 @@ def test_default_min_level_asks_for_errors_only(mock_db):
         return []
 
     with patch("app.db.error_logs.get_recent_errors", side_effect=_fake):
-        body = _body(asyncio.run(_builtin_handlers()["GetAppErrors"].handler({})))
+        body = tool_result_json(asyncio.run(_builtin_handlers()["GetAppErrors"].handler({})))
 
     assert captured["levels"] == ["ERROR", "CRITICAL"]
     assert body["min_level"] == "ERROR"
@@ -79,7 +75,7 @@ def test_min_level_warning_widens_the_query(mock_db):
         return [_row(1, level="WARNING")]
 
     with patch("app.db.error_logs.get_recent_errors", side_effect=_fake):
-        body = _body(
+        body = tool_result_json(
             asyncio.run(
                 _builtin_handlers()["GetAppErrors"].handler({"min_level": "warning"})
             )
@@ -97,13 +93,13 @@ def test_unknown_min_level_is_an_error(mock_db):
         )
 
     assert result.get("isError") is True
-    assert "min_level" in _body(result)["error"]
+    assert "min_level" in tool_result_json(result)["error"]
 
 
 def test_empty_error_result_says_it_is_not_proof(mock_db):
     """count: 0 is what the agent read as 'the app is healthy'."""
     with patch("app.db.error_logs.get_recent_errors", side_effect=lambda **kw: []):
-        body = _body(asyncio.run(_builtin_handlers()["GetAppErrors"].handler({})))
+        body = tool_result_json(asyncio.run(_builtin_handlers()["GetAppErrors"].handler({})))
 
     assert body["count"] == 0
     assert 'min_level: "WARNING"' in body["note"]
@@ -112,7 +108,7 @@ def test_empty_error_result_says_it_is_not_proof(mock_db):
 def test_empty_warning_result_has_no_nudge(mock_db):
     """Nothing left to escalate to — the note would be noise."""
     with patch("app.db.error_logs.get_recent_errors", side_effect=lambda **kw: []):
-        body = _body(
+        body = tool_result_json(
             asyncio.run(
                 _builtin_handlers()["GetAppErrors"].handler({"min_level": "WARNING"})
             )
@@ -163,7 +159,7 @@ def test_huge_payload_is_truncated_with_a_note(mock_db):
     with patch("app.db.error_logs.get_recent_errors", side_effect=lambda **kw: rows):
         result = asyncio.run(_builtin_handlers()["GetAppErrors"].handler({"limit": 50}))
 
-    body = _body(result)
+    body = tool_result_json(result)
     assert body["count"] < len(rows)
     assert body["matched"] == len(rows)
     assert "omitted" in body["truncated"]
@@ -176,7 +172,7 @@ def test_a_single_oversized_entry_is_clipped_not_dropped(mock_db):
     rows = [_row(1, detail="y" * 500_000)]
 
     with patch("app.db.error_logs.get_recent_errors", side_effect=lambda **kw: rows):
-        body = _body(asyncio.run(_builtin_handlers()["GetAppErrors"].handler({})))
+        body = tool_result_json(asyncio.run(_builtin_handlers()["GetAppErrors"].handler({})))
 
     assert body["count"] == 1
     assert len(body["errors"][0]["detail"]) < bt._APP_ERRORS_MAX_DETAIL_CHARS + 100
@@ -187,7 +183,7 @@ def test_small_result_is_untouched(mock_db):
     rows = [_row(1), _row(2)]
 
     with patch("app.db.error_logs.get_recent_errors", side_effect=lambda **kw: rows):
-        body = _body(asyncio.run(_builtin_handlers()["GetAppErrors"].handler({})))
+        body = tool_result_json(asyncio.run(_builtin_handlers()["GetAppErrors"].handler({})))
 
     assert body["count"] == 2
     assert "truncated" not in body
@@ -208,7 +204,7 @@ def _notify(results):
     with patch(
         "app.services.push_notification.push_notification_service", service
     ):
-        return _body(
+        return tool_result_json(
             asyncio.run(
                 _builtin_handlers()["NotifyDevices"].handler(
                     {"title": "Release", "body": "v1.2.3 is live"}
@@ -259,16 +255,16 @@ def test_stored_error_trace_preserves_final_exception_and_bounded_detail(mock_db
     error_id = error_logs.record_error("backend", "round8 trace", detail=detail, session_id="trace-session")
     assert error_id
     tool = _builtin_handlers(session_id="trace-session")["GetAppErrors"]
-    body = _body(asyncio.run(tool.handler({"this_session_only": True})))
+    body = tool_result_json(asyncio.run(tool.handler({"this_session_only": True})))
     trace = body["errors"][0]["detail"]
     assert trace.startswith("Traceback root cause")
     assert trace.endswith("RuntimeError: final cause")
     assert len(trace) <= bt._APP_ERRORS_MAX_DETAIL_CHARS
-    page = _body(asyncio.run(tool.handler({"error_id": error_id, "offset": 2100, "max_chars": 1200})))
+    page = tool_result_json(asyncio.run(tool.handler({"error_id": error_id, "offset": 2100, "max_chars": 1200})))
     assert page["detail"] == detail[2100:3300]
     assert page["next_offset"] == 3300
     other = _builtin_handlers(session_id="other")["GetAppErrors"]
-    denied = _body(asyncio.run(other.handler({"error_id": error_id, "this_session_only": True})))
+    denied = tool_result_json(asyncio.run(other.handler({"error_id": error_id, "this_session_only": True})))
     assert denied["success"] is False
 
 
@@ -286,11 +282,11 @@ def test_logger_to_error_store_keeps_final_exception_beyond_store_cap(mock_db):
     record.session_id = "logger-trace"
     ErrorLogDBHandler().emit(record)
     tool = _builtin_handlers(session_id="logger-trace")["GetAppErrors"]
-    body = _body(asyncio.run(tool.handler({"this_session_only": True})))
+    body = tool_result_json(asyncio.run(tool.handler({"this_session_only": True})))
     trace = body["errors"][0]["detail"]
     assert "original cause" in trace
     assert trace.endswith("FINAL EXCEPTION")
     error_id = body["errors"][0]["id"]
-    page = _body(asyncio.run(tool.handler({"error_id": error_id, "offset": 19000, "max_chars": 12000})))
+    page = tool_result_json(asyncio.run(tool.handler({"error_id": error_id, "offset": 19000, "max_chars": 12000})))
     assert page["detail"].endswith("FINAL EXCEPTION")
     assert page["total_chars"] == 20000

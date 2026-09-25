@@ -13,14 +13,13 @@ gateway's PostgreSQL listener thread.
 """
 
 import asyncio
-import json
 
 import pytest
 
 import app.api.events as events_mod
 from app.api.events import event_stream
-from app.core.event_gateway import EventGateway
 from app.db import session_events as se
+from tests.api.sse_helpers import collect_frames, parse_frame
 
 
 @pytest.fixture(autouse=True)
@@ -30,15 +29,6 @@ def _clean_tails():
     for tail in list(events_mod._tails.values()):
         tail.close()
     events_mod._tails.clear()
-
-
-@pytest.fixture
-def gw(monkeypatch):
-    """Fresh gateway with the PG listener stubbed, wired into the events module."""
-    g = EventGateway()
-    monkeypatch.setattr(g, "_ensure_listener", lambda: None)
-    monkeypatch.setattr(events_mod, "get_gateway", lambda: g)
-    return g
 
 
 class _Counter:
@@ -55,18 +45,6 @@ class _Counter:
         monkeypatch.setattr(events_mod, name, _wrapped)
 
 
-def _parse(frame: str) -> dict:
-    parsed = {}
-    for line in frame.splitlines():
-        if line.startswith("id: "):
-            parsed["id"] = int(line[4:])
-        elif line.startswith("event: "):
-            parsed["event"] = line[len("event: "):]
-        elif line.startswith("data: "):
-            parsed["data"] = json.loads(line[len("data: "):])
-    return parsed
-
-
 async def _to_live(agen, timeout=5.0):
     """Pump until the ``caught_up`` sentinel, so the stream is in its live tail.
 
@@ -79,29 +57,10 @@ async def _to_live(agen, timeout=5.0):
         async for chunk in agen:
             if chunk.startswith(":"):
                 continue
-            parsed = _parse(chunk)
+            parsed = parse_frame(chunk)
             if parsed.get("event") == "caught_up":
                 return
             frames.append(parsed)
-
-    await asyncio.wait_for(_pump(), timeout=timeout)
-    return frames
-
-
-async def _collect(agen, n, timeout=5.0):
-    """Read ``n`` event frames (skipping keepalive comments and sentinels)."""
-    frames = []
-
-    async def _pump():
-        async for chunk in agen:
-            if chunk.startswith(":"):
-                continue
-            parsed = _parse(chunk)
-            if parsed.get("event") == "caught_up":
-                continue
-            frames.append(parsed)
-            if len(frames) >= n:
-                return
 
     await asyncio.wait_for(_pump(), timeout=timeout)
     return frames
@@ -152,7 +111,7 @@ async def test_one_db_read_per_batch_regardless_of_client_count(
         gw._dispatch("sess-fan", last_seq)
 
         for agen in agens:
-            got = await _collect(agen, 2, timeout=3.0)
+            got = await collect_frames(agen, 2, timeout=3.0)
             assert [f["id"] for f in got] == [2, 3]
     finally:
         for agen in agens:
@@ -184,7 +143,7 @@ async def test_serialization_is_shared_not_repeated_per_client(
 
         payloads = []
         for agen in agens:
-            payloads.append((await _collect(agen, 1, timeout=3.0))[0])
+            payloads.append((await collect_frames(agen, 1, timeout=3.0))[0])
     finally:
         for agen in agens:
             await agen.aclose()
@@ -218,7 +177,7 @@ async def test_pushed_batches_preserve_order_and_are_gap_free(
             gw._dispatch("sess-ord", last_seq)
 
         for agen in agens:
-            got = await _collect(agen, 5, timeout=3.0)
+            got = await collect_frames(agen, 5, timeout=3.0)
             assert [f["id"] for f in got] == [2, 3, 4, 5, 6]
             assert [f["data"]["text"] for f in got] == ["0", "1", "2", "3", "4"]
     finally:
@@ -239,7 +198,7 @@ async def test_reconnect_cursor_semantics_hold_on_the_push_path(
         await asyncio.sleep(0.05)
         _, last_seq = se.append_events("sess-res", [{"type": "d"}])
         gw._dispatch("sess-res", last_seq)
-        got = await _collect(agen, 1, timeout=3.0)
+        got = await collect_frames(agen, 1, timeout=3.0)
     finally:
         await agen.aclose()
 
@@ -273,7 +232,7 @@ async def test_discontinuous_batch_is_never_emitted_but_read_instead(
         )
         sub.queue.put_nowait(poisoned)
 
-        got = await _collect(agen, 1, timeout=3.0)
+        got = await collect_frames(agen, 1, timeout=3.0)
     finally:
         await agen.aclose()
 
@@ -303,7 +262,7 @@ async def test_already_seen_batch_is_dropped_not_duplicated(
 
         _, last_seq = se.append_events("sess-dup", [{"type": "turn.completed"}])
         gw._dispatch("sess-dup", last_seq)
-        got = await _collect(agen, 1, timeout=3.0)
+        got = await collect_frames(agen, 1, timeout=3.0)
     finally:
         await agen.aclose()
 
@@ -324,7 +283,7 @@ async def test_event_appended_between_backfill_and_seed_still_arrives(
         # tick: a reader seeded at the current tail would swallow it forever.
         _, last_seq = se.append_events("sess-race", [{"type": "turn.completed"}])
         gw._dispatch("sess-race", last_seq)
-        got = await _collect(agen, 1, timeout=3.0)
+        got = await collect_frames(agen, 1, timeout=3.0)
     finally:
         await agen.aclose()
 
@@ -344,7 +303,7 @@ async def test_bogus_from_seq_cannot_starve_other_clients(mock_db, gw, monkeypat
         await asyncio.sleep(0.05)
         _, last_seq = se.append_events("sess-bogus", [{"type": "turn.completed"}])
         gw._dispatch("sess-bogus", last_seq)
-        got = await _collect(honest, 1, timeout=3.0)
+        got = await collect_frames(honest, 1, timeout=3.0)
     finally:
         await liar.aclose()
         await honest.aclose()
@@ -368,7 +327,7 @@ async def test_reader_failure_falls_back_to_reads(mock_db, gw, monkeypatch):
         assert tail.alive is False
 
         se.append_events("sess-dead", [{"type": "turn.completed"}])
-        got = await _collect(agen, 1, timeout=3.0)
+        got = await collect_frames(agen, 1, timeout=3.0)
     finally:
         await agen.aclose()
 
@@ -437,7 +396,7 @@ async def test_keepalive_still_polls_when_the_gateway_is_degraded(
         await _collect_comments(agen, 2, timeout=3.0)
         # Delivery must still work with no dispatch at all.
         se.append_events("sess-degraded", [{"type": "turn.completed"}])
-        got = await _collect(agen, 1, timeout=3.0)
+        got = await collect_frames(agen, 1, timeout=3.0)
     finally:
         await agen.aclose()
 
@@ -461,7 +420,7 @@ async def test_periodic_resync_still_reconciles_a_healthy_feed(
         await asyncio.sleep(0.05)
         # No dispatch, no reader push — only the periodic re-sync can find it.
         se.append_events("sess-resync", [{"type": "turn.completed"}])
-        got = await _collect(agen, 1, timeout=3.0)
+        got = await collect_frames(agen, 1, timeout=3.0)
     finally:
         await agen.aclose()
 

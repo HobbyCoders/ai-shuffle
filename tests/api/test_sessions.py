@@ -17,29 +17,18 @@ Tests cover:
 import pytest
 import asyncio
 import json
-import tempfile
-import shutil
-from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.api.sessions import router, check_session_access, enrich_sessions_with_tags
-from app.api.auth import require_auth
+from app.api.sessions import check_session_access, enrich_sessions_with_tags
+from tests.api.helpers import app  # noqa: F401  (fixture)
 
 
 # =============================================================================
 # Fixtures
 # =============================================================================
-
-@pytest.fixture
-def temp_dir():
-    """Create a temporary directory for tests."""
-    tmpdir = tempfile.mkdtemp()
-    yield Path(tmpdir)
-    shutil.rmtree(tmpdir, ignore_errors=True)
-
 
 @pytest.fixture
 def mock_database():
@@ -90,18 +79,6 @@ def mock_api_user():
             patch("app.api.common.get_api_user_from_request", new=mock):
         mock.return_value = None  # Default to admin (no api user)
         yield mock
-
-
-@pytest.fixture
-def app(mock_database, mock_api_user):
-    """Create a FastAPI app with the sessions router and mocked dependencies."""
-    app = FastAPI()
-    app.include_router(router)
-
-    # Override auth dependencies
-    app.dependency_overrides[require_auth] = lambda: "test-session-token"
-
-    yield app
 
 
 @pytest.fixture
@@ -2551,4 +2528,3 @@ class TestGetSessionContextUsage:
 
         assert response.status_code == 200
         assert response.json() == {"available": False, "reason": "not_connected"}
-

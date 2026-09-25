@@ -20,7 +20,8 @@ from app.core.provider.events import SystemMessage
 from app.db import database
 from app.db import turns as turns_db
 
-from tests.core.test_session_runtime import _make_pump, _runtime_env
+from tests.core.helpers import make_pump
+from tests.core.test_session_runtime import _runtime_env
 from tests.core.engine_harness import StubPool, make_state, stream_response
 
 
@@ -116,7 +117,7 @@ async def test_run_pump_passes_resume_and_records_no_user_message(mock_db):
 async def test_run_pump_records_the_user_message_for_a_normal_turn(mock_db):
     turn = turns_db.enqueue_turn("s-user", "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env:
         await session_runtime.SessionRuntime(turn).execute()
 
     env["recorder"].start.assert_awaited_once()

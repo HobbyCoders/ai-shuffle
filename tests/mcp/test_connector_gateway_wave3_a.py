@@ -8,7 +8,6 @@ never global) — no network, no MCP transport.
 """
 
 import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,22 +17,12 @@ from app.core.connectors.signal_connector import SignalConnector
 from app.core.connectors.telegram import TelegramConnector
 from app.core.connectors.whatsapp import WhatsAppConnector
 from app.mcp.connector_gateway_sdk import build_gateway_tools, get_gateway_tool_names
+from tests.fakes.http import fake_response
+from tests.mcp.tool_helpers import tool_result_json
 
 BOUND_CHAT = "1000001"
 FORBIDDEN_CHAT = "9999999"
 CTX = {"session_id": "ai-1", "connector_id": "c1", "bound_chat_id": BOUND_CHAT}
-
-
-def _payload(result):
-    return json.loads(result["content"][0]["text"])
-
-
-def _resp(status=200, body=None, text=""):
-    r = MagicMock()
-    r.status_code = status
-    r.json = MagicMock(return_value=body if body is not None else {})
-    r.text = text or json.dumps(body or {})
-    return r
 
 
 # ---------------------------------------------------------------------------
@@ -244,10 +233,10 @@ def make_signal(config=None):
         on_incoming_message=AsyncMock(),
         on_permission_response=AsyncMock(),
     )
-    conn._api_get = AsyncMock(return_value=_resp())
-    conn._api_post = AsyncMock(return_value=_resp())
-    conn._api_put = AsyncMock(return_value=_resp())
-    conn._api_delete = AsyncMock(return_value=_resp())
+    conn._api_get = AsyncMock(return_value=fake_response())
+    conn._api_post = AsyncMock(return_value=fake_response())
+    conn._api_put = AsyncMock(return_value=fake_response())
+    conn._api_delete = AsyncMock(return_value=fake_response())
     return conn
 
 
@@ -284,7 +273,7 @@ class TestSignalHandlers:
     @pytest.mark.asyncio
     async def test_list_groups(self):
         conn = make_signal()
-        conn._api_get = AsyncMock(return_value=_resp(body=[
+        conn._api_get = AsyncMock(return_value=fake_response(body=[
             {"id": "g1", "name": "Group One", "members": ["+1", "+2"]},
         ]))
         res = await conn.execute_action("list_groups", {}, context=CTX)
@@ -304,7 +293,7 @@ class TestSignalHandlers:
     @pytest.mark.asyncio
     async def test_http_error_surfaces(self):
         conn = make_signal()
-        conn._api_post = AsyncMock(return_value=_resp(status=400, text="bad request"))
+        conn._api_post = AsyncMock(return_value=fake_response(status=400, text="bad request"))
         res = await conn.execute_action("send_message", {"text": "hi"}, context=CTX)
         assert res["success"] is False
         assert "400" in res["error"]
@@ -384,8 +373,8 @@ def make_whatsapp(config=None):
         on_incoming_message=AsyncMock(),
         on_permission_response=AsyncMock(),
     )
-    conn._api_post = AsyncMock(return_value=_resp())
-    conn._api_get_phone_number = AsyncMock(return_value=_resp())
+    conn._api_post = AsyncMock(return_value=fake_response())
+    conn._api_get_phone_number = AsyncMock(return_value=fake_response())
     return conn
 
 
@@ -435,7 +424,7 @@ class TestWhatsAppHandlers:
     @pytest.mark.asyncio
     async def test_get_phone_number_info(self):
         conn = make_whatsapp()
-        conn._api_get_phone_number = AsyncMock(return_value=_resp(body={
+        conn._api_get_phone_number = AsyncMock(return_value=fake_response(body={
             "id": "pn1", "verified_name": "Acme", "quality_rating": "GREEN",
         }))
         res = await conn.execute_action("get_phone_number_info", {}, context=CTX)
@@ -445,7 +434,7 @@ class TestWhatsAppHandlers:
     @pytest.mark.asyncio
     async def test_http_error_surfaces(self):
         conn = make_whatsapp()
-        conn._api_post = AsyncMock(return_value=_resp(status=401, text="unauthorized"))
+        conn._api_post = AsyncMock(return_value=fake_response(status=401, text="unauthorized"))
         res = await conn.execute_action("send_message", {"text": "hi"}, context=CTX)
         assert res["success"] is False
         assert "401" in res["error"]
@@ -576,7 +565,7 @@ class TestRegistration:
             side_effect=fake_get_instance,
         ):
             tools = {t.name: t.handler for t in build_gateway_tools("ai-1")}
-            res = _payload(await tools["telegram_invoke"]({
+            res = tool_result_json(await tools["telegram_invoke"]({
                 "action": "send_message", "params": {"text": "hi"},
             }))
         assert res["success"] is True

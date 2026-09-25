@@ -10,14 +10,11 @@ import pytest
 
 from app.core import encryption, xai_oauth
 from app.db import database as db
+from tests.helpers import unlock_encryption
 
 
 ROOT = "/api/v1/model-providers"
 PROVIDER_ID = "prov-xai-api"
-
-
-def _unlock(mock_db):
-    encryption.set_encryption_key("test-password", db)
 
 
 def _make_provider():
@@ -45,7 +42,7 @@ class TestDeviceStart:
     def test_start_prefers_verification_uri_complete(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
 
         async def _fake_start(*, client=None):
@@ -69,7 +66,7 @@ class TestDeviceStart:
         assert "dev-1" not in resp.text
 
     def test_start_unknown_provider_404(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         resp = authenticated_client.post(
             f"{ROOT}/nope/xai/device/start", json={}
         )
@@ -90,7 +87,7 @@ class TestDevicePoll:
         assert r.status_code == 200, r.text
 
     def test_poll_pending(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
@@ -105,7 +102,7 @@ class TestDevicePoll:
         assert resp.json()["status"] == "pending"
 
     def test_poll_slow_down(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
@@ -119,7 +116,7 @@ class TestDevicePoll:
         assert resp.json()["status"] == "slow_down"
 
     def test_poll_without_start_400(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         resp = authenticated_client.post(
             f"{ROOT}/{PROVIDER_ID}/xai/device/poll", json={}
@@ -129,7 +126,7 @@ class TestDevicePoll:
     def test_poll_complete_persists_encrypted_seeds_preset(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 

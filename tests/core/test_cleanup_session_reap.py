@@ -24,18 +24,10 @@ and schedule the Monitor shell reap.
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from app.core import resource_monitor
 from app.core.task_registry import task_registry
-
-
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    """Keep the global task_registry isolated per test."""
-    task_registry.reset_all()
-    yield
-    task_registry.reset_all()
+from tests.shared_fixtures import clean_task_registry  # noqa: F401  (autouse fixture)
 
 
 def _patch_shell_reap():

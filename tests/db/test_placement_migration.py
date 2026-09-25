@@ -24,16 +24,10 @@ import json
 import pytest
 
 from app.db import database
+from tests.shared_fixtures import foreign_keys_off  # noqa: F401  (autouse fixture)
 
 
 RUNNER = "me-install"
-
-
-@pytest.fixture(autouse=True)
-def _foreign_keys_off(test_db):
-    """Run on the shared conftest DB with foreign keys off: the backfill
-    touches only sessions; the FK to projects is irrelevant here."""
-    test_db.execute("PRAGMA foreign_keys = OFF")
 
 
 @pytest.fixture(autouse=True)

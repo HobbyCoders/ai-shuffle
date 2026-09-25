@@ -13,10 +13,11 @@ The HTTP intake paths (``app/api/sessions_worktree.py``) have always called
 """
 
 import asyncio
-import json
 from unittest.mock import patch
 
 import pytest
+
+from tests.mcp.tool_helpers import tool_result_json
 
 
 SESSION = "s-enter"
@@ -44,10 +45,6 @@ def _handlers(session_id=SESSION, project_id="proj-1"):
     return {tool.name: tool for tool in captured["tools"]}
 
 
-def _body(result):
-    return json.loads(result["content"][0]["text"])
-
-
 @pytest.fixture
 def checkout(mock_db, monkeypatch):
     """A session row plus a resolvable v2 checkout."""
@@ -69,7 +66,7 @@ def checkout(mock_db, monkeypatch):
 def _enter(**args):
     payload = {"branch_name": BRANCH}
     payload.update(args)
-    return _body(asyncio.run(_handlers()["EnterWorktree"].handler(payload)))
+    return tool_result_json(asyncio.run(_handlers()["EnterWorktree"].handler(payload)))
 
 
 def test_entering_a_worktree_binds_the_session_to_the_branch(checkout):

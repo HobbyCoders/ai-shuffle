@@ -50,13 +50,6 @@ class _ThreadSpy:
 
 
 @pytest.fixture
-def loop_thread():
-    """The thread the test's event loop runs on — everything blocking must
-    happen somewhere else."""
-    return threading.get_ident()
-
-
-@pytest.fixture
 def manager():
     return AutomationManager()
 

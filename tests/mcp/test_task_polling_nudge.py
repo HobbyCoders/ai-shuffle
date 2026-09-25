@@ -7,8 +7,9 @@ and then shadowed its own child for 18 cells.
 """
 
 import asyncio
-import json
 from unittest.mock import patch
+
+from tests.mcp.tool_helpers import tool_result_json
 
 
 def _builtin_handlers(session_id="session-parent"):
@@ -27,10 +28,6 @@ def _builtin_handlers(session_id="session-parent"):
         builtin_tools.create_builtin_tools_server(session_id=session_id)
 
     return {tool.name: tool for tool in captured["tools"]}
-
-
-def _body(result):
-    return json.loads(result["content"][0]["text"])
 
 
 # ─── descriptions ────────────────────────────────────────────────────────────
@@ -58,7 +55,7 @@ def test_task_list_nudges_when_nothing_has_finished(mock_db, monkeypatch):
     from app.core.task_registry import task_registry
 
     monkeypatch.setattr(task_registry, "get_all", lambda sid: [_running()])
-    body = _body(asyncio.run(_builtin_handlers()["TaskList"].handler({})))
+    body = tool_result_json(asyncio.run(_builtin_handlers()["TaskList"].handler({})))
 
     assert body["note"] == (
         "all tasks still running — park; you will be woken on completion."
@@ -74,7 +71,7 @@ def test_task_list_stays_quiet_when_something_finished(mock_db, monkeypatch):
         "get_all",
         lambda sid: [_running(), {"task_id": "t-2", "status": "completed"}],
     )
-    body = _body(asyncio.run(_builtin_handlers()["TaskList"].handler({})))
+    body = tool_result_json(asyncio.run(_builtin_handlers()["TaskList"].handler({})))
 
     assert "note" not in body
 
@@ -84,7 +81,7 @@ def test_task_list_stays_quiet_with_no_tasks(mock_db, monkeypatch):
     from app.core.task_registry import task_registry
 
     monkeypatch.setattr(task_registry, "get_all", lambda sid: [])
-    body = _body(asyncio.run(_builtin_handlers()["TaskList"].handler({})))
+    body = tool_result_json(asyncio.run(_builtin_handlers()["TaskList"].handler({})))
 
     assert "note" not in body
 
@@ -93,7 +90,7 @@ def test_task_get_nudges_on_a_still_running_agent_task(mock_db, monkeypatch):
     from app.core.task_registry import task_registry
 
     monkeypatch.setattr(task_registry, "get_task", lambda sid, tid, **_kw: _running(tid))
-    body = _body(
+    body = tool_result_json(
         asyncio.run(_builtin_handlers()["TaskGet"].handler({"task_id": "t-1"}))
     )
 
@@ -109,7 +106,7 @@ def test_task_get_stays_quiet_on_a_finished_task(mock_db, monkeypatch):
         "get_task",
         lambda sid, tid, **_kw: {"task_id": tid, "status": "completed"},
     )
-    body = _body(
+    body = tool_result_json(
         asyncio.run(_builtin_handlers()["TaskGet"].handler({"task_id": "t-1"}))
     )
 

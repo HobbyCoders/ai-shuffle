@@ -25,18 +25,15 @@ from app.core.provider.fluid_transcript import (
     fluid_transcript_entries,
     rewind_fluid_session,
 )
-
-
-def _msg(role, blocks):
-    return {"role": role, "content": blocks, "provider_meta": {}}
+from tests.helpers import fluid_message
 
 
 def _user(text):
-    return _msg("user", [{"kind": "text", "text": text}])
+    return fluid_message("user", [{"kind": "text", "text": text}])
 
 
 def _assistant(text):
-    return _msg("assistant", [{"kind": "text", "text": text}])
+    return fluid_message("assistant", [{"kind": "text", "text": text}])
 
 
 def _insert(session_id, nodes):
@@ -75,11 +72,11 @@ def _seed(session_id="ses_fixture"):
     _insert(session_id, [
         ("n1", None, _user("first prompt")),
         ("n2", "n1", _assistant("first reply")),
-        ("n3", "n2", _msg("assistant", [{
+        ("n3", "n2", fluid_message("assistant", [{
             "kind": "tooluseblock", "id": "t1", "name": "Read",
             "input": {"file_path": "/x"},
         }])),
-        ("n4", "n3", _msg("user", [{
+        ("n4", "n3", fluid_message("user", [{
             "kind": "toolresultblock", "tool_use_id": "t1",
             "content": [{"kind": "text", "text": "file body"}],
             "is_error": False,
@@ -102,14 +99,14 @@ def test_fixture_matches_real_fluid_serialization():
     assert Message(
         role="assistant",
         content=[ToolUseBlock(id="t1", name="Read", input={"file_path": "/x"})],
-    ).to_dict() == _msg("assistant", [{
+    ).to_dict() == fluid_message("assistant", [{
         "kind": "tooluseblock", "id": "t1", "name": "Read",
         "input": {"file_path": "/x"},
     }])
     assert Message(
         role="user",
         content=[ToolResultBlock(tool_use_id="t1", content=[Text(text="file body")])],
-    ).to_dict() == _msg("user", [{
+    ).to_dict() == fluid_message("user", [{
         "kind": "toolresultblock", "tool_use_id": "t1",
         "content": [{"kind": "text", "text": "file body"}],
         "is_error": False,

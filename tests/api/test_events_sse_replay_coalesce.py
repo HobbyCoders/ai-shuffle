@@ -9,43 +9,13 @@ generator is consumed DIRECTLY — ASGI transports buffer the infinite SSE body.
 """
 
 import asyncio
-import json
 
-import pytest
 
 import app.api.events as events_mod
-import app.core.history_backfill as hb
 from app.api.events import event_stream
-from app.core.event_gateway import EventGateway
 from app.db import session_events as se
-
-
-@pytest.fixture(autouse=True)
-def _reset_memo():
-    hb._reset_memo()
-    yield
-    hb._reset_memo()
-
-
-@pytest.fixture
-def gw(monkeypatch):
-    """Fresh gateway with the PG listener stubbed, wired into the events module."""
-    g = EventGateway()
-    monkeypatch.setattr(g, "_ensure_listener", lambda: None)
-    monkeypatch.setattr(events_mod, "get_gateway", lambda: g)
-    return g
-
-
-def _parse(frame: str) -> dict:
-    parsed = {}
-    for line in frame.splitlines():
-        if line.startswith("id: "):
-            parsed["id"] = int(line[4:])
-        elif line.startswith("event: "):
-            parsed["event"] = line[len("event: "):]
-        elif line.startswith("data: "):
-            parsed["data"] = json.loads(line[len("data: "):])
-    return parsed
+from tests.api.sse_helpers import parse_frame
+from tests.shared_fixtures import reset_backfill_memo  # noqa: F401  (autouse fixture)
 
 
 async def _backfill(session_id: str, from_seq: int = 0) -> list:
@@ -56,7 +26,7 @@ async def _backfill(session_id: str, from_seq: int = 0) -> list:
         async for chunk in agen:
             if chunk.startswith(":"):
                 continue
-            parsed = _parse(chunk)
+            parsed = parse_frame(chunk)
             frames.append(parsed)
             if parsed.get("event") == "caught_up":
                 return

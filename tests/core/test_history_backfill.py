@@ -18,15 +18,9 @@ import app.core.history_backfill as hb
 from app.core.history_backfill import convert_messages_to_events, ensure_backfilled
 from app.db import session_events as se
 from app.db import sessions as sessions_db
+from tests.shared_fixtures import reset_backfill_memo  # noqa: F401  (autouse fixture)
 
 SID = "sess-backfill"
-
-
-@pytest.fixture(autouse=True)
-def _reset_memo():
-    hb._reset_memo()
-    yield
-    hb._reset_memo()
 
 
 def _one(msg):

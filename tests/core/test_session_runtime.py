@@ -16,6 +16,7 @@ import pytest
 from app.core import session_runtime
 from app.db import runs as runs_db
 from app.db import turns as turns_db
+from tests.core.helpers import make_pump
 
 
 # ---------------------------------------------------------------------------
@@ -42,15 +43,6 @@ def _clean_module_state():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _make_pump(events):
-    """An async-generator stand-in for ``_stream_to_websocket_impl`` that yields
-    ``events`` (accepts and ignores the impl's kwargs)."""
-    async def _impl(**kwargs):
-        for e in events:
-            yield e
-    return _impl
-
 
 def _crashing_pump():
     async def _impl(**kwargs):
@@ -133,7 +125,7 @@ def _runtime_env(*, pump, bg_work=None, bg_launches=None, patch_idle=True):
 @pytest.mark.asyncio
 async def test_handoff_after_placement_read_releases_claim_without_running(mock_db):
     turn = turns_db.enqueue_turn("handoff-race", "user", prompt="hello")
-    with _runtime_env(pump=_make_pump([{"type": "done"}])) as env, patch(
+    with _runtime_env(pump=make_pump([{"type": "done"}])) as env, patch(
         "app.network.engine.context", return_value=object()
     ), patch("app.db.database.get_session", return_value={"id": "handoff-race"}), patch(
         "app.network.control.owner_of", return_value="new-owner"
@@ -262,7 +254,7 @@ async def test_execute_requires_run_claim(mock_db):
     other = runs_db.claim_run("s1", "other-runner", 60)
     assert other is not None
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env:
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome is None
@@ -301,7 +293,7 @@ async def test_execute_behind_a_stranded_live_turn_does_not_claim_or_retry(mock_
         start_calls.append(args)
         return real_start(*args, **kwargs)
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env:
         with patch.object(turns_db, "start_turn", side_effect=_spy_start):
             # Several claim passes in a row, as the NOTIFY-driven loop does.
             for _ in range(5):
@@ -362,7 +354,7 @@ async def test_execute_notifies_streaming_status_at_claim_and_release(mock_db):
 
     turn = turns_db.enqueue_turn("s1n", "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         with patch("app.core.session_runtime._notify_run_change", new=_spy):
             await session_runtime.SessionRuntime(turn).execute()
 
@@ -466,17 +458,18 @@ async def test_finalize_parks_when_background_work_survives(mock_db):
     turn = turns_db.enqueue_turn("s3", "user", prompt="hi")
 
     with _runtime_env(
-        pump=_make_pump([{"type": "done", "metadata": {}}]),
+        pump=make_pump([{"type": "done", "metadata": {}}]),
         bg_work=[{"id": "task-1"}],
     ) as env:
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "parked"
     assert turns_db.get_turn(turn["id"])["state"] == "parked"
-    # payload.task_ids recorded, turn.parked event tapped, idle reader started.
+    # payload.task_ids recorded, turn.parked event tapped; no reader (only a
+    # draining turn starts one).
     assert turns_db.get_turn(turn["id"])["payload"]["task_ids"] == ["task-1"]
     env["record_parked"].assert_awaited_once()
-    env["start_idle"].assert_called_once_with("s3")
+    env["start_idle"].assert_not_called()
     env["scheduler"].assert_called_once_with("s3", turn["id"], "parked")
     done = [c.args[1] for c in env["broadcaster"].await_args_list if c.args[1]["type"] == "done"]
     assert done == [{"type": "done", "metadata": {}, "session_id": "s3", "outcome": "parked"}]
@@ -485,7 +478,7 @@ async def test_finalize_parks_when_background_work_survives(mock_db):
 async def test_finalize_completes_when_no_background_work(mock_db):
     turn = turns_db.enqueue_turn("s4", "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env:
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "completed"
@@ -522,7 +515,7 @@ async def test_park_drops_a_task_that_has_already_settled(mock_db):
     _durable_task("s-drop", "still-going", "running", kind="shell")
 
     with _runtime_env(
-        pump=_make_pump([{"type": "done", "metadata": {}}]),
+        pump=make_pump([{"type": "done", "metadata": {}}]),
         bg_work=[{"id": "settled"}, {"id": "still-going"}],
     ) as env:
         outcome = await session_runtime.SessionRuntime(turn).execute()
@@ -539,7 +532,7 @@ async def test_no_park_when_every_registry_id_has_already_settled(mock_db):
     _durable_task("s-nopark", "settled", "completed", kind="shell")
 
     with _runtime_env(
-        pump=_make_pump([{"type": "done", "metadata": {}}]),
+        pump=make_pump([{"type": "done", "metadata": {}}]),
         bg_work=[{"id": "settled"}],
     ) as env:
         outcome = await session_runtime.SessionRuntime(turn).execute()
@@ -555,12 +548,11 @@ async def test_park_gate_falls_back_to_the_durable_subagent_rows(mock_db):
     turn = turns_db.enqueue_turn("s-durable", "user", prompt="hi")
     _durable_task("s-durable", "explore-1", "running", kind="agent")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env:
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "parked"
     assert turns_db.get_turn(turn["id"])["payload"]["task_ids"] == ["explore-1"]
-    env["start_idle"].assert_called_once_with("s-durable")
 
 
 async def test_durable_park_arm_ignores_monitor_shells(mock_db):
@@ -569,7 +561,7 @@ async def test_durable_park_arm_ignores_monitor_shells(mock_db):
     turn = turns_db.enqueue_turn("s-serves", "user", prompt="hi")
     _durable_task("s-serves", "dev-server", "running", kind="shell")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env:
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "completed"
@@ -583,7 +575,7 @@ async def test_turn_end_reconciles_the_engine_pending_set(mock_db):
     turn = turns_db.enqueue_turn("s-reconcile", "user", prompt="hi")
     reconcile = AsyncMock(return_value=["ghost"])
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         with patch(
             "app.core.pending_reconcile.reconcile_engine_pending", new=reconcile
         ):
@@ -605,7 +597,7 @@ async def test_turn_start_self_heal_settles_stale_park_when_no_bg_work(mock_db):
     assert turns_db.get_turn(stale["id"])["state"] == "parked"
 
     fresh = turns_db.enqueue_turn(sid, "user", prompt="new")
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         outcome = await session_runtime.SessionRuntime(fresh).execute()
 
     assert outcome == "completed"
@@ -628,7 +620,7 @@ async def test_turn_start_self_heal_spares_park_with_running_bg_work(mock_db):
     fresh = turns_db.enqueue_turn(sid, "user", prompt="new")
     # bg_work present → has_active_background_work True → self-heal is skipped.
     with _runtime_env(
-        pump=_make_pump([{"type": "done", "metadata": {}}]),
+        pump=make_pump([{"type": "done", "metadata": {}}]),
         bg_work=[{"id": "task-live"}],
     ):
         await session_runtime.SessionRuntime(fresh).execute()
@@ -680,7 +672,7 @@ async def test_turn_start_revives_a_failed_worker_session(mock_db):
     _seed_session(sid, "failed")
     turn = turns_db.enqueue_turn(sid, "user", prompt="carry on")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "completed"
@@ -696,7 +688,7 @@ async def test_turn_start_revives_on_a_server_originated_wake(mock_db):
     _seed_session(sid, "failed")
     turn = turns_db.enqueue_turn(sid, "unpark", prompt="<task-notification/>")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         await session_runtime.SessionRuntime(turn).execute()
 
     assert _status_of(sid) == "active"
@@ -708,7 +700,7 @@ async def test_turn_start_leaves_a_non_failed_status_alone(mock_db):
     _seed_session(sid, "archived")
     turn = turns_db.enqueue_turn(sid, "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         await session_runtime.SessionRuntime(turn).execute()
 
     assert _status_of(sid) == "archived"
@@ -723,7 +715,7 @@ async def test_queued_turn_that_never_starts_does_not_revive(mock_db):
     # Another runner owns the session's active run → execute bails before 4c.
     assert runs_db.claim_run(sid, "other-runner", 60) is not None
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome is None
@@ -751,7 +743,7 @@ async def test_finalize_runs_even_when_pump_crashes(mock_db):
 async def test_interrupted_terminal_settles_aborted(mock_db):
     turn = turns_db.enqueue_turn("s6", "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "interrupted"}])):
+    with _runtime_env(pump=make_pump([{"type": "interrupted"}])):
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "aborted"
@@ -766,7 +758,7 @@ async def test_error_terminal_records_the_error_message(mock_db):
     turn = turns_db.enqueue_turn("s6err", "user", prompt="hi")
     body = '{"error":{"message":"User not found.","code":401}}'
 
-    with _runtime_env(pump=_make_pump([{"type": "error", "message": body}])):
+    with _runtime_env(pump=make_pump([{"type": "error", "message": body}])):
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "aborted"
@@ -783,7 +775,7 @@ async def test_error_terminal_records_the_error_message(mock_db):
 async def test_on_turn_settled_fired_exactly_once(mock_db):
     turn = turns_db.enqueue_turn("s7", "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env:
         await session_runtime.SessionRuntime(turn).execute()
 
     assert env["scheduler"].call_count == 1
@@ -1060,7 +1052,7 @@ async def test_run_pump_broadcast_trims_render_frames(mock_db):
         {"type": "done", "metadata": {}},
     ]
 
-    with _runtime_env(pump=_make_pump(events)) as env:
+    with _runtime_env(pump=make_pump(events)) as env:
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "completed"
@@ -1167,7 +1159,7 @@ async def test_unpark_turn_records_terminal_task_events_after_start(mock_db):
     )
     order = []
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env:
         rec = env["recorder"]
         rec.start.side_effect = lambda *a, **k: order.append("start")
         rec.record_task_terminal.side_effect = lambda *a, **k: order.append("terminal")
@@ -1182,7 +1174,7 @@ async def test_plain_turn_records_no_terminal_task_events(mock_db):
     """No claimed completions on the payload → nothing to settle."""
     turn = turns_db.enqueue_turn("s12u", "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env:
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "completed"
@@ -1200,7 +1192,7 @@ async def test_terminal_task_event_failure_never_kills_the_wake_turn(mock_db):
         payload={"pending_frames": frames, "task_ids": ["shell-9"]},
     )
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env:
         env["recorder"].record_task_terminal.side_effect = RuntimeError("boom")
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
@@ -1225,7 +1217,7 @@ async def test_pump_does_not_broadcast_redundant_render_frames(mock_db):
         {"type": "done", "metadata": {}},
     ]
 
-    with _runtime_env(pump=_make_pump(frames)) as env:
+    with _runtime_env(pump=make_pump(frames)) as env:
         await session_runtime.SessionRuntime(turn).execute()
 
     # Everything still reaches the recorder → session event log → SSE.
@@ -1251,7 +1243,7 @@ async def test_pump_caps_oversized_tool_input_on_the_ws_leg_only(mock_db):
         {"type": "done", "metadata": {}},
     ]
 
-    with _runtime_env(pump=_make_pump(frames)) as env:
+    with _runtime_env(pump=make_pump(frames)) as env:
         await session_runtime.SessionRuntime(turn).execute()
 
     recorded = env["recorder"].on_event.call_args_list[0].args[0]
@@ -1439,7 +1431,7 @@ async def test_undelivered_task_notification_is_handed_back_at_finalize(mock_db)
     frames = _notification_frames()
     stranded = AsyncMock(name="on_task_notification_stranded")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         rt = session_runtime.SessionRuntime(turn)
         rt._task_steers["task-notify:mno"] = {
             "frames": frames, "task_ids": ["bg-1"],
@@ -1465,7 +1457,7 @@ async def test_wake_turn_latches_terminal_notified(mock_db):
     )
     delivered = MagicMock(name="on_task_notification_delivered")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         with patch(
             "app.core.turn_scheduler.on_task_notification_delivered", new=delivered,
         ):
@@ -1480,7 +1472,7 @@ async def test_plain_turn_latches_nothing(mock_db):
     turn = turns_db.enqueue_turn("sn6", "user", prompt="hi")
     delivered = MagicMock(name="on_task_notification_delivered")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         with patch(
             "app.core.turn_scheduler.on_task_notification_delivered", new=delivered,
         ):
@@ -1518,7 +1510,7 @@ async def test_error_terminal_persists_a_durable_system_message(mock_db):
     message list, so a reload showed the user's prompt and nothing else."""
     _seed_message_session("se1")
     turn = turns_db.enqueue_turn("se1", "user", prompt="do the thing")
-    pump = _make_pump([
+    pump = make_pump([
         {"type": "error", "message": "RuntimeError('client has been closed')"},
     ])
 
@@ -1536,7 +1528,7 @@ async def test_a_wake_turns_error_message_says_it_was_automatic(mock_db):
     _seed_message_session("se2")
     turn = turns_db.enqueue_turn("se2", "unpark", prompt="<task-notification/>")
 
-    with _runtime_env(pump=_make_pump([{"type": "error", "message": "boom"}])):
+    with _runtime_env(pump=make_pump([{"type": "error", "message": "boom"}])):
         await session_runtime.SessionRuntime(turn).execute()
 
     (row,) = _system_rows("se2")
@@ -1547,7 +1539,7 @@ async def test_a_clean_turn_writes_no_error_row(mock_db):
     _seed_message_session("se3")
     turn = turns_db.enqueue_turn("se3", "user", prompt="hi")
 
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         await session_runtime.SessionRuntime(turn).execute()
 
     assert _system_rows("se3") == []

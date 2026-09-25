@@ -21,7 +21,6 @@ but stubs turn-end persistence (not under test here).
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import uuid
 
 from app.core.provider.events import (
     AssistantMessage,
@@ -30,8 +29,8 @@ from app.core.provider.events import (
 )
 
 import app.core.query_engine as qe
-from app.db import database
 from tests.core.engine_harness import StubPool, collect, make_state, stream_response
+from tests.core.helpers import new_session
 
 
 # ─── minimal engine harness (subprocess/profile boundaries only) ─────────────
@@ -85,17 +84,11 @@ def _engine_patches(
     return options
 
 
-def _new_session(profile_id="default"):
-    session_id = f"sess-{uuid.uuid4()}"
-    database.create_session(session_id=session_id, profile_id=profile_id)
-    return session_id
-
-
 async def _run(
     messages, model=None, tmp_path=None, provider=None, resolved_provider=_UNSET
 ):
     """Drive the streaming loop over ``messages`` and return model_info frames."""
-    session_id = _new_session()
+    session_id = new_session()
     state = make_state()
     pool = StubPool(state)
     state.adapter.receive_events = stream_response(messages)

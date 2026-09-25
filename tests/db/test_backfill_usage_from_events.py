@@ -17,13 +17,7 @@ import json
 import pytest
 
 from scripts import backfill_usage_from_events as backfill
-
-
-@pytest.fixture(autouse=True)
-def _foreign_keys_off(test_db):
-    """Run on the shared conftest DB with foreign keys off: the backfill
-    touches only sessions; the FK to projects is irrelevant here."""
-    test_db.execute("PRAGMA foreign_keys = OFF")
+from tests.shared_fixtures import foreign_keys_off  # noqa: F401  (autouse fixture)
 
 
 @pytest.fixture

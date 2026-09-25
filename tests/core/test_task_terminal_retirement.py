@@ -41,17 +41,15 @@ def _short_terminal_batch_window(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_module_state():
-    from app.core import idle_reader, session_runtime, turn_manager
+    from app.core import session_runtime, turn_manager
 
     session_runtime.register_scheduler(None)
-    idle_reader.register_on_task_terminal(None)
     turn_manager.register_kick(None)
     turn_scheduler._kick_tasks.clear()
     turn_scheduler._batch_kick_tasks.clear()
     task_registry.reset_all()
     yield
     session_runtime.register_scheduler(None)
-    idle_reader.register_on_task_terminal(None)
     turn_manager.register_kick(None)
     turn_scheduler._kick_tasks.clear()
     turn_scheduler._batch_kick_tasks.clear()

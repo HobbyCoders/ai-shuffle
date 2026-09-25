@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.core import jsonl_parser as jp
+from tests.core.jsonl_cache_helpers import setup_function, teardown_function  # noqa: F401  (module hooks)
 
 
 def _store_loader_for(main_entries, subagent_entries_by_id):
@@ -57,14 +58,6 @@ def _parse_via_file(session_id, main_entries, agent_files=None):
             mock_settings.get_claude_projects_dir = projects_dir
             jp.invalidate_parse_cache()
             return jp.parse_session_history(session_id, "/workspace")
-
-
-def setup_function(_func):
-    jp.invalidate_parse_cache()
-
-
-def teardown_function(_func):
-    jp.invalidate_parse_cache()
 
 
 # ---------------------------------------------------------------------------

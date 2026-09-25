@@ -31,13 +31,6 @@ def pinned_cluster_secret(monkeypatch):
 
 
 @pytest.fixture
-def artifacts_dir(tmp_path, monkeypatch):
-    d = tmp_path / "artifacts"
-    monkeypatch.setattr(artifact_store, "ARTIFACTS_DIR", d)
-    return d
-
-
-@pytest.fixture
 def client(artifacts_dir, mock_db):
     from app.db import api_users, sessions
     api_users.create_api_user('fixture-user', 'Fixture user', 'fixture-hash')

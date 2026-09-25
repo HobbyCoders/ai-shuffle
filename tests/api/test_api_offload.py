@@ -29,6 +29,7 @@ from app.api import hooks as hooks_api
 from app.api import import_export as ie_api
 from app.api.import_export import ExportData, ExportedProfile, ExportedSubagent
 from app.core.models import HookUpdate
+from tests.api.helpers import fake_request
 
 
 # ═══ harness ════════════════════════════════════════════════════════════════
@@ -89,13 +90,6 @@ class _HopCounter:
     def __exit__(self, *exc):
         self._patch.stop()
         return False
-
-
-@pytest.fixture
-def loop_thread():
-    """The thread the test's event loop runs on — every DB call must land
-    somewhere else."""
-    return threading.get_ident()
 
 
 # ═══ automations ════════════════════════════════════════════════════════════
@@ -356,17 +350,13 @@ async def test_export_all_reads_both_tables_in_one_hop(loop_thread):
 # ═══ hooks ══════════════════════════════════════════════════════════════════
 
 
-def _request(api_user=None):
-    return SimpleNamespace(state=SimpleNamespace(api_user=api_user))
-
-
 async def test_update_hook_keeps_read_authorise_write_in_one_hop(loop_thread):
     db = _SpyDatabase(get_hook={"id": "h1", "project_id": None})
     with patch.object(hooks_api, "database", db), _HopCounter(hooks_api) as hops:
         await hooks_api.update_hook(
             hook_id="h1",
             hook_data=HookUpdate(enabled=False),
-            request=_request(),
+            request=fake_request(),
             token="t",
         )
 
@@ -378,7 +368,7 @@ async def test_update_hook_keeps_read_authorise_write_in_one_hop(loop_thread):
 async def test_delete_hook_keeps_read_authorise_delete_in_one_hop(loop_thread):
     db = _SpyDatabase(get_hook={"id": "h1", "project_id": None}, delete_hook=True)
     with patch.object(hooks_api, "database", db), _HopCounter(hooks_api) as hops:
-        await hooks_api.delete_hook(hook_id="h1", request=_request(), token="t")
+        await hooks_api.delete_hook(hook_id="h1", request=fake_request(), token="t")
 
     assert db.calls == ["get_hook", "delete_hook"]
     assert loop_thread not in db.threads
@@ -395,7 +385,7 @@ async def test_delete_hook_still_403s_for_a_foreign_project(loop_thread):
         with pytest.raises(HTTPException) as exc:
             await hooks_api.delete_hook(
                 hook_id="h1",
-                request=_request({"project_id": "proj-b"}),
+                request=fake_request({"project_id": "proj-b"}),
                 token="t",
             )
 
@@ -413,7 +403,7 @@ async def test_create_project_hook_checks_the_project_in_the_write_hop(loop_thre
             hook_data=HookCreate(
                 name="h", event="PreToolUse", hook_type="bash", command="echo hi"
             ),
-            request=_request(),
+            request=fake_request(),
             token="t",
         )
 

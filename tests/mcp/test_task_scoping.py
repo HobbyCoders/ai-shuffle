@@ -23,6 +23,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.mcp.tool_helpers import tool_result_json
+
 
 PARENT = "s-parent"
 WORKER = "s-worker"
@@ -47,12 +49,8 @@ def _handlers(session_id=PARENT):
     return {tool.name: tool for tool in captured["tools"]}
 
 
-def _body(result):
-    return json.loads(result["content"][0]["text"])
-
-
 def _call(name, args, session_id=PARENT):
-    return _body(asyncio.run(_handlers(session_id)[name].handler(args)))
+    return tool_result_json(asyncio.run(_handlers(session_id)[name].handler(args)))
 
 
 @pytest.fixture

@@ -14,7 +14,6 @@ from fastapi.testclient import TestClient
 
 from app.api.auth import require_auth
 from app.api.cluster import router
-from app.core.config import settings
 from datetime import datetime, timezone
 
 from app.db import checkouts as checkouts_db
@@ -22,19 +21,12 @@ from app.db import database
 from app.db import projects as projects_db
 from app.db import projects_v2
 from app.db.base import get_db
+from tests.shared_fixtures import LOCAL_ME as ME, pin_runner  # noqa: F401  (autouse fixture)
 
 
-ME = "local-me"
 PEER = "peer-install-1"
 ORIGIN = "git:example.com/shared.git"
 OTHER_ORIGIN = "git:example.com/other.git"
-
-
-@pytest.fixture(autouse=True)
-def pin_runner(monkeypatch):
-    monkeypatch.setattr(
-        type(settings), "effective_instance_id", property(lambda self: ME)
-    )
 
 
 @pytest.fixture

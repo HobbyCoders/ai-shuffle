@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from app.api.sessions import get_session
 from app.db import sessions as sessions_db
+from tests.helpers import fluid_message
 
 SID = "sess-fluid-detail"
 SDK_ID = "ses_detail0001"
@@ -23,12 +24,8 @@ def _request():
     return SimpleNamespace(state=SimpleNamespace(api_user=None))
 
 
-def _msg(role, blocks):
-    return {"role": role, "content": blocks, "provider_meta": {}}
-
-
 def _text(role, text):
-    return _msg(role, [{"kind": "text", "text": text}])
+    return fluid_message(role, [{"kind": "text", "text": text}])
 
 
 def _seed_fluid(nodes):
@@ -74,11 +71,11 @@ async def test_detail_read_renders_fluid_tool_cards_through_the_shared_transform
     every other source, so a tool call renders as a merged tool card."""
     _seed_fluid([
         ("n1", None, _text("user", "read it")),
-        ("n2", "n1", _msg("assistant", [{
+        ("n2", "n1", fluid_message("assistant", [{
             "kind": "tooluseblock", "id": "t1", "name": "Read",
             "input": {"file_path": "/x"},
         }])),
-        ("n3", "n2", _msg("user", [{
+        ("n3", "n2", fluid_message("user", [{
             "kind": "toolresultblock", "tool_use_id": "t1",
             "content": [{"kind": "text", "text": "file body"}],
             "is_error": False,
@@ -129,11 +126,11 @@ async def test_detail_read_lists_the_tools_a_code_mode_cell_ran(mock_db):
     cell = {"code": "grep('needle')"}
     _seed_fluid([
         ("n1", None, _text("user", "find the needle")),
-        ("n2", "n1", _msg("assistant", [{
+        ("n2", "n1", fluid_message("assistant", [{
             "kind": "tooluseblock", "id": "rp1", "name": "run_python",
             "input": cell,
         }])),
-        ("n3", "n2", _msg("user", [{
+        ("n3", "n2", fluid_message("user", [{
             "kind": "toolresultblock", "tool_use_id": "rp1",
             "content": [{"kind": "text", "text": "=> 2 hits"}],
             "is_error": False,

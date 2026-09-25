@@ -13,16 +13,10 @@ from app.core import placement
 from app.core.placement import PlacementDecision
 from app.db import checkouts as checkouts_db
 from app.db import database
+from tests.shared_fixtures import LOCAL_ME as RUNNER_ME, pin_runner  # noqa: F401  (autouse fixture)
+from tests.shared_fixtures import foreign_keys_off  # noqa: F401  (autouse fixture)
 
-RUNNER_ME = "local-me"
 PROJECT = "pv2-x"
-
-
-@pytest.fixture(autouse=True)
-def _foreign_keys_off(test_db):
-    """Run on the shared conftest DB with foreign keys off: these tests
-    seed rows without their FK parents."""
-    test_db.execute("PRAGMA foreign_keys = OFF")
 
 
 @pytest.fixture
@@ -30,14 +24,6 @@ def mock_db(mock_db):
     """The shared conftest DB, shim-wrapped (dict rows, %s placeholders)."""
     from tests.pg_shim import ShimConnection
     return ShimConnection(mock_db)
-
-
-@pytest.fixture(autouse=True)
-def pin_runner(monkeypatch):
-    from app.core.config import settings
-    monkeypatch.setattr(
-        type(settings), "effective_instance_id", property(lambda self: RUNNER_ME)
-    )
 
 
 def _stub_installs(monkeypatch, online_ids, caps_by_id=None):

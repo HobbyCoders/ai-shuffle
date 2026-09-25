@@ -13,14 +13,7 @@ follow exactly).
 """
 
 from app.db import database
-
-
-def _column_names(conn, table):
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-
-
-def _schema_version(conn):
-    return conn.execute("SELECT version FROM schema_version").fetchone()[0]
+from tests.db.migration_helpers import column_names, schema_version
 
 
 def test_fresh_db_has_binding_columns_and_version(mock_db):
@@ -29,8 +22,8 @@ def test_fresh_db_has_binding_columns_and_version(mock_db):
     conn = mock_db
     assert {
         "model", "effort", "permission_mode", "context_window", "fast", "workspace_project_ids",
-    } <= _column_names(conn, "sessions")
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    } <= column_names(conn, "sessions")
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_init_upgrades_pre_v79_db(mock_db):
@@ -49,14 +42,14 @@ def test_init_upgrades_pre_v79_db(mock_db):
     )
     conn.commit()
 
-    assert "model" not in _column_names(conn, "sessions")
+    assert "model" not in column_names(conn, "sessions")
 
     database.init_database()
 
     assert {
         "model", "effort", "permission_mode", "context_window", "fast",
-    } <= _column_names(conn, "sessions")
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    } <= column_names(conn, "sessions")
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
     row = database.get_session("s-legacy-binding")
     assert row["model"] is None

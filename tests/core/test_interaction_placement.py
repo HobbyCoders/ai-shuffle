@@ -23,7 +23,6 @@ poll cadence, exactly as documented in ``interaction_wait``.
 
 import asyncio
 
-import pytest
 from unittest.mock import AsyncMock
 
 from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
@@ -33,44 +32,12 @@ from app.core.permission_handler import PermissionHandler, _DeferSentinel
 from app.core.user_question_handler import UserQuestionHandler
 from app.db import interactions
 from app.db import session_events as session_events_db
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def _no_gateway_listener(monkeypatch):
-    """Never register a real gateway LISTEN thread; poll/in-proc wake only."""
-    monkeypatch.setattr(interaction_wait, "_ensure_listener", lambda: None)
-
-
-@pytest.fixture(autouse=True)
-def _no_push(monkeypatch):
-    """Silence the best-effort mobile notify so no background task leaks."""
-    import app.services.push_notification as pn
-
-    monkeypatch.setattr(pn, "fire_and_forget_notify", lambda *a, **k: None)
-
-
-@pytest.fixture(autouse=True)
-def _reset_interaction_wait_state():
-    """Reset ``interaction_wait`` module state before each test.
-
-    The one-time ``_listener_registered`` flag survives across tests while each
-    test gets a fresh event loop, so notifies registered by an earlier test's
-    loop go nowhere; resetting forces re-registration on the current loop.
-    """
-    interaction_wait._waiters.clear()
-    interaction_wait._listener_registered = False
-
-
-@pytest.fixture(autouse=True)
-def _reset_backfill_memo():
-    """Drop the per-process empty-session memo so each test backfills fresh."""
-    from app.core import history_backfill
-
-    history_backfill._reset_memo()
+from tests.core.interaction_harness import (  # noqa: F401  (autouse fixtures)
+    no_gateway_listener,
+    no_push,
+    reset_backfill_memo_on_setup,
+    reset_interaction_wait_state,
+)
 
 
 # ---------------------------------------------------------------------------

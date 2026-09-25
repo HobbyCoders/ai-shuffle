@@ -9,11 +9,12 @@ a browser through a Cloudflare login to read them.
 """
 
 import asyncio
-import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
+
+from tests.mcp.tool_helpers import tool_result_json
 
 
 def _handlers(session_id="session-logs"):
@@ -34,12 +35,8 @@ def _handlers(session_id="session-logs"):
     return {tool.name: tool for tool in captured["tools"]}
 
 
-def _body(result):
-    return json.loads(result["content"][0]["text"])
-
-
 def _get(**args):
-    return _body(asyncio.run(_handlers()["GetAppLogs"].handler(args)))
+    return tool_result_json(asyncio.run(_handlers()["GetAppLogs"].handler(args)))
 
 
 @pytest.fixture

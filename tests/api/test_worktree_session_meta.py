@@ -22,16 +22,9 @@ from app.db import checkouts as checkouts_db
 from app.db import git_ops as git_ops_db
 from app.db import projects_v2
 from tests.fake_path import FakePath
+from tests.shared_fixtures import LOCAL_ME as ME, pin_runner  # noqa: F401  (autouse fixture)
 
-ME = "local-me"
 PEER = "peer-install-1"
-
-
-@pytest.fixture(autouse=True)
-def pin_runner(monkeypatch):
-    monkeypatch.setattr(
-        type(settings), "effective_instance_id", property(lambda self: ME)
-    )
 
 
 def _patch(monkeypatch, existing=None, resolver=None):

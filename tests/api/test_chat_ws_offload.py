@@ -15,7 +15,6 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 import app.api.chat_ws_handler as cwh
 from app.core import turn_manager
@@ -37,13 +36,6 @@ class _ThreadSpy:
     def __call__(self, *args, **kwargs):
         self.threads.append(threading.get_ident())
         return self._fn(*args, **kwargs)
-
-
-@pytest.fixture
-def loop_thread():
-    """The thread the test's event loop runs on — everything blocking must
-    happen somewhere else."""
-    return threading.get_ident()
 
 
 # ═══ handle_query / handle_queue_message — turn_manager.submit ═══════════════

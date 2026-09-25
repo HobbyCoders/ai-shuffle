@@ -19,11 +19,12 @@ async def clean_delivery():
 
 
 async def test_runtime_enqueues_only_winning_start_and_settlement(monkeypatch, mock_db):
-    from tests.core.test_session_runtime import _runtime_env, _make_pump
+    from tests.core.helpers import make_pump
+    from tests.core.test_session_runtime import _runtime_env
     emitted = []
     monkeypatch.setattr(lifecycle_events, "enqueue", lambda *args, **kw: emitted.append(args))
     row = turns.enqueue_turn("fixture-session", "user", prompt="not sent to a model")
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         assert await session_runtime.SessionRuntime(row).execute() == "completed"
         assert await session_runtime.SessionRuntime(row).execute() is None
     assert emitted == [("started", "fixture-session", row["id"]),
@@ -32,7 +33,8 @@ async def test_runtime_enqueues_only_winning_start_and_settlement(monkeypatch, m
 
 @pytest.mark.parametrize("metadata", [{"is_error": True}, {"errors": ["max turns exceeded"]}])
 async def test_durable_failed_result_reaches_error_lifecycle(monkeypatch, mock_db, metadata):
-    from tests.core.test_session_runtime import _runtime_env, _make_pump
+    from tests.core.helpers import make_pump
+    from tests.core.test_session_runtime import _runtime_env
     from app.core.turn_recorder import TurnRecorder
     monkeypatch.setattr(lifecycle_events.database, "get_session", lambda sid: {"profile_id": "p"})
     monkeypatch.setattr(lifecycle_events.database, "get_connector_sessions_for_ai_session", lambda sid: [])
@@ -45,7 +47,7 @@ async def test_durable_failed_result_reaches_error_lifecycle(monkeypatch, mock_d
     # Restore our factory override before _runtime_env restores the real class
     # method. Function-scoped teardown would reinstall that helper's AsyncMock
     # and silently disable recording in later tests on the same worker.
-    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": metadata}])), \
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": metadata}])), \
             monkeypatch.context() as recorder_patch:
         recorder_patch.setattr(session_runtime.TurnRecorder, "create_for_run", create_recorder)
         assert await session_runtime.SessionRuntime(row).execute() == "completed"

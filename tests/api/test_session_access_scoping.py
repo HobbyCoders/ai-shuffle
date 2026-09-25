@@ -6,7 +6,6 @@ its scope; importing a server-side JSONL file is owner-only and confined to
 the transcript roots.
 """
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,12 +14,9 @@ from fastapi import HTTPException
 from app.api import query as query_api
 from app.api import ws_sync
 from app.api.sessions_export import ImportJSONLRequest, import_jsonl_session
+from tests.api.helpers import fake_request
 
 FOREIGN_USER = {"id": "u1", "project_id": None, "profile_id": "other-profile"}
-
-
-def _request(api_user=None):
-    return SimpleNamespace(state=SimpleNamespace(api_user=api_user))
 
 
 # -- /ws/sessions/{id} --------------------------------------------------------
@@ -67,7 +63,7 @@ async def test_interrupt_denies_foreign_session(mock_db):
     database.create_session("sess-int", "default")
     with patch.object(query_api, "interrupt_session", AsyncMock(return_value=True)) as interrupt:
         with pytest.raises(HTTPException) as exc:
-            await query_api.interrupt(_request(FOREIGN_USER), "sess-int", token="t")
+            await query_api.interrupt(fake_request(FOREIGN_USER), "sess-int", token="t")
     assert exc.value.status_code == 403
     interrupt.assert_not_awaited()
 
@@ -79,7 +75,7 @@ async def test_interrupt_allows_owner_and_in_scope_user(mock_db):
     database.create_session("sess-own", "default")
     in_scope = {"id": "u2", "project_id": None, "profile_id": "default"}
     with patch.object(query_api, "interrupt_session", AsyncMock(return_value=True)):
-        for request in (_request(None), _request(in_scope)):
+        for request in (fake_request(None), fake_request(in_scope)):
             result = await query_api.interrupt(request, "sess-own", token="t")
             assert result == {"status": "interrupted", "session_id": "sess-own"}
 
@@ -93,8 +89,8 @@ async def test_streaming_active_is_filtered_for_api_users(mock_db):
     database.create_session("sess-theirs", "default")
     active = ["sess-mine", "sess-theirs", "sess-gone"]
     with patch("app.core.query_engine.get_streaming_sessions", return_value=active):
-        owner = await query_api.list_active_sessions(_request(None), token="t")
-        scoped = await query_api.list_active_sessions(_request(FOREIGN_USER), token="t")
+        owner = await query_api.list_active_sessions(fake_request(None), token="t")
+        scoped = await query_api.list_active_sessions(fake_request(FOREIGN_USER), token="t")
     assert owner == {"active_sessions": active}
     assert scoped == {"active_sessions": ["sess-mine"]}
 
@@ -141,7 +137,7 @@ async def test_import_jsonl_rejects_paths_outside_roots(mock_db, transcript_root
     (outside / "abc.jsonl").write_text("{}\n")
     body = ImportJSONLRequest(jsonl_path=make_path(projects, outside))
     with pytest.raises(HTTPException) as exc:
-        await import_jsonl_session(_request(), body, token="owner")
+        await import_jsonl_session(fake_request(), body, token="owner")
     assert exc.value.status_code == 400
 
 
@@ -153,7 +149,7 @@ async def test_import_jsonl_rejects_symlink_escaping_root(mock_db, transcript_ro
     link = projects / "-workspace-app" / "link.jsonl"
     link.symlink_to(secret)
     with pytest.raises(HTTPException) as exc:
-        await import_jsonl_session(_request(), ImportJSONLRequest(jsonl_path=str(link)), token="owner")
+        await import_jsonl_session(fake_request(), ImportJSONLRequest(jsonl_path=str(link)), token="owner")
     assert exc.value.status_code == 400
 
 
@@ -163,7 +159,7 @@ async def test_import_jsonl_accepts_transcript_inside_projects_dir(mock_db, tran
     transcript = projects / "-workspace-app" / "11111111-2222-3333-4444-555555555555.jsonl"
     transcript.write_text('{"type": "user", "message": {"role": "user", "content": "hello"}}\n')
     result = await import_jsonl_session(
-        _request(), ImportJSONLRequest(jsonl_path=str(transcript)), token="owner"
+        fake_request(), ImportJSONLRequest(jsonl_path=str(transcript)), token="owner"
     )
     assert result.status == "success"
     assert result.sdk_session_id == transcript.stem
