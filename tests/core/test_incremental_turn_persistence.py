@@ -68,8 +68,8 @@ from app.core.provider.events import (
 import app.core.query_engine as qe
 import app.core.query_persistence as qp
 from app.core import jsonl_parser as jp
-from app.core.session_pool import SessionState
 from app.db import database
+from tests.core.engine_harness import StubPool, collect, make_state
 
 
 # ─── mode + cache hygiene ───────────────────────────────────────────────────
@@ -194,43 +194,6 @@ def _tool_result_entry(tool_id, output, entry_uuid):
 # ─── run_sync + database + _persist_turn_results REAL) ───────────────────────
 
 
-def _make_state():
-    adapter = MagicMock()
-    adapter.is_alive = MagicMock(return_value=True)
-    adapter.sdk_client = MagicMock()
-    adapter.send_query = AsyncMock()
-    return SessionState(adapter=adapter, is_connected=True)
-
-
-class _StubPool:
-    def __init__(self, state=None):
-        self.state = state
-
-    def get(self, session_id):
-        return self.state
-
-    def peek(self, session_id):
-        return self.state
-
-    def put(self, session_id, state):
-        self.state = state
-
-    def admission_check(self, lane="delegated"):
-        return None
-
-    async def evict_if_needed(self, incoming_lane="delegated"):
-        return None
-
-    async def remove(self, session_id):
-        self.state = None
-
-    async def remove_dead(self, session_id):
-        self.state = None
-
-    async def remove_broken(self, session_id):
-        self.state = None
-
-
 def _fake_sync_engine():
     sync = MagicMock()
     sync.broadcast_message_added = AsyncMock()
@@ -240,7 +203,7 @@ def _fake_sync_engine():
     return sync
 
 
-def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str):
+def _engine_patches(stack: ExitStack, pool: StubPool, cwd: str):
     """Patch the subprocess/profile boundaries ONLY.
 
     Deliberately REAL (they are the subject under test): run_sync, the whole
@@ -263,13 +226,6 @@ def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str):
     stack.enter_context(patch.object(qe, "push_memory", new=AsyncMock()))
     stack.enter_context(patch.object(qe, "sync_engine", new=_fake_sync_engine()))
     return options
-
-
-async def _collect(agen):
-    events = []
-    async for ev in agen:
-        events.append(ev)
-    return events
 
 
 def _new_session(profile_id="default"):
@@ -336,8 +292,8 @@ async def test_mid_turn_death_preserves_flushed_blocks_via_real_read_path(test_d
     and no crash artifacts / duplicate rows anywhere."""
     session_id = _new_session()
     sdk_sid = str(uuid.uuid4())
-    state = _make_state()
-    pool = _StubPool(state)
+    state = make_state(sdk_client=MagicMock())
+    pool = StubPool(state)
 
     script = [
         ("yield", SystemMessage(subtype="init", data={"session_id": sdk_sid})),
@@ -364,7 +320,7 @@ async def test_mid_turn_death_preserves_flushed_blocks_via_real_read_path(test_d
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
-        events = await _collect(
+        events = await collect(
             qe.stream_to_websocket("run the thing", session_id, "default")
         )
 
@@ -396,8 +352,8 @@ async def test_mid_turn_death_before_any_flush_loses_only_that_turn(test_db, sto
     an error), the session row survives, and nothing is fabricated."""
     session_id = _new_session()
     sdk_sid = str(uuid.uuid4())
-    state = _make_state()
-    pool = _StubPool(state)
+    state = make_state(sdk_client=MagicMock())
+    pool = StubPool(state)
 
     script = [
         ("yield", SystemMessage(subtype="init", data={"session_id": sdk_sid})),
@@ -407,7 +363,7 @@ async def test_mid_turn_death_before_any_flush_loses_only_that_turn(test_db, sto
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
-        events = await _collect(qe.stream_to_websocket("hi", session_id, "default"))
+        events = await collect(qe.stream_to_websocket("hi", session_id, "default"))
 
     assert any(e.get("type") == "error" for e in events), events
     assert database.get_session(session_id)["sdk_session_id"] == sdk_sid
@@ -427,8 +383,8 @@ async def test_normal_turn_end_no_dupes_and_aggregates(test_db, store_read, tmp_
     (cached or fresh) returns the identical transcript."""
     session_id = _new_session()
     sdk_sid = str(uuid.uuid4())
-    state = _make_state()
-    pool = _StubPool(state)
+    state = make_state(sdk_client=MagicMock())
+    pool = StubPool(state)
 
     script = [
         ("yield", SystemMessage(subtype="init", data={"session_id": sdk_sid})),
@@ -457,7 +413,7 @@ async def test_normal_turn_end_no_dupes_and_aggregates(test_db, store_read, tmp_
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
-        events = await _collect(qe.stream_to_websocket("do it", session_id, "default"))
+        events = await collect(qe.stream_to_websocket("do it", session_id, "default"))
 
     assert any(e.get("type") == "done" for e in events), events
 
@@ -490,8 +446,8 @@ async def test_interrupt_mid_turn_no_dupes(test_db, store_read, tmp_path):
     interrupted persist path must not duplicate the mirrored block either."""
     session_id = _new_session()
     sdk_sid = str(uuid.uuid4())
-    state = _make_state()
-    pool = _StubPool(state)
+    state = make_state(sdk_client=MagicMock())
+    pool = StubPool(state)
 
     script = [
         ("yield", SystemMessage(subtype="init", data={"session_id": sdk_sid})),
@@ -505,7 +461,7 @@ async def test_interrupt_mid_turn_no_dupes(test_db, store_read, tmp_path):
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
-        events = await _collect(qe.stream_to_websocket("long task", session_id, "default"))
+        events = await collect(qe.stream_to_websocket("long task", session_id, "default"))
 
     assert any(e.get("type") == "interrupted" for e in events), events
     assert _content_signature(store_read(sdk_sid)) == [

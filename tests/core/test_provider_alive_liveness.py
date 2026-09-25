@@ -33,7 +33,8 @@ from app.db import database
 from app.db import runs as runs_db
 from app.db import session_events as se
 from app.db import turns as turns_db
-from tests.core.test_native_usage_settlement_paths import _StubPool, _engine_patches
+from tests.core.engine_harness import StubPool
+from tests.core.test_native_usage_settlement_paths import _engine_patches
 
 ENGINE = "ses_luna_worker"
 
@@ -69,7 +70,7 @@ async def _run_worker_turn(tmp_path, fluid_events):
 
     frames = []
     with ExitStack() as stack:
-        _engine_patches(stack, _StubPool(state), str(tmp_path))
+        _engine_patches(stack, StubPool(state), str(tmp_path))
         run = runs_db.claim_run(sid, "runner-test", 60)
         turn = turns_db.enqueue_turn(sid, "provider_agent", prompt="go")
         turn = turns_db.start_turn(turn["id"], run["id"], "runner-test")

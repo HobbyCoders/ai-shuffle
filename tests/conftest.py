@@ -243,7 +243,11 @@ def _auto_db_shim(_raw_sqlite: sqlite3.Connection, request):
         # Startup-owned extension schemas are not part of create_postgres_schema.
         from app.db import mobile_tool_identity
         mobile_tool_identity.init_schema()
-        # Seed a "default" profile so tests can reference it.
+        # Seed a "default" profile so tests can reference it (unless the test
+        # asked for an unseeded database via ``bare_db``).
+        if "bare_db" in request.fixturenames:
+            yield
+            return
         try:
             database.create_profile(
                 profile_id="default",
@@ -262,6 +266,16 @@ def mock_db(_raw_sqlite: sqlite3.Connection, _auto_db_shim) -> sqlite3.Connectio
 
     Depending on ``_auto_db_shim`` (autouse) documents the coupling; the patch
     is active for the whole test regardless.
+    """
+    return _raw_sqlite
+
+
+@pytest.fixture(scope="function")
+def bare_db(_raw_sqlite: sqlite3.Connection, _auto_db_shim) -> sqlite3.Connection:
+    """Like ``mock_db`` but without the seeded "default" profile.
+
+    For tests that count or list every row of a table (``get_all_profiles``
+    and similar) and so must start from an empty database.
     """
     return _raw_sqlite
 

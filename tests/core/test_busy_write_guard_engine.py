@@ -37,6 +37,7 @@ import app.core.query_background as qb
 from app.core.session_pool import SessionState
 from app.db import session_events as se
 from app.db import sessions as sessions_db
+from tests.core.engine_harness import StubPool, collect
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -58,36 +59,7 @@ def _fake_state(**overrides) -> SessionState:
     return state
 
 
-class _StubPool:
-    def __init__(self, state=None):
-        self.state = state
-
-    def get(self, session_id):
-        return self.state
-
-    def peek(self, session_id):
-        return self.state
-
-    def put(self, session_id, state):
-        self.state = state
-
-    def admission_check(self, lane="delegated"):
-        return None
-
-    async def evict_if_needed(self, incoming_lane="delegated"):
-        return None
-
-    async def remove(self, session_id):
-        self.state = None
-
-    async def remove_dead(self, session_id):
-        self.state = None
-
-    async def remove_broken(self, session_id):
-        self.state = None
-
-
-def _chat_patches(stack: ExitStack, pool: _StubPool):
+def _chat_patches(stack: ExitStack, pool: StubPool):
     """Patch every stream_to_websocket boundary up to (and past) the reuse gate."""
     stack.enter_context(patch.object(
         qe, "get_profile", return_value={"id": "claude-code", "config": {}}
@@ -147,16 +119,9 @@ def _claim_window_options(options) -> None:
     options.aih_provider_id = None  # same provider → the model change hot-swaps
 
 
-async def _collect(agen):
-    events = []
-    async for ev in agen:
-        events.append(ev)
-    return events
-
-
 async def test_native_chat_admission_passes_its_lane_to_eviction(tmp_path):
     from app.core.session_pool import SessionPool
-    pool = _StubPool()
+    pool = StubPool()
     busy_pool = SessionPool(max_size=1)
     busy_pool.put("busy-one", _fake_state(is_streaming=True))
     busy_pool.put("busy-two", _fake_state(is_streaming=True))
@@ -171,7 +136,7 @@ async def test_native_chat_admission_passes_its_lane_to_eviction(tmp_path):
         stack.enter_context(patch.object(qe, "memory_leg_for_options", return_value="native"))
         # The missing CWD stops at the next boundary, before adapter creation.
         stack.enter_context(patch("app.core.hook_service.attach_hooks_to_options", return_value=None))
-        await _collect(qe.stream_to_websocket("fixture", "new-native", "claude-code"))
+        await collect(qe.stream_to_websocket("fixture", "new-native", "claude-code"))
     assert lanes == ["native"]
     assert "busy-one" in busy_pool and "busy-two" in busy_pool
 
@@ -183,11 +148,11 @@ async def test_chat_gate_refuses_busy_client_and_never_writes_stdin():
     """A query for a session whose pooled client is mid-turn yields a busy
     error and returns — client.query() is never called on the busy client."""
     state = _fake_state(is_streaming=True)
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         _chat_patches(stack, pool)
-        events = await _collect(qe.stream_to_websocket("hi", "sess-busy", "claude-code"))
+        events = await collect(qe.stream_to_websocket("hi", "sess-busy", "claude-code"))
 
     assert any(e.get("type") == "error" and "busy" in e.get("message", "").lower()
                for e in events), events
@@ -199,7 +164,7 @@ async def test_chat_gate_refuses_busy_client_and_never_writes_stdin():
 async def test_chat_gate_uses_current_pool_entry_after_async_setup():
     old_state = _fake_state()
     current_state = _fake_state()
-    pool = _StubPool(old_state)
+    pool = StubPool(old_state)
     setup_started = asyncio.Event()
     finish_setup = asyncio.Event()
 
@@ -212,7 +177,7 @@ async def test_chat_gate_uses_current_pool_entry_after_async_setup():
         # Any await between the pool read and the reuse decision will do;
         # the pending-checkout wait is one.
         stack.enter_context(patch("app.core.query_options.ensure_pending_checkout", new=_slow_checkout))
-        query = asyncio.create_task(_collect(qe.stream_to_websocket(
+        query = asyncio.create_task(collect(qe.stream_to_websocket(
             "hi", "sess-replaced", "claude-code",
             overrides={"provider_id": "provider-a"},
         )))
@@ -238,12 +203,12 @@ async def test_chat_gate_claims_is_streaming_at_decision_point():
 
     state = _claim_window_state(set_model_side_effect=_observe)
     state.is_streaming = False
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         options = _chat_patches(stack, pool)
         _claim_window_options(options)
-        await _collect(qe.stream_to_websocket("hi", "sess-claim", "claude-code"))
+        await collect(qe.stream_to_websocket("hi", "sess-claim", "claude-code"))
 
     assert observed == [True], (
         "is_streaming must already be claimed when the first await after the "
@@ -255,7 +220,7 @@ async def test_chat_gate_two_concurrent_entrants_exactly_one_proceeds():
     """Entrant A holds the client mid-turn; entrant B arriving concurrently is
     rejected with a busy error and never writes into A's stdin."""
     state = _fake_state()
-    pool = _StubPool(state)
+    pool = StubPool(state)
     a_blocked = asyncio.Event()
     a_release = asyncio.Event()
 
@@ -279,7 +244,7 @@ async def test_chat_gate_two_concurrent_entrants_exactly_one_proceeds():
         assert state.is_streaming is True
 
         # B arrives while A is mid-turn.
-        b_events = await _collect(qe.stream_to_websocket("second", "sess-race", "claude-code"))
+        b_events = await collect(qe.stream_to_websocket("second", "sess-race", "claude-code"))
 
         a_release.set()
         await asyncio.wait_for(task_a, timeout=5.0)
@@ -295,12 +260,12 @@ async def test_chat_gate_two_concurrent_entrants_exactly_one_proceeds():
 
 async def test_chat_is_streaming_cleared_on_exception():
     state = _fake_state()
-    pool = _StubPool(state)
+    pool = StubPool(state)
     state.adapter.send_query = AsyncMock(side_effect=RuntimeError("boom"))
 
     with ExitStack() as stack:
         _chat_patches(stack, pool)
-        events = await _collect(qe.stream_to_websocket("hi", "sess-exc", "claude-code"))
+        events = await collect(qe.stream_to_websocket("hi", "sess-exc", "claude-code"))
 
     assert any(e.get("type") == "error" for e in events), events
     assert state.is_streaming is False
@@ -308,7 +273,7 @@ async def test_chat_is_streaming_cleared_on_exception():
 
 async def test_chat_is_streaming_cleared_on_cancel():
     state = _fake_state()
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     async def _cancelled_response():
         raise asyncio.CancelledError()
@@ -320,7 +285,7 @@ async def test_chat_is_streaming_cleared_on_cancel():
 
     with ExitStack() as stack:
         _chat_patches(stack, pool)
-        events = await _collect(qe.stream_to_websocket("hi", "sess-cancel", "claude-code"))
+        events = await collect(qe.stream_to_websocket("hi", "sess-cancel", "claude-code"))
 
     assert any(e.get("type") == "interrupted" for e in events), events
     assert state.is_streaming is False
@@ -329,7 +294,7 @@ async def test_chat_is_streaming_cleared_on_cancel():
 # ─── stream_query (REST gate) ───────────────────────────────────────────────
 
 
-def _rest_patches(stack: ExitStack, pool: _StubPool):
+def _rest_patches(stack: ExitStack, pool: StubPool):
     stack.enter_context(patch.object(
         qe, "get_profile", return_value={"id": "claude-code", "config": {}}
     ))
@@ -352,11 +317,11 @@ def _rest_patches(stack: ExitStack, pool: _StubPool):
 
 async def test_rest_gate_refuses_busy_client_and_never_writes_stdin():
     state = _fake_state(is_streaming=True)
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         _rest_patches(stack, pool)
-        events = await _collect(qe.stream_query("hi", "claude-code", session_id="sess-busy"))
+        events = await collect(qe.stream_query("hi", "claude-code", session_id="sess-busy"))
 
     assert any(e.get("type") == "error" and "busy" in e.get("message", "").lower()
                for e in events), events
@@ -369,7 +334,7 @@ async def test_rest_gate_refuses_busy_client_and_never_writes_stdin():
 
 async def test_background_gate_refuses_busy_client_and_never_writes_stdin(mock_db):
     state = _fake_state(is_streaming=True)
-    pool = _StubPool(state)
+    pool = StubPool(state)
     # v2 session — the event log is the background path's only error surface.
     sessions_db.create_session("sess-busy", "default")
 
@@ -417,13 +382,13 @@ async def test_chat_claim_window_exception_clears_flag():
     ``except Exception`` swallows ordinary errors, so only a BaseException can
     still reach — and must be released by — the claim guard."""
     state = _claim_window_state(set_model_side_effect=KeyboardInterrupt("claim boom"))
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         options = _chat_patches(stack, pool)
         _claim_window_options(options)
         with pytest.raises(KeyboardInterrupt):
-            await _collect(qe.stream_to_websocket("hi", "sess-window", "claude-code"))
+            await collect(qe.stream_to_websocket("hi", "sess-window", "claude-code"))
 
     assert state.is_streaming is False, "claim must be released on claim-window failure"
     assert state.streaming_started_at is None
@@ -434,13 +399,13 @@ async def test_chat_claim_window_cancel_clears_flag():
     """Same window, CancelledError (except Exception would MISS it — the guard
     must be BaseException-wide): the claim is released and the cancel propagates."""
     state = _claim_window_state(set_model_side_effect=asyncio.CancelledError())
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         options = _chat_patches(stack, pool)
         _claim_window_options(options)
         with pytest.raises(asyncio.CancelledError):
-            await _collect(qe.stream_to_websocket("hi", "sess-window", "claude-code"))
+            await collect(qe.stream_to_websocket("hi", "sess-window", "claude-code"))
 
     assert state.is_streaming is False, "claim must be released on cancellation"
     assert state.streaming_started_at is None
@@ -453,7 +418,7 @@ async def test_rest_claim_window_exception_clears_flag():
     old broadcast_stream_start seam is deleted) clears the flag and propagates
     as before."""
     state = _fake_state()
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     async def _run_sync_boom(fn, *a, **k):
         if k.get("event_type") == "stream_start":
@@ -466,7 +431,7 @@ async def test_rest_claim_window_exception_clears_flag():
             patch.object(qe, "run_sync", new=AsyncMock(side_effect=_run_sync_boom))
         )
         with pytest.raises(RuntimeError, match="sync-log boom"):
-            await _collect(qe.stream_query("hi", "claude-code", session_id="sess-window"))
+            await collect(qe.stream_query("hi", "claude-code", session_id="sess-window"))
 
     assert state.is_streaming is False, "claim must be released on claim-window failure"
     assert state.streaming_started_at is None
@@ -478,7 +443,7 @@ async def test_background_claim_window_exception_clears_flag():
     main try (here: the post-claim set_model await) clears the flag and
     propagates — the pooled client stays reusable."""
     state = _claim_window_state(set_model_side_effect=KeyboardInterrupt("claim boom"))
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     sync = _fake_sync_engine()
 
@@ -528,13 +493,13 @@ async def test_chat_applies_permission_mode_on_reuse_without_respawn():
     turn's gets set_permission_mode(new) awaited, and the pool entry is NOT
     torn down (no respawn — that would kill in-flight background tasks)."""
     state = _reuse_state_with_opts(perm_mode="default", model="m")
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         options = _chat_patches(stack, pool)
         options.permission_mode = "plan"
         options.model = "m"  # unchanged → set_model must NOT fire
-        events = await _collect(qe.stream_to_websocket("hi", "sess-perm", "claude-code"))
+        events = await collect(qe.stream_to_websocket("hi", "sess-perm", "claude-code"))
 
     state.adapter.set_permission_mode.assert_awaited_once_with("plan")
     state.adapter.set_model.assert_not_awaited()
@@ -546,13 +511,13 @@ async def test_chat_applies_permission_mode_on_reuse_without_respawn():
 async def test_chat_permission_mode_unchanged_does_not_call_setter():
     """No spurious setter call when permission_mode is identical to spawn."""
     state = _reuse_state_with_opts(perm_mode="plan", model="m")
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         options = _chat_patches(stack, pool)
         options.permission_mode = "plan"
         options.model = "m"
-        await _collect(qe.stream_to_websocket("hi", "sess-noop", "claude-code"))
+        await collect(qe.stream_to_websocket("hi", "sess-noop", "claude-code"))
 
     state.adapter.set_permission_mode.assert_not_awaited()
 
@@ -563,13 +528,13 @@ async def test_chat_permission_mode_setter_failure_does_not_propagate():
     strand the flag and brick the pooled client. The turn proceeds normally."""
     state = _reuse_state_with_opts(perm_mode="default", model="m")
     state.adapter.set_permission_mode = AsyncMock(side_effect=RuntimeError("setter boom"))
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         options = _chat_patches(stack, pool)
         options.permission_mode = "plan"
         options.model = "m"
-        events = await _collect(qe.stream_to_websocket("hi", "sess-perm-boom", "claude-code"))
+        events = await collect(qe.stream_to_websocket("hi", "sess-perm-boom", "claude-code"))
 
     state.adapter.set_permission_mode.assert_awaited_once_with("plan")
     assert not any(e.get("type") == "error" for e in events), events
@@ -582,7 +547,7 @@ async def test_rest_applies_permission_mode_on_reuse_without_respawn():
     right after the reuse block (the stream_start sync-log write is the first main
     await) to assert the apply ran before it, without harnessing a full turn."""
     state = _reuse_state_with_opts(perm_mode="default", model="m")
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     async def _run_sync_boom(fn, *a, **k):
         if k.get("event_type") == "stream_start":
@@ -595,7 +560,7 @@ async def test_rest_applies_permission_mode_on_reuse_without_respawn():
         options.model = "m"
         stack.enter_context(patch.object(qe, "run_sync", new=AsyncMock(side_effect=_run_sync_boom)))
         with pytest.raises(RuntimeError, match="sync-log boom"):
-            await _collect(qe.stream_query("hi", "claude-code", session_id="sess-perm-rest"))
+            await collect(qe.stream_query("hi", "claude-code", session_id="sess-perm-rest"))
 
     state.adapter.set_permission_mode.assert_awaited_once_with("plan")
     state.adapter.set_model.assert_not_awaited()
@@ -607,7 +572,7 @@ async def test_background_applies_permission_mode_on_reuse_without_respawn(mock_
     block via _store_background_task (first statement after the 'Mark as
     streaming' claim, before the query) to assert the apply ran, without a turn."""
     state = _reuse_state_with_opts(perm_mode="default", model="m")
-    pool = _StubPool(state)
+    pool = StubPool(state)
     sessions_db.create_session("sess-perm-bg", "default")
 
     async def _fake_run_sync(fn, *a, **k):

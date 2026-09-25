@@ -7,11 +7,9 @@ import pytest
 
 from app.db import network as store
 from app.network import engine, hub, startup_sync, transport
-from tests.core.network.harness import join
+from tests.core.network.harness import join, owner_pref, set_owner_pref
 from tests.core.network.test_transport import (  # noqa: F401
     ServedBy,
-    _pref,
-    _set_pref,
     workers,
 )
 
@@ -40,26 +38,26 @@ async def test_launch_applies_newer_peer_data_across_all_pages_before_returning(
     with a.active():
         engine.create_network("Home")
     join(a, b)
-    _set_pref(b, "theme", "old")
+    set_owner_pref(b, "theme", "old")
     # Forward B's value first so A's update is causally newer.
     from tests.core.network.harness import exchange
     exchange(b, a)
     for i in range(8):
-        _set_pref(a, f"new-{i}", i)
-    _set_pref(a, "theme", "new")
+        set_owner_pref(a, f"new-{i}", i)
+    set_owner_pref(a, "theme", "new")
     served = connect(monkeypatch, a, b)
     monkeypatch.setattr(transport, "BATCH_LIMIT", 2)
     with b.active():
         result = await startup_sync.synchronize()
         assert result == {"status": "synced", "peers": 1}
-        assert _pref(b, "theme") == "new"
-        assert all(_pref(b, f"new-{i}") == i for i in range(8))
+        assert owner_pref(b, "theme") == "new"
+        assert all(owner_pref(b, f"new-{i}") == i for i in range(8))
     assert sum(path.endswith('/exchange') for _, path in served.requests) > 1
     # A later desktop launch attached to the same worker must check again.
-    _set_pref(a, "theme", "newer")
+    set_owner_pref(a, "theme", "newer")
     with b.active():
         assert (await startup_sync.synchronize())["status"] == "synced"
-        assert _pref(b, "theme") == "newer"
+        assert owner_pref(b, "theme") == "newer"
 
 
 async def test_catchup_reuses_the_post_apply_watermarks_for_the_next_page(workers, monkeypatch):
@@ -69,7 +67,7 @@ async def test_catchup_reuses_the_post_apply_watermarks_for_the_next_page(worker
         engine.create_network("Home")
     join(a, b)
     for i in range(8):
-        _set_pref(a, f"page-{i}", i)
+        set_owner_pref(a, f"page-{i}", i)
     served = connect(monkeypatch, a, b)
     monkeypatch.setattr(transport, "BATCH_LIMIT", 2)
     with b.active(), patch.object(store, "local_watermarks", wraps=store.local_watermarks) as heads:
@@ -81,7 +79,7 @@ async def test_catchup_reuses_the_post_apply_watermarks_for_the_next_page(worker
     # One initial pull frontier, one server and one post-apply frontier per
     # page, then one push frontier. No duplicate read between pull pages.
     assert heads.call_count == 2 * pages + 2
-    assert all(_pref(b, f"page-{i}") == i for i in range(8))
+    assert all(owner_pref(b, f"page-{i}") == i for i in range(8))
 
 
 async def test_snapshot_catchup_restores_peer_materialized_data(workers, monkeypatch):
@@ -90,7 +88,7 @@ async def test_snapshot_catchup_restores_peer_materialized_data(workers, monkeyp
         engine.create_network("Home")
     join(a, b)
     join(a, c)
-    _set_pref(a, "saved", "from snapshot")
+    set_owner_pref(a, "saved", "from snapshot")
     # B acquires materialized state through the real producing snapshot path,
     # without A's full operation log, then serves C while A is offline.
     source = ServedBy(a, "https://source.example.com")
@@ -102,7 +100,7 @@ async def test_snapshot_catchup_restores_peer_materialized_data(workers, monkeyp
         store.touch_member(a.device_id, endpoints=[])
         result = await startup_sync.synchronize()
         assert result["peers"] == 1
-        assert _pref(c, "saved") == "from snapshot"
+        assert owner_pref(c, "saved") == "from snapshot"
 
 
 async def test_offline_peer_keeps_local_data_and_reports_fallback(workers, monkeypatch):
@@ -110,14 +108,14 @@ async def test_offline_peer_keeps_local_data_and_reports_fallback(workers, monke
     with a.active():
         engine.create_network("Home")
     join(a, b)
-    _set_pref(b, "saved", "local")
+    set_owner_pref(b, "saved", "local")
     real_client = httpx.AsyncClient
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(lambda r: httpx.Response(503)), **kwargs))
     with b.active():
         store.touch_member(a.device_id, endpoints=["https://offline.example.com"])
         result = await startup_sync.synchronize()
         assert result["status"] == "offline"
-        assert _pref(b, "saved") == "local"
+        assert owner_pref(b, "saved") == "local"
         assert startup_sync.status() == result
 
 
@@ -144,7 +142,7 @@ async def test_account_outage_does_not_skip_paired_peer(workers, monkeypatch):
     with a.active():
         engine.create_network("Home")
     join(a, b)
-    _set_pref(a, "available", True)
+    set_owner_pref(a, "available", True)
     connect(monkeypatch, a, b)
     async def unavailable():
         await asyncio.Event().wait()
@@ -153,7 +151,7 @@ async def test_account_outage_does_not_skip_paired_peer(workers, monkeypatch):
     with b.active():
         result = await startup_sync.synchronize()
         assert result["status"] == "partial" and result["peers"] == 1
-        assert _pref(b, "available") is True
+        assert owner_pref(b, "available") is True
 
 async def test_account_admission_finishes_peer_bootstrap_before_launch(workers, monkeypatch):
     a, b = workers("account-source"), workers("account-new")
@@ -161,7 +159,7 @@ async def test_account_admission_finishes_peer_bootstrap_before_launch(workers, 
         engine.create_network("Home")
         admission = engine.admit_device(device_id=b.device_id, signing_public=b.identity.signing_public,
                                         encryption_public=b.identity.encryption_public, name="New desktop")
-    _set_pref(a, "account-setting", "available on first load")
+    set_owner_pref(a, "account-setting", "available on first load")
     served = connect(monkeypatch, a, b)
     admission["issuer"]["endpoints"] = [served.base_url]
     monkeypatch.setattr(hub, "_binding", lambda: {"hub_url": "https://account.example.com", "server_id": "new"})
@@ -174,7 +172,7 @@ async def test_account_admission_finishes_peer_bootstrap_before_launch(workers, 
         result = await startup_sync.synchronize()
         assert result["status"] == "synced", (result, dict(hub._state))
         assert engine.context().bootstrap_state == engine.BOOTSTRAP_READY
-        assert _pref(b, "account-setting") == "available on first load"
+        assert owner_pref(b, "account-setting") == "available on first load"
 
 
 async def test_account_directory_refreshes_known_peer_but_cannot_admit_a_stranger(workers, monkeypatch):

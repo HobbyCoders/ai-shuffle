@@ -30,47 +30,11 @@ from app.core.provider.events import (
 )
 
 import app.core.query_engine as qe
-from app.core.session_pool import SessionState
 from app.db import database
+from tests.core.engine_harness import StubPool, collect, make_state, stream_response
 
 
 # ─── minimal engine harness (subprocess/profile boundaries only) ─────────────
-
-
-def _make_state():
-    adapter = MagicMock()
-    adapter.is_alive = MagicMock(return_value=True)
-    adapter.send_query = AsyncMock()
-    return SessionState(adapter=adapter, is_connected=True)
-
-
-class _StubPool:
-    def __init__(self, state=None):
-        self.state = state
-
-    def get(self, session_id):
-        return self.state
-
-    def peek(self, session_id):
-        return self.state
-
-    def put(self, session_id, state):
-        self.state = state
-
-    def admission_check(self, lane="delegated"):
-        return None
-
-    async def evict_if_needed(self, incoming_lane="delegated"):
-        return None
-
-    async def remove(self, session_id):
-        self.state = None
-
-    async def remove_dead(self, session_id):
-        self.state = None
-
-    async def remove_broken(self, session_id):
-        self.state = None
 
 
 _UNSET = object()
@@ -78,7 +42,7 @@ _UNSET = object()
 
 def _engine_patches(
     stack: ExitStack,
-    pool: _StubPool,
+    pool: StubPool,
     cwd: str,
     model=None,
     provider=None,
@@ -121,23 +85,6 @@ def _engine_patches(
     return options
 
 
-def _stream_response(messages):
-    """Build a receive_response factory that yields the given SDK messages."""
-
-    async def _gen():
-        for m in messages:
-            yield m
-
-    return MagicMock(side_effect=lambda: _gen())
-
-
-async def _collect(agen):
-    events = []
-    async for ev in agen:
-        events.append(ev)
-    return events
-
-
 def _new_session(profile_id="default"):
     session_id = f"sess-{uuid.uuid4()}"
     database.create_session(session_id=session_id, profile_id=profile_id)
@@ -149,9 +96,9 @@ async def _run(
 ):
     """Drive the streaming loop over ``messages`` and return model_info frames."""
     session_id = _new_session()
-    state = _make_state()
-    pool = _StubPool(state)
-    state.adapter.receive_events = _stream_response(messages)
+    state = make_state()
+    pool = StubPool(state)
+    state.adapter.receive_events = stream_response(messages)
     with ExitStack() as stack:
         _engine_patches(
             stack,
@@ -161,7 +108,7 @@ async def _run(
             provider=provider,
             resolved_provider=resolved_provider,
         )
-        events = await _collect(qe.stream_to_websocket("hi", session_id, "default"))
+        events = await collect(qe.stream_to_websocket("hi", session_id, "default"))
     return [
         e for e in events
         if e.get("type") == "system" and e.get("subtype") == "model_info"

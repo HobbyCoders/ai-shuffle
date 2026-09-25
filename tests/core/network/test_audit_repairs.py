@@ -10,7 +10,7 @@ import pytest
 from app.db import database
 from app.db import network as store
 from app.network import crypto, engine, envelope as envelope_mod, identity as identity_mod, membership, tokens, transport
-from tests.core.network.harness import Worker, converge, exchange, join
+from tests.core.network.harness import Worker, converge, exchange, join, owner_pref, set_owner_pref
 
 
 @pytest.fixture
@@ -31,20 +31,6 @@ def workers(tmp_path):
     engine.hold_outbox(False)
 
 
-def _set_pref(worker, key, value):
-    with worker.active():
-        from app.core import owner_auth
-        database.set_user_preference("admin", owner_auth.preference_identity(), key, value)
-        engine.scan_all()
-
-
-def _pref(worker, key):
-    with worker.active():
-        from app.core import owner_auth
-        row = database.get_user_preference("admin", owner_auth.preference_identity(), key)
-        return row["value"] if row else None
-
-
 def _pref_ops(worker, *, exclude=None):
     with worker.active():
         ops = store.ops_since({}, exclude_origin=exclude)
@@ -62,7 +48,7 @@ def test_revoked_device_cannot_write_from_a_new_incarnation(workers):
     join(a, b)
     join(a, c)
     converge([a, b, c])
-    _set_pref(b, "before_revocation", "kept")
+    set_owner_pref(b, "before_revocation", "kept")
     converge([a, b, c])
     with a.active():
         engine.revoke_device(b.device_id, reason="lost")
@@ -73,7 +59,7 @@ def test_revoked_device_cannot_write_from_a_new_incarnation(workers):
     with b.active():
         identity_mod.bump_incarnation()
         engine.load_context()
-    _set_pref(b, "after_revocation", "smuggled")
+    set_owner_pref(b, "after_revocation", "smuggled")
     ops = [o for o in _pref_ops(b) if o["origin_incarnation"] == 2]
     assert ops
     for member in (a, c):
@@ -81,7 +67,7 @@ def test_revoked_device_cannot_write_from_a_new_incarnation(workers):
             result = engine.apply_batch(ops)
             assert result.applied == 0 and result.rejected == len(ops)
             assert all(r == "origin revoked" for r in result.reasons)
-        assert _pref(member, "after_revocation") is None
+        assert owner_pref(member, "after_revocation") is None
 
 
 def test_revoked_founder_cannot_recertify_itself(workers):
@@ -204,14 +190,14 @@ def test_out_of_order_op_under_an_unknown_key_waits_instead_of_being_dropped(wor
     for w in (b, c, x):
         join(a, w)
     converge([a, b, c, x])
-    _set_pref(b, "before", 1)
+    set_owner_pref(b, "before", 1)
     converge([a, b, c])
     # A rotates the key (revokes X); B learns it and writes under key v2 twice.
     with a.active():
         engine.revoke_device(x.device_id)
     exchange(a, b)
-    _set_pref(b, "under_v2_first", 1)
-    _set_pref(b, "under_v2_second", 2)
+    set_owner_pref(b, "under_v2_first", 1)
+    set_owner_pref(b, "under_v2_second", 2)
     ops = _pref_ops(b)
     first, second = ops[-2], ops[-1]
     assert second["key_version"] == 2 and second["origin_seq"] == first["origin_seq"] + 1
@@ -225,7 +211,7 @@ def test_out_of_order_op_under_an_unknown_key_waits_instead_of_being_dropped(wor
     # Once A's rotation reaches C, both ops apply on the next pass.
     exchange(a, c)
     exchange(b, c)
-    assert _pref(c, "under_v2_first") == 1 and _pref(c, "under_v2_second") == 2
+    assert owner_pref(c, "under_v2_first") == 1 and owner_pref(c, "under_v2_second") == 2
     with c.active():
         assert not store.pending_holes()
 
@@ -236,8 +222,8 @@ def test_buffered_op_that_fails_transiently_on_drain_is_kept(workers, monkeypatc
         engine.create_network("Home")
     join(a, b)
     converge([a, b])
-    _set_pref(a, "head", 1)
-    _set_pref(a, "tail", 2)
+    set_owner_pref(a, "head", 1)
+    set_owner_pref(a, "tail", 2)
     head, tail = _pref_ops(a)[-2:]
     real = engine.materialize
 
@@ -257,7 +243,7 @@ def test_buffered_op_that_fails_transiently_on_drain_is_kept(workers, monkeypatc
         monkeypatch.setattr(engine, "materialize", real)
         assert engine.apply_batch([tail]).applied == 1
         assert not store.pending_holes()
-    assert _pref(b, "tail") == 2
+    assert owner_pref(b, "tail") == 2
 
 
 # ---------------------------------------------------------------------------
@@ -307,8 +293,8 @@ def test_storage_refusal_keeps_the_stream_moving_and_records_a_conflict(workers,
         engine.create_network("Home")
     join(a, b)
     converge([a, b])
-    _set_pref(a, "poison", "x")
-    _set_pref(a, "healthy", "y")
+    set_owner_pref(a, "poison", "x")
+    set_owner_pref(a, "healthy", "y")
     poison, healthy = _pref_ops(a)[-2:]
     real = engine.materialize
 
@@ -325,7 +311,7 @@ def test_storage_refusal_keeps_the_stream_moving_and_records_a_conflict(workers,
         assert store.local_watermarks()[a.device_id]["1"] == healthy["origin_seq"]
         conflicts = store.list_conflicts()
         assert any(c["record_id"] == poison["record_id"] for c in conflicts)
-    assert _pref(b, "healthy") == "y"
+    assert owner_pref(b, "healthy") == "y"
 
 
 def test_key_record_without_a_generation_is_rejected_not_fatal(workers):
@@ -354,7 +340,7 @@ def test_own_signed_op_past_the_outbox_moves_to_a_new_incarnation(workers):
         engine.create_network("Home")
     join(a, b)
     converge([a, b])
-    _set_pref(a, "before_backup", 1)
+    set_owner_pref(a, "before_backup", 1)
     converge([a, b])
     with a.active():
         ctx = engine.context()
@@ -426,11 +412,11 @@ def test_outbox_is_held_until_streams_were_compared(workers):
     with a.active():
         engine.create_network("Home")
         engine.hold_outbox(True)
-    _set_pref(a, "while_held", 1)
+    set_owner_pref(a, "while_held", 1)
     assert not _pref_ops(a)
     with a.active():
         engine.hold_outbox(False)
-    _set_pref(a, "released", 2)
+    set_owner_pref(a, "released", 2)
     keys = {o["record_id"] for o in _pref_ops(a)}
     assert "admin|@owner|while_held" in keys and "admin|@owner|released" in keys
 
@@ -574,11 +560,11 @@ def test_same_content_written_on_two_devices_is_not_a_conflict(workers):
     join(a, b)
     join(a, c)
     converge([a, b, c])
-    _set_pref(a, "theme", "dark")
+    set_owner_pref(a, "theme", "dark")
     exchange(a, c)
-    _set_pref(b, "theme", "dark")  # B never saw A's write, same value
+    set_owner_pref(b, "theme", "dark")  # B never saw A's write, same value
     exchange(b, c)
-    assert _pref(c, "theme") == "dark"
+    assert owner_pref(c, "theme") == "dark"
     with c.active():
         assert not [x for x in store.list_conflicts() if x["record_id"].endswith("|theme")]
 
@@ -591,8 +577,8 @@ def test_unreadable_row_is_skipped_without_publishing_a_deletion(workers, monkey
     a = workers("a")
     with a.active():
         engine.create_network("Home")
-    _set_pref(a, "fine", 1)
-    _set_pref(a, "locked", 2)
+    set_owner_pref(a, "fine", 1)
+    set_owner_pref(a, "locked", 2)
     real = engine.serialize_row
 
     def locked(coll, row):
@@ -600,7 +586,7 @@ def test_unreadable_row_is_skipped_without_publishing_a_deletion(workers, monkey
             raise engine.TransientApplyError("Credential storage is locked; cannot share user_preferences")
         return real(coll, row)
     monkeypatch.setattr(engine, "serialize_row", locked)
-    _set_pref(a, "fine", 3)
+    set_owner_pref(a, "fine", 3)
     ops = _pref_ops(a)
     assert any(o["record_id"] == "admin|@owner|fine" and o["op"] == "upsert" for o in ops[-1:])
     assert not any(o["record_id"] == "admin|@owner|locked" and o["op"] == "delete" for o in ops)

@@ -9,7 +9,6 @@ from app.api import commands, rewind_owner
 from app.db import database, session_events
 from app.network import catalog, control, engine
 from tests.core.network.harness import converge, join
-from tests.core.network.test_control import workers  # noqa: F401
 from tests.core.network.test_transport import ServedBy
 from tests.core.test_fluid_transcript import _seed, load_fluid_path
 

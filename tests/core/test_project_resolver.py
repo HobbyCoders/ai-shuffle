@@ -14,20 +14,18 @@ from app.db import projects_v2
 RUNNER = "me"
 
 
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    conn.execute("PRAGMA foreign_keys = OFF")
-    yield conn
-    conn.close()
+@pytest.fixture(autouse=True)
+def _foreign_keys_off(test_db):
+    """Run on the shared conftest DB with foreign keys off: these tests
+    seed rows without their FK parents."""
+    test_db.execute("PRAGMA foreign_keys = OFF")
 
 
 @pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db) as shim:
-        yield shim
+def mock_db(mock_db):
+    """The shared conftest DB, shim-wrapped (dict rows, %s placeholders)."""
+    from tests.pg_shim import ShimConnection
+    return ShimConnection(mock_db)
 
 
 @pytest.fixture(autouse=True)

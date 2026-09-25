@@ -31,10 +31,8 @@ Tests cover:
 
 import logging
 import pytest
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-from contextlib import contextmanager
 
 from app.db import database as db
 
@@ -42,32 +40,6 @@ from app.db import database as db
 # =============================================================================
 # Fixtures
 # =============================================================================
-
-@pytest.fixture
-def test_db():
-    """Create an in-memory SQLite database whose schema is the canonical
-    PostgreSQL schema, built via the test shim so it never drifts from the app.
-    """
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    """Route the app DB layer through the shim-wrapped test connection.
-
-    Domain code writes PostgreSQL SQL (``%s`` placeholders, ``NOW()``, ``JSONB``
-    …) and reaches the DB via ``get_connection``. Wrapping the raw connection in
-    a ``ShimConnection`` translates that SQL to SQLite and returns dict rows.
-    The fixture still yields the raw connection so tests that run their own
-    ``?``-placeholder SQL directly keep working.
-    """
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
-
 
 @pytest.fixture
 def setup_profile(mock_db):
@@ -220,7 +192,7 @@ class TestProfileOperations:
         """get_profile should return None for non-existent profile."""
         assert db.get_profile("nonexistent") is None
 
-    def test_get_all_profiles(self, mock_db):
+    def test_get_all_profiles(self, bare_db):
         """get_all_profiles should return all profiles ordered by builtin then name."""
         db.create_profile("profile-b", "B Profile", None, {}, False)
         db.create_profile("profile-a", "A Profile", None, {}, True)
@@ -731,40 +703,6 @@ class TestSessionMessageOperations:
 class TestSearchSessions:
     """Test session search functionality."""
 
-    @pytest.mark.skip(
-        reason="search_sessions uses Postgres-native FTS (tsvector @@ plainto_tsquery, "
-        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. No "
-        "real-Postgres integration suite exists yet — the SQL's structure is "
-        "guarded by TestSearchSessionsSql below; behavior needs manual "
-        "verification against a Postgres instance."
-    )
-    def test_search_sessions_by_title(self, mock_db, setup_profile):
-        """search_sessions should find sessions by title."""
-        db.create_session("session-1", setup_profile, title="Python debugging help")
-        db.create_session("session-2", setup_profile, title="JavaScript tutorial")
-
-        result = db.search_sessions("Python")
-
-        assert len(result) == 1
-        assert result[0]["id"] == "session-1"
-
-    @pytest.mark.skip(
-        reason="search_sessions uses Postgres-native FTS (tsvector @@ plainto_tsquery, "
-        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. No "
-        "real-Postgres integration suite exists yet — the SQL's structure is "
-        "guarded by TestSearchSessionsSql below; behavior needs manual "
-        "verification against a Postgres instance."
-    )
-    def test_search_sessions_by_content(self, mock_db, setup_profile):
-        """search_sessions should find sessions by message content."""
-        db.create_session("session-1", setup_profile, title="Session 1")
-        db.add_session_message("session-1", "user", "How do I use React hooks?")
-
-        result = db.search_sessions("React hooks")
-
-        assert len(result) == 1
-        assert result[0]["id"] == "session-1"
-
     def test_search_sessions_empty_query(self, mock_db, setup_profile):
         """search_sessions should return empty for empty query."""
         db.create_session("session-1", setup_profile, title="Test")
@@ -773,74 +711,12 @@ class TestSearchSessions:
 
         assert result == []
 
-    _STORE_SKIP = (
-        "store-backed FTS uses Postgres-native constructs (sse_entry_text() "
-        "IMMUTABLE function, to_tsvector/ts_headline/plainto_tsquery over the "
-        "session_store_entries JSONB, DISTINCT ON, COUNT(*) OVER); not emulated "
-        "by the sqlite test shim. Structure is guarded by TestSearchSessionsSql "
-        "below; behavior needs a real Postgres instance."
-    )
-
-    @pytest.mark.skip(reason=_STORE_SKIP)
-    def test_search_finds_store_content(self, mock_db, setup_profile):
-        """A query hitting only the JSONB store transcript (not session_messages)
-        should surface the session as a 'content' match — this is the whole point
-        of store-backed search under postgres_only."""
-        db.create_session("session-1", setup_profile, title="Session 1")
-        # Under real PG: insert a session_store_entries row whose entry text
-        # contains the query, with sessions.sdk_session_id joining it.
-        result = db.search_sessions("needle-in-the-store")
-        assert any(r["id"] == "session-1" for r in result)
-
-    @pytest.mark.skip(reason=_STORE_SKIP)
-    def test_search_dedupes_title_legacy_store(self, mock_db, setup_profile):
-        """A session matching in title, legacy message content, AND the store must
-        appear exactly once, with title winning as the retained match_type."""
-        db.create_session("session-1", setup_profile, title="python")
-        db.add_session_message("session-1", "user", "python question")
-        result = db.search_sessions("python")
-        ids = [r["id"] for r in result]
-        assert ids.count("session-1") == 1
-        row = next(r for r in result if r["id"] == "session-1")
-        assert row["match_type"] == "title"
-
-    @pytest.mark.skip(reason=_STORE_SKIP)
-    def test_search_reports_match_count(self, mock_db, setup_profile):
-        """match_count reflects how many of {title, legacy-content, store-content}
-        hit for a session (counted before the final dedupe)."""
-        db.create_session("session-1", setup_profile, title="python")
-        db.add_session_message("session-1", "user", "python question")
-        result = db.search_sessions("python")
-        row = next(r for r in result if r["id"] == "session-1")
-        assert row["match_count"] >= 2
-
-    @pytest.mark.skip(reason=_STORE_SKIP)
-    def test_search_excludes_archived(self, mock_db, setup_profile):
-        """Archived sessions must be excluded from store matches just like the
-        title/legacy CTEs."""
-        db.create_session("session-1", setup_profile, title="keep")
-        db.update_session("session-1", status="archived")
-        result = db.search_sessions("keep")
-        assert all(r["id"] != "session-1" for r in result)
-
-    @pytest.mark.skip(reason=_STORE_SKIP)
-    def test_sse_entry_text_extraction_matrix(self, mock_db):
-        """Documents the sse_entry_text() contract (run against real Postgres):
-
-        * user/assistant + string content    -> the string as-is
-        * user/assistant + array content      -> string_agg of type='text' blocks
-        * isMeta true / isSidechain true       -> NULL (skipped)
-        * type NOT IN (user, assistant)        -> NULL (tool/system/summary skipped)
-        * tool_use / tool_result array blocks  -> NULL (only 'text' blocks kept)
-        """
-        assert True  # Placeholder — the real matrix requires a PG session.
-
 
 class TestSearchSessionsSql:
     """Always-on structural guard for the Postgres-native search SQL.
 
-    The FTS behavior itself can't run under the sqlite shim (see the skips
-    above), but the query's most fragile property is mechanical: the
+    The FTS behavior itself can't run under the sqlite shim (it is exercised
+    against real Postgres in tests/db/test_universal_search_pg.py), but the query's most fragile property is mechanical: the
     title_matches and content_matches CTEs feed ``SELECT * ... UNION ALL``,
     which silently mispairs values — or errors at runtime on Postgres only —
     the moment one CTE's column list drifts from the other (how a per-CTE
@@ -1232,7 +1108,7 @@ class TestSubagentOperations:
         assert result is not None
         assert result["id"] == "subagent-1"
 
-    def test_get_all_subagents(self, mock_db):
+    def test_get_all_subagents(self, bare_db):
         """get_all_subagents should return all subagents."""
         db.create_subagent("sub-a", "A Agent", "Desc", "Prompt")
         db.create_subagent("sub-b", "B Agent", "Desc", "Prompt")
@@ -2138,183 +2014,3 @@ class TestSessionsByTag:
 
         assert len(result) == 1
         assert result[0]["id"] == "session-1"
-
-
-# =============================================================================
-# Database Maintenance Tests
-# =============================================================================
-
-@pytest.mark.skip(
-    reason="run_database_maintenance was migrated to Postgres semantics "
-    "(ANALYZE + VACUUM ANALYZE outside a txn, notifications retention). These "
-    "tests assert the old SQLite contract (wal_checkpoint/optimize/PRAGMA "
-    "checkpointed_pages) and VACUUM ANALYZE isn't valid sqlite. No "
-    "real-Postgres integration suite exists yet — verify maintenance manually "
-    "against a Postgres instance."
-)
-class TestRunDatabaseMaintenance:
-    """Test run_database_maintenance cleanup and results."""
-
-    @pytest.fixture
-    def setup_log_tables(self, mock_db, setup_profile):
-        """Add missing log tables and seed old + recent rows for maintenance tests."""
-        cursor = mock_db.cursor()
-
-        # Create a session for FK references
-        db.create_session("s1", setup_profile)
-
-        # connector_event_log requires connectors table for FK
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS connectors (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                connector_type TEXT NOT NULL,
-                is_active BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS connector_event_log (
-                id TEXT PRIMARY KEY,
-                connector_id TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                direction TEXT NOT NULL DEFAULT 'outbound',
-                payload JSON,
-                status TEXT DEFAULT 'pending',
-                error TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE
-            )
-        """)
-        # Insert a connector for FK reference
-        cursor.execute(
-            "INSERT INTO connectors (id, name, connector_type) VALUES (?, ?, ?)",
-            ("conn-1", "Test Connector", "slack"),
-        )
-        mock_db.commit()
-
-        now = datetime.now(timezone.utc)
-        old_ts = (now - timedelta(days=10)).isoformat()
-        recent_ts = (now - timedelta(days=1)).isoformat()
-
-        # usage_log: old + recent
-        cursor.execute(
-            "INSERT INTO usage_log (session_id, model, tokens_in, tokens_out, cost_usd, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("s1", "claude-3", 100, 200, 0.01, 500, old_ts),
-        )
-        cursor.execute(
-            "INSERT INTO usage_log (session_id, model, tokens_in, tokens_out, cost_usd, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("s1", "claude-3", 150, 250, 0.02, 600, recent_ts),
-        )
-
-        # audit_log: old + recent
-        cursor.execute(
-            "INSERT INTO audit_log (id, event_type, created_at) VALUES (?, ?, ?)",
-            ("audit-old", "login", old_ts),
-        )
-        cursor.execute(
-            "INSERT INTO audit_log (id, event_type, created_at) VALUES (?, ?, ?)",
-            ("audit-new", "login", recent_ts),
-        )
-
-        # sync_log: old + recent (needs a session FK)
-        cursor.execute(
-            "INSERT INTO sync_log (session_id, event_type, entity_type, created_at) VALUES (?, ?, ?, ?)",
-            ("s1", "create", "message", old_ts),
-        )
-        cursor.execute(
-            "INSERT INTO sync_log (session_id, event_type, entity_type, created_at) VALUES (?, ?, ?, ?)",
-            ("s1", "create", "message", recent_ts),
-        )
-
-        # connector_event_log: old + recent
-        cursor.execute(
-            "INSERT INTO connector_event_log (id, connector_id, event_type, created_at) VALUES (?, ?, ?, ?)",
-            ("evt-old", "conn-1", "message", old_ts),
-        )
-        cursor.execute(
-            "INSERT INTO connector_event_log (id, connector_id, event_type, created_at) VALUES (?, ?, ?, ?)",
-            ("evt-new", "conn-1", "message", recent_ts),
-        )
-
-        mock_db.commit()
-        return mock_db
-
-    def test_maintenance_cleans_old_rows_keeps_recent(self, setup_log_tables):
-        """run_database_maintenance should delete rows older than 7 days and keep recent ones."""
-        conn = setup_log_tables
-
-        # Verify precondition: 2 rows in each table before maintenance
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM usage_log")
-        assert cursor.fetchone()[0] == 2
-        cursor.execute("SELECT COUNT(*) FROM audit_log")
-        assert cursor.fetchone()[0] == 2
-
-        results = db.run_database_maintenance()
-
-        # Note: after maintenance, the test connection may be closed by VACUUM's
-        # conn.close() since mock_get_connection returns the same connection.
-        # We verify behavior via the results dict instead.
-
-        # Should return a dict with keys for each step
-        assert isinstance(results, dict)
-        assert "wal_checkpoint" in results
-        assert "optimize" in results
-        assert "vacuum" in results
-
-        # usage_log: 1 old deleted, 1 recent kept
-        assert results["cleaned_usage_log"] == 1
-
-        # audit_log: 1 old deleted, 1 recent kept
-        assert results["cleaned_audit_log"] == 1
-
-        # sync_log: 1 old deleted, 1 recent kept
-        assert results["cleaned_sync_log"] == 1
-
-        # connector_event_log: 1 old deleted, 1 recent kept
-        assert results["cleaned_connector_event_log"] == 1
-
-    def test_maintenance_returns_wal_checkpoint_info(self, setup_log_tables):
-        """run_database_maintenance should return WAL checkpoint details."""
-        results = db.run_database_maintenance()
-
-        wal = results["wal_checkpoint"]
-        # In-memory DB won't use WAL mode, but the PRAGMA still returns a row
-        assert isinstance(wal, dict)
-        assert "busy" in wal
-        assert "log_pages" in wal
-        assert "checkpointed_pages" in wal
-
-    def test_maintenance_with_no_old_rows(self, mock_db):
-        """run_database_maintenance should report 0 cleaned when no old rows exist."""
-        # Add tables that are missing from test schema
-        cursor = mock_db.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS connectors (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                connector_type TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS connector_event_log (
-                id TEXT PRIMARY KEY,
-                connector_id TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE
-            )
-        """)
-        mock_db.commit()
-
-        results = db.run_database_maintenance()
-
-        assert results["cleaned_usage_log"] == 0
-        assert results["cleaned_audit_log"] == 0
-        assert results["cleaned_sync_log"] == 0
-        assert results["cleaned_connector_event_log"] == 0
-        assert results["optimize"] == "ok"
-        assert results["vacuum"] == "ok"

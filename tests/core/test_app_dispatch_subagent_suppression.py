@@ -34,10 +34,9 @@ from app.core.provider.events import (
     UserMessage,
 )
 
+from tests.core.engine_harness import StubPool, collect
 from tests.core.test_cross_turn_background_subagent_routing import (
-    _StubPool,
     _chat_patches,
-    _collect,
     _fake_state,
 )
 
@@ -62,10 +61,10 @@ def _result(tool_id, content, is_error=False):
 
 async def _run(session_id, messages):
     state = _fake_state(messages)
-    pool = _StubPool(state)
+    pool = StubPool(state)
     with ExitStack() as stack:
         _chat_patches(stack, pool)
-        return await _collect(qe.stream_to_websocket("prompt", session_id, "claude-code"))
+        return await collect(qe.stream_to_websocket("prompt", session_id, "claude-code"))
 
 
 class TestAppDispatchSubagentStartSuppressed:

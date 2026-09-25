@@ -29,14 +29,11 @@ from app.db import database
 RUNNER = "me-install"
 
 
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    # The backfill touches only sessions; the FK to projects is irrelevant here.
-    conn.execute("PRAGMA foreign_keys = OFF")
-    yield conn
-    conn.close()
+@pytest.fixture(autouse=True)
+def _foreign_keys_off(test_db):
+    """Run on the shared conftest DB with foreign keys off: the backfill
+    touches only sessions; the FK to projects is irrelevant here."""
+    test_db.execute("PRAGMA foreign_keys = OFF")
 
 
 @pytest.fixture(autouse=True)

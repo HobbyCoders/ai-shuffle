@@ -38,6 +38,7 @@ from app.core.turn_finalize import persist_turn_end_state
 from app.db import runs as runs_db
 from app.db import session_events as se
 from app.db import sessions as sessions_db
+from tests.core.engine_harness import StubPool
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -77,33 +78,7 @@ def _fake_state(messages=None, receive_error=None) -> SessionState:
     return SessionState(adapter=adapter, is_connected=True)
 
 
-class _StubPool:
-    def __init__(self, state=None):
-        self.state = state
-
-    def get(self, session_id):
-        return self.state
-
-    def peek(self, session_id):
-        return self.state
-
-    def put(self, session_id, state):
-        self.state = state
-
-    def admission_check(self, lane="delegated"):
-        return None
-
-    async def evict_if_needed(self, incoming_lane="delegated"):
-        return None
-
-    async def remove(self, session_id):
-        self.state = None
-
-    async def remove_dead(self, session_id):
-        self.state = None
-
-
-def _bg_patches(stack: ExitStack, pool: _StubPool, run_sync_calls=None):
+def _bg_patches(stack: ExitStack, pool: StubPool, run_sync_calls=None):
     """Patch every _run_background_query boundary EXCEPT the recorder/DB."""
 
     async def _fake_run_sync(fn, *a, **k):
@@ -158,7 +133,7 @@ async def _run(session_id, prompt="hello"):
 
 async def test_background_options_change_preserves_session_ownership(mock_db):
     sessions_db.create_session("bg-replace", "default")
-    pool = _StubPool(_fake_state())
+    pool = StubPool(_fake_state())
     pool.remove = AsyncMock()
     # Stop this caller-contract test before a real provider connection.
     pool.admission_check = MagicMock(return_value="fixture connection boundary")
@@ -175,7 +150,7 @@ async def test_background_rate_limit_event_updates_usage_snapshot(mock_db):
     sid = "bg-rate-limit"
     sessions_db.create_session(sid, "default")
     info = RateLimitInfo(status="allowed", rate_limit_type="five_hour", utilization=0.4)
-    pool = _StubPool(_fake_state(messages=[RateLimitEvent(rate_limit_info=info), _result_message()]))
+    pool = StubPool(_fake_state(messages=[RateLimitEvent(rate_limit_info=info), _result_message()]))
     with ExitStack() as stack:
         _bg_patches(stack, pool)
         apply = stack.enter_context(patch(
@@ -203,7 +178,7 @@ async def test_background_turn_records_full_event_sequence(mock_db):
         AssistantMessage(content=[TextBlock("done.")], model="claude"),
         _result_message(),
     ])
-    pool = _StubPool(state)
+    pool = StubPool(state)
     run_sync_calls = []
 
     with ExitStack() as stack:
@@ -281,7 +256,7 @@ async def test_background_interrupt_records_turn_aborted_interrupt(mock_db):
         messages=[AssistantMessage(content=[TextBlock("partial")], model="claude")],
         receive_error=asyncio.CancelledError(),
     )
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         _bg_patches(stack, pool)
@@ -299,7 +274,7 @@ async def test_background_stream_error_records_turn_aborted_error(mock_db):
     sid = "bg-rec-err"
     sessions_db.create_session(sid, "default")
     state = _fake_state(messages=[], receive_error=RuntimeError("sdk exploded"))
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         _bg_patches(stack, pool)
@@ -318,7 +293,7 @@ async def test_background_records_regardless_of_v2_flag(mock_db):
     sid = "bg-rec-legacy"
     sessions_db.create_session(sid, "default")
     state = _fake_state(messages=[_result_message()])
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         _bg_patches(stack, pool)
@@ -339,7 +314,7 @@ async def test_background_lane_books_each_run_once(mock_db):
     sid = "bg-usage-booked"
     sessions_db.create_session(sid, "default")
     for _ in range(2):
-        pool = _StubPool(_fake_state(messages=[_result_message()]))
+        pool = StubPool(_fake_state(messages=[_result_message()]))
         with ExitStack() as stack:
             _bg_patches(stack, pool)
             stack.enter_context(patch.object(
@@ -389,7 +364,7 @@ async def test_background_sidechain_usage_does_not_overwrite_last_call_tokens(mo
         ),
         _result_message(),
     ])
-    pool = _StubPool(state)
+    pool = StubPool(state)
 
     with ExitStack() as stack:
         _sync, persist_results, _finalize = _bg_patches(stack, pool)
@@ -423,7 +398,7 @@ async def test_background_init_stamps_launched_model(mock_db):
         AssistantMessage(content=[TextBlock("hi")], model="fable"),
         _result_message(),
     ])
-    pool = _StubPool(state)
+    pool = StubPool(state)
     run_sync_calls = []
 
     with ExitStack() as stack:
@@ -547,7 +522,7 @@ async def test_background_provider_config_error_records_aborted_no_escape(mock_d
 
     sid = "bg-provider-config-err"
     sessions_db.create_session(sid, "default")
-    pool = _StubPool(None)
+    pool = StubPool(None)
 
     with ExitStack() as stack:
         _bg_patches(stack, pool)

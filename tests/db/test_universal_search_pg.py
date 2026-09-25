@@ -60,6 +60,34 @@ def test_searches_messages_written_by_native_store():
             conn.cursor().execute('DELETE FROM fluid_sessions WHERE session_id = %s', (store_id,))
             conn.cursor().execute('DELETE FROM agents WHERE id = %s', (profile,))
 
+def test_title_match_dedupes_counts_and_honours_limit():
+    """Ported from the SQLite-skipped TestSearchSessions / TestSessionSearchExtended:
+    a session matching in title AND legacy content appears once, keeps the
+    title match_type, counts both hits, and ``limit`` caps the result."""
+    from app.db import sessions, profiles, base
+
+    token = uuid4().hex
+    profile = 'search-title-profile-' + token
+    ids = ['search-title-%s-%d' % (token, i) for i in range(3)]
+    needle = 'titleneedle' + token
+    profiles.create_profile(profile, 'Search test', '', {})
+    try:
+        for sid in ids:
+            sessions.create_session(sid, profile, title=needle)
+        sessions.add_session_message(ids[0], 'user', needle + ' question')
+        rows = sessions.search_sessions(needle)
+        assert [row['id'] for row in rows].count(ids[0]) == 1
+        row = next(r for r in rows if r['id'] == ids[0])
+        assert row['match_type'] == 'title'
+        assert row['match_count'] >= 2
+        assert len(sessions.search_sessions(needle, limit=2)) == 2
+    finally:
+        for sid in ids:
+            sessions.delete_session(sid)
+        with base.get_db() as conn:
+            conn.cursor().execute('DELETE FROM agents WHERE id = %s', (profile,))
+
+
 def test_note_search_title_body_and_literal_wildcards():
     from app.db import notes
     note_id = 'search-note-' + uuid4().hex

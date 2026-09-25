@@ -13,45 +13,21 @@ This is the guard against the divergence bug that motivated PR C.1.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any, List, Optional
+from typing import List
 
 import pytest
 
 import app.core.pg_session_store as pss
-
-
-class FakeCursor:
-    """Records executed SQL/params; returns canned rows on fetchall()."""
-
-    def __init__(self, rows: List[dict]) -> None:
-        self._rows = rows
-        self.executed: List[tuple] = []  # (sql, params)
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        self.executed.append((sql, params))
-
-    def fetchall(self) -> List[dict]:
-        return list(self._rows)
-
-    def fetchone(self) -> Optional[dict]:
-        return self._rows[0] if self._rows else None
-
-
-class FakeConn:
-    def __init__(self, cursor: FakeCursor) -> None:
-        self._cursor = cursor
-
-    def cursor(self) -> FakeCursor:
-        return self._cursor
+from tests.fakes.db import RecordingConn, RecordingCursor
 
 
 @contextmanager
-def _fake_get_db(cursor: FakeCursor):
-    yield FakeConn(cursor)
+def _fake_get_db(cursor: RecordingCursor):
+    yield RecordingConn(cursor)
 
 
-def _patch_db(monkeypatch, rows: List[dict]) -> FakeCursor:
-    cur = FakeCursor(rows)
+def _patch_db(monkeypatch, rows: List[dict]) -> RecordingCursor:
+    cur = RecordingCursor(rows)
     monkeypatch.setattr(pss, "get_db", lambda: _fake_get_db(cur))
     return cur
 

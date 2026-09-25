@@ -34,6 +34,7 @@ from app.core.turn_recorder import TurnRecorder
 from app.db import database
 from app.db import runs as runs_db
 from app.db import turns as turns_db
+from tests.core.engine_harness import StubPool
 
 
 ENGINE = "ses_native_worker"
@@ -77,35 +78,6 @@ def _fluid_turn(turn_id="ft-1"):
     return events, terminal
 
 
-class _StubPool:
-    def __init__(self, state):
-        self.state = state
-
-    def get(self, session_id):
-        return self.state
-
-    def peek(self, session_id):
-        return self.state
-
-    def put(self, session_id, state):
-        self.state = state
-
-    def admission_check(self, lane="delegated"):
-        return None
-
-    async def evict_if_needed(self, incoming_lane="delegated"):
-        return None
-
-    async def remove(self, session_id):
-        self.state = None
-
-    async def remove_dead(self, session_id):
-        self.state = None
-
-    async def remove_broken(self, session_id):
-        self.state = None
-
-
 class _Worker:
     """One live native worker turn: its turns row, run lease, adapter and pump."""
 
@@ -119,7 +91,7 @@ class _Worker:
         state.adapter.is_alive = MagicMock(return_value=True)
         state.adapter.send_query = AsyncMock()
         state.adapter.receive_events = MagicMock(side_effect=self._receive)
-        _engine_patches(stack, _StubPool(state), str(tmp_path))
+        _engine_patches(stack, StubPool(state), str(tmp_path))
         self.task = None
 
     async def start_turn(self):
@@ -169,7 +141,7 @@ class _Worker:
         )
 
 
-def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str) -> None:
+def _engine_patches(stack: ExitStack, pool: StubPool, cwd: str) -> None:
     stack.enter_context(patch.object(
         qe, "get_profile", return_value={"id": "default", "config": {}}
     ))

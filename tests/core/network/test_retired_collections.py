@@ -1,25 +1,8 @@
 """Peers on older builds still send ``claude_accounts``; this build drops it quietly."""
-import pytest
 
 from app.db import network as store
 from app.network import engine, envelope as envelope_mod, peer_snapshot, policy
-from tests.core.network.harness import Worker, exchange, join
-from tests.core.network.test_engine import _pref, _set_pref
-
-
-@pytest.fixture
-def workers(tmp_path):
-    made = []
-
-    def make(name):
-        worker = Worker(name, tmp_path)
-        made.append(worker)
-        return worker
-
-    yield make
-    for worker in made:
-        worker.close()
-    engine.reset_for_tests()
+from tests.core.network.harness import exchange, join, owner_pref, set_owner_pref
 
 
 def _publish_old_build_op(worker):
@@ -53,12 +36,12 @@ def test_old_build_ops_are_consumed_without_storing_or_forwarding(workers):
         engine.create_network("Home")
     join(a, b)
     _publish_old_build_op(a)
-    _set_pref(a, "after", 7)
+    set_owner_pref(a, "after", 7)
 
     result = exchange(a, b)
 
     assert result.rejected == 0
-    assert _pref(b, "after") == 7  # the stream moved past the retired op
+    assert owner_pref(b, "after") == 7  # the stream moved past the retired op
     assert not b.sql("SELECT * FROM sync_ops WHERE collection = 'claude_accounts'")
     assert not b.sql("SELECT * FROM sync_records WHERE collection = 'claude_accounts'")
     assert not b.sql("SELECT * FROM sync_pending")
@@ -81,7 +64,7 @@ def test_state_copy_serves_an_empty_retired_page_and_accepts_it(workers, tmp_pat
     with a.active():
         engine.create_network("Home")
     join(a, b)
-    _set_pref(a, "copied", 3)
+    set_owner_pref(a, "copied", 3)
     with a.active():
         manifest = peer_snapshot.capture(b.device_id)
         copied = tmp_path / "received"
@@ -92,4 +75,4 @@ def test_state_copy_serves_an_empty_retired_page_and_accepts_it(workers, tmp_pat
     assert pages == [dict(pages[0], count=0, more=False, offset=0)]
     with b.active():
         peer_snapshot.apply(manifest, copied, a.device_id)
-    assert _pref(b, "copied") == 3
+    assert owner_pref(b, "copied") == 3

@@ -8,25 +8,8 @@ from app.db import database
 from app.db import network as store
 from app.db import session_events as events_db
 from app.network import catalog, control, engine, tokens, transport
-from tests.core.network.harness import Worker, converge, join
+from tests.core.network.harness import converge, join
 from tests.core.network.test_transport import ServedBy
-
-
-@pytest.fixture
-def workers(tmp_path):
-    made = []
-
-    def make(name):
-        worker = Worker(name, tmp_path)
-        made.append(worker)
-        return worker
-
-    yield make
-    for worker in made:
-        worker.close()
-    engine.reset_for_tests()
-    tokens.reset_for_tests()
-    transport.reset_for_tests()
 
 
 def _new_session(worker, session_id, title, *, target=None):

@@ -7,11 +7,9 @@ import pytest
 
 from app.db import network as store
 from app.network import engine, hub, peer_snapshot, transport
-from tests.core.network.harness import join
+from tests.core.network.harness import join, owner_pref, set_owner_pref
 from tests.core.network.test_transport import (  # noqa: F401
     ServedBy,
-    _pref,
-    _set_pref,
     workers,
 )
 
@@ -22,22 +20,22 @@ async def test_state_recipient_forwards_to_offline_peer_without_original_log(wor
         engine.create_network('Home')
     join(a, b)
     join(a, c)
-    _set_pref(a, 'while_offline', 'kept')
+    set_owner_pref(a, 'while_offline', 'kept')
     served_a = ServedBy(a, 'https://a.example.com')
     with b.active():
         async with httpx.AsyncClient(transport=served_a.transport()) as client:
             await transport.PeerLink(a.device_id, [served_a.base_url]).receive_state(client, engine.context())
-    assert _pref(b, 'while_offline') == 'kept'
+    assert owner_pref(b, 'while_offline') == 'kept'
     # A is no longer reachable. B has A's state, but not its original ops.
     served_b = ServedBy(b, 'https://b.example.com')
-    _set_pref(c, 'from_c', 'offline edit')
+    set_owner_pref(c, 'from_c', 'offline edit')
     with c.active():
         async with httpx.AsyncClient(transport=served_b.transport()) as client:
             result = await transport.PeerLink(b.device_id, [served_b.base_url]).sync_once(client, engine.context())
             assert result['received'] > 0
-    assert _pref(c, 'while_offline') == 'kept'
-    assert _pref(b, 'from_c') == 'offline edit'
-    assert _pref(c, 'from_c') == 'offline edit'
+    assert owner_pref(c, 'while_offline') == 'kept'
+    assert owner_pref(b, 'from_c') == 'offline edit'
+    assert owner_pref(c, 'from_c') == 'offline edit'
 
 
 def test_incomplete_or_tampered_state_never_advances_frontier(workers, tmp_path):
@@ -45,7 +43,7 @@ def test_incomplete_or_tampered_state_never_advances_frontier(workers, tmp_path)
     with a.active():
         engine.create_network('Home')
     join(a, b)
-    _set_pref(a, 'new_value', 42)
+    set_owner_pref(a, 'new_value', 42)
     with a.active():
         manifest = peer_snapshot.capture(b.device_id)
         copied = tmp_path / 'received'
@@ -60,10 +58,10 @@ def test_incomplete_or_tampered_state_never_advances_frontier(workers, tmp_path)
         with pytest.raises(ValueError, match='verify'):
             peer_snapshot.apply(manifest, copied, a.device_id)
         assert store.local_watermarks() == before
-        assert _pref(b, 'new_value') is None
+        assert owner_pref(b, 'new_value') is None
         last.write_bytes(raw)
         peer_snapshot.apply(manifest, copied, a.device_id)
-        assert _pref(b, 'new_value') == 42
+        assert owner_pref(b, 'new_value') == 42
 
 
 async def test_peer_mode_never_uploads_or_polls_cloud_data(workers, monkeypatch):
@@ -95,7 +93,7 @@ async def test_account_bootstrap_waits_then_copies_peer_without_cloud_feed(worke
         response = engine.admit_device(device_id=b.device_id, signing_public=b.identity.signing_public,
                                       encryption_public=b.identity.encryption_public, name='B')
     response['issuer']['endpoints'] = ['https://a.example.com']
-    _set_pref(a, 'account_setting', 7)
+    set_owner_pref(a, 'account_setting', 7)
     served = ServedBy(a, 'https://a.example.com')
     real_client = httpx.AsyncClient
     calls = []
@@ -110,7 +108,7 @@ async def test_account_bootstrap_waits_then_copies_peer_without_cloud_feed(worke
         monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: real_client(transport=served.transport(), **kwargs))
         assert await hub._bootstrap_from_hub()
         assert engine.context().bootstrap_state == engine.BOOTSTRAP_READY
-        assert _pref(b, 'account_setting') == 7
+        assert owner_pref(b, 'account_setting') == 7
         assert all(route == '' for _, route in calls)
 
 
@@ -125,12 +123,12 @@ async def test_peer_state_after_key_rotation_and_revoked_transfer_denial(workers
         engine.revoke_device(removed.device_id)
         with pytest.raises(ValueError):
             peer_snapshot.page(removed.device_id, stale['transfer'], 0)
-    _set_pref(a, 'after_rotation', 9)
+    set_owner_pref(a, 'after_rotation', 9)
     served = ServedBy(a, 'https://a.example.com')
     with b.active():
         async with httpx.AsyncClient(transport=served.transport()) as client:
             await transport.PeerLink(a.device_id, [served.base_url]).receive_state(client, engine.context())
-        assert _pref(b, 'after_rotation') == 9
+        assert owner_pref(b, 'after_rotation') == 9
         assert engine.context().member(removed.device_id).status == 'revoked'
         assert engine.context().network_key == a.context.network_key
 
@@ -168,12 +166,12 @@ async def test_snapshot_merge_keeps_conflicting_offline_edit(workers):
     with a.active():
         engine.create_network('Home')
     join(a, b)
-    _set_pref(a, 'same_setting', 'a edit')
-    _set_pref(b, 'same_setting', 'b edit')
+    set_owner_pref(a, 'same_setting', 'a edit')
+    set_owner_pref(b, 'same_setting', 'b edit')
     served = ServedBy(a, 'https://a.example.com')
     with b.active():
         async with httpx.AsyncClient(transport=served.transport()) as client:
             await transport.PeerLink(a.device_id, [served.base_url]).receive_state(client, engine.context())
         conflicts = store.list_conflicts()
         assert any('same_setting' in row['record_id'] for row in conflicts)
-        assert _pref(b, 'same_setting') in ('a edit', 'b edit')
+        assert owner_pref(b, 'same_setting') in ('a edit', 'b edit')

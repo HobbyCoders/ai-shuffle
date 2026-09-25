@@ -3916,7 +3916,9 @@ def test_normalize_mcp_http_config_becomes_streamable_http():
     assert cfg == {"type": "http", "url": "https://example.test/mcp"}
 
 
-def test_normalize_mcp_http_headers_warn_but_still_connect(caplog):
+def test_normalize_mcp_http_headers_are_kept(caplog):
+    # fluid's HTTP transport sends per-server headers, so they pass through
+    # without a warning.
     cfg = {
         "type": "http",
         "url": "https://example.test/mcp",
@@ -3927,10 +3929,8 @@ def test_normalize_mcp_http_headers_warn_but_still_connect(caplog):
 
     assert out is not None
     assert out["transport"] == "streamable_http"
-    assert any(
-        "authed" in r.getMessage() and "headers" in r.getMessage().lower()
-        for r in caplog.records
-    )
+    assert out["headers"] == {"Authorization": "Bearer x"}
+    assert not any("authed" in r.getMessage() for r in caplog.records)
 
 
 def test_normalize_mcp_sse_config_is_skipped_with_warning(caplog):

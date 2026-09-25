@@ -6,21 +6,6 @@ from app.db import session_events as se
 from app.db import runs
 
 
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
-
-
 def test_seqs_start_at_one_and_are_contiguous(mock_db):
     fs1, ls1 = se.append_events("s1", [{"type": "a"}, {"type": "b"}])
     assert (fs1, ls1) == (1, 2)

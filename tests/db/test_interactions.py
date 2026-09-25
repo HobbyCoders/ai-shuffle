@@ -1,23 +1,6 @@
 """Unit tests for app/db/interactions.py — pending interaction state machine."""
 
-import pytest
-
 from app.db import interactions as ix
-
-
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
 
 
 def test_create_lists_as_pending(mock_db):

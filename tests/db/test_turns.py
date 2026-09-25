@@ -7,21 +7,6 @@ from app.db import turns
 from app.db import runs
 
 
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
-
-
 # ---------------------------------------------------------------------------
 # Enqueue + ordering + reads
 # ---------------------------------------------------------------------------

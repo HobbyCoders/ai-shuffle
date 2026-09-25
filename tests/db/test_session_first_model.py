@@ -14,7 +14,6 @@ happens to be first and no later write can move it.
 from __future__ import annotations
 
 import sqlite3
-from unittest.mock import patch
 
 import pytest
 

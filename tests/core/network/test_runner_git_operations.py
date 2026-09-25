@@ -4,7 +4,6 @@ import asyncio
 from unittest.mock import patch
 
 import httpx
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -17,31 +16,14 @@ from app.core.config import settings
 from app.db import checkouts as checkouts_db
 from app.db import database, git_ops as git_ops_db
 from app.db import network as store
-from app.network import engine, tokens, transport
-from tests.core.network.harness import Worker, join
+from app.network import engine, transport
+from tests.core.network.harness import join
 from tests.core.network.test_transport import ServedBy
 
 
 LEGACY_A = "legacy-a"
 LEGACY_B = "legacy-b"
 PROJECT_ID = "project-1"
-
-
-@pytest.fixture
-def workers(tmp_path):
-    made = []
-
-    def make(name):
-        worker = Worker(name, tmp_path)
-        made.append(worker)
-        return worker
-
-    yield make
-    for worker in made:
-        worker.close()
-    engine.reset_for_tests()
-    tokens.reset_for_tests()
-    transport.reset_for_tests()
 
 
 def _effective_id_for(*workers):

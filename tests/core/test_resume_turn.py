@@ -17,51 +17,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import app.core.query_engine as qe
 from app.core import session_runtime
 from app.core.provider.events import SystemMessage
-from app.core.session_pool import SessionState
 from app.db import database
 from app.db import turns as turns_db
 
 from tests.core.test_session_runtime import _make_pump, _runtime_env
+from tests.core.engine_harness import StubPool, make_state, stream_response
 
 
 # ─── pump harness (subprocess/profile boundaries only) ───────────────────────
-
-
-def _make_state():
-    adapter = MagicMock()
-    adapter.is_alive = MagicMock(return_value=True)
-    adapter.send_query = AsyncMock()
-    adapter.send_resume = AsyncMock()
-    return SessionState(adapter=adapter, is_connected=True)
-
-
-class _StubPool:
-    def __init__(self, state=None):
-        self.state = state
-
-    def get(self, session_id):
-        return self.state
-
-    def peek(self, session_id):
-        return self.state
-
-    def put(self, session_id, state):
-        self.state = state
-
-    def admission_check(self, lane="delegated"):
-        return None
-
-    async def evict_if_needed(self, incoming_lane="delegated"):
-        return None
-
-    async def remove(self, session_id):
-        self.state = None
-
-    async def remove_dead(self, session_id):
-        self.state = None
-
-    async def remove_broken(self, session_id):
-        self.state = None
 
 
 def _engine_patches(stack, pool, cwd, notes):
@@ -86,21 +49,13 @@ def _engine_patches(stack, pool, cwd, notes):
     stack.enter_context(patch.object(qe, "_persist_turn_results", new=AsyncMock()))
 
 
-def _stream_response(messages):
-    async def _gen():
-        for m in messages:
-            yield m
-
-    return MagicMock(side_effect=lambda: _gen())
-
-
 async def _drive(prompt, *, resume, tmp_path):
     """Run the real pump once and return (adapter, resolve_note_references spy)."""
     session_id = f"sess-{uuid.uuid4()}"
     database.create_session(session_id=session_id, profile_id="default")
-    state = _make_state()
-    pool = _StubPool(state)
-    state.adapter.receive_events = _stream_response(
+    state = make_state(send_resume=AsyncMock())
+    pool = StubPool(state)
+    state.adapter.receive_events = stream_response(
         [SystemMessage(subtype="init", data={"session_id": "ses_x"})]
     )
     notes = MagicMock(side_effect=lambda p: p)

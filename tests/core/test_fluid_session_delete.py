@@ -8,57 +8,33 @@ which validates a UUID — every fluid delete logged ``Invalid session_id`` and
 the delegated-CLI transcript file (named by ``fluid_sessions.cli_session_id``,
 a real uuid) leaked too.
 
-The fix routes on the id format. These tests run WITHOUT Postgres (FakeCursor
+The fix routes on the id format. These tests run WITHOUT Postgres (RecordingCursor
 records SQL).
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any, List, Optional
+from typing import List
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import app.core.provider.fluid_transcript as ft
+from tests.fakes.db import RecordingConn, RecordingCursor
 
 FLUID_SID = "ses_7f41e2151f6b"
 CLI_SID = "6f5f6e0c-6c22-4a41-9a2e-7d1d9c6b1a10"
 LEGACY_SID = "0c1f2b3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d"
 
 
-class FakeCursor:
-    def __init__(self, rowcounts: List[int]) -> None:
-        self._rowcounts = rowcounts
-        self.executed: List[tuple] = []
-        self.rowcount = 0
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        self.executed.append((sql, params))
-        self.rowcount = self._rowcounts.pop(0) if self._rowcounts else 0
-
-    def fetchone(self) -> Optional[dict]:
-        return None
-
-    def fetchall(self) -> List[dict]:
-        return []
-
-
-class FakeConn:
-    def __init__(self, cursor: FakeCursor) -> None:
-        self._cursor = cursor
-
-    def cursor(self, *args, **kwargs) -> FakeCursor:
-        return self._cursor
-
-
-def _patch_db(monkeypatch, rowcounts: List[int]) -> FakeCursor:
+def _patch_db(monkeypatch, rowcounts: List[int]) -> RecordingCursor:
     """fluid_transcript lazy-imports get_db per call — patch it at the source."""
     import app.db.base as db_base
 
-    cur = FakeCursor(rowcounts)
+    cur = RecordingCursor(rowcounts=rowcounts)
 
     @contextmanager
     def _fake_get_db():
-        yield FakeConn(cur)
+        yield RecordingConn(cur)
 
     monkeypatch.setattr(db_base, "get_db", _fake_get_db)
     return cur

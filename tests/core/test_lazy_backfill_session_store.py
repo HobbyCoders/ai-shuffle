@@ -30,39 +30,17 @@ import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import app.core.pg_session_store as pss
-
-
-class FakeCursor:
-    def __init__(self) -> None:
-        self.executed: List[tuple] = []  # (sql, params)
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        self.executed.append((sql, params))
-
-    def fetchone(self) -> Optional[dict]:
-        return None
-
-    def fetchall(self) -> List[dict]:
-        return []
-
-
-class FakeConn:
-    def __init__(self, cursor: FakeCursor) -> None:
-        self._cursor = cursor
-
-    def cursor(self) -> FakeCursor:
-        return self._cursor
+from tests.fakes.db import RecordingConn, RecordingCursor
 
 
 @contextmanager
-def _fake_transaction(cur: FakeCursor):
-    yield FakeConn(cur)
+def _fake_transaction(cur: RecordingCursor):
+    yield RecordingConn(cur)
 
 
 SID = "11111111-2222-3333-4444-555555555555"
@@ -92,7 +70,7 @@ def seams(monkeypatch, project_dir: Path):
     main_path = project_dir / f"{SID}.jsonl"
     _write_jsonl(main_path, [{"uuid": "u0"}, {"uuid": "u1"}])
 
-    cur = FakeCursor()
+    cur = RecordingCursor()
     mocks = MagicMock()
     mocks.cursor = cur
     mocks.main_path = main_path

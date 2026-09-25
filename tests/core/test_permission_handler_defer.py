@@ -3,9 +3,9 @@ Tests for Slice B — "defer" decision end-to-end (backend).
 
 Covers:
 - B.1  PermissionDecision.DEFER enum value
-- B.2  respond("defer") moves request to _deferred, returns sentinel
+- B.2  respond("defer") defers the request, returns sentinel
 - B.3  request_permission returns _DeferSentinel when deferred
-- B.4  requeue_deferred moves requests back to _pending_requests
+- B.4  requeue_deferred moves requests back to pending
 - B.7  defer skips rule creation regardless of remember/pattern
 """
 
@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock, patch
 
 from app.core.permission_handler import (
     PermissionDecision,
-    PermissionRequest,
     PermissionHandler,
     _DeferSentinel,
 )
@@ -24,16 +23,6 @@ from app.core.permission_handler import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _make_request(request_id="req-1", session_id="session-1") -> PermissionRequest:
-    return PermissionRequest(
-        request_id=request_id,
-        session_id=session_id,
-        profile_id="profile-1",
-        tool_name="Bash",
-        tool_input={"command": "rm -rf /"},
-    )
-
 
 # ---------------------------------------------------------------------------
 # B.1 — Enum
@@ -61,7 +50,6 @@ class TestRespondDefer:
     @pytest.mark.asyncio
     async def test_respond_defer_request_not_found(self, handler):
         """respond('defer') with unknown request_id returns error."""
-        handler._pending_requests["session-1"] = {}
         result = await handler.respond(
             request_id="unknown-req",
             session_id="session-1",

@@ -28,50 +28,14 @@ from app.core.provider.events import (
 )
 
 import app.core.query_engine as qe
-from app.core.session_pool import SessionState
 from app.db import database
+from tests.core.engine_harness import StubPool, make_state, stream_response
 
 
 # ─── minimal engine harness (subprocess/profile boundaries only) ─────────────
 
 
-def _make_state():
-    adapter = MagicMock()
-    adapter.is_alive = MagicMock(return_value=True)
-    adapter.send_query = AsyncMock()
-    return SessionState(adapter=adapter, is_connected=True)
-
-
-class _StubPool:
-    def __init__(self, state=None):
-        self.state = state
-
-    def get(self, session_id):
-        return self.state
-
-    def peek(self, session_id):
-        return self.state
-
-    def put(self, session_id, state):
-        self.state = state
-
-    def admission_check(self, lane="delegated"):
-        return None
-
-    async def evict_if_needed(self, incoming_lane="delegated"):
-        return None
-
-    async def remove(self, session_id):
-        self.state = None
-
-    async def remove_dead(self, session_id):
-        self.state = None
-
-    async def remove_broken(self, session_id):
-        self.state = None
-
-
-def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str) -> AsyncMock:
+def _engine_patches(stack: ExitStack, pool: StubPool, cwd: str) -> AsyncMock:
     """Patch the subprocess/profile boundaries; capture the turn-end persist."""
     stack.enter_context(patch.object(
         qe, "get_profile", return_value={"id": "default", "config": {}}
@@ -94,14 +58,6 @@ def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str) -> AsyncMock:
     persist = AsyncMock()
     stack.enter_context(patch.object(qe, "_persist_turn_results", new=persist))
     return persist
-
-
-def _stream_response(messages):
-    async def _gen():
-        for m in messages:
-            yield m
-
-    return MagicMock(side_effect=lambda: _gen())
 
 
 def _new_session(profile_id="default"):
@@ -139,9 +95,9 @@ SUBAGENT_USAGE = {
 async def _run(messages, tmp_path):
     """Drive the streaming loop; return (yielded events, persist mock)."""
     session_id = _new_session()
-    state = _make_state()
-    pool = _StubPool(state)
-    state.adapter.receive_events = _stream_response(messages)
+    state = make_state()
+    pool = StubPool(state)
+    state.adapter.receive_events = stream_response(messages)
     events = []
     with ExitStack() as stack:
         persist = _engine_patches(stack, pool, str(tmp_path))

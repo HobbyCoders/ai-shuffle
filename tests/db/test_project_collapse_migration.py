@@ -14,15 +14,12 @@ from app.db import projects_v2 as pv2
 from app.db.projects_v2 import project_v2_id_for_origin as origin_id
 
 
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    # The collapse seeds freely across projects/sessions; the sessions FK to
-    # projects is irrelevant to this unit test.
-    conn.execute("PRAGMA foreign_keys = OFF")
-    yield conn
-    conn.close()
+@pytest.fixture(autouse=True)
+def _foreign_keys_off(test_db):
+    """Run on the shared conftest DB with foreign keys off: the collapse
+    seeds freely across projects/sessions; the sessions FK to projects is
+    irrelevant to this unit test."""
+    test_db.execute("PRAGMA foreign_keys = OFF")
 
 
 def _seed_project(shim, pid, name, path, instance_id=None, link_group_id=None):

@@ -11,24 +11,6 @@ from app.db import database as db
 
 
 @pytest.fixture
-def test_db():
-    """In-memory SQLite database built from the canonical PostgreSQL schema via
-    the test shim (see tests/db/test_database.py::test_db)."""
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    """Route the app DB layer through the shim-wrapped test connection."""
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
-
-
-@pytest.fixture
 def setup_profile(mock_db):
     """Create a test profile for use in tests that require foreign key references."""
     profile = db.create_profile(
@@ -362,31 +344,6 @@ class TestSubagentExtended:
         result = db.update_subagent("sub-1", model="claude-3")
 
         assert result["model"] == "claude-3"
-
-
-# =============================================================================
-# Session Search Extended Tests
-# =============================================================================
-
-
-class TestSessionSearchExtended:
-    """Test extended session search operations."""
-
-    @pytest.mark.skip(
-        reason="search_sessions uses Postgres-native FTS (tsvector @@ plainto_tsquery, "
-        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. No "
-        "real-Postgres integration suite exists yet — the SQL's structure is "
-        "guarded by TestSearchSessionsSql (test_database.py); behavior needs "
-        "manual verification against a Postgres instance."
-    )
-    def test_search_sessions_with_limit(self, mock_db, setup_profile):
-        """search_sessions should respect limit."""
-        for i in range(5):
-            db.create_session(f"session-{i}", setup_profile, title=f"Python topic {i}")
-
-        result = db.search_sessions("Python", limit=2)
-
-        assert len(result) == 2
 
 
 # =============================================================================

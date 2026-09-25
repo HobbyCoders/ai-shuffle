@@ -6,23 +6,8 @@ import pytest
 
 from app.db import database
 from app.db import network as store
-from app.network import engine, tokens, transport
-from tests.core.network.harness import Worker, exchange, join
-
-
-@pytest.fixture
-def workers(tmp_path):
-    made = []
-    def make(name):
-        worker = Worker(name, tmp_path)
-        made.append(worker)
-        return worker
-    yield make
-    for worker in made:
-        worker.close()
-    engine.reset_for_tests()
-    tokens.reset_for_tests()
-    transport.reset_for_tests()
+from app.network import engine
+from tests.core.network.harness import exchange, join
 
 
 @pytest.mark.parametrize("reverse", [False, True])

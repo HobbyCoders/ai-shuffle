@@ -33,21 +33,6 @@ from app.db import turns as turns_db
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
-
-
 @pytest.fixture(autouse=True)
 def _short_terminal_batch_window(monkeypatch):
     """The real 2s terminal-batch window made every on_task_terminal test wait

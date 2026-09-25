@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.db import checkouts as checkouts_db, database
 from app.mcp import builtin_tools as bt
 from tests.core.test_checkout_materialization import (
-    RUNNER, _git, base_checkout, mock_db, project, test_db, workspace_root,
+    RUNNER, _foreign_keys_off, _git, base_checkout, project, workspace_root,
 )
 
 

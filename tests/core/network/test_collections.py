@@ -6,25 +6,8 @@ from app.core import automation_service
 from app.core.config import settings
 from app.db import database
 from app.db import network as store
-from app.network import blobs, engine, memory_records, ownership, plugins_sync, startup as network_startup, tokens, transport
-from tests.core.network.harness import Worker, converge, join
-
-
-@pytest.fixture
-def workers(tmp_path):
-    made = []
-
-    def make(name):
-        worker = Worker(name, tmp_path)
-        made.append(worker)
-        return worker
-
-    yield make
-    for worker in made:
-        worker.close()
-    engine.reset_for_tests()
-    tokens.reset_for_tests()
-    transport.reset_for_tests()
+from app.network import blobs, engine, memory_records, ownership, plugins_sync, startup as network_startup, transport
+from tests.core.network.harness import converge, join
 
 
 def _skills_root(worker):

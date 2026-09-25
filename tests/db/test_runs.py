@@ -6,21 +6,6 @@ from app.db import runs
 from app.db import session_events as se
 
 
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
-
-
 def test_claim_then_second_claim_returns_none(mock_db):
     r1 = runs.claim_run("s1", "runnerA", 60)
     assert r1 is not None

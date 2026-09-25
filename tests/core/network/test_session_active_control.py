@@ -9,10 +9,7 @@ from app.db import network as store
 from app.network import control, engine, transport
 from tests.core.network.harness import converge, join
 from tests.core.network.test_control import _new_session
-from tests.core.network.test_control import workers as _worker_fixture
 from tests.core.network.test_transport import ServedBy
-
-workers = _worker_fixture
 
 
 def connect_owner(monkeypatch, owner):

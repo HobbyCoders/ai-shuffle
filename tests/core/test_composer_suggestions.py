@@ -7,7 +7,7 @@ import pytest
 
 from app.core import composer_suggestions as cs
 from app.db import session_events as events
-from tests.core.test_turn_scheduler import mock_db, test_db, _settled_turn
+from tests.core.test_turn_scheduler import _settled_turn
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +25,7 @@ def clean_state(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def seed_owners(mock_db):
+def seed_owners(bare_db):
     from app.db import profiles, api_users
     profiles.create_profile("default", "Default", None, {})
     api_users.create_api_user("owner", "Owner", "test-only-hash")
