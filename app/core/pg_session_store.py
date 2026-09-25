@@ -1247,15 +1247,6 @@ class PgSessionStore:
     ) -> None:
         await asyncio.to_thread(_append_sync, key, entries)
 
-    async def flush_summaries(self, session_id: str | None = None) -> int:
-        """Fold any summary this process still owes (see :func:`flush_summary_folds`).
-
-        NOT part of the SDK SessionStore protocol. Exposed so a turn-end hook
-        can bring the sidecar current the moment a turn finishes instead of
-        waiting for the next reader.
-        """
-        return await asyncio.to_thread(flush_summary_folds, session_id)
-
     async def load(self, key: SessionKey) -> list[SessionStoreEntry] | None:
         return await asyncio.to_thread(_load_sync, key)
 
@@ -1330,50 +1321,6 @@ class PgSessionStore:
         """
         return await asyncio.to_thread(
             _list_subpaths_by_session_id_sync, session_id
-        )
-
-    # ------------------------------------------------------------------
-    # Backfill API.
-    #
-    # NOT part of the SDK SessionStore protocol. These methods bulk-load a
-    # complete on-disk transcript into the SAME tables, in the SAME row shape,
-    # so backfilled history is indistinguishable from appended history to
-    # readers.
-    # ------------------------------------------------------------------
-
-    async def count_entries(self, key: SessionKey) -> int:
-        """Rows already present for ``key`` (used for the idempotency check)."""
-        return await asyncio.to_thread(_count_entries_sync, key)
-
-    async def backfill(
-        self,
-        key: SessionKey,
-        entries: list[SessionStoreEntry],
-        *,
-        skip_if_present: bool = True,
-        batch_size: int = 500,
-    ) -> int:
-        """Bulk-insert a full transcript for ``key``, idempotently.
-
-        Idempotency: ``session_store_entries`` has no unique constraint
-        (BIGSERIAL PK only), so there is no ``ON CONFLICT`` target. When
-        ``skip_if_present`` is True (default) this first counts existing rows
-        for the exact (project_key, session_id, subpath) and returns ``0``
-        without writing if any exist — the on-disk JSONL is the complete,
-        append-only history, so partial overlap is not expected. Pass
-        ``skip_if_present=False`` only when you have already truncated the
-        target rows yourself.
-
-        Returns the number of rows written (``0`` when skipped or empty).
-        """
-        if not entries:
-            return 0
-        if skip_if_present:
-            existing = await asyncio.to_thread(_count_entries_sync, key)
-            if existing > 0:
-                return 0
-        return await asyncio.to_thread(
-            _backfill_entries_sync, key, entries, batch_size
         )
 
 

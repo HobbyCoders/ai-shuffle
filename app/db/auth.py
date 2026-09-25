@@ -226,15 +226,6 @@ def clear_all_sessions():
 # API Key Session Operations
 # ============================================================================
 
-def _get_api_user_profile_ids(cursor, user_id: str) -> List[str]:
-    """Get profile IDs for an API user from junction table"""
-    cursor.execute(
-        "SELECT profile_id FROM api_user_profiles WHERE api_user_id = %s ORDER BY created_at",
-        (user_id,)
-    )
-    return [row["profile_id"] for row in cursor.fetchall()]
-
-
 def cleanup_expired_sessions() -> dict:
     """Remove expired auth sessions, API key sessions, login attempts, and lockouts.
 
@@ -276,4 +267,3 @@ def cleanup_expired_sessions() -> dict:
         logger.debug("Session cleanup: nothing to remove")
 
     return results
-

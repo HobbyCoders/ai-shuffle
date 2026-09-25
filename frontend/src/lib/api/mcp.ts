@@ -110,19 +110,6 @@ export async function removeGlobalMcpServer(serverName: string): Promise<void> {
 	await api.delete(`/mcp/servers/${encodeURIComponent(serverName)}`);
 }
 
-/**
- * Toggle a global MCP server enabled/disabled
- */
-export async function toggleGlobalMcpServer(
-	serverName: string,
-	enabled: boolean
-): Promise<McpServerInfo> {
-	return api.patch<McpServerInfo>(
-		`/mcp/servers/${encodeURIComponent(serverName)}/toggle`,
-		{ enabled }
-	);
-}
-
 // ============================================================================
 // Project-scoped MCP API
 // ============================================================================
@@ -185,24 +172,6 @@ export async function removeProjectMcpServer(
 	await api.delete(
 		`/projects/${projectId}/mcp/servers/${encodeURIComponent(serverName)}?scope=${scope}`
 	);
-}
-
-// ============================================================================
-// MCP Tools Discovery
-// ============================================================================
-
-/**
- * Get all discovered MCP tools from the CLI cache
- */
-export async function getMcpTools(refresh: boolean = false): Promise<McpTool[]> {
-	return api.get<McpTool[]>(`/mcp/tools${refresh ? '?refresh=true' : ''}`);
-}
-
-/**
- * Get MCP server statistics
- */
-export async function getMcpStats(): Promise<McpStats> {
-	return api.get<McpStats>('/mcp/stats');
 }
 
 // ============================================================================

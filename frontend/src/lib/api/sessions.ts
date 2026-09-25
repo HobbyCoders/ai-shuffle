@@ -103,16 +103,6 @@ export interface Session {
 	hidden?: boolean;  // List-hidden internal sessions (for example delegated workers)
 }
 
-export interface SessionMessage {
-	id: number;
-	role: string;
-	content: string;
-	tool_name?: string;
-	tool_input?: Record<string, unknown>;
-	metadata?: Record<string, unknown>;
-	created_at: string;
-}
-
 export interface SessionSearchResult extends Session {
 	match_type: 'title' | 'content';
 	match_snippet: string | null;

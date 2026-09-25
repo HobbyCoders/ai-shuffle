@@ -154,18 +154,6 @@ export function parseDiff(diffText: string): ParsedDiff {
 	return result;
 }
 
-/**
- * Get a human-readable description of the diff type.
- */
-export function getDiffDescription(parsed: ParsedDiff): string {
-	if (!parsed.oldFile && parsed.newFile) return 'New file';
-	if (parsed.oldFile && !parsed.newFile) return 'Deleted file';
-	if (parsed.oldFile && parsed.newFile && parsed.oldFile !== parsed.newFile) {
-		return `Renamed: ${parsed.oldFile} → ${parsed.newFile}`;
-	}
-	return 'Modified';
-}
-
 // ============================================================================
 // Side-by-Side Diff
 // ============================================================================

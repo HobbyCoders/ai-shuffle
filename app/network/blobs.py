@@ -54,21 +54,6 @@ def backfill_attachment_hashes() -> int:
     return updated
 
 
-def backfill_artifact_inventory(limit: int = 100) -> int:
-    """Discover older files in bounded pages without claiming absent bytes."""
-    from app.core.artifact_store import artifact_path
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""SELECT a.hash,a.size FROM artifacts a WHERE NOT EXISTS
-            (SELECT 1 FROM sync_blobs b WHERE b.hash=a.hash) ORDER BY a.hash LIMIT %s""", (limit,))
-        rows = cursor.fetchall()
-        for row in rows:
-            path = artifact_path(row["hash"])
-            present = path is not None and sha256(path.read_bytes()) == row["hash"]
-            store.upsert_blob(row["hash"], size=int(row["size"]), present=present, _conn=conn)
-        return len(rows)
-
-
 def register_present(hash_value: str, size: int) -> None:
     ctx = engine.context()
     store.upsert_blob(hash_value, size=size, present=True, holder=ctx.device_id if ctx else None)

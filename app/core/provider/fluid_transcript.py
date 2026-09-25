@@ -363,7 +363,7 @@ def _inner_calls_by_block(
     dispatched from inside one of those blocks — the question is which one.
 
     The engine emits every outer ``ToolUse`` while the assistant message is
-    still STREAMING (``NativeLoop._stream_call``), before it has dispatched
+    still STREAMING (``NativeLoop._stream_once``), before it has dispatched
     anything, and only then runs the blocks one at a time in order. So an
     assistant message with two tool_use blocks logs
     ``ToolUse(a), ToolUse(b), <a's inner calls>, ToolResult(a), <b's inner

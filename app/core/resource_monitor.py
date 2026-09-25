@@ -768,20 +768,3 @@ async def stop_resource_monitor(task: asyncio.Task):
         await task
     except asyncio.CancelledError:
         pass
-
-
-async def log_snapshot_now(reason: str = "manual"):
-    """Take an immediate snapshot (useful for on-demand diagnostics)."""
-    global _snapshot_count
-    _snapshot_count += 1
-    uptime_minutes = round((time.monotonic() - _start_time) / 60, 1) if _start_time else 0
-
-    metrics = await _collect_metrics()
-    formatted = _format_metrics(metrics)
-    logger.info(f"{_PREFIX} snapshot={_snapshot_count} reason={reason} uptime={uptime_minutes}m {formatted}")
-
-    warnings = _check_warnings(metrics)
-    for warning in warnings:
-        logger.warning(f"{_PREFIX} {warning}")
-
-    return metrics

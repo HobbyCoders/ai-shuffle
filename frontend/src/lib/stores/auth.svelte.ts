@@ -101,7 +101,6 @@ export const auth = {
 
 export const isAuthenticated = createDerived(() => _state.status?.authenticated ?? false);
 export const isAdmin = createDerived(() => _state.status?.is_admin ?? false);
-export const setupRequired = createDerived(() => _state.status?.setup_required ?? false);
 export const claudeAuthenticated = createDerived(() => _state.status?.claude_authenticated ?? false);
 // "Any usable credential" (PA10): the Claude subscription login OR at least one
 // enabled model provider with a stored credential. This — not claudeAuthenticated
@@ -115,7 +114,4 @@ export const anyCredential = createDerived(
 // The server's credential gate for Claude agent runs (null on older backends).
 export const agentGate = createDerived(() => _state.status?.agent_gate ?? null);
 export const githubAuthenticated = createDerived(() => _state.status?.github_authenticated ?? false);
-export const onboardingComplete = createDerived(() => _state.status?.onboarding_complete ?? true);
 export const username = createDerived(() => _state.status?.username ?? null);
-export const authLoading = createDerived(() => _state.loading);
-export const authError = createDerived(() => _state.error);

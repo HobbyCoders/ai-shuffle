@@ -1214,7 +1214,6 @@ def _apply_membership(cursor, ctx: NetworkContext, plaintext: Mapping[str, Any])
         from app.network import recovery
         recovery.refresh_wrap_after_rotation(_conn=conn)
     elif kind == membership.TYPE_KEY:
-        version = int(record_data["key_version"])
         try:
             key = membership.unwrap_from_key_record(record_data, ctx.device_id, ctx.identity.encryption_private)
         except crypto.CryptoError as exc:

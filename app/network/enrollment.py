@@ -41,7 +41,6 @@ from app.network import crypto, engine, identity as identity_mod, membership
 
 logger = logging.getLogger(__name__)
 
-JOIN_PURPOSE = "network:join"
 JOIN_TTL_MINUTES = 30
 POLL_INTERVAL_SECONDS = 3.0
 SNAPSHOT_RETRY_ATTEMPTS = 3

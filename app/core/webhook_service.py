@@ -15,7 +15,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 import httpx
 
@@ -342,61 +342,3 @@ async def send_test_webhook(webhook: Dict[str, Any]) -> WebhookTestResponse:
             response_time_ms=elapsed_ms,
             error=f"Unexpected error: {e}"
         )
-
-
-# Convenience functions for common events
-
-async def dispatch_session_complete(
-    session_id: str,
-    title: Optional[str],
-    profile_id: str,
-    total_cost: float,
-    input_tokens: int,
-    output_tokens: int,
-    duration_seconds: float
-) -> None:
-    """Dispatch a session.complete event."""
-    await dispatch_webhook(
-        event_type="session.complete",
-        data={
-            "session_id": session_id,
-            "title": title,
-            "profile_id": profile_id,
-            "total_cost": total_cost,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "duration_seconds": duration_seconds
-        }
-    )
-
-
-async def dispatch_session_error(
-    session_id: str,
-    title: Optional[str],
-    profile_id: str,
-    error_message: str
-) -> None:
-    """Dispatch a session.error event."""
-    await dispatch_webhook(
-        event_type="session.error",
-        data={
-            "session_id": session_id,
-            "title": title,
-            "profile_id": profile_id,
-            "error_message": error_message
-        }
-    )
-
-
-async def dispatch_session_started(
-    session_id: str,
-    profile_id: str
-) -> None:
-    """Dispatch a session.started event."""
-    await dispatch_webhook(
-        event_type="session.started",
-        data={
-            "session_id": session_id,
-            "profile_id": profile_id
-        }
-    )

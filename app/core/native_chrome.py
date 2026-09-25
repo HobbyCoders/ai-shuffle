@@ -203,24 +203,6 @@ async def cdp_get(path: str, port: Optional[int] = None) -> Optional[object]:
         return None
 
 
-def unreachable_detail() -> str:
-    """Best explanation for why no browser answers on the CDP port.
-
-    Supervisor's own last detail (crash-loop, no executable, external owner…)
-    → the browser-mcp build being absent → a generic "nothing answering" note.
-    """
-    if get_detail():
-        return get_detail()
-
-    from app.core.builtin_mcp_servers import _browser_mcp_entry
-
-    entry = _browser_mcp_entry()
-    if not os.path.exists(entry):
-        return f"browser-mcp not built: {entry} missing"
-
-    return f"no browser answering CDP on 127.0.0.1:{_cdp_port()}"
-
-
 def _launch_args(port: int) -> List[str]:
     """CDP-headless launch flags. No ``--no-sandbox`` / ``--disable-dev-shm-usage``
     (those are Linux/docker-only concerns)."""

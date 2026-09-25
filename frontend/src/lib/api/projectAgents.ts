@@ -53,13 +53,6 @@ export async function getProjectAgents(projectId: string): Promise<ProjectAgent[
 }
 
 /**
- * Get detailed information about a specific agent including full prompt
- */
-export async function getProjectAgent(projectId: string, agentName: string): Promise<ProjectAgentDetail> {
-	return api.get(`/projects/${projectId}/agents/${encodeURIComponent(agentName)}`);
-}
-
-/**
  * Create a new agent in the project
  */
 export async function createProjectAgent(
@@ -67,30 +60,6 @@ export async function createProjectAgent(
 	data: CreateProjectAgentRequest
 ): Promise<ProjectAgent> {
 	return api.post(`/projects/${projectId}/agents`, data);
-}
-
-/**
- * Update an existing agent
- */
-export async function updateProjectAgent(
-	projectId: string,
-	agentName: string,
-	data: UpdateProjectAgentRequest
-): Promise<ProjectAgent> {
-	return api.put(`/projects/${projectId}/agents/${encodeURIComponent(agentName)}`, data);
-}
-
-/**
- * Rename an agent (changes the .md filename)
- */
-export async function renameProjectAgent(
-	projectId: string,
-	agentName: string,
-	newName: string
-): Promise<ProjectAgent> {
-	return api.post(`/projects/${projectId}/agents/${encodeURIComponent(agentName)}/rename`, {
-		new_name: newName
-	});
 }
 
 /**

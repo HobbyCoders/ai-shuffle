@@ -29,7 +29,7 @@ import re
 import signal
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from app.core.config import settings
 from app.core.jsonl_parser import get_project_dir_name

@@ -524,11 +524,6 @@ async def sweep_loop() -> None:
     logger.info("turn_claim: unified sweep driver stopped")
 
 
-# Back-compat alias — this loop's only caller is :func:`start`, but the name is
-# referenced in docs/commit history.
-claim_loop = sweep_loop
-
-
 def _ensure_driver() -> None:
     """Spawn the sweep driver task if it is not already running."""
     global _loop_task

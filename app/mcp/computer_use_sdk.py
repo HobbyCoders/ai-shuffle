@@ -101,7 +101,6 @@ def create_computer_use_server(
     permission_mode: Optional[str] = None,
     session_id: Optional[str] = None,
     profile_id: Optional[str] = None,
-    require_confirmation: bool = False,  # accepted for back-compat; unused
 ) -> Optional[Any]:
     """Build the `computer-use` SDK MCP server, or None if unavailable/disabled."""
     if not enabled:

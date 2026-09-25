@@ -7,8 +7,7 @@ and ``ToolRegistry._normalize`` accepts the SDK result envelope
 
 ``register_recorded_sdk_servers`` (called by the harness adapter) re-registers
 every recorded in-proc server with per-tool risk classes. The lower-level
-converters are ``sdk_tool_to_inproc``, ``sdk_tools_to_inproc_server`` and
-``register_sdk_tools``.
+converters are ``sdk_tool_to_inproc`` and ``register_sdk_tools``.
 """
 
 from __future__ import annotations
@@ -48,28 +47,6 @@ def sdk_tool_to_inproc(sdk_tool: Any, *, risk: str = "safe") -> InprocTool:
         handler=handler,
         risk=risk,
     )
-
-
-def sdk_tools_to_inproc_server(
-    server_name: str,
-    sdk_tools: Iterable[Any],
-    *,
-    version: str = "1.0.0",
-    risk_map: Optional[Mapping[str, str]] = None,
-) -> InprocServer:
-    """Bundle a list of SDK ``@tool`` objects into a named fluid ``InprocServer``.
-
-    ``risk_map`` optionally assigns per-tool risk (``"safe"|"write"|"destructive"``)
-    by tool name; anything unlisted defaults to ``"safe"``. This is where a
-    module declares that, e.g., ``CronDelete`` is ``destructive`` so fluid's
-    PermissionEngine gates it.
-    """
-    risk_map = risk_map or {}
-    tools: List[InprocTool] = [
-        sdk_tool_to_inproc(t, risk=risk_map.get(getattr(t, "name", ""), "safe"))
-        for t in sdk_tools
-    ]
-    return create_inproc_server(server_name, tools, version=version)
 
 
 def register_sdk_tools(

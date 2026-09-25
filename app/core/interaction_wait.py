@@ -26,6 +26,8 @@ import logging
 import threading
 from typing import Any, Dict, Optional, Set, Tuple
 
+from app.core.detached_tasks import spawn_detached
+
 logger = logging.getLogger(__name__)
 
 # Slow-poll cadence (correctness floor; NOTIFY wakes are the latency path).
@@ -36,10 +38,6 @@ POLL_SECONDS = 5.0
 _waiters: Dict[str, Set[Tuple[object, object]]] = {}
 _lock = threading.Lock()
 _listener_registered = False
-
-# Strong refs to in-flight fire-and-forget DB-NOTIFY tasks so the loop cannot GC
-# them before they run (see :func:`notify_changed`).
-_notify_tasks: Set["asyncio.Task[None]"] = set()
 
 
 def _on_gateway_tick(session_id: str) -> None:
@@ -146,15 +144,13 @@ def notify_changed(session_id: str) -> None:
     """
     _on_gateway_tick(session_id)
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         # No running loop (called from a worker thread): already off-loop, so
         # run the blocking NOTIFY inline (failure-isolated inside the helper).
         _notify_session_blocking(session_id)
         return
-    task = loop.create_task(asyncio.to_thread(_notify_session_blocking, session_id))
-    _notify_tasks.add(task)
-    task.add_done_callback(_notify_tasks.discard)
+    spawn_detached(asyncio.to_thread(_notify_session_blocking, session_id))
 
 
 async def await_interaction(

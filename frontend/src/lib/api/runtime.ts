@@ -211,9 +211,3 @@ function installTokenHooks(): void {
 		if (typeof token === 'string') setMobileToken(token);
 	});
 }
-
-/** Test hook: forget the installed hooks so a fresh runtime re-installs them. */
-export function _resetRuntimeForTests(): void {
-	hooksInstalled = false;
-	if (typeof window !== 'undefined') delete window.shuffleMobileSetToken;
-}

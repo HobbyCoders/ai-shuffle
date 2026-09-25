@@ -25,10 +25,6 @@ from app.core.config import settings
 
 logger = logging.getLogger("app.db")
 
-# Type aliases for Postgres connections/cursors
-DbConnection = psycopg2.extensions.connection
-DbCursor = psycopg2.extensions.cursor
-
 # ---------------------------------------------------------------------------
 # Connection pool (initialized once via init_pool at startup)
 # ---------------------------------------------------------------------------
@@ -69,20 +65,6 @@ class WorktreeStatus:
     COMPLETED = "completed"  # Worktree cleaned up after merge; DB record preserved for session reopen
     DELETED = "deleted"
     ORPHANED = "orphaned"
-
-
-# =============================================================================
-# Backend helpers (always Postgres — kept for downstream compatibility)
-# =============================================================================
-
-def is_postgres() -> bool:
-    """Always returns True. Kept for backward compatibility during migration."""
-    return True
-
-
-def is_sqlite() -> bool:
-    """Always returns False. Kept for backward compatibility during migration."""
-    return False
 
 
 # =============================================================================

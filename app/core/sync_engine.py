@@ -12,10 +12,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import (
-    Any, Awaitable, Callable, Coroutine, Deque, Dict, List, Optional, Set, Tuple,
+    Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple,
 )
 
 from fastapi import WebSocket
+
+from app.core.detached_tasks import spawn_detached
 
 logger = logging.getLogger(__name__)
 
@@ -77,27 +79,6 @@ _OUTBOUND_QUEUE_MAXSIZE = 256
 #      beats a silently truncated stream it cannot detect.
 _COALESCABLE_SESSION_EVENTS = frozenset({"queue_updated"})
 _COALESCABLE_USER_FRAMES = frozenset({"usage_snapshot", "tabs_sync"})
-
-# Detached teardown tasks (socket close + registry reap) spawned from the
-# non-blocking enqueue path. Held so they are not garbage-collected mid-flight.
-_background_tasks: Set["asyncio.Task[Any]"] = set()
-
-
-def _spawn_detached(coro: Coroutine[Any, Any, None], name: str) -> None:
-    """Run ``coro`` as a fire-and-forget task, keeping a strong reference.
-
-    Used from synchronous, non-blocking code paths (``ConnectionWriter.enqueue``)
-    that must not await anything.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:  # no loop (interpreter teardown / sync unit context)
-        coro.close()  # don't leave a "never awaited" coroutine behind
-        return
-    task = loop.create_task(coro, name=name)
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
 
 def _session_coalesce_key(event_type: str, session_id: str) -> Optional[Tuple[Any, ...]]:
     """Coalescing key for a session-scoped SyncEvent, or None if it must not drop."""
@@ -208,7 +189,7 @@ class ConnectionWriter:
         self._pending.clear()
         self._coalescable.clear()
         if close_socket:
-            _spawn_detached(self._close_socket(), f"ws-writer-close:{self._label}")
+            spawn_detached(self._close_socket(), name=f"ws-writer-close:{self._label}")
 
     async def _close_socket(self) -> None:
         try:
@@ -229,7 +210,7 @@ class ConnectionWriter:
         self._pending.clear()
         self._coalescable.clear()
         self._wakeup.set()
-        _spawn_detached(self._teardown(), f"ws-writer-teardown:{self._label}")
+        spawn_detached(self._teardown(), name=f"ws-writer-teardown:{self._label}")
 
     async def _teardown(self) -> None:
         await self._close_socket()

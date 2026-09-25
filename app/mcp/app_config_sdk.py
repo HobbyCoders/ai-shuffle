@@ -181,7 +181,7 @@ def _create_discovery_tools() -> list:
 # Server Factory
 # ============================================================================
 
-def get_app_config_tool_names(is_admin: bool = True) -> List[str]:
+def get_app_config_tool_names() -> List[str]:
     """
     Return the list of MCP tool names for allowed_tools registration.
 

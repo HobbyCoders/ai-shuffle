@@ -57,7 +57,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import re
 import time
@@ -66,7 +65,7 @@ from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
 
 from app.db import turns as turns_db
-from app.db.base import get_db
+from app.db.base import get_db, parse_jsonb
 
 logger = logging.getLogger(__name__)
 
@@ -109,16 +108,6 @@ def _frame_has_renderable_content(frame: Dict[str, Any]) -> bool:
 # Durable reads (the turns table is the machine; the log is the record)
 # ---------------------------------------------------------------------------
 
-def _parse_json(raw: Any) -> Any:
-    """Decode a JSONB column the test shim stores as TEXT (dicts pass through)."""
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return None
-    return raw
-
-
 def _turn_terminal_payload(session_id: str, turn_id: str) -> Dict[str, Any]:
     """The settled turn's terminal ``turn.completed`` payload from the event
     log (``{}`` when the turn has no terminal event — e.g. recorder never ran).
@@ -138,7 +127,7 @@ def _turn_terminal_payload(session_id: str, turn_id: str) -> Dict[str, Any]:
         row = cursor.fetchone()
     if row is None:
         return {}
-    payload = _parse_json(row["payload"])
+    payload = parse_jsonb(row["payload"])
     return payload if isinstance(payload, dict) else {}
 
 
@@ -1658,49 +1647,6 @@ async def on_task_notification_stranded(
             "turn_scheduler: could not enqueue the fallback wake for %s (tasks=%s)",
             session_id, list(task_ids or []), exc_info=True,
         )
-
-
-#: Terminal frame statuses that mean the task was STOPPED rather than that it
-#: failed. The wire vocabulary here is fluid's, not the registry's — the adapter
-#: maps a killed shell onto ``cancelled`` on the way out.
-_CANCELLATION_FRAME_STATUSES = frozenset({"killed", "cancelled", "stopped"})
-
-
-async def _retire_without_wake(
-    session_id: str, frame: Dict[str, Any], task_id: str
-) -> None:
-    """Settle a deliberately-cancelled task with no wake turn behind it.
-
-    Three effects, in the order they matter:
-
-    * the ENGINE is told the task is terminal, so fluid drops it from
-      ``_background_pending`` instead of listing a dead id on every later
-      ``SessionParked``;
-    * the wake latch is spent, so no later frame for the same task can enqueue
-      one after the fact;
-    * a running turn — and only a running turn — is handed the line as a steer.
-      It carries no frames, so an undelivered one strands into nothing rather
-      than falling back to the wake this path exists to avoid. At rest there is
-      no delivery at all, which is the whole point: the model asked for this
-      cancellation and does not need to be woken to be told it happened.
-
-    Never raises — the caller's ``except`` covers it either way.
-    """
-    await retire_task_terminals(session_id, [frame])
-    from app.core.task_registry import task_registry
-
-    task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
-    prompt = await asyncio.to_thread(_build_task_notification_prompt, [frame])
-    steered = await _try_steer_terminal_notification(
-        session_id, prompt, [], [task_id]
-    )
-    if not steered:
-        _mark_terminal_notified(session_id, [task_id])
-    logger.info(
-        "turn_scheduler: task %s on %s was cancelled deliberately (%s) — "
-        "retired with no wake turn (steered=%s)",
-        task_id, session_id, frame.get("status"), steered,
-    )
 
 
 _terminal_delivery_locks: WeakValueDictionary = WeakValueDictionary()

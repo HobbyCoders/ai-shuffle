@@ -26,18 +26,14 @@ from typing import List, Optional, Dict, Any
 
 # Re-export all models and helpers for backward compatibility
 from app.core.plugin_models import (  # noqa: F401
-    DictMixin,
     PluginScope,
     MarketplaceInfo,
-    PluginInstallation,
     PluginInfo,
     PluginDetails,
     PluginUpdateInfo,
     AutoUpdateSettings,
     AvailablePlugin,
-    _get_claude_dir,
     _get_fluid_dir,
-    _force_rmtree,
 )
 
 # Import delegate modules
@@ -1153,13 +1149,6 @@ def get_plugin_service(project_dir: Optional[Path] = None) -> PluginService:
         if cache_key not in _plugin_services:
             _plugin_services[cache_key] = PluginService(project_dir=project_dir)
         return _plugin_services[cache_key]
-
-
-def clear_plugin_service_cache():
-    """Clear the plugin service cache (useful for testing)"""
-    global _plugin_services
-    with _plugin_services_lock:
-        _plugin_services = {}
 
 
 def get_all_plugin_hooks() -> List[Dict[str, Any]]:
