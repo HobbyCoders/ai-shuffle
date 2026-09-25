@@ -35,9 +35,34 @@ def _is_trusted_proxy(host: str) -> bool:
         addr = ipaddress.ip_address(host)
     except (ValueError, TypeError):
         return False
+    candidates = [addr]
     if addr.version == 6 and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
-    return any(addr in net for net in _trusted_networks(settings.trusted_proxies or ""))
+        candidates.append(addr.ipv4_mapped)
+    networks = _trusted_networks(settings.trusted_proxies or "")
+    return any(a in net for a in candidates for net in networks)
+
+
+def _is_port(text: str) -> bool:
+    return text.isascii() and text.isdigit()
+
+
+def _hop_address(hop: str) -> str:
+    """One X-Forwarded-For entry without a port: ``1.2.3.4:5678`` -> ``1.2.3.4``,
+    ``[::1]:80`` and ``[::1]`` -> ``::1``. A bare IPv6 address, or anything that
+    is not ``host:port``, is returned unchanged.
+
+    Some proxies append the client's source port; keeping it would give every
+    connection its own rate-limit key and never match a TRUSTED_PROXIES entry.
+    """
+    if hop.startswith("["):
+        end = hop.find("]")
+        if end > 1 and (end == len(hop) - 1 or (hop[end + 1] == ":" and _is_port(hop[end + 2:]))):
+            return hop[1:end]
+        return hop
+    host, sep, port = hop.partition(":")
+    if sep and host and _is_port(port):
+        return host
+    return hop
 
 
 def get_client_ip(request: Request) -> str:
@@ -50,11 +75,11 @@ def get_client_ip(request: Request) -> str:
     direct_ip = request.client.host if request.client else "unknown"
     if direct_ip == "unknown" or not _is_trusted_proxy(direct_ip):
         return direct_ip
-    for header in settings.trusted_proxy_headers.split(","):
+    for header in (settings.trusted_proxy_headers or "").split(","):
         value = request.headers.get(header.strip())
         if not value:
             continue
-        hops = [hop.strip() for hop in value.split(",") if hop.strip()]
+        hops = [_hop_address(hop.strip()) for hop in value.split(",") if hop.strip()]
         if not hops:
             continue
         for hop in reversed(hops):
