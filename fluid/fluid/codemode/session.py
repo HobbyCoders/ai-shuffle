@@ -170,7 +170,10 @@ def run_python_prompt(input: Any, *, sandboxed: bool) -> dict[str, str]:
 
     The description leads with why this host asks (only when the cell is
     unsandboxed, i.e. its risk was not lowered to ``safe``), then the code as
-    plain text, cut by :func:`code_preview`.
+    plain text, cut by :func:`code_preview`. The app shows the whole
+    description as the "Code to run" block, so a caller that tags the prompt
+    (a ProviderAgent worker's approval) puts its tag in the title instead of
+    prepending it here.
     """
     code = input.get("code") if isinstance(input, dict) else None
     parts = [] if sandboxed else [RUN_PYTHON_UNSANDBOXED_REASON]

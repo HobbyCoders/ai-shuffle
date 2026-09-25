@@ -49,7 +49,7 @@ import httpx
 from fluid.providers._trace import trace_request
 
 from fluid.providers._retry import RetryPolicy
-from fluid.providers._sse import sse_events
+from fluid.providers._sse import KEEPALIVE_EVENT, sse_events
 from fluid.providers._transport import (
     DEFAULT_FIRST_BYTE_TIMEOUT_S,
     DEFAULT_STREAM_DEADLINE_S,
@@ -133,6 +133,7 @@ class OpenAIResponsesClient:
         timeout: float = 600.0,
         stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
         first_byte_timeout: float | None = DEFAULT_FIRST_BYTE_TIMEOUT_S,
+        event_silence_timeout: float | None = None,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
         routing_arm: str | None = None,
@@ -154,6 +155,15 @@ class OpenAIResponsesClient:
         # truncated stream. None or 0 disables it. See
         # fluid.providers._transport.FirstByteTimeout.
         self._first_byte_timeout = first_byte_timeout
+        # Wall clock since the last real (data) event. A heartbeat keeps the
+        # read timeout and the first-byte timer satisfied, so a server that
+        # sends only heartbeats would otherwise be bounded by the stream
+        # deadline alone (or nothing when that is off). Once heartbeats have
+        # been the only frames for this long, the stream ends as truncated.
+        # None means the per-read ``timeout``; 0 disables it.
+        self._event_silence_timeout = (
+            timeout if event_silence_timeout is None else event_silence_timeout
+        )
         self._http = http_client
         self._retry = retry or RetryPolicy()
 
@@ -405,7 +415,18 @@ class OpenAIResponsesClient:
                             # body that ends before either was cut off.
                             terminal = False
                             retry_class: ErrorClass | None = None
+                            silence_limit = self._event_silence_timeout
+                            last_event_at = time.monotonic()
+                            heartbeats_only = False
                             async for event_name, data in events:
+                                now = time.monotonic()
+                                if event_name != KEEPALIVE_EVENT:
+                                    last_event_at = now
+                                elif silence_limit and silence_limit > 0 and (
+                                    now - last_event_at > silence_limit
+                                ):
+                                    heartbeats_only = True
+                                    break
                                 for chunk in normalizer.consume(event_name, data):
                                     if chunk.kind == "message_start":
                                         # Held, so not yet yielded: a
@@ -459,14 +480,18 @@ class OpenAIResponsesClient:
                                 await asyncio.sleep(wait)
                                 attempt += 1
                                 continue
+                            if heartbeats_only:
+                                await events.aclose()
                             if pending_start is not None:
                                 start_sent = True
                                 yield pending_start
                             if not terminal:
-                                yield StreamChunk(
-                                    "error",
-                                    truncated_stream_payload("response.completed"),
-                                )
+                                payload = truncated_stream_payload("response.completed")
+                                if heartbeats_only:
+                                    payload["message"] += (
+                                        f" (only heartbeats for {silence_limit:g}s)"
+                                    )
+                                yield StreamChunk("error", payload)
                             return
                         text = (await resp.aread()).decode(errors="replace")
                         # One free retry: a 401 with the OAuth hook refreshes

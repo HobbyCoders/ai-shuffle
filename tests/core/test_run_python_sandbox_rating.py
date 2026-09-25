@@ -128,3 +128,39 @@ async def test_sandboxed_cell_prompt_has_no_sandbox_reason_and_other_tools_none(
     assert ctx.description == "print(1)"
     other = await _bridged_context("write", {"command": "ls"}, name="Bash")
     assert not hasattr(other, "title") and not hasattr(other, "description")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("risk", ["write", "safe"])
+async def test_a_workers_cell_prompt_keeps_its_tag_out_of_the_code_block(risk):
+    """R15-4: a ProviderAgent worker's approval prepended "Requested by
+    ProviderAgent worker ..." to the description, which the app shows whole as
+    the "Code to run" block. The tag now rides the title; the description is
+    exactly what the prompt builder produced."""
+    from unittest.mock import AsyncMock
+
+    from app.core import provider_agent_approvals as approvals
+
+    ctx = await _bridged_context(risk, {"code": "print(1)\n"})
+    route = approvals.WorkerApprovalRoute(
+        worker_session_id="worker-1", parent_session_id="parent-1",
+        label="reviewer", provider_id="prov-openai", model_id="gpt-5.5",
+    )
+    kwargs = dict(
+        request_id="perm-1", session_id="worker-1", profile_id="default",
+        tool_name="run_python", tool_input={"code": "print(1)\n"},
+        broadcast_func=AsyncMock(), title=ctx.title,
+        display_name=ctx.display_name, description=ctx.description,
+    )
+    out = approvals.redirect_kwargs(route, kwargs)
+
+    assert out["description"] == ctx.description
+    assert out["description"].endswith("print(1)")
+    assert "Requested by" not in out["description"] and "reviewer" not in out["description"]
+    assert out["title"] == "reviewer (prov-openai · gpt-5.5) — Run Python code"
+    assert out["provider_agent"]["label"] == "reviewer"
+    # Any other tool keeps the tag line in its description.
+    bash = approvals.redirect_kwargs(route, {**kwargs, "tool_name": "Bash",
+                                             "title": None, "description": None})
+    assert bash["title"] == "reviewer"
+    assert bash["description"].startswith("Requested by ProviderAgent worker “reviewer”")

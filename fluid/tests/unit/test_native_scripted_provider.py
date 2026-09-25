@@ -1568,3 +1568,69 @@ def test_the_first_byte_timeout_comes_from_the_provider_config(kind, value, expe
     client = _build_provider_client(config, "slow")
     assert client._first_byte_timeout == expected
     assert config.to_dict()["providers"]["slow"]["first_byte_timeout"] == value
+
+
+# ─── Responses: heartbeats alone do not keep a stream open forever ──────────
+
+
+_HEARTBEAT = b": keepalive\n\n"
+
+
+def _heartbeats(seconds: float, every: float = 0.05) -> list:
+    frames: list = []
+    for _ in range(int(seconds / every)):
+        frames += [_HEARTBEAT, Sleep(every)]
+    return frames
+
+
+async def test_a_heartbeat_only_responses_stream_ends_as_truncated():
+    """R15-6: a heartbeat counts as the first frame, so a server that answers
+    200 and then sends only SSE comments passed the first-byte check and was
+    bounded by the 900 s stream deadline alone (nothing when that is 0). The
+    time since the last data event is now bounded too."""
+    with fps.FakeProviderServer(_heartbeats(30)) as srv:
+        client = _client("responses", srv.url, first_byte_timeout=0.2,
+                         event_silence_timeout=0.5, stream_deadline=0)
+        request = ProviderRequest(
+            model=MODELS["responses"], messages=[Message(role="user", content=[Text("hi")])]
+        )
+        started = time.monotonic()
+        chunks = [chunk async for chunk in client.stream(request)]
+        elapsed = time.monotonic() - started
+
+    assert 0.5 <= elapsed < 10
+    [error] = [c for c in chunks if c.kind == "error"]
+    assert "truncated response" in error.payload["message"]
+    assert "only heartbeats for 0.5s" in error.payload["message"]
+    # The heartbeat still satisfied the first-byte timer.
+    assert "first-byte" not in error.payload["message"]
+    assert error.payload["retriable"] is False
+    assert any(c.kind == "provider_alive" for c in chunks)
+    assert len(srv.requests) == 1
+
+
+async def test_heartbeats_between_data_events_restart_the_silence_bound():
+    """The bound is on the time since the last DATA event, not the whole call:
+    long reasoning with heartbeats between real events still completes."""
+    frames = [Responses.created(), *_heartbeats(0.3)]
+    for piece in Responses.message("msg_1", "all done"):
+        frames += [piece, *_heartbeats(0.3)]
+    frames.append(Responses.completed())
+    with fps.FakeProviderServer(frames) as srv:
+        client = _client("responses", srv.url, event_silence_timeout=0.6)
+        request = ProviderRequest(
+            model=MODELS["responses"], messages=[Message(role="user", content=[Text("hi")])]
+        )
+        started = time.monotonic()
+        chunks = [chunk async for chunk in client.stream(request)]
+
+    assert time.monotonic() - started > 0.6  # longer than the bound in total
+    assert not [c for c in chunks if c.kind == "error"]
+    assert any(c.kind == "message_stop" for c in chunks)
+    assert "".join(c.payload.get("text", "") for c in chunks if c.kind == "text_delta") == "all done"
+
+
+def test_the_event_silence_bound_defaults_to_the_read_timeout():
+    assert OpenAIResponsesClient(api_key="k")._event_silence_timeout == 600.0
+    assert OpenAIResponsesClient(api_key="k", timeout=42)._event_silence_timeout == 42
+    assert OpenAIResponsesClient(api_key="k", event_silence_timeout=0)._event_silence_timeout == 0

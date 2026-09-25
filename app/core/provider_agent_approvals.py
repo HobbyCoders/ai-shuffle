@@ -232,6 +232,22 @@ def tagged_description(route: WorkerApprovalRoute, description: Optional[str]) -
     return f"{tag}\n\n{base}" if base else tag
 
 
+#: Tools whose prompt description is code: ``PermissionRequest.svelte`` shows
+#: the whole description as the "Code to run" block, so a worker tag prepended
+#: there would read as the first lines of the code.
+CODE_PROMPT_TOOLS = frozenset({"run_python"})
+
+
+def tagged_code_title(route: WorkerApprovalRoute, title: Optional[str]) -> str:
+    """The heading of a code prompt, carrying the whole worker tag (label and
+    binding) because its description must hold only the code."""
+    label = route.display_label
+    if route.binding:
+        label = f"{label} ({route.binding})"
+    base = (title or "").strip()
+    return f"{label} — {base}" if base else label
+
+
 # ---------------------------------------------------------------------------
 # Delivery to the parent's UI
 # ---------------------------------------------------------------------------
@@ -314,8 +330,11 @@ def redirect_kwargs(
     out["session_id"] = route.parent_session_id
     out["request_id"] = scoped_request_id(route, kwargs.get("request_id"))
     out["broadcast_func"] = parent_broadcast(route)
-    out["title"] = tagged_title(route, kwargs.get("title"))
-    out["description"] = tagged_description(route, kwargs.get("description"))
+    if kwargs.get("tool_name") in CODE_PROMPT_TOOLS:
+        out["title"] = tagged_code_title(route, kwargs.get("title"))
+    else:
+        out["title"] = tagged_title(route, kwargs.get("title"))
+        out["description"] = tagged_description(route, kwargs.get("description"))
     out["provider_agent"] = route.as_payload()
     return out
 
