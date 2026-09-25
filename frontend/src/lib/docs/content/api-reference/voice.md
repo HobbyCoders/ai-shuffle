@@ -98,7 +98,7 @@ curl -X POST http://localhost:8000/api/v1/voice/preview \
 
 Create a voice session. Voice mode must be enabled, or the request returns `403`.
 
-**Auth:** Required. An API key restricted to certain agents can only start voice sessions with those agents, as described in [Agent Restriction](/docs/api-reference/api-users#agent-restriction).
+**Auth:** Required. An API key restricted to certain agents can only start voice sessions with those agents, as described in [Agent Restriction](/docs/api-reference/api-users#agent-restriction). A voice session started with an API key belongs to that key, so only that key and the owner can use the call control endpoints below on it.
 
 JSON body. Every field is optional, but `model` is needed for GPT Live calls (`400` without it):
 
@@ -139,11 +139,13 @@ curl -X POST http://localhost:8000/api/v1/voice/sessions \
 
 These endpoints act on a session created by [POST /api/v1/voice/sessions](#post-apiv1voicesessions). They return `404` when the session does not exist or is not a voice session.
 
+An API key can only use them on voice sessions it started, and only while the session is inside the key's project and agent restrictions, as described in [Own Sessions](/docs/api-reference/api-users#own-sessions). Any other voice session, including one the owner started, returns `403`, so a key cannot get a client secret for, end, change or read another caller's call. The owner can use them on every voice session.
+
 ### POST /api/v1/voice/sessions/{session_id}/secret
 
 Get a fresh client secret for an existing voice session, for example to rejoin it. The session keeps the model, voice and provider it was created with.
 
-**Auth:** Required
+**Auth:** Required. An API key can use it only on its own voice sessions (`403` otherwise).
 
 Returns `client_secret`, `expires_at`, `model` and `options` (the secret is empty for GPT Live). Returns `403` when voice mode is disabled and `409` once the call has reached `voice_max_call_minutes`.
 
@@ -156,7 +158,7 @@ curl -X POST http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f
 
 For a session on an OpenAI Realtime model: after the client has connected to OpenAI, send the `call_id` it received so the server can join the call. Sending a new `call_id` replaces the previous one without restarting the call-length limit. Returns `{"ok": true}`.
 
-**Auth:** Required
+**Auth:** Required. An API key can use it only on its own voice sessions (`403` otherwise).
 
 JSON body:
 
@@ -180,7 +182,7 @@ curl -X POST http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f
 
 End the call and mark the session inactive. Agents the call started keep running. Safe to repeat, and it works even if voice mode was turned off during the call. Returns `{"ok": true}`.
 
-**Auth:** Required
+**Auth:** Required. An API key can use it only on its own voice sessions (`403` otherwise).
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f-5b8a7c6d4e3f/hangup \
@@ -191,7 +193,7 @@ curl -X POST http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f
 
 Whether the call is live.
 
-**Auth:** Required
+**Auth:** Required. An API key can use it only on its own voice sessions (`403` otherwise).
 
 ```bash
 curl http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f-5b8a7c6d4e3f/state \
@@ -217,7 +219,7 @@ curl http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f-5b8a7c6
 
 The voice setup the session was created with: `model`, `voice`, `provider_id` and `options`. Sessions created before this was recorded report the current settings.
 
-**Auth:** Required
+**Auth:** Required. An API key can use it only on its own voice sessions (`403` otherwise).
 
 ```bash
 curl http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f-5b8a7c6d4e3f/config \
@@ -228,7 +230,7 @@ curl http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f-5b8a7c6
 
 Change the model and options used by agents the call starts from now on. Only the fields you send change.
 
-**Auth:** Required. An API key can only change its own sessions (`403` otherwise).
+**Auth:** Required. An API key can use it only on its own voice sessions (`403` otherwise).
 
 JSON body, all optional:
 

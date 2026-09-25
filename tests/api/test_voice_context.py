@@ -200,3 +200,39 @@ def test_api_user_session_access_is_enforced(context_client, monkeypatch):
     response = context_client.patch(PATH.format(session_id), json={"fast": True})
     assert response.status_code == 403
     assert bool(db.get_session(session_id)["fast"]) is False
+
+
+def _as_api_user(monkeypatch, api_user):
+    for key in ("key-a", "key-b"):
+        if not db.get_api_user(key):
+            db.create_api_user(key, key, f"hash-{key}")
+    monkeypatch.setattr(
+        "app.api.sessions_helpers.get_api_user_from_request", lambda request: api_user
+    )
+
+
+def test_api_user_edits_its_own_voice_session(context_client, monkeypatch):
+    _as_api_user(monkeypatch, {"id": "key-a"})
+    session_id = _session(api_user_id="key-a")
+    response = context_client.patch(PATH.format(session_id), json={"fast": True})
+    assert response.status_code == 200, response.text
+    assert bool(db.get_session(session_id)["fast"]) is True
+
+
+@pytest.mark.parametrize("owner", ["key-b", None], ids=["other-key", "owner"])
+def test_api_user_cannot_edit_a_voice_session_it_does_not_own(
+    context_client, monkeypatch, owner
+):
+    """Same agent and no project restriction: ownership alone refuses it."""
+    _as_api_user(monkeypatch, {"id": "key-a"})
+    session_id = _session(api_user_id=owner)
+    response = context_client.patch(PATH.format(session_id), json={"fast": True})
+    assert response.status_code == 403
+    assert bool(db.get_session(session_id)["fast"]) is False
+
+
+def test_owner_edits_a_key_owned_voice_session(context_client, monkeypatch):
+    _as_api_user(monkeypatch, None)
+    session_id = _session(api_user_id="key-a")
+    response = context_client.patch(PATH.format(session_id), json={"fast": True})
+    assert response.status_code == 200, response.text
