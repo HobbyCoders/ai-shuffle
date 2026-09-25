@@ -43,6 +43,7 @@ export class Updater {
   private installing = false;
   private beforeInstall: () => Promise<void> = async () => {};
   private installFailed: (error: unknown) => Promise<void> = async () => {};
+  private confirmInstall: () => Promise<boolean> = async () => true;
   private policy: () => Promise<boolean> = async () => true;
   private bridge: ((state: UpdateState) => Promise<Record<string, unknown>>) | null = null;
   private safeToRestart: () => Promise<boolean> = async () => false;
@@ -87,6 +88,12 @@ export class Updater {
   onBeforeInstall(action: () => Promise<void>): void { this.beforeInstall = action; }
   /** Runs when an install fails after onBeforeInstall began, so the owner can restart what it stopped. */
   onInstallFailed(action: (error: unknown) => Promise<void>): void { this.installFailed = action; }
+  /**
+   * Asked before an install stops the worker; false leaves everything running.
+   * The bridge refuses an install while sessions run, but "Restart and update"
+   * calls install() directly, so the owner asks here too.
+   */
+  onConfirmInstall(confirm: () => Promise<boolean>): void { this.confirmInstall = confirm; }
   useApplications(applications: SourceUpdates, installedExecutable?: string, restartArgs: string[] = []): void {
     if (!this.releaseUpdates || process.env.SHUFFLE_DESKTOP_NO_UPDATES === '1') return;
     this.applications = applications;
@@ -171,7 +178,7 @@ export class Updater {
     this.installing = true; this.set({ error: null, message: null });
     let stopping = false;
     try {
-      if (!await this.permitted()) { this.installing = false; return; }
+      if (!await this.permitted() || !await this.confirmInstall()) { this.installing = false; return; }
       stopping = true;
       await this.beforeInstall();
       await this.applications.prepareInstall?.();

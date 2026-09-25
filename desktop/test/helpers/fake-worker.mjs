@@ -11,7 +11,14 @@ const token = process.env.SHUFFLE_DESKTOP_ATTACH_TOKEN;
 // Like the real worker's local gate: everything but health needs the listener token.
 const listener = process.env.SHUFFLE_DESKTOP_LISTENER_TOKEN;
 const exitAfterReady = Number(process.env.FAKE_WORKER_EXIT_AFTER_READY || 0);
+// Answers /health but never /health/ready, like a worker stuck in its lifespan.
+const neverReady = process.env.FAKE_WORKER_NEVER_READY === '1';
 if (process.env.FAKE_WORKER_LOG) appendFileSync(process.env.FAKE_WORKER_LOG, `${process.pid} ${token ?? '-'} ${listener ?? '-'}\n`);
+// Dies during start-up with a message on stderr, like a bad setting would.
+if (process.env.FAKE_WORKER_EXIT_BEFORE_READY) {
+	process.stderr.write('fatal: could not parse settings\n');
+	process.exit(Number(process.env.FAKE_WORKER_EXIT_BEFORE_READY));
+}
 let exiting = false;
 const server = http.createServer((req, res) => {
 	res.setHeader('content-type', 'application/json');
@@ -20,6 +27,10 @@ const server = http.createServer((req, res) => {
 		return;
 	}
 	if (req.url === '/health/ready') {
+		if (neverReady) {
+			res.statusCode = 503;
+			return res.end('{"status":"starting"}');
+		}
 		res.end('{"status":"ready"}');
 		if (exitAfterReady && !exiting) {
 			exiting = true;

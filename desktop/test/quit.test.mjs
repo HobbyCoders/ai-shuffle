@@ -129,3 +129,51 @@ test('NC-11: a successful stop resets the repeated-failure count', async () => {
 	assert.deepEqual(offers, [false]);
 	fail = false; await guard.request(); assert.equal(guard.canQuit, true);
 });
+
+test('a close dialog that cannot be shown is reported and never counts as permission to quit', async () => {
+	const { actions, calls, guard } = setup(3);
+	const reported = [];
+	actions.confirm = async () => { throw Error('renderer gone'); };
+	actions.failed = async (error, offerForce) => { reported.push([error.message, offerForce]); };
+	await guard.request();
+	assert.deepEqual(calls, [], 'no stop, no quit');
+	assert.deepEqual(reported, [['renderer gone', false]]);
+	assert.equal(guard.canQuit, false);
+	// The guard is free again for the next attempt.
+	actions.confirm = async () => true;
+	await guard.request();
+	assert.deepEqual(calls, ['stop', 'quit']);
+});
+
+test('a kill that fails after a failed graceful stop keeps the app open and reports it', async () => {
+	const { actions, calls, guard } = forcing(0);
+	const reported = [];
+	actions.stop = async () => { throw Error('hung'); };
+	actions.forceStop = async () => { calls.push('forceStop'); throw Error('EPERM: kill'); };
+	actions.failed = async (error, offerForce) => { reported.push([error.message, offerForce]); };
+	await guard.request({ force: true });
+	assert.deepEqual(calls, ['forceStop']);
+	assert.deepEqual(reported, [['EPERM: kill', false]]);
+	assert.equal(guard.canQuit, false, 'nothing was confirmed stopped, so the app does not quit');
+	actions.forceStop = async () => { calls.push('forceStop'); };
+	await guard.request({ force: true });
+	assert.deepEqual(calls, ['forceStop', 'forceStop', 'quit']);
+});
+
+test('a forced quit whose graceful stop finishes in time does not leave its grace timer running', async () => {
+	const s = setup(0);
+	const timers = new Set();
+	const realSet = globalThis.setTimeout; const realClear = globalThis.clearTimeout;
+	globalThis.setTimeout = (fn, ms) => { const id = realSet(fn, ms); timers.add(id); return id; };
+	globalThis.clearTimeout = (id) => { timers.delete(id); realClear(id); };
+	try {
+		s.actions.forceStop = async () => { s.calls.push('forceStop'); };
+		const guard = new QuitGuard(s.actions, 60_000);
+		await guard.request({ force: true });
+		await new Promise(resolve => setImmediate(resolve));
+		assert.deepEqual(s.calls, ['stop', 'quit']);
+		assert.equal(timers.size, 0, 'the 60 s timer would otherwise hold the quitting process open');
+	} finally {
+		globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear;
+	}
+});

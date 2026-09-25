@@ -102,3 +102,22 @@ test('NC-15: the bridge has no download channel, and the preload has no download
 	const preload = readFileSync(new URL('../dist/preload/index.js', import.meta.url), 'utf8');
 	assert.doesNotMatch(preload, /update-download/);
 });
+
+test('window actions and the title-bar theme take only what they expect from a trusted page', async () => {
+	const { invoke, calls } = setup();
+	// Only "close" does anything; other actions are ignored rather than forwarded.
+	await invoke('desktop:window-action', `${WORKER}/`, undefined, 'minimize');
+	await invoke('desktop:window-action', `${WORKER}/`, undefined, { toString: () => 'close' });
+	assert.deepEqual(calls, []);
+	await invoke('desktop:window-action', `${WORKER}/`, undefined, 'close');
+	assert.deepEqual(calls, ['close']);
+	calls.length = 0;
+	for (const theme of [null, 'dark', {}, { background: '#fff', symbol: '#000000' }, { background: 'red', symbol: '#000000' },
+		{ background: '#000000', symbol: 'url(javascript:1)' }, { background: '#00000000', symbol: '#000000' }, ['#000000', '#ffffff']]) {
+		await invoke('desktop:set-title-bar-theme', `${WORKER}/`, undefined, theme);
+	}
+	assert.deepEqual(calls, [], 'malformed themes never reach the native title bar');
+	await invoke('desktop:set-title-bar-theme', `${WORKER}/`, undefined, { background: '#1A2b3C', symbol: '#ffffff' });
+	assert.deepEqual(calls, ['theme']);
+	assert.deepEqual(await invoke('desktop:window-state', `${PAGE}?mode=status`), { maximized: false, fullscreen: false, focused: true });
+});

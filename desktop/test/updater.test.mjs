@@ -322,3 +322,51 @@ test('NC-6: the worker bridge ticks every 30 s, not 2 s, and pushes a new phase 
  updater.stop(); seen.length = 0; updater.set({ phase: 'idle' }); await new Promise(setImmediate);
  assert.deepEqual(seen, [], 'nothing after stop');
 });
+
+test('an install the owner declines stops nothing and can be confirmed later; a failing confirmation fails closed', async () => {
+ const { updater, calls } = fixture(); const order = []; let answer = false;
+ updater.useApplications(source({ pendingVersion: 'b'.repeat(40) }));
+ updater.onConfirmInstall(async () => { order.push('confirm'); return answer; });
+ updater.onBeforeInstall(async () => { order.push('stop'); });
+ updater.onInstallFailed(async () => { order.push('restart'); });
+ await updater.install();
+ assert.deepEqual(order, ['confirm'], 'declined: the worker and database keep running');
+ assert.equal(calls.length, 0); assert.equal(updater.current.phase, 'ready'); assert.equal(updater.current.error, null);
+ updater.onConfirmInstall(async () => { order.push('confirm'); throw Error('No window to ask in'); });
+ await updater.install();
+ assert.deepEqual(order, ['confirm', 'confirm'], 'nothing was stopped, so nothing is restarted');
+ assert.equal(calls.length, 0); assert.match(updater.current.error, /No window to ask in/);
+ answer = true; updater.onConfirmInstall(async () => { order.push('confirm'); return answer; });
+ await updater.install();
+ assert.deepEqual(order, ['confirm', 'confirm', 'confirm', 'stop']);
+ assert.equal(calls.at(-1), 'quit');
+});
+
+test('the account policy is read before the owner is asked to confirm an install', async () => {
+ const { updater, calls } = fixture(); let asked = 0;
+ updater.useApplications(source({ pendingVersion: 'b'.repeat(40) }));
+ updater.setPolicy(async () => false);
+ updater.onConfirmInstall(async () => { asked++; return true; });
+ await updater.install();
+ assert.equal(asked, 0); assert.equal(calls.length, 0);
+});
+
+test('a bridge that fails or a session count that cannot be read never installs and never rejects', async () => {
+ const { updater, calls } = fixture(); let installs = 0;
+ updater.useApplications(source({ pendingVersion: 'b'.repeat(40) }));
+ updater.onBeforeInstall(async () => { installs++; });
+ updater.setBridge(async () => { throw Error('worker restarting'); }, async () => true);
+ updater.start();
+ await updater.exchange();
+ updater.setBridge(async () => ({ action: 'install', expires_at: Date.now() / 1000 + 10 }), async () => { throw Error('active-sessions 503'); });
+ await updater.exchange(); await new Promise(setImmediate);
+ assert.equal(installs, 0); assert.equal(calls.length, 0);
+ assert.equal(updater.current.phase, 'ready');
+ // An unknown action, or one without an expiry, does nothing either.
+ updater.setBridge(async () => ({ action: 'reinstall-everything', expires_at: Date.now() / 1000 + 10 }), async () => true);
+ await updater.exchange();
+ updater.setBridge(async () => ({ action: 'install' }), async () => true);
+ await updater.exchange(); await new Promise(setImmediate);
+ assert.equal(installs, 0);
+ updater.stop();
+});

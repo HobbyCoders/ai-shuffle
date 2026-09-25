@@ -72,10 +72,18 @@ export class MainWindow {
 		return this.browserWindow?.webContents.id === webContentsId;
 	}
 
-	async ensure(): Promise<BrowserWindow> {
-		const existing = this.browserWindow;
-		if (existing) return existing;
+	private creating: Promise<BrowserWindow> | null = null;
 
+	ensure(): Promise<BrowserWindow> {
+		const existing = this.browserWindow;
+		if (existing) return Promise.resolve(existing);
+		// A second caller while the saved bounds load (a dock click during the
+		// first open) shares this window instead of creating an untracked one.
+		this.creating ??= this.create().finally(() => { this.creating = null; });
+		return this.creating;
+	}
+
+	private async create(): Promise<BrowserWindow> {
 		const state = await this.stateStore.load();
 		const initialTheme = nativeTheme.shouldUseDarkColors ? DARK_TITLE_BAR : LIGHT_TITLE_BAR;
 		const isMac = process.platform === 'darwin';

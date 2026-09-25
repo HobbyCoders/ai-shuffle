@@ -447,3 +447,145 @@ test('DESK-04: a preview build also reclaims its own orphan but still never atta
 	assert.match(refused.error, /in use by another program/);
 	assert.deepEqual(await g.spawns(), []);
 });
+
+// --- Supervisor: start-up failures, port collisions, log rotation ----------
+
+/** A server on `port` that answers each request with `reply(req, res)`. */
+async function rawServer(t, port, reply) {
+	const server = http.createServer(reply);
+	await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
+	t.after(() => new Promise((resolve) => { server.closeAllConnections?.(); server.close(resolve); }));
+	return server;
+}
+
+const within = (promise, ms, what) => Promise.race([promise, sleep(ms).then(() => { throw new Error(`${what} did not settle within ${ms} ms`); })]);
+
+test('a health reply cut off mid-body resolves as not ok instead of hanging the probe', async (t) => {
+	const port = await freePort();
+	await rawServer(t, port, (req, res) => {
+		res.writeHead(200, { 'content-type': 'application/json', 'content-length': '1000' });
+		res.write('{"service":');
+		setTimeout(() => req.socket.destroy(), 20);
+	});
+	const reply = await within(fetchHealth(port), 2000, 'fetchHealth');
+	assert.equal(reply.ok, false);
+});
+
+test('a health reply that never stops streaming is cut off at a bound', async (t) => {
+	const port = await freePort();
+	await rawServer(t, port, (_req, res) => {
+		res.writeHead(200, { 'content-type': 'application/json' });
+		// Faster than the probe's idle timeout, so only the size bound can end it.
+		const timer = setInterval(() => { if (!res.write('x'.repeat(8192))) { /* keep going */ } }, 5);
+		res.on('close', () => clearInterval(timer));
+	});
+	const reply = await within(fetchHealth(port, '/health', 60_000), 5000, 'fetchHealth');
+	assert.equal(reply.ok, false);
+});
+
+test('a worker port answering with a truncated health reply fails the start instead of leaving it starting', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t);
+	await rawServer(t, f.port, (req, res) => {
+		res.writeHead(200, { 'content-type': 'application/json', 'content-length': '1000' });
+		res.write('{"service":"ai-shuffle"');
+		setTimeout(() => req.socket.destroy(), 20);
+	});
+	const state = await within(f.supervisor.start(), 5000, 'start');
+	assert.equal(state.phase, 'failed');
+	assert.match(state.error, new RegExp(`Port ${f.port} is in use by another program`));
+	assert.deepEqual(await f.spawns(), []);
+	// And stop() does not wait on a start that never ends.
+	await within(f.supervisor.stop(), 5000, 'stop');
+});
+
+test('the protected port held by another program fails the start before anything is spawned', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t, {}, { allowAttach: false });
+	const holder = net.createServer();
+	await new Promise((resolve) => holder.listen(f.protectedPort, '127.0.0.1', resolve));
+	t.after(() => new Promise((resolve) => holder.close(resolve)));
+	const state = await f.supervisor.start();
+	assert.equal(state.phase, 'failed');
+	assert.match(state.error, new RegExp(`Port ${f.protectedPort} is in use by another program`));
+	assert.equal(state.pid, null);
+	assert.deepEqual(await f.spawns(), []);
+	assert.equal(existsSync(f.processFile), false);
+	// Once the port is free, a retry starts normally.
+	await new Promise((resolve) => holder.close(resolve));
+	assert.equal((await f.supervisor.start()).phase, 'ready');
+});
+
+test('no embedded database means no spawn and a stated reason', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t, {}, { postgres: () => null });
+	const state = await f.supervisor.start();
+	assert.equal(state.phase, 'failed');
+	assert.match(state.error, /embedded PostgreSQL server is not ready/);
+	assert.deepEqual(await f.spawns(), []);
+});
+
+test('a worker that never becomes ready is stopped at the deadline and reported, not left running', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t, { FAKE_WORKER_NEVER_READY: '1' }, { readyTimeoutMs: 1500 });
+	const state = await f.supervisor.start();
+	assert.equal(state.phase, 'failed');
+	assert.match(state.error, /did not become ready in time/);
+	assert.equal(state.pid, null);
+	const [spawned] = await f.spawns();
+	const pid = Number(spawned.split(' ')[0]);
+	let alive = true;
+	for (let i = 0; i < 20 && alive; i++) { try { process.kill(pid, 0); await sleep(50); } catch { alive = false; } }
+	assert.equal(alive, false, 'the stuck worker process is gone');
+	assert.ok(f.supervisor.tail().some((line) => /did not become ready in time; stopping it/.test(line)));
+	for (let i = 0; i < 20 && existsSync(f.processFile); i++) await sleep(50);
+	assert.equal(existsSync(f.processFile), false, 'no process record is left for the next launch to chase');
+	await sleep(1800);
+	assert.equal((await f.spawns()).length, 1, 'a start-up failure is not retried on its own');
+});
+
+test('a worker that exits while starting is reported with its exit code and last output, without a restart', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t, { FAKE_WORKER_EXIT_BEFORE_READY: '4' });
+	const state = await f.supervisor.start();
+	assert.equal(state.phase, 'failed');
+	assert.equal(state.exitCode, 4);
+	assert.match(state.error, /stopped while starting\. \(exit code 4\)/);
+	// The last lines are the worker's own output, not the supervisor's exit marker.
+	assert.match(state.error, /fatal: could not parse settings$/);
+	assert.doesNotMatch(state.error, /--- worker/);
+	await sleep(1800);
+	assert.equal((await f.spawns()).length, 1, 'crash restarts are only for a worker that was ready');
+	assert.equal(f.states.some((s) => /restarting it/.test(s.error ?? '')), false);
+});
+
+test('each start rotates the previous run\'s log to worker.prev.log', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t);
+	const logs = path.join(f.dir, 'logs');
+	await f.supervisor.start();
+	const firstPid = f.supervisor.state.pid;
+	await f.supervisor.stop();
+	await f.supervisor.start();
+	await f.supervisor.stop();
+	const previous = await readFile(path.join(logs, 'worker.prev.log'), 'utf8');
+	const current = await readFile(path.join(logs, 'worker.log'), 'utf8');
+	assert.equal((previous.match(/--- worker start/g) ?? []).length, 1);
+	assert.equal((current.match(/--- worker start/g) ?? []).length, 1);
+	assert.match(previous, /--- worker stopped by the app/);
+	assert.match(current, /--- worker stopped by the app/);
+	assert.notEqual(previous, current);
+	assert.ok(firstPid);
+});
+
+test('a child that exits after a newer one was spawned leaves the newer worker\'s state alone', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t);
+	assert.equal((await f.supervisor.start()).phase, 'ready');
+	const stale = f.supervisor.child;
+	// Stand in for a newer spawn (the stale child outlived its stop).
+	const newer = { exitCode: null, pid: null, once() {}, kill() {} };
+	f.supervisor.child = newer;
+	const exited = new Promise((resolve) => stale.once('exit', resolve));
+	process.kill(stale.pid, 'SIGKILL');
+	await exited;
+	await sleep(50);
+	assert.equal(f.supervisor.child, newer, 'the handle a later stop needs is kept');
+	assert.equal(f.supervisor.state.phase, 'ready');
+	assert.equal(existsSync(f.processFile), true, 'the newer worker\'s process record stays');
+	assert.equal((await f.spawns()).length, 1, 'no crash restart for a child that is not current');
+	newer.exitCode = 0;
+});

@@ -12,7 +12,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const URL_READY = 'http://127.0.0.1:8000';
 
 /** Runs dist/main/index.js against fakes of Electron and of every module with side effects. */
-async function launch({ stop = async () => {}, acknowledge = async () => true, realUpdater = false, postgresStart = null, installed = null, registered = false } = {}) {
+async function launch({ stop = async () => {}, acknowledge = async () => true, realUpdater = false, postgresStart = null, installed = null, registered = false, messageBox = async () => ({ response: 0 }) } = {}) {
 	const file = path.join(desktopDir, 'dist/main/index.js');
 	const localRequire = createRequire(file);
 	const appEvents = new EventEmitter();
@@ -79,7 +79,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		tail() { return []; }
 	}
 	class FakeUpdater {
-		setPolicy() {} setBridge() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} start() {} stop() {}
+		setPolicy() {} setBridge() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} onConfirmInstall() {} start() {} stop() {}
 		async check() {}
 	}
 	let updater;
@@ -87,7 +87,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	let tray;
 	let ipc;
 	const replacements = {
-		electron: electronFake(app, errors),
+		electron: electronFake(app, errors, messageBox),
 		'./close-dialog': { showCloseDialog: async () => true },
 		'./managed-context': { managedContext: () => null },
 		'./installed-entry': { installedContext: () => installed },
@@ -100,7 +100,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		'./postgres': { PostgresSupervisor, resolvePostgresBinaries: () => ({}) },
 		'./settings': { plainCipher: {}, SettingsStore: class { async load() {} postgres() { return null; } } },
 		'./tray': { installTray: (actions) => { tray = actions; } },
-		'./updater': { Updater: class extends (realUpdater ? loadUpdater(electronFake(app, errors)) : FakeUpdater) { constructor(...args) { super(...args); updater = this; } } },
+		'./updater': { Updater: class extends (realUpdater ? loadUpdater(electronFake(app, errors, messageBox)) : FakeUpdater) { constructor(...args) { super(...args); updater = this; } } },
 		'./installer-updates': { InstallerUpdates: class {}, installerPlatform: () => null },
 		'./window': { MainWindow, PARTITION: 'test' },
 		'./worker': { WorkerSupervisor, resolveRuntime: () => ({ mode: 'repo' }) }
@@ -116,10 +116,10 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	return { app, appEvents, pages, errors, serviceWorkerClears, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get tray() { return tray; }, get ipc() { return ipc; }, get updater() { return updater; } };
 }
 
-function electronFake(app, errors) {
+function electronFake(app, errors, messageBox) {
 	return {
 		app,
-		dialog: { showErrorBox: (title, message) => errors.push([title, message]), showMessageBox: async () => ({ response: 0 }) },
+		dialog: { showErrorBox: (title, message) => errors.push([title, message]), showMessageBox: (...args) => messageBox(args.at(-1)) },
 		safeStorage: { isEncryptionAvailable: () => false },
 		session: { fromPartition: () => ({ setUserAgent() {}, getUserAgent: () => 'test' }) },
 		shell: { showItemInFolder() {}, openPath: async () => '' }
@@ -259,4 +259,62 @@ test('NC-16: no aishuffle:// handler is registered, and one left by an older bui
 	assert.deepEqual(clean.app.protocol, [['is', 'aishuffle', executable]]);
 	const development = await launch();
 	assert.deepEqual(development.app.protocol, [], 'an unpackaged run never touches the OS handler');
+});
+
+/** A staged source update that installs cleanly. */
+function stagedInstall(updater) {
+	updater.useApplications({
+		version: 'a'.repeat(40), pendingVersion: 'b'.repeat(40), options: { root: '/isolated/source' },
+		check: async () => ({ kind: 'ready' }), download: async () => ({ kind: 'ready' }),
+		application: async () => ({ node: '/isolated/node', desktopDir: '/isolated/desktop' })
+	});
+}
+
+test('restarting into an update asks first while sessions run, and a declined restart stops nothing', async () => {
+	const asked = [];
+	let response = 1;
+	const main = await launch({ realUpdater: true, messageBox: async (options) => { asked.push(options); return { response }; } });
+	stagedInstall(main.updater);
+	main.worker.activeSessionCount = async () => 2;
+	await main.updater.install();
+	assert.equal(asked.length, 1);
+	assert.match(asked[0].detail, /You have 2 active sessions\. Restarting stops any active sessions\./);
+	assert.equal(asked[0].buttons[asked[0].cancelId], 'Cancel');
+	assert.equal(asked[0].defaultId, asked[0].cancelId, 'Enter does not stop the sessions');
+	assert.equal(main.worker.stops, undefined, 'declined: the worker keeps running');
+	assert.equal(main.worker.state.phase, 'ready');
+	assert.equal(main.app.quits, 0);
+	// A session count that cannot be read asks too.
+	main.worker.activeSessionCount = async () => { throw new Error('503'); };
+	await main.updater.install();
+	assert.match(asked[1].detail, /could not check for active sessions/);
+	assert.equal(main.app.quits, 0);
+	// Confirmed: the stack stops and the app restarts into the update.
+	response = 0;
+	main.worker.activeSessionCount = async () => 1;
+	await main.updater.install();
+	assert.match(asked[2].detail, /You have 1 active session\. Restarting stops it\./);
+	assert.deepEqual(main.worker.stops, ['graceful']);
+	assert.equal(main.app.quits, 1);
+	// With no session running there is nothing to ask.
+	const idle = await launch({ realUpdater: true, messageBox: async (options) => { asked.push(options); return { response: 1 }; } });
+	stagedInstall(idle.updater);
+	await idle.updater.install();
+	assert.equal(asked.length, 3);
+	assert.equal(idle.app.quits, 1);
+});
+
+test('nothing opens and no worker starts before the agent-access disclosure is accepted', async () => {
+	let accept;
+	const main = await launch({ acknowledge: () => new Promise((resolve) => { accept = resolve; }) });
+	// A dock click or the tray's Open while the first-run disclosure is showing.
+	main.appEvents.emit('activate');
+	main.tray.show();
+	for (let i = 0; i < 10; i++) await tick();
+	assert.deepEqual(main.pages, []);
+	assert.equal(main.worker, undefined, 'the runtime is not even resolved');
+	accept(true);
+	for (let i = 0; i < 20 && !(main.worker && main.worker.state.phase === 'ready'); i++) await tick();
+	await tick();
+	assert.deepEqual(main.pages, ['status', URL_READY]);
 });

@@ -258,6 +258,8 @@ async function main(): Promise<void> {
 
 	let quitting = false;
 	let applicationFailed = false;
+	/** Set once the agent-access disclosure is accepted; no window or worker before that. */
+	let accepted = false;
 	// A worker that has just answered /health/ready can still refuse its first
 	// page load for a moment; retry briefly before showing the failure.
 	let loadRetries = 0;
@@ -355,6 +357,22 @@ async function main(): Promise<void> {
 		}
 		await postgres?.stop();
 	});
+	// Restarting into an update stops the worker's sessions: ask first while any run.
+	updater.onConfirmInstall(async () => {
+		let active: number | null;
+		try { active = supervisor ? await supervisor.activeSessionCount() : 0; }
+		catch { active = null; }
+		if (active === 0) return true;
+		const activity = active === null ? 'AI Shuffle could not check for active sessions.' : `You have ${active} active session${active === 1 ? '' : 's'}.`;
+		const options = {
+			type: 'warning' as const, title: 'AI Shuffle', message: 'Restart to install the update?',
+			detail: `${activity} Restarting stops ${active === 1 ? 'it' : 'any active sessions'}.`,
+			buttons: ['Stop Sessions and Restart', 'Cancel'], defaultId: 1, cancelId: 1, noLink: true
+		};
+		const parent = window.browserWindow;
+		const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+		return response === 0;
+	});
 	// An install that failed after the step above leaves the stack down: start it again.
 	updater.onInstallFailed(async (error) => {
 		const reason = error instanceof Error ? error.message : String(error);
@@ -417,12 +435,14 @@ async function main(): Promise<void> {
 	app.on('activate', () => void open());
 
 	// "Agents run as you": once, before the first worker ever starts.
+	// Until it is accepted, a dock click or the tray's Open must not start the worker.
 	// Isolated test profiles are driven by scripts, not people.
 	if (!isolation && !(await ensureAgentAccessAcknowledged(DisclosureStore.forProfile(userData), () => showAgentAccess(true)))) {
 		app.quit();
 		return;
 	}
 
+	accepted = true;
 	await open();
 	updater.start();
 	installScreenshotHook(window);
@@ -444,6 +464,7 @@ async function main(): Promise<void> {
 	}
 
 	async function open(): Promise<void> {
+		if (!accepted) return;
 		if (window.browserWindow) {
 			window.focus();
 			return;

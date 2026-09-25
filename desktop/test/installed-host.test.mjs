@@ -35,3 +35,25 @@ test('D5: the source-managed relaunch keeps the user\'s home and Claude Code con
  assert.equal(env.HOME,'/home/me');assert.equal(env.USERPROFILE,'C:\\Users\\me');
  assert.equal(env.ANTHROPIC_API_KEY,undefined);
 });
+
+test('a corrupt or foreign installed-host.json fails closed instead of choosing a profile',async t=>{
+ const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-installed-host-'));t.after(()=>fs.rm(userData,{recursive:true,force:true}));
+ const root=path.join(userData,'updates');await fs.mkdir(root);const file=path.join(root,'installed-host.json');
+ const host={executable:path.join(userData,'Programs','AI Shuffle.exe'),userData,name:'AI Shuffle'};
+ // Truncated by a crash or an editor: an error, never "no host" (which would start a fresh default profile).
+ await fs.writeFile(file,'{"executable":');assert.throws(()=>readInstalledHostSync(root),SyntaxError);
+ for(const bad of [
+  {...host,userData:path.join(userData,'..','someone-else')},  // a profile other than the one owning these updates
+  {...host,executable:'AI Shuffle.exe'},                       // relative executable
+  {...host,executable:path.join(userData,'run.sh')},           // not an EXE
+  {...host,name:''},{executable:host.executable,userData},null,[]
+ ]){
+  await fs.writeFile(file,JSON.stringify(bad));
+  assert.throws(()=>readInstalledHostSync(root),/Invalid installed desktop host/,JSON.stringify(bad));
+ }
+ await fs.writeFile(file,JSON.stringify(host));assert.deepEqual(readInstalledHostSync(root),host);
+ // A save leaves no temporary file behind and replaces the record whole.
+ await saveInstalledHost(root,{...host,name:'AI Shuffle 2'});
+ assert.deepEqual((await fs.readdir(root)).sort(),['installed-host.json']);
+ assert.equal(readInstalledHostSync(root).name,'AI Shuffle 2');
+});

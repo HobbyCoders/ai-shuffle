@@ -271,7 +271,14 @@ export function fetchHealth(port: number, pathname = '/health', timeoutMs = 2500
 		const req = http.get({ host: '127.0.0.1', port, path: pathname, timeout: timeoutMs, headers: { accept: 'application/json' } }, (res) => {
 			let body = '';
 			res.setEncoding('utf8');
-			res.on('data', (chunk) => (body += chunk));
+			// A reply cut off mid-body (the worker crashed while answering) never
+			// ends; without this the probe, and the start or stop awaiting it, hangs.
+			res.on('error', () => resolve({ ok: false, status: res.statusCode }));
+			res.on('data', (chunk) => {
+				body += chunk;
+				// Whatever answers on the port may stream forever; a health reply is small.
+				if (body.length > 65_536) req.destroy(new Error('Health response too large'));
+			});
 			res.on('end', () => {
 				if (res.statusCode !== 200) return resolve({ ok: false, status: res.statusCode });
 				try {
@@ -638,7 +645,7 @@ export class WorkerSupervisor extends EventEmitter {
 				resolve(-2);
 			});
 		});
-		void exited.then((code) => this.onExit(code));
+		void exited.then((code) => this.onExit(code, child));
 		this.set({ pid: child.pid ?? null, port, url: `http://127.0.0.1:${port}`, startedAt: new Date().toISOString() });
 		try {
 			const record: WorkerProcessRecord = { version: 1, pid: child.pid ?? null, token: attachToken, port, listener };
@@ -665,7 +672,11 @@ export class WorkerSupervisor extends EventEmitter {
 		return this.state;
 	}
 
-	private onExit(code: number | null): void {
+	private onExit(code: number | null, exited: ChildProcess): void {
+		// A child that outlived its stop (it ignored even SIGKILL for a while) and
+		// exits after a newer one was spawned must not end the newer one's state,
+		// log or process record, nor drop the handle a later stop needs.
+		if (this.child !== null && this.child !== exited) return;
 		const child = this.child;
 		this.child = null;
 		this.closeLog(`--- worker ${this.stopping ? 'stopped by the app' : `exited (${code ?? 'signal'})`} ${new Date().toISOString()} ---`);
@@ -695,7 +706,8 @@ export class WorkerSupervisor extends EventEmitter {
 	}
 
 	private describeExit(code: number | null, lead: string): string {
-		const last = this.recentLog.filter((l) => l.trim()).slice(-3).join('\n');
+		// The worker's own last words; not the "--- worker exited" marker logged just before.
+		const last = this.recentLog.filter((l) => l.trim() && !l.startsWith('--- worker ')).slice(-3).join('\n');
 		return `${lead}${code !== null ? ` (exit code ${code})` : ''}${last ? `\n${last}` : ''}`;
 	}
 

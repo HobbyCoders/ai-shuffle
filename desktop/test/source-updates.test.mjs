@@ -378,3 +378,28 @@ test('checks and downloads report the signed release name and notes; a staged up
  await f.release(C,undefined,{notes:undefined,version:undefined});
  const w=f.create();await w.load();assert.deepEqual(await w.check(),{kind:'available',version:C.slice(0,12)});
 });
+test('the update lock: a live holder refuses, a dead holder is reclaimed, garbage asks for attention, and every outcome releases it',async t=>{
+ const f=await fixture(t);const release=await f.release(A);const u=f.create();await u.load();
+ const lock=path.join(f.root,'update.lock');
+ // Another updater process is running (this test process stands in for it).
+ await fs.writeFile(lock,String(process.pid));
+ await assert.rejects(u.check(),/already running/);
+ assert.equal(await fs.readFile(lock,'utf8'),String(process.pid),'a live holder\'s lock is left alone');
+ assert.deepEqual(f.requests,[],'nothing is fetched under another updater\'s lock');
+ // A holder that died (a crash mid-update) is reclaimed.
+ const dead=execFileSync(process.execPath,['-e','process.stdout.write(String(process.pid))'],{encoding:'utf8'});
+ await fs.writeFile(lock,dead);
+ assert.equal((await u.check()).kind,'available');
+ await assert.rejects(fs.stat(lock),/ENOENT/,'released after a check');
+ // A lock without a pid is not guessed at.
+ await fs.writeFile(lock,'not a pid');
+ await assert.rejects(u.check(),/needs attention/);
+ await fs.rm(lock);
+ // A corrupt manifest fails the check, before any archive request, and still releases the lock.
+ f.signed='{"payload":';f.requests.length=0;
+ await assert.rejects(u.download(),SyntaxError);
+ assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest']);
+ await assert.rejects(fs.stat(lock),/ENOENT/);
+ f.signed=release.signed;assert.equal((await u.download()).kind,'ready');
+ await assert.rejects(fs.stat(lock),/ENOENT/);
+});
