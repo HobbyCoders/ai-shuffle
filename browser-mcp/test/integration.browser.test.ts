@@ -26,7 +26,7 @@ import { runFind } from "../src/tools/find.js";
 import { runReadText } from "../src/tools/read_text.js";
 import { runEval } from "../src/tools/eval.js";
 import { runConsole } from "../src/tools/console.js";
-import { runNetwork } from "../src/tools/network.js";
+import { runNetwork, NETWORK_BODY_TIMEOUT_MS } from "../src/tools/network.js";
 import { runTabs } from "../src/tools/tabs.js";
 import { runResize } from "../src/tools/resize.js";
 import { runUpload } from "../src/tools/upload.js";
@@ -72,6 +72,17 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
     if (req.url === "/login") {
       res.writeHead(200, { "content-type": "text/html" });
       res.end('<title>Sign in</title><button>Sign in</button>');
+      return;
+    }
+    if (req.url === "/stream-page") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end('<title>stream</title><p>streaming</p><script>fetch("/stream").then(r => r.body.getReader().read())</script>');
+      return;
+    }
+    if (req.url === "/stream") {
+      // An event stream that never ends: headers and one event, then silence.
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      res.write("data: first\n\n");
       return;
     }
     if (req.url === "/api/data") {
@@ -619,6 +630,39 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const missing = await runNetwork(session, { request_id: "req999999" });
     expect(missing.isError).toBe(true);
   });
+
+  it("network: the body of a never-ending event stream is a bounded error, not a hung session", async () => {
+    await runNavigate(session, { url: `${httpUrl}stream-page` });
+    let streamId: string | undefined;
+    for (let i = 0; i < 30 && !streamId; i++) {
+      const listed = JSON.parse(firstText(await runNetwork(session, { url_pattern: "/stream$" })));
+      streamId = listed.requests[0]?.id;
+      if (!streamId) await delay(100);
+    }
+    expect(streamId).toBeTruthy();
+    const t0 = Date.now();
+    const res = await session.runExclusive(() => runNetwork(session, { request_id: streamId! }));
+    expect(Date.now() - t0).toBeLessThan(NETWORK_BODY_TIMEOUT_MS + 3000);
+    expect(res.isError).toBe(true);
+    expect(firstText(res)).toContain("still streaming");
+    // The session queue is free again.
+    const after = await session.runExclusive(() => runEval(session, { code: "1 + 1" }));
+    expect(JSON.parse(firstText(after)).value).toBe("2");
+  });
+
+  it("act(type) on a ref types a long value in full instead of timing out as stale_ref", async () => {
+    await runNavigate(session, { url: fixtureUrl });
+    const snap = await runSnapshot(session, { filter: "interactive" });
+    const snapText = snap.content[1] && snap.content[1].type === "text" ? snap.content[1].text : "";
+    const boxRef = /textbox[^\n]*\[ref=(e\d+)\]/.exec(snapText)?.[1];
+    expect(boxRef).toBeTruthy();
+    const value = "x".repeat(3000);
+    const res = await runAct(session, { kind: "type", ref: boxRef!, value });
+    expect(firstText(res)).not.toContain("stale_ref");
+    expect(JSON.parse(firstText(res)).ok).toBe(true);
+    const page = await session.ensurePage();
+    expect((await page.inputValue("#name")).length).toBe(3000);
+  }, 60_000);
 
   it("tabs: create/list/select/close lifecycle, cannot close the last tab", async () => {
     await runNavigate(session, { url: fixtureUrl });

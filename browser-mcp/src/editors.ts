@@ -2,6 +2,10 @@ import type { Page, ElementHandle } from 'playwright-core';
 import { randomUUID } from 'node:crypto';
 import type { BrowserEditor } from './workspace-protocol.js';
 import { validatePaths, uploadTimeoutMs } from './tools/upload.js';
+import { raceWithTimeout } from './session.js';
+
+/** Ceiling for locating the chosen file field in the page (the transfer has its own). */
+export const FILE_FIELD_TIMEOUT_MS = 5000;
 
 export async function rememberFileChooser(page: Page, input: ElementHandle<Node>): Promise<void> {
   await page.evaluate(node => {
@@ -18,12 +22,17 @@ export async function rememberFileChooser(page: Page, input: ElementHandle<Node>
 export async function uploadField(page: Page, args: Record<string, unknown>): Promise<void> {
   const validated = validatePaths(args.paths as string[], process.env.AIS_BROWSER_PANEL_UPLOAD_DIR);
   if ('error' in validated) throw new Error('Selected upload files are unavailable or outside the upload directory');
-  const handle = await page.evaluateHandle((id) => {
+  const pending = page.evaluateHandle((id) => {
     const host = window as typeof window & { __aisEditors?: { nodes: Map<string, HTMLInputElement> } };
     const el = host.__aisEditors?.nodes.get(id);
     if (!el?.isConnected || el.disabled || el.type !== 'file') throw new Error('File field changed. Choose the files again.');
     return el;
   }, args.field as string);
+  // A handle that arrives after the deadline is released, not leaked.
+  const handle = await raceWithTimeout(pending, FILE_FIELD_TIMEOUT_MS, 'file field lookup timed out').catch(async (err) => {
+    void pending.then(late => late.dispose(), () => {});
+    throw err;
+  });
   try {
     const el = handle.asElement();
     if (!el) throw new Error('File field unavailable');

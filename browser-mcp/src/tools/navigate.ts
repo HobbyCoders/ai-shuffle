@@ -164,9 +164,17 @@ export async function runNavigate(
     }
     // A plain-http refusal is the proxy's own 403 page, a "successful"
     // navigation (the retry's included); its marker header says it is
-    // policy, not the site.
+    // policy, not the site. The response is the redirect chain's LAST hop, so
+    // the refusal names that URL: a public page that redirects to a blocked
+    // address is not itself outside the policy.
     if (response?.headers()[EGRESS_REFUSAL_HEADER] === "blocked") {
-      throw refusal(rewroteTo ?? requested);
+      let refusedUrl = "";
+      try {
+        refusedUrl = response.url();
+      } catch {
+        /* no URL on the handle: name what we asked for */
+      }
+      throw refusal(refusedUrl || (rewroteTo ?? requested));
     }
   }
 

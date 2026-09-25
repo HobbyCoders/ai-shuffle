@@ -13,12 +13,14 @@ import { join } from "node:path";
 
 import {
   chromiumProxyArgs,
+  connectPinned,
   decideEgress,
   launchBehindProxy,
   parseAuthority,
   policyLabel,
   startEgressProxy,
   stripProxyArgs,
+  withDeniedPort,
   type EgressProxy,
   type EgressResolver,
 } from "../src/egress.js";
@@ -465,5 +467,88 @@ describe.skipIf(process.platform === "win32")("launchBehindProxy", () => {
     await new Promise((r) => setTimeout(r, 100));
     launched.child.kill("SIGTERM");
     expect(await launched.exited).toBe(143);
+  });
+});
+
+describe("egress proxy forwarding edges", () => {
+  it("connectPinned falls through a refused or non-address entry to the next checked address", async () => {
+    const live = await target("127.0.0.1");
+    const closed = await target("127.0.0.1");
+    const closedPort = closed.port;
+    await new Promise<void>((r) => closed.server.close(() => r()));
+    // Same port on two loopback addresses: the first refuses, the second answers.
+    const socket = await connectPinned(["not-an-ip", "127.0.0.2", "127.0.0.1"], live.port);
+    expect(socket.remoteAddress).toBe("127.0.0.1");
+    socket.destroy();
+    await expect(connectPinned(["127.0.0.1"], closedPort)).rejects.toThrow();
+    await expect(connectPinned([], live.port)).rejects.toThrow("no address to connect to");
+  });
+
+  it("withDeniedPort adds the proxy port once and keeps the configured ones", () => {
+    const policy = withDeniedPort(withDeniedPort(LOOPBACK, 4321), 4321);
+    expect(policy.denyPorts.filter((p) => p === 4321)).toHaveLength(1);
+    expect(policy.denyPorts).toContain(8000);
+    expect(LOOPBACK.denyPorts).not.toContain(4321);
+  });
+
+  it("forwards a request body and strips hop-by-hop headers from the response", async () => {
+    const received: string[] = [];
+    const upstream = createHttpServer((req, res) => {
+      let data = "";
+      req.on("data", (c) => (data += c));
+      req.on("end", () => {
+        received.push(`${req.method} ${data}`);
+        res.writeHead(201, {
+          "content-type": "text/plain",
+          "proxy-authenticate": "Basic realm=upstream",
+          "keep-alive": "timeout=99",
+          "x-app": "kept",
+        });
+        res.end("created");
+      });
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    closers.push(() => new Promise<void>((r) => { upstream.closeAllConnections(); upstream.close(() => r()); }));
+    const port = (upstream.address() as { port: number }).port;
+    const proxy = await proxyWith();
+    const res = await new Promise<{ status: number; body: string; headers: IncomingHttpHeaders }>((resolve, reject) => {
+      const req = request(
+        { host: "127.0.0.1", port: proxy.port, method: "POST", path: `http://127.0.0.1:${port}/items`, headers: { "content-type": "application/json" } },
+        (r) => {
+          let body = "";
+          r.setEncoding("utf8");
+          r.on("data", (c) => (body += c));
+          r.on("end", () => resolve({ status: r.statusCode ?? 0, body, headers: r.headers }));
+        },
+      );
+      req.on("error", reject);
+      req.end('{"name":"x"}');
+    });
+    expect(received).toEqual(['POST {"name":"x"}']);
+    expect({ status: res.status, body: res.body }).toEqual({ status: 201, body: "created" });
+    expect(res.headers["x-app"]).toBe("kept");
+    expect(res.headers["proxy-authenticate"]).toBeUndefined();
+    // The proxy's own hop may carry its own Keep-Alive; the upstream's never passes.
+    expect(res.headers["keep-alive"]).not.toBe("timeout=99");
+  });
+
+  it("answers an unmarked 502 when the destination drops the request", async () => {
+    const upstream = createHttpServer((req) => req.socket.destroy());
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    closers.push(() => new Promise<void>((r) => { upstream.closeAllConnections(); upstream.close(() => r()); }));
+    const port = (upstream.address() as { port: number }).port;
+    const proxy = await proxyWith();
+    const res = await viaProxy(proxy.port, `http://127.0.0.1:${port}/`);
+    expect(res.status).toBe(502);
+    expect(res.headers["x-browser-egress"]).toBeUndefined();
+  });
+
+  it("answers a malformed CONNECT target with 400, never a tunnel", async () => {
+    const proxy = await proxyWith();
+    for (const authority of ["127.0.0.1", "user@127.0.0.1:80", "127.0.0.1:0", "127.0.0.1:99999"]) {
+      const r = await tunnel(proxy.port, authority);
+      expect(r.status).toBe(400);
+      r.socket.destroy();
+    }
   });
 });
