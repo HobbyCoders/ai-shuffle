@@ -2676,7 +2676,9 @@ class HarnessAdapter(ProviderAdapter):
             return [
                 RateLimitEvent(
                     rate_limit_info=RateLimitInfo(
-                        status="allowed",
+                        # The CLI's verdict (``allowed`` / ``allowed_warning`` /
+                        # ``rejected``); older fluid builds did not forward it.
+                        status=getattr(event, "status", None) or "allowed",
                         resets_at=event.resets_at,
                         rate_limit_type=event.kind,
                         utilization=event.utilization,
@@ -3777,8 +3779,11 @@ def _codemode_kernel_config() -> KernelConfig:
 
     Do not raise ``stdout_cap`` to fit subagent reports: sync Task results
     already carry a bounded head plus ``report_path`` (``app.core.task_dispatch``).
+    The OS sandbox mode comes from the app setting so a value in the .env
+    file reaches the kernel (the env var alone would not).
     """
-    return KernelConfig()
+    from app.core.config import settings
+    return KernelConfig(os_sandbox=settings.code_mode_os_sandbox)
 
 
 def _session_mode(options: SessionOptions) -> str:

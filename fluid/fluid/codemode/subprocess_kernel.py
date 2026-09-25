@@ -19,6 +19,11 @@ below the cell's own declared timeout), so a hung MCP call cannot hold the cell
 open. Time the host spent
 waiting on a *human* is credited back, so an approval nobody answers for ten
 minutes is never mistaken for a hung tool.
+
+On Linux the child can run under an OS-level sandbox (bubblewrap: private
+user/pid/net namespaces, an empty read-only root, a private ``/tmp``), chosen
+by ``KernelConfig.os_sandbox`` (``auto``/``required``/``off``, default from
+``CODE_MODE_OS_SANDBOX``); see :mod:`fluid.codemode.os_sandbox`.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from fluid.codemode import os_sandbox
 from fluid.codemode.kernel import HostCall, HostReply, KernelResult
 from fluid.codemode.truncate import DEFAULT_LIMIT, DEFAULT_STDOUT_CAP
 from fluid.codemode.vfs import DEFAULT_ALLOWLIST
@@ -93,6 +99,10 @@ class KernelConfig:
     # turn open until the session ends.
     host_call_timeout: float = 900.0
     python: str = field(default_factory=lambda: sys.executable)
+    # OS-level sandbox for the child (``auto``/``required``/``off``; see
+    # ``fluid.codemode.os_sandbox``). The host app's ``code_mode_os_sandbox``
+    # setting reads the same ``CODE_MODE_OS_SANDBOX`` variable.
+    os_sandbox: str = field(default_factory=os_sandbox.default_mode)
 
     def boot_payload(self) -> dict:
         return {
@@ -160,23 +170,47 @@ class SubprocessKernel:
         # that reaches the raw pipe cannot mint a frame the host will act on
         # without also extracting the nonce from the child's closures.
         self._nonce = ""
+        # Whether the live child runs under the OS sandbox (bwrap), and why it
+        # does not when it does not.
+        self.sandboxed = False
+        self.sandbox_note = ""
 
     # ── lifecycle ──
     async def start(self) -> None:
-        await self._spawn()
+        try:
+            await self._spawn()
+        except os_sandbox.OsSandboxUnavailable:
+            # ``required`` and no sandbox: do not start. Every exec retries the
+            # spawn and returns this refusal as the cell's error, which is
+            # where the model and the operator will see it.
+            pass
 
     async def _spawn(self) -> None:
         spawn_kwargs: dict = {}
         if sys.platform != "win32":
             # Own process group, so a kill reaches whatever the cell spawned
             # through an allowed route; on Windows the Job Object does this.
+            # Under bwrap the group holds the outer bwrap; killing it tears
+            # down the sandbox's pid namespace (``--die-with-parent``).
             spawn_kwargs["start_new_session"] = True
+        # The first call runs the sandbox self-test (a short subprocess), so
+        # it is kept off the event loop; later calls hit its cache.
+        plan = await asyncio.to_thread(
+            os_sandbox.plan_spawn,
+            self.config.os_sandbox,
+            python=self.config.python,
+            runner=_RUNNER,
+            base_env=scrub_env(os.environ),
+            allow_network=self.config.allow_network,
+            allow_fs=self.config.allow_fs,
+        )
+        self.sandboxed, self.sandbox_note = plan.sandboxed, plan.reason
         self._proc = await asyncio.create_subprocess_exec(
-            self.config.python, "-I", "-S", _RUNNER,
+            *plan.argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=scrub_env(os.environ),
+            env=plan.env,
             **spawn_kwargs,
         )
         self._stderr_tail = bytearray()
@@ -249,6 +283,9 @@ class SubprocessKernel:
         way out.
         """
         code = proc.returncode if proc is not None else None
+        if code is not None and self.sandboxed and code > 128:
+            # bwrap reports a signalled child as 128 + signal number.
+            code = 128 - code
         if code is None:
             reason = "kernel died mid-exec"
         elif code == -9:
@@ -433,10 +470,13 @@ class SubprocessKernel:
             # The kernel died between turns (eviction, an OOM kill, a host
             # restart). Restore the checkpoint and arm the notice rather than
             # hand the next cell an empty namespace with no explanation.
-            if self._ever_started:
-                await self._restart_and_restore()
-            else:
-                await self._spawn()
+            try:
+                if self._ever_started:
+                    await self._restart_and_restore()
+                else:
+                    await self._spawn()
+            except os_sandbox.OsSandboxUnavailable as exc:
+                return KernelResult(error=str(exc))
         await self._send({"kind": "exec", "code": code})
 
         loop = asyncio.get_running_loop()

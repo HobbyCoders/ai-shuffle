@@ -404,6 +404,13 @@ class Settings(BaseSettings):
     fluid_memory_enabled: bool = True
     fluid_continual_model: Optional[str] = None
     fluid_skills_dir: Optional[str] = None
+    # OS-level sandbox (bubblewrap) for the code-mode kernel child. ``auto``
+    # uses it when bwrap is installed and its one-off self-test passes (else
+    # one warning, then the plain child); ``required`` refuses to start the
+    # kernel without it (every cell gets the reason as its error); ``off``
+    # never uses it. See fluid/fluid/codemode/os_sandbox.py. Env:
+    # CODE_MODE_OS_SANDBOX (fluid's KernelConfig reads the same variable).
+    code_mode_os_sandbox: str = "auto"
     # Bounds passed to fluid when the vendored build has the seams
     # (see harness_adapter._registry_bound_kwargs / _loop_bound_kwargs).
     #   - fluid_external_call_timeout_seconds: cap on ONE MCP/inproc tool call.
