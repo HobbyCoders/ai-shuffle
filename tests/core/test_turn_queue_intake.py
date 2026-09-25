@@ -134,6 +134,9 @@ async def test_conversation_continues_existing_session(mock_db, monkeypatch):
     from app.db import database
 
     database.create_session(session_id="sess-known", profile_id="default")
+    # These tests exercise queue intake, not access: the placeholder API user
+    # (id None) owns no session, so treat it as the session's owner here.
+    monkeypatch.setattr("app.api.sessions_helpers.api_user_owns_session", lambda *a, **k: True)
     calls = _capture_submit(monkeypatch)
     _stub_wait(monkeypatch)
     _stub_outcome(monkeypatch, text="continued")
@@ -220,6 +223,7 @@ async def test_conversation_into_busy_session_queues_instead_of_racing(
 
     sid = "sess-busy"
     database.create_session(session_id=sid, profile_id="default")
+    monkeypatch.setattr("app.api.sessions_helpers.api_user_owns_session", lambda *a, **k: True)
     live = turns_db.enqueue_turn(sid, "user", prompt="do work")
     turns_db.start_turn(live["id"])
     assert turns_db.get_live_turn(sid)["state"] == "running"
