@@ -127,6 +127,13 @@ def result_error_message(frame: dict[str, Any]) -> str:
     return f"claude reported {subtype}: {detail}" if detail else f"claude reported {subtype}"
 
 
+def _dict_field(frame: dict[str, Any], key: str) -> dict[str, Any]:
+    """``frame[key]`` when it is an object, else ``{}``: a frame whose body
+    has the wrong shape maps to nothing instead of raising into the turn."""
+    value = frame.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def flatten_tool_content(content: Any) -> str:
     """Reduce a tool_result ``content`` (str | list[block] | any) to model text."""
     if content is None:
@@ -382,6 +389,12 @@ class StreamJsonMapper:
         """True once an assistant or tool-result frame was mapped this turn."""
         return self._last_node_id != self.user_node_id
 
+    @property
+    def last_node_id(self) -> str:
+        """The node the turn's terminal event points at: the last one mapped,
+        else the user's."""
+        return self._last_node_id
+
     # ─── frame dispatch ──────────────────────────────────────────────────
 
     def feed(self, frame: dict[str, Any]) -> Mapped:
@@ -497,7 +510,9 @@ class StreamJsonMapper:
         )])
 
     def _on_assistant(self, frame: dict[str, Any]) -> Mapped:
-        msg = frame.get("message", {})
+        msg = _dict_field(frame, "message")
+        if not msg:
+            return Mapped()  # no message body: nothing to show or store
         blocks = msg.get("content", []) or []
         events: list[Event] = []
         content: list[Any] = []
@@ -562,7 +577,7 @@ class StreamJsonMapper:
         return Mapped(events=events, message=Message(role="assistant", content=content), node_id=node_id)
 
     def _on_user(self, frame: dict[str, Any]) -> Mapped:
-        msg = frame.get("message", {})
+        msg = _dict_field(frame, "message")
         raw_blocks = msg.get("content", [])
         events: list[Event] = []
         content: list[Any] = []
@@ -705,7 +720,7 @@ class StreamJsonMapper:
         )])
 
     def _on_control_request(self, frame: dict[str, Any]) -> Mapped:
-        req = frame.get("request", {}) or {}
+        req = _dict_field(frame, "request")
         if req.get("subtype") == "hook_callback":
             return Mapped(hook_request=parse_hook_callback(frame))
         if req.get("subtype") != "can_use_tool":

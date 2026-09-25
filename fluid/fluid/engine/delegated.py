@@ -840,9 +840,28 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             argv += ["--include-partial-messages"]
         return argv
 
+    def _proc_usable(self) -> bool:
+        """True while the CLI process can still take a turn.
+
+        ``returncode`` alone is not enough: it is set only once the child
+        watcher reaps the process, and a CLI that crashed a moment ago (or
+        closed stdout and is still shutting down) reads as alive until then.
+        A stdout already at EOF can never deliver another frame, so such a
+        process is finished whatever its returncode says.
+        """
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            return False
+        return proc.stdout is None or not proc.stdout.at_eof()
+
     async def _ensure_process(self) -> asyncio.subprocess.Process:
-        if self._proc is not None and self._proc.returncode is None:
+        if self._proc_usable():
+            assert self._proc is not None
             return self._proc
+        if self._proc is not None and self._proc.returncode is None:
+            # stdout closed but not reaped yet: finish it off before the
+            # respawn, so the next turn does not write into a dead pipe.
+            await self._stop_process(grace=1.0)
         await self._version_guard()
         await self._start_bundled_server()
         spawn_kwargs: dict[str, Any] = {}
@@ -909,7 +928,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         try:
             # The CLI comes up before the user node is written: a wake whose
             # spawn fails must stay undelivered so the lifecycle retries it.
-            reused = self._proc is not None and self._proc.returncode is None
+            reused = self._proc_usable()
             try:
                 await self._ensure_process()
             except Exception as exc:
@@ -985,6 +1004,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         session_id=sid, turn_id=turn_id, message=_spawn_failure_message(exc)
                     ))
                     return mapper
+            if self._interrupted.is_set():
+                # Stopped while the CLI was still starting (or being drained):
+                # never hand it the turn, or it would run the whole thing,
+                # tools included, before the stop could reach it. The native
+                # loop honours an interrupt that lands before its first call
+                # the same way.
+                await self._emit_terminal_with_park(Interrupted(
+                    session_id=sid, node_id=user_node.node_id, turn_id=turn_id,
+                ))
+                return mapper
             mapper = StreamJsonMapper(
                 session_id=sid, turn_id=turn_id, model=self.model,
                 provider=self.provider, user_node_id=user_node.node_id,
@@ -1314,6 +1343,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 frame = json.loads(text)
             except json.JSONDecodeError:
                 continue  # non-JSON diagnostic line — skip
+            if not isinstance(frame, dict):
+                continue  # valid JSON but not a frame (a stray number, a list)
 
             mapped = mapper.feed(frame)
             if mapped.hook_request is not None:
@@ -1412,7 +1443,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self._snapshot_call_index.clear()
                 if mapped.error is not None:
                     self._hook_stop_reason = None
-                    return mapped.error
+                    if not self._interrupted.is_set():
+                        return mapped.error
+                    # The CLI can report a turn it cut short on our interrupt
+                    # as failed (``error_during_execution``). The user stopped
+                    # it: end it as Interrupted, billed, and never read it as
+                    # a rejected --resume handle (that would replay the turn).
+                    await self._emit_terminal_with_park(Interrupted(
+                        session_id=sid, node_id=mapper.last_node_id, turn_id=turn_id,
+                        usage=dict(mapper.failed_usage), cost_usd=mapper.failed_cost_usd,
+                        num_model_calls=mapper.model_calls or None,
+                    ))
                 self._proc_results += 1
                 self._journal_turn_end(last_assistant)
                 return None
