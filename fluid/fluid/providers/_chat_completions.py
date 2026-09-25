@@ -255,6 +255,8 @@ class ChatCompletionsNormalizer:
         self._order: list[str] = []
         self._next_index = 0
         self._stop_reason = "end_turn"
+        # A choice carried a finish_reason: the model said it was done.
+        self._finish_seen = False
         self._content_filtered = False
         self._response_meta: dict[str, Any] = {}
         # Tool calls keyed without an ``index`` (some servers omit it): the
@@ -376,6 +378,7 @@ class ChatCompletionsNormalizer:
                         )
                     )
             if choice.get("finish_reason"):
+                self._finish_seen = True
                 self._stop_reason = map_stop_reason(choice["finish_reason"])
                 if choice["finish_reason"] == "content_filter":
                     self._content_filtered = True
@@ -431,6 +434,35 @@ class ChatCompletionsNormalizer:
             )
             out.append(StreamChunk("message_stop", dict(terminal)))
             self.finished = True
+        return out
+
+    def finish_without_usage(self) -> list[StreamChunk]:
+        """Terminal chunks for a stream that ended on ``[DONE]`` after a
+        ``finish_reason`` but never sent the ``include_usage`` chunk.
+
+        Servers that ignore ``stream_options`` (some local and self-hosted
+        OpenAI-compatible builds) end every reply this way. The reply is
+        complete, the usage is just unknown, so it closes like any other
+        response with an empty usage object. Empty when the stream is not in
+        that state; also empty when the provider gave its own upstream verdict
+        (``native_finish_reason``) or a content filter fired, which keep the
+        truncated-stream error.
+        """
+        if (
+            self.finished or self.errored or not self._finish_seen
+            or self.native_stop_reason is not None or self._content_filtered
+        ):
+            return []
+        out = [
+            StreamChunk("block_stop", {"index": self._index_of[key]})
+            for key in self._order
+        ]
+        usage: dict[str, Any] = {}
+        if self._response_meta:
+            usage["provider_response"] = dict(self._response_meta)
+        out.append(StreamChunk("usage", {"usage": usage, "stop_reason": self._stop_reason}))
+        out.append(StreamChunk("message_stop", {}))
+        self.finished = True
         return out
 
 
@@ -559,7 +591,21 @@ async def stream_chat_completions(
                         )
                         return
                     normalizer = ChatCompletionsNormalizer()
-                    events = sse_events(diagnostics.lines()).__aiter__()
+                    # ``[DONE]`` is the server's own end-of-stream sentinel.
+                    # sse_events drops it (it is not JSON), so it is noted on
+                    # the way through: a stream that reached it was not cut.
+                    done_seen = [False]
+
+                    async def _lines(
+                        source: AsyncIterator[str] = diagnostics.lines(),
+                        seen: list[bool] = done_seen,
+                    ) -> AsyncIterator[str]:
+                        async for line in source:
+                            if line.strip().replace(" ", "") == "data:[DONE]":
+                                seen[0] = True
+                            yield line
+
+                    events = sse_events(_lines()).__aiter__()
                     starved = False
                     awaiting_first = True
                     # message_start is held until the first chunk after it,
@@ -645,6 +691,25 @@ async def stream_chat_completions(
                         await asyncio.sleep(retry.delay(attempt))
                         attempt += 1
                         continue
+                    if done_seen[0] and not starved and not overran:
+                        closing = normalizer.finish_without_usage()
+                        if closing and pending_start is not None:
+                            yielded = True
+                            yield pending_start
+                            pending_start = None
+                        for chunk in closing:
+                            if chunk.kind == "usage" and track_provider_requests:
+                                payload = dict(chunk.payload)
+                                payload["usage"] = {
+                                    **payload["usage"],
+                                    "provider_requests": {
+                                        "logical_call_id": logical_call_id,
+                                        "attempts": list(attempts),
+                                    },
+                                }
+                                chunk = StreamChunk("usage", payload)
+                            yielded = True
+                            yield chunk
                     if pending_start is not None:
                         yielded = True
                         yield pending_start

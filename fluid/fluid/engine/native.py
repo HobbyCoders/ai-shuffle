@@ -37,6 +37,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -569,6 +570,13 @@ def _plain_text(blocks: list[Any]) -> str:
     return "\n".join(b.text for b in blocks if isinstance(b, Text) and b.text).strip()
 
 
+# The ToolResult a tool call gets when the model response that carried it
+# failed before it finished (see the error path in _agent_loop).
+_FAILED_CALL_TOOL_TEXT = (
+    "Tool not executed: the model's response failed before it finished."
+)
+
+
 LOST_TOOL_RESULT_TEXT = (
     "[interrupted: this tool call never completed (e.g. the server restarted "
     "mid-call); its result was lost]"
@@ -779,6 +787,16 @@ def _parse_tool_args(raw_args: str) -> tuple[dict[str, Any], str | None]:
         )
     return decoded, None
 
+
+
+def _synthetic_tool_use_id() -> str:
+    """An id for a tool call the provider streamed without one.
+
+    Some OpenAI-compatible servers omit ``tool_calls[].id``. Every call then
+    shared the id "", so parallel calls' results could not be told apart by
+    a host, and the next request answered each call with ``tool_call_id: ""``.
+    """
+    return f"call_{uuid.uuid4().hex[:24]}"
 
 
 def _held_peer_id(seq: int) -> str:
@@ -2971,6 +2989,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                         )
                         await self.store.append(sid, node)
                         parent = node
+                else:
+                    # The failed call's message is not stored, but the tool
+                    # blocks that closed before the failure were already
+                    # published as ToolUse events. Answer each one, so a host
+                    # rendering the stream never keeps a tool card open for a
+                    # call that will never run.
+                    for tu in result.tool_uses:
+                        await self._emit(ToolResult(
+                            session_id=sid, turn_id=turn_id,
+                            tool_use_id=tu["tool_use_id"], name=tu["name"],
+                            output=_FAILED_CALL_TOOL_TEXT, is_error=True,
+                        ))
                 partial, partial_cost = self._partial_usage(total_usage)
                 await self._emit_terminal_with_park(ErrorEvent(
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id,
@@ -3483,6 +3513,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         The provider's ``classify_error`` decides (its ``drop_sticky``). A
         provider without one keeps the original behaviour, which drops it.
         """
+        if not self._affinity_keys(True):
+            # This provider is never sent an affinity key (Anthropic, local
+            # servers): there is nothing to drop, and announcing a dropped key
+            # would be a false alarm.
+            return False
         classify = getattr(self.provider, "classify_error", None)
         if not callable(classify):
             return True
@@ -3798,13 +3833,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._merge_usage(usage_totals, payload.get("usage", {}))
             elif chunk.kind == "block_start":
                 index = payload["index"]
+                tool_use_id = payload.get("tool_use_id")
+                if payload["block_type"] == "tool_use" and not tool_use_id:
+                    tool_use_id = _synthetic_tool_use_id()
                 blocks[index] = {
                     "type": payload["block_type"],
                     "text": "",
                     "args": "",
                     "signature": "",
                     "tool_name": payload.get("tool_name"),
-                    "tool_use_id": payload.get("tool_use_id"),
+                    "tool_use_id": tool_use_id,
                     # The provider's own block as it opened. Blocks the
                     # engine has no model for (redacted thinking, server
                     # tool use and results) are kept from this and resent
@@ -3818,7 +3856,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         block_type=payload["block_type"],
                         subtype=payload.get("subtype"),
                         tool_name=payload.get("tool_name"),
-                        tool_use_id=payload.get("tool_use_id"),
+                        tool_use_id=tool_use_id,
                     )
                 )
             elif chunk.kind == "text_delta":
@@ -4091,12 +4129,14 @@ class NativeLoop(BackgroundLifecycleMixin):
         """
         if index in blocks:
             return
+        tool_use_id = _synthetic_tool_use_id() if block_type == "tool_use" else None
         blocks[index] = {
             "type": block_type, "text": "", "args": "", "signature": "",
-            "tool_name": None, "tool_use_id": None, "raw": None,
+            "tool_name": None, "tool_use_id": tool_use_id, "raw": None,
         }
         await self._emit(BlockStart(
             session_id=sid, turn_id=turn_id, index=index, block_type=block_type,
+            tool_use_id=tool_use_id,
         ))
 
     async def _provider_chunks_interruptible(

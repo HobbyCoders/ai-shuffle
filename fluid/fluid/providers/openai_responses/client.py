@@ -55,6 +55,7 @@ from fluid.providers._transport import (
     deadline_error_payload,
     is_closed_client_error,
     is_usable_client,
+    truncated_stream_payload,
     with_deadline,
 )
 from fluid.providers.base import (
@@ -372,6 +373,10 @@ class OpenAIResponsesClient:
                             # released, a retry's own start is dropped.
                             pending_start: StreamChunk | None = None
                             content = False
+                            # Set once the response's own end (usage +
+                            # message_stop) or an error reached the engine; a
+                            # body that ends before either was cut off.
+                            terminal = False
                             retry_class: ErrorClass | None = None
                             async for event_name, data in events:
                                 for chunk in normalizer.consume(event_name, data):
@@ -401,6 +406,8 @@ class OpenAIResponsesClient:
                                     if chunk.kind != "provider_alive":
                                         yielded = True
                                         content = True
+                                    if chunk.kind in ("message_stop", "error"):
+                                        terminal = True
                                     yield chunk
                                 if retry_class is not None:
                                     break
@@ -428,6 +435,11 @@ class OpenAIResponsesClient:
                             if pending_start is not None:
                                 start_sent = True
                                 yield pending_start
+                            if not terminal:
+                                yield StreamChunk(
+                                    "error",
+                                    truncated_stream_payload("response.completed"),
+                                )
                             return
                         text = (await resp.aread()).decode(errors="replace")
                         # One free retry: a 401 with the OAuth hook refreshes

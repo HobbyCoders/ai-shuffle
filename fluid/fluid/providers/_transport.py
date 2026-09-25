@@ -179,3 +179,25 @@ def deadline_error_payload(exc: StreamDeadlineExceeded) -> dict[str, Any]:
     to spend another call; nothing here loops on its own.
     """
     return {"message": str(exc), "retriable": True}
+
+
+def truncated_stream_payload(terminal: str) -> dict[str, Any]:
+    """The ``error`` StreamChunk payload for a stream that ended without its
+    terminal event.
+
+    A socket closed cleanly mid-response (a proxy or gateway giving up on its
+    upstream, an HTTP/1.0 hop) reads as an ordinary end of body: no transport
+    error is raised, and a client that simply returned would hand the engine a
+    cut-off reply as a finished one, or a tool call whose arguments never
+    closed. The wording carries the same "terminal usage chunk" marker the
+    chat/completions client uses, so the engine treats both alike: a stream
+    that delivered nothing is retried as an empty completion, one that
+    delivered part of a reply ends the turn on this error.
+    """
+    return {
+        "message": (
+            "stream ended before the provider sent a terminal usage chunk "
+            f"({terminal} never arrived: empty or truncated response)"
+        ),
+        "retriable": False,
+    }

@@ -26,6 +26,7 @@ from fluid.providers._transport import (
     deadline_error_payload,
     is_closed_client_error,
     is_usable_client,
+    truncated_stream_payload,
     with_deadline,
 )
 from fluid.providers.anthropic.pricing import estimate_cost as _estimate_cost
@@ -136,6 +137,9 @@ class AnthropicClient:
                         # begin. Once content has flowed, an error surfaces.
                         pending_start: StreamChunk | None = None
                         retry_error = False
+                        # Set once message_stop or an error reached the
+                        # engine; a body that ends before either was cut off.
+                        terminal = False
                         events = with_deadline(
                             sse_events(diagnostics.lines()), self._stream_deadline
                         )
@@ -159,6 +163,8 @@ class AnthropicClient:
                                 yield pending_start
                                 pending_start = None
                             yielded = True
+                            if chunk.kind in ("message_stop", "error"):
+                                terminal = True
                             yield chunk
                         if retry_error:
                             await asyncio.sleep(self._retry.delay(attempt))
@@ -167,6 +173,10 @@ class AnthropicClient:
                         if pending_start is not None:
                             yielded = True
                             yield pending_start
+                        if not terminal:
+                            yield StreamChunk(
+                                "error", truncated_stream_payload("message_stop")
+                            )
                         return
                 except StreamDeadlineExceeded as exc:
                     yield StreamChunk("error", deadline_error_payload(exc))
