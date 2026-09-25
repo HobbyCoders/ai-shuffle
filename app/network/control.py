@@ -26,7 +26,7 @@ from fastapi.encoders import jsonable_encoder
 
 from app.db import network as store
 from app.db.async_database import run_sync
-from app.network import engine, runners, transport
+from app.network import engine, membership, runners, transport
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,11 @@ def owner_of(session_row: Dict[str, Any]) -> Optional[str]:
 async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = None, *, timeout: float | None = None) -> Dict[str, Any]:
     """POST a control action to the owner with a device token."""
     ctx = engine.require_context()
+    known = ctx.member(device_id)
+    if known is not None and known.status != membership.STATUS_ACTIVE:
+        # A removed device is untrusted: never hand it a prompt, an answer or
+        # a stop. Its sessions stay read-only mirrors here (fork to continue).
+        raise RunnerUnreachable("The owning worker was removed from this network")
     link = transport._links.get(device_id)
     if link is None:
         member = await run_sync(store.get_member, device_id)

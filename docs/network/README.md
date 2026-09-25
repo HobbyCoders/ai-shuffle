@@ -155,8 +155,11 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   (its later incarnations are refused outright), a revoked founder cannot
   re-establish itself with another self-signed certificate, certificates it
   issued past the honoured point are withdrawn when the revocation applies,
-  and the account hub is told to retire its registration. The UI recommends
-  rotating provider keys.
+  and the account hub is told to retire its registration. Sessions the
+  removed device owned stay read-only mirrors on the other members: no
+  control request (turn, stop, answer) is sent to it any more, and the UI
+  offers to fork the transcript instead. The UI recommends rotating provider
+  keys.
 - **Recovery.** A 128-bit recovery key (`A1-XXXXX-...`) wraps the network key
   through HKDF-SHA256 + AES-GCM; the wrap is public data kept locally and at the
   hub. Unlocking self-issues a certificate whose proof is an AES-GCM tag under

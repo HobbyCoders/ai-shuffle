@@ -291,7 +291,8 @@ async def test_control_retry_is_bounded_and_only_for_rejected_tokens(monkeypatch
     link.authenticate = AsyncMock()
     link._request = AsyncMock(side_effect=failure)
     monkeypatch.setitem(transport._links, "owner", link)
-    monkeypatch.setattr(engine, "require_context", lambda: object())
+    from types import SimpleNamespace
+    monkeypatch.setattr(engine, "require_context", lambda: SimpleNamespace(member=lambda _device_id: None))
     with pytest.raises((control.RunnerUnreachable, control.ControlRefused)):
         await control.call("owner", "session-git", {"action": "get_git_status"})
     assert link._request.await_count == attempts
