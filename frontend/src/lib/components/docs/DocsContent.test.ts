@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import DocsContent from './DocsContent.svelte';
 
@@ -73,5 +73,74 @@ describe('DocsContent in-app links', () => {
 		expect(preventedByDocs).toBe(false);
 		expect(open).not.toHaveBeenCalled();
 		open.mockRestore();
+	});
+});
+
+describe('DocsContent anchor links', () => {
+	// jsdom has no CSS.escape (every supported browser does).
+	const g = globalThis as { CSS?: { escape?: (s: string) => string } };
+	const hadCss = g.CSS;
+	beforeEach(() => {
+		if (!g.CSS?.escape) g.CSS = { ...(g.CSS ?? {}), escape: (s: string) => s.replace(/[^\w-]/g, (c) => `\\${c}`) };
+	});
+	afterEach(() => { g.CSS = hadCss; });
+
+	function captureScroll() {
+		const scroll = vi.fn();
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element, ...args: unknown[]) { scroll(this.id, ...args); };
+		return { scroll, restore: () => { Element.prototype.scrollIntoView = original; } };
+	}
+
+	it('scrolls to an in-page #anchor heading without opening another page', async () => {
+		const { layout } = await import('$lib/stores/layout.svelte');
+		const open = vi.spyOn(layout, 'openFeaturePage').mockImplementation(() => {});
+		const { scroll, restore } = captureScroll();
+		try {
+			const { container } = render(DocsContent, { content: '[Jump](#setup-steps)\n\n## Setup steps\n\nBody.' });
+			expect(container.querySelector('h2')!.id).toBe('setup-steps');
+			const event = new MouseEvent('click', { bubbles: true, cancelable: true });
+			container.querySelector('a')!.dispatchEvent(event);
+			expect(event.defaultPrevented).toBe(true);
+			expect(scroll).toHaveBeenCalledExactlyOnceWith('setup-steps', { behavior: 'smooth', block: 'start' });
+			expect(open).not.toHaveBeenCalled();
+
+			// An anchor with no matching heading, or with selector metacharacters,
+			// is a quiet no-op: it neither throws nor leaves the panel.
+			scroll.mockClear();
+			const { container: other } = render(DocsContent, { content: '[Odd](#a.b[c]) [Missing](#nope)' });
+			for (const a of other.querySelectorAll('a')) {
+				const e = new MouseEvent('click', { bubbles: true, cancelable: true });
+				a.dispatchEvent(e);
+				expect(e.defaultPrevented).toBe(true);
+			}
+			expect(scroll).not.toHaveBeenCalled();
+		} finally {
+			restore();
+			open.mockRestore();
+		}
+	});
+
+	it('opens a cross-page /docs link and scrolls to its anchor only on the next frame', async () => {
+		const { layout } = await import('$lib/stores/layout.svelte');
+		const open = vi.spyOn(layout, 'openFeaturePage').mockImplementation(() => {});
+		const frames: FrameRequestCallback[] = [];
+		const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { frames.push(cb); return frames.length; });
+		const { scroll, restore } = captureScroll();
+		try {
+			const { container } = render(DocsContent, { content: '[Hooks](/docs/features/hooks#exit-codes)\n\n## Exit codes' });
+			frames.length = 0; // drop the heading-extraction frame from mount
+			container.querySelector('a')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+			expect(open).toHaveBeenCalledExactlyOnceWith('docs', 'features/hooks');
+			// The target page renders after the panel switches, so the scroll waits a frame.
+			await vi.waitFor(() => expect(frames).toHaveLength(1));
+			expect(scroll).not.toHaveBeenCalled();
+			frames[0](0);
+			expect(scroll).toHaveBeenCalledExactlyOnceWith('exit-codes', { behavior: 'smooth', block: 'start' });
+		} finally {
+			restore();
+			raf.mockRestore();
+			open.mockRestore();
+		}
 	});
 });

@@ -1057,7 +1057,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					if (remainingCount !== undefined) setNeedsAttention(queueSessionId, remainingCount);
 					break;
 				}
-				const resolvedIds = data.resolved_ids as string[];
+				// The requeue reply names `requeued_ids` and carries no `resolved_ids`;
+				// the requeued requests arrive again as permission_request frames.
+				const resolvedIds = Array.isArray(data.resolved_ids) ? data.resolved_ids as string[] : [];
+				if (resolvedIds.length === 0) break;
 				update(s => ({
 					...s,
 					pendingPermissions: s.pendingPermissions.filter(p => !resolvedIds.includes(p.request_id)),

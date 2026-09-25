@@ -885,3 +885,39 @@ describe('rateLimit.applySnapshot — usage source metadata', () => {
 		unsubscribe();
 	});
 });
+
+describe('reset times and data-less live events', () => {
+	it('reads resets_at as ISO, epoch seconds or epoch ms, and shows no countdown once it has passed', async () => {
+		const { parseResetMs, formatCountdown, formatAsOf } = await import('./rate-limit');
+		const now = Date.UTC(2026, 8, 25, 12, 0, 0);
+		expect(parseResetMs(now / 1000)).toBe(now);
+		expect(parseResetMs(now)).toBe(now);
+		expect(parseResetMs(String(now / 1000))).toBe(now);
+		expect(parseResetMs(new Date(now).toISOString())).toBe(now);
+		expect(parseResetMs('  ')).toBeNull();
+		expect(parseResetMs('soon')).toBeNull();
+
+		expect(formatCountdown(new Date(now + 2 * 86_400_000 + 3 * 3_600_000).toISOString(), now)).toBe('2d 3h');
+		expect(formatCountdown(String((now + 3_600_000 + 12 * 60_000) / 1000), now)).toBe('1h 12m');
+		expect(formatCountdown(new Date(now + 61_500).toISOString(), now)).toBe('1m 2s');
+		// A reset in the past is a finished window, not "now".
+		expect(formatCountdown(new Date(now - 1000).toISOString(), now)).toBe('');
+		expect(formatCountdown(new Date(now).toISOString(), now)).toBe('');
+		expect(formatCountdown('garbage', now)).toBe('');
+
+		expect(formatAsOf(now - 30_000, now)).toBe('just now');
+		expect(formatAsOf(now - 4 * 60_000, now)).toBe('4m ago');
+		expect(formatAsOf(now - 26 * 3_600_000, now)).toBe('1d ago');
+		expect(formatAsOf(null, now)).toBe('');
+	});
+
+	it('ignores a live event that carries no utilization instead of creating or wiping a window', () => {
+		rateLimit.applySnapshot({ available: true, windows: [{ type: 'five_hour', utilization: 60, resets_at: future() }] });
+		const before = selfBucket()!.windows.five_hour;
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: undefined, resets_at: future() });
+		rateLimit.applyLiveEvent({ rate_limit_type: 'seven_day', utilization: null as unknown as number });
+		rateLimit.applyLiveEvent({ rate_limit_type: '', utilization: 0.5 });
+		expect(selfBucket()!.windows.five_hour).toEqual(before);
+		expect(Object.keys(selfBucket()!.windows)).toEqual(['five_hour']);
+	});
+});

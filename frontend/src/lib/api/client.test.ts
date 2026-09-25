@@ -258,6 +258,32 @@ describe('ApiClient', () => {
 				status: 418
 			});
 		});
+
+		// SDK structured `api_error` bodies name the real upstream status and
+		// retry hint; they beat the canned per-status strings.
+		it.each([
+			['explicit detail wins', 502, { type: 'api_error', status: 529, detail: 'Anthropic is overloaded' }, 'Anthropic is overloaded'],
+			['message when no detail', 500, { type: 'api_error', message: 'Upstream reset' }, 'Upstream reset'],
+			['429 with a retry hint', 500, { type: 'api_error', status: 429, retry_after_seconds: 42 }, 'Rate limited — retry in 42s'],
+			['429 without a hint', 429, { type: 'api_error' }, 'Rate limited — too many requests, try again shortly'],
+			['upstream status over the HTTP status', 500, { type: 'api_error', status: 503 }, 'API error: HTTP 503'],
+			['a malformed status falls back to HTTP', 502, { type: 'api_error', status: '503', retry_after_seconds: '9' }, 'API error: HTTP 502'],
+			['untyped 429 with a retry hint', 429, { retry_after_seconds: 7 }, 'Rate limited — retry in 7s'],
+			['a structured error object', 400, { error: { code: 'bad_branch' } }, '{"code":"bad_branch"}'],
+		])('api_error body: %s', async (_name, status, body, detail) => {
+			fetchMock.mockResolvedValueOnce(Response.json(body, { status }));
+			await expect(client.get('/error')).rejects.toEqual({ detail, status });
+		});
+
+		it('does not re-check worker auth on 403, only on 401', async () => {
+			// A 403 is an authorization answer from a signed-in worker session;
+			// re-checking the session would not change it.
+			const checkAuth = vi.spyOn(auth, 'checkAuth').mockResolvedValue(undefined as never);
+			fetchMock.mockResolvedValueOnce(Response.json({ detail: 'Owner only' }, { status: 403 }));
+			await expect(client.get('/sessions')).rejects.toEqual({ detail: 'Owner only', status: 403 });
+			await new Promise((r) => setTimeout(r, 0));
+			expect(checkAuth).not.toHaveBeenCalled();
+		});
 	});
 
 	// ── Phase 3.2: global 401 → fresh worker auth check ─────────────────────
