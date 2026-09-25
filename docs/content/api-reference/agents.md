@@ -52,6 +52,14 @@ curl http://localhost:8000/api/v1/agents \
 ]
 ```
 
+### GET /api/v1/agents/templates
+
+Built-in system prompts offered as starting points for a new agent. Nothing is applied until you copy one into an agent's config.
+
+**Auth:** Required
+
+Returns a list of `{"id", "name", "description", "prompt", "tools"}`.
+
 ### GET /api/v1/agents/{agent_id}
 
 Get a specific agent.
@@ -279,6 +287,67 @@ curl -X POST http://localhost:8000/api/v1/agents/import \
   -H "Content-Type: application/json" \
   -d @agent.json
 ```
+
+## Generate with AI
+
+Draft an agent or a nested agent from a plain-language description. Nothing is saved: the result has the export format, which you can pass to `POST /api/v1/agents/import` or edit first.
+
+**Auth:** Required for every generate endpoint.
+
+### POST /api/v1/generate/profile
+
+Draft an agent. When the description is vague, the answer may be questions instead of a result.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/generate/profile \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Reviews pull requests for security problems and explains each finding"}'
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `description` | string | Yes | 10 to 5000 characters |
+| `reference_material` | string | No | Up to 15000 characters, such as an existing prompt to build on. When given, no questions are asked |
+| `model` | string | No | Model to generate with (see `GET /api/v1/models`) |
+| `skip_clarification` | boolean | No | `true` never asks questions. Default `false` |
+
+```json
+{
+  "status": "needs_clarification",
+  "result": null,
+  "questions": [{ "id": "scope", "question": "...", "options": ["..."], "context": "..." }],
+  "generation_type": "profile"
+}
+```
+
+With `status: "complete"`, `result` is `{"version": "1.0", "type": "ai-shuffle-agent", "exported_at": "...", "agent": {...}}` and `questions` is `null`.
+
+### POST /api/v1/generate/subagent
+
+Draft a nested agent. Same body and response as `POST /api/v1/generate/profile`. A complete `result` has `type: "ai-shuffle-subagent"` and a `subagent` object with `id`, `name`, `description`, `prompt`, and optional `tools`, `model`, `skills`, `memory` and `mcp_servers`.
+
+### POST /api/v1/generate/continue
+
+Finish a draft after answering the questions. Always returns `status: "complete"`.
+
+```json
+{
+  "generation_type": "profile",
+  "description": "Reviews pull requests for security problems and explains each finding",
+  "answers": { "scope": "Only the changed files" }
+}
+```
+
+`generation_type` (`profile` or `subagent`), `description` and `answers` (question `id` to answer) are required; `reference_material` and `model` are optional as above. Any other `generation_type` returns `400`.
+
+### POST /api/v1/generate/profile/direct
+
+Draft an agent without questions. Same body as `POST /api/v1/generate/profile`; returns the export object itself (not wrapped in `status` and `result`).
+
+### POST /api/v1/generate/subagent/direct
+
+Draft a nested agent without questions. Same body as `POST /api/v1/generate/subagent`; returns the nested-agent export object itself.
 
 ## Former `/subagents` API
 

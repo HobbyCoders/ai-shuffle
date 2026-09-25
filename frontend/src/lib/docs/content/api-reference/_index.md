@@ -113,15 +113,22 @@ The `session_id` is sent in the message body (e.g. `{"type": "query", "prompt": 
 
 | Category | Prefix | Description |
 |----------|--------|-------------|
-| [Authentication](/docs/api-reference/authentication) | `/auth`, `/owner` | Owner password and sign-in, setup, Claude CLI, GitHub |
-| [Sessions](/docs/api-reference/sessions) | `/sessions` | Chat session CRUD, search, export, clear and retry, moving between devices |
+| [Authentication](/docs/api-reference/authentication) | `/auth`, `/owner`, `/workspace`, `/filesystem` | Owner password and sign-in, setup, Claude CLI, GitHub, workspace folder |
+| [Sessions](/docs/api-reference/sessions) | `/sessions`, `/commands/rewind` | Chat session CRUD, search, export, clear and retry, workspace folders, background workers, rewind, browser panel, moving between devices |
 | [Query & Execution](/docs/api-reference/query-execution) | `/query`, `/conversation` | One-shot queries, conversations, streaming |
 | [WebSocket](/docs/api-reference/websocket) | `/ws` | Real-time chat control, permissions, questions, message queue |
-| [Agents](/docs/api-reference/agents) | `/agents` | Agent configuration CRUD and nested-agent management |
+| [Agents](/docs/api-reference/agents) | `/agents`, `/generate` | Agent configuration CRUD, nested-agent management, drafting agents with AI |
 | [Projects](/docs/api-reference/projects) | `/projects` | Project CRUD, files, project agents, memory files, project plugins, links |
 | [Connectors](/docs/api-reference/connectors) | `/connectors` | Platform connector management, Gmail sign-in, Plaid |
 | [Automations](/docs/api-reference/automations) | `/automations` | Scheduled/triggered workflows |
 | [Hooks](/docs/api-reference/hooks) | `/hooks` | Event hook management |
 | [MCP](/docs/api-reference/mcp) | `/mcp` | MCP server configuration |
+| [Plugins](/docs/api-reference/plugins) | `/plugins` | Marketplaces, installing, updating and enabling plugins |
 | [API Users](/docs/api-reference/api-users) | `/api-users` | API key management |
-| [Miscellaneous](/docs/api-reference/miscellaneous) | Various | Tags, analytics, git, GitHub pull requests and actions, settings, files |
+| [Model Providers](/docs/api-reference/model-providers) | `/model-providers`, `/models` | Other model providers, sign-in, usage tracking, model registry |
+| [Devices & Network](/docs/api-reference/devices) | `/network`, `/cluster`, `/pairing`, `/mobile/hub` | Worker network, installs, pairing codes, paired devices, Shuffle account |
+| [Notes](/docs/api-reference/notes) | `/notes` | Notes and attachments |
+| [Voice](/docs/api-reference/voice) | `/voice`, `/settings/voice` | Voice settings and voice calls |
+| [Miscellaneous](/docs/api-reference/miscellaneous) | Various | Tags, analytics, git (including Ship It and worktrees), GitHub pull requests and actions, settings, loop guard, computer use, license, files |
+
+Internal routes are not part of this reference: anything under `/api/v1/internal`, worker-to-worker traffic (`/api/v1/network/peer/*` and the network join handshake), the pairing and account-link handshakes (`/api/v1/pairing/exchange`, `/api/v1/mobile/hub/endpoint`, `/ingress`, `/link`, `/enroll`), and the desktop app's local listener.

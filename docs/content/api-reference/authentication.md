@@ -221,6 +221,12 @@ Start web device flow for GitHub authentication.
 
 **Auth:** Owner only
 
+### POST /api/v1/auth/github/login/web/cancel
+
+Stop a web sign-in started with `POST /api/v1/auth/github/login/web`. No body. Returns `{"success": true}`, also when no sign-in was running.
+
+**Auth:** Owner only
+
 ### POST /api/v1/auth/github/logout
 
 Logout from GitHub.
@@ -240,3 +246,63 @@ Mark the setup onboarding as complete.
 Run authentication diagnostic checks.
 
 **Auth:** Owner only
+
+## Workspace folder
+
+The folder where new projects are created. Setup asks for it on first run.
+
+### GET /api/v1/workspace/config
+
+**Auth:** Required
+
+```json
+{
+  "workspace_path": "/home/me/ai-shuffle",
+  "is_configured": true,
+  "is_local_mode": true,
+  "default_path": "/home/me/ai-shuffle",
+  "exists": true
+}
+```
+
+`is_configured` is `false` until a folder has been saved for this worker; `workspace_path` then shows the folder in use.
+
+### POST /api/v1/workspace/config
+
+Save the workspace folder. It is created if missing and must be writable.
+
+**Auth:** Owner only
+
+```bash
+curl -X POST http://localhost:8000/api/v1/workspace/config \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"workspace_path": "~/ai-shuffle"}'
+```
+
+Returns the same fields as `GET`. `~` is expanded and the path made absolute. Returns `400` for an empty path or a folder that cannot be written.
+
+### POST /api/v1/workspace/validate
+
+Check a folder without saving or creating anything. Same body as `POST /api/v1/workspace/config`.
+
+**Auth:** Owner only
+
+Returns `{"valid": true, "error": null, "path": "/home/me/ai-shuffle", "exists": false, "writable": true}`. For a folder that does not exist yet, `writable` says whether its parent is writable.
+
+### GET /api/v1/filesystem/browse
+
+List the folders and files under a path, for picking a folder.
+
+**Auth:** Owner only
+
+| Query | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string | No | Folder to list. Omit it to get the starting points |
+
+```bash
+curl "http://localhost:8000/api/v1/filesystem/browse?path=/home/me" \
+  -H "Authorization: Bearer $OWNER_TOKEN"
+```
+
+Returns `path`, `parent` (`null` at the top), `is_local_mode` and `entries`, each with `name`, `path`, `is_dir` and `has_children` (whether a folder has subfolders). Hidden entries are left out. Without `path`, the entries are the home folder and `/` (drive letters on Windows) when AI Shuffle runs directly on your computer, or the workspace folder in Docker. In Docker, paths outside the workspace folder return `400`. A missing path returns `404`.

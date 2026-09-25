@@ -49,22 +49,25 @@ ws.send(JSON.stringify({
 | `session_created` | New session created for an omitted `session_id` | `session_id`, `title`, `request_id` (echoed if sent) |
 | `tool_use` | A tool call started (for tracking pending tools) | `session_id`, `id`, `name`, `input` (replaced by a truncation marker when over 4 KB) |
 | `tool_result` | A tool call finished | `session_id`, `tool_use_id`, `name`, `output`, `is_error` |
-| `permission_request` | A tool needs approval | `session_id`, `request_id`, `tool_name`, `tool_input` |
+| `permission_request` | A tool needs approval | `session_id`, `request_id`, `tool_name`, `tool_input`, `queue_position`, `queue_total` |
 | `user_question` | The agent asks the user a question | `session_id`, `request_id`, `tool_use_id`, `questions` |
 | `done` | Turn complete | `session_id`, `metadata` (`total_cost_usd`, `tokens_in`, `tokens_out`, `model`, `duration_ms`, ...) |
 | `interrupted` | Turn ended by an interrupt | `session_id`, `message` |
 | `interrupt_confirmed` / `interrupt_failed` | Reply to `interrupt_for_query` | `session_id`, `message` (on failure) |
 | `query_queued` | The `query` was queued behind a running turn (or handed to the device that runs the session) instead of starting now | `session_id` |
 | `session_not_found` | Reply to `load_session` for an unknown session | `session_id` |
-| `session_closed` | Reply to `close_session` | `session_id` |
-| `permission_response_ack` | Reply to `permission_response` | `session_id`, `request_id`, `result` |
+| `session_closed` | Reply to `close_session` | `session_id` (null when no session was selected) |
+| `permission_response_ack` | Reply to `permission_response`. `result` is `{"resolved": true, "auto_resolved_count", "auto_resolved_ids"}` on success (plus `"deferred": true` for a deferral), or `{"error": "Request not found"}` when the request is unknown or already answered | `session_id`, `request_id`, `result` |
 | `user_question_response_ack` | Reply to `user_question_response` | `session_id`, `request_id`, `success`, `reason` (`not_pending` when the question was already answered) |
 | `pending_permissions` | Reply to `get_pending_permissions` | `session_id`, `pending`, `deferred` |
 | `pending_questions` | Reply to `get_pending_questions` | `session_id`, `questions` |
+| `tabs_sync` | Another of your devices sent `tabs_update` | `tabs`, `activeTabId`, `source_device_id` |
 | `permission_queue_update` | The permission queue changed. Three forms: deferred requests were put back in the queue (`requeued_ids`); a request was deferred (`resolved_ids` and `deferred_ids`, both holding its id); a remembered rule answered other waiting requests (`resolved_ids`) | `session_id`, `remaining_count`, plus `requeued_ids`, or `resolved_ids` and `deferred_ids`, or `resolved_ids` |
 | `sync` | Multi-device update. With `event_type: "queue_updated"`, `data.queued_messages` is the session's current queue | `event_type`, `session_id`, `data` |
-| `error` | Error occurred | `message` |
-| `ping` | Keep-alive | — |
+| `error` | Error occurred | `message`, `session_id` (when the error concerns a session) |
+| `ping` | Keep-alive, every 30 seconds; answer with `pong` | `timestamp` (always null) |
+
+Every server frame also carries `_seq`, a number that increases by one per frame on the connection. It is a delivery diagnostic: a gap means a frame was dropped or replaced by a newer one of the same kind. Recover state from the event feed and the pending lists, not from the socket.
 
 Other devices watching the same session receive the same control frames. Content reaches every device through the session event feed.
 
@@ -78,7 +81,7 @@ Other devices watching the same session receive the same control frames. Content
 | `clear_queued_messages` | Remove every queued message for the session | `session_id` |
 | `load_session` | Load/switch to a session and receive its history | `session_id` |
 | `watch_session` | Follow a session without loading its history. The server sends its queue, if any, as a `sync` frame | `session_id` |
-| `close_session` | Stop following the current session; replies `session_closed` | — |
+| `close_session` | Stop following the current session; replies `session_closed` (with a null `session_id` when none was selected) | — |
 | `stop` | Stop the current turn, its background work and queued messages | `session_id`, `turn_id` (optional) |
 | `permission_response` | Approve, deny or defer a tool use | `request_id`, `session_id`, `decision`, `remember`, `pattern` |
 | `get_pending_permissions` | List open and deferred permission requests for the current session | — |
@@ -86,9 +89,14 @@ Other devices watching the same session receive the same control frames. Content
 | `user_question_response` | Answer a `user_question` | `request_id`, `session_id`, `answers`, `dismissed`, `skipped` |
 | `get_pending_questions` | List unanswered questions for the current session | — |
 | `interrupt_for_query` | Interrupt the running turn so a new `query` can follow; replies `interrupt_confirmed` or `interrupt_failed` | `session_id` |
+| `tabs_update` | Share this device's open tabs with your other devices, which receive `tabs_sync`; no reply | `tabs_data` (`tabs`, `activeTabId`) |
 | `pong` | Keep-alive response to a `ping` | — |
 
-An API key acts only on its own sessions, the ones it started. Every frame that names a session (`query` or `queue_message` with a `session_id`, `load_session`, `watch_session`, `stop`, `interrupt_for_query`, `permission_response`, `requeue_deferred_permissions`, `user_question_response`, `remove_queued_message`, `clear_queued_messages`) is refused with an `error` frame when the session belongs to the owner or another key, or is outside the key's project or agents. `interrupt_for_query` replies `interrupt_failed` instead. The refusal carries `session_id` and `message` and changes nothing; it is the WebSocket equivalent of the REST 403. The owner's connection is not limited this way.
+Every client frame is a JSON object with a string `type`. A frame with an unknown or missing `type` is answered with an `error` frame, and so is a frame that is not a JSON object (invalid JSON, an array, a string, a binary frame). The connection stays open, but after 10 frames that are not JSON objects the server closes it with code `1007`. A frame may be at most 10 MiB; a larger one closes the connection (code `1009`).
+
+A connection may send 30 frames in any 10 seconds (`pong` does not count). A frame over the limit is not processed and is answered with `{"type": "error", "message": "Rate limited: too many messages. Please slow down."}`; the connection stays open.
+
+An API key acts only on its own sessions, the ones it started. Every frame that names a session (`query` or `queue_message` with a `session_id`, `watch_session`, `stop`, `interrupt_for_query`, `permission_response`, `requeue_deferred_permissions`, `user_question_response`, `remove_queued_message`, `clear_queued_messages`) is refused with an `error` frame when the session belongs to the owner or another key, or is outside the key's project or agents. `interrupt_for_query` replies `interrupt_failed` instead. The refusal carries `session_id` and `message` (`Access denied to this session`) and changes nothing; it is the WebSocket equivalent of the REST 403. A session id that does not exist gets the same refusal, and `load_session` answers another principal's session with `session_not_found`, as it does an unknown id, so neither reveals whether a session exists. The owner's connection is not limited this way.
 
 For an API key with assigned agents, `query` and `queue_message` apply the same agent restriction as the REST endpoints. On `query`, a `profile` outside the key's agents, or an omitted one when the key has several, is refused with an `error` frame and nothing runs. On `queue_message` a named `profile` must be one of the key's agents; an omitted one keeps the session's agent, which must be one of them too.
 
@@ -115,7 +123,9 @@ ws.send(JSON.stringify({
 
 An agent-wide (`"profile"`) rule applies to every session on that agent, so only the owner can create one. An API key that sends `remember: "profile"` gets a rule for its own session only, the same as `"session"`. A `decision` of `"defer"` sets the request aside without answering it; `remember` and `pattern` are ignored. Deferred requests come back in `pending_permissions.deferred`, and `requeue_deferred_permissions` sends them again. The server confirms every answer with `permission_response_ack`.
 
-`get_pending_permissions` and `get_pending_questions` act on the session selected by the last `load_session` or `watch_session` on this socket. Send them after reconnecting to restore prompts that are still open.
+`get_pending_permissions` and `get_pending_questions` act on the session selected by the last `load_session` or `watch_session` on this socket. Send them after reconnecting to restore prompts that are still open. With no session selected, each replies with empty lists and a null `session_id`.
+
+`requeue_deferred_permissions` sends each deferred request again as a `permission_request`, then one `permission_queue_update` with the `requeued_ids` (empty when nothing was deferred) and the `remaining_count` of open requests.
 
 ### Answering Questions
 
@@ -194,6 +204,8 @@ Authentication is performed via:
 
 WebSocket close codes:
 - `1000` — Normal closure
+- `1007` — Too many frames that were not JSON objects (`/ws/chat`)
+- `1009` — Frame larger than 10 MiB
 - `1013` — Authorization temporarily unavailable; retry later
 - `4001` — Authentication failed
 - `4003` — Access denied: for an API key, the session is not one it started, or it belongs to another project or agent (`/ws/sessions/{session_id}`)

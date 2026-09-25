@@ -306,6 +306,21 @@ curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/active \
   -d '{"is_active": false}'
 ```
 
+### PUT /api/v1/sessions/{session_id}/workspace-folders
+
+Set the extra project folders a code or voice session can work in, besides its own project. The list replaces the previous one.
+
+**Auth:** Required. Every listed project must be one the caller can access.
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/sessions/sess_abc123/workspace-folders \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"workspace_project_ids": ["proj_def456"]}'
+```
+
+`workspace_project_ids` (required) holds up to 50 project ids; duplicates and the session's own project are dropped. Returns `{"workspace_project_ids": [...]}` as saved. Returns `400` for a chat-mode session and `404` when a newly added project does not exist.
+
 ## Background Tasks
 
 ### POST /api/v1/sessions/{session_id}/tasks/{task_id}/stop
@@ -325,6 +340,159 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/tasks/task_123/st
 ```
 
 A task that had already finished returns `"ok": true` with `"detail": "already finished"`, so a stale row in the UI clears. A task the app can no longer reach is marked stopped and also returns `"ok": true`. `"ok": false` (still `200`, with a `detail` message) means the stop did not fully work: a background shell whose child processes outlived it, or a task the app cannot find (`detail` is `session not active`, `session not connected` or `task not found`).
+
+### GET /api/v1/sessions/{session_id}/provider-workers
+
+Background workers the session's agent started on other model providers, with their token use and cost while they run.
+
+**Auth:** Required
+
+```json
+{
+  "session_id": "sess_abc123",
+  "workers": [
+    { "workerSessionId": "...", "taskId": "...", "toolUseId": "...", "provider": "prov_123", "model": "...", "label": "Review the diff", "startedAt": 1758790000.0, "usage": { "tokens_in": 1200, "tokens_out": 300, "total_cost_usd": 0.004 } }
+  ],
+  "providers": { "prov_123": { "tokens_in": 1200, "tokens_out": 300, "cache_creation_tokens": 0, "cache_read_tokens": 0, "total_cost_usd": 0.004, "workers": 1 } },
+  "totals": { "tokens_in": 1200, "tokens_out": 300, "cache_creation_tokens": 0, "cache_read_tokens": 0, "total_cost_usd": 0.004, "workers": 1 }
+}
+```
+
+`workers` is empty when none are running.
+
+### POST /api/v1/sessions/{session_id}/provider-workers/stop
+
+Stop every running background worker of the session. No body. Returns `{"session_id": "...", "stopped": 2, "workers": [...]}`; `stopped` is `0` when none were running.
+
+**Auth:** Required
+
+## Rewind
+
+### GET /api/v1/commands/rewind/checkpoints/{session_id}
+
+List the messages a session can be rewound to.
+
+**Auth:** Required
+
+Returns `success`, `session_id`, `error` and `checkpoints`, each with `uuid`, `index`, `role` (`user` or `assistant`), `message_preview`, `full_message` and `timestamp`.
+
+### POST /api/v1/commands/rewind/execute/{session_id}
+
+Rewind the conversation to a message: later messages are dropped from what the agent sees on its next turn.
+
+**Auth:** Required
+
+```bash
+curl -X POST http://localhost:8000/api/v1/commands/rewind/execute/sess_abc123 \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"target_uuid": "5f1c...", "target_role": "user", "include_response": true}'
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `target_uuid` | string | `""` | `uuid` of the checkpoint to rewind to |
+| `target_role` | string | `user` | `user` or `assistant` |
+| `include_response` | boolean | `true` | Keep the reply to the target message; `false` also drops the target message |
+| `restore_chat` | boolean | `true` | Rewind the conversation |
+| `restore_files` | boolean | `false` | Not supported: reported in `error` while the conversation still rewinds |
+| `target_content` | string | | With `target_occurrence`, finds a message that has no `uuid` yet by its text |
+| `target_occurrence` | integer | | 0-based position among the user messages with that exact text |
+
+Returns `success`, `message`, `chat_rewound`, `files_rewound`, `messages_removed`, `error`, `partial_success` and `warning`. When the target cannot be found, the rewind is refused with `success: false` and `error`.
+
+## Swarms
+
+A swarm is a set of tasks an agent hands to other agents, some waiting on others. These two endpoints use the `/api/sessions` prefix, without `/v1`.
+
+**Auth:** Required. An API key must own the session.
+
+### GET /api/sessions/{session_id}/swarms
+
+```json
+{
+  "swarms": [
+    {
+      "id": "swarm_9c1e...",
+      "session_id": "sess_abc123",
+      "title": "Audit the API",
+      "status": "running",
+      "created_at": "...",
+      "updated_at": "...",
+      "tasks": [
+        { "id": "scan", "title": "Scan routes", "agent": "Explore", "depends_on": [], "status": "completed", "worker_session_id": "...", "result": "...", "error": null, "started_at": "...", "finished_at": "..." }
+      ]
+    }
+  ]
+}
+```
+
+`status` (swarm and task) is `queued`, `running`, `completed`, `failed`, `cancelled` or `interrupted`.
+
+### POST /api/sessions/{session_id}/swarms/{swarm_id}/cancel
+
+Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for an unknown swarm, or `409` when this worker cannot control it.
+
+## Private Access
+
+When an agent asks for access to a folder on this worker or to a machine over SSH, the owner answers here. Access is temporary, lasts until it expires or the worker restarts, and each write the agent attempts needs a separate approval.
+
+**Auth:** Owner only, over HTTPS or from the same machine. Refused (`403`) for agent previews.
+
+### GET /api/v1/chat-access/{session_id}
+
+Returns `requests` (open asks: `id`, `kind` (`folder` or `machine`), `purpose`, `expires_at`), `grants` (`id`, `label`, `kind`, `target`, `expires_at`, `writable`, `fingerprint`), `actions` (writes waiting for approval: `id`, `grant_id`, `operation`, `arguments`, `expires_at`), `saved_connections`, `vault_available`, `folder_available` and `restart_revokes`.
+
+### POST /api/v1/chat-access/{session_id}/requests/{request_id}
+
+Grant a request, with a new connection or a saved one (`saved_id`), not both.
+
+```json
+{
+  "connection": {
+    "kind": "machine",
+    "label": "Build server",
+    "host": "192.0.2.10",
+    "port": 22,
+    "username": "deploy",
+    "fingerprint": "SHA256:...",
+    "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----...",
+    "writable": false
+  },
+  "minutes": 60,
+  "save_connection": false
+}
+```
+
+`connection.kind` must match the request. For `folder`, send `path` instead of the SSH fields. `label` is 1 to 80 characters; `minutes` is 1 to 480 (default 60); `fingerprint` (`SHA256:...`) is optional; without it the server's key is pinned on first connect. `password`, `private_key` and `passphrase` are optional secrets that are never returned. Returns `{"granted": true, "saved": false}`. Connection failures return `400` with a message; secrets are never echoed.
+
+### DELETE /api/v1/chat-access/{session_id}/requests/{request_id}
+
+Decline a request. Returns `{"declined": true}`.
+
+### DELETE /api/v1/chat-access/{session_id}/grants/{grant_id}
+
+End a grant now. Returns `{"revoked": true}`.
+
+### POST /api/v1/chat-access/{session_id}/actions/{action_id}
+
+Approve or refuse one pending write. Body: exactly `{"allow": true}` or `{"allow": false}`. Returns `{"accepted": true}`.
+
+### DELETE /api/v1/chat-access/{session_id}/saved/{connection_id}
+
+Forget a saved connection and end any grant that uses it. Returns `{"deleted": true}`.
+
+A request, grant or action that no longer exists returns `409` (`400` when granting).
+
+## Browser Panel
+
+### POST /api/v1/sessions/{session_id}/browser/panel/start
+
+Start the session's shared browser (the Browser panel) without navigating it or taking control from the agent. No body.
+
+**Auth:** Required
+
+Returns the browser state: `runtime_id`, `revision`, `available`, `busy`, `target_id`, `active_tab_id`, `tabs` (each with `id`, `url`, `title`, `current`), `viewport` and `control` (`owner` is `agent` or `human`). Returns `503` with a reason when the browser cannot start.
 
 ## Moving Sessions Between Devices
 
