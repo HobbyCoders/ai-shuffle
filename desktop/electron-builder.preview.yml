@@ -1,5 +1,5 @@
-# Standalone: electron-builder concatenates inherited protocol arrays.
-# Never extend the stable config or register its aishuffle protocol.
+# Standalone: never extend the stable config (electron-builder concatenates
+# inherited arrays). Neither config registers a URL scheme.
 extends: null
 appId: com.hobbycoders.aishuffle.preview
 productName: AI Shuffle Preview
@@ -28,10 +28,6 @@ asar: true
 afterPack: scripts/verify-packaged-runtime.cjs
 compression: normal
 publish: null
-protocols:
-  - name: AI Shuffle Preview
-    schemes:
-      - aishuffle-preview
 win:
   executableName: AI Shuffle Preview
   icon: build/icon.png

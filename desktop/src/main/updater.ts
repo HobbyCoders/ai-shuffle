@@ -12,6 +12,18 @@ export interface UpdateState {
   /** Release name and notes from the signed manifest of the offered update. */
   release?: string | null; notes?: string | null;
 }
+/**
+ * How often the shell trades update state with its worker (the web UI's
+ * update button reads that state and queues check/download/install requests
+ * there). Each exchange is a local request and a settings read in the
+ * worker, so this is not the 2 s it used to be. It cannot go past about 8 s
+ * without a worker change: the worker treats the desktop updater as gone
+ * after 10 s of silence and drops a queued request after 10 s
+ * (app/core/application_updates.py). Phase changes are pushed at once, so
+ * the button still follows a check or download without waiting for a tick.
+ */
+export const BRIDGE_INTERVAL_MS = 8_000;
+
 export class Updater {
   private state: UpdateState = { phase: 'unsupported', version: null, percent: null, error: null, checkedAt: null };
   private listeners = new Set<(state: UpdateState) => void>();
@@ -33,11 +45,13 @@ export class Updater {
   private safeToRestart: () => Promise<boolean> = async () => false;
   private bridgeTimer: ReturnType<typeof setInterval> | null = null;
   private exchanging = false;
+  private exchangeAgain = false;
   setBridge(exchange: (state: UpdateState) => Promise<Record<string, unknown>>, safeToRestart: () => Promise<boolean>): void {
     this.bridge = exchange; this.safeToRestart = safeToRestart;
   }
   async exchange(): Promise<void> {
-    if (!this.bridge || this.exchanging) return;
+    if (!this.bridge) return;
+    if (this.exchanging) { this.exchangeAgain = true; return; }
     this.exchanging = true;
     try {
       const request = await this.bridge(this.current);
@@ -49,7 +63,12 @@ export class Updater {
         else this.set({ error: 'Busy with active sessions; retry when finished.' });
       }
     } catch { /* Worker startup/restart is not an update failure. Retry the heartbeat, not the command. */ }
-    finally { this.exchanging = false; }
+    finally {
+      // A phase change during the exchange: report it now rather than on the next tick.
+      const again = this.exchangeAgain && this.bridgeTimer !== null;
+      this.exchanging = false; this.exchangeAgain = false;
+      if (again) void this.exchange();
+    }
   }
   constructor(private readonly releaseUpdates = true) {}
   setPolicy(policy: () => Promise<boolean>): void { this.policy = policy; }
@@ -91,12 +110,18 @@ export class Updater {
   }
   get current(): UpdateState { return { ...this.state, running_version: this.applications?.version ?? null }; }
   subscribe(fn: (state: UpdateState) => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
-  private set(patch: Partial<UpdateState>): void { this.state = { ...this.state, ...patch }; for (const fn of this.listeners) fn(this.current); }
+  private set(patch: Partial<UpdateState>): void {
+    const phase = this.state.phase;
+    this.state = { ...this.state, ...patch };
+    for (const fn of this.listeners) fn(this.current);
+    // Progress ticks wait for the interval; a new phase (checking, available, ready, ...) goes out now.
+    if (this.state.phase !== phase && this.bridgeTimer) void this.exchange();
+  }
   start(): void {
     if (this.timer || this.bridgeTimer) return;
     this.stop();
     if (this.bridge) {
-      this.bridgeTimer = setInterval(() => void this.exchange(), 2000);
+      this.bridgeTimer = setInterval(() => void this.exchange(), BRIDGE_INTERVAL_MS);
       void this.exchange();
     }
     if ((!this.applications && !this.installers) || this.timer) return;

@@ -160,6 +160,30 @@ repository key) is out of scope until there is a repository. Each build writes
 the packages and tell users to run `sha256sum --check SHA256SUMS` in the
 download folder.
 
+## Electron fuses (not enabled yet)
+
+The packaged app still has Electron's default fuses. Flipping them needs the
+`@electron/fuses` package (or electron-builder's `electronFuses` option, which
+uses it), which is not a dependency yet. When it is added, set these in
+`electron-builder.yml` (and the preview config):
+
+| Fuse | Value | Why |
+| --- | --- | --- |
+| `runAsNode` | `false` | `ELECTRON_RUN_AS_NODE` must not turn the signed binary into a Node interpreter. |
+| `enableNodeOptionsEnvironmentVariable` | `false` | `NODE_OPTIONS` must not inject code at startup. |
+| `enableNodeCliInspectArguments` | `false` | No `--inspect` debugger on the shipped app. |
+| `enableCookieEncryption` | `true` | Encrypt the session's cookies with the OS keyring. |
+| `onlyLoadAppFromAsar` | `true` | Load the app only from `app.asar`. |
+| `enableEmbeddedAsarIntegrityValidation` | `true` | Refuse a modified `app.asar` (Windows and macOS). |
+
+Before flipping them, check that nothing relies on the disabled paths: the
+source-managed bootstrap relaunches through its own `node` (`updater.ts`), not
+`ELECTRON_RUN_AS_NODE`; `--remote-debugging-port`, which the installed-app CI
+verification uses, is a Chromium switch and is not affected by these fuses; and
+cookie encryption is one-way (existing cookies are encrypted as they are
+rewritten; turning the fuse off again makes the store unreadable), so test an
+upgrade over a profile that has a signed-in hub session and never revert it.
+
 ## Update checks
 
 - **Windows (installed).** The app checks the hub's signed manifest

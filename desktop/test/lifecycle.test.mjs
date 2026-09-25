@@ -80,3 +80,24 @@ test('missing stop acknowledgment preserves the owned child for retry', async ()
     assert.equal(worker.state.phase, 'ready');
     assert.equal(worker.stopping, false);
 });
+
+test('NC-11: a forced stop does not ask a wedged worker to stop sessions; it ends the process', { skip: process.platform === 'win32' }, async (t) => {
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+    t.after(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ } });
+    await new Promise(resolve => child.once('spawn', resolve));
+    const worker = supervisor();
+    worker._state = {...worker.state, phase: 'ready', pid: child.pid};
+    worker.child = child;
+    worker.lifecycleRequest = () => { throw Error('a forced stop must not wait on stop-sessions'); };
+    await worker.stop({force: true});
+    assert.notEqual(child.exitCode ?? child.signalCode, null, 'the worker process is gone');
+    // The graceful path still asks first.
+    const graceful = supervisor();
+    graceful._state = {...graceful.state, phase: 'ready'};
+    graceful.child = {exitCode: null};
+    let asked = 0;
+    graceful.lifecycleRequest = async (action) => { asked++; assert.equal(action, 'stop-sessions'); return {stopped: false}; };
+    await assert.rejects(graceful.stop(), /did not finish/);
+    assert.equal(asked, 1);
+});

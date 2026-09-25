@@ -74,10 +74,10 @@ async function main(): Promise<void> {
 	app.on('window-all-closed', () => {
 		if (process.platform !== 'darwin') app.quit();
 	});
-	if (isolation) { /* Isolated profiles never replace the normal app’s URL handler. */ }
-	else if (installedExecutable) app.setAsDefaultProtocolClient(identity.protocol, installedExecutable);
-	else if (managed) app.setAsDefaultProtocolClient(identity.protocol, managed.application.node, [path.join(managed.application.desktopDir, 'scripts/bootstrap.mjs'), '--root', managed.root]);
-	else if (app.isPackaged) app.setAsDefaultProtocolClient(identity.protocol);
+	// No aishuffle:// link is produced anywhere and the app never read one, so
+	// the scheme is no longer registered: it only let any web page launch the
+	// app with arguments of its choosing. Drop the handler older builds set.
+	if (!isolation) forgetProtocolHandler(identity.protocol, installedExecutable, managed);
 
 	await app.whenReady();
 
@@ -142,11 +142,12 @@ async function main(): Promise<void> {
 	const ses = session.fromPartition(PARTITION);
 	ses.setUserAgent(`${ses.getUserAgent()} AIShuffleDesktop/${app.getVersion()}`);
 	installPermissionPolicy(() => window.currentWorkerUrl);
-	// Every request this window makes to its own worker carries the listener token.
+	// Requests to the worker from its own UI (and top-level loads of it) carry the listener token.
 	const listenerTarget = (): ListenerTarget | null => {
 		const token = supervisor?.listenerToken;
 		if (!supervisor || !token) return null;
-		try { return { origin: new URL(supervisor.state.url).origin, token }; } catch { return null; }
+		// pageOrigin: a development run's frontend dev server; the worker's own origin otherwise.
+		try { return { origin: new URL(supervisor.state.url).origin, token, pageOrigin: window.currentWorkerUrl }; } catch { return null; }
 	};
 	installListenerHeader(ses, listenerTarget);
 
@@ -336,7 +337,9 @@ async function main(): Promise<void> {
 		show: () => {
 			window.focus();
 			void open();
-		}
+		},
+		// The tray's Quit: the graceful stop first, then a kill if the worker is wedged.
+		forceQuit: () => void quitGuard.request({ force: true })
 	};
 	installMenu(actions);
 	if (!isolation) installTray(actions);
@@ -361,6 +364,9 @@ async function main(): Promise<void> {
 		dialog.showErrorBox('Update could not be installed', reason);
 	});
 
+	// Set once a quit kills the worker; a graceful stop still settling in the
+	// background must not reopen the app's state after that.
+	let forcedQuit = false;
 	const quitGuard = new QuitGuard({
 		activeSessionCount: () => supervisor?.activeSessionCount() ?? Promise.resolve(0),
 		confirm: (activeCount) => showCloseDialog(window.browserWindow, activeCount),
@@ -375,16 +381,23 @@ async function main(): Promise<void> {
 				if (supervisor && !supervisor.state.external) await supervisor.clearConnectionFile();
 				updater.stop();
 			} catch (error) {
-				quitting = false;
+				if (!forcedQuit) quitting = false;
 				throw error;
 			}
 		},
+		forceStop: async () => {
+			quitting = true;
+			forcedQuit = true;
+			updater.stop();
+			// The worker never confirmed its sessions stopped: end it without asking again.
+			if (supervisor && !supervisor.state.external) await supervisor.stop({ force: true });
+			if (postgres) await postgres.stop();
+			if (supervisor && !supervisor.state.external) await supervisor.clearConnectionFile();
+		},
 		quit: () => app.quit(),
-		failed: async () => {
-			await showCloseDialog(window.browserWindow, null, true).catch(() => {
-				// A failed renderer must never turn an error into permission to quit.
-			});
-		}
+		failed: (_error, offerForce) =>
+			// A failed renderer must never turn an error into permission to quit.
+			showCloseDialog(window.browserWindow, null, true, offerForce).catch(() => false)
 	});
 	// Windows/Linux window close must be intercepted BEFORE its renderer dies.
 	// On macOS closing the window leaves the app running; Cmd+Q uses before-quit.
@@ -446,6 +459,19 @@ async function main(): Promise<void> {
 		}
 		await window.showPage('status');
 		void startStack();
+	}
+}
+
+/** Remove this build's own aishuffle:// registration from an earlier version, if it is still there. */
+function forgetProtocolHandler(protocol: string, installedExecutable: string | undefined, managed: ReturnType<typeof managedContext>): void {
+	const handler: [string?, string[]?] | null = installedExecutable ? [installedExecutable]
+		: managed ? [managed.application.node, [path.join(managed.application.desktopDir, 'scripts/bootstrap.mjs'), '--root', managed.root]]
+			: app.isPackaged ? [] : null;
+	if (!handler) return;
+	try {
+		if (app.isDefaultProtocolClient(protocol, ...handler)) app.removeAsDefaultProtocolClient(protocol, ...handler);
+	} catch (error) {
+		console.error('Could not remove the old aishuffle:// handler', error);
 	}
 }
 

@@ -85,8 +85,7 @@ settings, browser session, provider credentials, workspace and PostgreSQL data.
 Later launches use `--root <same-folder>`; Update and restart preserves the profile.
 Isolated roots cannot overlap the normal application or its data, and neither
 listener can claim ports 8000/8001. The window is labelled **AI Shuffle Isolated**,
-does not take foreground focus, and does not register a tray icon or replace the
-normal URL handler.
+does not take foreground focus, and does not register a tray icon.
 
 For Windows acceptance testing, install the desktop and browser-mcp Node
 dependencies, build the desktop TypeScript, then run
@@ -112,9 +111,11 @@ hosted public downloads or GitHub download permissions.
   is spawned. An orphan of our own from a crashed run is stopped by pid and
   replaced. Every spawn also gets a fresh listener token
   (`SHUFFLE_DESKTOP_LISTENER_TOKEN`, see `src/main/listener.ts`). The main
-  process adds it as `X-Shuffle-Desktop-Listener` to every request the window
-  makes to the worker's exact origin, WebSocket handshakes included, and strips
-  it from every other request; no page can read it. The worker uses it to tell this app from any other local process
+  process adds it as `X-Shuffle-Desktop-Listener` to requests to the worker's
+  exact origin, WebSocket handshakes included, when they are top-level page
+  loads or come from a document under a worker-origin top frame (so an OAuth,
+  hub or Plaid pop-up cannot use it), and strips it from every other request;
+  no page can read it. The worker uses it to tell this app from any other local process
   that reaches its loopback port.
   Set `SHUFFLE_DESKTOP_ATTACH_ANY=1` to attach to any local worker
   (developers running the worker by hand). Preview builds refuse occupied ports
@@ -143,8 +144,11 @@ hosted public downloads or GitHub download permissions.
 - PostgreSQL is managed-only. There is no connection form, external-server mode,
   or database environment configuration. Worker → Worker Status… shows lifecycle
   and failure details; Show PostgreSQL Log opens the database log.
-- Restart, status and log actions in the Worker menu; restart, status and
-  Open in Browser in the tray.
+- Restart, status and log actions in the Worker menu; restart, status,
+  Open in Browser and Quit in the tray. The tray's Quit first stops sessions
+  like any other quit; if the worker does not confirm within the grace period
+  it is ended anyway, so a stuck worker cannot keep the app open. Closing the
+  window instead offers "Quit Anyway" after a second failed attempt.
 - Frameless window with the OS window controls overlaid. The web UI's top
   strip is the drag handle and keeps clear of the buttons through the Window
   Controls Overlay API; see the `html.desktop` rules in `frontend/src/app.css`
@@ -211,12 +215,20 @@ browser automation.
 
 ## The bridge
 
-The preload exposes `window.shuffleDesktop` to the worker page: window state,
-close and title-bar colours, menu commands, the agent-access disclosure, update
-state and actions, and the worker's state. The bundled status page
-additionally gets `window.shuffleDesktopWorker` for the database lifecycle, the
-worker log and restart; neither page exposes credentials, the listener token or
-connection forms. The web UI's side is `frontend/src/lib/services/desktop.ts`.
+The preload exposes `window.shuffleDesktop` to the worker page: window state
+and title-bar colours, menu commands, the agent-access disclosure, and update
+state and install. The web UI's side, and the members it uses, are in
+`frontend/src/lib/services/desktop.ts`; `window.close`, `worker.getState` and
+`updates.check` remain only for the CI verification scripts
+(`scripts/verify-*.mjs`). The bundled status page additionally gets
+`window.shuffleDesktopWorker` for the database lifecycle, the worker log and
+restart. The main process answers IPC only from the main window's main frame
+while it shows the bundled status page (that exact file) or the worker's own
+origin (`src/main/ipc.ts`); redirects and links that would leave those two go
+to the system browser (`src/main/navigation.ts`). Only the worker origin gets
+browser permissions: microphone, clipboard write and fullscreen. Neither page
+exposes credentials, the listener token or connection forms. The app registers
+no URL scheme (`aishuffle://` was dropped: nothing produced or read such links).
 
 ## Develop
 

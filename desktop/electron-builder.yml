@@ -43,11 +43,6 @@ publish:
   repo: ai-shuffle
   releaseType: release
 
-protocols:
-  - name: AI Shuffle
-    schemes:
-      - aishuffle
-
 win:
   target:
     - target: nsis

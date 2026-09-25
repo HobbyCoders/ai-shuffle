@@ -18,18 +18,14 @@ function wire() {
 		window: {
 			getState: () => Promise.resolve({ maximized: false, fullscreen: false, focused: true }),
 			onStateChange: (listener: (state: DesktopWindowState) => void) => { states.add(listener); return () => states.delete(listener); },
-			close: () => {},
 			setTitleBarTheme: () => {}
 		},
 		shell: {
 			onCommand: (listener: (command: string) => void) => { commands.add(listener); return () => commands.delete(listener); }
 		},
-		worker: { getState: () => Promise.resolve({ phase: 'ready' }) },
 		updates: {
 			getState: () => Promise.resolve({ phase: 'idle', version: null, percent: null, error: null, checkedAt: null }),
 			onState: () => () => {},
-			check: () => Promise.resolve(),
-			download: () => Promise.resolve(),
 			install: () => {}
 		}
 	} as unknown as ShuffleDesktopBridge;

@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 const require=createRequire(import.meta.url);
 const {readInstalledHostSync,saveInstalledHost,sourceLaunch,installedLaunchArgs}=require('../dist/main/installed-host.js');
 test('an explicit Chromium debugging port survives even when Electron omits it from argv',()=>{
- assert.deepEqual(installedLaunchArgs(['aishuffle://callback'],'19229'),['aishuffle://callback','--remote-debugging-port=19229']);
+ assert.deepEqual(installedLaunchArgs(['aishuffle://callback'],'19229'),['--remote-debugging-port=19229'],'NC-16: no URL scheme is registered, so no link argument is forwarded');
  assert.deepEqual(installedLaunchArgs([]),[]);
  assert.deepEqual(installedLaunchArgs(['--remote-debugging-port=0'],'0'),['--remote-debugging-port=0']);
  assert.deepEqual(installedLaunchArgs(['--remote-debugging-port=19229'],'19229'),['--remote-debugging-port=19229']);

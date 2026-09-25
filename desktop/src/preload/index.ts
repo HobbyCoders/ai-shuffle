@@ -2,10 +2,15 @@
  * `window.shuffleDesktop`: the bridge the web UI uses to notice it runs in
  * the desktop app and to talk to the shell.
  *
- * The preload runs for every document in the main window. The worker's web
- * UI gets the window, menu-command, update and worker-status surface.
- * The raw worker log and the way back to the worker UI are exposed only to
- * the bundled status page (file://) as `window.shuffleDesktopWorker`. No database configuration is exposed.
+ * The preload runs for every document in the main window; the main process
+ * answers only the bundled status page and the worker's own origin (ipc.ts).
+ * The web UI uses the window, menu-command and update surface
+ * (frontend/src/lib/services/desktop.ts). `window.close`, `worker.getState`
+ * and `updates.check` are not used by the web UI; the desktop CI verification
+ * scripts (scripts/verify-*.mjs, driven over CDP) rely on them.
+ * Worker control, the raw worker log and the way back to the worker UI are
+ * exposed only to the bundled status page (file://) as
+ * `window.shuffleDesktopWorker`. No database configuration is exposed.
  */
 import { contextBridge, ipcRenderer } from 'electron';
 
@@ -54,7 +59,6 @@ const bridge = {
 		getState: () => ipcRenderer.invoke('desktop:update-state'),
 		onState: (listener: Listener<unknown>) => subscribe('desktop:update-state', listener),
 		check: () => ipcRenderer.invoke('desktop:update-check'),
-		download: () => ipcRenderer.invoke('desktop:update-download') as Promise<void>,
 		install: () => ipcRenderer.invoke('desktop:update-install') as Promise<void>
 	}
 };

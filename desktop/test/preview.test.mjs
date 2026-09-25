@@ -40,7 +40,10 @@ test('preview identity comes exclusively from packaged metadata and installer ne
 	const config = await getConfig(project, 'electron-builder.preview.yml', null);
 	await validateConfiguration(config, { isEnabled: false });
 	assert.equal(config.appId, preview.appId); assert.equal(config.productName, preview.name);
-	assert.deepEqual(config.protocols.flatMap((p) => p.schemes), ['aishuffle-preview']);
+	// NC-16: no URL scheme is registered by either build; the stable one is checked too.
+	assert.equal(config.protocols ?? null, null);
+	const stableConfig = await getConfig(project, 'electron-builder.yml', null);
+	assert.equal(stableConfig.protocols ?? null, null);
 	assert.equal(config.publish, null); assert.equal(config.extraMetadata.shuffleDesktopChannel, 'preview');
 	// A standalone preview must not inherit package.json's source launcher entry.
 	assert.equal(config.extraMetadata.main, 'dist/main/index.js');
@@ -120,20 +123,23 @@ test('preview updater cannot register, check, download, install, or schedule upd
 test('update preload commands return promises and IPC rejects senders outside the main window', async () => {
  const handlers = new Map(); const calls = [];
  const { registerIpc } = loadMain('ipc', { electron: { ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} }, app: {} } });
- registerIpc({ window: { isOwnSender: id => id === 7 }, updater: {
-  check: async interactive => calls.push(['check', interactive]), download: async () => calls.push(['download']), install: async () => calls.push(['install'])
+ registerIpc({ window: { isOwnSender: id => id === 7, currentWorkerUrl: 'http://127.0.0.1:8000', bundledPageUrl: 'file:///app/src/pages/worker.html' }, updater: {
+  check: async interactive => calls.push(['check', interactive]), install: async () => calls.push(['install'])
  }, worker: {} });
  const exposed = {}; let sender = 7;
+ const frame = { url: 'http://127.0.0.1:8000/', processId: 1, routingId: 1 };
  vm.runInNewContext(readFileSync(new URL('../dist/preload/index.js', import.meta.url), 'utf8'), { exports: {}, process, window: { location: { protocol: 'https:' } }, require: () => ({
   contextBridge: { exposeInMainWorld: (name, value) => { exposed[name] = value; } },
-  ipcRenderer: { sendSync: () => null, invoke: async channel => handlers.get(channel)({ sender: { id: sender } }) }
+  ipcRenderer: { sendSync: () => null, invoke: async channel => handlers.get(channel)({ sender: { id: sender, mainFrame: frame }, senderFrame: frame }) }
  }) });
  const updates = exposed.shuffleDesktop.updates;
- for (const action of ['check', 'download', 'install']) { const result = updates[action](); assert.equal(typeof result.then, 'function'); await result; }
- assert.deepEqual(calls, [['check', true], ['download'], ['install']]);
+ // NC-15: the web UI downloads through the worker's update bridge; the preload has no download member or channel.
+ assert.equal('download' in updates, false); assert.equal(handlers.has('desktop:update-download'), false);
+ for (const action of ['check', 'install']) { const result = updates[action](); assert.equal(typeof result.then, 'function'); await result; }
+ assert.deepEqual(calls, [['check', true], ['install']]);
  sender = 8;
- for (const action of ['check', 'download', 'install']) await assert.rejects(updates[action](), /not allowed/);
- assert.equal(calls.length, 3);
+ for (const action of ['check', 'install']) await assert.rejects(updates[action](), /not allowed/);
+ assert.equal(calls.length, 2);
 });
 
 test('IPC and preload contain no external database actions, even on bundled pages', () => {
@@ -151,15 +157,16 @@ test('IPC and preload contain no external database actions, even on bundled page
 test('only the bundled status page in the main window can open the worker UI', async () => {
 	const handlers = new Map(); let opened = 0;
 	const { registerIpc } = loadMain('ipc', { electron: { ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} }, app: {} } });
-	registerIpc({ window: { isOwnSender: id => id === 7 }, updater: {}, worker: { openUi: async () => { opened++; } } });
+	registerIpc({ window: { isOwnSender: id => id === 7, currentWorkerUrl: null, bundledPageUrl: 'file:///app/src/pages/worker.html' }, updater: {}, worker: { openUi: async () => { opened++; } } });
 	const exposed = {}; let event;
 	vm.runInNewContext(readFileSync(new URL('../dist/preload/index.js', import.meta.url), 'utf8'), { exports: {}, process, window: { location: { protocol: 'file:' } }, require: () => ({
 		contextBridge: { exposeInMainWorld: (name, value) => { exposed[name] = value; } },
 		ipcRenderer: { sendSync: () => null, invoke: async channel => handlers.get(channel)(event) }
 	}) });
-	event = { sender: { id: 7 }, senderFrame: { url: 'file:///app/pages/worker.html' } };
+	const main = (url, id = 7) => { const frame = { url, processId: 1, routingId: 1 }; return { sender: { id, mainFrame: frame }, senderFrame: frame }; };
+	event = main('file:///app/src/pages/worker.html?mode=status');
 	await exposed.shuffleDesktopWorker.openUi(); assert.equal(opened, 1);
-	for (const denied of [{ sender: { id: 7 }, senderFrame: { url: 'http://127.0.0.1:8000/' } }, { sender: { id: 8 }, senderFrame: { url: 'file:///app/pages/worker.html' } }]) {
+	for (const denied of [main('http://127.0.0.1:8000/'), main('file:///app/src/pages/worker.html', 8), main('file:///tmp/other.html')]) {
 		event = denied; await assert.rejects(exposed.shuffleDesktopWorker.openUi(), /not allowed/);
 	}
 	assert.equal(opened, 1);

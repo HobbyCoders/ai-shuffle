@@ -14,14 +14,10 @@ function makeBridge() {
 		window: {
 			getState: () => Promise.resolve({ maximized: false, fullscreen: false, focused: true }),
 			onStateChange: () => () => {},
-			close: () => {},
 			setTitleBarTheme: () => {}
 		},
 		shell: {
 			onCommand: () => () => {}
-		},
-		worker: {
-			getState: () => Promise.resolve({ phase: 'ready', port: 8000, url: 'http://127.0.0.1:8000', pid: 1, external: false, error: null, exitCode: null, startedAt: null, logPath: '' })
 		},
 		updates: {
 			getState: () => Promise.resolve(idle()),
@@ -29,8 +25,6 @@ function makeBridge() {
 				updateListeners.add(listener);
 				return () => updateListeners.delete(listener);
 			},
-			check: () => Promise.resolve(),
-			download: () => Promise.resolve(),
 			install
 		}
 	};

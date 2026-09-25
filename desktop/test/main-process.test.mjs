@@ -12,7 +12,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const URL_READY = 'http://127.0.0.1:8000';
 
 /** Runs dist/main/index.js against fakes of Electron and of every module with side effects. */
-async function launch({ stop = async () => {}, acknowledge = async () => true, realUpdater = false, postgresStart = null } = {}) {
+async function launch({ stop = async () => {}, acknowledge = async () => true, realUpdater = false, postgresStart = null, installed = null, registered = false } = {}) {
 	const file = path.join(desktopDir, 'dist/main/index.js');
 	const localRequire = createRequire(file);
 	const appEvents = new EventEmitter();
@@ -27,7 +27,11 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		on: (name, fn) => appEvents.on(name, fn),
 		whenReady: async () => {},
 		quits: 0,
-		quit() { app.quits++; }, relaunch() {}
+		quit() { app.quits++; }, relaunch() {},
+		protocol: [],
+		setAsDefaultProtocolClient(...args) { app.protocol.push(['set', ...args]); return true; },
+		isDefaultProtocolClient(...args) { app.protocol.push(['is', ...args]); return registered; },
+		removeAsDefaultProtocolClient(...args) { app.protocol.push(['remove', ...args]); return true; }
 	};
 	const pages = [];
 	let mainWindow;
@@ -56,7 +60,11 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 			this.emit('state', this.state);
 			return this.state;
 		}
-		async stop() { await stop(); this.state = { ...this.state, phase: 'stopped' }; this.emit('state', this.state); }
+		async stop(options = {}) {
+			this.stops = [...(this.stops ?? []), options.force ? 'force' : 'graceful'];
+			if (!options.force) await stop();
+			this.state = { ...this.state, phase: 'stopped' }; this.emit('state', this.state);
+		}
 		tail() { return []; }
 		async activeSessionCount() { return 0; }
 		async clearConnectionFile() {}
@@ -75,12 +83,13 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	}
 	let updater;
 	let menu;
+	let tray;
 	let ipc;
 	const replacements = {
 		electron: electronFake(app, errors),
 		'./close-dialog': { showCloseDialog: async () => true },
 		'./managed-context': { managedContext: () => null },
-		'./installed-entry': { installedContext: () => null },
+		'./installed-entry': { installedContext: () => installed },
 		'./installed-host': { installedLaunchArgs: () => [] },
 		'./ipc': { registerIpc: (deps) => { ipc = deps; } },
 		'./menu': { installMenu: (actions) => { menu = actions; } },
@@ -89,7 +98,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		'./disclosure': { AGENT_ACCESS: {}, agentAccessDetail: () => '', DisclosureStore: { forProfile: () => ({}) }, ensureAgentAccessAcknowledged: acknowledge },
 		'./postgres': { PostgresSupervisor, resolvePostgresBinaries: () => ({}) },
 		'./settings': { plainCipher: {}, SettingsStore: class { async load() {} postgres() { return null; } } },
-		'./tray': { installTray() {} },
+		'./tray': { installTray: (actions) => { tray = actions; } },
 		'./updater': { Updater: class extends (realUpdater ? loadUpdater(electronFake(app, errors)) : FakeUpdater) { constructor(...args) { super(...args); updater = this; } } },
 		'./installer-updates': { InstallerUpdates: class {}, installerPlatform: () => null },
 		'./window': { MainWindow, PARTITION: 'test' },
@@ -103,7 +112,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	}, { filename: file });
 	for (let i = 0; i < 20 && !(worker && worker.state.phase === 'ready'); i++) await tick();
 	await tick();
-	return { app, appEvents, pages, errors, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get ipc() { return ipc; }, get updater() { return updater; } };
+	return { app, appEvents, pages, errors, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get tray() { return tray; }, get ipc() { return ipc; }, get updater() { return updater; } };
 }
 
 function electronFake(app, errors) {
@@ -213,4 +222,34 @@ test('a failed restart after a failed update install is shown, not swallowed', a
 	assert.equal(main.errors[0][0], 'AI Shuffle could not restart');
 	assert.match(main.errors[0][1], /Could not stage the update/);
 	assert.match(main.errors[0][1], /pg_ctl: could not start server/);
+});
+
+test('NC-11: the tray Quit ends a wedged worker after its graceful stop fails', async () => {
+	const main = await launch({ stop: async () => { throw new Error('Worker did not finish stopping sessions'); } });
+	main.tray.forceQuit();
+	for (let i = 0; i < 20 && main.app.quits === 0; i++) await tick();
+	assert.deepEqual(main.worker.stops, ['graceful', 'force'], 'graceful first, then the kill');
+	assert.equal(main.app.quits, 1);
+	// The app's own before-quit now lets it go.
+	let prevented = false;
+	main.appEvents.emit('before-quit', { preventDefault: () => { prevented = true; } });
+	assert.equal(prevented, false);
+});
+
+test('NC-11: the tray Quit with a healthy worker is the ordinary graceful quit', async () => {
+	const main = await launch();
+	main.tray.forceQuit();
+	for (let i = 0; i < 20 && main.app.quits === 0; i++) await tick();
+	assert.deepEqual(main.worker.stops, ['graceful']);
+	assert.equal(main.app.quits, 1);
+});
+
+test('NC-16: no aishuffle:// handler is registered, and one left by an older build is removed', async () => {
+	const executable = '/Programs/AI Shuffle/AI Shuffle.exe';
+	const stale = await launch({ installed: { executable }, registered: true });
+	assert.deepEqual(stale.app.protocol, [['is', 'aishuffle', executable], ['remove', 'aishuffle', executable]]);
+	const clean = await launch({ installed: { executable } });
+	assert.deepEqual(clean.app.protocol, [['is', 'aishuffle', executable]]);
+	const development = await launch();
+	assert.deepEqual(development.app.protocol, [], 'an unpackaged run never touches the OS handler');
 });

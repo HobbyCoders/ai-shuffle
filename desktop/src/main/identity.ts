@@ -4,6 +4,7 @@ export interface DesktopIdentity {
 	preview: boolean;
 	appId: string;
 	name: string;
+	/** The URL scheme older builds registered; kept only to remove that registration (index.ts). */
 	protocol: string;
 	port: number;
 	protectedPort: number;

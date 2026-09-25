@@ -51,18 +51,6 @@ export function notesSummary(notes: string | null | undefined, limit = 280): str
 	return text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}…` : text;
 }
 
-export interface DesktopWorkerState {
-	phase: 'idle' | 'starting' | 'ready' | 'stopping' | 'stopped' | 'failed';
-	port: number;
-	url: string;
-	pid: number | null;
-	external: boolean;
-	error: string | null;
-	exitCode: number | null;
-	startedAt: string | null;
-	logPath: string;
-}
-
 export type DesktopCommand =
 	| 'new-session'
 	| 'command-palette'
@@ -80,6 +68,10 @@ export interface DesktopAgentAccess {
 	footer: string;
 }
 
+/**
+ * The part of the preload bridge (desktop/src/preload/index.ts) the web UI
+ * uses. The preload has a few more members for the desktop CI scripts.
+ */
 export interface ShuffleDesktopBridge {
 	version: string;
 	platform: DesktopPlatform;
@@ -88,21 +80,19 @@ export interface ShuffleDesktopBridge {
 	window: {
 		getState(): Promise<DesktopWindowState>;
 		onStateChange(listener: (state: DesktopWindowState) => void): () => void;
-		close(): void;
 		setTitleBarTheme(theme: { background: string; symbol: string }): void;
 	};
 	shell: {
 		onCommand(listener: (command: DesktopCommand | string) => void): () => void;
 	};
-	/** The local worker this window belongs to. */
-	worker: {
-		getState(): Promise<DesktopWorkerState>;
-	};
+	/**
+	 * Checking and downloading go through the worker's update bridge (the
+	 * shell polls the worker for requests), so the page only reads the state
+	 * and asks for the install.
+	 */
 	updates: {
 		getState(): Promise<DesktopUpdateState>;
 		onState(listener: (state: DesktopUpdateState) => void): () => void;
-		check(): Promise<void>;
-		download(): Promise<void>;
 		install(): Promise<void>;
 	};
 }

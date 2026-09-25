@@ -279,3 +279,41 @@ test('installer checks never replace Windows source updates and respect the no-u
  assert.equal(off.updater.current.phase, 'unsupported');
  off.updater.start(); assert.equal(off.timers.length, 0);
 });
+
+test('NC-6: the worker bridge ticks every 8 s, not 2 s, and pushes a new phase at once', async () => {
+ const delays = []; const ticks = [];
+ const module = { exports: {} };
+ vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
+  exports: module.exports, module, require: id => id === 'electron' ? { app: {} } : path, process: { env: {} },
+  setTimeout: () => 0, clearTimeout() {}, setInterval: (fn, ms) => { delays.push(ms); ticks.push(fn); return ticks.length; }, clearInterval() {}, Date
+ });
+ const { Updater, BRIDGE_INTERVAL_MS } = module.exports;
+ assert.equal(BRIDGE_INTERVAL_MS, 8000);
+ // The worker treats the desktop updater as gone after 10 s of silence and drops a request after 10 s.
+ assert(BRIDGE_INTERVAL_MS < 10_000);
+ const updater = new Updater(); const seen = [];
+ let release; const gate = () => new Promise(resolve => { release = resolve; });
+ updater.useApplications(source({ check: async () => { await gate(); return { kind: 'available', version: 'bbbbbbbbbbbb' }; } }));
+ updater.setBridge(async state => { seen.push(state.phase); return {}; }, async () => false);
+ updater.start();
+ assert.deepEqual(delays.filter(ms => ms < 60_000), [8000], 'one bridge interval, no 2 s heartbeat');
+ await new Promise(setImmediate);
+ assert.deepEqual(seen, ['idle'], 'one exchange at start');
+ // An explicit check: "checking" and then "available" reach the worker without waiting for the tick.
+ const check = updater.check(true); await new Promise(setImmediate);
+ assert.deepEqual(seen, ['idle', 'checking']);
+ release(); await check; await new Promise(setImmediate);
+ assert.deepEqual(seen, ['idle', 'checking', 'available']);
+ // Progress inside a phase waits for the interval.
+ updater.useApplications(source({ download: async progress => { progress(10, 'a'); progress(20, 'b'); return { kind: 'ready', version: 'bbbbbbbbbbbb' }; } }));
+ seen.length = 0; updater.set({ phase: 'available' }); await new Promise(setImmediate);
+ seen.length = 0; await updater.download(); await new Promise(setImmediate);
+ assert.deepEqual(seen, ['downloading', 'ready'], 'no exchange per progress tick');
+ // A phase change during an exchange is reported right after it, not dropped.
+ seen.length = 0; let hold;
+ updater.setBridge(async state => { seen.push(state.phase); if (!hold) await new Promise(resolve => { hold = resolve; }); return {}; }, async () => false);
+ const ex = updater.exchange(); updater.set({ phase: 'error' }); hold(); await ex; await new Promise(setImmediate);
+ assert.deepEqual(seen, ['ready', 'error']);
+ updater.stop(); seen.length = 0; updater.set({ phase: 'idle' }); await new Promise(setImmediate);
+ assert.deepEqual(seen, [], 'nothing after stop');
+});

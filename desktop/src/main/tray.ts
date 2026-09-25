@@ -12,6 +12,8 @@ export interface TrayActions {
 	updatesEnabled?: boolean;
 	openInBrowser(): void;
 	checkForUpdates(): void;
+	/** Quit, killing the worker if its graceful stop fails or hangs. */
+	forceQuit(): void;
 }
 
 export function installTray(actions: TrayActions): Tray | null {
@@ -32,7 +34,8 @@ export function installTray(actions: TrayActions): Tray | null {
 			{ type: 'separator' },
 			{ label: 'Worker Status', click: () => actions.openWorkerStatus() },
 			{ type: 'separator' },
-			{ role: 'quit' }
+			// Not role 'quit': this one still quits when the worker is wedged.
+			{ label: 'Quit', click: () => actions.forceQuit() }
 		])
 	);
 	tray.on('click', () => actions.show());

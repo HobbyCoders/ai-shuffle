@@ -758,10 +758,15 @@ export class WorkerSupervisor extends EventEmitter {
 		return requestLifecycle(this._state.port, this.lifecycleToken, action, state, this.listener);
 	}
 
-	async stop(): Promise<void> {
+	/**
+	 * Stop the worker we launched. `force` skips asking it to stop its sessions
+	 * first; only the quit path uses it, after that request already failed or
+	 * hung, so a wedged worker cannot keep the app open.
+	 */
+	async stop({ force = false }: { force?: boolean } = {}): Promise<void> {
 		// Windows taskkill does not run Python's lifespan cleanup. Persist Stop
 		// BEFORE terminating the process tree, while PostgreSQL is still alive.
-		if (this.child && this.child.exitCode === null && this._state.phase === 'ready' && !this._state.external) {
+		if (!force && this.child && this.child.exitCode === null && this._state.phase === 'ready' && !this._state.external) {
 			const reply = await this.lifecycleRequest('stop-sessions');
 			if (reply.stopped !== true) throw new Error('Worker did not finish stopping sessions');
 		}

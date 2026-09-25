@@ -1,6 +1,6 @@
 // Evaluated by the desktop main process in the app page (or bundled fallback).
 // Keep this aligned with ConfirmDialog.svelte: inherit the user's live theme tokens.
-(async function showCloseDialog({ activeCount = null, error = false } = {}) {
+(async function showCloseDialog({ activeCount = null, error = false, offerForce = false } = {}) {
     const previousFocus = document.activeElement;
     const style = document.createElement('style');
     style.textContent = `
@@ -39,12 +39,16 @@
     const activity = activeCount === null ? 'Unable to check for active sessions.' :
         `You have ${activeCount} active session${activeCount === 1 ? '' : 's'}.`;
     dialog.querySelector('h2').textContent = title;
-    dialog.querySelector('p').textContent = error
-        ? 'AI Shuffle could not confirm that every session has stopped. The app will stay open. Wait a moment, then try closing again.'
-        : `${activity} Closing the app will stop ${activeCount === 1 ? "it" : "any active sessions"}. Are you sure you want to close?`;
+    dialog.querySelector('p').textContent = !error
+        ? `${activity} Closing the app will stop ${activeCount === 1 ? "it" : "any active sessions"}. Are you sure you want to close?`
+        : offerForce
+            ? 'AI Shuffle still could not confirm that every session has stopped. The worker may be stuck. Quit Anyway ends it now; sessions that were running may be interrupted.'
+            : 'AI Shuffle could not confirm that every session has stopped. The app will stay open. Wait a moment, then try closing again.';
     const cancel = dialog.querySelector('.quit-cancel');
     const confirm = dialog.querySelector('.quit-confirm');
-    if (error) confirm.remove();
+    // A first failure offers no destructive action; a repeated one offers to quit anyway.
+    if (error && !offerForce) confirm.remove();
+    else if (error) confirm.textContent = 'Quit Anyway';
     document.head.append(style);
     document.body.append(dialog);
     try {
