@@ -147,7 +147,7 @@ curl -X POST http://localhost:8000/api/v1/plugins/install \
 
 The `plugin_id` is in the format `name@marketplace`. The `scope` can be `"user"` (global) or `"project"` (project-specific).
 
-Installation only takes files from inside the plugin's source: symlinks that point outside the marketplace repository (or outside a cloned plugin) are skipped. A plugin name or version containing a path separator is rejected. External sources must use an `https://`, `http://`, `ssh://` or `git@` URL. An entry that pins a `sha` installs exactly that commit, and the install fails if that commit cannot be fetched.
+Installation only takes files from inside the plugin's source: symlinks that point outside the marketplace repository (or outside a cloned plugin) are skipped. A plugin or marketplace name or version that is not a single plain folder name (one containing a slash, or `.` or `..`) is rejected. External sources must use an `https://`, `http://`, `ssh://` or `git@` URL. An entry that pins a `sha` installs exactly that commit, and the install fails if that commit cannot be fetched.
 
 ### Batch Install
 

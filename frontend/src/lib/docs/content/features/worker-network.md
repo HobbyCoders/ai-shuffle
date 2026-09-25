@@ -14,7 +14,7 @@ Everything the network shares is encrypted with one network key that only the me
 
 Worker connections are managed in Settings > Providers > Devices (owner only). Until a worker joins a network, that section shows **Set up this worker**. The choices are:
 
-- **Sign in to your Shuffle account.** Sign the worker into the same account as your other workers (the setup wizard's *Account & GitHub* step does the same). The first worker on an account founds its network; every later worker is admitted by whichever of your workers is online, with nothing to approve. Phones signed in to the account see and control every worker on it.
+- **Sign in to your Shuffle account.** Use **Sign in** at the top of the section to sign the worker into the same account as your other workers (the setup wizard's *Account & GitHub* step does the same). The first worker on an account founds its network; every later worker is admitted by whichever of your workers is online, with nothing to approve. Phones signed in to the account see and control every worker on it.
 - **Join with an invite.** On an existing worker open Settings > Providers > Devices > *Add device* > *Worker*. Scan the QR code or paste the link on the new worker. The one-time code is the authorization: the new worker joins as soon as it reaches the inviter, copies a snapshot and starts syncing.
 - **Keep separate settings.** The worker keeps its own settings. You can sign in or connect other devices later.
 

@@ -22,7 +22,7 @@ Notes provide a simple, global space for capturing ideas, tracking bugs, and pla
 ### Creating a Note
 
 1. Navigate to **Notes** in the sidebar
-2. Click **New Note** (+ button)
+2. Click **New note**
 3. Enter a title and content
 4. Add tags for organization
 5. Notes auto-save as you type

@@ -99,10 +99,10 @@ Import sessions from the Claude Code CLI:
 
 ```bash
 curl -X POST "http://localhost:8000/api/v1/projects/proj_abc/sync-sessions?profile_id=YOUR_AGENT_ID" \
-  -H "Authorization: Bearer aih_your_key"
+  -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
-This finds Claude Code CLI sessions recorded for this project's directory (in the CLI's own session store) and imports any not yet listed. `profile_id` is the agent the imported sessions use.
+This finds Claude Code CLI sessions recorded for this project's directory (in the CLI's own session store) and imports any not yet listed. `profile_id` is the agent the imported sessions use; without it, the project's default agent is used. Imported sessions belong to the owner, so an API key cannot open them afterwards.
 
 ## Chat History
 

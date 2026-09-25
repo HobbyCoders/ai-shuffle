@@ -18,6 +18,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Check automation schedules that use weekday numbers. They now follow standard cron: 0 and 7 are Sunday and `1-5` is Monday to Friday. Before, they ran one day late (`1-5` ran Tuesday to Saturday). Schedules that use day names, such as `mon-fri`, are unchanged. See [Automations](/docs/features/automations#cron).
 - If you use API users limited to certain agents, make sure every call uses one of those agents. Calls for any other agent are now refused, and an API user with several agents must name the one it wants.
 - If a chat connection you created in the app never answered, give its API user an agent in **Settings → API**.
+- If an integration uses an API key to read, continue or stop sessions that key did not start (for example sessions you started in the app, or ones started with another key), it is now refused. Start those sessions with the same key, or use an owner token.
 
 ### Install and packaging
 
@@ -57,6 +58,18 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Signing out with an owner token revokes that token.
 - Hooks run without the app's secrets in their environment, credentials in URLs are removed from webhook payloads, and a guard hook that cannot start blocks the tool call instead of allowing it.
 - An unused route that returned a decrypted provider key is removed.
+- API keys act only on sessions they started: session requests, conversations, live sync, the chat connection and voice calls refuse another key's or the owner's sessions. The owner is unrestricted.
+- "Always allow" from an API key is remembered for that session only, so a key can no longer save a rule that approves tools in the owner's sessions.
+- Voice call routes (secret, call, hang up, state, configuration and the audio connection) now check who owns the session, like other session requests.
+- The built-in browser now runs behind a local proxy that checks every connection, including WebSockets and each redirect, against the address it actually connects to. Cloud metadata addresses and the app's own ports are always blocked; other services on this computer stay reachable by default. The browser does not start without the proxy.
+- The browser's page snapshots no longer show what is typed in password fields.
+- Plugin installs refuse names and versions that are not plain folder names, clone URLs that are not https, http, ssh or `git@`, and links that point outside the plugin, and uninstalling never deletes anything outside the plugin folder.
+- Importing settings refuses plugin and marketplace names that would read or write outside the plugin folders.
+- Discarding changes in Git can no longer delete the project folder, the repository or a linked folder; only files inside the checkout are discarded.
+- Worktree and per-branch checkout paths that would land outside the project are refused.
+- On Claude subscription sessions, "Always allow" on a Bash command whose programs cannot be worked out (such as `echo $(whoami)`) now allows that one call instead of every Bash command.
+- On Claude subscription sessions too, a tool call is denied when its `PreToolUse` hooks cannot be run or run past their deadline.
+- Computer use starts only after an approval was recorded for that call, whether it came from a prompt, a remembered rule, a hook or the permission mode.
 
 ### Agents and providers
 
@@ -70,22 +83,35 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Each hook's own timeout now applies; before, every hook stopped at 60 seconds. A hook that times out is stopped together with everything it started.
 - PostToolUse, UserPromptSubmit, SessionStart, SessionEnd, SubagentStop, PreCompact and Notification hooks now run. Before, only PreToolUse and Stop hooks did.
 - A Stop webhook can block by returning `{"decision": "block"}`, a bad tool pattern no longer skips the event's other hooks, and hook data over 64 KiB is shortened but stays valid JSON.
-- Message hooks are not supported. They now report an error instead of appearing to succeed.
+- Message hooks are not supported. They now report an error instead of appearing to succeed, and the hook editor no longer offers them.
+- `Notification` and `SessionEnd` hooks now fire on Claude subscription sessions too.
+- The `jq` that hook commands get now behaves like the real `jq` in many more cases, stops runaway programs, and hands anything it does not support to a real `jq` if one is installed.
+- Messages you send while an agent is working are no longer lost or delivered twice when the turn ends, fails or waits for background work at that moment, and removing a queued message works with every provider.
 
 ### Sessions and interface
 
 - Long sessions have a redesigned timeline for moving through earlier turns.
 - Saving a remembered fact works when the agent also sends a revision.
 - The usage panel keeps Claude usage after a restart and on every device. Unchanged readings no longer look stale, a window that has rolled over reads "awaiting next report" instead of "resets in now", and stale sections show when they last updated.
+- The usage panel re-reads usage at most every 30 seconds however often you open it, keeps its last readings when a read fails, and a stale provider shows when it last updated and when it checks next.
 - OpenAI spend keeps updating, background API queries update the rate-limit readings, and the 7- and 30-day analytics ranges cover exactly 7 and 30 days.
 - Access requests in a chat update when something changes instead of asking the server every two seconds, and **Saved connections** refresh in every open session.
 - Links between documentation pages open inside the Docs panel instead of a missing page. The docs were checked against the app and corrected, including hooks, connector setup, menu paths and the API reference, which now covers the endpoints it left out.
 - Menus and messages name the right settings pages (**Settings → Providers → Devices**, **Settings → Account**, **Settings → API**).
 - The broken "Manage project knowledge" search action is removed.
+- A session file with a damaged or unusual line no longer shows an empty history, token totals are no longer counted several times, and rewinding to an earlier reply keeps the reply you chose.
+- The automation edit form shows the webhook URL and a secret you can sign requests with, and run history shows what started each run (Schedule, Event, Connector, Webhook or Manual) instead of always "Manual".
+- Plugin details show the Hooks badge for plugins that contribute hooks, and plugin errors show the real reason.
+- The chat connection survives a malformed message instead of closing.
+- Large file uploads in the built-in browser get more time instead of failing after 30 seconds.
 
 ### Connectors
 
 - Creating a chat or incoming-webhook connection now asks which agent answers it. Before, new connections refused every message until an agent was assigned elsewhere.
+- Changing part of a connection's settings through the API keeps the rest (such as the bot token) instead of replacing them all, and a running connection restarts with the result.
+- Turning a connection on or off through the API now also starts or stops it.
+- Starting a connection that is already running no longer answers every message twice.
+- Incoming hooks whose name is `test`, `activate`, `deactivate` or `restart` are reachable again.
 
 ### Desktop app (beta)
 
@@ -93,6 +119,9 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - It tells you on first launch that agents run as your user account.
 - Each launch uses its own token between the window and its worker.
 - `Start AI Shuffle.cmd` on Windows now starts the desktop app; a broken path stopped it before.
+- **Worker → Worker Status…** now offers **Open AI Shuffle** to return to the app.
+- An update that fails partway reports the failure and starts the worker and database again instead of leaving them stopped.
+- A worker that cannot start shows an error instead of staying on "starting", and quitting no longer tries to stop a process that is not the app's database.
 
 ### Android app
 
@@ -105,3 +134,12 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Remote access keeps working through short outages of the connection service.
 - The connection service no longer stores synced data. Sync between your workers stays end to end encrypted.
 - Account devices that ask for owner access must be approved on each worker (**Settings → Providers → Devices**).
+
+### Fixed
+
+- Automations: a repeated result is no longer delivered again inside the deduplication window, an approved run no longer runs alongside another run of the same automation, and failed runs show the real error.
+- Files: a slow folder listing no longer replaces the folder you moved to, and a failed file in a multi-delete is reported.
+- Voice calls: a dropped connection shows its error, and a call that drops after its 50-minute renewal no longer shows as live.
+- Two parts of the app sharing a keyboard shortcut no longer remove each other's binding.
+- A requeued permission prompt no longer causes an error in the app.
+- The REST streaming query ends on its error when a turn crashes, instead of also reporting a clean finish.
