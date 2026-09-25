@@ -2,7 +2,7 @@
 Git worktree API endpoints.
 
 Provides endpoints for worktree management including:
-- List, create, get, delete, reopen worktrees
+- List, get, delete, reopen worktrees
 - Sync worktree records with git
 - Browse files within worktrees
 """
@@ -23,7 +23,7 @@ from app.core.project_utils import get_worktree_working_dir
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
-from app.api.common import check_project_access
+from app.api.common import check_project_access, format_file_size, get_file_extension
 from app.api.git_helpers import run_git, get_project_path, invalidate_working_dir_cache
 
 from app.api.schemas.git import (
@@ -32,7 +32,6 @@ from app.api.schemas.git import (
     WorktreeGitStatus,
     WorktreeInfo,
     WorktreeListResponse,
-    WorktreeCreateStandalone,
     WorktreeSyncResponse,
     WorktreeFileInfo,
     WorktreeFilesResponse,
@@ -223,109 +222,6 @@ def _invalidate_worktree_status_cache(project_id: str) -> None:
     _worktree_status_cache.pop(project_id, None)
 
 
-def _copy_uncommitted_files(main_dir: str, worktree_path: str) -> dict:
-    """
-    Copy uncommitted files (modified and untracked) from main repo to worktree.
-
-    This allows users to continue working on uncommitted changes in a worktree
-    without having to commit or stash first.
-
-    Config files are never copied, whatever git status says about them: see
-    ``checkout_manager._is_never_provisioned``. A ``.env`` that is gitignored
-    already cannot reach this loop, but one that is merely untracked can, and a
-    worktree must not end up holding its own copy of a database password.
-    Configuration reaches worktree processes by env-var reference instead.
-
-    Args:
-        main_dir: Path to the main repository
-        worktree_path: Path to the worktree
-
-    Returns:
-        Dict with copied file counts and any errors
-    """
-    import shutil
-
-    from app.core.checkout_manager import _is_never_provisioned
-
-    result = {
-        "modified_copied": 0,
-        "untracked_copied": 0,
-        "skipped_config": [],
-        "errors": []
-    }
-
-    try:
-        # Get git status to find uncommitted files
-        status = git_service.get_status(main_dir)
-
-        main_path = Path(main_dir)
-        worktree_abs_path = Path(worktree_path)
-
-        # Copy modified files (staged and unstaged)
-        modified_files = status.get("modified", [])
-        # Also include staged files that might be renamed or added
-        staged_files = [s.get("file") for s in status.get("staged", []) if s.get("file")]
-        all_modified = set(modified_files + staged_files)
-
-        for file_path in all_modified:
-            try:
-                if _is_never_provisioned(file_path):
-                    result["skipped_config"].append(file_path)
-                    continue
-                src = main_path / file_path
-                dest = worktree_abs_path / file_path
-
-                if src.exists():
-                    # Ensure parent directory exists
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-
-                    if src.is_file():
-                        shutil.copy2(src, dest)
-                        result["modified_copied"] += 1
-                    elif src.is_dir():
-                        if dest.exists():
-                            shutil.rmtree(dest)
-                        shutil.copytree(src, dest)
-                        result["modified_copied"] += 1
-            except Exception as e:
-                result["errors"].append(f"Failed to copy modified file {file_path}: {str(e)}")
-
-        # Copy untracked files
-        untracked_files = status.get("untracked", [])
-        for file_path in untracked_files:
-            try:
-                if _is_never_provisioned(file_path):
-                    result["skipped_config"].append(file_path)
-                    continue
-                src = main_path / file_path
-                dest = worktree_abs_path / file_path
-
-                if src.exists():
-                    # Ensure parent directory exists
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-
-                    if src.is_file():
-                        shutil.copy2(src, dest)
-                        result["untracked_copied"] += 1
-                    elif src.is_dir():
-                        if dest.exists():
-                            shutil.rmtree(dest)
-                        shutil.copytree(src, dest)
-                        result["untracked_copied"] += 1
-            except Exception as e:
-                result["errors"].append(f"Failed to copy untracked file {file_path}: {str(e)}")
-
-        logger.debug(
-            f"Copied uncommitted files to worktree: "
-            f"{result['modified_copied']} modified, {result['untracked_copied']} untracked"
-        )
-
-    except Exception as e:
-        result["errors"].append(f"Failed to get git status: {str(e)}")
-
-    return result
-
-
 def _require_worktree_for_project(
     worktree_id: str, project_id: str, *, use_details: bool = False
 ) -> dict:
@@ -364,24 +260,6 @@ def _require_worktree_for_project(
         )
 
     return worktree
-
-
-def _get_file_extension(name: str) -> str:
-    """Get lowercase file extension without the dot"""
-    ext = Path(name).suffix.lower()
-    return ext[1:] if ext else ""
-
-
-def _format_file_size(size_bytes: int) -> str:
-    """Format file size in human-readable format."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    else:
-        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
 
 
 # =============================================================================
@@ -519,7 +397,7 @@ async def reopen_worktree(
     """
     check_project_access(request, project_id)
 
-    worktree = _require_worktree_for_project(worktree_id, project_id)
+    _require_worktree_for_project(worktree_id, project_id)
 
     try:
         updated = worktree_manager.recreate_worktree(worktree_id)
@@ -717,9 +595,9 @@ async def list_worktree_files(
                 name=item.name,
                 type="directory" if is_dir else "file",
                 size=stat_info.st_size if not is_dir else None,
-                sizeFormatted=_format_file_size(stat_info.st_size) if not is_dir else None,
+                sizeFormatted=format_file_size(stat_info.st_size) if not is_dir else None,
                 path=str(item.relative_to(worktree_base)),
-                extension=_get_file_extension(item.name) if not is_dir else None,
+                extension=get_file_extension(item.name) if not is_dir else None,
                 modifiedAt=datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
                 createdAt=datetime.fromtimestamp(stat_info.st_ctime).isoformat(),
             )

@@ -136,8 +136,11 @@ async def test_handle_stop_interrupts_off_the_event_loop(mock_db, loop_thread):
 
 
 async def test_handle_interrupt_for_query_interrupts_off_the_event_loop(
-    mock_db, loop_thread
+    mock_db, loop_thread, monkeypatch
 ):
+    # Nothing settles the interrupted turn here, so the handler polls out the
+    # whole drain window; keep it short (8s by default).
+    monkeypatch.setattr(cwh, "_INTERRUPT_DRAIN_TIMEOUT_SECONDS", 0.1)
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="live")["id"]
     from app.db import runs

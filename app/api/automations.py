@@ -6,14 +6,14 @@ run history, approval workflow, and statistics.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import List
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 
 from app.core.models import (
     Automation, AutomationCreate, AutomationUpdate,
     AutomationRun, AutomationApproval, AutomationStats,
-    AutomationTestResult, VALID_AUTOMATION_TRIGGER_TYPES, TriggerItem,
+    AutomationTestResult, VALID_AUTOMATION_TRIGGER_TYPES,
 )
 from app.api.auth import require_admin
 from app.db import database

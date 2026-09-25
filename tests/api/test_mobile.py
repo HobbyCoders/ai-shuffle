@@ -784,11 +784,7 @@ class TestModuleImports:
         """Mobile models should be importable."""
         from app.core.models import (
             MobileDevice,
-            MobileDeviceRegisterRequest,
-            MobileDeviceRegisterResponse,
             PendingAction,
-            ActionConfirmRequest,
-            PushTokenRequest,
         )
         assert MobileDevice is not None
         assert PendingAction is not None

@@ -20,7 +20,8 @@ from app.core.platform import is_local_mode
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
-from app.api.common import check_project_access, format_file_size, api_error_handler
+from app.api.common import check_project_access, format_file_size, get_file_extension, api_error_handler, is_path_safe
+from app.api.sessions_helpers import check_session_access_for_api_user
 from app.core.project_links import is_link_locked
 
 logger = logging.getLogger(__name__)
@@ -450,10 +451,17 @@ async def unlink_project(project_id: str, token: str = Depends(require_admin)):
     return await run_sync(_unlink)
 
 
-def get_file_extension(name: str) -> str:
-    """Get lowercase file extension without the dot"""
-    ext = Path(name).suffix.lower()
-    return ext[1:] if ext else ""
+def _get_project_session(session_id: str, project_id: str, api_user: Optional[dict]) -> Optional[dict]:
+    """Load a session for a project-scoped route; 404 if it is another project's, 403 if denied."""
+    session = database.get_session(session_id)
+    if session:
+        if session.get("project_id") != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session not found: {session_id}"
+            )
+        check_session_access_for_api_user(api_user, session)
+    return session
 
 
 @router.get("/{project_id}/files")
@@ -467,6 +475,7 @@ async def list_project_files(
 ):
     """List files in a project directory. API users can only access their assigned project."""
     check_project_access(request, project_id)
+    api_user = get_api_user_from_request(request)
 
     def _list():
         # ONE hop for the whole listing. Everything here is blocking: the
@@ -479,7 +488,7 @@ async def list_project_files(
         if session_id:
             from app.core.project_resolver import resolve_existing_cwd
 
-            session = database.get_session(session_id)
+            session = _get_project_session(session_id, project_id, api_user)
             if session:
                 cwd = resolve_existing_cwd(session)
                 if cwd:
@@ -488,6 +497,11 @@ async def list_project_files(
         if session_cwd is not None:
             base_path = session_cwd
             full_path = base_path / path if path else base_path
+            if not is_path_safe(full_path, base_path):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Path escapes session checkout"
+                )
 
             if not full_path.exists():
                 raise HTTPException(
@@ -533,6 +547,11 @@ async def list_project_files(
         base_path = get_project_working_dir_as_path(project)
         if path:
             full_path = validate_project_path(f"{project['path']}/{path}")
+            if not is_path_safe(full_path, base_path):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Path escapes project directory"
+                )
         else:
             full_path = base_path
 
@@ -991,6 +1010,7 @@ async def list_chat_history(
     from app.core.jsonl_parser import list_chat_history_sessions
 
     check_project_access(request, project_id)
+    api_user = get_api_user_from_request(request)
 
     def _load():
         # ONE hop for the working-dir resolution AND the history scan. The scan
@@ -1002,7 +1022,7 @@ async def list_chat_history(
         if not worktree_id and session_id:
             from app.core.project_resolver import resolve_existing_cwd
 
-            session = database.get_session(session_id)
+            session = _get_project_session(session_id, project_id, api_user)
             if session:
                 cwd = resolve_existing_cwd(session)
                 if cwd:

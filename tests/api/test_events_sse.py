@@ -12,8 +12,10 @@ is exercised by calling ``_dispatch`` by hand.
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from starlette.requests import ClientDisconnect
 
@@ -365,11 +367,34 @@ def test_is_client_disconnect_classifier():
     )
 
 
+def _request(api_user=None):
+    return SimpleNamespace(state=SimpleNamespace(api_user=api_user))
+
+
 async def test_endpoint_returns_sse_response(mock_db, gw):
-    response = await stream_session_events("sess-f", 0, token="test-token")
+    from app.db import database
+
+    database.create_session("sess-f", "default")
+    response = await stream_session_events(_request(), "sess-f", 0, token="test-token")
     try:
         assert response.media_type == "text/event-stream"
         assert response.headers["cache-control"] == "no-cache"
         assert response.headers["x-accel-buffering"] == "no"
     finally:
         await response.body_iterator.aclose()
+
+
+async def test_endpoint_unknown_session_is_404(mock_db, gw):
+    with pytest.raises(HTTPException) as exc:
+        await stream_session_events(_request(), "sess-missing", 0, token="test-token")
+    assert exc.value.status_code == 404
+
+
+async def test_endpoint_denies_api_user_outside_session_profile(mock_db, gw):
+    from app.db import database
+
+    database.create_session("sess-g", "default")
+    api_user = {"id": "u1", "project_id": None, "profile_id": "other-profile"}
+    with pytest.raises(HTTPException) as exc:
+        await stream_session_events(_request(api_user), "sess-g", 0, token="test-token")
+    assert exc.value.status_code == 403

@@ -1,5 +1,4 @@
 """Command discovery uses the selected runtime and authorizes before disk reads."""
-from types import SimpleNamespace
 from unittest.mock import Mock
 import pytest
 from fastapi import HTTPException

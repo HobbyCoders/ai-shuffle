@@ -1,8 +1,7 @@
 """
 Session helper functions, models, and shared state.
 
-Extracted from sessions.py for maintainability. All symbols are
-re-exported from sessions.py for backward compatibility.
+Extracted from sessions.py for maintainability.
 """
 
 from typing import List, Optional
@@ -166,9 +165,8 @@ class CreateWorktreeSessionRequest(BaseModel):
     create_new_branch: bool = False  # False = use existing branch, True = create new branch
     # Optional first-prompt kickoff — when ``prompt`` is set the backend
     # persists the user message, migrates any pending uploads into the new
-    # worktree, and launches ``run_query`` in a detached task. This lets the
-    # user lock their phone / switch sessions during creation without losing
-    # the in-flight query (it runs server-side regardless of WS state).
+    # worktree, and submits a durable first turn, so the query runs server-side
+    # regardless of WS state.
     prompt: Optional[str] = None
     overrides: Optional[dict] = None
     pending_upload_paths: Optional[List[str]] = None
@@ -193,9 +191,9 @@ class WorktreeSessionResponse(BaseModel):
     # The materialized checkout path (v2) or the legacy worktree path.
     worktree_path: Optional[str] = None
     status: str
-    # True when ``prompt`` was provided and the backend has already spawned
-    # a ``run_query`` task for the new session. Frontend uses this flag to
-    # skip sending a redundant WS ``query`` message.
+    # True when ``prompt`` was provided and the backend has already submitted
+    # the first turn. Frontend uses this flag to skip sending a redundant WS
+    # ``query`` message.
     query_started: bool = False
     upload_migration_errors: Optional[List[str]] = None
 

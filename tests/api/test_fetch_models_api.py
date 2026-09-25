@@ -12,7 +12,6 @@ monkeypatch on ``app.core.http_client.get_http_client``.
 """
 
 import httpx
-import pytest
 
 from app.api import model_providers as mp_api
 from app.core import encryption, model_catalog_presets

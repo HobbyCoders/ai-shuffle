@@ -5,13 +5,12 @@ Security API routes for audit logging
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request, Depends, status
+from fastapi import APIRouter, Request, Depends
 
 from app.core.models import (
     AuditLogResponse,
     AuditLogEntry
 )
-from app.core import audit_service
 from app.api.auth import require_admin
 from app.db import database as db
 from app.db.async_database import run_sync

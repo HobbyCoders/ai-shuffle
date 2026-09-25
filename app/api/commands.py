@@ -109,8 +109,6 @@ def get_working_dir_for_project(
 ) -> str:
     """Get the working directory for a project, its worktree, or a v2 branch
     session's own checkout (sessions.branch + project_v2_id).
-
-    .. deprecated:: Use :func:`app.api.common.resolve_project_path` instead.
     """
     if not worktree_id and session_id:
         from app.core.project_resolver import resolve_existing_cwd
@@ -220,16 +218,6 @@ async def get_command(
         model=cmd.model,
         is_interactive=False
     )
-
-
-class ExecuteCommandResponseV2(BaseModel):
-    """Enhanced response from command execution with REST API support"""
-    success: bool
-    message: str
-    expanded_prompt: Optional[str] = None
-    is_interactive: bool = False
-    is_rest_api: bool = False
-    api_endpoint: Optional[str] = None
 
 
 @router.post("/execute", response_model=ExecuteCommandResponse)
@@ -1210,7 +1198,6 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # Chat rewind is the primary operation - if it succeeds, the operation is successful
     # File rewind failure is a partial success, not a total failure
     chat_success = not request.restore_chat or chat_rewound
-    file_success = not request.restore_files or files_rewound
 
     # Success if chat rewind worked (or wasn't requested)
     success = chat_success
@@ -1397,33 +1384,3 @@ async def execute_rewind_legacy(session_id: str, request: RewindRequest, http_re
         restore_option=request.restore_option,
         error=v2_response.error
     )
-
-
-@router.get("/rewind/status")
-async def get_rewind_status():
-    """
-    Get current rewind status.
-
-    V2: No longer uses pending rewind configuration.
-    Returns info about rewind capability.
-    """
-    return {
-        "version": "v2",
-        "method": "direct_jsonl",
-        "description": "Rewind via direct JSONL truncation - no PTY/CLI bridge needed",
-        "has_pending": False,
-        "pending_rewind": None
-    }
-
-
-@router.post("/rewind/clear")
-async def clear_pending_rewind():
-    """
-    Clear any pending rewind configuration.
-
-    V2: No-op since we no longer use pending rewind config.
-    """
-    return {
-        "success": True,
-        "message": "V2 rewind doesn't use pending configuration"
-    }

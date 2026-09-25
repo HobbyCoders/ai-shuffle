@@ -167,6 +167,12 @@ def format_file_size(size_bytes: int) -> str:
         return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
 
 
+def get_file_extension(name: str) -> str:
+    """Get lowercase file extension without the dot"""
+    ext = Path(name).suffix.lower()
+    return ext[1:] if ext else ""
+
+
 # =============================================================================
 # Project Access & Path Resolution
 # =============================================================================

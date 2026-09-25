@@ -96,7 +96,6 @@ def _patch_stack(
         stack.enter_context(patch(f"{mod}.git_service", mock_git_service))
     for mod in ("app.api.git", "app.api.git_helpers", "app.api.git_worktrees", "app.api.common"):
         stack.enter_context(patch(f"{mod}.database", mock_database))
-    stack.enter_context(patch("app.api.git.settings", mock_settings))
     stack.enter_context(patch("app.core.project_utils.settings", mock_settings))
     stack.enter_context(patch("app.api.git.get_api_user_from_request", return_value=None))
     stack.enter_context(patch("app.api.common.get_api_user_from_request", return_value=None))

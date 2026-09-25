@@ -2,22 +2,18 @@
 
 ``GET /api/v1/sessions/{session_id}/events`` streams the append-only event log
 (``app.db.session_events``) as SSE. It backfills from ``from_seq`` then tails
-live, waking on gateway notifies (``app.core.event_gateway``) and — crucially —
-falling back to a keepalive-timer poll of ``get_max_seq`` so delivery never
-depends on LISTEN/NOTIFY being healthy.
+live, waking on gateway notifies (``app.core.event_gateway``) and falling back
+to reading rows from its own cursor (``_tail_from_db``) on the keepalive timer,
+so delivery never depends on LISTEN/NOTIFY being healthy.
 
 Ordering is gap-free: the session's shared tail reader is subscribed *before*
 backfill, so no event can slip between the backfill snapshot and the live tail,
 and every frame is emitted in strictly increasing ``seq`` order (``cursor``
 dedupes).
 
-Live delivery is shared per session, not per client (:class:`_SessionTail`).
-Each notify tick used to cost every connected client a ``get_max_seq`` + a
-``get_events`` + a full re-serialization of every row; with C clients on a
-streaming session that was ~14*C queries/second against a 10-connection pool
-shared with the whole REST surface. Now ONE reader per session does one read and
-one serialization per append batch and fans the resulting frame text out to
-every subscriber. A client only emits a pushed batch when it continues exactly
+Live delivery is shared per session, not per client (:class:`_SessionTail`):
+ONE reader per session does one read and one serialization per append batch and
+fans the resulting frame text out to every subscriber. A client only emits a pushed batch when it continues exactly
 where that client left off; anything else (a dropped batch, a late attach, a
 degraded reader) falls back to reading from its own cursor, so the
 "``seq > from_seq`` is gap- and duplicate-free" contract holds by construction.
@@ -42,11 +38,12 @@ from typing import (
     Tuple,
 )
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from starlette.requests import ClientDisconnect
 
 from app.api.auth import require_auth
+from app.api.sessions_helpers import require_session
 from app.api.sse_utils import is_client_disconnect
 from app.core.event_gateway import get_gateway
 from app.core.history_backfill import ensure_backfilled
@@ -65,10 +62,8 @@ KEEPALIVE_SECONDS = 15.0
 
 # Correctness re-sync cadence for a client whose live delivery is healthy (the
 # gateway LISTEN connection is up AND this session's shared reader is running).
-# The keepalive tick then costs a comment, not a DB read (F9): a hidden tab on a
-# quiet session used to run get_max_seq every KEEPALIVE_SECONDS forever. The
-# re-sync stays as a cheap belt-and-braces reconciliation; the moment either
-# health signal drops, every tick reconciles again, exactly as before.
+# The keepalive tick then costs a comment, not a DB read (F9); the moment either
+# health signal drops, every tick reconciles again.
 LIVE_RESYNC_SECONDS = 120.0
 
 # Per-client push queue depth. Frames are shared strings (one serialization,
@@ -661,11 +656,13 @@ async def event_stream(session_id: str, from_seq: int = 0):
 
 @router.get("/{session_id}/events")
 async def stream_session_events(
+    request: Request,
     session_id: str,
     from_seq: int = 0,
     token: str = Depends(require_auth),
 ):
     """Stream the session event log as SSE, backfilling from ``from_seq``."""
+    await require_session(request, session_id)
     return StreamingResponse(
         event_stream(session_id, from_seq),
         media_type="text/event-stream",

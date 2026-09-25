@@ -623,7 +623,7 @@ class TestSetSessionTags:
                 mock_db.set_session_tags.return_value = []
 
                 data = SessionTagsUpdate(tag_ids=["tag-1", "tag-2", "tag-3"])
-                result = await set_session_tags(
+                await set_session_tags(
                     request=mock_request,
                     session_id="ses-abc12345",
                     data=data,

@@ -286,28 +286,6 @@ def is_admin_request(request: Request) -> bool:
     return getattr(request.state, "is_admin", False)
 
 
-def get_current_api_user(request: Request) -> dict:
-    """
-    Dependency that requires an API user to be authenticated via API key.
-    Returns the API user dict.
-    """
-    preview_access.enforce_limits(request)
-    api_key = get_api_key(request)
-    if api_key:
-        key_hash = hash_api_key(api_key)
-        api_user = db.get_api_user_by_key_hash(key_hash)
-        if api_user and api_user.get("is_active", True):
-            db.update_api_user_last_used(api_user["id"])
-            request.state.is_admin = False
-            request.state.api_user = api_user
-            return api_user
-
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="API key authentication required."
-    )
-
-
 @router.get("/status")
 async def get_auth_status(request: Request, response: Response = None):
     """Get complete authentication status"""

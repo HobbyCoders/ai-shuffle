@@ -18,7 +18,7 @@ from app.core.git_service import git_service
 from app.api.git_owner import session_git_action
 from app.api.auth import require_auth
 from app.api.common import check_project_access
-from app.api.git_helpers import run_git, get_working_dir, get_working_dir_async
+from app.api.git_helpers import run_git, get_working_dir_async
 
 from app.api.schemas.git import (
     GenerateCommitMessageRequest,

@@ -281,7 +281,7 @@ async def create_folder(
 
     try:
         folder_path.mkdir(parents=True, exist_ok=False)
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to create folder")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -329,7 +329,7 @@ async def rename_file_or_folder(
 
     try:
         current_path.rename(new_path)
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to rename file or folder")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -390,7 +390,7 @@ async def delete_file_or_folder(
         # Offloaded: rmtree walks the whole subtree, so a big folder would
         # otherwise stall every other request on this worker.
         await run_sync(_delete)
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to delete file or folder")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

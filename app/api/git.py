@@ -4,14 +4,14 @@ Git management API routes
 Provides endpoints for git repository operations including:
 - Repository status and diff stats
 - Branch management (list, create, delete, checkout)
-- Worktree management (list, create, delete, file browsing)
+- Worktree management (list, delete, file browsing)
 - Commit, push, and commit graph visualization
 - AI-powered commit message and PR description generation
 - Fetch from remote
 
 Sub-modules:
 - git_helpers: Thread pool, request coalescing, path utilities
-- git_worktrees: Worktree CRUD and file browsing endpoints
+- git_worktrees: Worktree list/get/delete/reopen and file browsing endpoints
 - git_ai: AI-powered commit message, PR description, and branch name generation
 """
 
@@ -23,16 +23,13 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 
-from app.core.config import settings
 from app.core.git_service import git_service
-from app.core.worktree_manager import worktree_manager
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.db import database
 from app.db.async_database import run_sync
-from app.db.base import WorktreeStatus
 from app.api.git_owner import session_git_action
 from app.api.auth import require_auth, get_api_user_from_request
-from app.api.common import check_project_access, resolve_project_path
+from app.api.common import check_project_access
 
 # Import from sub-modules
 from app.api.git_helpers import (  # noqa: F401
@@ -54,9 +51,6 @@ from app.api.git_helpers import (  # noqa: F401
 
 from app.api.git_worktrees import (  # noqa: F401
     _convert_worktree_to_info,
-    _copy_uncommitted_files,
-    _get_file_extension,
-    _format_file_size,
 )
 
 from app.api.git_ai import (  # noqa: F401
@@ -108,10 +102,6 @@ from app.api.schemas.git import (  # noqa: E402
     InitRepoResponse,
     CloneRepoRequest,
     CloneRepoResponse,
-    GenerateCommitMessageRequest,
-    GenerateCommitMessageResponse,
-    GeneratePRDescriptionRequest,
-    GeneratePRDescriptionResponse,
     FileChangeInfo,
     ChangedFilesResponse,
     FileDiffRequest,
@@ -119,20 +109,8 @@ from app.api.schemas.git import (  # noqa: E402
     StageRequest,
     UnstageRequest,
     DiscardRequest,
-    WorktreeCreate,
-    SessionInfo,
-    WorktreeGitStatus,
-    WorktreeInfo,
-    WorktreeListResponse,
-    WorktreeCreateResponse,
-    WorktreeSyncResponse,
-    GenerateBranchNameRequest,
-    GenerateBranchNameResponse,
     MigrateUploadsRequest,
     MigrateUploadsResponse,
-    WorktreeCreateStandalone,
-    WorktreeFileInfo,
-    WorktreeFilesResponse,
 )
 
 

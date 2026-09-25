@@ -11,7 +11,6 @@ from app.core.sync_engine import sync_engine
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.ws_auth import authenticate_websocket
-from app.api.ws_cleanup import _active_chat_sessions, _active_sessions_lock
 from app.api.ws_utils import ping_loop
 
 logger = logging.getLogger(__name__)
@@ -47,7 +46,7 @@ async def session_sync_websocket(
 
     Messages to server:
         - pong: Response to ping
-        - subscribe: Start watching a session (automatic on connect)
+        - request_state: Re-send the state snapshot
     """
     # Accept connection first (must accept before close per WebSocket protocol)
     await websocket.accept()
@@ -139,19 +138,10 @@ async def session_sync_websocket(
         # Unregister device
         await sync_engine.unregister_device(device_id, session_id, websocket=websocket)
 
-        # Check if this was the last device and cleanup if needed
-        remaining_devices = sync_engine.get_device_count(session_id)
-        async with _active_sessions_lock:
-            active_task = _active_chat_sessions.get(session_id)
-        is_task_done = active_task is None or active_task.done()
-
-        if remaining_devices == 0 and is_task_done:
+        # V2: no in-memory streaming state to purge — busy truth is the
+        # durable runs table and a stale run lease self-heals via TTL.
+        if sync_engine.get_device_count(session_id) == 0:
             logger.debug(f"Last device disconnected from legacy sync session {session_id}")
-
-            # V2: no in-memory streaming state to purge — busy truth is the
-            # durable runs table and a stale run lease self-heals via TTL.
-            async with _active_sessions_lock:
-                _active_chat_sessions.pop(session_id, None)
 
 
 @router.websocket("/ws/global")

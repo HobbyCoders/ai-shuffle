@@ -1653,7 +1653,7 @@ class TestImportProfileEndpoint:
                 agent=AgentImportData(name="Imported Agent")
             )
 
-            result = await import_profile(request, token="test-token")
+            await import_profile(request, token="test-token")
 
             mock_db.create_profile.assert_called_once()
             call_kwargs = mock_db.create_profile.call_args[1]
@@ -1694,7 +1694,7 @@ class TestImportProfileEndpoint:
                 agent=AgentImportData(name="Imported Agent")
             )
 
-            result = await import_profile(request, token="test-token")
+            await import_profile(request, token="test-token")
 
             # Verify the profile was created with incremented ID
             call_kwargs = mock_db.create_profile.call_args[1]

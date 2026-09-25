@@ -26,7 +26,6 @@ import httpx
 import pytest
 
 from app.core import encryption
-from app.core.voice_options import validate_options
 from app.core import voice_bridge
 from app.db import database as db
 
@@ -161,7 +160,7 @@ class TestVoiceSettings:
         assert resp.json()["model_details"]["model"] == "gpt-live-1"
 
     def test_put_roundtrip(self, authenticated_client, mock_db):
-        pid = _make_provider()
+        _make_provider()
         resp = authenticated_client.put(VOICE_SETTINGS, json={
             "voice_mode_enabled": True,
             "voice_model": "gpt-live-1",

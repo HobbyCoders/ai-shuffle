@@ -14,6 +14,7 @@ These tests cover:
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 
@@ -169,8 +170,11 @@ class TestGetWorkingDirForProject:
         """Should return workspace dir when project_id is None."""
         from app.api.commands import get_working_dir_for_project
 
+        mock_settings.workspace_dir = "/workspace"
+
         result = get_working_dir_for_project(None)
 
+        assert result == "/workspace"
         mock_database.get_project.assert_not_called()
 
     def test_returns_workspace_dir_when_project_not_found(self, mock_database, mock_settings):
@@ -178,9 +182,11 @@ class TestGetWorkingDirForProject:
         from app.api.commands import get_working_dir_for_project
 
         mock_database.get_project.return_value = None
+        mock_settings.workspace_dir = "/workspace"
 
         result = get_working_dir_for_project("nonexistent-project")
 
+        assert result == "/workspace"
         mock_database.get_project.assert_called_once_with("nonexistent-project")
 
     def test_returns_project_path_when_project_exists(self, mock_database, mock_settings):
@@ -188,9 +194,11 @@ class TestGetWorkingDirForProject:
         from app.api.commands import get_working_dir_for_project
 
         mock_database.get_project.return_value = {"id": "test-project", "path": "my-project"}
+        mock_settings.effective_workspace_dir = Path("/workspace")
 
         result = get_working_dir_for_project("test-project")
 
+        assert result == "/workspace/my-project"
         mock_database.get_project.assert_called_once_with("test-project")
 
 
@@ -1883,36 +1891,6 @@ class TestLegacyRewindEndpoints:
         # Option 3 still returns success (no action taken for code restore)
         assert response.success is True
         assert response.restore_option == 3
-
-
-# =============================================================================
-# Tests for rewind status and clear endpoints
-# =============================================================================
-
-class TestRewindStatusEndpoints:
-    """Tests for rewind status and clear endpoints."""
-
-    @pytest.mark.asyncio
-    async def test_get_rewind_status(self):
-        """Should return V2 rewind status."""
-        from app.api.commands import get_rewind_status
-
-        response = await get_rewind_status()
-
-        assert response["version"] == "v2"
-        assert response["method"] == "direct_jsonl"
-        assert response["has_pending"] is False
-        assert response["pending_rewind"] is None
-
-    @pytest.mark.asyncio
-    async def test_clear_pending_rewind(self):
-        """Should return success (V2 doesn't use pending config)."""
-        from app.api.commands import clear_pending_rewind
-
-        response = await clear_pending_rewind()
-
-        assert response["success"] is True
-        assert "V2" in response["message"]
 
 
 # =============================================================================

@@ -404,7 +404,7 @@ async def fork_session(
 
         logger.debug(f"Created forked JSONL file: {new_jsonl_path} with {fork_entry_index + 1} entries")
 
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to create JSONL file for forked session")
         # Delete the session we just created since fork failed
         await run_sync(database.delete_session, new_session_id)

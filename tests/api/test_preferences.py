@@ -129,16 +129,6 @@ def sample_preference():
 
 
 @pytest.fixture
-def sample_api_user():
-    """Sample API user data."""
-    return {
-        "id": "test-api-user-id",
-        "username": "test-user",
-        "role": "user"
-    }
-
-
-@pytest.fixture
 def mock_request():
     """Mock FastAPI Request object."""
     request = MagicMock()
@@ -317,7 +307,7 @@ class TestGetPreference:
                 mock_identity.return_value = ("admin", "admin")
                 mock_database.get_user_preference.return_value = None
 
-                result = await get_preference(
+                await get_preference(
                     request=mock_request,
                     key="somePref",
                     token="test-token"
@@ -519,7 +509,7 @@ class TestSetPreference:
                 }
 
                 body = PreferenceValue(key="adminSetting", value="secret")
-                result = await set_preference(
+                await set_preference(
                     request=mock_request,
                     key="adminSetting",
                     body=body,
@@ -768,7 +758,7 @@ class TestSetPreferencePost:
                 }
 
                 body = PreferenceValue(key="admin_setting", value="value")
-                result = await set_preference_post(
+                await set_preference_post(
                     request=mock_request,
                     key="admin_setting",
                     body=body,
@@ -895,7 +885,7 @@ class TestDeletePreference:
                 mock_identity.return_value = ("admin", "admin")
                 mock_database.delete_user_preference.return_value = True
 
-                result = await delete_preference(
+                await delete_preference(
                     request=mock_request,
                     key="somePref",
                     token="test-token"

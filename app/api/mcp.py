@@ -8,15 +8,12 @@ Provides REST endpoints for managing MCP (Model Context Protocol) servers:
 """
 
 import logging
-from pathlib import Path
 from typing import List, Optional, Dict, Literal
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
-from app.db import database
-from app.api.auth import require_auth, require_admin, get_api_user_from_request
-from app.core.project_utils import get_project_working_dir_as_path
+from app.api.auth import require_auth, require_admin
 from app.api.common import validate_project_access, get_project_path_from_dict, api_error_handler
 from app.core.mcp_service import (
     get_mcp_service,

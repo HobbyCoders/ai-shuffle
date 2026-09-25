@@ -1,10 +1,4 @@
-"""Tool inventory API — the single live surface (ruling T1).
-
-Replaces the old ``/api/v1/tools``, ``/api/v1/tools/builtin`` and
-``/api/v1/tools/discover`` routes, which reported whatever ``claude --tools
-default`` said (or a hardcoded fallback) and knew nothing about fluid's
-builtins, the app's bridge servers, or MCP.
-"""
+"""Tool inventory API: GET /api/v1/tools/surface."""
 
 import logging
 

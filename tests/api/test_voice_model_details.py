@@ -1,6 +1,5 @@
 """Settings metadata and the call configuration producer must agree."""
-from tests.api.test_voice_api import _make_provider, VOICE_SETTINGS
-from app.core import voice_bridge
+from tests.api.test_voice_api import VOICE_SETTINGS
 
 
 class TestVoiceModelDetails:

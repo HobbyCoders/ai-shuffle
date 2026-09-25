@@ -6,7 +6,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Deque, Dict, List, Literal, Optional
+from typing import Any, Deque, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field

@@ -217,7 +217,6 @@ async def _preflight_remote_target(
 
     Raises HTTPException(409) with wording matching the local 409 family.
     """
-    from app.db import checkouts as checkouts_db
 
     install = await run_sync(database.get_install, target_instance_id)
     if not install:
@@ -274,7 +273,6 @@ async def _create_remote_branch_session(
     here, and inventing one would be a lie.
     """
     from app.core import turn_claim, turn_manager, upload_transfer
-    from app.db import git_ops as git_ops_db
 
     branch_name = body.branch_name
 
@@ -614,11 +612,8 @@ async def create_session_with_worktree(
     """
     Create a new session with an associated git worktree.
 
-    Optionally kicks off the first Claude query server-side when ``prompt``
-    is provided. The query is spawned as a detached task that persists
-    state via ``sync_engine`` and the live session store, so the user can
-    disconnect (lock phone, switch session, close tab) during creation
-    without cancelling the work.
+    Optionally submits a durable first turn when ``prompt`` is provided, so
+    the user can disconnect during creation without cancelling the work.
 
     Since Phase-3 PR-B this always takes the V2 branch-intake path (the
     ``v2_projects`` kill switch was removed): the new session records only
@@ -644,11 +639,6 @@ async def create_session_with_worktree(
             detail=ATTACHMENTS_NEED_LOCAL_CHECKOUT,
         )
 
-    # V2 branch-intake is the ONLY path (Phase-3 PR-B removed the ``v2_projects``
-    # kill switch): a NEW branch session records only sessions.branch +
-    # project_v2_id and materializes a deterministic checkout — no legacy
-    # worktrees row / md5-hash dir. EXISTING legacy worktree sessions keep
-    # resolving through the resolver's legacy ladder in ``query_options``.
     return await _create_v2_branch_session(
         request, body, project, api_user_id, access["project_v2"]
     )

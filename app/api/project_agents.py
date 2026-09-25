@@ -4,15 +4,13 @@ Project agents API routes - manages file-based agents in project directories.
 Agents are stored as .md files in <project>/.claude/agents/ with YAML frontmatter.
 """
 
-from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
-from app.db import database
-from app.api.auth import require_auth, get_api_user_from_request
+from app.api.auth import require_auth
 from app.api.common import validate_project_access, get_project_path_from_dict
 from app.core.project_agent_service import (
     get_project_agent_service,

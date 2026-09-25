@@ -3,7 +3,7 @@ import secrets
 import sqlite3
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI, Depends, Request, WebSocket

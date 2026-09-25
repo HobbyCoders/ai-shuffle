@@ -23,9 +23,7 @@ from app.core.permission_handler import permission_handler
 from app.core.session_modes import chat_mode_read_permitted, normalize_session_mode
 from app.core.session_title import derive_session_title
 from app.core.sync_engine import sync_engine
-# W2: the origin socket reuses the SAME bounded-queue + writer-task mechanism
-# the device fan-out uses, rather than a second copy of it. Private only by
-# name — promoting it to a public export belongs to sync_engine's owner.
+# W2: the origin socket reuses sync_engine's bounded-queue writer.
 from app.core.sync_engine import ConnectionWriter
 from app.core.user_question_handler import user_question_handler
 from app.db import database
@@ -114,11 +112,6 @@ def _encode_frame(data: Dict[str, Any]) -> str:
         return json.dumps(data, separators=(",", ":"), default=str)
     except (TypeError, ValueError) as e:
         raise WSPayloadEncodeError(str(e)) from e
-
-
-# Terminal background-task statuses that should wake the parent (mirror the SDK's
-# TaskNotificationStatus literal — every TaskNotificationMessage is terminal).
-_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped"})
 
 
 # Queue sources that render as user-visible queue chips (B3). Internal
@@ -384,7 +377,6 @@ class ChatWebSocketHandler:
 
         # Mutable connection state (formerly nonlocal variables)
         self.current_session_id: Optional[str] = None
-        self.query_task: Optional[asyncio.Task] = None
         self.connection_healthy: bool = True
 
         # (interrupt_pending_sessions and stopped_sessions are now module-level
@@ -619,14 +611,6 @@ class ChatWebSocketHandler:
                 except asyncio.CancelledError:
                     pass
 
-                # NOTE: We intentionally do NOT cancel the query task when the websocket closes.
-                # This allows streaming to continue for other devices even if the originating
-                # device disconnects (e.g., page refresh, phone locked, network issue).
-                # The query will complete naturally and broadcast stream_end to all devices.
-                # If the user wants to stop the query, they should use the "stop" message explicitly.
-                if self.query_task and not self.query_task.done():
-                    logger.debug("WebSocket closed but query task still running for session - letting it continue for other devices")
-
                 # Unregister user device from tab sync
                 await sync_engine.unregister_user_device(self.user_id, self.device_id, self.websocket)
 
@@ -637,30 +621,14 @@ class ChatWebSocketHandler:
                     await sync_engine.unregister_device(self.device_id, self.current_session_id, self.websocket)
                     logger.debug(f"Cleanup: unregister device {self.device_id} from session {self.current_session_id}")
 
-                    # Check if this was the last device for this session
-                    # If so, and no active query is running, cleanup the session resources
-                    from app.api.websocket import _active_chat_sessions, _active_sessions_lock
-
                     remaining_devices = sync_engine.get_device_count(self.current_session_id)
 
-                    async with _active_sessions_lock:
-                        active_task = _active_chat_sessions.get(self.current_session_id)
-                        is_task_done = active_task is None or active_task.done()
-
-                        if remaining_devices == 0 and is_task_done:
-                            # Remove from active chat sessions tracking
-                            _active_chat_sessions.pop(self.current_session_id, None)
-
-                    if remaining_devices == 0 and is_task_done:
-                        # No more devices watching and no active query — nothing
-                        # to tear down here (V2: busy truth lives in the runs
-                        # table; sessions age out via pool eviction).
+                    if remaining_devices == 0:
+                        # Nothing to tear down here (V2: busy truth lives in the
+                        # runs table; sessions age out via pool eviction).
                         logger.debug(f"Last device disconnected from session {self.current_session_id}")
-
-                    elif remaining_devices > 0:
+                    else:
                         logger.debug(f"Session {self.current_session_id} still has {remaining_devices} device(s) connected")
-                    elif not is_task_done:
-                        logger.debug(f"Session {self.current_session_id} has active query, deferring cleanup")
 
         except WebSocketDisconnect as exc:
             # Keep the close code in normal desktop/worker logs so a dropped
@@ -809,16 +777,9 @@ class ChatWebSocketHandler:
     ) -> bool:
         """Preflight the composer's device pick for a NEW session.
 
-        Mirrors the ``POST /sessions/{id}/move`` preflight — the target must be
-        a registered install that is online, and (when the session carries a
-        project) must have an ACTIVE BASE checkout of that project
-        (``has_active_base_checkout``, not ``capable_runners``: the latter
-        also matches branch-only worktrees, and Phase 3 never clones). The
-        caller passes the already-resolved ``project_v2_id`` (legacy
-        ``project_id`` is resolved upstream). The checkout half fails OPEN on
-        lookup trouble, exactly like /move: a preflight bug must not make a
-        usable device unpickable. Sends the refusal frame itself and returns
-        False when the pick cannot be honored.
+        The target must be registered, approved, online and
+        ``network_git.eligible`` for the project. Fails closed. Sends the
+        refusal frame itself and returns False when the pick cannot be honored.
         """
         async def _refuse(message: str) -> bool:
             await self.send_json({"type": "error", "message": message})
@@ -838,7 +799,6 @@ class ChatWebSocketHandler:
             )
 
         if project_v2_id:
-            from app.db import checkouts as checkouts_db
 
             try:
                 from app.network import git as network_git
@@ -1464,41 +1424,11 @@ class ChatWebSocketHandler:
             # Stop now means STOP, not "interrupt so I can send another message":
             # mid-stream messages have their own steering path.
             #
-            # STOP SEMANTICS (round 7). Stop ends EVERYTHING this session is
-            # doing and lets NOTHING restart it until the user's next message.
-            # That is the whole button, and it is a deliberate reversal of the
-            # audit-item-5 rule that used to spare a healthy Monitor shell ("a
-            # dev server the user asked to keep up is not part of the turn").
-            # Living with that produced the complaint this change answers —
-            # stopped sessions came back to life, because the spared shell (or
-            # a CI watcher, or a nested worker, or an armed wakeup, or a turn
-            # queued behind the stopped one) still had a road back into the
-            # scheduler. So ``stop_all_background_tasks(user_stop=True)`` now:
-            #   * kills every background task — sub-agents and their
-            #     descendants, provider-lane workers including nested ones,
-            #     Monitor shells including serving tasks and watchers;
-            #   * latches the session stopped, so every wake producer no-ops
-            #     until the user speaks;
-            #   * drops armed wakeups, aborts queued turns and settles stale
-            #     parked rows;
-            #   * gives every killed task a terminal registry row, a terminal
-            #     chip and an engine retirement, so nothing sits "running"
-            #     forever and the model is never left waiting on a corpse.
-            # The old keep-the-server-up behaviour survives as an explicit
-            # opt-in that defaults to OFF: ``STOP_KEEPS_MONITOR_SHELLS=true``.
-            # Typing mid-stream is UNCHANGED: it goes through
-            # ``interrupt_for_query``, which sets no stop_background bit and
-            # never reaches this path — a steer is not a Stop.
-
-            # v2 turns cutover: the ONE interrupt implementation. Flip the live
-            # turn running->interrupting (durable intent) and fire the executor,
-            # which drives the live runtime's SDK interrupt + evict/drain
-            # escalation (the safety-timeout/eviction choreography now lives in
-            # SessionRuntime, not here). A user stop settles the turn ``aborted``;
-            # the settle path then drains queued turns like any other outcome (F4
-            # preserve-on-stop retired, PR #694) — no _stopped_sessions latch.
-            # ``stop_background`` records the user intent durably; the explicit
-            # lifecycle call below performs the transport-specific task teardown.
+            # Stop = durable running->interrupting flip, then
+            # ``stop_all_background_tasks(user_stop=True)``, which latches the
+            # session stopped, kills all background work and aborts queued turns
+            # (see query_session_lifecycle.enter_user_stop). Typing mid-stream
+            # uses ``interrupt_for_query``, not this path.
             # #585: bind the stop to the turn the FE believed was live (optional
             # — older clients omit it). turn_manager threads it to the DB flip
             # (id=turn_id guard) and the runtime signal so a stop that arrives
@@ -1629,8 +1559,6 @@ class ChatWebSocketHandler:
 
     async def handle_load_session(self, data: dict) -> None:
         """Handle 'load_session' message type."""
-        from app.api.websocket import _active_chat_sessions
-
         session_id = data.get("session_id")
         if not session_id:
             return
@@ -1741,16 +1669,6 @@ class ChatWebSocketHandler:
                 session["total_tokens_out"] = resolved.usage.get("total_tokens_out", 0)
 
             logger.debug(f"Loaded context tokens for session {session_id}: context={session['context_tokens']}")
-
-        # Also check for queries that are about to stream but haven't
-        # started yet (gap between session creation and first stream_start
-        # from the SDK). This ensures late-joining devices see the session
-        # as streaming even during the SDK initialization delay.
-        if not is_streaming:
-            pending_task = _active_chat_sessions.get(session_id)
-            if pending_task and not pending_task.done():
-                is_streaming = True
-                logger.debug(f"Session {session_id} has pending query task, marking as streaming")
 
         # V2: no live-buffer override for streaming sessions — the persistent
         # chain above is the history, and a late joiner picks up the live tail
@@ -2127,10 +2045,8 @@ class ChatWebSocketHandler:
             return
 
         # V2 placement: the durable queued turn IS the hand-off (see
-        # handle_message) — enqueue locally with no kick and wake the owner's
-        # claim loop. A session placed on ANOTHER runner still takes the LOCAL
-        # enqueue path below (PR-B collapsed the legacy cloud-relay dispatch
-        # unconditionally). Headless handlers never place remotely.
+        # handle_query) — enqueue locally with no kick and wake the owner's
+        # claim loop.
         placed_remote = False
         if self.websocket is not None:
             cloud_sess = await run_sync(database.get_session, session_id)
@@ -2174,7 +2090,7 @@ class ChatWebSocketHandler:
         queue_profile_id = profile_id
         if placed_remote and queue_profile_id == "claude-code":
             queue_profile_id = None
-        # Transport context, at parity with handle_message: without it a drained
+        # Transport context, at parity with handle_query: without it a drained
         # queue turn runs with user_id/api_user_id None, so session_runtime skips
         # the attention bump and the AskUserQuestion fanout.
         payload: Dict[str, Any] = {}

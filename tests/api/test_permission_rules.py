@@ -263,7 +263,7 @@ class TestListPermissionRulesEndpoint:
         with patch("app.api.permission_rules.database") as mock_db:
             mock_db.get_permission_rules.return_value = rules
 
-            result = await list_permission_rules(
+            await list_permission_rules(
                 profile_id=None,
                 tool_name="Bash",
                 token="test-token"

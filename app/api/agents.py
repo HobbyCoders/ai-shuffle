@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.core.models import (
-    Profile, ProfileConfig, ProfileCreate, ProfileUpdate,
+    Profile, ProfileCreate, ProfileUpdate,
     AgentExport, AgentExportData, AgentImportRequest
 )
 from app.db import database
@@ -21,7 +21,6 @@ from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.core.plugin_service import get_plugin_service
 from app.core.project_utils import get_project_working_dir_as_path, get_worktree_working_dir_as_path
 from app.core.project_agent_service import get_project_agent_service, get_user_agent_service
-from app.core.config import settings
 from app.core.profiles import get_builtin_profile_defaults
 
 logger = logging.getLogger(__name__)

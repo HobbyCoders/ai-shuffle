@@ -3,7 +3,6 @@
 The suite's SQLite adapter tests persistence and rollback, not PostgreSQL row
 locking. A serialized adapter test additionally asserts FOR UPDATE is emitted.
 """
-import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager

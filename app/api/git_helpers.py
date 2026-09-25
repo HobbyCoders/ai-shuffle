@@ -146,10 +146,7 @@ async def stage_and_commit(
 
 
 def get_project_path(project_id: str, allow_missing: bool = False) -> Optional[str]:
-    """Get the filesystem path for a project.
-
-    .. deprecated:: Use :func:`app.api.common.resolve_project_path` instead.
-    """
+    """Get the filesystem path for a project, honouring the worker checkout scope."""
     scoped = _worker_checkout_scope.get()
     if scoped is not None:
         if scoped[0] != project_id:

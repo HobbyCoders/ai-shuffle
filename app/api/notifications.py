@@ -18,7 +18,7 @@ server emit funnel and this REST path write/read the same rows.
 """
 
 import logging
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -54,12 +54,8 @@ class NotificationCreate(BaseModel):
 # Auth helper — resolve user_id the same way the WS broadcast path does.
 # =============================================================================
 
-def current_user_id(request: Request, _token: str = Depends(require_auth)) -> str:
-    """Return the caller's user_id (``api_user["id"]`` or ``"admin"``).
-
-    Mirrors ``app/api/websocket.py`` so notifications written by the server emit
-    funnel (keyed on the same user_id) hydrate for the same caller here.
-    """
+def current_user_id(request: Request, _token: str = Depends(require_auth)) -> notifications_db.NotificationOwner:
+    """Return the caller's notification owner (the API user, or ``"admin"``)."""
     api_user = get_api_user_from_request(request)
     return notifications_db.NotificationOwner(
         api_user["id"] if api_user else "admin",

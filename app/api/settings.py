@@ -1,11 +1,8 @@
 """
 Settings API routes - integration settings, API keys, and configuration.
 
-This module re-exports symbols from sub-modules for backward compatibility:
-- settings_crypto: API key encryption/decryption/masking
-- settings_audio: TTS/STT endpoints and model data
-- settings_media: Media model selection and generation settings
-- settings_credentials: Credential policy management
+Includes the sub-routers from settings_audio, stt_realtime, settings_media,
+settings_credentials and settings_updates.
 """
 
 import logging
@@ -32,31 +29,13 @@ from app.api.settings_audio import (  # noqa: F401
     audio_router,
     TTS_MODELS,
     STT_MODELS,
-    AudioModelUpdateRequest,
-    TTSSettingsRequest,
-    TranscriptionResponse,
-    TTSGenerateRequest,
-    TTSGenerateResponse,
-    get_generated_audio_dir,
-    _build_tts_payload,
-    _extract_audio_url,
 )
 from app.api.stt_realtime import stt_stream_router  # noqa: F401
 from app.api.settings_media import (  # noqa: F401
     media_router,
-    ModelUpdateRequest,
-    ImageSettingsRequest,
-    VideoSettingsRequest,
-    STTSettingsRequest,
-    _update_model_setting,
 )
 from app.api.settings_credentials import (  # noqa: F401
     credentials_router,
-    CredentialPolicyResponse,
-    UpdateCredentialPolicyRequest,
-    AllCredentialPoliciesResponse,
-    UserCredentialPolicyResponse,
-    SetUserCredentialPolicyRequest,
     CREDENTIAL_POLICY_INFO,
     _compute_effective_status,
 )
@@ -71,31 +50,6 @@ router.include_router(stt_stream_router)
 router.include_router(media_router)
 router.include_router(credentials_router)
 router.include_router(updates_router)
-
-
-# ============================================================================
-# Internal API Key Access (for AI tools)
-# ============================================================================
-
-@router.get("/internal/api-keys/{key_name}")
-async def get_internal_api_key(key_name: str, _: str = Depends(require_admin)):
-    """
-    Internal endpoint for AI tools to get decrypted API keys.
-
-    Only allows specific key names to prevent arbitrary setting access.
-    Requires admin authentication to prevent unauthorized access.
-    """
-    allowed_keys = ["fal_api_key"]
-
-    if key_name not in allowed_keys:
-        raise HTTPException(status_code=400, detail=f"Invalid key name. Allowed: {allowed_keys}")
-
-    api_key = get_decrypted_api_key(key_name)
-
-    if not api_key:
-        raise HTTPException(status_code=404, detail=f"API key '{key_name}' not configured or encryption not ready")
-
-    return {"key": api_key}
 
 
 # ============================================================================
@@ -798,7 +752,7 @@ def get_voice_settings() -> dict:
 
 def _voice_settings_response(value: dict) -> VoiceSettingsResponse:
     from app.core.voice_models import model_details
-    from app.api.settings_audio import STT_MODELS, _model_provider
+    from app.api.settings_audio import _model_provider
     return VoiceSettingsResponse(
         **value,
         voice_input_models=[

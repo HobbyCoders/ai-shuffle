@@ -285,8 +285,3 @@ async def test_runtime_registration_discovery(monkeypatch):
     response = await tools['AndroidDevices'].handler({})
     assert 'controller_context_missing' in response['content'][0]['text']
 
-
-@pytest.mark.asyncio
-async def test_legacy_first_device_disabled(monkeypatch):
-    from app.mcp import phone_tools
-    assert await phone_tools._get_default_device() is None

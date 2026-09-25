@@ -356,7 +356,7 @@ class TestSetWorkspaceConfigFunction:
         from app.api.system import set_workspace_config, WorkspaceConfigRequest
 
         with patch("app.api.system.database") as mock_db, \
-             patch("app.api.system.settings") as mock_settings, \
+             patch("app.api.system.settings"), \
              patch("app.core.platform.is_local_mode") as mock_local:
 
             mock_local.return_value = True
@@ -408,8 +408,8 @@ class TestSetWorkspaceConfigFunction:
 
         new_path = temp_workspace / "new_subdir"
 
-        with patch("app.api.system.database") as mock_db, \
-             patch("app.api.system.settings") as mock_settings, \
+        with patch("app.api.system.database"), \
+             patch("app.api.system.settings"), \
              patch("app.core.platform.is_local_mode") as mock_local:
 
             mock_local.return_value = True
@@ -426,7 +426,7 @@ class TestSetWorkspaceConfigFunction:
         from app.api.system import set_workspace_config, WorkspaceConfigRequest
         from fastapi import HTTPException
 
-        with patch("app.api.system.database") as mock_db, \
+        with patch("app.api.system.database"), \
              patch("app.core.platform.is_local_mode") as mock_local, \
              patch("pathlib.Path.mkdir") as mock_mkdir:
 
@@ -447,7 +447,7 @@ class TestSetWorkspaceConfigFunction:
         from app.api.system import set_workspace_config, WorkspaceConfigRequest
         from fastapi import HTTPException
 
-        with patch("app.api.system.database") as mock_db, \
+        with patch("app.api.system.database"), \
              patch("app.core.platform.is_local_mode") as mock_local, \
              patch("pathlib.Path.mkdir") as mock_mkdir:
 

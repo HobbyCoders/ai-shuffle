@@ -11,7 +11,7 @@ A pre-cutover session (only a legacy ``project_id``) goes through the SAME gate,
 which self-heals its project_v2 binding off the legacy id.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI

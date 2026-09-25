@@ -42,15 +42,6 @@ def temp_dir():
 
 
 @pytest.fixture
-def mock_settings(temp_dir):
-    """Mock settings with temporary workspace directory."""
-    mock_settings_obj = MagicMock()
-    mock_settings_obj.workspace_dir = temp_dir
-    mock_settings_obj.get_claude_projects_dir = temp_dir / ".claude" / "projects"
-    return mock_settings_obj
-
-
-@pytest.fixture
 def mock_database():
     """Mock database module.
 
@@ -98,20 +89,6 @@ def mock_api_user():
             patch("app.api.sessions_export.get_api_user_from_request", new=mock), \
             patch("app.api.common.get_api_user_from_request", new=mock):
         mock.return_value = None  # Default to admin (no api user)
-        yield mock
-
-
-@pytest.fixture
-def mock_sync_engine():
-    """Mock sync engine."""
-    with patch("app.api.sessions.sync_engine") as mock:
-        mock.is_session_streaming.return_value = False
-        mock.get_device_count.return_value = 1
-        mock.get_session_state = AsyncMock(return_value={
-            "is_streaming": False,
-            "connected_devices": 1,
-            "streaming_messages": []
-        })
         yield mock
 
 

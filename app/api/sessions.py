@@ -6,8 +6,6 @@ This module was split for maintainability. Sub-modules:
 - sessions_export: export/import endpoints
 - sessions_fork: fork endpoint
 - sessions_worktree: worktree session endpoint
-
-All public symbols are re-exported here for backward compatibility.
 """
 
 import asyncio
@@ -15,39 +13,14 @@ from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, Response, status, Request
 
-try:
-    from app.core.cli_sessions import get_session_messages as sdk_get_session_messages
-except ImportError:
-    sdk_get_session_messages = None
-
-try:
-    from app.core.cli_sessions import rename_session as sdk_rename_session
-except ImportError:
-    sdk_rename_session = None
-
-try:
-    from app.core.cli_sessions import tag_session as sdk_tag_session
-except ImportError:
-    sdk_tag_session = None
-
-try:
-    from app.core.cli_sessions import get_session_info as sdk_get_session_info
-except ImportError:
-    sdk_get_session_info = None
-
-try:
-    from app.core.cli_sessions import delete_session as sdk_delete_session
-except ImportError:
-    sdk_delete_session = None
-
-try:
-    from app.core.cli_sessions import (
-        list_subagents as sdk_list_subagents,
-        get_subagent_messages as sdk_get_subagent_messages,
-    )
-except ImportError:
-    sdk_list_subagents = None
-    sdk_get_subagent_messages = None
+from app.core.cli_sessions import (
+    rename_session as sdk_rename_session,
+    tag_session as sdk_tag_session,
+    get_session_info as sdk_get_session_info,
+    delete_session as sdk_delete_session,
+    list_subagents as sdk_list_subagents,
+    get_subagent_messages as sdk_get_subagent_messages,
+)
 
 from app.core.models import (
     Session,
@@ -69,65 +42,43 @@ import logging
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Re-export all public symbols from sub-modules for backward compatibility
+# Sub-module imports (check_session_access / enrich_sessions_with_tags are also
+# imported from here by commands.py, tags.py and tests)
 # ---------------------------------------------------------------------------
 from app.api.sessions_helpers import (  # noqa: F401 — re-exports
-    _SESSION_SYNC_THROTTLE_S,
-    _last_sync_times,
-    _transform_sdk_messages,
     parse_session_history_via_store,
     check_session_access,
     require_session,
     enrich_sessions_with_tags,
-    enrich_search_results_with_tags,
     fetch_and_enrich_sessions,
     fetch_and_enrich_search_results,
     build_detail_messages,
     build_live_messages,
     finalize_transcript,
     paginate_messages,
-    compact_messages_for_display,
-    cap_tool_input,
-    resolve_message_page_limit,
     DEFAULT_MESSAGE_PAGE_LIMIT,
     MAX_MESSAGE_PAGE_LIMIT,
-    MAX_TOOL_INPUT_CHARS,
     _annotate_cluster_fields,
     _apply_session_filters,
     BatchDeleteRequest,
     SessionActiveUpdate,
-    SessionImportData,
-    SessionImportResponse,
-    ImportJSONLRequest,
-    ImportJSONLResponse,
-    ForkSessionRequest,
-    ForkSessionResponse,
     AdoptRequest,
     AdoptSessionResponse,
     MoveSessionRequest,
     MoveSessionResponse,
-    CreateWorktreeSessionRequest,
-    WorktreeSessionResponse,
-    is_pinned,
-    retain_sdk_session_id,
     apply_sdk_session_keep,
 )
 
-from app.api.sessions_export import (  # noqa: F401 — re-exports
+from app.api.sessions_export import (
     export_router,
-    export_session,
-    import_session,
-    import_jsonl_session,
 )
 
-from app.api.sessions_fork import (  # noqa: F401 — re-exports
+from app.api.sessions_fork import (
     fork_router,
-    fork_session,
 )
 
-from app.api.sessions_worktree import (  # noqa: F401 — re-exports
+from app.api.sessions_worktree import (
     worktree_router,
-    create_session_with_worktree,
 )
 
 # ---------------------------------------------------------------------------
@@ -137,8 +88,6 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 router.include_router(export_router)
 router.include_router(fork_router)
 router.include_router(worktree_router)
-from app.api.swarms import router as swarm_router
-router.include_router(swarm_router)
 
 
 # ============================================================================
@@ -822,7 +771,6 @@ async def get_session(
     ``X-Message-Next-Before-Seq`` expose whether older messages exist and how
     to fetch them.
     """
-    import traceback
 
     logger.debug(f"Loading session: {session_id}")
 
@@ -854,7 +802,6 @@ async def get_session(
     if sdk_session_id:
         try:
             from app.core.message_resolver import resolve_working_dir
-            from app.core.config import settings
 
             # Resolve working dir preferring worktree → project → default.
             # Worktree sessions store JSONL under the worktree's encoded path;
@@ -1097,8 +1044,7 @@ async def get_live_session(
 
     V2: live render deltas ride the session event feed (SSE); this endpoint
     serves the PERSISTED transcript plus lifecycle fields (activeTasks,
-    unpark_pending, is_streaming from the durable runs table) and the cloud
-    relay proxy for cross-install sessions.
+    unpark_pending, is_streaming from the durable runs table).
 
     Response includes:
     - messages: Persisted transcript
@@ -1112,18 +1058,12 @@ async def get_live_session(
     message list it throws away is pure cost on every session open. Defaults to
     true, so every existing caller sees the wire shape it always saw.
     """
-    from starlette.responses import Response
 
     # Check session exists and user has access
     session = await require_session(request, session_id)
 
-    # Derived lifecycle snapshot (Phase 1: derivation before enforcement).
-    # ``compute`` absorbed this endpoint's inline activeTasks / unpark_pending
-    # logic VERBATIM — same reads, same order, same side effects — so the two
-    # destructured values below are byte-identical to what was computed here
-    # before. It also reads the remaining lifecycle sources (pool, drain pump,
-    # parked marker) and logs any cross-source disagreement as
-    # ``lifecycle-drift``; nothing else about this endpoint changes.
+    # Derived lifecycle snapshot; ``compute`` also logs any cross-source
+    # disagreement (pool, drain pump, parked marker) as ``lifecycle-drift``.
     #
     # active_tasks: SDK agent tasks + Monitor shell subprocesses PLUS any
     # recently-failed task still inside the retention window (``get_visible``,
@@ -1142,9 +1082,7 @@ async def get_live_session(
     active_tasks = lifecycle.active_tasks
     unpark_pending = lifecycle.unpark_pending
 
-    # Per-session V2 streaming opt-in (V2 Phase 1). Surfaced on every response
-    # body so a polling client always knows which streaming path this session
-    # is on, the same way the flags above are attached to every path.
+    # Surfaced on every response body, like the lifecycle flags above.
     v2_stream = bool(session.get("v2_stream"))
 
     # Compute session metadata from DB session — included in all response
@@ -1179,7 +1117,7 @@ async def get_live_session(
     # V2: no in-memory live overlay — the persistent loader chain below is the
     # single transcript source; live render deltas ride the event feed (SSE).
 
-    # Load from DB first (fast path), fall back to JSONL
+    # Session store first, then the fluid/JSONL fallbacks below.
     sdk_session_id = session.get("sdk_session_id")
     messages = []
     working_dir = "/workspace"
@@ -1197,7 +1135,6 @@ async def get_live_session(
     if include_messages and not messages and sdk_session_id:
         try:
             from app.core.message_resolver import resolve_working_dir
-            from app.core.config import settings
 
             # Worktree-aware working dir (worktree → project → default).
             working_dir = await run_sync(resolve_working_dir, dict(session))
@@ -1291,8 +1228,7 @@ async def get_live_session(
     # Per-turn input (last turn), persisted on sessions row by _persist_turn_results
     input_tokens = session.get("last_input_tokens", 0) or 0
 
-    # Override with JSONL data if available (legacy sessions without
-    # persisted per-turn columns — usage_data only populated when JSONL fallback ran)
+    # Override with the transcript read's usage when it produced one.
     # A metadata-only request never parses the transcript, so usage_data is None
     # and the sessions-row columns above stand. That is the intended trade: the
     # only caller passing include_messages=false uses this as a pre-feed
@@ -1386,7 +1322,7 @@ async def update_session(
 
     # Sync title rename to Claude SDK session if available
     sdk_sid = existing.get("sdk_session_id")
-    if title and sdk_sid and sdk_rename_session:
+    if title and sdk_sid:
         try:
             sdk_rename_session(session_id=sdk_sid, title=title)
             logger.debug(f"Renamed SDK session {sdk_sid} to '{title}'")
@@ -1411,12 +1347,6 @@ async def tag_sdk_session(
     token: str = Depends(require_auth)
 ):
     """Tag a session in the Claude SDK. Requires the session to have an SDK session ID."""
-    if not sdk_tag_session:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="SDK tag_session not available (requires SDK 0.1.49+)"
-        )
-
     existing = await require_session(request, session_id)
 
     sdk_sid = existing.get("sdk_session_id")
@@ -1438,12 +1368,6 @@ async def get_sdk_session_info(
     token: str = Depends(require_auth)
 ):
     """Get session metadata from the Claude SDK (tag, created_at, git_branch, etc.)."""
-    if not sdk_get_session_info:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="SDK get_session_info not available (requires SDK 0.1.50+)"
-        )
-
     existing = await require_session(request, session_id)
 
     sdk_sid = existing.get("sdk_session_id")
@@ -1616,12 +1540,6 @@ async def list_session_subagents(
     token: str = Depends(require_auth)
 ):
     """List subagent IDs spawned during a session (SDK 0.1.60+)."""
-    if not sdk_list_subagents:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="SDK list_subagents not available (requires SDK 0.1.60+)"
-        )
-
     existing = await require_session(request, session_id)
 
     sdk_sid = existing.get("sdk_session_id")
@@ -1648,12 +1566,6 @@ async def get_session_subagent_messages(
     token: str = Depends(require_auth)
 ):
     """Read a subagent's transcript messages in chronological order (SDK 0.1.60+)."""
-    if not sdk_get_subagent_messages:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="SDK get_subagent_messages not available (requires SDK 0.1.60+)"
-        )
-
     existing = await require_session(request, session_id)
 
     sdk_sid = existing.get("sdk_session_id")
@@ -1924,18 +1836,9 @@ async def resume_session(
     the request the provider sees is the one that failed, so the prefix cache
     survives.
 
-    **A busy session queues rather than refusing.** This used to 409 with "a
-    turn is already running", and the submission was simply gone: the user
-    pressed Retry, got an error toast, and had to type the request again — while
-    every other mid-turn submission in the app (the chat WebSocket lane) is
-    enqueued durably and steered or drained into the session. A refusal that
-    loses the intent is worse than a resume that lands a few seconds later, so
-    the durable queue is now the default here too. ``if_busy=conflict`` keeps
-    the refusal for a caller that genuinely needs it.
-
-    Duplicate Retry presses do NOT stack: a resume already queued for this
-    session is returned as-is rather than enqueued twice (the anti-duplicate
-    guard the 409 used to provide, without the data loss).
+    A busy session queues the resume durably (``if_busy=queue``, the default);
+    ``if_busy=conflict`` refuses with 409 instead. A resume already queued for
+    this session is returned as-is rather than enqueued twice.
 
     Only fluid sessions can do this. The Claude CLI owns its own transcript and
     has no head node to hand back, so a non-fluid session is refused outright.
@@ -2061,7 +1964,7 @@ async def batch_delete_sessions(
 @router.post("/{session_id}/archive")
 async def archive_session(request: Request, session_id: str, token: str = Depends(require_auth)):
     """Archive a session. API users can only archive their accessible sessions."""
-    existing = await require_session(request, session_id)
+    await require_session(request, session_id)
 
     # Update session - result not needed for response
     await run_sync(
@@ -2146,7 +2049,7 @@ async def get_sync_changes(
         - latest_id: The most recent sync ID (use for next poll)
         - is_streaming: Whether the session is currently streaming
     """
-    existing = await require_session(request, session_id)
+    await require_session(request, session_id)
 
     changes = await run_sync(database.get_sync_logs, session_id, since_id=since_id)
     latest_id = await run_sync(database.get_latest_sync_id, session_id)

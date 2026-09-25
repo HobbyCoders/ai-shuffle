@@ -16,7 +16,6 @@ from app.core.models import (
     QueryRequest, QueryResponse, ConversationRequest, QueryMetadata
 )
 from app.core.query_engine import stream_query, interrupt_session, start_background_query
-from app.core.auth import auth_service
 from app.core.session_title import derive_session_title
 from app.api.auth import require_api_key, require_auth
 from app.api.sse_utils import is_client_disconnect
@@ -163,7 +162,7 @@ async def one_shot_query(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Query execution failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -387,7 +386,7 @@ async def conversation(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Conversation failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -519,7 +518,7 @@ async def start_conversation(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to start conversation")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

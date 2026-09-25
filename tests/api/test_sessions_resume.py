@@ -8,7 +8,7 @@ when the session is not fluid (the Claude CLI owns its own transcript and has no
 head node to continue from).
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI

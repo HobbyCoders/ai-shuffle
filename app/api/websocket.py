@@ -11,33 +11,24 @@ Additional endpoints:
 """
 
 import logging
-import asyncio
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, WebSocket, Query
 
 from app.core.sync_engine import sync_engine  # noqa: F401
-from app.core.config import settings  # noqa: F401
 from app.db import database  # noqa: F401
-from app.db.async_database import run_sync  # noqa: F401
 from app.core.permission_handler import permission_handler  # noqa: F401
 from app.core.user_question_handler import user_question_handler  # noqa: F401
-from app.api.chat_ws_handler import (
-    ChatWebSocketHandler,
-    WebSocketRateLimiter,  # noqa: F401  (patch surface: characterization test)
-)
+from app.api.chat_ws_handler import ChatWebSocketHandler
 
-# Import from split modules — these are the canonical definitions.
-# Re-exported here so that existing ``from app.api.websocket import ...``
-# statements throughout the codebase continue to work without changes.
+# Re-exported for chat_ws_handler, app.core.resource_monitor and tests.
 from app.api.ws_auth import authenticate_websocket  # noqa: F401
 from app.api.ws_cleanup import (  # noqa: F401
     _active_chat_sessions,
     _active_sessions_lock,
-    cleanup_session_handlers,
 )
-from app.api.ws_utils import ping_loop, safe_ws_send, WSPayloadEncodeError  # noqa: F401
+from app.api.ws_utils import ping_loop  # noqa: F401
 from app.api.ws_cli import (  # noqa: F401
     _active_cli_bridges,
     router as _cli_router,
@@ -121,13 +112,7 @@ async def chat_websocket(
         device_id = str(uuid.uuid4())
         logger.debug(f"Generated device_id: {device_id}")
 
-    # ── Phase 6.1 (streaming-path unification) ───────────────────────────
-    # /ws/chat is served by the unified ChatWebSocketHandler — the same class
-    # that drives headless (background/automation) sessions — so there is
-    # exactly ONE streaming implementation. Only the accept/auth/device_id
-    # prologue above stays endpoint-side; everything from device registration
-    # through the receive loop and disconnect cleanup lives in handler.run().
-    # (Step 7 deleted the legacy inline closure that this route used to run.)
+    # Everything after the accept/auth/device_id prologue lives in handler.run().
     handler = ChatWebSocketHandler(
         websocket=websocket,
         device_id=device_id,

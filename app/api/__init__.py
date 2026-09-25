@@ -1,1 +1,1 @@
-"""API routes for AI Hub"""
+"""API routes for AI Shuffle."""

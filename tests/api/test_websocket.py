@@ -176,6 +176,7 @@ class TestAuthenticateWebSocket:
 
             assert is_auth is True
             assert api_user["id"] == "user-456"
+            mock_db.get_api_user_by_key_hash.assert_called_once_with(key_hash)
 
     @pytest.mark.asyncio
     async def test_authenticate_with_cookie_session(self, mock_websocket):
@@ -285,7 +286,7 @@ class TestPingLoop:
         mock_ws.client_state = WebSocketState.DISCONNECTED
         mock_ws.send_json = AsyncMock()
 
-        with patch("app.api.websocket.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch("app.api.ws_utils.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             mock_sleep.return_value = None
 
             await ping_loop(mock_ws, "test-device")
@@ -303,7 +304,7 @@ class TestPingLoop:
         mock_ws.client_state = WebSocketState.CONNECTED
         mock_ws.send_json = AsyncMock(side_effect=Exception("Connection closed"))
 
-        with patch("app.api.websocket.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch("app.api.ws_utils.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             mock_sleep.return_value = None
 
             # Should exit gracefully without raising
@@ -1140,6 +1141,7 @@ class TestWebSocketErrorHandling:
         close_reason = "No SDK session"
 
         assert close_code == 4005
+        assert "sdk" in close_reason.lower()
 
 
 # =============================================================================
@@ -2339,7 +2341,6 @@ class TestAPIUserAccessControl:
     def test_admin_can_access_any_session(self):
         """Admin (no api_user) should access any session."""
         api_user = None  # Admin user
-        session = {"id": "session-1", "api_user_id": "api-user-1"}
 
         # Admin has no api_user, so can access all
         is_admin = api_user is None

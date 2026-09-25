@@ -50,15 +50,6 @@ def app(mock_plugin_service):
 
 
 @pytest.fixture
-def client(app, mock_plugin_service):
-    """Create a test client with mocked dependencies."""
-    with patch("app.api.plugins.get_plugin_service") as mock_get_service:
-        mock_get_service.return_value = mock_plugin_service
-        with TestClient(app) as test_client:
-            yield test_client
-
-
-@pytest.fixture
 def sample_marketplace():
     """Sample marketplace data."""
     marketplace = MagicMock()

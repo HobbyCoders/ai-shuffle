@@ -7,15 +7,13 @@ Plugins can be installed to:
 """
 
 import logging
-from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
-from app.db import database
-from app.api.auth import require_auth, get_api_user_from_request
+from app.api.auth import require_auth
 from app.api.common import validate_project_access, get_project_path_from_dict
 from app.core.plugin_service import (
     get_plugin_service,

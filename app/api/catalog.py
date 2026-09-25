@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 
 from app.api.auth import require_auth
-from app.services.fal_catalog import catalog_service, CatalogModel
+from app.services.fal_catalog import catalog_service
 from app.services.fal_schema import schema_service
 from app.api.settings import get_decrypted_api_key
 

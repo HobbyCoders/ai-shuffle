@@ -7,7 +7,7 @@ Also includes the WhatsApp webhook verification endpoint.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from fastapi.responses import PlainTextResponse
@@ -83,7 +83,7 @@ async def create_connector_endpoint(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except RuntimeError as e:
+    except RuntimeError:
         logger.exception("Failed to create connector")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create connector")
 
@@ -603,7 +603,6 @@ async def whatsapp_webhook_receive(request: Request):
     from app.core.connectors.manager import connector_manager
     from app.core.connector_service import decrypt_config
 
-    any_handled = False
     any_error = False
 
     # Extract phone_number_id from payload to match the correct connector
@@ -673,7 +672,6 @@ async def whatsapp_webhook_receive(request: Request):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
 
     for connector_id, connector in recipients:
-        any_handled = True
         try:
             await connector.handle_webhook_payload(payload)
         except Exception as e:
@@ -712,7 +710,6 @@ async def inbound_webhook(webhook_slug: str, request: Request):
 
     # Find matching webhook connector
     from app.core.connectors.manager import connector_manager
-    from app.core.connector_service import decrypt_config
 
     matched = False
     for connector_id, connector in connector_manager.get_running_connectors("webhook"):

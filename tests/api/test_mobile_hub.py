@@ -447,7 +447,6 @@ def test_activation_outage_leaves_locked_inactive_binding(setup, monkeypatch):
 
 
 def test_schema_migration_idempotent(setup, test_db):
-    from tests.pg_shim import ShimConnection
     # Use the same adapter as production module tests, never a live pool.
     with database.get_db() as conn:
         store.create_schema(conn.cursor())
@@ -476,7 +475,7 @@ async def test_revoked_hub_websocket_handshake_denied(setup, monkeypatch, hub_st
 
 
 def test_direct_phone_deletion_revokes_derived_cookie(setup):
-    grant = database.create_pairing_grant(
+    database.create_pairing_grant(
         token_hash='direct-grant', purpose='controller',
         scopes=list(pairing.DEFAULT_MOBILE_SCOPES), target_install_id=None,
         endpoint_url=None, device_label=None, created_by='test',

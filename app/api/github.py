@@ -19,10 +19,9 @@ from app.core.github_service import (
     PullRequest,
     WorkflowRun,
 )
-from app.core.config import settings
 from app.core.session_pr_state import persist_pr_state
 from app.api.git_owner import session_git_action
-from app.api.auth import require_auth, get_api_user_from_request
+from app.api.auth import require_auth
 from app.api.common import check_project_access, resolve_project_path
 
 logger = logging.getLogger(__name__)

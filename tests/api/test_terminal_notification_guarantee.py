@@ -324,7 +324,6 @@ def test_surface_terminal_notification_records_only_never_spawns():
     body = src.split('"""', 2)[-1]  # drop the docstring (which explains the strip)
     assert "_deliver_unpark_impl(" not in body, "step 3 unpark handoff must be gone"
     assert "HeadlessChatHandler(" not in body, "must not instantiate a headless runner"
-    assert "StreamingContext(" not in body, "must not build the pending husk"
 
 
 async def test_callback_durable_chip_only_when_no_live_client():

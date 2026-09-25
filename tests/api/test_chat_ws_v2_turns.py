@@ -28,10 +28,8 @@ import asyncio
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 import app.api.chat_ws_handler as cwh
-import app.api.websocket as ws_mod
 from app.core.config import settings
 from app.db import database
 from app.db import turns as turns_db

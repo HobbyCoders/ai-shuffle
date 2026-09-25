@@ -13,8 +13,6 @@ from tests.api.test_voice_api import (
     VOICE_SETTINGS,
     _make_provider,
     _enable_voice,
-    _install_mock_transport,
-    _secret_handler,
 )
 
 

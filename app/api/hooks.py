@@ -17,7 +17,7 @@ from app.core.models import (
 )
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.auth import require_admin, get_api_user_from_request
+from app.api.auth import require_admin
 from app.api.common import check_project_access
 
 router = APIRouter(prefix="/api/v1/hooks", tags=["Hooks"])

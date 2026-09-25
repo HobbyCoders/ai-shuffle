@@ -108,23 +108,6 @@ def sample_project():
     }
 
 
-@pytest.fixture
-def sample_project_with_settings():
-    """Sample project with settings."""
-    return {
-        "id": "test-project-settings",
-        "name": "Test Project with Settings",
-        "description": "A test project with settings",
-        "path": "test-project-settings",
-        "settings": {
-            "default_profile_id": "custom-profile",
-            "custom_instructions": "Some instructions"
-        },
-        "created_at": "2024-01-15T10:30:00",
-        "updated_at": "2024-01-15T10:30:00"
-    }
-
-
 # =============================================================================
 # Test Module Imports
 # =============================================================================
@@ -923,6 +906,85 @@ class TestListProjectFiles:
 
         assert response.status_code == 400
         assert "not a directory" in response.json()["detail"].lower()
+
+    def test_list_files_rejects_traversal_outside_project(self, client, mock_database, sample_project, temp_dir, mock_settings):
+        """A ``../`` path must not list a sibling directory of the project."""
+        mock_database.get_project.return_value = sample_project
+        (temp_dir / "test-project").mkdir()
+        (temp_dir / "other-project").mkdir()
+
+        response = client.get("/api/v1/projects/test-project/files?path=../other-project")
+
+        assert response.status_code == 400
+
+
+class TestListProjectFilesSessionCheckout:
+    """GET /projects/{id}/files?session_id= lists a session's checkout, confined to it."""
+
+    @pytest.fixture
+    def checkout(self, temp_dir):
+        checkout = temp_dir / "checkout"
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "main.py").write_text("x")
+        (temp_dir / "outside").mkdir()
+        (temp_dir / "outside" / "secret.txt").write_text("s")
+        with patch("app.core.project_resolver.resolve_existing_cwd", return_value=str(checkout)):
+            yield checkout
+
+    def _session(self, project_id="test-project", **extra):
+        return {"id": "s1", "project_id": project_id, **extra}
+
+    def test_lists_session_checkout(self, client, mock_database, checkout):
+        mock_database.get_session.return_value = self._session()
+
+        response = client.get("/api/v1/projects/test-project/files?session_id=s1&path=src")
+
+        assert response.status_code == 200
+        assert [f["name"] for f in response.json()["files"]] == ["main.py"]
+
+    @pytest.mark.parametrize("path", ["..", "../outside", "src/../../outside"])
+    def test_rejects_relative_traversal(self, client, mock_database, checkout, path):
+        mock_database.get_session.return_value = self._session()
+
+        response = client.get("/api/v1/projects/test-project/files", params={"session_id": "s1", "path": path})
+
+        assert response.status_code == 400
+        assert "secret.txt" not in response.text
+
+    def test_rejects_absolute_path(self, client, mock_database, checkout, temp_dir):
+        mock_database.get_session.return_value = self._session()
+
+        response = client.get(
+            "/api/v1/projects/test-project/files",
+            params={"session_id": "s1", "path": str(temp_dir / "outside")},
+        )
+
+        assert response.status_code == 400
+
+    def test_session_from_another_project_is_not_found(self, client, mock_database, checkout):
+        mock_database.get_session.return_value = self._session(project_id="other-project")
+
+        response = client.get("/api/v1/projects/test-project/files?session_id=s1")
+
+        assert response.status_code == 404
+        mock_database.get_project.assert_not_called()
+
+    def test_restricted_api_user_denied_foreign_profile_session(self, client, mock_database, mock_api_user, checkout):
+        mock_api_user.return_value = {"id": "u1", "project_id": "test-project", "profile_id": "mine"}
+        mock_database.get_session.return_value = self._session(profile_id="theirs")
+
+        response = client.get("/api/v1/projects/test-project/files?session_id=s1")
+
+        assert response.status_code == 403
+
+    def test_chat_history_rejects_session_from_another_project(self, client, mock_database, checkout):
+        mock_database.get_session.return_value = self._session(project_id="other-project")
+
+        with patch("app.core.jsonl_parser.list_chat_history_sessions", return_value=[]) as listing:
+            response = client.get("/api/v1/projects/test-project/chat-history?session_id=s1")
+
+        assert response.status_code == 404
+        listing.assert_not_called()
 
 
 # =============================================================================

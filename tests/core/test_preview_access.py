@@ -260,7 +260,7 @@ def test_transport_check_uses_the_shared_owner_auth_helpers():
     assert not preview_access._private_peer(_request(peer="203.0.113.4"))
     assert not preview_access._private_peer(_request(ingress="remote"))
 
-@pytest.mark.parametrize("dependency", ["require_auth", "require_admin", "require_api_key", "get_current_api_user"])
+@pytest.mark.parametrize("dependency", ["require_auth", "require_admin", "require_api_key"])
 @pytest.mark.parametrize("identity", ["local-owner", "admin-cookie", "invalid-admin-cookie", "paired-cookie", "paired-bearer", "api-key"])
 @pytest.mark.parametrize("transport", ["direct-LAN", "vite-proxy", "remote"])
 @pytest.mark.parametrize("cookie_state", ["valid", "expired", "invalid", "missing"])
@@ -309,7 +309,7 @@ def test_preview_ceiling_precedes_every_authentication_path(monkeypatch, depende
         return
 
     # A broken/absent cookie does not change the normal credential's authority.
-    api_only = dependency in ("require_api_key", "get_current_api_user")
+    api_only = dependency == "require_api_key"
     admitted = (identity == "api-key" if api_only else
                 identity.startswith("paired") or
                 (identity == "api-key" and dependency == "require_auth") or

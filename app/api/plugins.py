@@ -203,7 +203,7 @@ async def add_marketplace(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
-    except RuntimeError as e:
+    except RuntimeError:
         logger.exception("Failed to add marketplace")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -242,7 +242,7 @@ async def sync_marketplace(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
-    except RuntimeError as e:
+    except RuntimeError:
         logger.exception("Failed to sync marketplace")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

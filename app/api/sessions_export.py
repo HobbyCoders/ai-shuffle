@@ -175,7 +175,7 @@ async def export_session(
         - For JSONL: The authoritative transcript as newline-delimited JSON;
           raw Claude history files are returned verbatim when available
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
     from fastapi.responses import Response
     import json
 
@@ -435,7 +435,7 @@ async def import_session(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid JSON file: {str(e)}"
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to read session import file")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

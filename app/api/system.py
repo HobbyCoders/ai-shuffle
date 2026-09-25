@@ -4,13 +4,12 @@ System API routes - health, version, stats, workspace configuration, tools
 
 import asyncio
 import hashlib
-import json
 import logging
 import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -358,7 +357,7 @@ async def set_workspace_config(
             status_code=400,
             detail=f"Permission denied: Cannot write to '{path}'"
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Invalid workspace path")
         raise HTTPException(
             status_code=400,
@@ -608,7 +607,7 @@ async def browse_filesystem(
 
 @router.post("/api/v1/system/db-maintenance")
 async def run_db_maintenance(token: str = Depends(require_admin)):
-    """Run database maintenance on-demand: WAL checkpoint, OPTIMIZE, log cleanup, VACUUM."""
+    """Run database maintenance on demand: ANALYZE, log-table cleanup, VACUUM ANALYZE."""
     import time
     start = time.monotonic()
     result = await asyncio.to_thread(database.run_database_maintenance)

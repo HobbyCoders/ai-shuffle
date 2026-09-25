@@ -323,18 +323,6 @@ class DiscardRequest(BaseModel):
 # Worktree Models
 # =============================================================================
 
-class WorktreeCreate(BaseModel):
-    """Request to create a new worktree"""
-    branch_name: str = Field(..., min_length=1, max_length=255)
-    create_new_branch: bool = False
-    base_branch: Optional[str] = None
-    profile_id: Optional[str] = None
-    copy_uncommitted: bool = Field(
-        default=False,
-        description="Copy uncommitted files (modified and untracked) from main repo to worktree"
-    )
-
-
 class SessionInfo(BaseModel):
     """Session info embedded in worktree response"""
     id: str
@@ -404,15 +392,6 @@ class WorktreeListResponse(BaseModel):
     total: int
 
 
-class WorktreeCreateResponse(BaseModel):
-    """Response for worktree creation"""
-    success: bool
-    message: str
-    worktree: Optional[WorktreeInfo] = None
-    session: Optional[dict] = None
-    errors: Optional[List[str]] = None  # Errors from copy_uncommitted operation
-
-
 class WorktreeSyncResponse(BaseModel):
     """Response for worktree sync endpoint"""
     synced: int
@@ -450,17 +429,6 @@ class MigrateUploadsResponse(BaseModel):
     """Result of upload migration"""
     migrated: List[Dict[str, str]]  # List of {original_path, new_path, relative_path}
     errors: List[str]
-
-
-# =============================================================================
-# Standalone Worktree Models
-# =============================================================================
-
-class WorktreeCreateStandalone(BaseModel):
-    """Request to create a standalone worktree (no session)"""
-    branch_name: str = Field(..., min_length=1, max_length=255)
-    create_new_branch: bool = False
-    base_branch: Optional[str] = None
 
 
 # =============================================================================

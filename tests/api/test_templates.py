@@ -244,7 +244,7 @@ class TestListTemplates:
         with patch("app.api.templates.database") as mock_database:
             mock_database.get_all_templates.return_value = [sample_template]
 
-            result = await list_templates(profile_id="test-profile", category=None, token="test-token")
+            await list_templates(profile_id="test-profile", category=None, token="test-token")
 
         mock_database.get_all_templates.assert_called_once_with(profile_id="test-profile", category=None)
 
@@ -256,7 +256,7 @@ class TestListTemplates:
         with patch("app.api.templates.database") as mock_database:
             mock_database.get_all_templates.return_value = [sample_template]
 
-            result = await list_templates(profile_id=None, category="coding", token="test-token")
+            await list_templates(profile_id=None, category="coding", token="test-token")
 
         mock_database.get_all_templates.assert_called_once_with(profile_id=None, category="coding")
 
@@ -268,7 +268,7 @@ class TestListTemplates:
         with patch("app.api.templates.database") as mock_database:
             mock_database.get_all_templates.return_value = [sample_template]
 
-            result = await list_templates(profile_id="test-profile", category="coding", token="test-token")
+            await list_templates(profile_id="test-profile", category="coding", token="test-token")
 
         mock_database.get_all_templates.assert_called_once_with(profile_id="test-profile", category="coding")
 
@@ -451,7 +451,7 @@ class TestCreateTemplate:
                 profile_id=None
             )
 
-            result = await create_template(template_data=template_data, token="test-token")
+            await create_template(template_data=template_data, token="test-token")
 
         call_kwargs = mock_database.create_template.call_args.kwargs
         assert call_kwargs["name"] == "Full Template"
@@ -715,7 +715,7 @@ class TestDeleteTemplate:
             mock_database.delete_template.return_value = True
 
             # Should not raise an exception
-            result = await delete_template(template_id=sample_template["id"], token="test-token")
+            await delete_template(template_id=sample_template["id"], token="test-token")
 
         mock_database.delete_template.assert_called_once_with(sample_template["id"])
 
