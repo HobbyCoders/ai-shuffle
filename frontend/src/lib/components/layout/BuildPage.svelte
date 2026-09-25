@@ -132,8 +132,9 @@
 		if (!buildCountsAreStale()) return;
 		lastCountsLoadAt = Date.now();
 		appData.loadProfiles();
-		mcp.loadGlobalServers();
-		hooks.loadAppHooks();
+		// Badge counts only: a failed load leaves the badge hidden.
+		mcp.loadGlobalServers().catch(() => {});
+		hooks.loadAppHooks().catch(() => {});
 	});
 
 	const counts = $derived<Record<BuildSub, number>>({

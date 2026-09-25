@@ -358,7 +358,20 @@
 	const hasEnrichmentDetails = $derived(
 		Boolean(request.decision_reason || request.blocked_path)
 	);
+	// A plain-text multi-line description (a Python cell's prompt, titled
+	// "Run Python code", carries the first lines of the code) reads as code: it
+	// is shown whole in a scrolling block that replaces both the one-line
+	// subhead and the JSON-escaped summary of the input.
+	const CODE_PROMPT_TITLE = 'Run Python code';
+	const codeDescription = $derived.by(() => {
+		// Keep the first line's indentation; drop blank edges only.
+		const text = (request.description ?? '').replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd();
+		if (!text.trim()) return null;
+		const isCode = text.includes('\n') || request.title?.trim() === CODE_PROMPT_TITLE;
+		return isCode ? text : null;
+	});
 	const descriptionTruncatedView = $derived.by(() => {
+		if (codeDescription !== null) return null;
 		const desc = request.description?.trim();
 		if (!desc) return null;
 		const needsTruncate = desc.length > DESCRIPTION_TRUNCATE_LEN;
@@ -454,14 +467,18 @@
 			</p>
 		{/if}
 
-		<div class="relative group">
-			<div class="text-sm text-foreground font-mono bg-card/60 rounded-xl px-3 py-2.5 border border-border/40 break-all leading-relaxed">
-				{#if request.tool_name === 'Bash'}
-					<span class="text-muted-foreground select-none">$ </span>
-				{/if}
-				{summary || 'No details available'}
+		{#if codeDescription !== null}
+			<pre class="permission-code" aria-label="Code to run">{codeDescription}</pre>
+		{:else}
+			<div class="relative group">
+				<div class="text-sm text-foreground font-mono bg-card/60 rounded-xl px-3 py-2.5 border border-border/40 break-all leading-relaxed">
+					{#if request.tool_name === 'Bash'}
+						<span class="text-muted-foreground select-none">$ </span>
+					{/if}
+					{summary || 'No details available'}
+				</div>
 			</div>
-		</div>
+		{/if}
 
 		<!-- Slice D: enrichment details (decision_reason / blocked_path) -->
 		{#if hasEnrichmentDetails}
@@ -755,6 +772,25 @@
 		font-size: 0.75rem;
 		color: var(--muted-foreground);
 		line-height: 1.5;
+	}
+
+	/* Multi-line description (a Python cell's code): kept whole, line breaks
+	   and indentation intact, scrolling past a readable height. */
+	.permission-code {
+		margin: 0;
+		max-height: 16rem;
+		overflow: auto;
+		padding: 0.625rem 0.75rem;
+		border-radius: var(--radius, 0.75rem);
+		border: 1px solid var(--border);
+		background: color-mix(in oklch, var(--muted) 35%, var(--card));
+		color: var(--foreground);
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		line-height: 1.5;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		tab-size: 4;
 	}
 
 	.enrichment-expand-btn {

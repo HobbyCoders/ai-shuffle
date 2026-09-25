@@ -58,7 +58,8 @@
 	// Load hooks when project changes
 	$effect(() => {
 		if (projectId) {
-			hooks.loadAll(projectId);
+			// A failed load is shown through $hooksError.
+			hooks.loadAll(projectId).catch(() => {});
 		}
 	});
 

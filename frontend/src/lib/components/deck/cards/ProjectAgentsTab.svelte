@@ -58,7 +58,8 @@
 	// Load agents when project changes
 	$effect(() => {
 		if (projectId) {
-			projectAgents.loadAgents(projectId);
+			// A failed load is shown through $projectAgentsError.
+			projectAgents.loadAgents(projectId).catch(() => {});
 		}
 	});
 

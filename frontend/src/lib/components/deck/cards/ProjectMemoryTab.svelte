@@ -74,7 +74,8 @@
 	// Load files when project changes
 	$effect(() => {
 		if (projectId) {
-			projectMemory.loadFiles(projectId);
+			// A failed load is shown through $memoryError.
+			projectMemory.loadFiles(projectId).catch(() => {});
 			// Reset editing state on project change
 			editingLocation = null;
 			creatingLocation = null;

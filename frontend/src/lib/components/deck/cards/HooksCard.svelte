@@ -66,12 +66,13 @@
 
 
 	// ── Data loading ───────────────────────────────────────────────────
+	// A failed load is shown through $hooksError.
 	$effect(() => {
 		if ($selectedProject) {
-			hooks.loadAll($selectedProject);
+			hooks.loadAll($selectedProject).catch(() => {});
 		} else {
 			// Still load app hooks even without a project
-			hooks.loadAppHooks();
+			hooks.loadAppHooks().catch(() => {});
 		}
 	});
 

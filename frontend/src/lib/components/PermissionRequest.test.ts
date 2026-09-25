@@ -404,3 +404,49 @@ describe('PermissionRequest — page-wide keyboard shortcuts', () => {
 		composer.remove();
 	});
 });
+
+describe('PermissionRequest — multi-line (code) descriptions', () => {
+	const code = ['import os', 'for name in os.listdir("."):', '    print(name)', ...Array.from({ length: 17 }, (_, i) => `x${i} = ${i}`)].join('\n');
+	const pythonCell = (over: Partial<PermissionRequestData> = {}) => makeRequest({
+		tool_name: 'mcp__fluid__run_python',
+		tool_input: { code: code + '\nmore = "not in the preview"' },
+		title: 'Run Python code',
+		description: code + '\n… 1 more line',
+		...over
+	});
+
+	it('shows the whole description as a code block in place of the JSON summary', () => {
+		const { container } = render(PermissionRequest, { props: { request: pythonCell() } });
+
+		const block = screen.getByLabelText('Code to run');
+		expect(block.tagName).toBe('PRE');
+		// Line breaks and indentation survive, nothing is cut at 120 characters.
+		expect(block.textContent).toBe(code + '\n… 1 more line');
+		expect(block.textContent).toContain('\n    print(name)\n');
+		expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull();
+		// No JSON-escaped summary of the input, and no one-line subhead.
+		expect(container.textContent).not.toContain('{"code"');
+		expect(container.querySelector('.enrichment-description')).toBeNull();
+		expect(screen.getByRole('heading', { name: /Run Python code/ })).toBeTruthy();
+	});
+
+	it('treats any multi-line description as code, whatever the title', () => {
+		render(PermissionRequest, { props: { request: pythonCell({ title: undefined, description: 'line one\nline two' }) } });
+		expect(screen.getByLabelText('Code to run').textContent).toBe('line one\nline two');
+	});
+
+	it('shows a one-line Python cell description as code too', () => {
+		render(PermissionRequest, { props: { request: pythonCell({ description: 'print(1)' }) } });
+		expect(screen.getByLabelText('Code to run').textContent).toBe('print(1)');
+	});
+
+	it('keeps the one-line subhead and summary for other tools', () => {
+		const { container } = render(PermissionRequest, {
+			props: { request: makeRequest({ description: 'x'.repeat(150), title: 'Run a command' }) }
+		});
+		expect(screen.queryByLabelText('Code to run')).toBeNull();
+		expect(container.querySelector('.enrichment-description')).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Show more' })).toBeTruthy();
+		expect(screen.getByText(/git status/)).toBeTruthy();
+	});
+});
