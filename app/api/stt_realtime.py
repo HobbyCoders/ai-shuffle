@@ -49,6 +49,7 @@ from fastapi.websockets import WebSocketState
 
 from app.api.auth import require_auth
 from app.api.ws_auth import authenticate_websocket
+from app.api.ws_key_watch import watch_api_key
 from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
@@ -581,53 +582,56 @@ async def transcribe_stream(
                     if not state["configured"]:
                         return
 
-        client_task = asyncio.create_task(pump_client_to_upstream())
-        upstream_task = asyncio.create_task(pump_upstream_to_client())
+        # A revoked API key loses the socket and the upstream session it pays
+        # for (app.api.ws_key_watch).
+        async with watch_api_key(websocket, on_revoke=lambda: upstream.close()):
+            client_task = asyncio.create_task(pump_client_to_upstream())
+            upstream_task = asyncio.create_task(pump_upstream_to_client())
 
-        try:
-            done, pending = await asyncio.wait(
-                {client_task, upstream_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            try:
+                done, pending = await asyncio.wait(
+                    {client_task, upstream_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
 
-            # A clean "stop" earns a drain window: the last commit is still
-            # transcribing upstream and its ``final`` is the text the user
-            # actually wants. Anything else (client vanished, upstream closed)
-            # tears down immediately.
-            if state["stopping"] and client_task in done and not upstream_task.done():
-                waiter = asyncio.ensure_future(drain_ready.wait())
-                try:
-                    # Never cancel the pump while it is forwarding the tail.
-                    await asyncio.wait(
-                        {waiter, upstream_task},
-                        timeout=DRAIN_TIMEOUT_SECONDS,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                except Exception:  # noqa: BLE001 - the drain is best-effort
-                    pass
-                finally:
-                    waiter.cancel()
-                    await asyncio.gather(waiter, return_exceptions=True)
-                pending = {t for t in pending if not t.done()}
+                # A clean "stop" earns a drain window: the last commit is still
+                # transcribing upstream and its ``final`` is the text the user
+                # actually wants. Anything else (client vanished, upstream closed)
+                # tears down immediately.
+                if state["stopping"] and client_task in done and not upstream_task.done():
+                    waiter = asyncio.ensure_future(drain_ready.wait())
+                    try:
+                        # Never cancel the pump while it is forwarding the tail.
+                        await asyncio.wait(
+                            {waiter, upstream_task},
+                            timeout=DRAIN_TIMEOUT_SECONDS,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                    except Exception:  # noqa: BLE001 - the drain is best-effort
+                        pass
+                    finally:
+                        waiter.cancel()
+                        await asyncio.gather(waiter, return_exceptions=True)
+                    pending = {t for t in pending if not t.done()}
 
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-
-            for task in done:
-                exc = task.exception() if not task.cancelled() else None
-                if exc and not isinstance(exc, _ClientGone):
-                    logger.warning("STT stream: pump failed: %s", exc)
-
-        except _ClientGone:
-            pass
-        except Exception:  # noqa: BLE001 - a proxy bug must not 500 the socket
-            logger.exception("STT stream: proxy failed")
-        finally:
-            for task in (client_task, upstream_task):
-                if not task.done():
+                for task in pending:
                     task.cancel()
-            await asyncio.gather(client_task, upstream_task, return_exceptions=True)
+                await asyncio.gather(*pending, return_exceptions=True)
+
+                for task in done:
+                    exc = task.exception() if not task.cancelled() else None
+                    if exc and not isinstance(exc, _ClientGone):
+                        logger.warning("STT stream: pump failed: %s", exc)
+
+            except _ClientGone:
+                pass
+            except Exception:  # noqa: BLE001 - a proxy bug must not 500 the socket
+                logger.exception("STT stream: proxy failed")
+            finally:
+                for task in (client_task, upstream_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(client_task, upstream_task, return_exceptions=True)
 
     await _send_client(websocket, {"type": "closed"})
     if websocket.client_state == WebSocketState.CONNECTED:

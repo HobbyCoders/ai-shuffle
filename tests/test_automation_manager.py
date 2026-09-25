@@ -2352,6 +2352,56 @@ class TestRunFailures:
         assert session is not None and session["automation_id"] == "auto-noprov"
         assert _auto("auto-noprov")["last_error"] == "No provider configured for profile default"
 
+    async def test_shutdown_after_the_session_mint_cancels_the_run_before_its_turn(
+        self, manager, mock_db, monkeypatch
+    ):
+        """R10-21: a fire that passed the shutdown gates just before the flag
+        was set still queued its turn; the row stayed ``running`` and the turn
+        ran unattended on the next boot. The last gate is before the submit."""
+        from app.core import startup
+
+        submit = AsyncMock(return_value="turn-1")
+        monkeypatch.setattr("app.core.turn_manager.submit_async", submit)
+        sync = MagicMock()
+
+        async def _broadcast(**kwargs):
+            monkeypatch.setattr(startup, "is_shutting_down", True)
+
+        sync.broadcast_user_session_created = _broadcast
+        monkeypatch.setattr("app.core.sync_engine.sync_engine", sync)
+        _make_automation("auto-sd-mint", triggers=_WEBHOOK_NO_SECRET)
+
+        await manager._execute("auto-sd-mint", {"trigger": "manual"})
+
+        submit.assert_not_awaited()
+        (run,) = _runs("auto-sd-mint")
+        assert run["status"] == "cancelled"
+        assert _auto("auto-sd-mint")["status"] == "idle"
+        assert not _auto("auto-sd-mint").get("last_error")
+
+    async def test_shutdown_before_the_session_mint_mints_nothing(self, manager, mock_db, monkeypatch):
+        from app.core import startup
+        from app.db import database
+
+        submit = AsyncMock(return_value="turn-1")
+        monkeypatch.setattr("app.core.turn_manager.submit_async", submit)
+        real_mark = database.update_automation
+
+        def _mark(automation_id, **kwargs):
+            real_mark(automation_id, **kwargs)
+            if kwargs.get("status") == "running":
+                monkeypatch.setattr(startup, "is_shutting_down", True)
+
+        monkeypatch.setattr(am.database, "update_automation", _mark)
+        _make_automation("auto-sd-pre", triggers=_WEBHOOK_NO_SECRET)
+
+        await manager._execute("auto-sd-pre", {"trigger": "manual"})
+
+        submit.assert_not_awaited()
+        (run,) = _runs("auto-sd-pre")
+        assert run["status"] == "cancelled"
+        assert not run.get("session_id")
+
     async def test_session_broadcast_failure_does_not_fail_the_run(self, manager, mock_db, monkeypatch):
         monkeypatch.setattr("app.core.turn_manager.submit_async", AsyncMock(return_value="turn-1"))
         monkeypatch.setattr("app.core.turn_manager.wait_session_idle", AsyncMock(return_value=True))

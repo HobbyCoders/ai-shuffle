@@ -95,6 +95,9 @@ jobs:
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
+      # The checkout below has full history: a missing old-schema commit is a
+      # failure here, not a silent skip (tests/db/test_schema_lifecycle.py).
+      SCHEMA_LIFECYCLE_REQUIRED: "1"
       PYTEST_WORKERS: ${{ inputs.runner_cpus == '4' && '4' || '2' }}
     steps:
       - uses: actions/checkout@v4

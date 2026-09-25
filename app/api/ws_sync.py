@@ -12,6 +12,7 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.api.sessions_helpers import check_session_access_for_api_user
 from app.api.ws_auth import authenticate_websocket
+from app.api.ws_key_watch import watch_api_key
 from app.api.ws_utils import ping_loop
 
 logger = logging.getLogger(__name__)
@@ -95,38 +96,41 @@ async def session_sync_websocket(
         ping_task = asyncio.create_task(ping_loop(websocket))
 
         try:
-            while True:
-                try:
-                    # Wait for messages from client
-                    data = await asyncio.wait_for(
-                        websocket.receive_json(),
-                        timeout=60.0  # 60 second timeout
-                    )
+            # A revoked API key loses the socket (app.api.ws_key_watch).
+            async with watch_api_key(websocket):
+                # Until this side closes it (a revoked key) or the client goes.
+                while websocket.application_state == WebSocketState.CONNECTED:
+                    try:
+                        # Wait for messages from client
+                        data = await asyncio.wait_for(
+                            websocket.receive_json(),
+                            timeout=60.0  # 60 second timeout
+                        )
 
-                    # Handle client messages
-                    msg_type = data.get("type")
+                        # Handle client messages
+                        msg_type = data.get("type")
 
-                    if msg_type == "pong":
-                        # Client responding to ping - connection is alive
-                        connection.last_activity = datetime.now(timezone.utc)
+                        if msg_type == "pong":
+                            # Client responding to ping - connection is alive
+                            connection.last_activity = datetime.now(timezone.utc)
 
-                    elif msg_type == "request_state":
-                        # Client requesting current state
-                        state = await sync_engine.get_session_state(session_id)
-                        state["session"] = await run_sync(database.get_session, session_id)
-                        state["messages"] = await run_sync(database.get_session_messages, session_id)
-                        await websocket.send_json({
-                            "event_type": "state",
-                            "session_id": session_id,
-                            "data": state,
-                            "timestamp": None
-                        })
+                        elif msg_type == "request_state":
+                            # Client requesting current state
+                            state = await sync_engine.get_session_state(session_id)
+                            state["session"] = await run_sync(database.get_session, session_id)
+                            state["messages"] = await run_sync(database.get_session_messages, session_id)
+                            await websocket.send_json({
+                                "event_type": "state",
+                                "session_id": session_id,
+                                "data": state,
+                                "timestamp": None
+                            })
 
-                except asyncio.TimeoutError:
-                    # No message received, check if connection is still alive
-                    if websocket.client_state != WebSocketState.CONNECTED:
-                        break
-                    continue
+                    except asyncio.TimeoutError:
+                        # No message received, check if connection is still alive
+                        if websocket.client_state != WebSocketState.CONNECTED:
+                            break
+                        continue
 
         finally:
             ping_task.cancel()
@@ -170,17 +174,19 @@ async def global_sync_websocket(
     )
     socket_id = global_events.register(websocket, user_type, user_id)
     try:
-        while True:
-            try:
-                message = await asyncio.wait_for(websocket.receive_json(), timeout=30)
-                if message.get("type") == "ping":
+        async with watch_api_key(websocket):
+            # Until this side closes it (a revoked key) or the client goes.
+            while websocket.application_state == WebSocketState.CONNECTED:
+                try:
+                    message = await asyncio.wait_for(websocket.receive_json(), timeout=30)
+                    if message.get("type") == "ping":
+                        connection = global_events.connections.get(socket_id)
+                        if connection is None or not connection[3].enqueue('{"type":"pong"}'):
+                            break
+                except asyncio.TimeoutError:
                     connection = global_events.connections.get(socket_id)
-                    if connection is None or not connection[3].enqueue('{"type":"pong"}'):
+                    if connection is None or not connection[3].enqueue('{"type":"ping"}'):
                         break
-            except asyncio.TimeoutError:
-                connection = global_events.connections.get(socket_id)
-                if connection is None or not connection[3].enqueue('{"type":"ping"}'):
-                    break
     except WebSocketDisconnect:
         pass
     finally:

@@ -171,11 +171,44 @@ _BEARER_RE = re.compile(r"(?i)\b(bearer|basic|token)\s+[^\s\"']+")
 _QUERY_SECRET_RE = re.compile(r"(?i)([?&][\w.-]*(?:token|key|secret|password|auth|sig)[\w.-]*=)[^&#\s]+")
 
 
+# A ``name=value`` or ``"name": value`` pair inside a larger value: a libpq
+# DSN (``host=db password=x``), an ADO/ODBC string (``;Pwd=x;``) or JSON.
+_EMBEDDED_NAME_RE = re.compile(r"(?<![\w.-])([\"']?)([A-Za-z][\w.-]*)\1\s*[=:]\s*")
+_EMBEDDED_VALUE_RE = re.compile(r"[^\s;&,}\]]*")
+
+
 def _secret_name(name: str) -> bool:
     parts = [p for p in re.split(r"[-_.]+", name.lower()) if p]
     if any(p in _SECRET_NAME_PARTS for p in parts) or parts == ["key"]:
         return True
+    if parts and parts[-1] == "pass":  # ``--db-pass``, ``--pass`` (not ``--pass-through``)
+        return True
     return any(pair in _SECRET_NAME_PAIRS for pair in zip(parts, parts[1:]))
+
+
+def _mask_embedded_pairs(text: str) -> str:
+    """Mask the value of every secret-named pair inside ``text``."""
+    out: List[str] = []
+    pos = 0
+    for match in _EMBEDDED_NAME_RE.finditer(text):
+        if match.start() < pos or not _secret_name(match.group(2)):
+            continue
+        start = match.end()
+        if start < len(text) and text[start] in "\"'":
+            quote = text[start]
+            close = text.find(quote, start + 1)
+            end = len(text) if close == -1 else close + 1
+            replacement = f"{quote}{_SECRET_MASK}{quote}"
+        else:
+            end = _EMBEDDED_VALUE_RE.match(text, start).end()
+            replacement = _SECRET_MASK
+        if end == start:
+            continue
+        out.append(text[pos:start])
+        out.append(replacement)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def _looks_like_token(value: str) -> bool:
@@ -230,7 +263,8 @@ def _mask_arg_text(arg: str) -> str:
         return _SECRET_MASK
     masked = redact_url_credentials(arg)
     masked = _QUERY_SECRET_RE.sub(lambda m: m.group(1) + _SECRET_MASK, masked)
-    return _BEARER_RE.sub(lambda m: f"{m.group(1)} {_SECRET_MASK}", masked)
+    masked = _BEARER_RE.sub(lambda m: f"{m.group(1)} {_SECRET_MASK}", masked)
+    return _mask_embedded_pairs(masked)
 
 
 def _mask_args(args: Optional[List[str]]) -> Optional[List[str]]:

@@ -4028,11 +4028,26 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # Raw exception text stays out of user messaging and cannot
                     # accidentally activate a context-overflow retry. Transport
                     # clients already exhausted safe pre-stream retries.
-                    error_message = (
-                        "The provider connection was interrupted before the response finished. "
-                        "The response may be incomplete. No automatic replay was attempted. "
-                        "Review any completed actions before asking to continue."
-                    )
+                    evidence = transport_failure if isinstance(transport_failure, dict) else {}
+                    if not blocks and evidence.get("chunks_delivered") is False:
+                        # Nothing arrived on any attempt (a first-byte timeout
+                        # or a refused connection): no partial reply exists.
+                        attempts = evidence.get("attempt")
+                        tried = (
+                            f" ({attempts} attempts)"
+                            if isinstance(attempts, int) and not isinstance(attempts, bool)
+                            and attempts > 1 else ""
+                        )
+                        error_message = (
+                            f"The provider sent nothing before the connection failed{tried}. "
+                            "No reply was received."
+                        )
+                    else:
+                        error_message = (
+                            "The provider connection was interrupted before the response finished. "
+                            "The response may be incomplete. No automatic replay was attempted. "
+                            "Review any completed actions before asking to continue."
+                        )
                 provider_message = payload.get("provider_message")
                 return _CallResult(
                     message=self._assemble_message(blocks, request.model),

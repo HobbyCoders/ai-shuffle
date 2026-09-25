@@ -393,6 +393,16 @@ class TestSendToAllDevices:
 
         assert results == []
 
+    async def test_unreadable_device_list_raises_only_when_asked(self):
+        """R10-23: NotifyDevices must tell a failed read from "no receiver"."""
+        from app.services.push_notification import DeviceListUnavailable
+
+        service = PushNotificationService()
+        with patch("app.db.mobile.get_all_mobile_devices", side_effect=RuntimeError("db down")):
+            assert await service.send_to_all_devices(title="T", body="B") == []
+            with pytest.raises(DeviceListUnavailable):
+                await service.send_to_all_devices(title="T", body="B", raise_lookup_errors=True)
+
 
 # =============================================================================
 # fire_and_forget_notify Tests

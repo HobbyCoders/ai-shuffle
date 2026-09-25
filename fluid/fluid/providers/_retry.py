@@ -15,10 +15,11 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 # HTTP statuses worth an automatic retry (rate limit / transient upstream).
-# 520-524 are Cloudflare's edge codes: an origin that misbehaved, refused the
-# edge, or timed out. Providers fronted by Cloudflare (Z.AI among them) return
-# them for blips that clear on the next attempt.
-RETRIABLE_STATUSES = frozenset((408, 429, 500, 502, 503, 520, 521, 522, 523, 524, 529))
+# 504 is a gateway timeout (and Anthropic's ``timeout_error``), the same blip
+# as Cloudflare's 524. 520-524 are Cloudflare's edge codes: an origin that
+# misbehaved, refused the edge, or timed out. Providers fronted by Cloudflare
+# (Z.AI among them) return them for blips that clear on the next attempt.
+RETRIABLE_STATUSES = frozenset((408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529))
 
 # A refusal about money, not load: the account is out of credit or over a hard
 # spend limit. OpenAI sends ``insufficient_quota`` with HTTP 429, the status of
@@ -30,7 +31,7 @@ BILLING_ERROR_CODES = frozenset((
     "insufficient_quota",          # OpenAI, with HTTP 429
     "billing_hard_limit_reached",  # OpenAI
     "billing_not_active",          # OpenAI
-    "insufficient_credits",        # OpenRouter, with HTTP 402
+    "insufficient_credits",        # symbolic spelling; OpenRouter sends ``code: 402``
     "billing_error",               # Anthropic error type
 ))
 

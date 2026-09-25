@@ -106,6 +106,12 @@ def _parse_utc(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+class _ShutdownBeforeTurn(Exception):
+    """Shutdown began after the run moved to ``running`` but before its turn
+    was queued: the run is settled ``cancelled`` instead of leaving a queued
+    turn nobody watches (it would run unattended on the next boot)."""
+
+
 class AutomationManager:
     """Central hub for automation scheduling, execution, and output delivery."""
 
@@ -1004,6 +1010,19 @@ class AutomationManager:
             # Deliver output
             await self._deliver_output(automation, run_id, response_text)
 
+        except _ShutdownBeforeTurn:
+            logger.info(f"Automation {automation_id}: shutting down — run {run_id} cancelled before its turn")
+
+            def _settle_cancelled() -> None:
+                database.update_automation_run(
+                    run_id, status="cancelled", error="Shutting down: the run's turn was not started",
+                    duration_ms=int((time.time() - start_time) * 1000),
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+                database.update_automation(automation_id, status="idle")
+
+            await run_sync(_settle_cancelled)
+
         except asyncio.TimeoutError:
             duration_ms = int((time.time() - start_time) * 1000)
             error_msg = f"Execution timed out after {automation.get('timeout_seconds', 300)}s"
@@ -1094,6 +1113,10 @@ class AutomationManager:
         automation_id = automation["id"]
         profile_id = automation["profile_id"]
         timeout_seconds = automation.get("timeout_seconds", 300)
+        # The fire passed the shutdown gates before the run moved to
+        # ``running``; project resolution (possibly a clone) ran since.
+        if self._shutdown_begun():
+            raise _ShutdownBeforeTurn()
 
         # 1. Fresh badged session. This runs only AFTER the cross-install
         #    fire claim (_on_schedule_trigger) and budget check (_execute),
@@ -1154,7 +1177,10 @@ class AutomationManager:
         # 3. Submit a durable ``source=automation`` turn. ``submit`` enqueues
         #    then kicks the scheduler, which starts the turn in the ONE spawn
         #    path (SessionRuntime). No ``deferred_delivery`` concept survives —
-        #    the v2 SSE typed-event feed is always live.
+        #    the v2 SSE typed-event feed is always live. Last shutdown gate:
+        #    the session mint and broadcast above both awaited.
+        if self._shutdown_begun():
+            raise _ShutdownBeforeTurn()
         await turn_manager.submit_async(
             session_id,
             "automation",

@@ -75,6 +75,37 @@ async def test_overloaded_before_content_is_retried() -> None:
     assert kinds[-1] == "message_stop"
 
 
+async def test_timeout_error_before_content_is_retried() -> None:
+    """R10-25: Anthropic documents ``timeout_error`` (504) as transient."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _sse(MESSAGE_START + _error_event("timeout_error"))
+        return _sse(MESSAGE_START + TEXT_BLOCK + TAIL)
+
+    chunks = await _run(handler)
+    assert calls == 2
+    assert "error" not in [c.kind for c in chunks]
+
+
+async def test_gateway_504_is_retried() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(504, text="upstream request timeout")
+        return _sse(MESSAGE_START + TEXT_BLOCK + TAIL)
+
+    chunks = await _run(handler)
+    assert calls == 2
+    assert chunks[-1].kind == "message_stop"
+
+
 async def test_overloaded_after_content_surfaces_as_a_retriable_error() -> None:
     calls = 0
 

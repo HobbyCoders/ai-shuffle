@@ -164,12 +164,18 @@ class OsSandboxUnavailable(RuntimeError):
     """
 
 
+# Unrecognised mode values already warned about: ``plan_spawn`` normalizes on
+# every kernel start, and one warning per value is enough.
+_warned_modes: set[str] = set()
+
+
 def normalize_mode(value: object) -> str:
     """``auto``/``required``/``off``; anything unrecognised is ``auto``."""
     text = str(value or "").strip().lower()
     if text in MODES:
         return text
-    if text:
+    if text and text not in _warned_modes:
+        _warned_modes.add(text)
         _log.warning(
             "code_mode_os_sandbox=%r is not one of %s; using %r",
             value, "/".join(MODES), DEFAULT_MODE,

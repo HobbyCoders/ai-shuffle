@@ -66,6 +66,14 @@ def test_normalize_mode(raw, expected) -> None:
     assert os_sandbox.normalize_mode(raw) == expected
 
 
+def test_an_invalid_mode_warns_once_not_on_every_spawn(caplog, monkeypatch) -> None:
+    monkeypatch.setattr(os_sandbox, "_warned_modes", set(), raising=False)
+    caplog.set_level(logging.WARNING, logger="fluid.codemode.os_sandbox")
+    for _ in range(3):
+        assert os_sandbox.normalize_mode("strict") == "auto"
+    assert len([r for r in caplog.records if "'strict'" in r.getMessage()]) == 1
+
+
 def test_default_mode_reads_env_and_kernel_config_follows(monkeypatch) -> None:
     monkeypatch.setenv("CODE_MODE_OS_SANDBOX", "required")
     assert os_sandbox.default_mode() == "required"

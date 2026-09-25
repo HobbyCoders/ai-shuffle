@@ -44,6 +44,11 @@ class NotificationResult:
 
 #: Why a broadcast reached nobody when no registration can show a notification.
 NO_PUSH_RECEIVER_REASON = "no device can receive push notifications"
+DEVICE_LIST_UNAVAILABLE_REASON = "the registered device list could not be read"
+
+
+class DeviceListUnavailable(RuntimeError):
+    """The registered devices could not be read, so nothing was attempted."""
 
 #: The channel that does reach the user today.
 IN_APP_CHANNEL_NOTE = (
@@ -371,6 +376,7 @@ class PushNotificationService:
         body: str,
         data: Optional[Dict[str, Any]] = None,
         device_tokens: Optional[List[str]] = None,
+        raise_lookup_errors: bool = False,
     ) -> List[NotificationResult]:
         """
         Broadcast notification to all registered devices.
@@ -384,6 +390,9 @@ class PushNotificationService:
                 whose registration can receive push (``device_receives_push``)
                 is sent to its FCM token. Other registrations, including
                 every legacy UnifiedPush endpoint, are skipped, not posted to.
+            raise_lookup_errors: Raise :class:`DeviceListUnavailable` when the
+                registered devices cannot be read, instead of returning the
+                empty list that also means "no device can receive push".
 
         Returns:
             List of NotificationResult for each device dispatched to; empty
@@ -413,6 +422,8 @@ class PushNotificationService:
             devices = await run_sync(mobile_db.get_all_mobile_devices)
         except Exception as e:
             logger.warning(f"Could not enumerate mobile devices for broadcast: {e}")
+            if raise_lookup_errors:
+                raise DeviceListUnavailable(str(e)) from e
             return []
 
         results = []

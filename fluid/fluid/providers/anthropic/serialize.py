@@ -218,7 +218,7 @@ def sse_to_chunk(event_name: str, data: dict[str, Any]) -> StreamChunk | None:
 
 
 _RETRIABLE_STREAM_ERRORS = frozenset(
-    ("overloaded_error", "api_error", "rate_limit_error")
+    ("overloaded_error", "api_error", "rate_limit_error", "timeout_error")
 )
 
 # Anthropic's documented error type → HTTP status pairs.

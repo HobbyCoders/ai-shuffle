@@ -113,7 +113,7 @@ JSON body. Every field is optional, but `model` is needed for GPT Live calls (`4
 | `worktree_branch`, `base_branch` | With `worktree` mode, the branch to use; without `worktree_branch` a new `voice/...` branch is created from `base_branch` (default `main`). A project is required |
 | `worktree_id` | An existing worktree of the project (needs `project_id`) |
 | `target_instance_id` | Run on another connected device |
-| `session_mode` | Only `chat` is accepted (sent by the native apps). Any other value returns `400` |
+| `session_mode` | Only `chat` is accepted (sent by the native apps); an empty string is the same as leaving it out. Any other string returns `400` |
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/voice/sessions \

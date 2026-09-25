@@ -358,6 +358,28 @@ def test_cold_config_uses_session_project_profile_policy_and_direct_mode(monkeyp
     assert result["cwd"] == str(tmp_path)
 
 
+def test_cold_config_runs_a_worker_as_its_parents_key(monkeypatch, tmp_path):
+    """R10-28: a legacy worker row with no ``api_user_id`` got the owner's
+    AI-tools env (``ANTHROPIC_*`` among it) in the browser-mcp child."""
+    from app.core import environment, mcp_config, profiles, project_resolver
+    from app.db import database
+    rows = {
+        "worker": {"id": "worker", "profile_id": "p", "provider_id": None, "api_user_id": None,
+                   "is_worker": True, "parent_session_id": "parent"},
+        "parent": {"id": "parent", "profile_id": "p", "api_user_id": "key-1"},
+    }
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    monkeypatch.setattr(profiles, "get_profile", lambda pid: {"config": {"env": {}, "ai_tools": {}}})
+    monkeypatch.setattr(project_resolver, "resolve_cwd", lambda session: str(tmp_path))
+    seen = []
+    monkeypatch.setattr(environment, "_build_env_with_ai_tools",
+                        lambda base, ai, user, provider: seen.append(user) or {})
+    monkeypatch.setattr(mcp_config, "_build_mcp_servers_dict",
+                        lambda project, env, sid: {"browser": {"command": "node", "env": {}}})
+    runtime.resolve_config("worker")
+    assert seen == ["key-1"]
+
+
 def test_proxy_mode_only_with_session_wiring():
     from app.core.mcp_config import _build_browser_server_env
     assert "AIS_BROWSER_MODE" not in _build_browser_server_env({}, None)

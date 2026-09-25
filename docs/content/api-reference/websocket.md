@@ -190,7 +190,7 @@ Authentication is performed via:
 - Session cookie (for the owner's web UI)
 - API key or owner token in the query string: `?token=aih_your_key`
 
-A disabled API key fails authentication (`4001`). On `/ws/chat` the key is checked again before every frame is acted on and every 30 seconds whether or not the client sends anything, so a key that is disabled, deleted or rotated while its socket is open closes that socket with `4001`: at once when the change is made through the API users routes, otherwise within about 30 seconds.
+A disabled API key fails authentication (`4001`). An open socket's key is checked again every 30 seconds whether or not the client sends anything (on `/ws/chat` also before every frame is acted on), so a key that is disabled, deleted or rotated while connected loses its sockets with `4001`: at once when the change is made through the API users routes, otherwise within about 30 seconds. This covers `/ws/chat`, `/ws/sessions/{session_id}`, `/ws/global`, the browser panel socket, the voice audio socket and streaming transcription; the voice and transcription sockets also drop their provider connection.
 
 ## Error Handling
 
@@ -199,6 +199,6 @@ WebSocket close codes:
 - `1007` — Too many frames that were not JSON objects (`/ws/chat`)
 - `1009` — Frame larger than 10 MiB
 - `1013` — Authorization temporarily unavailable; retry later
-- `4001` — Authentication failed, or (`/ws/chat`) the API key was disabled, deleted or rotated while connected
+- `4001` — Authentication failed, or the API key was disabled, deleted or rotated while connected
 - `4003` — Access denied: for an API key, the session is not one it started, or it belongs to another project or agent (`/ws/sessions/{session_id}`)
 - `4004` — Session not found

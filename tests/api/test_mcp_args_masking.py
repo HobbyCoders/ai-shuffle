@@ -30,6 +30,16 @@ GH = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
     (["https://h/cb?access_token=abc&x=1"], ["https://h/cb?access_token=" + M + "&x=1"]),
     (["serve", GH], ["serve", M]),  # a bare known-prefix token
     (["aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY"], [M]),  # a long high-entropy value
+    # Secrets embedded inside a value (R10-20).
+    (["--dsn", "host=db user=app password=hunter2 dbname=x"],
+     ["--dsn", "host=db user=app password=" + M + " dbname=x"]),
+    (["Server=db;User Id=app;Password=hunter2;Database=x"],
+     ["Server=db;User Id=app;Password=" + M + ";Database=x"]),
+    (['{"apiKey":"hunter2","region":"eu"}'], ['{"apiKey":"' + M + '","region":"eu"}']),
+    (["--config", '{"token": \'hunter2\'}'], ["--config", '{"token": \'' + M + '\'}']),
+    (["CONN=password=hunter2"], ["CONN=password=" + M]),
+    (["--db-pass", "hunter2"], ["--db-pass", M]),
+    (["--pass=hunter2"], ["--pass=" + M]),
 ])
 def test_secret_looking_args_are_masked(args, expected):
     assert _mask_args(args) == expected
@@ -41,6 +51,9 @@ def test_secret_looking_args_are_masked(args, expected):
     ["--model=claude-sonnet-4-5-20250929", "src/components/Button.svelte"],
     ["--url", "https://api.example.com/v1", "uvx", "mcp-server-fetch==1.2.3"],
     ["--verbose", "--token", "--other"],  # a bare flag masks no following flag
+    ["--pass-through", "stdio", "--bypass", "cache"],
+    ["--dsn", "host=db user=app dbname=x sslmode=require"],
+    ['{"region":"eu","timeout":30}'],
 ])
 def test_ordinary_args_stay_readable(args):
     assert _mask_args(args) == args

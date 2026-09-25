@@ -1219,6 +1219,7 @@ async def get_voice_session_config(
 @router.websocket("/sessions/{session_id}/audio")
 async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optional[str] = Query(None)):
     from app.api.ws_auth import authenticate_websocket
+    from app.api.ws_key_watch import watch_api_key
     from app.core import voice_stream
 
     authenticated, api_user = await authenticate_websocket(websocket, token)
@@ -1247,7 +1248,10 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
         return
     try:
         await websocket.accept()
-        await call.run()
+        # A revoked API key loses the call and the provider connection it
+        # pays for (app.api.ws_key_watch).
+        async with watch_api_key(websocket, on_revoke=lambda: call.close()):
+            await call.run()
     finally:
         if voice_stream.calls.get(session_id) is call:
             voice_stream.calls.pop(session_id, None)

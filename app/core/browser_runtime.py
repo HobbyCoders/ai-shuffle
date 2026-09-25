@@ -99,6 +99,7 @@ class RawMcpClient(McpClient):
 
 def resolve_config(session_id):
     """Resolve the same profile env and project MCP scopes as query options."""
+    from app.core.api_user_scope import session_api_user_id
     from app.core.config import settings
     from app.core.environment import _build_env_with_ai_tools, apply_provider_env
     from app.core.mcp_config import _build_mcp_servers_dict
@@ -118,8 +119,9 @@ def resolve_config(session_id):
         raise RuntimeUnavailable("Session project is not checked out on this device")
     cwd = cwd or config.get("cwd") or str(settings.workspace_dir)
     provider = row.get("provider_id")
+    # A worker row may carry no key of its own; it runs as its parent's.
     env = _build_env_with_ai_tools(
-        config.get("env"), config.get("ai_tools"), row.get("api_user_id"), provider
+        config.get("env"), config.get("ai_tools"), session_api_user_id(row), provider
     )
     if provider:
         apply_provider_env(

@@ -83,8 +83,29 @@ def _old(tmp_path, commit, *, with_column_pass, name="old.db"):
     raw = lifecycle.connect(tmp_path / name)
     if not lifecycle.build_old_database(raw, commit, with_column_pass=with_column_pass):
         raw.close()
-        pytest.skip(f"git history for {commit} is not available (shallow checkout)")
+        message = f"git history for {commit} is not available (shallow checkout)"
+        # CI checks out full history and sets this: a skip there would hide
+        # a shallow checkout or a pinned commit that was garbage-collected.
+        if os.environ.get("SCHEMA_LIFECYCLE_REQUIRED") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
     return raw
+
+
+def test_missing_history_fails_instead_of_skipping_when_required(tmp_path, monkeypatch):
+    """R10-29: CI runs ``-q`` without ``-rs``, so a skip there went unnoticed."""
+    monkeypatch.setattr(lifecycle, "build_old_database", lambda raw, commit, **kw: False)
+    outcomes = []
+    for required in ("1", None):
+        if required:
+            monkeypatch.setenv("SCHEMA_LIFECYCLE_REQUIRED", required)
+        else:
+            monkeypatch.delenv("SCHEMA_LIFECYCLE_REQUIRED", raising=False)
+        try:
+            _old(tmp_path, V49_COMMIT, with_column_pass=False, name=f"old-{required}.db")
+        except BaseException as exc:  # noqa: BLE001 - pytest's outcomes are BaseException
+            outcomes.append(type(exc))
+    assert outcomes == [pytest.fail.Exception, pytest.skip.Exception]
 
 
 def _comparable(snapshot):

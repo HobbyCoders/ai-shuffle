@@ -97,7 +97,7 @@ Get API user details (key is not included). This and the routes below return `40
 
 ### PATCH /api/v1/api-users/{user_id}
 
-Update an API user. Takes the same fields as create, plus `is_active` (set `false` to disable the key without deleting it; an open chat WebSocket using the key then closes with `4001`).
+Update an API user. Takes the same fields as create, plus `is_active` (set `false` to disable the key without deleting it; the key's open WebSockets then close with `4001`).
 
 **Auth:** Owner only
 
@@ -113,7 +113,7 @@ curl -X PATCH http://localhost:8000/api/v1/api-users/3f9a1c2e \
 
 ### DELETE /api/v1/api-users/{user_id}
 
-Delete an API user and invalidate its key. An open chat WebSocket using the key closes with `4001`.
+Delete an API user and invalidate its key. The key's open WebSockets close with `4001`.
 
 **Auth:** Owner only
 
@@ -121,7 +121,7 @@ Delete an API user and invalidate its key. An open chat WebSocket using the key 
 
 ### POST /api/v1/api-users/{user_id}/rotate-key
 
-Generate a new API key for the user, invalidating the old one. An open chat WebSocket using the old key closes with `4001`; reconnect with the new one.
+Generate a new API key for the user, invalidating the old one. The old key's open WebSockets close with `4001`; reconnect with the new one.
 
 **Auth:** Owner only
 
@@ -174,7 +174,7 @@ Worker sessions an agent starts (Task workers and the workers a voice call hands
 
 Some data belongs to the owner's account, to the whole install or to another key. A key's requests and the agents in its sessions are held to their own part of it:
 
-- **Agent tools.** In a key's session, `GetAppLogs`, `GetAppErrors`, `CronList`, `CronCreate` and `RemoteTrigger` refuse to run, and `GetUsage` returns no readings with the reason. `SessionSearch`, `SessionView` and the list of recent sessions the agent is given cover only the key's own sessions; another session reads as unknown.
+- **Agent tools.** In a key's session, `GetAppLogs`, `GetAppErrors`, `CronList`, `CronCreate`, `CronDelete` and `RemoteTrigger` refuse to run, and `GetUsage` returns no readings with the reason. `SessionSearch`, `SessionView` and the list of recent sessions the agent is given cover only the key's own sessions; another session reads as unknown.
 - **Usage.** `GET /api/v1/usage/limits` returns an empty reading (`"available": false`, `"providers": []`) and never starts a provider refresh. Usage is the owner's subscription and provider billing (see [Usage Limits](/docs/api-reference/miscellaneous#usage-limits)).
 - **Notes.** Each key has its own notes and sees only those, including through `@Notes/...` references in a prompt. The owner sees every note (see [Notes](/docs/api-reference/notes)).
 - **MCP server settings.** The server lists show environment and header values, URL credentials and secret-looking arguments as `********` (see [MCP Servers](/docs/api-reference/mcp#get-apiv1mcpservers)).

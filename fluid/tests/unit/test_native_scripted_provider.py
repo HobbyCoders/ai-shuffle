@@ -1127,9 +1127,13 @@ async def test_openrouter_body_fields_go_only_to_openrouter(server, url, explici
 # ─── a provider that says nothing ───────────────────────────────────────────
 
 
-async def test_a_silent_anthropic_stream_is_retried_after_the_first_byte_timeout(server):
+async def test_a_silent_anthropic_stream_after_its_headers_ends_at_the_first_byte_timeout(server):
     """Regression: a stream that answered 200 and then sent nothing held the
-    turn for the whole 600 s read timeout."""
+    turn for the whole 600 s read timeout.
+
+    R11-6: it is not re-sent either. The provider accepted the call (and may
+    bill it), and a gateway that holds the first event until its upstream
+    answers cost a full first-byte budget per attempt, four times over."""
     server.script([Sleep(30)], Messages.text("second attempt"))
     run = Harness(server, "anthropic", client_kwargs={"first_byte_timeout": 0.3})
     started = time.monotonic()
@@ -1140,10 +1144,9 @@ async def test_a_silent_anthropic_stream_is_retried_after_the_first_byte_timeout
         await run.aclose()
 
     assert time.monotonic() - started < 10
-    assert isinstance(_terminal(events), TurnComplete)
-    assert stored[-1].text() == "second attempt"
-    assert len(server.requests) == 2
-    assert server.requests[0].body == server.requests[1].body
+    assert isinstance(_terminal(events), ErrorEvent)
+    assert len(server.requests) == 1
+    assert all(node.text() != "second attempt" for node in stored)
 
 
 async def test_anthropic_headers_that_never_arrive_hit_the_first_byte_timeout():
@@ -1172,6 +1175,37 @@ async def test_anthropic_headers_that_never_arrive_hit_the_first_byte_timeout():
     assert time.monotonic() - started < 10
     assert calls == 2
     assert isinstance(_terminal(loop.bus.log(loop.session_id)), TurnComplete)
+
+
+async def test_a_provider_that_never_answers_is_not_reported_as_an_interrupted_reply():
+    """R10-24: after every first-byte timeout the error said the response
+    "may be incomplete" and "No automatic replay was attempted", although
+    several requests were sent and nothing at all came back."""
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(30)
+        raise AssertionError("unreachable")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = AnthropicClient(api_key="k", base_url="https://api.anthropic.test/v1/messages",
+                             http_client=http, retry=FAST_RETRY, first_byte_timeout=0.2)
+    loop = NativeLoop(provider=client, store=MemoryStore(), model=MODELS["anthropic"])
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await asyncio.wait_for(loop.wait_turn(), TURN_BUDGET)
+    finally:
+        await loop.aclose()
+        await http.aclose()
+
+    error = _terminal(loop.bus.log(loop.session_id))
+    assert isinstance(error, ErrorEvent)
+    assert calls > 1
+    assert f"sent nothing before the connection failed ({calls} attempts)" in error.message
+    assert "No automatic replay" not in error.message
+    assert "incomplete" not in error.message
 
 
 def test_the_first_byte_timeout_defaults_to_sixty_seconds():
@@ -1356,7 +1390,6 @@ _QUOTA_BODY = {"error": {
     (429, {"error": {"message": "Billing hard limit has been reached",
                      "type": "invalid_request_error",
                      "code": "billing_hard_limit_reached"}}),
-    (402, {"error": {"code": 402, "message": "Insufficient credits. Add more credits."}}),
     (402, {"error": {"code": "insufficient_credits", "message": "Insufficient credits."}}),
 ])
 async def test_a_billing_refusal_is_fatal_and_not_reported_as_a_rate_limit(
@@ -1377,6 +1410,35 @@ async def test_a_billing_refusal_is_fatal_and_not_reported_as_a_rate_limit(
     assert error.status == 402
     assert error.provider_message.startswith("Out of credit or quota")
     assert body["error"]["message"] in error.provider_message
+    assert len(server.requests) == 1
+
+
+@pytest.mark.parametrize("kind", DIALECTS)
+@pytest.mark.parametrize("message", [
+    # OpenRouter's numeric ``code: 402``: a smaller request fixes this one.
+    "This request requires more credits, or fewer max_tokens. You requested up "
+    "to 64000 tokens, but can only afford 12000.",
+    "Insufficient credits. Add more credits.",
+])
+async def test_a_bare_402_is_fatal_and_carries_the_providers_words(server, kind, message):
+    """R11-8: every 402 was labelled "Out of credit or quota", including
+    OpenRouter's "fewer max_tokens" refusal, which lowering max_tokens fixes.
+    Only a billing code says credit; a bare 402 keeps the provider's text."""
+    body = {"error": {"code": 402, "message": message}}
+    server.script(*[fps.error_reply(402, body=body, retry_after="0") for _ in range(3)])
+    run = Harness(server, kind)
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    error = _terminal(events)
+    assert isinstance(error, ErrorEvent) and not error.retriable
+    assert error.status == 402
+    assert error.provider_message.startswith("Payment required (HTTP 402): ")
+    assert "Out of credit" not in error.provider_message
+    assert "out of credit" not in error.message
+    assert message[:60] in error.provider_message
     assert len(server.requests) == 1
 
 

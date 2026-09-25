@@ -531,6 +531,7 @@ def test_cloudflare_edge_statuses_are_retriable() -> None:
     from fluid.providers._retry import RETRIABLE_STATUSES, is_retriable_status
 
     assert {520, 521, 522, 523, 524} <= RETRIABLE_STATUSES
+    assert is_retriable_status(504)  # a gateway timeout, like 524 (R10-25)
     assert is_retriable_status(520) and is_retriable_status("429")
     assert not is_retriable_status(400)
     assert not is_retriable_status("rate_limit_exceeded")

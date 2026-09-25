@@ -361,3 +361,28 @@ def test_logger_to_error_store_keeps_final_exception_beyond_store_cap(mock_db):
     page = tool_result_json(asyncio.run(tool.handler({"error_id": error_id, "offset": 19000, "max_chars": 12000})))
     assert page["detail"].endswith("FINAL EXCEPTION")
     assert page["total_chars"] == 20000
+
+
+def test_a_mix_of_mock_and_rejected_sends_names_both(mock_db):
+    """R10-23: it read "all 2 device(s) rejected the push"."""
+    body = _notify([_Result(True, simulated=True), _Result(False)])
+
+    assert body["delivered"] is False
+    assert body["reason"] == (
+        "1 device(s) rejected the push and 1 send(s) were mock mode (no Firebase credentials)"
+    )
+
+
+def test_an_unreadable_device_list_is_not_reported_as_no_receiver(mock_db):
+    """R10-23: a failed device-list read read as "no device can receive push"."""
+    from app.services.push_notification import DeviceListUnavailable
+
+    service = AsyncMock()
+    service.send_to_all_devices = AsyncMock(side_effect=DeviceListUnavailable("db down"))
+    with patch("app.services.push_notification.push_notification_service", service):
+        body = tool_result_json(asyncio.run(_builtin_handlers()["NotifyDevices"].handler(
+            {"title": "Release", "body": "v1.2.3 is live"})))
+
+    assert body["delivered"] is False
+    assert body["reason"] == "the registered device list could not be read"
+    assert service.send_to_all_devices.await_args.kwargs["raise_lookup_errors"] is True

@@ -113,5 +113,7 @@ cache_prompt = true     # llama-server: reuse the KV cache across turns
 temperature = 0.7
 ```
 
-Usage accounting degrades gracefully — servers that don't report token counts
-show zeros, and there is never a cost figure for local inference.
+Usage accounting degrades gracefully — for a reply from a server that doesn't
+report token counts, the counts are estimated from the text and flagged
+(`input_tokens_estimated` / `output_tokens_estimated` in the usage event's
+`raw`), and there is never a cost figure for local inference.

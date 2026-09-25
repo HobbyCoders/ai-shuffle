@@ -1507,14 +1507,21 @@ def create_builtin_tools_server(
             return _err("title and body are required.")
         try:
             from app.services.push_notification import (
+                DEVICE_LIST_UNAVAILABLE_REASON,
                 IN_APP_CHANNEL_NOTE,
                 NO_PUSH_RECEIVER_REASON,
+                DeviceListUnavailable,
                 delivered_count,
                 push_notification_service,
             )
-            results = await push_notification_service.send_to_all_devices(
-                title=title, body=body, data=args.get("data"),
-            )
+            lookup_failed = False
+            try:
+                results = await push_notification_service.send_to_all_devices(
+                    title=title, body=body, data=args.get("data"),
+                    raise_lookup_errors=True,
+                )
+            except DeviceListUnavailable:
+                results, lookup_failed = [], True
             # ``successful`` counts only acknowledgements from a device that
             # receives push: a mock-mode send left nothing on this server.
             successful = delivered_count(results)
@@ -1528,15 +1535,24 @@ def create_builtin_tools_server(
             # told. Not an exception — there is nothing to retry — but not a
             # green light either.
             if not results:
-                payload["reason"] = NO_PUSH_RECEIVER_REASON
+                payload["reason"] = (
+                    DEVICE_LIST_UNAVAILABLE_REASON if lookup_failed else NO_PUSH_RECEIVER_REASON
+                )
             elif not successful:
                 simulated = sum(1 for r in results if getattr(r, "simulated", False))
-                payload["reason"] = (
-                    "push is in mock mode (no Firebase credentials); nothing "
-                    "left this server"
-                    if simulated == len(results)
-                    else f"all {len(results)} device(s) rejected the push"
-                )
+                rejected = len(results) - simulated
+                if not rejected:
+                    payload["reason"] = (
+                        "push is in mock mode (no Firebase credentials); nothing "
+                        "left this server"
+                    )
+                elif simulated:
+                    payload["reason"] = (
+                        f"{rejected} device(s) rejected the push and {simulated} "
+                        "send(s) were mock mode (no Firebase credentials)"
+                    )
+                else:
+                    payload["reason"] = f"all {rejected} device(s) rejected the push"
             if not successful:
                 payload["note"] = (
                     f"{payload['reason']} — nothing was delivered; tell the "

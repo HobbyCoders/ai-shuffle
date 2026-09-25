@@ -316,7 +316,7 @@ These lines turn off Docker's default seccomp and AppArmor filters for the whole
 
 `CODE_MODE_OS_SANDBOX` chooses how the sandbox is used. Set it under `environment:` in `compose.yaml` (a line in `.env` alone does not reach the container):
 
-- `auto` (the default): use the sandbox when its self-test at startup passes, otherwise run without it after the one log line above.
+- `auto` (the default): use the sandbox when its self-test (run when the first code-mode kernel starts) passes, otherwise run without it after the one log line above.
 - `required`: never run code without the sandbox. When it is unavailable, every Python cell fails with the reason.
 - `off`: never use it.
 
