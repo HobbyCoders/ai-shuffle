@@ -1,4 +1,4 @@
-/** Public download transport. Signed manifests establish trust without accounts. */
+/** Hub download transport. Signed manifests establish trust; the hub's license gate reads a lease or key header. */
 export const SOURCE_ORIGIN = 'https://hobbycoders.com';
 /** The hub's license gate (android/hub/src/license-gate.ts) reads the lease from this header. */
 export const LEASE_HEADER = 'X-Shuffle-Lease';

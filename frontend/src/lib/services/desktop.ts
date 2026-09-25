@@ -97,12 +97,6 @@ export interface ShuffleDesktopBridge {
 	/** The local worker this window belongs to. */
 	worker: {
 		getState(): Promise<DesktopWorkerState>;
-		openStatus(): void;
-		/**
-		 * The header and per-launch token the shell already adds to every
-		 * request this window makes to its worker. Older shells lack it.
-		 */
-		listenerToken?(): Promise<{ header: string; token: string } | null>;
 	};
 	updates: {
 		getState(): Promise<DesktopUpdateState>;

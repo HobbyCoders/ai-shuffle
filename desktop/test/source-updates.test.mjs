@@ -173,7 +173,7 @@ test('compact Windows native and Python dependency caches resolve after activati
  await f.release(A);const u=f.create();await u.load();await u.download();
  const app=await u.select();assert.equal(app.resources,path.join(f.root,'runtimes',KEY.slice(0,24)));
  assert.equal(app.python,path.join(f.root,'dependencies',KEY.slice(0,24),'python',pythonKey.slice(0,24),'Scripts/python.exe'));
- await u.healthy();assert.equal((await u.current()).revision,A);
+ await u.healthy();assert.equal(u.version,A);assert.equal((await u.application(A)).revision,A);
 });
 
 test('a newer milestone installer supersedes older healthy source code but never rolls back failed boot state',async t=>{

@@ -229,6 +229,31 @@ async function foreignWorker(t, port, health) {
 	return server;
 }
 
+test('a start that fails before the spawn reports failed instead of rejecting or staying starting', async (t) => {
+	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-logdir-'));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	await writeFile(path.join(dir, 'blocker'), '');
+	const runtime = { mode: 'bundled', root: dir, python: path.join(dir, 'python'), serverDir: dir, nodeBinDir: null, toolsDir: dir, browserMcpEntry: dir, manifest: null };
+	const supervisor = new WorkerSupervisor({
+		runtime, logDir: path.join(dir, 'blocker', 'logs'), envFile: path.join(dir, 'worker', '.env'), dataDir: path.join(dir, 'data'),
+		port: await freePort(), protectedPort: await freePort(), allowAttach: false,
+		postgres: () => ({ host: '127.0.0.1', port: 5432, user: 'u', password: 'pw', database: 'd' })
+	});
+	const state = await supervisor.start();
+	assert.equal(state.phase, 'failed');
+	assert.match(state.error, /ENOTDIR|EEXIST|not a directory/i);
+	assert.equal(state.pid, null);
+});
+
+test('a worker log file that cannot be opened does not crash the app', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t);
+	// worker.log is a directory and cannot be rotated away (worker.prev.log is a non-empty directory).
+	await mkdir(path.join(f.dir, 'logs', 'worker.log'), { recursive: true });
+	await mkdir(path.join(f.dir, 'logs', 'worker.prev.log', 'keep'), { recursive: true });
+	assert.equal((await f.supervisor.start()).phase, 'ready');
+	assert.ok(f.supervisor.tail().some((line) => line.startsWith('--- worker start')), 'the in-memory tail still records the run');
+});
+
 test('DESK-01: a worker that crashes after becoming ready is respawned, twice per five minutes, then reported', { skip: !posix }, async (t) => {
 	const f = await fakeSupervisor(t, { FAKE_WORKER_EXIT_AFTER_READY: '300' });
 	const first = await f.supervisor.start();
@@ -339,7 +364,8 @@ test('SEC-08: every spawn gets a fresh listener token that the app sends and rec
 	assert.equal(f.supervisor.listenerToken, listener);
 	assert.equal(JSON.stringify(f.supervisor.state).includes(listener), false, 'worker state sent to pages never carries the token');
 	assert.equal((await readWorkerProcessRecord(f.processFile)).listener, listener);
-	await f.supervisor.restart();
+	await f.supervisor.stop();
+	await f.supervisor.start();
 	const second = (await f.spawns())[1].split(' ')[2];
 	assert.notEqual(second, listener);
 	assert.equal(f.supervisor.listenerToken, second);

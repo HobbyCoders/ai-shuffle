@@ -53,7 +53,11 @@ if (!app.isPackaged && !managedContext() && process.env.SHUFFLE_DESKTOP_USER_DAT
 if (!app.requestSingleInstanceLock()) {
 	app.quit();
 } else {
-	void main();
+	// A startup failure must not leave a windowless process behind.
+	main().catch((error) => {
+		dialog.showErrorBox('AI Shuffle could not start', error instanceof Error ? error.message : String(error));
+		app.quit();
+	});
 }
 
 async function main(): Promise<void> {
@@ -130,8 +134,6 @@ async function main(): Promise<void> {
 						allowAttach: applications ? false : identity.allowAttach,
 						postgres: () => postgres?.connection() ?? null
 					});
-		worker.supervisor = supervisor;
-		worker.runtimeError = runtimeError;
 		observeWorker();
 	}
 	// Development: point the window at a frontend dev server instead of the worker UI.
@@ -192,17 +194,22 @@ async function main(): Promise<void> {
 	};
 
 	const worker: WorkerControl = {
-		supervisor,
-		runtimeError,
-		bundledPostgresError: postgresError,
 		state: desktopState,
-		listener: listenerTarget,
 		tail: () => [...(postgres?.tail().map((line) => `[postgres] ${line}`) ?? []), ...(supervisor?.tail() ?? [])],
-		openStatus: () => window.showPage('status'),
 		restart: async () => {
 			if (!supervisor) { app.relaunch(); app.quit(); return; }
 			if (window.currentPage !== 'status') await window.showPage('status');
-			await supervisor.stop();
+			try {
+				await supervisor.stop();
+			} catch (error) {
+				// Sessions could not be stopped, so the worker is still running: go back to its UI.
+				const state = supervisor.state;
+				if (state.phase === 'ready' && window.currentPage === 'status') {
+					loadRetries = 0;
+					void window.loadWorker(state.url);
+				}
+				throw error;
+			}
 			await startStack();
 		}
 	};
@@ -292,8 +299,8 @@ async function main(): Promise<void> {
 
 	const actions = {
 		command: (name: string) => window.send('desktop:command', name),
-		restartWorker: () => void worker.restart(),
-		openWorkerStatus: () => void worker.openStatus(),
+		restartWorker: () => void worker.restart().catch((error) => dialog.showErrorBox('Restart Worker', error instanceof Error ? error.message : String(error))),
+		openWorkerStatus: () => void window.showPage('status'),
 		updatesEnabled: identity.updates,
 		showLogs: () => void shell.showItemInFolder(worker.state().logPath),
 		showPostgresLogs: () => {
@@ -408,6 +415,14 @@ async function main(): Promise<void> {
 		}
 		if (devUrl) {
 			await window.loadWorker(devUrl);
+			return;
+		}
+		// macOS keeps the app and its worker running after the window closes;
+		// a new window goes straight back to the running worker.
+		const state = supervisor?.state;
+		if (state?.phase === 'ready') {
+			loadRetries = 0;
+			await window.loadWorker(state.url);
 			return;
 		}
 		await window.showPage('status');

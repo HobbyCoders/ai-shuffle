@@ -31,35 +31,20 @@ test('only the worker origin over http and ws gets the header', () => {
 	}
 });
 
-test('listener token IPC answers only the worker main frame of the app window', () => {
+test('no IPC channel or preload member hands the listener token to a page', () => {
 	const handlers = new Map();
 	const exports = {};
 	const source = readFileSync(new URL('../dist/main/ipc.js', import.meta.url), 'utf8');
 	runInNewContext(source, { exports, URL, process, require: name => {
 		if (name === 'electron') return { ipcMain: { handle: (key, fn) => handlers.set(key, fn), on() {} }, app: {} };
 		if (name === './managed-context') return { managedContext: () => null };
-		if (name === './diagnostics') return { desktopSampler: () => () => ({}) };
-		if (name === './listener') return require('../dist/main/listener.js');
 		if (name === './disclosure') return require('../dist/main/disclosure.js');
 		throw new Error(name);
 	} });
-	let current = { origin: 'http://127.0.0.1:8000', token };
-	exports.registerIpc({ window: { isOwnSender: id => id === 1, currentWorkerUrl: 'http://127.0.0.1:8000' }, updater: {}, worker: { listener: () => current } });
-	const invoke = handlers.get('desktop:listener-token');
-	const frame = { url: 'http://127.0.0.1:8000/sessions' };
-	const sender = { id: 1, mainFrame: frame };
-	assert.deepEqual({ ...invoke({ sender, senderFrame: frame }) }, { header: LISTENER_HEADER, token });
-	assert.throws(() => invoke({ sender: { ...sender, id: 2 }, senderFrame: frame }), /not allowed/);
-	assert.throws(() => invoke({ sender, senderFrame: { ...frame } }), /not allowed/, 'subframes get nothing');
-	for (const url of ['file:///C:/app/src/pages/worker.html', 'https://hobbycoders.com/', 'http://127.0.0.1:3000/']) {
-		assert.throws(() => invoke({ sender, senderFrame: { url }, }), /not allowed/, url);
-		const main = { url };
-		assert.throws(() => invoke({ sender: { id: 1, mainFrame: main }, senderFrame: main }), /not allowed/, url);
-	}
-	current = { origin: 'http://127.0.0.1:9000', token };
-	assert.equal(invoke({ sender, senderFrame: frame }), null, 'a token for another worker is never handed out');
-	current = null;
-	assert.equal(invoke({ sender, senderFrame: frame }), null);
+	exports.registerIpc({ window: { isOwnSender: () => true }, updater: {}, worker: {} });
+	assert.equal(handlers.has('desktop:listener-token'), false);
+	const preload = readFileSync(new URL('../dist/preload/index.js', import.meta.url), 'utf8');
+	assert.doesNotMatch(preload, /listener-token|listenerToken/);
 });
 
 test('a page-supplied copy of the header is stripped everywhere and replaced for the worker', () => {

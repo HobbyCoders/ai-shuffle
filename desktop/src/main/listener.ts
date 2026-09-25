@@ -11,9 +11,8 @@
  * process adds the header to every request its session makes to the worker's
  * exact origin: page loads, fetches, EventSource and WebSocket handshakes.
  * A page cannot add headers to a navigation or a WebSocket handshake itself,
- * which is why the header is attached here rather than by the web UI. The
- * web UI can also read the token over IPC (`desktop:listener-token`, worker
- * origin only) for anything that has to leave the session.
+ * which is why the header is attached here rather than by the web UI. No
+ * page can read the token; "Open in Browser" uses a one-time handoff URL.
  *
  * The token never goes to any other origin, including other loopback ports.
  */

@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { PostgresConfig } from './settings';
 import { privateDirectory } from './private-file';
-import { isPortFree } from './worker';
+import { isPortFree, isProcessAlive } from './worker';
 
 export const POSTGRES_HOST = '127.0.0.1';
 export const POSTGRES_USER = 'ai_shuffle';
@@ -247,15 +247,6 @@ export async function pickPort(preferred: number | null): Promise<number> {
 	});
 }
 
-export function isPidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === 'EPERM';
-	}
-}
-
 export const nodeRuntime: PostgresRuntime = {
 	platform: process.platform,
 	env: process.env,
@@ -266,9 +257,9 @@ export const nodeRuntime: PostgresRuntime = {
 	mkdir: privateDirectory,
 	remove: (target) => fs.rm(target, { recursive: true, force: true }),
 	exec: execCapture,
-	pidAlive: isPidAlive,
+	pidAlive: isProcessAlive,
 	freePort: pickPort,
-	// Hex keeps the password safe for the .env file and for a connection URL.
+	// Hex keeps the password safe in the managed descriptor and in a connection URL.
 	randomPassword: () => randomBytes(20).toString('hex')
 };
 
@@ -296,6 +287,8 @@ export class PostgresSupervisor extends EventEmitter {
 	private conn: PostgresConfig | null = null;
 	private queue: Promise<unknown> = Promise.resolve();
 	private readonly rt: PostgresRuntime;
+	/** Set once this supervisor has run `pg_ctl start`; only then is the pid file ours to stop. */
+	private launched = false;
 
 	constructor(private readonly opts: PostgresSupervisorOptions) {
 		super();
@@ -317,10 +310,6 @@ export class PostgresSupervisor extends EventEmitter {
 
 	get dataDir(): string {
 		return this._state.dataDir;
-	}
-
-	get binaries(): PostgresBinaries {
-		return this.opts.binaries;
 	}
 
 	/** The connection the worker should use; null until the server is ready. */
@@ -388,10 +377,14 @@ export class PostgresSupervisor extends EventEmitter {
 	private async doStop(): Promise<void> {
 		if (this._state.phase === 'idle' || this._state.phase === 'stopped') return;
 		this.conn = null;
-		if (this.rt.existsSync(this.pidFile)) {
+		// A start that failed before launching (for example over a pid file held
+		// by an unrelated process) has nothing of ours to stop; pg_ctl would
+		// signal whatever pid that file names.
+		if (this.launched && this.rt.existsSync(this.pidFile)) {
 			const result = await this.exec(this.opts.binaries.pgCtl, pgCtlStopArgs(this.dataDir));
 			if (result.code !== 0) this.log(`pg_ctl stop exited with ${result.code}`);
 		}
+		this.launched = false;
 		this.set({ phase: 'stopped', pid: null });
 	}
 
@@ -478,6 +471,7 @@ export class PostgresSupervisor extends EventEmitter {
 		const timeoutSec = this.opts.startTimeoutSec ?? 60;
 		this.log(`starting PostgreSQL on ${POSTGRES_HOST}:${port}`);
 		const args = pgCtlStartArgs({ dataDir: this.dataDir, logPath: this._state.logPath, port, socketDir, timeoutSec });
+		this.launched = true;
 		const result = await this.exec(this.opts.binaries.pgCtl, args, { timeoutMs: (timeoutSec + 30) * 1000 });
 		if (result.code !== 0) {
 			throw new Error(`PostgreSQL did not start (pg_ctl exit code ${result.code}).\n${lastLines(result)}${await this.serverLogTail()}`);

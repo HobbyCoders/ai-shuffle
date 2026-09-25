@@ -9,10 +9,8 @@ import { app, ipcMain, shell, type IpcMainEvent, type IpcMainInvokeEvent } from 
 import type { PostgresPhase } from './postgres';
 import type { Updater } from './updater';
 import { managedContext } from './managed-context';
-import { desktopSampler } from './diagnostics';
 import type { MainWindow, TitleBarTheme } from './window';
-import { type WorkerState, type WorkerSupervisor } from './worker';
-import { LISTENER_HEADER, type ListenerTarget } from './listener';
+import type { WorkerState } from './worker';
 import { AGENT_ACCESS } from './disclosure';
 
 /** The database behind the worker, as the status page shows it. */
@@ -30,17 +28,9 @@ export interface PostgresStatus {
 export type DesktopState = WorkerState & { postgres: PostgresStatus };
 
 export interface WorkerControl {
-	supervisor: WorkerSupervisor | null;
-	/** Why no supervisor exists (runtime missing), shown on the status page. */
-	runtimeError: string | null;
-	/** Whether the bundled PostgreSQL can be used, and if not, why. */
-	bundledPostgresError: string | null;
 	state(): DesktopState;
-	/** The worker origin and listener token this window sends, or null. */
-	listener(): ListenerTarget | null;
 	/** The supervisor lines followed by the worker's, for the status page log. */
 	tail(): string[];
-	openStatus(): Promise<void>;
 	restart(): Promise<void>;
 }
 
@@ -70,41 +60,12 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 			event.returnValue = null;
 			return;
 		}
-		const state = worker.state();
 		event.returnValue = {
 			platform: process.platform,
 			version: managedContext() ? `main@${managedContext()!.application.revision.slice(0, 12)}` : app.getVersion(),
-			worker: { url: state.url, phase: state.phase, external: state.external },
-			windowState: window.windowState(),
-			updateState: updater.current,
 			agentAccess: AGENT_ACCESS
 		};
 	});
-
-	// The worker's own top-level page only. The session already sends the
-	// token on every request to the worker; this is for anything that has to
-	// leave the session (for example a URL handed to another program).
-	const fromWorkerMainFrame = (event: IpcMainInvokeEvent) => {
-		if (!fromMainWindow(event) || event.senderFrame !== event.sender.mainFrame) return false;
-		try {
-			return !!window.currentWorkerUrl && new URL(event.senderFrame.url).origin === new URL(window.currentWorkerUrl).origin;
-		} catch { return false; }
-	};
-	handle('desktop:listener-token', fromWorkerMainFrame, () => {
-		const target = worker.listener();
-		if (!target || target.origin !== new URL(window.currentWorkerUrl!).origin) return null;
-		return { header: LISTENER_HEADER, token: target.token };
-	});
-
-	// Opt-in only, with the existing sender guard plus a main-frame origin check.
-	const sampleDesktop = desktopSampler(() => app.getAppMetrics());
-	handle('desktop:diagnostics', event => {
-		if (!fromMainWindow(event) || event.senderFrame !== event.sender.mainFrame) return false;
-		if (fromBundledPage(event)) return true;
-		try {
-			return !!window.currentWorkerUrl && new URL(event.senderFrame.url).origin === new URL(window.currentWorkerUrl).origin;
-		} catch { return false; }
-	}, () => sampleDesktop());
 
 	// Window and shell.
 	handle('desktop:window-action', fromMainWindow, (_e, action) => {
@@ -121,7 +82,6 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 	handle('desktop:worker-state', fromMainWindow, () => worker.state());
 	handle('desktop:worker-restart', fromMainWindow, () => worker.restart());
 	handle('desktop:worker-open-logs', fromMainWindow, () => void shell.showItemInFolder(worker.state().logPath));
-	handle('desktop:worker-open-status', fromMainWindow, () => worker.openStatus());
 
 	// Updates.
 	handle('desktop:update-state', fromMainWindow, () => updater.current);

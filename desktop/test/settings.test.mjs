@@ -21,12 +21,12 @@ test('only generated managed credentials are persisted, encrypted and reusable a
 	const cipher = { available: () => true, encrypt: (value) => Buffer.from(value.split('').reverse().join('')), decrypt: (value) => value.toString().split('').reverse().join('') };
 	try {
 		const store = new SettingsStore(file, cipher); await store.load();
-		assert.equal(store.configured, false);
+		assert.equal(store.postgres(), null);
 		await store.savePostgres(good);
 		assert.equal((await readFile(file, 'utf8')).includes(good.password), false);
 		const again = new SettingsStore(file, cipher); await again.load();
 		assert.deepEqual(again.postgres(), good);
-		assert.equal(again.passwordStoredPlain, false);
+		assert.equal('encrypted' in JSON.parse(await readFile(file, 'utf8')).postgres.password, true);
 		for (const patch of [{ host: 'external' }, { managed: false }, { managed: undefined }]) {
 			await assert.rejects(again.savePostgres({ ...good, ...patch }), /Only generated/);
 		}
@@ -45,7 +45,7 @@ test('legacy external settings are ignored without modifying or importing them',
 			const original = JSON.stringify({ version: 1, postgres: { ...good, managed, password: { plain: 'old-test-secret' } } });
 			await writeFile(file, original);
 			const store = new SettingsStore(file, plainCipher); await store.load();
-			assert.equal(store.postgres(), null); assert.equal(store.configured, false);
+			assert.equal(store.postgres(), null);
 			assert.equal(await readFile(file, 'utf8'), original);
 		}
 	} finally { await rm(dir, { recursive: true, force: true }); }
@@ -56,7 +56,7 @@ test('private fallback storage persists, and unavailable keyrings do not leak en
 	try {
 		const store = new SettingsStore(file, plainCipher); await store.load(); await store.savePostgres(good);
 		const again = new SettingsStore(file, plainCipher); await again.load();
-		assert.equal(again.passwordStoredPlain, true); assert.deepEqual(again.postgres(), good);
+		assert.equal('plain' in JSON.parse(await readFile(file, 'utf8')).postgres.password, true); assert.deepEqual(again.postgres(), good);
 		await writeFile(file, JSON.stringify({ version: 1, postgres: { ...good, password: { encrypted: 'dGVzdA==' } } }));
 		const broken = new SettingsStore(file, { available: () => true, decrypt: () => { throw Error('keyring locked'); } });
 		await broken.load(); assert.equal(broken.postgres(), null);

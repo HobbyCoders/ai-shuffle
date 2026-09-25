@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 const require=createRequire(import.meta.url);
-const {readInstalledHost,saveInstalledHost,sourceLaunch,installedLaunchArgs}=require('../dist/main/installed-host.js');
+const {readInstalledHostSync,saveInstalledHost,sourceLaunch,installedLaunchArgs}=require('../dist/main/installed-host.js');
 test('an explicit Chromium debugging port survives even when Electron omits it from argv',()=>{
  assert.deepEqual(installedLaunchArgs(['aishuffle://callback'],'19229'),['aishuffle://callback','--remote-debugging-port=19229']);
  assert.deepEqual(installedLaunchArgs([]),[]);
@@ -16,7 +16,7 @@ test('installed source versions preserve the original profile and EXE across res
  const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-installed-test-'));t.after(()=>fs.rm(userData,{recursive:true,force:true}));
  const root=path.join(userData,'updates');await fs.mkdir(root);
  const host={executable:path.join(userData,'Programs','AI Shuffle.exe'),userData,name:'ai-shuffle-desktop'};
- assert.equal(await readInstalledHost(root),null);await saveInstalledHost(root,host);assert.deepEqual(await readInstalledHost(root),host);
+ assert.equal(readInstalledHostSync(root),null);await saveInstalledHost(root,host);assert.deepEqual(readInstalledHostSync(root),host);
  await assert.rejects(saveInstalledHost(root,{...host,userData:path.join(userData,'other')}),/Invalid installed/);
  const app={electron:path.join(root,'electron.exe'),desktopDir:path.join(root,'desktop'),revision:'a'.repeat(40),node:path.join(root,'node.exe'),python:path.join(root,'python.exe')};
  const launch=sourceLaunch(app,root,['aishuffle://callback']);

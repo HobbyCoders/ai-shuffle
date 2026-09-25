@@ -384,7 +384,6 @@ export class SourceUpdates {
     }
     return { revision, directory: dir, desktopDir, serverDir: path.join(dir, 'server'), resources, python, node: path.join(resources, 'worker/node/node.exe'), electron };
   }
-  async current(): Promise<SourceApplication | null> { return this.state.active ? this.application(this.state.active) : null; }
   async select(): Promise<SourceApplication> {
     const revision = this.state.pending ?? this.state.active;
     if (!revision || (this.state.blocked && !this.state.pending)) throw new Error('No healthy source build is available. Check for updates. Previous files and data have been retained.');

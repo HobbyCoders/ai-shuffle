@@ -509,10 +509,6 @@ export class WorkerSupervisor extends EventEmitter {
 		return this.listener;
 	}
 
-	get runtime(): WorkerRuntime {
-		return this.opts.runtime;
-	}
-
 	/** The last few hundred log lines, for the status page. */
 	tail(lines = 120): string[] {
 		return this.recentLog.slice(-lines);
@@ -525,7 +521,14 @@ export class WorkerSupervisor extends EventEmitter {
 
 	start(): Promise<WorkerState> {
 		if (this.starting) return this.starting;
-		this.starting = this.doStart().finally(() => { this.starting = null; });
+		this.starting = this.doStart()
+			.catch((error: unknown) => {
+				// An unexpected failure before the spawn (for example a log directory
+				// that cannot be created) ends this start instead of leaving it 'starting'.
+				this.set({ phase: 'failed', startupStep: undefined, error: error instanceof Error ? error.message : String(error) });
+				return this.state;
+			})
+			.finally(() => { this.starting = null; });
 		return this.starting;
 	}
 
@@ -803,12 +806,6 @@ export class WorkerSupervisor extends EventEmitter {
 		await fs.rm(path.join(this.opts.dataDir, 'managed-postgres.json'), { force: true });
 	}
 
-	async restart(): Promise<WorkerState> {
-		await this.stop();
-		this.set({ phase: 'idle' });
-		return this.start();
-	}
-
 	private async waitForFreePorts(ports: number[], timeoutMs = 10_000): Promise<boolean> {
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() < deadline) {
@@ -828,7 +825,10 @@ export class WorkerSupervisor extends EventEmitter {
 		} catch {
 			/* first run */
 		}
-		this.logStream = createWriteStream(current, { flags: 'a' });
+		const stream = createWriteStream(current, { flags: 'a' });
+		// A log file that cannot be opened must not take the app down; the status page keeps the tail.
+		stream.on('error', () => { if (this.logStream === stream) this.logStream = null; });
+		this.logStream = stream;
 	}
 
 	private log(text: string): void {

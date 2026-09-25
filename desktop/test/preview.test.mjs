@@ -141,12 +141,11 @@ test('IPC and preload contain no external database actions, even on bundled page
 	const { registerIpc } = loadMain('ipc', { electron: { ipcMain: { handle: (name, handler) => handlers.set(name, handler), on: (name, handler) => listeners.set(name, handler) }, app: {} } });
 	registerIpc({ window: { isOwnSender: () => true }, updater: {}, worker: {} });
 	for (const name of ['desktop:db-check', 'desktop:settings-get', 'desktop:setup-save', 'desktop:setup-use-bundled', 'desktop:setup-cancel', 'desktop:worker-open-setup']) assert.equal(handlers.has(name), false, name);
-	assert.equal(handlers.has('desktop:worker-open-status'), true);
 	const exposed = {};
 	vm.runInNewContext(readFileSync(new URL('../dist/preload/index.js', import.meta.url), 'utf8'), { exports: {}, process, window: { location: { protocol: 'file:' } }, require: () => ({ contextBridge: { exposeInMainWorld: (name, value) => { exposed[name] = value; } }, ipcRenderer: { sendSync: () => null } }) });
 	const bridge = exposed.shuffleDesktopWorker;
 	for (const name of ['getSettings', 'checkDatabase', 'saveAndStart', 'useBundled', 'cancelSetup', 'openSetup']) assert.equal(name in bridge, false, name);
-	assert.equal('openDatabaseSettings' in exposed.shuffleDesktop.worker, false); assert.equal(typeof exposed.shuffleDesktop.worker.openStatus, 'function');
+	assert.deepEqual(Object.keys(exposed.shuffleDesktop.worker), ['getState']);
 });
 
 test('closing during private descriptor preparation cancels startup and joins cleanup before returning', async () => {

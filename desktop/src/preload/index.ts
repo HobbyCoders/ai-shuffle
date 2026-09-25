@@ -22,9 +22,6 @@ function subscribe<T>(channel: string, listener: Listener<T>): () => void {
 const info = ipcRenderer.sendSync('desktop:info') as {
 	platform: NodeJS.Platform;
 	version: string;
-	worker: { url: string; phase: string; external: boolean } | null;
-	windowState: { maximized: boolean; fullscreen: boolean; focused: boolean };
-	updateState: unknown;
 	agentAccess?: { title: string; message: string; points: string[]; footer: string };
 } | null;
 
@@ -48,19 +45,9 @@ const bridge = {
 		onCommand: (listener: Listener<string>) => subscribe('desktop:command', listener)
 	},
 
-	/** Collect once on request; no background sampling or retained history. */
-	diagnostics: () => ipcRenderer.invoke('desktop:diagnostics'),
-
 	/** The local worker this window belongs to. */
 	worker: {
-		getState: () => ipcRenderer.invoke('desktop:worker-state'),
-		openStatus: () => void ipcRenderer.invoke('desktop:worker-open-status'),
-		/**
-		 * The header and per-launch token the shell already adds to every
-		 * request this window makes to its worker. Only the worker's own
-		 * top-level page gets an answer; everything else gets null.
-		 */
-		listenerToken: () => ipcRenderer.invoke('desktop:listener-token') as Promise<{ header: string; token: string } | null>
+		getState: () => ipcRenderer.invoke('desktop:worker-state')
 	},
 
 	updates: {

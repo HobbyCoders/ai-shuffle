@@ -21,10 +21,6 @@ export function validateInstalledHost(root: string, host: InstalledHost): Instal
   }
   return host;
 }
-export async function readInstalledHost(root: string): Promise<InstalledHost | null> {
-  try { return validateInstalledHost(root, JSON.parse(await fs.readFile(path.join(root, 'installed-host.json'), 'utf8'))); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
-}
 export function readInstalledHostSync(root: string): InstalledHost | null {
   try { return validateInstalledHost(root, JSON.parse(readFileSync(path.join(root, 'installed-host.json'), 'utf8'))); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }

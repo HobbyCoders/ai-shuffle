@@ -35,8 +35,8 @@ mismatch. For your own testing you can follow **edge** (every `main` revision)
 on one install by writing `{"channel": "edge"}` to `update-channel.json` in the
 profile's `updates` folder; delete the file to return to stable.
 
-The `desktop-source.yml` job publishes edge builds on every push to `main`:
-it stores the runtime-only source archive as an immutable asset in the private
+The `desktop-source.yml` job publishes an edge build of `main` when the owner
+dispatches it manually: it stores the runtime-only source archive as an immutable asset in the private
 `desktop-sources` GitHub release and signs its revision, checksum, size, channel,
 version, release notes and tree digest. It uses a standard
 GitHub-hosted runner and performs no application or installer build. The existing
@@ -114,8 +114,7 @@ hosted public downloads or GitHub download permissions.
   (`SHUFFLE_DESKTOP_LISTENER_TOKEN`, see `src/main/listener.ts`). The main
   process adds it as `X-Shuffle-Desktop-Listener` to every request the window
   makes to the worker's exact origin, WebSocket handshakes included, and strips
-  it from every other request; the worker's top-level page can also read it
-  over IPC. The worker uses it to tell this app from any other local process
+  it from every other request; no page can read it. The worker uses it to tell this app from any other local process
   that reaches its loopback port.
   Set `SHUFFLE_DESKTOP_ATTACH_ANY=1` to attach to any local worker
   (developers running the worker by hand). Preview builds refuse occupied ports
@@ -134,15 +133,18 @@ hosted public downloads or GitHub download permissions.
 - Needs no database setup. The first run creates a cluster in
   `<userData>/postgres/data` (`initdb`, user `ai_shuffle`, a generated
   password, `scram-sha-256`); every start picks a free loopback port and
-  hands the connection to the worker. The password is stored with the OS
-  keyring (DPAPI, Keychain, or libsecret). Before startup the supervisor writes
-  the private `data/managed-postgres.json` descriptor; no database credentials
+  hands the connection to the worker. The password is stored in
+  `<userData>/worker-settings.json`, encrypted with the OS keyring (DPAPI,
+  Keychain, or libsecret) when one is available. Before startup the supervisor
+  writes the private `managed-postgres.json` descriptor into the worker's data
+  directory (see below); no database credentials
   are handed to the app through environment variables or `.env`. The transient
   descriptor is removed on shutdown; retain the private profile for persistence.
 - PostgreSQL is managed-only. There is no connection form, external-server mode,
   or database environment configuration. Worker → Worker Status… shows lifecycle
   and failure details; Show PostgreSQL Log opens the database log.
-- Restart and log actions in the Worker menu and the tray.
+- Restart, status and log actions in the Worker menu; restart, status and
+  Open in Browser in the tray.
 - Frameless window with the OS window controls overlaid. The web UI's top
   strip is the drag handle and keeps clear of the buttons through the Window
   Controls Overlay API; see the `html.desktop` rules in `frontend/src/app.css`
@@ -151,9 +153,10 @@ hosted public downloads or GitHub download permissions.
   sidebar toggle, breadcrumb, the current page's actions and the account badge
   on the right. Feature pages lend their header actions to the strip through
   `$lib/stores/page-header.svelte`.
-- Native menu with the usual accelerators, native notifications, window
-  placement that survives restarts, and signed source updates from the
-  **stable** channel (tagged releases).
+- Native menu with the usual accelerators, native notifications, and window
+  placement that survives restarts. Windows installs take signed source
+  updates from the **stable** channel (tagged releases); macOS and Linux check
+  the hub's signed installer list and offer the newer installer.
 - The sidebar update button checks, downloads and prepares updates, then offers
   Update and restart. Preview builds keep their updates disabled.
 
@@ -183,16 +186,24 @@ release, pinned in `scripts/postgres-binaries.mjs` and verified against the
 release's `.sha256` sidecar. The worker manifest records it under
 `postgres: {version, target}`. The runtime is built on a runner of the target
 architecture: Windows x64, macOS arm64, Linux x64. Installers are large
-(several hundred MB); updates download only the changed blocks.
+(several hundred MB).
 
 The database lives in `<userData>/postgres/data` (for example
 `%APPDATA%\AI Shuffle\postgres\data` on Windows,
 `~/Library/Application Support/AI Shuffle/postgres/data` on macOS,
 `~/.config/AI Shuffle/postgres/data` on Linux) and the server log next to the
-worker's under `<userData>/logs/postgres.log`. To back up AI Shuffle, back up
-that data directory with the app closed. The worker's `.env` carries no database
-credentials (see above), so it cannot be used for a manual `pg_dump`.
-Uninstalling the app leaves the data directory in place.
+worker's under `<userData>/logs/postgres.log`. The worker log is
+`<userData>/logs/worker.log` (the previous run's is `worker.prev.log`); Windows
+source-update builds log to `<userData>/updates/build.log`.
+
+The worker's own data directory (`DATA_DIR`) holds its app data, the
+credential keys the database contents depend on, and the transient
+`managed-postgres.json`: `%USERPROFILE%\.ai-shuffle` on Windows,
+`~/Library/Application Support/ai-shuffle` on macOS and
+`~/.local/share/ai-shuffle` on Linux. To back up AI Shuffle, close the app and
+back up both that directory and `<userData>/postgres/data`; keep them together.
+The worker's `.env` carries no database credentials (see above), so it cannot
+be used for a manual `pg_dump`. Uninstalling the app leaves both in place.
 
 Optional tools the worker looks for on PATH, as on any native install: the
 GitHub CLI for pull-request features, and a Chrome, Chromium or Edge for
@@ -200,11 +211,12 @@ browser automation.
 
 ## The bridge
 
-The preload exposes `window.shuffleDesktop` to the worker page: window and
-theme control, native notifications, menu commands, update state, and the
-worker's state with restart/log/status actions. The bundled
-status page additionally gets `window.shuffleDesktopWorker` for the database
-lifecycle and worker log; neither page exposes credentials or connection forms.
+The preload exposes `window.shuffleDesktop` to the worker page: window state,
+close and title-bar colours, menu commands, the agent-access disclosure, update
+state and actions, and the worker's state. The bundled status page
+additionally gets `window.shuffleDesktopWorker` for the database lifecycle, the
+worker log and restart; neither page exposes credentials, the listener token or
+connection forms. The web UI's side is `frontend/src/lib/services/desktop.ts`.
 
 ## Develop
 
@@ -257,8 +269,10 @@ for the bundled file; missing or invalid downloads fail the build.
 Both installer configurations also verify the copied cloudflared binary in
 their final resources directory before producing an installer.
 `npm run pack` builds an unpacked app in `release/`; `npm run dist` builds the
-installers. Pull-request CI packages a stub runtime on every platform and
-assembles a real one on Linux.
+installers. Pull-request CI (`desktop.yml`) runs the typecheck and unit tests;
+with the `ci:full` label it also packages a Windows shell around a stub runtime
+and installs and exercises a Windows preview with a real runtime. Assembling
+the Linux runtime is a manual `workflow_dispatch` opt-in.
 
 ## Release
 
