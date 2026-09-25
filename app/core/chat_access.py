@@ -138,7 +138,12 @@ class Broker:
         self.requests: dict[str, AccessRequest] = {}
         self._notifications: set[asyncio.Task] = set()
 
-    def _notify(self, session_id: str, owner: tuple) -> None:
+    def _notify(self, session_id: str, owner: tuple, *, saved: bool = False) -> None:
+        # Saved connections belong to the owner, not the session, and every
+        # session's panel lists them: a saved-list change also invalidates the
+        # unscoped resource so the owner's panels on other sessions refresh.
+        resources = [f"chat-access:{session_id}"] + (["chat-access"] if saved else [])
+
         async def send():
             try:
                 from app.core.global_events import global_events
@@ -150,9 +155,7 @@ class Broker:
                 principal = ({"kind": "api_user", "principal_id": owner[2]}
                              if owner[2] is not None else {"kind": "admin"})
                 kind, identity = await run_sync(principal_preference_identity, principal)
-                global_events.resources_changed(
-                    f"chat-access:{session_id}", user_type=kind, user_id=identity,
-                )
+                global_events.resources_changed(*resources, user_type=kind, user_id=identity)
                 from app.core.sync_engine import sync_engine
                 await sync_engine._broadcast_user_message(
                     owner[2] or "admin",
@@ -220,6 +223,7 @@ class Broker:
                 # even when the user left the fingerprint blank.
                 pinned = spec.model_copy(update={"fingerprint": grant["fingerprint"]})
                 saved_id = await run_sync(chat_vault.save, request.owner, pinned)
+                self._notify(session_id, request.owner, saved=True)
             if request.result.done() or request.expires_at <= time.time():
                 raise AccessDenied("The request expired while connecting. Session access was not retained.")
             current = await self.get(session_id, grant["id"])

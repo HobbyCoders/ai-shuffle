@@ -144,6 +144,23 @@ describe('starter agent', () => {
 		expect(mocks.post).not.toHaveBeenCalled();
 	});
 
+	it('skips the built-in agents and uses one the owner made', async () => {
+		mocks.get.mockResolvedValue([
+			{ id: 'explore', name: 'Explore', is_builtin: true },
+			{ id: 'coder', name: 'Coder', is_builtin: false },
+		]);
+		expect(await ensureStarterAgent()).toMatchObject({ id: 'coder' });
+		expect(mocks.post).not.toHaveBeenCalled();
+	});
+
+	it('creates an Assistant when only the built-in agents exist', async () => {
+		mocks.get.mockResolvedValue(['explore', 'general-purpose', 'plan', 'frontend-designer']
+			.map((id) => ({ id, name: id, is_builtin: true })));
+		mocks.post.mockResolvedValue({ id: 'assistant', name: 'Assistant' });
+		expect(await ensureStarterAgent()).toMatchObject({ id: 'assistant' });
+		expect(mocks.post).toHaveBeenCalledWith('/agents', expect.objectContaining({ name: 'Assistant', config: {} }));
+	});
+
 	it('creates an Assistant on a fresh install', async () => {
 		mocks.get.mockResolvedValue([]);
 		mocks.post.mockResolvedValue({ id: 'assistant', name: 'Assistant' });

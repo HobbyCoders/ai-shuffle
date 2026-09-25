@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * DevicesSection — Settings → Devices.
+	 * DevicesSection — Settings → Providers → Devices.
 	 *
 	 * One place for everything that connects to this worker: the Shuffle
 	 * account it belongs to, the other workers in its network, the phones and

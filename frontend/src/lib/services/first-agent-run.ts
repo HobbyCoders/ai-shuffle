@@ -68,10 +68,15 @@ const STARTER_AGENT = {
 	config: {},
 };
 
-/** The agent the first run uses: the first existing one, or a new "Assistant". */
+/**
+ * The agent the first run uses: the first agent the owner made, or a new
+ * "Assistant". The built-in agents are seeded on every start and list first,
+ * so they are skipped (the first of them is the read-only Explore agent).
+ */
 export async function ensureStarterAgent(): Promise<Profile> {
 	const agents = await api.get<Profile[]>('/agents');
-	if (Array.isArray(agents) && agents.length > 0) return agents[0];
+	const own = Array.isArray(agents) ? agents.find((agent) => !agent.is_builtin) : undefined;
+	if (own) return own;
 	return api.post<Profile>('/agents', STARTER_AGENT);
 }
 

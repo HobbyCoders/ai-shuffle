@@ -488,6 +488,54 @@ async def test_saved_connection_requires_new_request_and_approval(broker, ssh_ta
 
 
 @pytest.mark.asyncio
+async def test_saved_list_changes_invalidate_every_owner_session(broker, ssh_target, monkeypatch):
+    """Saving or deleting a saved connection refreshes the owner's panels on other sessions too."""
+    from app.api import chat_access as api
+    from app.core import chat_vault, preference_identity
+    from app.core.chat_access import GrantSubmission
+    from app.core.global_events import global_events
+    from app.core.sync_engine import sync_engine
+    owner = AsyncMock(return_value=(None, "worker", None))
+    monkeypatch.setattr(chat_access, "session_owner", owner)
+    published = []
+    monkeypatch.setattr(global_events, "resources_changed",
+                        lambda *names, user_type, user_id: published.append((names, user_type, user_id)))
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda principal: ("admin", "owner"))
+    monkeypatch.setattr(sync_engine, "_broadcast_user_message", AsyncMock())
+    monkeypatch.setattr(chat_vault, "save", lambda owner, value: "c" * 32)
+    monkeypatch.setattr(chat_vault, "load", lambda owner, saved_id: ssh_target[0])
+    monkeypatch.setattr(chat_vault, "delete", lambda owner, saved_id: None)
+
+    async def drain():
+        await asyncio.gather(*broker._notifications)
+
+    requested = asyncio.create_task(broker.request("chat", "machine", "Save this server"))
+    await asyncio.sleep(0)
+    request = next(iter(broker.requests.values()))
+    await broker.fulfill("chat", request.id, GrantSubmission(connection=ssh_target[0], save_connection=True))
+    handle = await requested
+    await drain()
+    assert (("chat-access:chat", "chat-access"), "admin", "owner") in published
+    broker.revoke("chat", handle["id"])
+    await drain()
+    # Grant-only changes stay scoped to their session.
+    assert published[-1] == (("chat-access:chat",), "admin", "owner")
+
+    published.clear()
+    monkeypatch.setattr(api, "broker", broker)
+    monkeypatch.setattr(api, "checked", AsyncMock())
+    monkeypatch.setattr(api, "session_owner", owner)
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_admin] = lambda: "owner"
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+        response = await client.delete(f"/api/v1/chat-access/chat/saved/{'c' * 32}")
+    assert response.status_code == 200
+    await drain()
+    assert published == [(("chat-access:chat", "chat-access"), "admin", "owner")]
+
+
+@pytest.mark.asyncio
 async def test_deleted_saved_connection_cannot_race_into_a_new_grant(broker, ssh_target, monkeypatch):
     from app.core import chat_vault
     from app.core.chat_access import GrantSubmission

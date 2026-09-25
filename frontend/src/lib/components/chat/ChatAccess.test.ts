@@ -171,6 +171,19 @@ describe('private-access recovery and live invalidations', () => {
   window.dispatchEvent(new Event('online')); await vi.advanceTimersByTimeAsync(100); expect(accessCalls()).toHaveLength(3);
   view.unmount(); await vi.advanceTimersByTimeAsync(300_000); expect(accessCalls()).toHaveLength(3);
  });
+ it('refreshes the saved list when another session saves or deletes a saved connection', async () => {
+  const saved = {id: 'c1', label: 'Build box', target: 'ops@10.0.0.5:22', fingerprint: 'SHA256:x'};
+  snapshot = {...empty(), saved_connections: [saved]};
+  render(ChatAccess, {sessionId: 's2'}); await flush();
+  expect(screen.getByText('Build box')).toBeTruthy();
+  // A delete in session s1 invalidates s1 and the owner-wide resource.
+  snapshot = empty();
+  resourceSync.invalidate(['chat-access:s1', 'chat-access']); await vi.advanceTimersByTimeAsync(100); await tick();
+  expect(accessCalls()).toHaveLength(2);
+  expect(screen.queryByText('Build box')).toBeNull();
+  await vi.advanceTimersByTimeAsync(600_000);
+  expect(accessCalls()).toHaveLength(2);
+ });
  it('keeps one follow-up when an access change arrives during a request', async () => {
   let finish!: (value: unknown) => void;
   m.get.mockImplementation((url: string) => url.startsWith('/sessions/') ? Promise.resolve({mode: 'code'}) : new Promise(resolve => {finish = resolve;}));

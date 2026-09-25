@@ -78,7 +78,7 @@ class AddServerActivity : NativeScreen() {
         navigation("Workers")
         navigationAction(R.drawable.ic_qr, "Scan worker QR code") { scanWorker() }
         heading("Add worker", if (direct) "Use a worker’s HTTPS address and pairing code."
-            else "On your worker, open Settings → Devices and choose Connect to my account.")
+            else "On your worker, open Settings → Providers → Devices and choose Sign in.")
         button("Scan QR code") { scanWorker() }
         gap(12)
         if (direct) {

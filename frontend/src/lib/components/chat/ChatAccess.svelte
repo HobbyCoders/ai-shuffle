@@ -24,7 +24,9 @@
 	let busy = $state(false);
 	// Refreshes are event-driven: the broker sends a session-scoped
 	// chat_access_changed on every request, action and grant change (including
-	// expiry), and live-sync invalidates every resource after a reconnect or on
+	// expiry), plus the owner-wide `chat-access` resource when a saved connection
+	// is saved or deleted (every session's panel lists them), and live-sync
+	// invalidates every resource after a reconnect or on
 	// return to the tab. A timer runs only as a safety net while a request or
 	// approval is waiting (2 s doubling to 30 s), and after transient failures.
 	// An empty or grant-only snapshot is not polled. An authorization denial

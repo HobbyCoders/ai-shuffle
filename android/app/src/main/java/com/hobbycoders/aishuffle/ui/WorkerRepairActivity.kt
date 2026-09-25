@@ -37,7 +37,7 @@ class WorkerRepairActivity : NativeScreen() {
         ready = true
         heading(snapshot.server.name, "Reconnect only this worker to this phone. Your Shuffle account and other workers stay connected.")
         text(snapshot.server.host, 14f)
-        text("On this worker, ask its administrator to prepare a repair for this phone's revoked authorization, then create a new one-time pairing code in Settings → Devices.", 15f)
+        text("On this worker, ask its administrator to prepare a repair for this phone's revoked authorization, then create a new one-time pairing code in Settings → Providers → Devices.", 15f)
         code = input("One-time repair code").apply { isSaveEnabled = false }
         button("Reconnect this worker", primary = true) {
             val value = try { PairingInput.code(code?.text.toString()) } catch (error: IllegalArgumentException) {

@@ -4,7 +4,7 @@
  * Every worker has a device identity and belongs to exactly one network.
  * Workers sync settings/preferences/profiles/keys with each other and each
  * session executes on one owner device. These endpoints power the Network
- * panel (Settings → Devices), the first-run wizard's network step and the
+ * panel (Settings → Providers → Devices), the first-run wizard's network step and the
  * "fork here" offer the chat shows when a session's owner is unreachable.
  *
  * The runner picker keeps reading `GET /cluster/installs` (which returns the
