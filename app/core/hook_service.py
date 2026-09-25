@@ -38,9 +38,11 @@ from app.core.hook_executor import (
     execute_hook,
     execute_hooks_for_event,
     hook_base_env,
+    hook_data_env_value,
     hook_env_value,
     kill_hook_process,
     spawn_hook_shell,
+    tool_matcher_matches,
 )
 
 logger = logging.getLogger(__name__)
@@ -408,11 +410,15 @@ def create_stop_hook_handler(
             # Execute the hook and check if it wants to block
             result = await execute_hook(hook, stop_event)
 
-            # If hook output contains a block decision, honor it
-            if result.get("success") and result.get("output"):
+            # A block decision is JSON: a bash hook's stdout, or a webhook's
+            # 2xx response body ("output" is the "HTTP n: ..." summary there).
+            decision_text = (
+                result.get("body") if hook.get("hook_type") == "webhook" else result.get("output")
+            )
+            if result.get("success") and decision_text:
                 try:
-                    output = json.loads(result["output"])
-                    if output.get("decision") == "block":
+                    output = json.loads(decision_text)
+                    if isinstance(output, dict) and output.get("decision") == "block":
                         return SyncHookJSONOutput(
                             decision="block",
                             reason=output.get("reason", ""),
@@ -611,12 +617,13 @@ async def _execute_db_bash_hook(
 
     # Env vars mirror the legacy execute_bash_hook contract (HOOK_* keys) so
     # existing bash hooks that read env still work; stdin JSON is the primary path.
-    # Values are capped/NUL-stripped (hook_env_value) so a padded tool input
-    # cannot make execve fail; the full input is on stdin.
+    # Values are capped/NUL-stripped so a padded tool input cannot make execve
+    # fail; HOOK_DATA stays valid JSON (long strings shortened, "truncated":
+    # true). The full input is on stdin.
     env = hook_base_env()
     env["HOOK_EVENT"] = "PreToolUse"
     env["HOOK_TOOL_NAME"] = hook_env_value(script_input.get("tool_name", "") or "")
-    env["HOOK_DATA"] = hook_env_value(json.dumps(script_input))
+    env["HOOK_DATA"] = hook_data_env_value(script_input)
 
     stdin_data = json.dumps(script_input)
 
@@ -794,18 +801,11 @@ def create_db_pretooluse_hook_handler(
             if not hook.get("enabled", True):
                 continue
 
-            # tool_matcher: exact tool name or regex. Mirror the DB dispatcher
-            # (execute_hooks_for_event) which uses re.fullmatch — an exact name
-            # fullmatches itself, and patterns like "Bash|Edit" work as expected.
+            # tool_matcher: exact tool name or regex, the whole name must match
+            # (same rule as the DB dispatcher; an invalid regex is plain text).
             tool_matcher = hook.get("tool_matcher")
-            if tool_matcher and tool_name:
-                try:
-                    if not re.fullmatch(tool_matcher, tool_name):
-                        continue
-                except re.error:
-                    # Invalid regex → fall back to exact-string comparison.
-                    if tool_matcher != tool_name:
-                        continue
+            if tool_matcher and tool_name and not tool_matcher_matches(tool_matcher, tool_name):
+                continue
 
             hook_type = hook.get("hook_type")
             if hook_type != "bash":
@@ -936,6 +936,36 @@ _OBSERVED_DB_HOOK_EVENTS = (
 )
 
 
+# A HookMatcher's timeout is the deadline for its whole callback, and the
+# bridge falls back to a shared 60 s one when it is unset. The callbacks below
+# run their hooks one after another, each under its own configured timeout, so
+# a matcher's deadline is the sum of those timeouts plus a margin per hook for
+# spawning and killing it. Never below the old shared 60 s, so a hook added
+# mid-session (the DB handlers re-query at fire time) gets at least that.
+_MIN_MATCHER_TIMEOUT_S = 60.0
+_PER_HOOK_MARGIN_S = 5.0
+_DEFAULT_DB_HOOK_TIMEOUT_MS = 30000
+
+
+def _matcher_timeout(hook_timeouts_s: List[float]) -> float:
+    """The deadline for a callback that runs hooks with these timeouts in turn."""
+    total = sum(max(float(t or 0), 0.0) + _PER_HOOK_MARGIN_S for t in hook_timeouts_s)
+    return max(_MIN_MATCHER_TIMEOUT_S, total)
+
+
+def _db_hook_timeouts_s(project_id: Optional[str], event: str) -> List[float]:
+    """Configured timeouts (seconds) of ``event``'s enabled DB hooks.
+    Best-effort: a DB error means none."""
+    if not project_id:
+        return []
+    try:
+        hooks = database.get_hooks_for_project_and_event(project_id, event) or []
+    except Exception as e:
+        logger.debug(f"Could not read DB {event} hook timeouts: {e}")
+        return []
+    return [(h.get("timeout") or _DEFAULT_DB_HOOK_TIMEOUT_MS) / 1000 for h in hooks]
+
+
 def _db_observed_hook_events(project_id: Optional[str]) -> List[str]:
     """Observed events with at least one enabled DB hook (project + app-level).
     Best-effort: a DB error means none, so config construction never fails."""
@@ -952,10 +982,9 @@ def create_db_event_hook_handler(event: str, project_id: Optional[str],
                                  session_id: Optional[str] = None):
     """SDK callback dispatching ``event``'s DB hooks; never blocks the turn.
 
-    ``session_id`` is the app session id (hook_input only carries the engine's).
-    Message hooks post into that session: the rendered message is saved and
-    broadcast as a user message; it does not start a new turn. Without a
-    session id they fail with "No active session".
+    ``session_id`` is the app session id (hook_input only carries the engine's),
+    passed through for message hooks, which are not delivered and report
+    failure (``hook_executor.execute_message_hook``).
     """
     async def db_event_hook_handler(hook_input: HookInput, tool_use_id: Optional[str],
                                     context: HookContext) -> SyncHookJSONOutput:
@@ -1019,7 +1048,11 @@ def build_hooks_config(
 
         if hook_defs:
             handler = create_plugin_hook_handler(event_name, hook_defs, working_dir, stderr_callback)
-            hooks_config[event_name] = [HookMatcher(hooks=[handler])]
+            hooks_config[event_name] = [HookMatcher(
+                hooks=[handler],
+                # hooks.json timeouts are in seconds.
+                timeout=_matcher_timeout([h.get("timeout", 30) for h in hook_defs]),
+            )]
             logger.debug(f"[HookService] Registered {event_name} handler with {len(hook_defs)} hook(s)")
 
     # Register a DB-backed PreToolUse handler when the project has enabled
@@ -1030,9 +1063,10 @@ def build_hooks_config(
         db_pretooluse_handler = create_db_pretooluse_hook_handler(
             working_dir, project_id, stderr_callback
         )
-        hooks_config.setdefault("PreToolUse", []).append(
-            HookMatcher(hooks=[db_pretooluse_handler])
-        )
+        hooks_config.setdefault("PreToolUse", []).append(HookMatcher(
+            hooks=[db_pretooluse_handler],
+            timeout=_matcher_timeout(_db_hook_timeouts_s(project_id, "PreToolUse")),
+        ))
         logger.debug(f"[HookService] Registered DB PreToolUse handler for project {project_id}")
 
     for event in _db_observed_hook_events(project_id):
@@ -1053,7 +1087,10 @@ def build_hooks_config(
     # ALWAYS register the Stop hook handler for database hooks support
     stop_plugin_hooks = plugin_hooks.get("Stop", [])
     stop_handler = create_stop_hook_handler(working_dir, project_id, stop_plugin_hooks, stderr_callback)
-    hooks_config["Stop"] = [HookMatcher(hooks=[stop_handler])]
+    hooks_config["Stop"] = [HookMatcher(hooks=[stop_handler], timeout=_matcher_timeout(
+        [h.get("timeout", 120) for h in stop_plugin_hooks]
+        + _db_hook_timeouts_s(project_id, "Stop")
+    ))]
     logger.debug(f"[HookService] Registered Stop handler with {len(stop_plugin_hooks)} plugin hook(s)")
 
     return hooks_config

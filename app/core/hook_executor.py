@@ -1,5 +1,6 @@
 """
-Hook execution service for running bash commands, webhook calls, and message injection
+Hook execution service for running bash commands and webhook calls (message
+hooks are accepted but not delivered; see execute_message_hook)
 """
 
 import asyncio
@@ -83,7 +84,8 @@ def _resolve_windows_bash() -> Optional[str]:
 # value (or one with a NUL byte) makes execve fail, and the hook never runs.
 # Tool input and output reach HOOK_* values, so the model could otherwise
 # silence a hook by padding a command or emitting a NUL. The full payload
-# still goes on stdin wherever the hook contract uses it.
+# still goes on stdin wherever the hook contract uses it (PreToolUse);
+# HOOK_DATA stays valid JSON when capped (hook_data_env_value).
 HOOK_ENV_VALUE_MAX_BYTES = 64 * 1024
 HOOK_ENV_TRUNCATED_MARKER = "...[truncated]"
 
@@ -101,6 +103,69 @@ def hook_env_value(value: Any) -> str:
         return data.decode("utf-8")
     cut = data[:HOOK_ENV_VALUE_MAX_BYTES].decode("utf-8", errors="ignore")
     return cut + HOOK_ENV_TRUNCATED_MARKER
+
+
+def _shorten_strings(value: Any, limit: int) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + HOOK_ENV_TRUNCATED_MARKER
+    if isinstance(value, dict):
+        return {k: _shorten_strings(v, limit) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_shorten_strings(v, limit) for v in value]
+    return value
+
+
+def _longest_string(value: Any) -> int:
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return max((_longest_string(v) for v in value.values()), default=0)
+    if isinstance(value, list):
+        return max((_longest_string(v) for v in value), default=0)
+    return 0
+
+
+def hook_data_env_value(data: Any) -> str:
+    """``data`` as the ``HOOK_DATA`` env value: JSON that always parses.
+
+    Within ``HOOK_ENV_VALUE_MAX_BYTES`` it is the plain serialization. Over the
+    cap, the payload's longest strings (a padded ``tool_input.command``, a
+    large Write body) are shortened just enough to fit, each ending in
+    ``HOOK_ENV_TRUNCATED_MARKER``, and ``"truncated": true`` is added at the
+    top level. Cutting the serialized text instead left invalid JSON, so a
+    ``jq`` guard failed open on a padded call. The output is ASCII (json
+    escapes everything else, NUL included), so characters equal bytes.
+    """
+    text = json.dumps(data, default=str)
+    if len(text) <= HOOK_ENV_VALUE_MAX_BYTES:
+        return text
+    base = json.loads(text)
+
+    def render(limit: int) -> str:
+        short = _shorten_strings(base, limit)
+        flagged = {**short, "truncated": True} if isinstance(short, dict) else {
+            "value": short, "truncated": True,
+        }
+        return json.dumps(flagged)
+
+    # Largest per-string limit that fits (binary search on the real size).
+    lo, hi, best = 0, _longest_string(base), None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = render(mid)
+        if len(candidate) <= HOOK_ENV_VALUE_MAX_BYTES:
+            best, lo = candidate, mid + 1
+        else:
+            hi = mid - 1
+    if best is not None:
+        return best
+    # Too many keys or items to fit even with empty strings.
+    minimal = {"truncated": True}
+    if isinstance(base, dict):
+        for key in ("hook_event_name", "tool_name"):
+            if isinstance(base.get(key), str):
+                minimal[key] = base[key][:256]
+    return json.dumps(minimal)
 
 
 def hook_base_env() -> Dict[str, str]:
@@ -231,7 +296,7 @@ async def execute_bash_hook(
         env.update({
             "HOOK_EVENT": hook_env_value(event_data.get("event", "")),
             "HOOK_TIMESTAMP": hook_env_value(event_data.get("timestamp", "")),
-            "HOOK_DATA": hook_env_value(json.dumps(event_data.get("data", {}))),
+            "HOOK_DATA": hook_data_env_value(event_data.get("data", {})),
         })
 
         # Execute the command
@@ -281,6 +346,10 @@ async def execute_bash_hook(
             "output": None,
             "error": str(e)
         }
+
+
+#: How much of a webhook's 2xx response body is kept for decision parsing.
+WEBHOOK_BODY_MAX_CHARS = 64 * 1024
 
 
 async def execute_webhook_hook(
@@ -345,7 +414,10 @@ async def execute_webhook_hook(
                 "success": True,
                 "duration_ms": duration_ms,
                 "output": f"HTTP {response.status_code}: {response.text[:1000]}",
-                "error": None
+                "error": None,
+                # The raw response body, for callers that read a decision
+                # from it (a Stop webhook's {"decision": "block"}).
+                "body": response.text[:WEBHOOK_BODY_MAX_CHARS],
             }
         else:
             return {
@@ -374,105 +446,35 @@ async def execute_webhook_hook(
         }
 
 
+#: Why a message hook run fails. See execute_message_hook.
+MESSAGE_HOOKS_UNSUPPORTED = (
+    "Message hooks are not supported: there is no delivery path into the "
+    "session transcript, so the message would not be shown or read"
+)
+
+
 async def execute_message_hook(
     hook: Dict[str, Any],
     event_data: Dict[str, Any],
     session_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Execute a message hook by injecting a user message into the active chat session.
+    Report a message hook run as failed, without writing anything.
 
-    The message_template is rendered with event data variables and sent as a new
-    user message in the specified session.
-
-    Args:
-        hook: Hook configuration from database (must include message_template)
-        event_data: Event data for template variable substitution
-        session_id: Active session to inject the message into
-
-    Returns:
-        Dict with success, duration_ms, output, and error fields
+    Sessions render and resume from the session event log. The old path wrote
+    a ``session_messages`` row and broadcast ``message_added``; the transcript
+    reads neither for a current session and the engine never saw the text, yet
+    the hook reported success. Injecting into the event log or queueing a turn
+    needs a design (a UserPromptSubmit message hook would start a turn that
+    fires it again), so until then the run fails honestly and the hook's
+    last-run status says why.
     """
-    template = hook.get("message_template")
-    if not template:
-        return {
-            "success": False,
-            "duration_ms": 0,
-            "output": None,
-            "error": "No message template specified"
-        }
-
-    if not session_id:
-        return {
-            "success": False,
-            "duration_ms": 0,
-            "output": None,
-            "error": "No active session to send message to"
-        }
-
-    start_time = time.time()
-
-    try:
-        # Build substitution variables from event_data
-        data = event_data.get("data", {})
-        variables = {
-            "event": event_data.get("event", ""),
-            "timestamp": event_data.get("timestamp", ""),
-            "tool_name": data.get("tool_name", ""),
-            "hook_name": hook.get("name", ""),
-            **{k: str(v) for k, v in data.items() if v is not None},
-            # The app session, not the engine id the hook input carries.
-            "session_id": session_id,
-        }
-
-        # Render template — replace {variable} placeholders
-        rendered = template
-        for key, value in variables.items():
-            rendered = rendered.replace(f"{{{key}}}", str(value))
-
-        # Inject as a user message into the session. One isolated write (the
-        # broadcast below is a real await), so one thread hop. Exceptions still
-        # propagate to this coroutine's ``except Exception`` handler unchanged.
-        await run_sync(
-            database.add_session_message,
-            session_id=session_id,
-            role="user",
-            content=rendered,
-            metadata={"source": "hook", "hook_id": hook.get("id"), "hook_name": hook.get("name")}
-        )
-
-        # Broadcast to connected clients
-        try:
-            from app.core.sync_engine import sync_engine
-            await sync_engine.broadcast_message_added(
-                session_id=session_id,
-                message={
-                    "role": "user",
-                    "content": rendered,
-                    "metadata": {"source": "hook", "hook_id": hook.get("id")}
-                },
-                source_device_id=None  # Broadcast to all devices
-            )
-        except Exception as broadcast_err:
-            logger.warning(f"Failed to broadcast hook message: {broadcast_err}")
-
-        duration_ms = int((time.time() - start_time) * 1000)
-        return {
-            "success": True,
-            "duration_ms": duration_ms,
-            "output": f"Message sent: {rendered[:200]}",
-            "error": None
-        }
-
-    except Exception as e:
-        duration_ms = int((time.time() - start_time) * 1000)
-        logger.exception(f"Error executing message hook {hook.get('id')}: {e}")
-        return {
-            "success": False,
-            "duration_ms": duration_ms,
-            "output": None,
-            "error": str(e)
-        }
+    return {
+        "success": False,
+        "duration_ms": 0,
+        "output": None,
+        "error": MESSAGE_HOOKS_UNSUPPORTED,
+    }
 
 
 async def execute_hook(
@@ -515,6 +517,27 @@ async def execute_hook(
     return result
 
 
+_warned_tool_matchers: set = set()
+
+
+def tool_matcher_matches(pattern: str, tool_name: str) -> bool:
+    """Whether ``tool_name`` fully matches a hook's ``tool_matcher`` regex.
+
+    An invalid pattern is compared as plain text and logged once per pattern,
+    so one bad hook cannot stop the event's other hooks from running.
+    """
+    try:
+        return re.fullmatch(pattern, tool_name) is not None
+    except re.error as e:
+        if pattern not in _warned_tool_matchers:
+            _warned_tool_matchers.add(pattern)
+            logger.warning(
+                "Hook tool_matcher %r is not a valid regex (%s); comparing it as plain text",
+                pattern, e,
+            )
+        return pattern == tool_name
+
+
 async def execute_hooks_for_event(
     project_id: Optional[str],
     event: str,
@@ -548,10 +571,8 @@ async def execute_hooks_for_event(
         for hook in hooks_list:
             # Check tool matcher for PreToolUse/PostToolUse events
             tool_matcher = hook.get("tool_matcher")
-            if tool_matcher and tool_name:
-                # tool_matcher is a regex pattern like "Bash|Edit"
-                if not re.fullmatch(tool_matcher, tool_name):
-                    continue
+            if tool_matcher and tool_name and not tool_matcher_matches(tool_matcher, tool_name):
+                continue
 
             # Prepare event data with timestamp
             full_event_data = {
@@ -586,8 +607,8 @@ async def test_hook(hook: Dict[str, Any]) -> Dict[str, Any]:
     """
     Test a hook with sample event data.
 
-    For message hooks, renders the template and returns the preview without
-    actually injecting a message into any session.
+    For message hooks, renders the template as a preview and reports failure:
+    message hooks are not delivered (see execute_message_hook).
 
     Args:
         hook: Hook configuration from database
@@ -611,7 +632,8 @@ async def test_hook(hook: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
 
-    # For message hooks, preview the rendered template without sending
+    # For message hooks, preview the rendered template; nothing is sent, and
+    # the result says a real run would not deliver it.
     if hook_type == "message":
         template = hook.get("message_template", "")
         if not template:
@@ -634,10 +656,10 @@ async def test_hook(hook: Dict[str, Any]) -> Dict[str, Any]:
             rendered = rendered.replace(f"{{{key}}}", str(value))
 
         return {
-            "success": True,
+            "success": False,
             "duration_ms": 0,
-            "output": f"[Preview] Message that would be sent:\n{rendered}",
-            "error": None
+            "output": f"[Preview] Rendered message:\n{rendered}",
+            "error": MESSAGE_HOOKS_UNSUPPORTED,
         }
 
     return await execute_hook(hook, test_event_data)

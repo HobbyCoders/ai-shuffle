@@ -177,10 +177,11 @@ def test_project_less_sessions_register_app_level_observed_hooks(monkeypatch, tm
 
 
 @pytest.mark.asyncio
-async def test_a_message_hook_posts_into_the_app_session(monkeypatch, tmp_path):
-    """attach_hooks_to_options hands the app session id (options.aih_session_id)
-    to the observed-event handler, so a message hook posts its rendered
-    message into that session instead of failing with "No active session"."""
+async def test_a_message_hook_reports_failure_and_writes_nothing(monkeypatch, tmp_path):
+    """R-3: message hooks used to write a legacy session_messages row that the
+    transcript never reads for a current session, broadcast a message the
+    frontend drops, and report success. Nothing was shown or read. The run now
+    fails honestly (last-run status false, error says why) and writes nothing."""
     import asyncio
 
     from app.core import hook_executor
@@ -207,6 +208,14 @@ async def test_a_message_hook_posts_into_the_app_session(monkeypatch, tmp_path):
         broadcast.append(kw)
 
     monkeypatch.setattr(sync_engine, "broadcast_message_added", _broadcast)
+    results: list[dict] = []
+    real_execute = hook_executor.execute_hook
+
+    async def _record(h, data, session_id=None):
+        results.append(await real_execute(h, data, session_id=session_id))
+        return results[-1]
+
+    monkeypatch.setattr(hook_executor, "execute_hook", _record)
 
     options = SimpleNamespace(cwd=str(tmp_path), plugins=[], env={}, hooks=None,
                               aih_session_id="app-session-1")
@@ -220,11 +229,50 @@ async def test_a_message_hook_posts_into_the_app_session(monkeypatch, tmp_path):
     await asyncio.gather(*list(hook_executor._active_hook_tasks))
 
     assert decision.action != "deny"
-    assert [(a["session_id"], a["role"], a["content"]) for a in added] == [
-        ("app-session-1", "user", "Bash ran in app-session-1"),
-    ]
-    assert broadcast and broadcast[0]["session_id"] == "app-session-1"
-    assert triggered == [("h-msg", True)]
+    assert added == [] and broadcast == []
+    assert triggered == [("h-msg", False)]
+    assert results[0]["success"] is False
+    assert results[0]["error"] == hook_executor.MESSAGE_HOOKS_UNSUPPORTED
+
+    preview = await hook_executor.test_hook(hook)
+    assert preview["success"] is False and "ExampleTool ran in" in preview["output"]
+    assert preview["error"] == hook_executor.MESSAGE_HOOKS_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_a_hook_timeout_above_the_bridge_default_applies(monkeypatch, tmp_path):
+    """A DB PreToolUse guard runs under its own timeout, not a deadline shared
+    by every hook of the event. The bridge's fallback is shrunk to 0.2 s so the
+    test is fast: a 1 s guard that answers after 0.5 s still denies."""
+    import asyncio
+
+    from app.core.provider import sdk_hook_bridge
+
+    hook = {"id": "slow", "hook_type": "bash", "enabled": True, "timeout": 1000}
+    monkeypatch.setattr(sdk_hook_bridge, "DEFAULT_TIMEOUT", 0.2)
+    monkeypatch.setattr(hook_service, "_MIN_MATCHER_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(hook_service, "_project_has_db_pretooluse_hooks", lambda _p: True)
+    monkeypatch.setattr(hook_service, "_db_observed_hook_events", lambda _p: [])
+    monkeypatch.setattr(hook_service.database, "get_hooks_for_project_and_event",
+                        lambda _p, _e: [hook])
+    monkeypatch.setattr(hook_service.database, "update_hook_triggered", lambda *a: None)
+
+    async def _db_hooks(project_id, event):
+        return [hook]
+
+    async def _slow_guard(h, script_input, working_dir):
+        await asyncio.sleep(0.5)
+        return "ok", 2, "", "slow guard says no"
+
+    monkeypatch.setattr(hook_service, "get_database_hooks_for_event", _db_hooks)
+    monkeypatch.setattr(hook_service, "_execute_db_bash_hook", _slow_guard)
+
+    config = hook_service.build_hooks_config(str(tmp_path), "proj-1")
+    adapter = HarnessAdapter()
+    adapter._sdk_hook_bus = sdk_hooks_bus(config, str(tmp_path))
+    decision = await adapter.hooks.emit("PreToolUse", _pre_tool_payload("Bash"))
+
+    assert decision.action == "deny" and decision.note == "slow guard says no"
 
 
 @pytest.mark.asyncio

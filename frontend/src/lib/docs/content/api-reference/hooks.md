@@ -6,16 +6,18 @@ order: 9
 
 # Hooks API
 
-Endpoints for managing hooks — custom bash scripts, webhook calls or messages attached to events in a session.
+Endpoints for managing hooks — custom bash scripts or webhook calls attached to events in a session.
 
 Every endpoint on this page needs owner access. API-user keys (`aih_...`) get `403`. The examples send an owner token from `POST /api/v1/owner/login` (see [Owner password](/docs/api-reference/authentication#owner-password)).
 
 > **How hooks run.**
 > - `PreToolUse` — bash hooks only, before the tool. They can block it (see [Blocking a tool call](#blocking-a-tool-call)). Webhook and message hooks on `PreToolUse` are skipped.
-> - `Stop` — bash and webhook hooks. A hook can keep the agent working with `{"decision": "block"}`.
+> - `Stop` — bash and webhook hooks. A bash hook's stdout or a webhook's 2xx JSON response body can keep the agent working with `{"decision": "block"}`.
 > - `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `SubagentStop`, `PreCompact`, `Notification` — bash and webhook hooks run in the background. They cannot block or change anything.
 >
-> `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-level hooks). Message hooks run on those seven events only: the rendered message is added to the session as a user message and does not start a new turn. Hooks contributed by plugins are not affected by these limits.
+> `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-level hooks). Message hooks (`hook_type: "message"`) are not supported yet: they can be saved, but a run delivers nothing and is recorded as failed. Hooks contributed by plugins are not affected by these limits.
+>
+> `timeout` applies to each hook on its own. Hooks that match the same event run one after another, each with its full timeout.
 
 ## Discovery
 
@@ -123,10 +125,10 @@ curl -X POST http://localhost:8000/api/v1/hooks/project/proj_abc123 \
 | `command` | string | Bash only | Shell command to execute |
 | `url` | string | Webhook only | URL to POST to |
 | `secret` | string | Webhook only | HMAC-SHA256 signing secret |
-| `message_template` | string | Message only | Prompt template sent as a message in the active chat |
-| `timeout` | integer | No | Timeout in ms (1000-300000, default: 30000) |
+| `message_template` | string | Message only | Message template. Message hooks are not delivered yet |
+| `timeout` | integer | No | Timeout in ms for this hook (1000-300000, default: 30000) |
 | `enabled` | boolean | No | Whether hook is active (default: true) |
-| `tool_matcher` | string | No | Tool name or regex the whole tool name must match (`PreToolUse`, `PostToolUse`) |
+| `tool_matcher` | string | No | Tool name or regex the whole tool name must match (`PreToolUse`, `PostToolUse`). A pattern that is not a valid regex is compared as plain text |
 
 ### GET /api/v1/hooks/{hook_id}
 
@@ -150,7 +152,7 @@ Delete a hook.
 
 ### POST /api/v1/hooks/{hook_id}/test
 
-Test a hook with sample data.
+Test a hook with sample data. For a message hook nothing is sent: the response has `success: false`, the rendered message in `output`, and an `error` saying message hooks are not supported.
 
 **Auth:** Owner only
 
@@ -191,7 +193,7 @@ A `PreToolUse` bash hook receives the tool call as a JSON object on stdin:
 }
 ```
 
-The same JSON is in the `HOOK_DATA` environment variable, next to `HOOK_EVENT` and `HOOK_TOOL_NAME`.
+The same JSON is in the `HOOK_DATA` environment variable, next to `HOOK_EVENT` and `HOOK_TOOL_NAME`. Stdin always carries the full call; `HOOK_DATA` may be shortened (see [Environment limits](#environment-limits)), so a guard should read stdin.
 
 Bash hooks on the seven background events get no stdin. They receive environment variables instead:
 
@@ -204,6 +206,12 @@ Bash hooks on the seven background events get no stdin. They receive environment
 
 A `Stop` bash hook gets the same variables, also with no stdin. `HOOK_DATA` holds the stop payload, such as `session_id`, `cwd`, `stop_hook_active`, `stop_reason`, the turn's final `text` (first 16,000 characters) and `project_id`.
 
+### Environment limits
+
+- Each `HOOK_*` value is capped at 64 KiB. A longer `HOOK_<KEY>` value is cut and ends in `...[truncated]`.
+- `HOOK_DATA` is always valid JSON. When it would be too long, its longest strings are shortened, each ending in `...[truncated]`, and `"truncated": true` is added at the top level. A guard that reads `HOOK_DATA` should block when `truncated` is `true`.
+- Hook commands (bash hooks, `PreToolUse` guards and plugin hooks) do not inherit the app's secrets: `DATABASE_URL`, `PG*`, `OWNER_PASSWORD`, `SECRET_KEY` and names ending in `_TOKEN`, `_SECRET`, `_PASSWORD` or `_API_KEY` are removed, except model-provider keys, `FAL_KEY`, `GH_TOKEN` and `GITHUB_TOKEN`. List extra names to keep in `FLUID_CHILD_ENV_PASSTHROUGH` (comma separated).
+
 ## Blocking a tool call
 
 A `PreToolUse` bash hook runs before the tool, and the tool waits for it. To block the call, either exit with code `2` (stderr becomes the reason), or print a JSON decision:
@@ -212,7 +220,9 @@ A `PreToolUse` bash hook runs before the tool, and the tool waits for it. To blo
 { "permissionDecision": "deny", "permissionDecisionReason": "Deploys are frozen" }
 ```
 
-`permissionDecision` can be `allow`, `deny` or `ask`. `{"decision": "block", "reason": "..."}` also blocks. Exit code `0` with no JSON leaves the normal permission flow in charge. Timeouts, crashes and other exit codes never block. A `Stop` hook can print `{"decision": "block", "reason": "..."}` to keep the agent going.
+`permissionDecision` can be `allow`, `deny` or `ask`. `{"decision": "block", "reason": "..."}` also blocks. Exit code `0` with no JSON leaves the normal permission flow in charge. A timeout, a crash or another exit code does not block, but a hook that cannot start at all denies the call. Only bash hooks can block a tool.
+
+A `Stop` hook keeps the agent going with `{"decision": "block", "reason": "..."}`: a bash hook prints it and exits `0`; a webhook returns it as the body of a 2xx response. Any other webhook response only notifies.
 
 ## Webhook Hook Payload
 
@@ -253,6 +263,8 @@ X-Hook-Signature: sha256=<hmac_hex_digest>  (if secret configured)
   }
 }
 ```
+
+A `Stop` webhook can answer with a 2xx status and the body `{"decision": "block", "reason": "..."}` to keep the agent working. Other responses are ignored.
 
 A test run (`POST /api/v1/hooks/{hook_id}/test`) sends `{"event": ..., "timestamp": ..., "data": {...}}` with sample data.
 

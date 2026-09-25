@@ -845,3 +845,125 @@ class TestBuildHooksConfigTranslatedMain:
         assert len(agent_matchers) == 1
         # DB handler (no matcher) is still present alongside.
         assert len(result["PreToolUse"]) >= 2
+
+
+# =============================================================================
+# Stop webhooks, tool_matcher and per-hook timeouts
+# =============================================================================
+
+def _webhook_client(monkeypatch, status_code, text):
+    from unittest.mock import MagicMock
+    client = MagicMock()
+    client.post = AsyncMock(return_value=MagicMock(status_code=status_code, text=text))
+    monkeypatch.setattr("app.core.http_client.get_http_client", lambda: client)
+    return client
+
+
+class TestStopWebhookDecision:
+    _hook = {"id": "w", "hook_type": "webhook", "url": "https://hooks.example/stop",
+             "timeout": 5000, "name": "stop-webhook"}
+    _input = {"hook_event_name": "Stop", "session_id": "s", "stop_reason": "end_turn"}
+
+    async def _run(self, monkeypatch, tmp_path, status_code, body):
+        client = _webhook_client(monkeypatch, status_code, body)
+        monkeypatch.setattr("app.core.hook_executor.database.update_hook_triggered", lambda *a: None)
+        with patch('app.core.hook_service.get_database_hooks_for_event', new_callable=AsyncMock) as mock:
+            mock.return_value = [dict(self._hook)]
+            handler = create_stop_hook_handler(str(tmp_path), project_id="p", plugin_stop_hooks=[])
+            result = await handler(dict(self._input), None, {"signal": None})
+        assert client.post.await_count == 1
+        return result
+
+    @pytest.mark.asyncio
+    async def test_a_json_block_body_keeps_the_agent_working(self, monkeypatch, tmp_path):
+        result = await self._run(
+            monkeypatch, tmp_path, 200, '{"decision": "block", "reason": "CI is red"}',
+        )
+        assert result.get("decision") == "block"
+        assert result.get("reason") == "CI is red"
+        assert result.get("continue_") is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code,body", [
+        (200, "ok"),
+        (200, '{"decision": "approve"}'),
+        (200, '["block"]'),
+        (500, '{"decision": "block", "reason": "error pages never block"}'),
+    ])
+    async def test_other_responses_only_notify(self, monkeypatch, tmp_path, status_code, body):
+        result = await self._run(monkeypatch, tmp_path, status_code, body)
+        assert result.get("decision") is None
+
+
+class TestToolMatcher:
+    @pytest.mark.asyncio
+    async def test_an_invalid_regex_does_not_skip_the_other_hooks(self, monkeypatch):
+        from app.core import hook_executor
+
+        hooks = [
+            {"id": "bad", "hook_type": "bash", "tool_matcher": "Bash("},
+            {"id": "good", "hook_type": "bash", "tool_matcher": "Bash|Edit"},
+            {"id": "literal", "hook_type": "bash", "tool_matcher": "Bash("},
+        ]
+        monkeypatch.setattr(hook_executor.database, "get_hooks_for_project_and_event",
+                            lambda _p, _e: hooks)
+        ran: list[str] = []
+
+        async def _execute(hook, data, session_id=None):
+            ran.append(hook["id"])
+            return {"success": True}
+
+        monkeypatch.setattr(hook_executor, "execute_hook", _execute)
+        await hook_executor.execute_hooks_for_event("p", "PostToolUse", {}, tool_name="Bash")
+        await hook_executor.execute_hooks_for_event("p", "PostToolUse", {}, tool_name="Bash(")
+        import asyncio
+        await asyncio.gather(*list(hook_executor._active_hook_tasks))
+
+        # "Bash(" is not a regex: it matches only the literal tool name "Bash(".
+        assert sorted(ran) == ["bad", "good", "literal"]
+
+    def test_matcher_helper(self):
+        from app.core.hook_executor import tool_matcher_matches
+        assert tool_matcher_matches("Bash|Edit", "Edit")
+        assert not tool_matcher_matches("Bash", "BashOutput")
+        assert not tool_matcher_matches("[", "Bash")
+        assert tool_matcher_matches("[", "[")
+
+
+class TestMatcherTimeouts:
+    def test_db_pretooluse_and_stop_matchers_cover_each_hooks_timeout(self, monkeypatch, tmp_path):
+        from app.core import hook_service
+        rows = {
+            "PreToolUse": [{"timeout": 120000}, {"timeout": 300000}],
+            "Stop": [{"timeout": 200000}],
+        }
+        monkeypatch.setattr(hook_service, "_project_has_db_pretooluse_hooks", lambda _p: True)
+        monkeypatch.setattr(hook_service, "_db_observed_hook_events", lambda _p: [])
+        monkeypatch.setattr(hook_service.database, "get_hooks_for_project_and_event",
+                            lambda _p, event: rows.get(event, []))
+        config = build_hooks_config(str(tmp_path), "p")
+
+        # Hooks run one after another, each under its own timeout.
+        assert config["PreToolUse"][0].timeout >= 120 + 300
+        assert config["Stop"][0].timeout >= 200
+
+    def test_plugin_matchers_cover_hooks_json_timeouts(self, tmp_path):
+        plugin_dir = tmp_path / "plugin"
+        (plugin_dir / "hooks").mkdir(parents=True)
+        (plugin_dir / "hooks" / "hooks.json").write_text("""{"hooks": {
+            "PostToolUse": [{"hooks": [{"type": "command", "command": "a", "timeout": 90},
+                                       {"type": "command", "command": "b", "timeout": 45}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": "c"}]}]
+        }}""")
+        config = build_hooks_config(str(tmp_path), None, plugin_paths=[str(plugin_dir)])
+        assert config["PostToolUse"][0].timeout >= 135
+        assert config["Stop"][0].timeout >= 120  # plugin Stop default
+
+    def test_small_timeouts_keep_the_old_60s_floor(self, monkeypatch, tmp_path):
+        from app.core import hook_service
+        monkeypatch.setattr(hook_service, "_project_has_db_pretooluse_hooks", lambda _p: True)
+        monkeypatch.setattr(hook_service, "_db_observed_hook_events", lambda _p: [])
+        monkeypatch.setattr(hook_service.database, "get_hooks_for_project_and_event",
+                            lambda _p, _e: [{"timeout": 1000}])
+        config = build_hooks_config(str(tmp_path), "p")
+        assert config["PreToolUse"][0].timeout == 60.0

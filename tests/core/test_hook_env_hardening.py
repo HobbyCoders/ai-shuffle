@@ -145,3 +145,63 @@ async def test_webhook_payload_redacts_url_credentials(monkeypatch):
     body = json.loads(client.post.call_args.kwargs["content"])
     assert "s3cret" not in body["data"]["tool_response"]
     assert "postgres://app:***@db:5432/app" in body["data"]["tool_response"]
+
+
+def test_oversized_hook_data_stays_valid_json_with_a_truncated_flag():
+    payload = {
+        "hook_event_name": "PreToolUse", "tool_name": "Write",
+        "tool_input": {"file_path": "/tmp/x", "content": "€" * 100_000},
+    }
+    value = hook_executor.hook_data_env_value(payload)
+    assert len(value.encode("utf-8")) <= hook_executor.HOOK_ENV_VALUE_MAX_BYTES
+    data = json.loads(value)
+    assert data["truncated"] is True
+    assert data["tool_name"] == "Write" and data["tool_input"]["file_path"] == "/tmp/x"
+    assert data["tool_input"]["content"].endswith(hook_executor.HOOK_ENV_TRUNCATED_MARKER)
+    # Small payloads are untouched and carry no flag.
+    assert json.loads(hook_executor.hook_data_env_value({"a": "b"})) == {"a": "b"}
+
+
+def test_hook_data_that_cannot_fit_even_with_empty_strings_is_still_json():
+    value = hook_executor.hook_data_env_value(
+        {"hook_event_name": "PostToolUse", "items": list(range(40_000))}
+    )
+    assert json.loads(value) == {"truncated": True, "hook_event_name": "PostToolUse"}
+
+
+@pytest.mark.asyncio
+async def test_padded_call_cannot_slip_past_a_guard_that_reads_hook_data(monkeypatch, tmp_path):
+    # R-2: the guard parses $HOOK_DATA and fails closed on a truncated payload.
+    # HOOK_DATA used to be cut mid-string: json.loads failed, the guard exited
+    # 1 (no opinion) and the padded call went through.
+    guard = (
+        f"{sys.executable} -c 'import json,os,sys; d=json.loads(os.environ[\"HOOK_DATA\"]); "
+        "sys.exit(2 if d.get(\"truncated\") or \"rm -rf /data\" in d[\"tool_input\"][\"command\"] else 0)'"
+    )
+    handler = _guard_handler(monkeypatch, tmp_path, guard)
+    padded = {"command": "#" + "a" * 70_000 + "\nrm -rf /data"}
+    output = await handler(
+        {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": padded, "session_id": "s"},
+        None, {},
+    )
+    assert _decision(output) == "deny"
+
+    plain = await handler(
+        {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"},
+         "session_id": "s"},
+        None, {},
+    )
+    assert _decision(plain) is None
+
+
+@pytest.mark.asyncio
+async def test_background_hook_data_stays_parseable_when_capped(tmp_path):
+    out = tmp_path / "out"
+    hook = {"id": "h", "command": f'printf %s "$HOOK_DATA" > {out}', "timeout": 10000}
+    result = await hook_executor.execute_bash_hook(
+        hook, {"event": "PostToolUse", "timestamp": "t",
+               "data": {"tool_name": "Read", "tool_response": "x" * 200_000}},
+    )
+    assert result["success"], result["error"]
+    data = json.loads(out.read_text())
+    assert data["truncated"] is True and data["tool_name"] == "Read"
