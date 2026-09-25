@@ -595,3 +595,36 @@ def test_call_timeout_defaults_and_rejects_nonsense(monkeypatch):
         assert runtime.call_timeout() == runtime.DEFAULT_CALL_TIMEOUT
     monkeypatch.setenv("BROWSER_TOOL_TIMEOUT_SECONDS", "12.5")
     assert runtime.call_timeout() == 12.5
+
+
+@pytest.mark.asyncio
+async def test_first_connect_env_sees_native_browser_behind_egress_proxy(fake, monkeypatch):
+    # The server env is built after the native supervisor starts, so the very
+    # first runtime already carries BROWSER_EGRESS_PROXY=1.
+    from app.core import mcp_config, native_chrome
+    monkeypatch.setattr(native_chrome, "_in_container", lambda: False)
+    monkeypatch.setattr(native_chrome, "_supervisor_task", None)
+    supervisor = asyncio.get_running_loop().create_future()
+
+    async def ensure_started():
+        native_chrome._supervisor_task = supervisor
+
+    monkeypatch.setattr(native_chrome, "ensure_started", ensure_started)
+    monkeypatch.setattr(
+        runtime, "resolve_config",
+        lambda sid: {"env": mcp_config._build_browser_server_env({}, None)},
+    )
+    seen = []
+    client_type = runtime.RawMcpClient
+
+    def client(name, config):
+        seen.append(dict(config["env"]))
+        return client_type(name, config)
+
+    monkeypatch.setattr(runtime, "RawMcpClient", client)
+    try:
+        await runtime.start("runtime-test")
+    finally:
+        supervisor.cancel()
+    assert len(seen) == 1
+    assert seen[0].get("BROWSER_EGRESS_PROXY") == "1"

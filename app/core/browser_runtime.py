@@ -188,9 +188,11 @@ class Runtime:
         if broker.runtime_id is not None:
             raise RuntimeUnavailable("An existing browser runtime already owns this session")
         try:
-            config = await run_sync(resolve_config, self.session_id)
+            # Start the native browser first: the server env built below flags
+            # BROWSER_EGRESS_PROXY only while its supervisor is running.
             from app.core.native_chrome import ensure_started
             await ensure_started()
+            config = await run_sync(resolve_config, self.session_id)
             if self.closed:
                 raise RuntimeUnavailable("Browser runtime closed")
             # Correlate this child before its bridge can register, even if MCP
