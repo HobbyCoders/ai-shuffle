@@ -337,17 +337,35 @@ class WorktreeManager:
             {project_dir}/.fluid/worktrees/feature-auth
         """
         sanitized = self._sanitize_branch_name(branch)
+        if sanitized in ("", ".", ".."):
+            raise WorktreeError(f"Invalid branch name for a worktree: '{branch}'")
 
         # Place worktrees inside the project's own .fluid/worktrees/ folder.
         main_dir = get_project_working_dir(project_path)
         worktrees_dir = Path(main_dir) / ".fluid" / "worktrees"
+        # A checked-out repository can carry a symlinked ``.fluid`` (or
+        # ``.fluid/worktrees``). Refuse to follow it out of the checkout before
+        # creating anything, so git never materializes files elsewhere.
+        self._require_inside_checkout(main_dir, worktrees_dir)
         worktrees_dir.mkdir(parents=True, exist_ok=True)
 
         # Ensure the nested worktree dir is ignored by the main repo so the
         # git worktrees we create here don't show up as untracked files.
         self._ensure_worktrees_ignored(main_dir)
 
-        return worktrees_dir / sanitized
+        worktree_path = worktrees_dir / sanitized
+        self._require_inside_checkout(main_dir, worktree_path)
+        return worktree_path
+
+    @staticmethod
+    def _require_inside_checkout(main_dir: str, path: Path) -> None:
+        """Raise WorktreeError unless *path* resolves strictly inside *main_dir*."""
+        root = Path(main_dir).resolve()
+        resolved = path.resolve()
+        if resolved == root or root not in resolved.parents:
+            raise WorktreeError(
+                f"Refusing worktree path outside the project checkout: {path}"
+            )
 
     def _ensure_worktrees_ignored(self, main_dir: str) -> None:
         """

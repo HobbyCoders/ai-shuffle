@@ -158,11 +158,32 @@ def _branch_differs_from_base(
         return True
 
 
+def _display_path(path: str) -> str:
+    """Make a libgit2 path safe to serialize.
+
+    pygit2 decodes non-UTF-8 path bytes with ``surrogateescape``; a lone
+    surrogate cannot be encoded as UTF-8, so one such file name would make
+    every JSON response carrying it fail. Replace the undecodable bytes with
+    U+FFFD, exactly as the CLI fallback does (``errors="replace"``).
+    """
+    return path.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
 def _format_timestamp(epoch: int, offset_minutes: int) -> str:
     """Format a commit timestamp as ISO 8601 with timezone offset."""
     tz = timezone(timedelta(minutes=offset_minutes))
     dt = datetime.fromtimestamp(epoch, tz=tz)
     return dt.isoformat()
+
+
+def _empty_tree(repo: "pygit2.Repository") -> "pygit2.Tree":
+    """The empty tree, the staged-diff base while HEAD is unborn.
+
+    ``Index.diff_to_tree`` requires a tree argument, so an unborn HEAD cannot
+    simply pass none. Writing the (content-addressed, well-known) empty tree is
+    idempotent and is what git itself does.
+    """
+    return repo[repo.TreeBuilder().write()]
 
 
 def _staged_diff(repo: "pygit2.Repository") -> Optional["pygit2.Diff"]:
@@ -174,7 +195,7 @@ def _staged_diff(repo: "pygit2.Repository") -> Optional["pygit2.Diff"]:
     try:
         repo.index.read()
         if repo.head_is_unborn:
-            return repo.index.diff_to_tree()
+            return repo.index.diff_to_tree(_empty_tree(repo))
         tree = repo.head.peel(pygit2.Tree)
         return repo.index.diff_to_tree(tree)
     except Exception:
@@ -205,7 +226,7 @@ def _both_diffs(
     staged = None
     try:
         if repo.head_is_unborn:
-            staged = repo.index.diff_to_tree()
+            staged = repo.index.diff_to_tree(_empty_tree(repo))
         else:
             staged = repo.index.diff_to_tree(repo.head.peel(pygit2.Tree))
     except Exception:
@@ -427,7 +448,7 @@ class GitNativeReader:
             file_statuses = repo.status()
             for filepath, flags in file_statuses.items():
                 if flags & pygit2.GIT_STATUS_CONFLICTED:
-                    status["conflicts"].append(filepath)
+                    status["conflicts"].append(_display_path(filepath))
                     continue
 
                 # libgit2 on Windows may report WT_DELETED for files
@@ -440,19 +461,19 @@ class GitNativeReader:
                         # worktree flags entirely (git CLI also ignores it).
                         if flags & _INDEX_FLAGS:
                             status["staged"].append({
-                                "file": filepath,
+                                "file": _display_path(filepath),
                                 "status": _index_status_char(flags),
                             })
                         continue
 
                 if flags & _INDEX_FLAGS:
                     status["staged"].append({
-                        "file": filepath,
+                        "file": _display_path(filepath),
                         "status": _index_status_char(flags),
                     })
 
                 if flags & _WT_MODIFIED_FLAGS:
-                    status["modified"].append(filepath)
+                    status["modified"].append(_display_path(filepath))
 
                 if flags & pygit2.GIT_STATUS_WT_NEW:
                     # Skip reparse-point directories (junctions/symlinks)
@@ -460,7 +481,7 @@ class GitNativeReader:
                     full = os.path.join(workdir_path, filepath)
                     if os.path.isdir(full) and _is_reparse_point(full):
                         continue
-                    status["untracked"].append(filepath)
+                    status["untracked"].append(_display_path(filepath))
 
             # Ahead/behind relative to default branch (matching GitService behavior)
             if status["current_branch"] and not repo.head_is_unborn:
@@ -604,7 +625,7 @@ class GitNativeReader:
                     else:
                         _, additions, deletions = patch.line_stats
                     files.append({
-                        "file": patch.delta.new_file.path,
+                        "file": _display_path(patch.delta.new_file.path),
                         "additions": additions,
                         "deletions": deletions,
                         "is_binary": is_binary,
@@ -623,7 +644,7 @@ class GitNativeReader:
                     else:
                         _, additions, deletions = patch.line_stats
                     files.append({
-                        "file": patch.delta.new_file.path,
+                        "file": _display_path(patch.delta.new_file.path),
                         "additions": additions,
                         "deletions": deletions,
                         "is_binary": is_binary,
@@ -1017,10 +1038,12 @@ class GitNativeReader:
                     try:
                         ref = repo.references[ref_name]
                         resolved = ref.resolve()
-                        # Only push commit-ish refs
+                        # Only push commit-ish refs. (``GIT_OBJ_COMMIT`` no
+                        # longer exists in pygit2 >= 1.19; referencing it raised
+                        # here and silently dropped every non-HEAD branch.)
                         try:
                             obj = repo.get(resolved.target)
-                            if obj is not None and obj.type == pygit2.GIT_OBJ_COMMIT:
+                            if isinstance(obj, pygit2.Commit):
                                 walker.push(resolved.target)
                         except Exception:
                             pass

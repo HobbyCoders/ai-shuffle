@@ -457,12 +457,10 @@ class GitService(
             "conflicts": []
         }
 
-        # Use rev-parse --git-dir to check if it's a repo (avoids separate is_git_repo call)
-        try:
-            check = self._run_git(working_dir, ["rev-parse", "--git-dir"], timeout=5)
-            if check.returncode != 0:
-                return status
-        except (subprocess.SubprocessError, OSError):
+        # Only the repository root counts (as in git_native.get_status): a
+        # project folder nested inside another repo must not report — or let
+        # the UI act on — the enclosing repo's changes.
+        if not self._is_git_repo_cli(working_dir):
             return status
 
         status["is_git_repo"] = True
@@ -565,32 +563,42 @@ class GitService(
                             except ValueError:
                                 status["unpushed"] = None
 
-            # Get file status using porcelain format
-            result = self._run_git(working_dir, ["status", "--porcelain=v1"], timeout=10)
+            # Get file status using porcelain format. ``-z`` keeps paths
+            # verbatim: without it git C-quotes non-ASCII names and prints a
+            # rename as "old -> new", neither of which is a usable path.
+            result = self._run_git(
+                working_dir, ["status", "--porcelain=v1", "-z"], timeout=10
+            )
             if result.returncode == 0:
-                for line in result.stdout.split("\n"):
+                entries = iter(result.stdout.split("\0"))
+                for line in entries:
                     if not line or len(line) < 3:
                         continue
 
                     index_status = line[0]
                     worktree_status = line[1]
                     filename = line[3:]
+                    if index_status in ("R", "C"):
+                        # -z emits the rename/copy source as the next entry.
+                        next(entries, None)
 
                     # Check for conflicts (both sides modified)
-                    if index_status == "U" or worktree_status == "U":
+                    if (
+                        index_status == "U" or worktree_status == "U"
+                        or (index_status == "A" and worktree_status == "A")
+                        or (index_status == "D" and worktree_status == "D")
+                    ):
                         status["conflicts"].append(filename)
-                    elif index_status == "A" and worktree_status == "A":
-                        status["conflicts"].append(filename)
-                    elif index_status == "D" and worktree_status == "D":
-                        status["conflicts"].append(filename)
+                        continue
                     # Staged changes
-                    elif index_status in ["A", "M", "D", "R", "C"]:
+                    if index_status in ["A", "M", "D", "R", "C", "T"]:
                         status["staged"].append({
                             "file": filename,
                             "status": index_status
                         })
-                    # Worktree changes (not staged)
-                    if worktree_status == "M":
+                    # Worktree changes (not staged): an unstaged deletion or
+                    # type change is a modification too, as in git_native.
+                    if worktree_status in ("M", "D", "T"):
                         status["modified"].append(filename)
                     elif worktree_status == "?":
                         status["untracked"].append(filename)

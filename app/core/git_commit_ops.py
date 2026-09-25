@@ -12,6 +12,28 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _untracked_discard_target(
+    working_dir: str, real_working_dir: str, rel_path: str
+) -> Optional[str]:
+    """Return the path to delete when discarding untracked *rel_path*, or None.
+
+    Only the final component is left unresolved, so an untracked symlink is
+    removed itself rather than the directory it points at. The target must sit
+    strictly inside the checkout and outside its ``.git`` metadata: discarding
+    ``.`` or ``.git`` would otherwise delete the whole checkout or its history.
+    """
+    lexical = os.path.normpath(os.path.join(working_dir, rel_path))
+    target = os.path.join(
+        os.path.realpath(os.path.dirname(lexical)), os.path.basename(lexical)
+    )
+    if not target.startswith(real_working_dir + os.sep):
+        return None
+    first = os.path.relpath(target, real_working_dir).split(os.sep)[0]
+    if first.lower() == ".git":
+        return None
+    return target
+
+
 class GitCommitMixin:
     """Mixin providing commit/staging operations for GitService."""
 
@@ -141,13 +163,15 @@ class GitCommitMixin:
 
             # Delete untracked files (with path traversal protection)
             for f in untracked:
-                full_path = os.path.realpath(os.path.join(working_dir, f))
-                if not full_path.startswith(real_working_dir + os.sep) and full_path != real_working_dir:
-                    logger.warning(f"Path traversal attempt blocked: {f}")
+                full_path = _untracked_discard_target(working_dir, real_working_dir, f)
+                if full_path is None:
+                    logger.warning(f"Refusing to delete path outside the checkout: {f}")
                     failed.append(f)
                     continue
                 try:
-                    if os.path.isdir(full_path):
+                    if os.path.islink(full_path):
+                        os.remove(full_path)
+                    elif os.path.isdir(full_path):
                         import shutil
                         shutil.rmtree(full_path)
                     elif os.path.exists(full_path):

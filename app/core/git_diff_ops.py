@@ -7,7 +7,7 @@ per-file diff stats, diff text, and branch log.
 
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from app.core.git_cache import (
     _git_cache,
@@ -16,6 +16,37 @@ from app.core.git_cache import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_numstat_z(output: str) -> List[Tuple[str, int, int, bool]]:
+    """Parse ``git diff --numstat -z`` into (path, additions, deletions, is_binary).
+
+    ``-z`` keeps paths verbatim (no C-quoting of non-ASCII names). A rename is
+    reported as ``add<TAB>del<TAB>`` followed by the old and new paths as two
+    further NUL-terminated fields; the new path is the one git status reports.
+    """
+    rows: List[Tuple[str, int, int, bool]] = []
+    fields = iter(output.split("\0"))
+    for field in fields:
+        if not field:
+            continue
+        parts = field.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        added, deleted, path = parts
+        if not path:
+            next(fields, None)  # rename source
+            path = next(fields, "")
+            if not path:
+                continue
+        is_binary = added == "-" and deleted == "-"
+        rows.append((
+            path,
+            0 if added == "-" else int(added),
+            0 if deleted == "-" else int(deleted),
+            is_binary,
+        ))
+    return rows
 
 
 class GitDiffMixin:
@@ -68,34 +99,17 @@ class GitDiffMixin:
             total_deletions = 0
             files = set()
 
-            # Get staged diff stats
-            result = self._run_git(working_dir, ["diff", "--staged", "--numstat"], timeout=10)
-            if result.returncode == 0:
-                for line in result.stdout.strip().split("\n"):
-                    if not line:
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) >= 3:
-                        added = int(parts[0]) if parts[0] != '-' else 0
-                        deleted = int(parts[1]) if parts[1] != '-' else 0
-                        total_additions += added
-                        total_deletions += deleted
-                        files.add(parts[2])
-
-            # Get unstaged diff stats
+            numstat_runs = [["diff", "--staged", "--numstat", "-z"]]
             if include_unstaged:
-                result = self._run_git(working_dir, ["diff", "--numstat"], timeout=10)
-                if result.returncode == 0:
-                    for line in result.stdout.strip().split("\n"):
-                        if not line:
-                            continue
-                        parts = line.split("\t")
-                        if len(parts) >= 3:
-                            added = int(parts[0]) if parts[0] != '-' else 0
-                            deleted = int(parts[1]) if parts[1] != '-' else 0
-                            total_additions += added
-                            total_deletions += deleted
-                            files.add(parts[2])
+                numstat_runs.append(["diff", "--numstat", "-z"])
+            for args in numstat_runs:
+                result = self._run_git(working_dir, args, timeout=10)
+                if result.returncode != 0:
+                    continue
+                for path, added, deleted, _binary in _parse_numstat_z(result.stdout):
+                    total_additions += added
+                    total_deletions += deleted
+                    files.add(path)
 
             result_data = {
                 "additions": total_additions,
@@ -269,43 +283,21 @@ class GitDiffMixin:
         files: List[Dict[str, Any]] = []
 
         try:
-            # Staged changes
-            result = self._run_git(
-                working_dir, ["diff", "--staged", "--numstat"], timeout=10
-            )
-            if result.returncode == 0:
-                for line in result.stdout.strip().split("\n"):
-                    if not line:
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) >= 3:
-                        is_binary = parts[0] == "-" and parts[1] == "-"
-                        files.append({
-                            "file": parts[2],
-                            "additions": 0 if is_binary else int(parts[0]),
-                            "deletions": 0 if is_binary else int(parts[1]),
-                            "is_binary": is_binary,
-                            "staged": True,
-                        })
-
-            # Unstaged changes
-            result = self._run_git(
-                working_dir, ["diff", "--numstat"], timeout=10
-            )
-            if result.returncode == 0:
-                for line in result.stdout.strip().split("\n"):
-                    if not line:
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) >= 3:
-                        is_binary = parts[0] == "-" and parts[1] == "-"
-                        files.append({
-                            "file": parts[2],
-                            "additions": 0 if is_binary else int(parts[0]),
-                            "deletions": 0 if is_binary else int(parts[1]),
-                            "is_binary": is_binary,
-                            "staged": False,
-                        })
+            for staged, args in (
+                (True, ["diff", "--staged", "--numstat", "-z"]),
+                (False, ["diff", "--numstat", "-z"]),
+            ):
+                result = self._run_git(working_dir, args, timeout=10)
+                if result.returncode != 0:
+                    continue
+                for path, added, deleted, is_binary in _parse_numstat_z(result.stdout):
+                    files.append({
+                        "file": path,
+                        "additions": added,
+                        "deletions": deleted,
+                        "is_binary": is_binary,
+                        "staged": staged,
+                    })
 
             _git_cache.put(cache_key, files)
         except Exception as e:
