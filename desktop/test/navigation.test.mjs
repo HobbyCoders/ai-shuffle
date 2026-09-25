@@ -14,19 +14,36 @@ const PAGE = 'file:///opt/AI%20Shuffle/resources/app/src/pages/worker.html';
 /** dist/main/navigation.js against a fake Electron that records what it is given. */
 function loadNavigation() {
 	const opened = [];
-	const handlers = {};
+	/** Per partition: its permission handlers and the storages each clearStorageData call named. */
+	const sessions = {};
+	const sessionFor = (name) => (sessions[name] ??= {
+		handlers: {},
+		cleared: [],
+		setPermissionRequestHandler(fn) { this.handlers.request = fn; },
+		setPermissionCheckHandler(fn) { this.handlers.check = fn; },
+		async clearStorageData(options) { this.cleared.push(options.storages); }
+	});
+	/** Windows the policy creates itself (isolated pop-ups). */
+	const windows = [];
+	class BrowserWindow extends EventEmitter {
+		constructor(options) {
+			super();
+			this.options = options;
+			this.loaded = [];
+			this.webContents = { setWindowOpenHandler: (fn) => { this.webContents.openHandler = fn; } };
+			windows.push(this);
+		}
+		async loadURL(url) { this.loaded.push(url); }
+	}
 	const electron = {
-		BrowserWindow: class {},
+		BrowserWindow,
 		shell: { openExternal: async (url) => { opened.push(url); } },
-		session: { fromPartition: () => ({
-			setPermissionRequestHandler: (fn) => { handlers.request = fn; },
-			setPermissionCheckHandler: (fn) => { handlers.check = fn; }
-		}) }
+		session: { fromPartition: sessionFor }
 	};
 	const file = new URL('../dist/main/navigation.js', import.meta.url);
 	const module = { exports: {} };
 	vm.runInNewContext(readFileSync(file, 'utf8'), {
-		module, exports: module.exports, process, URL,
+		module, exports: module.exports, process, URL, console,
 		require: (id) => {
 			if (id === 'electron') return electron;
 			if (id === './context-menu') return { attachTextContextMenu() {} };
@@ -34,7 +51,7 @@ function loadNavigation() {
 			return createRequire(file)(id);
 		}
 	});
-	return { nav: module.exports, opened, handlers };
+	return { nav: module.exports, opened, handlers: sessionFor('test').handlers, sessions, windows };
 }
 
 test('NC-3: only the worker origin gets permissions, and only microphone, clipboard write and fullscreen', () => {
@@ -152,4 +169,92 @@ test('NC-4: the bundled page is matched by its exact path, whatever the query or
 	assert.equal(trustedPage(`${WORKER}/chat`, null, PAGE), null);
 	assert.equal(externalHttpUrl('https://example.com/a b'), 'https://example.com/a%20b');
 	assert.equal(externalHttpUrl('mailto:x@example.com'), null);
+});
+
+/** Runs the window-open handler the policy installed, as Electron would. */
+function openWindow(contents, url, disposition = 'new-window') {
+	return contents.openHandler({ url, disposition, frameName: '', features: '', referrer: { url: '', policy: 'default' }, postBody: undefined });
+}
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+/** Objects made inside the vm context are another realm's: compare them as plain data. */
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
+test('R10-10: where each pop-up goes', () => {
+	const { nav } = loadNavigation();
+	assert.equal(nav.POPUP_PARTITION.startsWith('persist:'), false, 'the pop-up session is in memory only');
+	assert.equal(nav.popupPlacement('about:blank', 'foreground-tab', WORKER), 'child', 'account sign-in');
+	assert.equal(nav.popupPlacement('about:blank', 'new-window', WORKER), 'child', 'Google connector OAuth');
+	assert.equal(nav.popupPlacement(`${WORKER}/plaid-link`, 'new-window', `${WORKER}/`), 'child', 'Plaid Link');
+	assert.equal(nav.popupPlacement('https://accounts.example.com/authorize', 'new-window', WORKER), 'isolated');
+	assert.equal(nav.popupPlacement('http://127.0.0.1:8001/', 'new-window', WORKER), 'isolated', 'another loopback port is another site');
+	assert.equal(nav.popupPlacement(`${WORKER}/plaid-link`, 'new-window', null), 'isolated', 'no worker shown: nothing is the app\'s own');
+	assert.equal(nav.popupPlacement('https://example.com/', 'foreground-tab', WORKER), 'external');
+	for (const url of ['data:text/html,x', 'javascript:alert(1)', 'file:///etc/passwd', 'https://user:pw@evil.example/']) {
+		assert.equal(nav.popupPlacement(url, 'new-window', WORKER), 'external', url);
+	}
+});
+
+test('R10-10: a pop-up at another site opens in the isolated session, and what it registered is cleared when it closes', async () => {
+	const { nav, sessions, windows, opened } = loadNavigation();
+	const win = fakeWindow();
+	nav.attachNavigationPolicy(win, () => WORKER, () => {}, PAGE);
+	const url = 'https://accounts.example.com/authorize?client_id=1';
+	assert.deepEqual(plain(openWindow(win.webContents, url)), { action: 'deny' }, 'no native child in the app\'s session');
+	assert.equal(windows.length, 1);
+	const [popup] = windows;
+	assert.equal(popup.options.parent, win);
+	assert.equal(popup.options.webPreferences.partition, nav.POPUP_PARTITION);
+	assert.notEqual(popup.options.webPreferences.partition, 'test');
+	assert.equal(popup.options.webPreferences.preload, undefined);
+	assert.equal(popup.options.webPreferences.sandbox, true);
+	assert.equal(popup.options.webPreferences.contextIsolation, true);
+	assert.deepEqual(popup.loaded, [url]);
+	assert.deepEqual(opened, []);
+	// Its own window.open calls go to the system browser.
+	assert.deepEqual(plain(popup.webContents.openHandler({ url: 'https://bank.example.com/' })), { action: 'deny' });
+	assert.deepEqual(opened, ['https://bank.example.com/']);
+	popup.emit('closed');
+	await flush();
+	assert.deepEqual(plain(sessions[nav.POPUP_PARTITION].cleared), [['serviceworkers', 'cachestorage']]);
+	assert.equal(sessions.test?.cleared.length ?? 0, 0);
+});
+
+test('R10-10: pop-ups the page talks to stay in the app session, and its service workers are cleared when they close', async () => {
+	const { nav, sessions, windows } = loadNavigation();
+	const win = fakeWindow();
+	nav.attachNavigationPolicy(win, () => WORKER, () => {}, PAGE);
+	for (const url of ['about:blank', `${WORKER}/plaid-link`]) {
+		const result = openWindow(win.webContents, url);
+		assert.equal(result.action, 'allow', url);
+		assert.equal(result.overrideBrowserWindowOptions.webPreferences.partition, 'test', url);
+		assert.equal(result.overrideBrowserWindowOptions.webPreferences.preload, undefined, url);
+	}
+	assert.equal(windows.length, 0);
+	const child = new EventEmitter();
+	child.webContents = { setWindowOpenHandler() {} };
+	win.webContents.emit('did-create-window', child);
+	assert.equal(sessions.test.cleared.length, 0);
+	child.emit('closed');
+	await flush();
+	assert.deepEqual(plain(sessions.test.cleared), [['serviceworkers', 'cachestorage']]);
+});
+
+test('R10-10: the isolated pop-up session gets no permissions, and clearing never throws', async () => {
+	const { nav, sessions } = loadNavigation();
+	nav.installPermissionPolicy(() => WORKER);
+	const popups = sessions[nav.POPUP_PARTITION].handlers;
+	for (const permission of ['media', 'clipboard-sanitized-write', 'fullscreen', 'notifications']) {
+		let granted;
+		popups.request({ getURL: () => `${WORKER}/` }, permission, (value) => { granted = value; }, { requestingUrl: `${WORKER}/` });
+		assert.equal(granted, false, permission);
+		assert.equal(popups.check(null, permission, WORKER, { isMainFrame: true }), false, permission);
+	}
+	const warn = console.warn;
+	console.warn = () => {};
+	try {
+		await nav.forgetServiceWorkers({ clearStorageData: async () => { throw new Error('gone'); } });
+	} finally {
+		console.warn = warn;
+	}
 });

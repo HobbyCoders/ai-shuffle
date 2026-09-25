@@ -16,7 +16,7 @@ import { installedLaunchArgs } from './installed-host';
 import path from 'node:path';
 import { registerIpc, type DesktopState, type PostgresStatus, type WorkerControl } from './ipc';
 import { installMenu } from './menu';
-import { installPermissionPolicy } from './navigation';
+import { forgetServiceWorkers, installPermissionPolicy } from './navigation';
 import { installListenerHeader, type ListenerTarget } from './listener';
 import { AGENT_ACCESS, agentAccessDetail, DisclosureStore, ensureAgentAccessAcknowledged } from './disclosure';
 import { PostgresSupervisor, resolvePostgresBinaries } from './postgres';
@@ -150,6 +150,9 @@ async function main(): Promise<void> {
 		try { return { origin: new URL(supervisor.state.url).origin, token, pageOrigin: window.currentWorkerUrl }; } catch { return null; }
 	};
 	installListenerHeader(ses, listenerTarget);
+	// A service worker an earlier version let a pop-up register would own the
+	// window's requests; the app never uses one, so none survives a launch.
+	await forgetServiceWorkers(ses);
 
 	const failedState = (error: string): WorkerState => ({
 		phase: 'failed',

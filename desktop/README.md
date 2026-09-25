@@ -114,8 +114,12 @@ hosted public downloads or GitHub download permissions.
   process adds it as `X-Shuffle-Desktop-Listener` to requests to the worker's
   exact origin, WebSocket handshakes included, when they are top-level page
   loads or come from a document under a worker-origin top frame (so an OAuth,
-  hub or Plaid pop-up cannot use it), and strips it from every other request;
-  no page can read it. The worker uses it to tell this app from any other local process
+  hub or Plaid pop-up cannot use it); a service worker's own requests, which
+  have no frame, carry it only when their referrer is the worker origin. It is
+  stripped from every other request, and no page can read it. The app never
+  keeps a service worker: its partition's are cleared at startup and whenever
+  a pop-up closes, and a sized pop-up opened straight at another site gets a
+  window in a separate in-memory session (`src/main/navigation.ts`). The worker uses it to tell this app from any other local process
   that reaches its loopback port.
   Set `SHUFFLE_DESKTOP_ATTACH_ANY=1` to attach to any local worker
   (developers running the worker by hand). Preview builds refuse occupied ports

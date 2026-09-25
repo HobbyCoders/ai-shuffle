@@ -13,8 +13,12 @@
  * A subresource request (fetch, XHR, WebSocket, image, ...) carries it only
  * when the document that made it sits under a worker-origin top frame, so an
  * OAuth, hub or Plaid pop-up at another origin cannot use the token. A
- * top-level navigation to the worker carries it from any of the app's
- * windows: that is how the OAuth pop-up lands on the worker's callback, and
+ * request with no frame and no page at all comes from a service worker (or
+ * another frameless worker): it is judged by its referrer's origin instead,
+ * which a page cannot set to another origin, so the worker origin's own
+ * sw.js keeps working while a worker some other site registered gets
+ * nothing. A top-level navigation to the worker carries it from any of the
+ * app's windows: that is how the OAuth pop-up lands on the worker's callback, and
  * the worker still judges it by Sec-Fetch-Site and Origin like a browser.
  * A page cannot add headers to a navigation or a WebSocket handshake itself,
  * which is why the header is attached here rather than by the web UI. No
@@ -67,7 +71,11 @@ export function isWorkerRequest(url: string, origin: string): boolean {
 /** Who made a request, as far as the token decision needs to know. */
 export interface RequestInitiator {
 	resourceType: string;
-	/** The origin of the top-level document the requesting frame sits in, or null when unknown. */
+	/**
+	 * The origin of the top-level document the requesting frame sits in; for a
+	 * frameless request (a service worker's), the origin of its referrer; null
+	 * when unknown.
+	 */
 	topOrigin: string | null;
 }
 
@@ -78,13 +86,20 @@ export function initiatorAllowed(initiator: RequestInitiator, target: Pick<Liste
 	return initiator.topOrigin === originOf(target.origin) || (!!target.pageOrigin && initiator.topOrigin === originOf(target.pageOrigin));
 }
 
-/** The top frame's origin for a request: its frame's top, else the owning page's URL. */
-export function requestInitiator(details: Pick<OnBeforeSendHeadersListenerDetails, 'resourceType' | 'frame' | 'webContents'>): RequestInitiator {
+/**
+ * The top frame's origin for a request: its frame's top, else the owning
+ * page's URL. A request with neither (a service worker's own fetches, its
+ * script and update checks) has only its referrer: the worker context that
+ * made it, since the Fetch spec ignores a referrer from another origin.
+ * No referrer means unknown.
+ */
+export function requestInitiator(details: Pick<OnBeforeSendHeadersListenerDetails, 'resourceType' | 'frame' | 'webContents'> & { referrer?: string }): RequestInitiator {
 	let top: string | null = null;
 	try {
 		const frame = details.frame?.top ?? null;
 		if (frame) top = frame.url;
-		else if (details.webContents && !details.webContents.isDestroyed()) top = details.webContents.getURL();
+		else if (details.webContents) top = details.webContents.isDestroyed() ? null : details.webContents.getURL();
+		else if (!details.frame) top = details.referrer || null;
 	} catch {
 		top = null; // A frame that went away while the request was in flight.
 	}

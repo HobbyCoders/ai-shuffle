@@ -34,6 +34,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		removeAsDefaultProtocolClient(...args) { app.protocol.push(['remove', ...args]); return true; }
 	};
 	const pages = [];
+	const serviceWorkerClears = [];
 	let mainWindow;
 	class MainWindow {
 		constructor() { mainWindow = this; this.browserWindow = null; this.page = null; this.workerUrl = null; this.sent = []; }
@@ -93,7 +94,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		'./installed-host': { installedLaunchArgs: () => [] },
 		'./ipc': { registerIpc: (deps) => { ipc = deps; } },
 		'./menu': { installMenu: (actions) => { menu = actions; } },
-		'./navigation': { installPermissionPolicy() {} },
+		'./navigation': { installPermissionPolicy() {}, forgetServiceWorkers: async () => { serviceWorkerClears.push(pages.length); } },
 		'./listener': { installListenerHeader() {} },
 		'./disclosure': { AGENT_ACCESS: {}, agentAccessDetail: () => '', DisclosureStore: { forProfile: () => ({}) }, ensureAgentAccessAcknowledged: acknowledge },
 		'./postgres': { PostgresSupervisor, resolvePostgresBinaries: () => ({}) },
@@ -112,7 +113,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	}, { filename: file });
 	for (let i = 0; i < 20 && !(worker && worker.state.phase === 'ready'); i++) await tick();
 	await tick();
-	return { app, appEvents, pages, errors, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get tray() { return tray; }, get ipc() { return ipc; }, get updater() { return updater; } };
+	return { app, appEvents, pages, errors, serviceWorkerClears, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get tray() { return tray; }, get ipc() { return ipc; }, get updater() { return updater; } };
 }
 
 function electronFake(app, errors) {
@@ -145,6 +146,12 @@ test('reopening the window while the worker still runs goes straight back to the
 	main.appEvents.emit('activate');
 	for (let i = 0; i < 5; i++) await tick();
 	assert.deepEqual(main.pages, [URL_READY], 'no status page that would wait for a ready event that never comes');
+});
+
+test('R10-10: the app partition\'s service workers are cleared once at startup, before any page loads', async () => {
+	const main = await launch();
+	assert.deepEqual(main.serviceWorkerClears, [0]);
+	assert.deepEqual(main.pages, ['status', URL_READY]);
 });
 
 test('a menu restart whose session stop fails reports it and returns to the running worker', async () => {

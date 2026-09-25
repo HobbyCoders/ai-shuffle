@@ -99,3 +99,36 @@ test('NC-5: the session hook applies the initiator rule to every request', () =>
 	assert.equal(send({ url: 'http://127.0.0.1:8000/api/v1/me', resourceType: 'xhr', frame: { top: { url: 'https://evil.example/' } } }), undefined);
 	assert.equal(send({ url: 'http://127.0.0.1:8000/', resourceType: 'mainFrame', frame: { top: { url: 'file:///app/src/pages/worker.html' } } }), token);
 });
+
+test('R10-10: a frameless request (a service worker\'s) is judged by its referrer: the worker\'s own sw.js keeps the token, another site\'s does not', () => {
+	let hook;
+	installListenerHeader({ webRequest: { onBeforeSendHeaders: (fn) => { hook = fn; } } }, () => target);
+	// What Electron hands webRequest for a service worker: no frame, no webContents.
+	const fromServiceWorker = (url, referrer, resourceType = 'xhr') => {
+		let out;
+		hook({ id: 1, url, method: 'GET', resourceType, referrer, timestamp: 0, requestHeaders: {}, frame: null }, (result) => { out = result.requestHeaders; });
+		return out[LISTENER_HEADER];
+	};
+	// The worker origin's sw.js: its API passthrough (the page's referrer), its own fetches, its update check.
+	assert.equal(fromServiceWorker('http://127.0.0.1:8000/api/v1/sessions', 'http://127.0.0.1:8000/chat'), token);
+	assert.equal(fromServiceWorker('http://127.0.0.1:8000/_app/immutable/entry/start.js', 'http://127.0.0.1:8000/sw.js', 'script'), token);
+	assert.equal(fromServiceWorker('http://127.0.0.1:8000/sw.js', 'http://127.0.0.1:8000/', 'other'), token);
+	// A worker another site registered (a pop-up's), or one that sends no referrer, gets nothing.
+	assert.equal(fromServiceWorker('http://127.0.0.1:8000/api/v1/sessions', 'https://cdn.plaid.com/sw.js'), undefined);
+	assert.equal(fromServiceWorker('http://127.0.0.1:8000/api/v1/sessions', 'https://accounts.google.com/'), undefined);
+	assert.equal(fromServiceWorker('http://127.0.0.1:8000/api/v1/sessions', 'http://127.0.0.1:8001/sw.js'), undefined);
+	assert.equal(fromServiceWorker('http://127.0.0.1:8000/api/v1/sessions', ''), undefined);
+	// And the worker's own service worker never sends the token to another origin.
+	assert.equal(fromServiceWorker('https://cdn.plaid.com/link.js', 'http://127.0.0.1:8000/sw.js'), undefined);
+});
+
+test('R10-10: the referrer only stands in when there is no frame and no page', () => {
+	const page = (url, destroyed = false) => ({ isDestroyed: () => destroyed, getURL: () => url });
+	const worker = 'http://127.0.0.1:8000/chat';
+	// A frame or a page decides; a worker-origin referrer does not lift a foreign top frame.
+	assert.equal(requestInitiator({ resourceType: 'xhr', frame: { top: { url: 'https://evil.example/' } }, referrer: worker }).topOrigin, 'https://evil.example');
+	assert.equal(requestInitiator({ resourceType: 'xhr', frame: null, webContents: page('https://evil.example/'), referrer: worker }).topOrigin, 'https://evil.example');
+	assert.equal(requestInitiator({ resourceType: 'xhr', frame: null, webContents: page(worker, true), referrer: worker }).topOrigin, null, 'a closed page is unknown, not its referrer');
+	assert.equal(requestInitiator({ resourceType: 'xhr', referrer: worker }).topOrigin, 'http://127.0.0.1:8000');
+	assert.equal(requestInitiator({ resourceType: 'xhr', referrer: 'about:client' }).topOrigin, null);
+});

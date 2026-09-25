@@ -114,14 +114,23 @@ function checkInstallState() {
 	_update((s) => ({ ...s, isInstalled: isStandalone }));
 }
 
+/** Any page inside the desktop app, main window or pop-up: its partition's user agent carries this marker. */
+function isDesktopUserAgent(): boolean {
+	return typeof navigator !== 'undefined' && navigator.userAgent.includes('AIShuffleDesktop/');
+}
+
 async function registerServiceWorker() {
 	if (!browser || !('serviceWorker' in navigator)) {
 		return null;
 	}
 	// The desktop app has no install prompt and takes its updates from the
 	// shell, so the worker would only add a cache layer that Chromium's
-	// app partition does not always honour.
-	if (isDesktop) {
+	// app partition does not always honour. Pop-ups the desktop app opens at
+	// this origin (Plaid Link, an OAuth callback's "Return to AI Shuffle")
+	// have no preload bridge, so `isDesktop` is false there; they share the
+	// app's user agent, and a worker they registered would outlive them in
+	// the app's partition.
+	if (isDesktop || isDesktopUserAgent()) {
 		return null;
 	}
 	// The Android app ships the UI as bundled assets and updates it with the
