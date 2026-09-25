@@ -28,7 +28,7 @@ import os
 import re
 import signal
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from app.core.config import settings
@@ -479,21 +479,37 @@ def _parse_output_for_teammates(output: Any) -> List[Dict[str, Any]]:
     return [r for r in recs if any(v for v in r.values())]
 
 
-def _scan_team_dir_for_teammates(team_name: str) -> List[Dict[str, Any]]:
-    """Fallback: read ~/.claude/teams/{team_name}/ for teammate JSON files."""
-    # The team name comes from model-authored tool input: never let it name a
-    # directory outside ~/.claude/teams (an absolute path or ``..`` segment
-    # would, and a pid read from there is later signalled by kill_teammate).
+def _team_dir(team_name: str) -> Optional[Path]:
+    """``~/.claude/teams/<team_name>``, or None when the name could leave it.
+
+    The team name comes from model-authored tool input: it must never name a
+    directory outside ~/.claude/teams (a pid read from there is later
+    signalled by kill_teammate). Refused: separators, NUL, ``.``/``..``, a
+    Windows drive prefix (``D:x`` is drive-relative, ``C:..`` climbs) and any
+    name whose resolved directory is not directly inside the teams folder.
+    """
     if (
         not team_name
         or team_name in (".", "..")
-        or "/" in team_name
-        or "\\" in team_name
-        or "\0" in team_name
+        or any(ch in team_name for ch in ("/", "\\", "\0", ":"))
+        or PurePosixPath(team_name).name != team_name
+        or PureWindowsPath(team_name).name != team_name
     ):
-        return []
-    base = Path.home() / ".claude" / "teams" / team_name
-    if not base.exists() or not base.is_dir():
+        return None
+    root = Path.home() / ".claude" / "teams"
+    base = root / team_name
+    try:
+        if base.resolve().parent != root.resolve():
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return base
+
+
+def _scan_team_dir_for_teammates(team_name: str) -> List[Dict[str, Any]]:
+    """Fallback: read ~/.claude/teams/{team_name}/ for teammate JSON files."""
+    base = _team_dir(team_name)
+    if base is None or not base.is_dir():
         return []
 
     out: List[Dict[str, Any]] = []

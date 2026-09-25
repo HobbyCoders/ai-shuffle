@@ -23,6 +23,15 @@ import shutil
 # Fixtures
 # =============================================================================
 
+@pytest.fixture(autouse=True)
+def _isolated_workspace_override(monkeypatch):
+    """set_workspace_config moves the effective-workspace override; keep that
+    from leaking out of these tests (several patch only ``settings``)."""
+    from app.core import config as config_module
+
+    monkeypatch.setattr(config_module, "_runtime_overrides", dict(config_module._runtime_overrides))
+
+
 @pytest.fixture
 def temp_workspace():
     """Create a temporary workspace directory for testing."""

@@ -375,6 +375,34 @@ async def export_session(
         )
 
 
+_IMPORT_STRING_FIELDS = (
+    "role", "type", "subtype", "toolName", "tool_name", "agentType", "agentDescription",
+)
+_IMPORT_ID_FIELDS = ("id", "toolId", "tool_id")
+
+
+def _import_message_problem(msg: dict) -> Optional[str]:
+    """Why the transcript writer cannot take ``msg``, or None when it can."""
+    metadata = msg.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return "'metadata' must be an object"
+    if metadata and metadata.get("timestamp") is not None and not isinstance(metadata["timestamp"], str):
+        return "'metadata.timestamp' must be a string"
+    for field in _IMPORT_STRING_FIELDS:
+        value = msg.get(field)
+        if value is not None and not isinstance(value, str):
+            return f"'{field}' must be a string"
+    for field in _IMPORT_ID_FIELDS:
+        value = msg.get(field)
+        # Legacy database rows export integer ids.
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (str, int))):
+            return f"'{field}' must be a string"
+    content = msg.get("content")
+    if content is not None and not isinstance(content, (str, list)):
+        return "'content' must be a string or an array"
+    return None
+
+
 @export_router.post("/import", response_model=SessionImportResponse)
 async def import_session(
     request: Request,
@@ -473,6 +501,16 @@ async def import_session(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid export format. Every message must be an object."
         )
+    # The transcript writer below reads these per-message fields. A wrong type
+    # there used to fail it after the session row was saved, leaving an empty
+    # session behind a 200, so every message is checked before anything is.
+    for index, msg in enumerate(messages_data):
+        problem = _import_message_problem(msg)
+        if problem:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid export format. Message {index + 1}: {problem}."
+            )
     # These name the session and its agent and project. A non-string would fail
     # the lookups, or the response after the session row was already created.
     for field in ('title', 'profile_id', 'project_id'):
@@ -552,6 +590,7 @@ async def import_session(
     )
 
     # Create JSONL file for the session
+    jsonl_path = None
     try:
         from app.core.jsonl_parser import get_project_dir_name
 
@@ -697,9 +736,23 @@ async def import_session(
 
         logger.debug(f"Created JSONL file for imported session: {jsonl_path}")
 
-    except Exception as e:
-        logger.error(f"Failed to create JSONL file for imported session: {e}")
-        # Continue anyway - the session is in the database
+    except Exception:
+        # A session without its transcript is not an import: remove both, so a
+        # failure here never leaves an empty session behind a "success".
+        logger.exception("Failed to create JSONL file for imported session")
+        if jsonl_path is not None:
+            try:
+                jsonl_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove the partial transcript %s", jsonl_path)
+        try:
+            await run_sync(database.delete_session, new_session_id)
+        except Exception:
+            logger.exception("Could not remove imported session %s", new_session_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not write the imported transcript; nothing was imported.",
+        )
 
     logger.debug(f"Imported session {new_session_id} with {len(messages_data)} messages")
 

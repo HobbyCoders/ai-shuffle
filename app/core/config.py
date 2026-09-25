@@ -1126,6 +1126,16 @@ settings = Settings()
 # These take priority over settings fields when set.
 _runtime_overrides: dict[str, Path] = {}
 
+def set_workspace_override(path: Path) -> None:
+    """Make ``path`` the effective workspace, as start-up does for a saved one.
+
+    ``settings.effective_workspace_dir`` reads this override before the raw
+    ``workspace_dir`` setting, so a workspace chosen at runtime has to be set
+    here too, or it only takes effect after a restart.
+    """
+    _runtime_overrides["workspace_dir"] = path
+
+
 # Ensure directories exist
 def ensure_directories():
     """Create required directories if they don't exist"""
@@ -1153,7 +1163,7 @@ def load_workspace_from_database():
         if configured_path:
             path = Path(configured_path)
             if path.exists() or path.parent.exists():
-                _runtime_overrides["workspace_dir"] = path
+                set_workspace_override(path)
                 logger.info(f"Workspace directory set to: {path}")
             else:
                 logger.warning(f"Configured workspace path does not exist: {path}")

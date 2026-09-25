@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -305,6 +306,134 @@ def test_run_publishes_private_descriptor_before_spawning_worker(settings_factor
     monkeypatch.setattr(runtime, "shutdown", Mock())
     runtime.STOP.clear()
     assert runtime.run(cfg, "run") == 0
+
+
+_SUPERVISOR_SECRETS = {
+    "SECRET_KEY": "synthetic-secret-key",
+    "OWNER_PASSWORD": "synthetic-owner-password",
+    "CLUSTER_SECRET": "synthetic-cluster-secret",
+    "LICENSE_KEY": "synthetic-license",
+    "DATABASE_URL": "postgresql://u:synthetic@external.invalid/prod",
+    "ANTHROPIC_API_KEY": "sk-synthetic",
+    "OPENAI_API_KEY": "sk-synthetic-2",
+    "GITHUB_TOKEN": "ghp-synthetic",
+    "SOME_SERVICE_TOKEN": "synthetic-token",
+    "STRIPE_KEY": "synthetic-stripe",
+    "SHUFFLE_DESKTOP_LIFECYCLE_TOKEN": "synthetic-lifecycle-token",
+}
+
+
+def _secret_environment(monkeypatch):
+    for name, value in _SUPERVISOR_SECRETS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    monkeypatch.setenv("LC_MESSAGES", "C")
+    monkeypatch.setenv("TZ", "UTC")
+
+
+def _leaked(env):
+    return sorted(k for k, v in env.items() if k in _SUPERVISOR_SECRETS or v in _SUPERVISOR_SECRETS.values())
+
+
+def test_postgres_server_gets_only_its_own_environment(settings_factory, monkeypatch, tmp_path):
+    """R13-1: PostgreSQL (and its forked backends) ran with every secret the
+    supervisor holds, readable by same-uid processes in /proc/<pid>/environ."""
+    _secret_environment(monkeypatch)
+    monkeypatch.setenv("UNRELATED_APP_SETTING", "not-for-postgres")
+    db = runtime.Database(settings_factory())
+    db.pg.mkdir(parents=True)
+    monkeypatch.setattr(db, "command", lambda *a, **k: "postgres (PostgreSQL) 16.4")
+    spawned = []
+    monkeypatch.setattr(runtime.subprocess, "Popen", lambda args, **kw: spawned.append((args, kw["env"])) or Mock())
+    try:
+        db.start()
+    finally:
+        db.pg_log.close()
+        db.private_runtime.cleanup()
+    ((args, env),) = spawned
+    assert args[0] == "postgres"
+    assert _leaked(env) == []
+    assert "UNRELATED_APP_SETTING" not in env
+    assert env["PATH"] == os.environ["PATH"]
+    assert (env["LANG"], env["LC_MESSAGES"], env["TZ"], env["LC_ALL"]) == ("C.UTF-8", "C", "UTC", "C")
+    # The maintenance clients get the same base plus their own PG* settings.
+    client = runtime.client_env("postgresql://u:pw@127.0.0.1:5432/db")
+    assert _leaked(client) == [] and client["PGPASSWORD"] == "pw"
+
+
+def test_chrome_gets_no_secrets_or_lifecycle_token(settings_factory, tmp_path, monkeypatch):
+    """R13-1: chrome-supervisor, start-chrome and Chromium inherited the app's
+    secrets, and the lifecycle token that authorizes the internal desktop routes."""
+    cfg = settings_factory()
+    db = runtime.Database(cfg)
+    db.password = "synthetic-password"
+    for name in ("open", "close", "publish_descriptor"):
+        monkeypatch.setattr(db, name, Mock())
+    monkeypatch.setattr(runtime, "Database", lambda settings: db)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("START_CHROME", "1")
+    monkeypatch.setenv("CHROME_CDP_PORT", "9221")
+    monkeypatch.setenv("BROWSER_SSRF_ALLOW", "10.0.0.0/8")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    _secret_environment(monkeypatch)
+    spawned = {}
+
+    def spawn(args, *, env, **kwargs):
+        spawned["chrome-supervisor" if args[0] == "chrome-supervisor" else "app"] = env
+        return Mock()
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", spawn)
+    monkeypatch.setattr(runtime, "watch", lambda *args: 0)
+    monkeypatch.setattr(runtime, "shutdown", Mock())
+    runtime.STOP.clear()
+    assert runtime.run(cfg, "run") == 0
+    chrome, app = spawned["chrome-supervisor"], spawned["app"]
+    assert _leaked(chrome) == []
+    for name in ("CHROME_CDP_PORT", "BROWSER_SSRF_ALLOW", "HTTPS_PROXY", "HOME", "PATH", "LANG", "TZ"):
+        assert chrome[name] == os.environ[name]
+    assert chrome["DATA_DIR"] == str(tmp_path)
+    # The app itself still gets what it needs.
+    assert app["SECRET_KEY"] == "synthetic-secret-key"
+    assert app["SHUFFLE_DESKTOP_LIFECYCLE_TOKEN"] == "synthetic-lifecycle-token"
+
+
+def test_chrome_env_drops_a_token_the_supervisor_adds():
+    env = {"PATH": "/bin", "CHROME_CDP": "1", "SHUFFLE_DESKTOP_LIFECYCLE_TOKEN": "t",
+           "SHUFFLE_CONTAINER_UPDATES": "/data/application-updates", "GH_TOKEN": "g", "FAL_KEY": "f"}
+    assert runtime.chrome_env(env) == {"PATH": "/bin", "CHROME_CDP": "1",
+                                       "SHUFFLE_CONTAINER_UPDATES": "/data/application-updates"}
+
+
+def test_main_marks_the_supervisor_non_dumpable_after_dropping_privileges(monkeypatch, settings_factory):
+    """R13-1: the supervisor holds every secret in its own environ."""
+    order = []
+    cfg = settings_factory()
+    monkeypatch.setattr(runtime, "load_settings", lambda: cfg)
+    monkeypatch.setattr(runtime, "drop_privileges", lambda settings: order.append("drop"))
+    monkeypatch.setattr(runtime, "harden_process_introspection", lambda settings: order.append("harden"))
+    monkeypatch.setattr(runtime, "run", lambda settings, action, filename=None: order.append(action) or 0)
+    assert runtime.main(["run"]) == 0
+    assert order == ["drop", "harden", "run"]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="prctl is Linux-only")
+@pytest.mark.parametrize("allow,expected", [(False, "True 0"), (True, "False 1")])
+def test_supervisor_hardening_really_clears_dumpable(allow, expected):
+    import subprocess
+
+    script = (
+        "import ctypes, ctypes.util, importlib.util, sys, types\n"
+        "spec = importlib.util.spec_from_file_location('rt', sys.argv[1])\n"
+        "rt = importlib.util.module_from_spec(spec); spec.loader.exec_module(rt)\n"
+        "done = rt.harden_process_introspection(types.SimpleNamespace(allow_process_introspection=sys.argv[2] == '1'))\n"
+        "libc = ctypes.CDLL(ctypes.util.find_library('c') or None)\n"
+        "print(done, libc.prctl(3, 0, 0, 0, 0))\n"
+    )
+    path = Path(__file__).resolve().parents[2] / "docker" / "container_runtime.py"
+    out = subprocess.run([sys.executable, "-c", script, str(path), "1" if allow else "0"],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip() == expected
 
 
 def test_shutdown_order(monkeypatch):

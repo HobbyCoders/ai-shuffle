@@ -241,6 +241,34 @@ class TestImport:
         assert database.get_sessions() == []
         assert not world["projects_dir"].exists()
 
+    @pytest.mark.parametrize("message,detail", [
+        ({"role": "user", "content": "hi", "metadata": "not-an-object"}, "'metadata' must be an object"),
+        ({"role": "user", "content": "hi", "metadata": ["x"]}, "'metadata' must be an object"),
+        ({"role": "user", "content": "hi", "metadata": {"timestamp": 5}},
+         "'metadata.timestamp' must be a string"),
+        ({"role": ["user"], "content": "hi"}, "'role' must be a string"),
+        ({"role": "assistant", "type": "tool_use", "toolName": {"x": 1}}, "'toolName' must be a string"),
+        ({"role": "user", "content": {"text": "hi"}}, "'content' must be a string or an array"),
+        ({"role": "user", "content": "hi", "id": ["a"]}, "'id' must be a string"),
+    ], ids=["meta-str", "meta-list", "timestamp-int", "role-list", "tool-name-obj",
+            "content-obj", "id-list"])
+    def test_malformed_message_is_400_before_any_session(self, client, world, message, detail):
+        """R13-9: a bad message used to fail the transcript writer after the
+        session row was saved; the route still answered 200."""
+        r = _upload(client, _export(messages=[{"role": "user", "content": "ok"}, message]))
+        assert r.status_code == 400, r.text
+        assert r.json()["detail"] == f"Invalid export format. Message 2: {detail}."
+        assert database.get_sessions() == []
+        assert not world["projects_dir"].exists()
+
+    def test_transcript_write_failure_saves_nothing(self, client, world):
+        """R13-9: a transcript that cannot be written is a failed import, not
+        an empty session behind a "success"."""
+        world["projects_dir"].write_text("a file where the folder should be")
+        r = _upload(client, _export())
+        assert r.status_code == 500, r.text
+        assert database.get_sessions() == []
+
     @pytest.mark.parametrize("field", ["total_cost_usd", "total_tokens_in", "turn_count"])
     def test_non_numeric_stats_are_400(self, client, world, field):
         r = _upload(client, _export(session={field: "lots"}))

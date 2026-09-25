@@ -264,6 +264,27 @@ def test_legacy_plaintext_blob_route_is_gone(workers, make_client):
         assert not any(getattr(r, "path", "") == "/api/v1/network/peer/blob/{hash_value}" for r in network_api.router.routes)
 
 
+@pytest.mark.parametrize("url,ok", [
+    ("http://[::ffff:169.254.169.254]:80", False),       # IPv4-mapped
+    ("http://[::ffff:a9fe:a9fe]/", False),               # the same, hex form
+    ("http://[::ffff:0:169.254.169.254]/", False),       # IPv4-translated (SIIT)
+    ("http://[64:ff9b::169.254.169.254]/", False),       # NAT64 well-known
+    ("http://[64:ff9b:1::169.254.1.1]/", False),         # NAT64 local-use
+    ("http://[::169.254.169.254]/", False),              # IPv4-compatible
+    ("http://[fe80::1%25eth0]:8000", False),             # link-local with a zone
+    ("http://[::ffff:192.168.1.20]:8000", True),         # a mapped LAN address stays allowed
+    ("http://[64:ff9b::10.0.0.5]:8000", True),
+    ("http://[::1]:8000", True),                         # IPv6 loopback, not ::0.0.0.1
+    ("http://[2001:db8::1]:8000", True),
+], ids=["mapped", "mapped-hex", "translated", "nat64", "nat64-local", "compatible",
+        "zone", "mapped-lan", "nat64-lan", "v6-loopback", "global"])
+def test_ipv4_carrying_ipv6_endpoints_are_classified_by_the_ipv4(url, ok):
+    """R13-12: ``ipaddress`` calls ``::ffff:169.254.169.254`` neither link-local
+    nor private, so the "no link-local" rule let the metadata address through."""
+    from app.network import endpoints
+    assert endpoints.is_valid_endpoint(url) is ok
+
+
 def test_member_endpoints_are_validated_before_they_are_stored(workers, make_client):
     """NET-22: only plain http(s) addresses without credentials or link-local hosts are kept."""
     from app.network import endpoints

@@ -7,6 +7,7 @@ into focused, testable functions.
 
 import asyncio
 import logging
+import os
 import sys
 import time
 from typing import List, Optional
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 PR_SET_DUMPABLE = 4
 
 
-def harden_process_introspection() -> bool:
+def harden_process_introspection(*, force: bool = False) -> bool:
     """Make this process non-dumpable on Linux; True when it now is.
 
     Every model-run child (code-mode kernel, hooks, the CLI, MCP servers) runs
@@ -36,8 +37,17 @@ def harden_process_introspection() -> bool:
     are unaffected: ``execve`` makes them dumpable again. Best effort: a
     failure is logged once and startup continues. ``ALLOW_PROCESS_INTROSPECTION
     =true`` skips it, keeping core dumps and same-uid debugging.
+
+    Under the test suite (``TESTING=1``) it is skipped too: tests that run the
+    app lifespan would otherwise make the pytest process itself non-dumpable
+    for the rest of the session (no ``py-spy dump`` of a hung worker, no
+    reading its own ``/proc/self/io`` or ``environ``). ``force=True`` applies
+    it anyway, for the test that checks the hardening.
     """
     if not sys.platform.startswith("linux"):
+        return False
+    if not force and os.environ.get("TESTING") == "1":
+        logger.debug("TESTING=1: the process stays dumpable")
         return False
     if settings.allow_process_introspection:
         logger.info("ALLOW_PROCESS_INTROSPECTION is set: this process stays dumpable")

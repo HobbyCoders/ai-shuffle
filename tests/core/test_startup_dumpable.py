@@ -25,7 +25,7 @@ _SCRIPT = r"""
 import os, subprocess, sys
 from app.core import startup
 startup.settings.allow_process_introspection = sys.argv[1] == "1"
-hardened = startup.harden_process_introspection()
+hardened = startup.harden_process_introspection(force=True)
 probe = (
     "import sys\n"
     "try:\n"
@@ -69,6 +69,30 @@ def test_allow_process_introspection_keeps_environ_readable():
     assert _run(allow=True) == "False read"
 
 
+def test_testing_mode_keeps_the_test_process_dumpable(monkeypatch):
+    """R13-8: every test that runs the app lifespan called the prctl on the
+    pytest process itself. Under TESTING=1 the hardening is skipped unless
+    forced, and the libc call is never made."""
+    import ctypes
+
+    from app.core import startup
+
+    monkeypatch.setenv("TESTING", "1")
+    monkeypatch.setattr(startup.settings, "allow_process_introspection", False)
+    calls = []
+
+    def _recording_cdll(*_a, **_k):
+        calls.append(_a)
+        raise OSError("not in this test")
+
+    monkeypatch.setattr(ctypes, "CDLL", _recording_cdll)
+    assert startup.harden_process_introspection() is False
+    assert calls == []
+    # force=True still reaches the prctl (it fails here by design).
+    assert startup.harden_process_introspection(force=True) is False
+    assert len(calls) == 1
+
+
 def test_non_linux_is_a_no_op(monkeypatch):
     from app.core import startup
 
@@ -88,7 +112,7 @@ def test_prctl_failure_is_logged_not_raised(monkeypatch, caplog):
 
     monkeypatch.setattr(ctypes, "CDLL", _broken)
     with caplog.at_level("WARNING", logger=startup.logger.name):
-        assert startup.harden_process_introspection() is False
+        assert startup.harden_process_introspection(force=True) is False
     assert "non-dumpable" in caplog.text
 
 
@@ -96,3 +120,12 @@ def test_setting_defaults_off():
     from app.core.config import Settings
 
     assert Settings.model_fields["allow_process_introspection"].default is False
+
+
+def test_running_the_app_lifespan_leaves_the_test_process_dumpable(client):
+    """R13-8: the ``client`` fixture runs the lifespan in this process."""
+    import ctypes
+    import ctypes.util
+
+    libc = ctypes.CDLL(ctypes.util.find_library("c") or None)
+    assert libc.prctl(3, 0, 0, 0, 0) == 1  # PR_GET_DUMPABLE

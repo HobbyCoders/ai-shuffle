@@ -17,10 +17,12 @@ from pydantic import BaseModel
 
 from app.core.models import HealthResponse, VersionResponse, StatsResponse
 from app.core.auth import auth_service
+from app.core import config as config_module
 from app.core.config import settings
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin
+from app.api.common import reset_served_roots_cache
 
 logger = logging.getLogger(__name__)
 
@@ -367,8 +369,13 @@ async def set_workspace_config(
     instance_key = f"workspace_path:{settings.effective_instance_id}"
     await run_sync(database.set_system_setting, instance_key, str(path))
 
-    # Update the runtime settings
+    # Update the runtime settings. Callers read the effective workspace, which
+    # start-up pins to the saved folder through a runtime override, so the
+    # override moves too; otherwise the change only applied after a restart.
     object.__setattr__(settings, 'workspace_dir', path)
+    config_module.set_workspace_override(path)
+    # Relative project paths resolve against the workspace: drop the cached roots.
+    reset_served_roots_cache()
 
     return WorkspaceConfigResponse(
         workspace_path=str(path),

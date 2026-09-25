@@ -105,6 +105,84 @@ def test_unreadable_or_non_object_files_read_as_empty(user_svc, body):
     assert user_svc.get_server("x", McpScope.USER) is None
 
 
+_BAD_BODIES = ["null", "[1, 2]", "{broken", b"\xff\xfe{}"]
+
+
+def _write_raw(path, body):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(body, bytes):
+        path.write_bytes(body)
+    else:
+        path.write_text(body)
+
+
+@pytest.mark.parametrize("body", _BAD_BODIES, ids=["null", "list", "broken", "non-utf8"])
+@pytest.mark.parametrize("change", [
+    "toggle", "add-installed", "remove-installed", "add-user", "update-user", "remove-user",
+])
+def test_unreadable_claude_json_is_never_overwritten(svc, body, change):
+    """R13-11: an unreadable ~/.claude.json read as {} and the next MCP change
+    replaced the CLI's whole state file with {"projects": ...}."""
+    _write_raw(svc.USER_MCP_FILE, body)
+    before = svc.USER_MCP_FILE.read_bytes()
+    cfg = McpServerConfig(name="n", command="c")
+    act = {
+        "toggle": lambda: svc.set_project_server_enabled("n", False),
+        "add-installed": lambda: svc.add_project_installed_server("n", cfg),
+        "remove-installed": lambda: svc.remove_project_installed_server("n"),
+        "add-user": lambda: svc.add_server("n", cfg, McpScope.USER),
+        "update-user": lambda: svc.update_server("n", cfg, McpScope.USER),
+        "remove-user": lambda: svc.remove_server("n", McpScope.USER),
+    }[change]
+    with pytest.raises(ms.McpConfigUnreadable) as exc:
+        act()
+    assert exc.value.status_code == 409
+    assert str(svc.USER_MCP_FILE) in exc.value.detail
+    assert svc.USER_MCP_FILE.read_bytes() == before
+    # Reads still show an empty list rather than failing.
+    assert svc.get_project_installed_servers() == []
+
+
+@pytest.mark.parametrize("body", _BAD_BODIES, ids=["null", "list", "broken", "non-utf8"])
+def test_unreadable_settings_and_project_files_are_never_overwritten(svc, body):
+    _write_raw(svc.SETTINGS_FILE, body)
+    project_file = svc.get_mcp_file_for_scope(McpScope.PROJECT)
+    _write_raw(project_file, body)
+    settings_before, project_before = svc.SETTINGS_FILE.read_bytes(), project_file.read_bytes()
+    with pytest.raises(ms.McpConfigUnreadable):
+        svc.set_server_enabled("x", False)
+    with pytest.raises(ms.McpConfigUnreadable):
+        svc.add_server("n", McpServerConfig(name="n", command="c"), McpScope.PROJECT)
+    assert svc.SETTINGS_FILE.read_bytes() == settings_before
+    assert project_file.read_bytes() == project_before
+
+
+def test_missing_claude_json_is_still_created_on_change(svc):
+    assert not svc.USER_MCP_FILE.exists()
+    assert svc.set_project_server_enabled("n", False) is True
+    assert _read(svc.USER_MCP_FILE)["projects"][str(svc.project_dir)]["disabledMcpServers"] == ["n"]
+
+
+def test_unreadable_claude_json_is_a_409_from_the_api(svc, monkeypatch):
+    """The refusal reaches the client as a 409 with the reason, not a bare 500."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.api.common import api_error_handler
+
+    _write_raw(svc.USER_MCP_FILE, "{broken")
+
+    async def run():
+        async with api_error_handler("toggle MCP server"):
+            svc.set_project_server_enabled("n", False)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(run())
+    assert exc.value.status_code == 409
+    assert "left unchanged" in exc.value.detail
+
+
 def test_non_object_project_file_reads_as_empty(svc):
     _write(svc.USER_MCP_FILE, "[]")
     assert svc.get_project_disabled_servers() == []

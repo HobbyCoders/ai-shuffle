@@ -163,10 +163,69 @@ def stop_group(process, timeout):
         process.wait(timeout=5)
 
 
+# What PostgreSQL and its client tools take from the supervisor's environment.
+# Everything else stays out: the supervisor carries the app's secrets
+# (SECRET_KEY, OWNER_PASSWORD, provider keys, ...), and a same-uid process can
+# read an exec'd child's start-up environment through /proc/<pid>/environ.
+_POSTGRES_ENV_NAMES = frozenset({"PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR"})
+
+
+def postgres_base_env(environ=None):
+    """The allow-listed part of ``environ`` (default os.environ) for PostgreSQL:
+    path, home, user, locale and time zone. No PG* is inherited either; the
+    callers set the ones they mean."""
+    source = os.environ if environ is None else environ
+    return {k: v for k, v in source.items() if k in _POSTGRES_ENV_NAMES or k.startswith("LC_")}
+
+
+def chrome_env(environ):
+    """The environment for chrome-supervisor, start-chrome and Chromium.
+
+    They need the display, profile, proxy and egress-policy settings (CHROME_*,
+    BROWSER_*, HOME, PATH, the app's own non-secret settings, which
+    ``python -m app.core.browser_egress`` reads to compute the policy). Host
+    secrets go (the same list the hooks environment drops: SECRET_KEY,
+    DATABASE_*, PG*, *_TOKEN including SHUFFLE_DESKTOP_LIFECYCLE_TOKEN,
+    *_PASSWORD, ...), and so do the provider keys that list lets agent
+    children keep: the browser needs no credential at all.
+    """
+    from fluid.tools.child_env import ALLOWED_CREDENTIAL_NAMES, is_host_secret
+    return {k: v for k, v in environ.items()
+            if not is_host_secret(k)
+            and k.upper() not in ALLOWED_CREDENTIAL_NAMES
+            and not k.upper().endswith("_KEY")}
+
+
+PR_SET_DUMPABLE = 4
+
+
+def harden_process_introspection(settings):
+    """Mark the supervisor non-dumpable on Linux, as the app does itself.
+
+    The supervisor's environment holds every .env/compose secret, and a same-uid
+    process (a hook, the CLI's Bash, a kernel) could otherwise read it through
+    /proc/<pid>/environ. A root start that drops privileges is already
+    non-dumpable, a ``--user`` start is not. ``ALLOW_PROCESS_INTROSPECTION=true``
+    keeps it dumpable. Best effort; children are dumpable again after execve.
+    """
+    if not sys.platform.startswith("linux") or getattr(settings, "allow_process_introspection", False):
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or None, use_errno=True)
+        if libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl failed")
+    except Exception as error:
+        log(f"could not mark the supervisor non-dumpable ({type(error).__name__})")
+        return False
+    return True
+
+
 def client_env(url):
     # No inherited libpq service/password/options may silently redirect a
     # maintenance command. The normalized DSN is environment, never argv/logs.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PG")}
+    env = postgres_base_env()
     env.update(PGCONNECT_TIMEOUT="3", LC_ALL="C")
     if url:
         from urllib.parse import urlsplit, unquote, parse_qsl
@@ -646,7 +705,8 @@ def run(settings, action, filename=None):
             logdir = Path.home() / ".config"
             logdir.mkdir(parents=True, exist_ok=True)
             chrome_log = open(logdir / "chrome.log", "ab")
-            chrome = subprocess.Popen(["chrome-supervisor"], env=env, stdout=chrome_log, stderr=chrome_log, start_new_session=True)
+            # Only the app's copy carries secrets and the lifecycle token.
+            chrome = subprocess.Popen(["chrome-supervisor"], env=chrome_env(env), stdout=chrome_log, stderr=chrome_log, start_new_session=True)
         if STOP.is_set():
             return 0
         try:
@@ -700,6 +760,8 @@ def main(argv=None):
     try:
         settings = load_settings()
         drop_privileges(settings)
+        # After the drop: setuid() resets the flag to suid_dumpable.
+        harden_process_introspection(settings)
         return run(settings, args.action or "run", getattr(args, "file", None))
     except RuntimeFailure as error:
         log(str(error))

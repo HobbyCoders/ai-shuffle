@@ -194,6 +194,31 @@ def test_team_dir_scan_is_confined_to_teams_root(home, name):
     assert tr._scan_team_dir_for_teammates(name) == []
 
 
+@pytest.mark.parametrize("name", ["D:x", "C:..", "C:", "x:stream"])
+def test_team_dir_scan_refuses_windows_drive_names(home, name):
+    """R13-10: on Windows ``teams/D:x`` is the drive-relative ``D:x`` and
+    ``teams/C:..`` climbs out. Refused on every platform, even where (as here)
+    the name would be an ordinary folder inside the teams root."""
+    d = _team_dir(home, name)
+    (d / "victim.json").write_text(json.dumps({"session_id": SID, "pid": 1}))
+    assert tr._team_dir(name) is None
+    assert tr._scan_team_dir_for_teammates(name) == []
+
+
+def test_team_dir_scan_refuses_a_link_out_of_the_teams_root(home):
+    """R13-10: a name whose resolved folder is outside ~/.claude/teams."""
+    outside = home / "escape"
+    outside.mkdir()
+    (outside / "victim.json").write_text(json.dumps({"session_id": SID, "pid": 1}))
+    root = home / ".claude" / "teams"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "linked").symlink_to(outside, target_is_directory=True)
+    assert tr._scan_team_dir_for_teammates("linked") == []
+    # A plain team folder still scans.
+    (_team_dir(home, "plain") / "scout.json").write_text(json.dumps({"session_id": SID2}))
+    assert [r["teammate_session_id"] for r in tr._scan_team_dir_for_teammates("plain")] == [SID2]
+
+
 def test_team_dir_scan_missing_dir(home):
     assert tr._scan_team_dir_for_teammates("absent") == []
 

@@ -89,3 +89,36 @@ def test_command_context_default_cwd_is_effective_workspace(workspaces, monkeypa
     _, effective = workspaces
     monkeypatch.setattr(context.database, "get_profile", lambda pid: None)
     assert context.command_context(None, None, None, None) == (str(effective), None)
+
+
+async def test_saving_a_workspace_moves_the_effective_workspace_at_once(workspaces, monkeypatch, tmp_path):
+    """R13-2: start-up pins the saved workspace as a runtime override, and
+    callers read the effective value. Saving a new folder in Settings changed
+    only the raw setting, so it took effect only after a restart."""
+    from app.api import system
+
+    startup, effective = workspaces
+    chosen = tmp_path / "moved-workspace"
+    (chosen / "proj").mkdir(parents=True)
+    saved = {}
+    monkeypatch.setattr(system, "run_sync", _inline)
+    monkeypatch.setattr(system.database, "set_system_setting", lambda k, v: saved.update({k: v}))
+    monkeypatch.setattr(common.database, "get_all_projects", lambda: [{"id": "p", "path": "proj"}])
+    monkeypatch.setattr(common.database, "get_all_git_repositories", lambda: [])
+    common.reset_served_roots_cache()
+    try:
+        # Prime the served-roots cache against the old workspace.
+        assert (effective / "proj").resolve() in [Path(r).resolve() for r in common._registered_serve_roots()]
+
+        result = await system.set_workspace_config(
+            system.WorkspaceConfigRequest(workspace_path=str(chosen)), token="t")
+
+        assert result.workspace_path == str(chosen.resolve())
+        assert list(saved.values()) == [str(chosen.resolve())]
+        assert config_module.settings.effective_workspace_dir == chosen.resolve()
+        served = [Path(r).resolve() for r in common._registered_serve_roots()]
+        assert (chosen / "proj").resolve() in served
+        assert (effective / "proj").resolve() not in served
+        assert projects_module.validate_project_path("sub", allow_create=True) == (chosen / "sub").resolve()
+    finally:
+        common.reset_served_roots_cache()
