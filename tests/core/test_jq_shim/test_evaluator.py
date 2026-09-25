@@ -263,10 +263,10 @@ class TestBuiltinFunctions:
         assert evaluate(ast, {"b": 1, "a": 2, "c": 3}) == ["a", "b", "c"]
 
     def test_values(self):
-        """values should return object values."""
+        """values is jq's select(. != null): it passes non-null input through."""
         ast = parse_jq_expression("values")
-        result = evaluate(ast, {"a": 1, "b": 2})
-        assert set(result) == {1, 2}
+        assert evaluate(ast, {"a": 1, "b": 2}) == {"a": 1, "b": 2}
+        assert evaluate(ast, None) is EMPTY
 
     def test_length_string(self):
         """length should return string length."""

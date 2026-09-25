@@ -16,6 +16,9 @@ import sys
 import json
 import argparse
 import io
+import os
+import shutil
+import subprocess
 from typing import List, Optional, Any
 
 # Fix Windows console encoding - Windows uses cp1252 by default which
@@ -26,12 +29,79 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from .parser import parse_jq_expression, ParseError
-from .evaluator import evaluate, EvaluationError, EMPTY
+from .evaluator import evaluate, validate, is_stream, EvaluationError, EMPTY
+
+# Marker present near the top of every copy of this shim (bin/jq, bin/jq.bat),
+# used to skip them when looking for a real jq to delegate to.
+SHIM_MARKER = "Self-contained Python jq shim"
+
+
+class _ArgumentError(Exception):
+    """Raised instead of argparse's exit so unknown options can be delegated."""
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise _ArgumentError(message)
+
+
+def find_real_jq() -> Optional[str]:
+    """
+    Find a real jq binary on PATH, skipping copies of this shim.
+
+    Returns None when JQ_SHIM_NO_FALLBACK is set or no other jq exists.
+    """
+    if os.environ.get("JQ_SHIM_NO_FALLBACK"):
+        return None
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        candidate = shutil.which("jq", path=directory)
+        if not candidate:
+            continue
+        try:
+            with open(candidate, "rb") as f:
+                head = f.read(1024)
+        except OSError:
+            continue
+        if SHIM_MARKER.encode() in head:
+            continue
+        return candidate
+    return None
+
+
+def _delegate_or_fail(argv: List[str], message: str, status: int) -> int:
+    """Hand the whole invocation to a real jq if there is one, else report the error."""
+    real_jq = find_real_jq()
+    if real_jq is not None:
+        sys.stdout.flush()
+        # If that "real" jq is a wrapper that re-enters the shim, stop there
+        env = dict(os.environ, JQ_SHIM_NO_FALLBACK="1")
+        return subprocess.call([real_jq] + argv, env=env)
+    print(f"jq: error: {message}", file=sys.stderr)
+    return status
+
+
+def _parse_json_values(text: str) -> List[Any]:
+    """Parse a stream of whitespace-separated JSON values (jq's input format)."""
+    values = []
+    decoder = json.JSONDecoder()
+    idx = 0
+    while idx < len(text):
+        while idx < len(text) and text[idx] in " \t\n\r":
+            idx += 1
+        if idx >= len(text):
+            break
+        obj, end = decoder.raw_decode(text, idx)
+        values.append(obj)
+        idx = end
+    return values
 
 
 def main(args: Optional[List[str]] = None) -> int:
     """Main entry point for jq shim CLI."""
-    parser = argparse.ArgumentParser(
+    argv = list(sys.argv[1:] if args is None else args)
+    parser = _ArgumentParser(
         prog="jq",
         description="Python jq shim - JSON processor",
         add_help=True,
@@ -81,7 +151,7 @@ def main(args: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "-j", "--join-output",
         action="store_true",
-        help="No newline after each output",
+        help="Raw output with no newline after each output",
     )
     parser.add_argument(
         "--tab",
@@ -126,12 +196,25 @@ def main(args: Optional[List[str]] = None) -> int:
         help="Show version information",
     )
 
-    parsed = parser.parse_args(args)
+    try:
+        parsed = parser.parse_args(argv)
+    except _ArgumentError as e:
+        # An option the shim does not implement (e.g. -R, --indent): let a
+        # real jq handle the invocation if one is installed.
+        return _delegate_or_fail(argv, str(e), 2)
 
     if parsed.version:
         print("jq-shim - Python jq implementation for ai-shuffle")
-        print("Version: 1.0.0")
+        print("Version: 1.2.0")
         return 0
+
+    # Compile the filter before touching stdin, so that a program the shim
+    # cannot run can be handed to a real jq with the input still unread.
+    try:
+        ast = parse_jq_expression(parsed.filter)
+        validate(ast)
+    except (ParseError, EvaluationError) as e:
+        return _delegate_or_fail(argv, str(e), 3)
 
     # Build variables dict
     variables = {}
@@ -140,105 +223,56 @@ def main(args: Optional[List[str]] = None) -> int:
     for name, json_value in parsed.argjson:
         try:
             variables[name] = json.loads(json_value)
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, RecursionError) as e:
             print(f"jq: error: --argjson {name}: {e}", file=sys.stderr)
             return 2
     for name, filepath in parsed.slurpfile:
         try:
-            with open(filepath, "r") as f:
-                content = f.read()
-                # Parse as multiple JSON values
-                values = []
-                decoder = json.JSONDecoder()
-                idx = 0
-                while idx < len(content):
-                    while idx < len(content) and content[idx] in " \t\n\r":
-                        idx += 1
-                    if idx >= len(content):
-                        break
-                    obj, end = decoder.raw_decode(content, idx)
-                    values.append(obj)
-                    idx = end
-                variables[name] = values
-        except (OSError, json.JSONDecodeError) as e:
+            with open(filepath, "r", encoding="utf-8") as f:
+                variables[name] = _parse_json_values(f.read())
+        except (OSError, json.JSONDecodeError, RecursionError) as e:
             print(f"jq: error: --slurpfile {name}: {e}", file=sys.stderr)
             return 2
     for name, filepath in parsed.rawfile:
         try:
-            with open(filepath, "r") as f:
+            with open(filepath, "r", encoding="utf-8") as f:
                 variables[name] = f.read()
         except OSError as e:
             print(f"jq: error: --rawfile {name}: {e}", file=sys.stderr)
             return 2
 
-    # Get input data
+    # Get input data (each input is a stream of JSON values, like jq)
     inputs = []
     if parsed.null_input:
         inputs = [None]
     elif parsed.files:
         for filepath in parsed.files:
             try:
-                with open(filepath, "r") as f:
-                    content = f.read().strip()
-                    if content:
-                        if parsed.slurp:
-                            # Parse all JSON objects from file
-                            decoder = json.JSONDecoder()
-                            idx = 0
-                            while idx < len(content):
-                                while idx < len(content) and content[idx] in " \t\n\r":
-                                    idx += 1
-                                if idx >= len(content):
-                                    break
-                                obj, end = decoder.raw_decode(content, idx)
-                                inputs.append(obj)
-                                idx = end
-                        else:
-                            inputs.append(json.loads(content))
+                with open(filepath, "r", encoding="utf-8") as f:
+                    inputs.extend(_parse_json_values(f.read()))
             except OSError as e:
                 print(f"jq: error reading {filepath}: {e}", file=sys.stderr)
                 return 2
-            except json.JSONDecodeError as e:
-                print(f"jq: error parsing {filepath}: {e}", file=sys.stderr)
-                return 3
+            except (json.JSONDecodeError, RecursionError) as e:
+                print(f"jq: error parsing {filepath}: {_input_error(e)}", file=sys.stderr)
+                return 2
     else:
-        # Read from stdin
-        stdin_data = sys.stdin.read().strip()
-        if stdin_data:
-            try:
-                if parsed.slurp:
-                    # Parse all JSON objects from stdin
-                    decoder = json.JSONDecoder()
-                    idx = 0
-                    while idx < len(stdin_data):
-                        while idx < len(stdin_data) and stdin_data[idx] in " \t\n\r":
-                            idx += 1
-                        if idx >= len(stdin_data):
-                            break
-                        obj, end = decoder.raw_decode(stdin_data, idx)
-                        inputs.append(obj)
-                        idx = end
-                else:
-                    inputs.append(json.loads(stdin_data))
-            except json.JSONDecodeError as e:
-                print(f"jq: error parsing stdin: {e}", file=sys.stderr)
-                return 3
-        else:
+        try:
+            inputs = _parse_json_values(sys.stdin.read())
+        except (json.JSONDecodeError, RecursionError) as e:
+            print(f"jq: error parsing stdin: {_input_error(e)}", file=sys.stderr)
+            return 2
+        if not inputs and not parsed.slurp:
             inputs = [None]
 
     # Slurp mode: combine all inputs into array
-    if parsed.slurp and len(inputs) > 0:
+    if parsed.slurp:
         inputs = [inputs]
-
-    # Parse the filter expression
-    try:
-        ast = parse_jq_expression(parsed.filter)
-    except ParseError as e:
-        print(f"jq: error: {e}", file=sys.stderr)
-        return 3
 
     # Evaluate and output
     last_result = None
+    produced = False
+    multi = is_stream(ast)
 
     for input_data in inputs:
         try:
@@ -247,56 +281,50 @@ def main(args: Optional[List[str]] = None) -> int:
             if result is EMPTY:
                 continue
 
-            # Handle multiple results from iteration
-            results = result if (isinstance(result, list) and _is_multi_output(ast)) else [result]
+            # Handle multiple results from generators
+            results = result if multi else [result]
 
             for r in results:
                 if r is EMPTY:
                     continue
 
                 last_result = r
+                produced = True
                 output_result(r, parsed)
 
         except EvaluationError as e:
             print(f"jq: error: {e}", file=sys.stderr)
             return 5
+        except RecursionError:
+            print("jq: error: value is nested too deeply to output", file=sys.stderr)
+            return 5
 
-    # Exit status based on last result
+    # Exit status based on last result (jq -e: 1 for false/null, 4 for no output)
     if parsed.exit_status:
+        if not produced:
+            return 4
         if last_result is None or last_result is False:
             return 1
 
     return 0
 
 
-def _is_multi_output(ast) -> bool:
-    """Check if AST produces multiple outputs (has .[] in pipeline)."""
-    from .parser import NodeType
-    if ast.type == NodeType.ITERATE:
-        return True
-    if ast.type == NodeType.PIPE:
-        return _is_multi_output(ast.children[0]) or _is_multi_output(ast.children[1])
-    return False
+def _input_error(error: Exception) -> str:
+    if isinstance(error, RecursionError):
+        return "input is nested too deeply"
+    return str(error)
 
 
 def output_result(result: Any, opts: argparse.Namespace) -> None:
     """Output a single result value."""
-    if result is None:
-        output = "null"
-    elif opts.raw_output and isinstance(result, str):
+    if (opts.raw_output or opts.join_output) and isinstance(result, str):
         output = result
+    elif opts.compact_output:
+        output = json.dumps(result, separators=(",", ":"), ensure_ascii=False,
+                            sort_keys=opts.sort_keys)
     else:
-        if opts.sort_keys:
-            output = json.dumps(result, sort_keys=True, ensure_ascii=False,
-                              indent=None if opts.compact_output else (None if opts.tab else 2),
-                              separators=(",", ":") if opts.compact_output else None)
-        else:
-            if opts.compact_output:
-                output = json.dumps(result, separators=(",", ":"), ensure_ascii=False)
-            elif opts.tab:
-                output = json.dumps(result, indent="\t", ensure_ascii=False)
-            else:
-                output = json.dumps(result, indent=2, ensure_ascii=False)
+        output = json.dumps(result, indent="\t" if opts.tab else 2,
+                            ensure_ascii=False, sort_keys=opts.sort_keys)
 
     if opts.join_output:
         print(output, end="")

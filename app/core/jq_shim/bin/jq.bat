@@ -1,8 +1,4 @@
-@echo off
-REM Self-contained Python jq shim for Windows - no external module dependencies
-REM This script embeds the entire jq implementation inline
-
-python -x "%~f0" %* & goto :eof
+@python -x "%~f0" %* & goto :eof
 #!/usr/bin/env python3
 """
 Self-contained Python jq shim - CLI compatible with jq.
@@ -10,12 +6,21 @@ Self-contained Python jq shim - CLI compatible with jq.
 This module provides a command-line interface compatible with jq,
 allowing shell scripts to use jq syntax while the processing is
 handled by Python. All code is embedded - no external imports needed.
+
+GENERATED from app/core/jq_shim/{parser,evaluator,__main__}.py - edit those
+files and regenerate; tests/core/test_jq_shim checks the copies match.
 """
 
 import sys
 import json
 import argparse
 import io
+import math
+import os
+import re
+import shutil
+import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 from enum import Enum
@@ -27,166 +32,280 @@ if sys.platform == "win32":
 
 
 # =============================================================================
-# AST Node Types and Structures
+# parser.py
 # =============================================================================
 
 class NodeType(Enum):
     """AST node types."""
-    IDENTITY = "identity"
-    FIELD = "field"
-    INDEX = "index"
-    ITERATE = "iterate"
-    PIPE = "pipe"
-    DEFAULT = "default"
-    OBJECT = "object"
-    ARRAY = "array"
-    STRING = "string"
-    NUMBER = "number"
-    BOOL = "bool"
-    NULL = "null"
-    VARIABLE = "variable"
-    FUNCTION = "function"
-    COMPARISON = "comparison"
-    LOGICAL = "logical"
-    NEGATE = "negate"
+
+    IDENTITY = "identity"  # .
+    FIELD = "field"  # .field
+    INDEX = "index"  # .[0]
+    ITERATE = "iterate"  # .[]
+    PIPE = "pipe"  # a | b
+    DEFAULT = "default"  # a // b
+    OBJECT = "object"  # {a: b}
+    ARRAY = "array"  # [a, b]
+    STRING = "string"  # "text" or interpolated
+    NUMBER = "number"  # 123
+    BOOL = "bool"  # true/false
+    NULL = "null"  # null
+    VARIABLE = "variable"  # $name
+    FUNCTION = "function"  # select(), map()
+    COMPARISON = "comparison"  # ==, !=, <, >, <=, >=
+    LOGICAL = "logical"  # and, or, not
+    NEGATE = "negate"  # -expr
+    OPTIONAL = "optional"  # expr?
+    COMMA = "comma"  # a, b
 
 
 @dataclass
 class ASTNode:
     """AST node representation."""
+
     type: NodeType
     value: Any = None
     children: List["ASTNode"] = field(default_factory=list)
 
+    def __repr__(self) -> str:
+        if self.children:
+            return f"ASTNode({self.type.value}, {self.value!r}, {self.children})"
+        return f"ASTNode({self.type.value}, {self.value!r})"
+
 
 class ParseError(Exception):
     """Raised when parsing fails."""
+
     pass
 
 
-class EvaluationError(Exception):
-    """Raised when evaluation fails."""
-    pass
+# Nesting limit for (...), [...], {...}, "\\(...)" and prefix operators. Each
+# level costs ~8 Python frames in this recursive-descent parser, so this keeps
+# pathological programs well inside the interpreter's recursion limit.
+MAX_PARSE_DEPTH = 64
 
+# Limit on the depth of the resulting AST (long chains like .a.b.c... nest one
+# level per step), which bounds the recursion of validation and evaluation.
+MAX_AST_DEPTH = 150
 
-class EmptyValue:
-    """Sentinel for jq 'empty' - produces no output."""
-    _instance = None
+# jq keywords whose constructs the shim does not implement.
+UNSUPPORTED_KEYWORDS = frozenset({
+    "if", "then", "elif", "else", "end", "reduce", "foreach", "try", "catch",
+    "label", "def", "as", "import", "include", "and", "or",
+})
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def __repr__(self):
-        return "empty"
-
-
-EMPTY = EmptyValue()
-
-
-# =============================================================================
-# Parser
-# =============================================================================
 
 class JQParser:
-    """Recursive descent parser for jq expressions."""
+    """
+    Recursive descent parser for jq expressions.
+
+    Grammar (simplified):
+        expr       -> pipe
+        pipe       -> comma ("|" comma)*
+        comma      -> default ("," default)*
+        default    -> or ("//" or)*
+        or         -> and ("or" and)*
+        and        -> comparison ("and" comparison)*
+        comparison -> term (("==" | "!=" | "<" | ">" | "<=" | ">=") term)?
+        term       -> factor | "not" term | "-" term
+        factor     -> primary postfix*
+        postfix    -> "." IDENT | "." STRING | "[" expr "]" | "[]" | "?"
+        primary    -> "." | ".." | "." IDENT | "." STRING | NUMBER | STRING
+                    | "true" | "false" | "null"
+                    | "$" IDENT | "{" object_pairs "}" | "[" array_items "]"
+                    | IDENT "(" args ")" | "(" expr ")"
+    """
 
     def __init__(self, expression: str):
         self.expr = expression
         self.pos = 0
         self.length = len(expression)
+        self.depth = 0
 
     def parse(self) -> ASTNode:
         """Parse the full expression."""
         self._skip_whitespace()
         if self.pos >= self.length:
             return ASTNode(NodeType.IDENTITY)
-        result = self._parse_pipe()
+        try:
+            result = self._parse_pipe()
+        except RecursionError:
+            raise ParseError("jq program is nested too deeply") from None
         self._skip_whitespace()
         if self.pos < self.length:
+            raise ParseError(self._describe_unexpected())
+        if _ast_depth(result) > MAX_AST_DEPTH:
             raise ParseError(
-                f"Unexpected character at position {self.pos}: {self.expr[self.pos]!r}"
+                f"jq program is nested too deeply (AST depth limit {MAX_AST_DEPTH})"
             )
         return result
 
+    def _enter(self) -> None:
+        """Track nesting depth; refuse programs nested beyond MAX_PARSE_DEPTH."""
+        self.depth += 1
+        if self.depth > MAX_PARSE_DEPTH:
+            raise ParseError(
+                f"jq program is nested too deeply (limit {MAX_PARSE_DEPTH})"
+            )
+
+    def _describe_unexpected(self, expected: Optional[str] = None) -> str:
+        """Explain the token at the current position, naming unsupported jq syntax."""
+        if self.pos >= self.length:
+            if expected:
+                return f"Expected {expected!r} but reached end of input"
+            return "Unexpected end of input"
+        char = self.expr[self.pos]
+        where = f"at position {self.pos}"
+        if self._is_identifier_start(char):
+            end = self.pos
+            while end < self.length and self._is_identifier_char(self.expr[end]):
+                end += 1
+            word = self.expr[self.pos:end]
+            if word in UNSUPPORTED_KEYWORDS:
+                return f"unsupported jq syntax: '{word}' {where}"
+        if char in "+-*/%":
+            if self.expr[self.pos:self.pos + 2] in ("+=", "-=", "*=", "/=", "%="):
+                return f"unsupported jq syntax: assignment operator {where}"
+            return f"unsupported jq syntax: arithmetic operator {char!r} {where}"
+        if char == "=" or self.expr[self.pos:self.pos + 2] in ("|=", "//="):
+            return f"unsupported jq syntax: assignment operator {where}"
+        if char == ":":
+            return f"unsupported jq syntax: slice or ':' {where}"
+        if char == "@":
+            return f"unsupported jq syntax: @format strings {where}"
+        if expected:
+            return f"Expected {expected!r} but got {char!r} {where}"
+        return f"Unexpected character {where}: {char!r}"
+
     def _skip_whitespace(self) -> None:
+        """Skip whitespace characters."""
         while self.pos < self.length and self.expr[self.pos] in " \t\n\r":
             self.pos += 1
 
     def _peek(self, offset: int = 0) -> str:
+        """Peek at current character without consuming."""
         pos = self.pos + offset
         if pos < self.length:
             return self.expr[pos]
         return ""
 
     def _consume(self, expected: Optional[str] = None) -> str:
+        """Consume and return current character."""
         if self.pos >= self.length:
             if expected:
                 raise ParseError(f"Expected {expected!r} but reached end of input")
             return ""
         char = self.expr[self.pos]
         if expected and char != expected:
-            raise ParseError(
-                f"Expected {expected!r} but got {char!r} at position {self.pos}"
-            )
+            raise ParseError(self._describe_unexpected(expected))
         self.pos += 1
         return char
 
     def _match(self, s: str) -> bool:
+        """Check if current position matches string."""
         return self.expr[self.pos : self.pos + len(s)] == s
 
     def _consume_string(self, s: str) -> None:
+        """Consume expected string."""
         if not self._match(s):
             raise ParseError(f"Expected {s!r} at position {self.pos}")
         self.pos += len(s)
 
-    def _parse_pipe(self) -> ASTNode:
-        left = self._parse_default()
+    def _parse_pipe(self, allow_comma: bool = True) -> ASTNode:
+        """Parse pipe expression: a | b | c (object values pass allow_comma=False)"""
+        self._enter()
+        parse_operand = self._parse_comma if allow_comma else self._parse_default
+        left = parse_operand()
+
         while True:
             self._skip_whitespace()
-            if self._peek() == "|" and self._peek(1) != "|":
+            if self._peek() == "|" and self._peek(1) not in ("|", "="):
                 self._consume()
                 self._skip_whitespace()
-                right = self._parse_default()
+                right = parse_operand()
                 left = ASTNode(NodeType.PIPE, children=[left, right])
             else:
                 break
+
+        self.depth -= 1
         return left
 
-    def _parse_default(self) -> ASTNode:
-        left = self._parse_logical()
+    def _parse_comma(self) -> ASTNode:
+        """Parse comma expression: a, b, c (a trailing ',' before a closer is tolerated)"""
+        items = [self._parse_default()]
+
         while True:
             self._skip_whitespace()
-            if self._match("//"):
+            if self._peek() != ",":
+                break
+            self._consume()
+            self._skip_whitespace()
+            if self._peek() in ("]", "}", ")"):
+                break
+            items.append(self._parse_default())
+
+        if len(items) == 1:
+            return items[0]
+        return ASTNode(NodeType.COMMA, children=items)
+
+    def _parse_default(self) -> ASTNode:
+        """Parse default expression: a // b"""
+        left = self._parse_or()
+
+        while True:
+            self._skip_whitespace()
+            if self._match("//") and not self._match("//="):
                 self._consume_string("//")
                 self._skip_whitespace()
-                right = self._parse_logical()
+                right = self._parse_or()
                 left = ASTNode(NodeType.DEFAULT, children=[left, right])
             else:
                 break
+
         return left
 
-    def _parse_logical(self) -> ASTNode:
-        left = self._parse_comparison()
+    def _parse_or(self) -> ASTNode:
+        """Parse 'or' (binds looser than 'and', as in jq)."""
+        left = self._parse_and()
+
         while True:
             self._skip_whitespace()
-            if self._match("and") and not self._is_identifier_char(self._peek(3)):
+            if self._match_keyword("or"):
+                self._consume_string("or")
+                self._skip_whitespace()
+                right = self._parse_and()
+                left = ASTNode(NodeType.LOGICAL, "or", [left, right])
+            else:
+                break
+
+        return left
+
+    def _parse_and(self) -> ASTNode:
+        """Parse 'and'."""
+        left = self._parse_comparison()
+
+        while True:
+            self._skip_whitespace()
+            if self._match_keyword("and"):
                 self._consume_string("and")
                 self._skip_whitespace()
                 right = self._parse_comparison()
                 left = ASTNode(NodeType.LOGICAL, "and", [left, right])
-            elif self._match("or") and not self._is_identifier_char(self._peek(2)):
-                self._consume_string("or")
-                self._skip_whitespace()
-                right = self._parse_comparison()
-                left = ASTNode(NodeType.LOGICAL, "or", [left, right])
             else:
                 break
+
         return left
 
+    def _match_keyword(self, word: str) -> bool:
+        """Check for a whole keyword (not a prefix of a longer identifier)."""
+        return self._match(word) and not self._is_identifier_char(
+            self._peek(len(word))
+        )
+
     def _parse_comparison(self) -> ASTNode:
+        """Parse comparison operators: ==, !=, <, >, <=, >="""
         left = self._parse_term()
+
         self._skip_whitespace()
         op = None
         if self._match("=="):
@@ -212,61 +331,117 @@ class JQParser:
             self._skip_whitespace()
             right = self._parse_term()
             return ASTNode(NodeType.COMPARISON, op, [left, right])
+
         return left
 
     def _parse_term(self) -> ASTNode:
+        """Parse term with unary operators."""
         self._skip_whitespace()
-        if self._match("not") and not self._is_identifier_char(self._peek(3)):
+
+        # Handle 'not': jq's `f | not` filter, plus the shim's prefix form `not f`
+        if self._match_keyword("not"):
             self._consume_string("not")
             self._skip_whitespace()
+            if (
+                self.pos >= self.length
+                or self._peek() in "|);],}"
+                or self._match_keyword("and")
+                or self._match_keyword("or")
+                or self._match("//")
+            ):
+                return self._parse_postfix(ASTNode(NodeType.FUNCTION, "not"))
+            self._enter()
             operand = self._parse_term()
+            self.depth -= 1
             return ASTNode(NodeType.LOGICAL, "not", [operand])
-        if self._peek() == "-" and self._peek(1) not in "0123456789.":
+
+        # Handle unary minus (a leading '-' before a digit is a number literal)
+        if self._peek() == "-" and not self._peek(1).isdigit():
             self._consume()
             self._skip_whitespace()
+            self._enter()
             operand = self._parse_term()
+            self.depth -= 1
             return ASTNode(NodeType.NEGATE, children=[operand])
+
         return self._parse_factor()
 
     def _parse_factor(self) -> ASTNode:
+        """Parse factor with postfix operators."""
         node = self._parse_primary()
         return self._parse_postfix(node)
 
     def _parse_postfix(self, node: ASTNode) -> ASTNode:
+        """Parse postfix operations: .field, ."field", [n], [], ?"""
         while True:
             self._skip_whitespace()
             if self._peek() == ".":
+                # Check for .field / ."field" access
                 if self._is_identifier_start(self._peek(1)):
                     self._consume()
                     field_name = self._parse_identifier()
                     node = ASTNode(NodeType.PIPE, children=[node, ASTNode(NodeType.FIELD, field_name)])
+                elif self._peek(1) == '"':
+                    self._consume()
+                    node = self._parse_quoted_field(node)
                 else:
                     break
             elif self._peek() == "[":
                 self._consume()
                 self._skip_whitespace()
                 if self._peek() == "]":
+                    # [] - iterate
                     self._consume()
                     node = ASTNode(NodeType.PIPE, children=[node, ASTNode(NodeType.ITERATE)])
                 else:
+                    # term[expr] - index (slices are unsupported). The index
+                    # expression is evaluated against `.`, not against the term:
+                    # .a[.i] is .a[(.i)], so it is not a pipe.
                     index_expr = self._parse_pipe()
                     self._skip_whitespace()
                     self._consume("]")
-                    node = ASTNode(NodeType.PIPE, children=[node, ASTNode(NodeType.INDEX, children=[index_expr])])
+                    node = ASTNode(NodeType.INDEX, children=[index_expr, node])
+            elif self._peek() == "?":
+                # expr? - suppress errors from the term so far
+                self._consume()
+                node = ASTNode(NodeType.OPTIONAL, children=[node])
             else:
                 break
+
         return node
 
+    def _parse_quoted_field(self, target: Optional[ASTNode] = None) -> ASTNode:
+        """Parse the "key" of [target]."key" (the '.' is already consumed)."""
+        key_node = self._parse_string()
+        if isinstance(key_node.value, str):
+            field_node = ASTNode(NodeType.FIELD, key_node.value)
+            if target is None:
+                return field_node
+            return ASTNode(NodeType.PIPE, children=[target, field_node])
+        # An interpolated key is evaluated against `.`, like term[expr]
+        children = [key_node] if target is None else [key_node, target]
+        return ASTNode(NodeType.INDEX, children=children)
+
     def _parse_primary(self) -> ASTNode:
+        """Parse primary expression."""
         self._skip_whitespace()
+
         char = self._peek()
 
+        # Identity or field access
         if char == ".":
             self._consume()
+            if self._peek() == ".":
+                # .. - recursive descent
+                self._consume()
+                return ASTNode(NodeType.FUNCTION, "recurse")
+            if self._peek() == '"':
+                return self._parse_quoted_field()
             if self._is_identifier_start(self._peek()):
                 field_name = self._parse_identifier()
                 return ASTNode(NodeType.FIELD, field_name)
             elif self._peek() == "[":
+                # .[...] or .[]
                 self._consume()
                 self._skip_whitespace()
                 if self._peek() == "]":
@@ -280,23 +455,29 @@ class JQParser:
             else:
                 return ASTNode(NodeType.IDENTITY)
 
+        # Number (including negative)
         if char == "-" or char.isdigit():
             return self._parse_number()
 
+        # String
         if char == '"':
             return self._parse_string()
 
+        # Variable
         if char == "$":
             self._consume()
             var_name = self._parse_identifier()
             return ASTNode(NodeType.VARIABLE, var_name)
 
+        # Object construction
         if char == "{":
             return self._parse_object()
 
+        # Array construction
         if char == "[":
             return self._parse_array()
 
+        # Parenthesized expression
         if char == "(":
             self._consume()
             self._skip_whitespace()
@@ -305,8 +486,18 @@ class JQParser:
             self._consume(")")
             return expr
 
+        if char == "@":
+            raise ParseError(self._describe_unexpected())
+
+        # Keywords and functions
         if self._is_identifier_start(char):
+            start = self.pos
             name = self._parse_identifier()
+            if name in UNSUPPORTED_KEYWORDS:
+                self.pos = start
+                raise ParseError(self._describe_unexpected())
+
+            # Boolean literals
             if name == "true":
                 return ASTNode(NodeType.BOOL, True)
             if name == "false":
@@ -316,6 +507,7 @@ class JQParser:
             if name == "empty":
                 return ASTNode(NodeType.FUNCTION, "empty")
 
+            # Function call
             self._skip_whitespace()
             if self._peek() == "(":
                 self._consume()
@@ -330,11 +522,14 @@ class JQParser:
                 self._skip_whitespace()
                 self._consume(")")
                 return ASTNode(NodeType.FUNCTION, name, args)
+
+            # Bare function (no parens)
             return ASTNode(NodeType.FUNCTION, name)
 
         raise ParseError(f"Unexpected character {char!r} at position {self.pos}")
 
     def _parse_number(self) -> ASTNode:
+        """Parse a number literal."""
         start = self.pos
         if self._peek() == "-":
             self._consume()
@@ -361,16 +556,19 @@ class JQParser:
             raise ParseError(f"Invalid number: {num_str}")
 
     def _parse_string(self) -> ASTNode:
+        """Parse a string literal with interpolation support."""
         self._consume('"')
         parts: List[Union[str, ASTNode]] = []
         current_str = ""
 
         while self.pos < self.length and self._peek() != '"':
             char = self._peek()
+
             if char == "\\":
                 self._consume()
                 next_char = self._consume()
                 if next_char == "(":
+                    # String interpolation: \(expr)
                     if current_str:
                         parts.append(current_str)
                         current_str = ""
@@ -388,8 +586,18 @@ class JQParser:
                     current_str += "\\"
                 elif next_char == '"':
                     current_str += '"'
+                elif next_char == "/":
+                    current_str += "/"
+                elif next_char == "b":
+                    current_str += "\b"
+                elif next_char == "f":
+                    current_str += "\f"
+                elif next_char == "u":
+                    current_str += self._parse_unicode_escape()
                 else:
-                    current_str += next_char
+                    raise ParseError(
+                        f"Invalid escape '\\{next_char}' at position {self.pos - 1}"
+                    )
             else:
                 current_str += self._consume()
 
@@ -398,19 +606,44 @@ class JQParser:
         if current_str:
             parts.append(current_str)
 
+        # If no interpolation, return simple string
         if len(parts) == 0:
             return ASTNode(NodeType.STRING, "")
         if len(parts) == 1 and isinstance(parts[0], str):
             return ASTNode(NodeType.STRING, parts[0])
+
+        # Return string with interpolation parts
         return ASTNode(NodeType.STRING, parts)
 
+    def _parse_unicode_escape(self) -> str:
+        """Parse the XXXX of \\uXXXX (the '\\u' is consumed), joining surrogate pairs."""
+        code = self._parse_hex4()
+        if 0xD800 <= code < 0xDC00 and self._match("\\u"):
+            saved = self.pos
+            self.pos += 2
+            low = self._parse_hex4()
+            if 0xDC00 <= low < 0xE000:
+                return chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00))
+            self.pos = saved
+        return chr(code)
+
+    def _parse_hex4(self) -> int:
+        digits = self.expr[self.pos:self.pos + 4]
+        if len(digits) != 4 or any(c not in "0123456789abcdefABCDEF" for c in digits):
+            raise ParseError(f"Invalid \\u escape at position {self.pos}")
+        self.pos += 4
+        return int(digits, 16)
+
     def _parse_object(self) -> ASTNode:
+        """Parse object construction: {a: b, c: d}"""
         self._consume("{")
         self._skip_whitespace()
+
         pairs: List[tuple] = []
 
         if self._peek() != "}":
             pairs.append(self._parse_object_pair())
+
             while True:
                 self._skip_whitespace()
                 if self._peek() == ",":
@@ -424,63 +657,98 @@ class JQParser:
 
         self._skip_whitespace()
         self._consume("}")
+
         return ASTNode(NodeType.OBJECT, pairs)
 
     def _parse_object_pair(self) -> tuple:
+        """Parse a single object key-value pair (or a {a} / {$a} shorthand)."""
         self._skip_whitespace()
+
+        # Key can be identifier or string or parenthesized expression
+        shorthand = None
         if self._peek() == '"':
             key_node = self._parse_string()
             key = key_node.value if isinstance(key_node.value, str) else key_node
+            if isinstance(key, str):
+                shorthand = ASTNode(NodeType.FIELD, key)
         elif self._peek() == "(":
             self._consume()
             self._skip_whitespace()
             key = self._parse_pipe()
             self._skip_whitespace()
             self._consume(")")
+        elif self._peek() == "$":
+            self._consume()
+            key = self._parse_identifier()
+            shorthand = ASTNode(NodeType.VARIABLE, key)
         else:
             key = self._parse_identifier()
+            shorthand = ASTNode(NodeType.FIELD, key)
 
         self._skip_whitespace()
+        if shorthand is not None and self._peek() in (",", "}"):
+            # {a} means {a: .a}; {$x} means {x: $x}
+            return (key, shorthand)
         self._consume(":")
         self._skip_whitespace()
-        value = self._parse_pipe()
+
+        value = self._parse_pipe(allow_comma=False)
+
         return (key, value)
 
     def _parse_array(self) -> ASTNode:
+        """Parse array construction: [a, b, c] (the body is any expression)"""
         self._consume("[")
         self._skip_whitespace()
+
         items: List[ASTNode] = []
 
         if self._peek() != "]":
-            items.append(self._parse_pipe())
-            while True:
-                self._skip_whitespace()
-                if self._peek() == ",":
-                    self._consume()
-                    self._skip_whitespace()
-                    if self._peek() == "]":
-                        break
-                    items.append(self._parse_pipe())
-                else:
-                    break
+            body = self._parse_pipe()
+            items = body.children if body.type == NodeType.COMMA else [body]
 
         self._skip_whitespace()
         self._consume("]")
+
         return ASTNode(NodeType.ARRAY, children=items)
 
     def _parse_identifier(self) -> str:
+        """Parse an identifier."""
         if not self._is_identifier_start(self._peek()):
             raise ParseError(f"Expected identifier at position {self.pos}")
+
         start = self.pos
         while self._is_identifier_char(self._peek()):
             self._consume()
+
         return self.expr[start : self.pos]
 
     def _is_identifier_start(self, char: str) -> bool:
+        """Check if character can start an identifier."""
         return bool(char) and (char.isalpha() or char == "_")
 
     def _is_identifier_char(self, char: str) -> bool:
+        """Check if character can be part of an identifier."""
         return bool(char) and (char.isalnum() or char == "_")
+
+
+def _ast_depth(root: ASTNode) -> int:
+    """Depth of an AST, computed iteratively (safe for any depth)."""
+    deepest = 0
+    stack = [(root, 1)]
+    while stack:
+        node, depth = stack.pop()
+        deepest = max(deepest, depth)
+        children = list(node.children)
+        if node.type == NodeType.OBJECT:
+            for key, value in node.value:
+                children.append(value)
+                if isinstance(key, ASTNode):
+                    children.append(key)
+        elif node.type == NodeType.STRING and not isinstance(node.value, str):
+            children.extend(p for p in node.value if isinstance(p, ASTNode))
+        stack.extend((child, depth + 1) for child in children)
+    return deepest
 
 
 def parse_jq_expression(expression: str) -> ASTNode:
@@ -490,42 +758,291 @@ def parse_jq_expression(expression: str) -> ASTNode:
 
 
 # =============================================================================
-# Evaluator
+# evaluator.py
 # =============================================================================
+
+# Resource limits (module-level so tests and embedders can tune them).
+MAX_STEPS = 5_000_000
+MAX_SECONDS = 10.0
+MAX_EVAL_DEPTH = 200
+
+
+class EvaluationError(Exception):
+    """Raised when evaluation fails."""
+
+    pass
+
+
+class UnsupportedError(EvaluationError):
+    """Raised by validate() for programs the shim cannot evaluate faithfully."""
+
+    pass
+
+
+class LimitError(EvaluationError):
+    """Raised when evaluation exceeds a resource limit."""
+
+    pass
+
+
+class _EmptyArgument(Exception):
+    """Internal: a function argument produced no value, so the call yields nothing."""
+
+
+class EmptyValue:
+    """Sentinel for jq 'empty' - produces no output."""
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return "empty"
+
+
+EMPTY = EmptyValue()
+
+
+# Builtins the shim implements, with the arities it accepts.
+BUILTIN_ARITIES: Dict[str, frozenset] = {
+    name: frozenset(arities)
+    for name, arities in {
+        "empty": {0}, "select": {1}, "map": {1}, "map_values": {1},
+        "keys": {0}, "keys_unsorted": {0}, "values": {0}, "length": {0},
+        "type": {0}, "has": {1}, "in": {1}, "contains": {1}, "inside": {1},
+        "add": {0}, "flatten": {0, 1}, "reverse": {0}, "sort": {0},
+        "sort_by": {1}, "unique": {0}, "first": {0, 1}, "last": {0, 1},
+        "nth": {1}, "min": {0}, "max": {0}, "floor": {0}, "ceil": {0},
+        "round": {0}, "abs": {0}, "tostring": {0}, "tonumber": {0},
+        "tojson": {0}, "fromjson": {0}, "not": {0}, "ascii_downcase": {0},
+        "ascii_upcase": {0}, "ltrimstr": {1}, "rtrimstr": {1},
+        "startswith": {1}, "endswith": {1}, "split": {1}, "join": {1},
+        "test": {1, 2}, "match": {1, 2}, "capture": {1, 2}, "sub": {2, 3},
+        "gsub": {2, 3}, "error": {0, 1}, "debug": {0}, "getpath": {1},
+        "group_by": {1}, "any": {0, 1, 2}, "all": {0, 1, 2}, "from_entries": {0},
+        "to_entries": {0}, "with_entries": {1}, "recurse": {0, 1},
+        "walk": {1}, "env": {0}, "now": {0}, "infinite": {0}, "nan": {0},
+        "isinfinite": {0}, "isnan": {0}, "isnormal": {0},
+    }.items()
+}
+
+# Functions whose (first) argument may be a generator.
+_STREAM_ARG_FUNCTIONS = frozenset(
+    {"map", "map_values", "first", "last", "recurse", "with_entries",
+     "sort_by", "group_by", "any", "all"}
+)
+
+_NAMED_GROUP_RE = re.compile(r"(?<!\\)\(\?<(?![=!])")
+_NUMBER_RE = re.compile(r"\s*-?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*")
+
+
+def is_stream(node: ASTNode) -> bool:
+    """True if the node is a generator whose (list) result is a stream of outputs."""
+    if node.type == NodeType.ITERATE:
+        return True
+    if node.type == NodeType.PIPE:
+        return is_stream(node.children[0]) or is_stream(node.children[1])
+    if node.type == NodeType.OPTIONAL:
+        return is_stream(node.children[0])
+    if node.type == NodeType.COMMA:
+        return True
+    if node.type == NodeType.INDEX and len(node.children) > 1:
+        return is_stream(node.children[1])
+    if node.type == NodeType.FUNCTION and node.value == "recurse":
+        return True
+    return False
+
+
+def validate(node: ASTNode) -> None:
+    """
+    Statically check a parsed program, like jq's compile step.
+
+    Raises UnsupportedError for unknown functions / arities and for generators
+    in positions the evaluator cannot fan out.
+    """
+    t = node.type
+    if t == NodeType.FUNCTION:
+        arities = BUILTIN_ARITIES.get(node.value)
+        if arities is None or len(node.children) not in arities:
+            raise UnsupportedError(
+                f"{node.value}/{len(node.children)} is not defined"
+            )
+        for i, arg in enumerate(node.children):
+            if is_stream(arg) and not (i == 0 and node.value in _STREAM_ARG_FUNCTIONS):
+                _reject_stream(f"the arguments of {node.value}()")
+            validate(arg)
+        return
+    if t in (NodeType.PIPE, NodeType.ARRAY, NodeType.OPTIONAL, NodeType.COMMA):
+        for child in node.children:
+            validate(child)
+        return
+    if t == NodeType.INDEX:
+        # children: [index expression, optional target term]; only the target
+        # may be a generator
+        if is_stream(node.children[0]):
+            _reject_stream("an index expression")
+        for child in node.children:
+            validate(child)
+        return
+    if t == NodeType.OBJECT:
+        for key, value in node.value:
+            for part in (key, value):
+                if isinstance(part, ASTNode):
+                    if is_stream(part):
+                        _reject_stream("object construction")
+                    validate(part)
+        return
+    if t == NodeType.STRING:
+        if not isinstance(node.value, str):
+            for part in node.value:
+                if isinstance(part, ASTNode):
+                    if is_stream(part):
+                        _reject_stream("string interpolation")
+                    validate(part)
+        return
+    for child in node.children:
+        if is_stream(child):
+            _reject_stream(f"a {t.value} expression")
+        validate(child)
+
+
+def _reject_stream(where: str) -> None:
+    raise UnsupportedError(
+        f"generators such as .[] are not supported inside {where}; "
+        "collect them with [...] or map() first"
+    )
+
+
+def evaluate(
+    node: ASTNode,
+    data: Any,
+    variables: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """
+    Evaluate an AST node against input data.
+
+    Args:
+        node: The AST node to evaluate
+        data: The input JSON data
+        variables: Dict of $name -> value bindings
+
+    Returns:
+        The result of evaluation. May return:
+        - A single value
+        - A list (for generators; see is_stream)
+        - EMPTY sentinel (for no output)
+    """
+    variables = variables or {}
+    evaluator = JQEvaluator(variables)
+    try:
+        validate(node)
+        return evaluator.evaluate(node, data)
+    except RecursionError:
+        raise LimitError("input is nested too deeply to process") from None
+    except OverflowError as e:
+        raise EvaluationError(f"number out of range: {e}") from None
+    except ValueError as e:
+        # e.g. floor/round of nan
+        raise EvaluationError(str(e)) from None
+
+
+def tojson(value: Any) -> str:
+    """Serialize like jq's tojson (compact, UTF-8)."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
 
 class JQEvaluator:
     """Evaluator for jq AST nodes."""
 
     def __init__(self, variables: Dict[str, Any]):
         self.variables = variables
+        self._steps = 0
+        self._depth = 0
+        self._deadline = time.monotonic() + MAX_SECONDS
+
+    def _tick(self) -> None:
+        """Count one unit of work against the step and time limits."""
+        self._steps += 1
+        if self._steps > MAX_STEPS:
+            raise LimitError(
+                f"jq program exceeded the evaluation step limit ({MAX_STEPS})"
+            )
+        if self._steps % 1024 == 0 and time.monotonic() > self._deadline:
+            raise LimitError(
+                f"jq program exceeded the time limit ({MAX_SECONDS:g}s)"
+            )
+
+    def outputs(self, node: ASTNode, data: Any) -> List[Any]:
+        """Evaluate a node and return its outputs as a list (0..n values)."""
+        result = self.evaluate(node, data)
+        if result is EMPTY:
+            return []
+        if is_stream(node):
+            return result
+        return [result]
 
     def evaluate(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate a node against data."""
+        self._tick()
         method_name = f"_eval_{node.type.value}"
         method = getattr(self, method_name, None)
         if method is None:
             raise EvaluationError(f"Unsupported node type: {node.type}")
-        return method(node, data)
+        self._depth += 1
+        try:
+            if self._depth > MAX_EVAL_DEPTH:
+                raise LimitError(
+                    f"jq evaluation nested too deeply (limit {MAX_EVAL_DEPTH})"
+                )
+            return method(node, data)
+        finally:
+            self._depth -= 1
 
     def _eval_identity(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate identity expression (.)"""
         return data
 
     def _eval_field(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate field access (.field)"""
         if data is None:
             return None
         if not isinstance(data, dict):
             raise EvaluationError(
-                f"Cannot index {type(data).__name__} with string {node.value!r}"
+                f"Cannot index {self._type_name(data)} with {json.dumps(node.value)}"
             )
         return data.get(node.value)
 
     def _eval_index(self, node: ASTNode, data: Any) -> Any:
-        if data is None:
-            return None
+        """Evaluate .[expr] or term[expr]; expr is evaluated against `.` in both."""
         index = self.evaluate(node.children[0], data)
+        if index is EMPTY:
+            return EMPTY
+        if len(node.children) == 1:
+            return self._index(data, index)
+        target = node.children[1]
+        if is_stream(target):
+            return [self._index(item, index) for item in self.outputs(target, data)]
+        value = self.evaluate(target, data)
+        if value is EMPTY:
+            return EMPTY
+        return self._index(value, index)
 
-        if isinstance(index, int):
+    def _index(self, data: Any, index: Any) -> Any:
+        """Index a value with a number or string key (jq semantics)."""
+        if data is None and isinstance(index, (int, float, str)) and not isinstance(index, bool):
+            return None
+
+        if isinstance(index, (int, float)) and not isinstance(index, bool):
             if not isinstance(data, list):
-                raise EvaluationError(f"Cannot index {type(data).__name__} with number")
+                raise EvaluationError(
+                    f"Cannot index {self._type_name(data)} with number"
+                )
+            if isinstance(index, float) and not math.isfinite(index):
+                return None
+            index = math.floor(index)
             if index < 0:
                 index = len(data) + index
             if 0 <= index < len(data):
@@ -533,218 +1050,284 @@ class JQEvaluator:
             return None
         elif isinstance(index, str):
             if not isinstance(data, dict):
-                raise EvaluationError(f"Cannot index {type(data).__name__} with string")
+                raise EvaluationError(
+                    f"Cannot index {self._type_name(data)} with string {json.dumps(index)}"
+                )
             return data.get(index)
         else:
-            raise EvaluationError(f"Invalid index type: {type(index).__name__}")
+            raise EvaluationError(
+                f"Cannot index {self._type_name(data)} with {self._type_name(index)}"
+            )
 
     def _eval_iterate(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate array/object iteration (.[] )"""
         if data is None:
             return []
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
             return list(data.values())
-        raise EvaluationError(f"Cannot iterate over {type(data).__name__}")
+        raise EvaluationError(f"Cannot iterate over {self._type_name(data)}")
+
+    def _eval_optional(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate expr? - errors produce no output (resource limits still apply)."""
+        try:
+            return self.evaluate(node.children[0], data)
+        except LimitError:
+            raise
+        except EvaluationError:
+            return [] if is_stream(node.children[0]) else EMPTY
+
+    def _eval_comma(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate a, b: the outputs of each side in turn."""
+        results = []
+        for child in node.children:
+            results.extend(self.outputs(child, data))
+        return results
 
     def _eval_pipe(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate pipe expression (a | b)"""
         left_result = self.evaluate(node.children[0], data)
+
+        # Handle EMPTY
         if left_result is EMPTY:
             return EMPTY
 
-        if isinstance(left_result, list) and self._is_iterator(node.children[0]):
+        # If left produces multiple values, evaluate right for each
+        if is_stream(node.children[0]):
             results = []
             for item in left_result:
-                result = self.evaluate(node.children[1], item)
-                if result is EMPTY:
-                    continue
-                if isinstance(result, list) and self._is_iterator(node.children[1]):
-                    results.extend(result)
-                else:
-                    results.append(result)
+                results.extend(self.outputs(node.children[1], item))
             return results
 
         return self.evaluate(node.children[1], left_result)
 
-    def _is_iterator(self, node: ASTNode) -> bool:
-        if node.type == NodeType.ITERATE:
-            return True
-        if node.type == NodeType.PIPE:
-            return self._is_iterator(node.children[1])
-        return False
-
     def _eval_default(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate default expression (a // b)"""
         left_result = self.evaluate(node.children[0], data)
         if left_result is None or left_result is False or left_result is EMPTY:
             return self.evaluate(node.children[1], data)
         return left_result
 
     def _eval_object(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate object construction ({a: b})"""
         result = {}
         for key, value_node in node.value:
+            # Evaluate key (can be string or expression)
             if isinstance(key, str):
                 key_val = key
             elif isinstance(key, ASTNode):
                 key_val = self.evaluate(key, data)
+                if key_val is EMPTY:
+                    return EMPTY
                 if not isinstance(key_val, str):
-                    key_val = str(key_val)
+                    raise EvaluationError(
+                        f"Cannot use {self._type_name(key_val)} ({tojson(key_val)}) as object key"
+                    )
             else:
                 key_val = str(key)
+
+            # Evaluate value; an empty value means no object at all (as in jq)
             value_result = self.evaluate(value_node, data)
+            if value_result is EMPTY:
+                return EMPTY
             result[key_val] = value_result
+
         return result
 
     def _eval_array(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate array construction ([a, b, c])"""
         result = []
         for child in node.children:
-            value = self.evaluate(child, data)
-            if value is EMPTY:
-                continue
-            if isinstance(value, list) and self._is_iterator(child):
-                result.extend(value)
-            else:
-                result.append(value)
+            result.extend(self.outputs(child, data))
         return result
 
     def _eval_string(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate string literal with possible interpolation."""
         if isinstance(node.value, str):
             return node.value
 
+        # Handle interpolation
         parts = []
         for part in node.value:
             if isinstance(part, str):
                 parts.append(part)
             elif isinstance(part, ASTNode):
                 value = self.evaluate(part, data)
-                if value is None:
-                    parts.append("null")
-                elif isinstance(value, bool):
-                    parts.append("true" if value else "false")
-                elif isinstance(value, str):
-                    parts.append(value)
-                else:
-                    parts.append(str(value))
+                if value is EMPTY:
+                    return EMPTY
+                parts.append(self._tostring(value))
             else:
                 parts.append(str(part))
+
         return "".join(parts)
 
     def _eval_number(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate number literal."""
         return node.value
 
     def _eval_bool(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate boolean literal."""
         return node.value
 
     def _eval_null(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate null literal."""
         return None
 
     def _eval_variable(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate variable reference ($name)"""
         var_name = node.value
-        if var_name not in self.variables:
-            raise EvaluationError(f"Variable ${var_name} is not defined")
-        return self.variables[var_name]
+        if var_name in self.variables:
+            return self.variables[var_name]
+        if var_name == "ENV":
+            return dict(os.environ)
+        if var_name == "__loc__":
+            return {"file": "<top-level>", "line": 1}
+        raise EvaluationError(f"Variable ${var_name} is not defined")
 
     def _eval_comparison(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate comparison expression (jq total order across types)."""
         left = self.evaluate(node.children[0], data)
+        if left is EMPTY:
+            return EMPTY
         right = self.evaluate(node.children[1], data)
+        if right is EMPTY:
+            return EMPTY
         op = node.value
 
-        try:
-            if op == "==":
-                return left == right
-            elif op == "!=":
-                return left != right
-            elif op == "<":
-                return left < right
-            elif op == ">":
-                return left > right
-            elif op == "<=":
-                return left <= right
-            elif op == ">=":
-                return left >= right
-            else:
-                raise EvaluationError(f"Unknown comparison operator: {op}")
-        except TypeError:
-            if op == "==":
-                return False
-            elif op == "!=":
-                return True
-            raise EvaluationError(
-                f"Cannot compare {type(left).__name__} and {type(right).__name__}"
-            )
+        lk = self._sort_key(left)
+        rk = self._sort_key(right)
+        if op == "==":
+            return lk == rk
+        elif op == "!=":
+            return lk != rk
+        elif op == "<":
+            return lk < rk
+        elif op == ">":
+            return lk > rk
+        elif op == "<=":
+            return lk <= rk
+        elif op == ">=":
+            return lk >= rk
+        raise EvaluationError(f"Unknown comparison operator: {op}")
 
     def _eval_logical(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate logical expression (and, or, not)"""
         op = node.value
+
         if op == "not":
             operand = self.evaluate(node.children[0], data)
+            if operand is EMPTY:
+                return EMPTY
             return not self._truthy(operand)
         elif op == "and":
             left = self.evaluate(node.children[0], data)
+            if left is EMPTY:
+                return EMPTY
             if not self._truthy(left):
                 return False
             right = self.evaluate(node.children[1], data)
+            if right is EMPTY:
+                return EMPTY
             return self._truthy(right)
         elif op == "or":
             left = self.evaluate(node.children[0], data)
+            if left is EMPTY:
+                return EMPTY
             if self._truthy(left):
                 return True
             right = self.evaluate(node.children[1], data)
+            if right is EMPTY:
+                return EMPTY
             return self._truthy(right)
         else:
             raise EvaluationError(f"Unknown logical operator: {op}")
 
     def _eval_negate(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate unary negation (-expr)"""
         operand = self.evaluate(node.children[0], data)
-        if isinstance(operand, (int, float)):
+        if operand is EMPTY:
+            return EMPTY
+        if isinstance(operand, (int, float)) and not isinstance(operand, bool):
             return -operand
-        raise EvaluationError(f"Cannot negate {type(operand).__name__}")
+        raise EvaluationError(f"{self._type_name(operand)} cannot be negated")
+
+    def _arg(self, arg: ASTNode, data: Any) -> Any:
+        """Evaluate a value argument; an empty argument makes the call produce nothing."""
+        value = self.evaluate(arg, data)
+        if value is EMPTY:
+            raise _EmptyArgument()
+        return value
 
     def _eval_function(self, node: ASTNode, data: Any) -> Any:
+        """Evaluate function call."""
+        try:
+            return self._call_function(node, data)
+        except _EmptyArgument:
+            return EMPTY
+
+    def _call_function(self, node: ASTNode, data: Any) -> Any:
+        """Dispatch a builtin call (arity was checked by validate())."""
         func_name = node.value
         args = node.children
 
+        # Built-in functions
         if func_name == "empty":
             return EMPTY
 
         if func_name == "select":
-            if len(args) != 1:
-                raise EvaluationError("select() requires exactly 1 argument")
             predicate_result = self.evaluate(args[0], data)
             if self._truthy(predicate_result):
                 return data
             return EMPTY
 
         if func_name == "map":
-            if len(args) != 1:
-                raise EvaluationError("map() requires exactly 1 argument")
+            if isinstance(data, dict):
+                data = list(data.values())
             if not isinstance(data, list):
-                raise EvaluationError(f"Cannot map over {type(data).__name__}")
+                raise EvaluationError(f"Cannot iterate over {self._type_name(data)}")
             results = []
             for item in data:
-                result = self.evaluate(args[0], item)
-                if result is not EMPTY:
-                    results.append(result)
+                results.extend(self.outputs(args[0], item))
             return results
+
+        if func_name == "map_values":
+            def first_output(item):
+                result = self.outputs(args[0], item)
+                return result[0] if result else EMPTY
+
+            if isinstance(data, dict):
+                out = {}
+                for k, v in data.items():
+                    r = first_output(v)
+                    if r is not EMPTY:
+                        out[k] = r
+                return out
+            if isinstance(data, list):
+                return [r for r in (first_output(v) for v in data) if r is not EMPTY]
+            raise EvaluationError(f"Cannot iterate over {self._type_name(data)}")
 
         if func_name == "keys":
             if isinstance(data, dict):
                 return sorted(data.keys())
             if isinstance(data, list):
                 return list(range(len(data)))
-            raise EvaluationError(f"Cannot get keys of {type(data).__name__}")
+            raise EvaluationError(f"{self._type_name(data)} ({tojson(data)}) has no keys")
 
         if func_name == "values":
-            if isinstance(data, dict):
-                return list(data.values())
-            if isinstance(data, list):
-                return data
-            raise EvaluationError(f"Cannot get values of {type(data).__name__}")
+            # jq: def values: select(. != null)
+            return EMPTY if data is None else data
 
         if func_name == "length":
             if data is None:
                 return 0
+            if isinstance(data, bool):
+                raise EvaluationError(f"boolean ({tojson(data)}) has no length")
+            if isinstance(data, (int, float)):
+                return abs(data)
             if isinstance(data, (str, list, dict)):
                 return len(data)
-            raise EvaluationError(f"Cannot get length of {type(data).__name__}")
+            raise EvaluationError(f"Cannot get length of {self._type_name(data)}")
 
         if func_name == "type":
             return self._type_name(data)
@@ -754,116 +1337,106 @@ class JQEvaluator:
                 return list(data.keys())
             if isinstance(data, list):
                 return list(range(len(data)))
-            raise EvaluationError(f"Cannot get keys of {type(data).__name__}")
+            raise EvaluationError(f"{self._type_name(data)} ({tojson(data)}) has no keys")
 
         if func_name == "has":
-            if len(args) != 1:
-                raise EvaluationError("has() requires exactly 1 argument")
-            key = self.evaluate(args[0], data)
-            if isinstance(data, dict):
-                return key in data
-            if isinstance(data, list) and isinstance(key, int):
-                return 0 <= key < len(data)
-            return False
+            key = self._arg(args[0], data)
+            return self._has(data, key)
 
         if func_name == "in":
-            if len(args) != 1:
-                raise EvaluationError("in() requires exactly 1 argument")
-            container = self.evaluate(args[0], data)
-            if isinstance(container, dict):
-                return data in container
-            return False
+            container = self._arg(args[0], data)
+            return self._has(container, data)
 
         if func_name == "contains":
-            if len(args) != 1:
-                raise EvaluationError("contains() requires exactly 1 argument")
-            needle = self.evaluate(args[0], data)
-            return self._contains(data, needle)
+            needle = self._arg(args[0], data)
+            return self._checked_contains(data, needle)
 
         if func_name == "inside":
-            if len(args) != 1:
-                raise EvaluationError("inside() requires exactly 1 argument")
-            container = self.evaluate(args[0], data)
-            return self._contains(container, data)
+            container = self._arg(args[0], data)
+            return self._checked_contains(container, data)
 
         if func_name == "add":
+            if isinstance(data, dict):
+                data = list(data.values())
             if not isinstance(data, list):
-                raise EvaluationError(f"Cannot add {type(data).__name__}")
-            if len(data) == 0:
-                return None
-            result = data[0]
-            for item in data[1:]:
-                if isinstance(result, str) and isinstance(item, str):
-                    result = result + item
-                elif isinstance(result, (int, float)) and isinstance(item, (int, float)):
-                    result = result + item
-                elif isinstance(result, list) and isinstance(item, list):
-                    result = result + item
-                elif isinstance(result, dict) and isinstance(item, dict):
-                    result = {**result, **item}
-                else:
-                    raise EvaluationError(
-                        f"Cannot add {type(result).__name__} and {type(item).__name__}"
-                    )
+                raise EvaluationError(f"Cannot iterate over {self._type_name(data)}")
+            result = None
+            for item in data:
+                result = self._add(result, item)
             return result
 
         if func_name == "flatten":
-            depth = 1
+            depth = 1_000_000_000
             if args:
-                depth = self.evaluate(args[0], data)
+                depth = self._arg(args[0], data)
+                if not isinstance(depth, (int, float)) or isinstance(depth, bool):
+                    raise EvaluationError("flatten depth must be a number")
+                if depth < 0:
+                    raise EvaluationError("flatten depth must not be negative")
             if not isinstance(data, list):
-                raise EvaluationError(f"Cannot flatten {type(data).__name__}")
+                raise EvaluationError(f"Cannot flatten {self._type_name(data)}")
             return self._flatten(data, depth)
 
         if func_name == "reverse":
+            if data is None:
+                return []
             if isinstance(data, list):
                 return list(reversed(data))
             if isinstance(data, str):
                 return data[::-1]
-            raise EvaluationError(f"Cannot reverse {type(data).__name__}")
+            raise EvaluationError(f"Cannot reverse {self._type_name(data)}")
 
         if func_name == "sort":
             if not isinstance(data, list):
-                raise EvaluationError(f"Cannot sort {type(data).__name__}")
+                raise EvaluationError(f"{self._type_name(data)} cannot be sorted, as it is not an array")
             return sorted(data, key=self._sort_key)
 
         if func_name == "sort_by":
-            if len(args) != 1:
-                raise EvaluationError("sort_by() requires exactly 1 argument")
             if not isinstance(data, list):
-                raise EvaluationError(f"Cannot sort {type(data).__name__}")
-            return sorted(data, key=lambda x: self._sort_key(self.evaluate(args[0], x)))
+                raise EvaluationError(f"{self._type_name(data)} cannot be sorted, as it is not an array")
+            return sorted(data, key=lambda x: self._sort_key(self.outputs(args[0], x)))
 
         if func_name == "unique":
             if not isinstance(data, list):
-                raise EvaluationError(f"Cannot get unique of {type(data).__name__}")
-            seen = []
+                raise EvaluationError(f"{self._type_name(data)} cannot be sorted, as it is not an array")
             result = []
-            for item in data:
-                if item not in seen:
-                    seen.append(item)
+            last_key = None
+            for item in sorted(data, key=self._sort_key):
+                key = self._sort_key(item)
+                if not result or key != last_key:
                     result.append(item)
+                    last_key = key
             return result
 
-        if func_name == "first":
-            if isinstance(data, list):
-                return data[0] if data else None
-            return data
-
-        if func_name == "last":
-            if isinstance(data, list):
-                return data[-1] if data else None
-            return data
+        if func_name in ("first", "last"):
+            if args:
+                outputs = self.outputs(args[0], data)
+                if not outputs:
+                    # jq 1.7: first(empty) is empty, last(empty) is null
+                    return EMPTY if func_name == "first" else None
+                return outputs[0] if func_name == "first" else outputs[-1]
+            if data is None:
+                return None
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot index {self._type_name(data)} with number")
+            if not data:
+                return None
+            return data[0] if func_name == "first" else data[-1]
 
         if func_name == "nth":
-            if len(args) != 1:
-                raise EvaluationError("nth() requires exactly 1 argument")
-            n = self.evaluate(args[0], data)
-            if isinstance(data, list):
-                if 0 <= n < len(data):
-                    return data[n]
+            n = self._arg(args[0], data)
+            if data is None:
                 return None
-            return data if n == 0 else None
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot index {self._type_name(data)} with number")
+            if not isinstance(n, (int, float)) or isinstance(n, bool):
+                raise EvaluationError(f"Cannot index array with {self._type_name(n)}")
+            n = math.floor(n)
+            if n < 0:
+                n += len(data)
+            if 0 <= n < len(data):
+                return data[n]
+            return None
 
         if func_name == "min":
             if not isinstance(data, list) or len(data) == 0:
@@ -876,309 +1449,287 @@ class JQEvaluator:
             return max(data, key=self._sort_key)
 
         if func_name == "floor":
-            if isinstance(data, (int, float)):
-                import math
-                return math.floor(data)
-            raise EvaluationError(f"Cannot floor {type(data).__name__}")
+            self._require_number(data, "floor")
+            return math.floor(data)
 
         if func_name == "ceil":
-            if isinstance(data, (int, float)):
-                import math
-                return math.ceil(data)
-            raise EvaluationError(f"Cannot ceil {type(data).__name__}")
+            self._require_number(data, "ceil")
+            return math.ceil(data)
 
         if func_name == "round":
-            if isinstance(data, (int, float)):
-                return round(data)
-            raise EvaluationError(f"Cannot round {type(data).__name__}")
+            self._require_number(data, "round")
+            # C round(): halves go away from zero (Python's round() is banker's)
+            return math.floor(data + 0.5) if data >= 0 else -math.floor(-data + 0.5)
 
         if func_name == "abs":
-            if isinstance(data, (int, float)):
-                return abs(data)
-            raise EvaluationError(f"Cannot abs {type(data).__name__}")
+            self._require_number(data, "abs")
+            return abs(data)
 
         if func_name == "tostring":
-            if data is None:
-                return "null"
-            if isinstance(data, bool):
-                return "true" if data else "false"
-            if isinstance(data, str):
-                return data
-            return json.dumps(data)
+            return self._tostring(data)
+
+        if func_name == "tojson":
+            return tojson(data)
+
+        if func_name == "fromjson":
+            if not isinstance(data, str):
+                raise EvaluationError(f"{self._type_name(data)} ({tojson(data)}) cannot be parsed as JSON")
+            try:
+                return json.loads(data)
+            except ValueError as e:
+                raise EvaluationError(f"{data!r} cannot be parsed as JSON: {e}") from None
 
         if func_name == "tonumber":
-            if isinstance(data, (int, float)):
+            if isinstance(data, (int, float)) and not isinstance(data, bool):
                 return data
             if isinstance(data, str):
-                try:
-                    if "." in data or "e" in data.lower():
-                        return float(data)
-                    return int(data)
-                except ValueError:
-                    raise EvaluationError(f"Cannot convert {data!r} to number")
-            raise EvaluationError(f"Cannot convert {type(data).__name__} to number")
+                if not _NUMBER_RE.fullmatch(data):
+                    raise EvaluationError(f"Cannot parse {data!r} as a number")
+                text = data.strip()
+                if "." in text or "e" in text.lower():
+                    return float(text)
+                return int(text)
+            raise EvaluationError(f"{self._type_name(data)} ({tojson(data)}) cannot be parsed as a number")
 
         if func_name == "not":
             return not self._truthy(data)
 
         if func_name == "ascii_downcase":
             if isinstance(data, str):
-                return data.lower()
-            raise EvaluationError(f"Cannot lowercase {type(data).__name__}")
+                return data.translate(_ASCII_LOWER)
+            raise EvaluationError(f"{self._type_name(data)} cannot be lowercased, as it is not a string")
 
         if func_name == "ascii_upcase":
             if isinstance(data, str):
-                return data.upper()
-            raise EvaluationError(f"Cannot uppercase {type(data).__name__}")
+                return data.translate(_ASCII_UPPER)
+            raise EvaluationError(f"{self._type_name(data)} cannot be uppercased, as it is not a string")
 
         if func_name == "ltrimstr":
-            if len(args) != 1:
-                raise EvaluationError("ltrimstr() requires exactly 1 argument")
-            prefix = self.evaluate(args[0], data)
-            if isinstance(data, str) and isinstance(prefix, str):
-                if data.startswith(prefix):
-                    return data[len(prefix):]
-                return data
-            raise EvaluationError("ltrimstr requires string arguments")
+            prefix = self._arg(args[0], data)
+            # jq returns non-string inputs (or a non-string prefix) unchanged
+            if isinstance(data, str) and isinstance(prefix, str) and data.startswith(prefix):
+                return data[len(prefix):]
+            return data
 
         if func_name == "rtrimstr":
-            if len(args) != 1:
-                raise EvaluationError("rtrimstr() requires exactly 1 argument")
-            suffix = self.evaluate(args[0], data)
-            if isinstance(data, str) and isinstance(suffix, str):
-                if data.endswith(suffix):
-                    return data[:-len(suffix)] if suffix else data
-                return data
-            raise EvaluationError("rtrimstr requires string arguments")
+            suffix = self._arg(args[0], data)
+            if isinstance(data, str) and isinstance(suffix, str) and suffix and data.endswith(suffix):
+                return data[:-len(suffix)]
+            return data
 
         if func_name == "startswith":
-            if len(args) != 1:
-                raise EvaluationError("startswith() requires exactly 1 argument")
-            prefix = self.evaluate(args[0], data)
+            prefix = self._arg(args[0], data)
             if isinstance(data, str) and isinstance(prefix, str):
                 return data.startswith(prefix)
-            raise EvaluationError("startswith requires string arguments")
+            raise EvaluationError("startswith() requires string inputs")
 
         if func_name == "endswith":
-            if len(args) != 1:
-                raise EvaluationError("endswith() requires exactly 1 argument")
-            suffix = self.evaluate(args[0], data)
+            suffix = self._arg(args[0], data)
             if isinstance(data, str) and isinstance(suffix, str):
                 return data.endswith(suffix)
-            raise EvaluationError("endswith requires string arguments")
+            raise EvaluationError("endswith() requires string inputs")
 
         if func_name == "split":
-            if len(args) != 1:
-                raise EvaluationError("split() requires exactly 1 argument")
-            sep = self.evaluate(args[0], data)
+            sep = self._arg(args[0], data)
             if isinstance(data, str) and isinstance(sep, str):
+                if sep == "":
+                    return list(data)
                 return data.split(sep)
-            raise EvaluationError("split requires string arguments")
+            raise EvaluationError("split input and separator must be strings")
 
         if func_name == "join":
-            if len(args) != 1:
-                raise EvaluationError("join() requires exactly 1 argument")
-            sep = self.evaluate(args[0], data)
-            if isinstance(data, list) and isinstance(sep, str):
-                return sep.join(str(item) for item in data)
-            raise EvaluationError("join requires array and string separator")
+            sep = self._arg(args[0], data)
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot iterate over {self._type_name(data)}")
+            if not isinstance(sep, str):
+                raise EvaluationError("join separator must be a string")
+            parts = []
+            for item in data:
+                if item is None:
+                    parts.append("")
+                elif isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, (bool, int, float)):
+                    parts.append(tojson(item))
+                else:
+                    raise EvaluationError(
+                        f"Cannot join with {self._type_name(item)} ({tojson(item)})"
+                    )
+            return sep.join(parts)
 
-        if func_name == "test":
-            if len(args) != 1:
-                raise EvaluationError("test() requires exactly 1 argument")
-            pattern = self.evaluate(args[0], data)
-            if isinstance(data, str) and isinstance(pattern, str):
-                import re
-                return bool(re.search(pattern, data))
-            raise EvaluationError("test requires string arguments")
-
-        if func_name == "match":
-            if len(args) != 1:
-                raise EvaluationError("match() requires exactly 1 argument")
-            pattern = self.evaluate(args[0], data)
-            if isinstance(data, str) and isinstance(pattern, str):
-                import re
-                m = re.search(pattern, data)
-                if m:
-                    return {
-                        "offset": m.start(),
-                        "length": m.end() - m.start(),
-                        "string": m.group(0),
-                        "captures": [
-                            {"offset": m.start(i+1), "length": m.end(i+1) - m.start(i+1), "string": m.group(i+1), "name": None}
-                            for i in range(len(m.groups()))
-                        ] if m.groups() else []
+        if func_name in ("test", "match", "capture"):
+            pattern = self._arg(args[0], data)
+            flags = self._arg(args[1], data) if len(args) > 1 else None
+            if not (isinstance(data, str) and isinstance(pattern, str)):
+                raise EvaluationError(f"{self._type_name(data)} ({tojson(data)}) cannot be matched, as it is not a string")
+            m = self._compile_regex(pattern, flags, allow_global=func_name == "test").search(data)
+            if func_name == "test":
+                return m is not None
+            if m is None:
+                return EMPTY
+            if func_name == "capture":
+                return m.groupdict()
+            names = {index: name for name, index in m.re.groupindex.items()}
+            return {
+                "offset": m.start(),
+                "length": m.end() - m.start(),
+                "string": m.group(0),
+                "captures": [
+                    {
+                        "offset": m.start(i),
+                        "length": (m.end(i) - m.start(i)) if m.group(i) is not None else 0,
+                        "string": m.group(i),
+                        "name": names.get(i),
                     }
-                return None
-            raise EvaluationError("match requires string arguments")
+                    for i in range(1, len(m.groups()) + 1)
+                ],
+            }
 
-        if func_name == "capture":
-            if len(args) != 1:
-                raise EvaluationError("capture() requires exactly 1 argument")
-            pattern = self.evaluate(args[0], data)
-            if isinstance(data, str) and isinstance(pattern, str):
-                import re
-                m = re.search(pattern, data)
-                if m:
-                    return m.groupdict()
-                return {}
-            raise EvaluationError("capture requires string arguments")
+        if func_name in ("sub", "gsub"):
+            pattern = self._arg(args[0], data)
+            flags = self._arg(args[2], data) if len(args) > 2 else None
+            if not (isinstance(data, str) and isinstance(pattern, str)):
+                raise EvaluationError(f"{self._type_name(data)} ({tojson(data)}) cannot be matched, as it is not a string")
+            regex = self._compile_regex(pattern, flags, allow_global=True)
+            count = 0 if (func_name == "gsub" or "g" in (flags or "")) else 1
 
-        if func_name == "sub":
-            if len(args) != 2:
-                raise EvaluationError("sub() requires exactly 2 arguments")
-            pattern = self.evaluate(args[0], data)
-            replacement = self.evaluate(args[1], data)
-            if isinstance(data, str) and isinstance(pattern, str) and isinstance(replacement, str):
-                import re
-                return re.sub(pattern, replacement, data, count=1)
-            raise EvaluationError("sub requires string arguments")
+            def replace(m):
+                # The replacement is a jq expression evaluated against the
+                # named captures, e.g. sub("(?<x>a)"; "<\(.x)>")
+                replacement = self._arg(args[1], m.groupdict())
+                if not isinstance(replacement, str):
+                    raise EvaluationError(
+                        f"{self._type_name(replacement)} ({tojson(replacement)}) cannot be added to a string"
+                    )
+                return replacement
 
-        if func_name == "gsub":
-            if len(args) != 2:
-                raise EvaluationError("gsub() requires exactly 2 arguments")
-            pattern = self.evaluate(args[0], data)
-            replacement = self.evaluate(args[1], data)
-            if isinstance(data, str) and isinstance(pattern, str) and isinstance(replacement, str):
-                import re
-                return re.sub(pattern, replacement, data)
-            raise EvaluationError("gsub requires string arguments")
+            return regex.sub(replace, data, count=count)
 
         if func_name == "error":
             msg = data
             if args:
-                msg = self.evaluate(args[0], data)
-            raise EvaluationError(str(msg) if msg else "error")
+                msg = self._arg(args[0], data)
+            if isinstance(msg, str):
+                raise EvaluationError(msg)
+            raise EvaluationError(f"{tojson(msg)} (not a string)")
 
         if func_name == "debug":
-            print(f"DEBUG: {json.dumps(data)}", file=sys.stderr)
+            print(tojson(["DEBUG:", data]), file=sys.stderr)
             return data
 
         if func_name == "getpath":
-            if len(args) != 1:
-                raise EvaluationError("getpath() requires exactly 1 argument")
-            path = self.evaluate(args[0], data)
+            path = self._arg(args[0], data)
             if not isinstance(path, list):
-                raise EvaluationError("getpath requires array path")
+                raise EvaluationError("Path must be specified as an array")
             result = data
             for key in path:
                 if result is None:
                     return None
                 if isinstance(key, str) and isinstance(result, dict):
                     result = result.get(key)
-                elif isinstance(key, int) and isinstance(result, list):
-                    if 0 <= key < len(result):
+                elif isinstance(key, int) and not isinstance(key, bool) and isinstance(result, list):
+                    if -len(result) <= key < len(result):
                         result = result[key]
                     else:
                         return None
                 else:
-                    return None
+                    raise EvaluationError(
+                        f"Cannot index {self._type_name(result)} with {self._type_name(key)}"
+                    )
             return result
 
         if func_name == "group_by":
-            if len(args) != 1:
-                raise EvaluationError("group_by() requires exactly 1 argument")
             if not isinstance(data, list):
-                raise EvaluationError(f"Cannot group {type(data).__name__}")
-            groups: Dict[Any, List] = {}
-            group_order = []
-            for item in data:
-                key = self.evaluate(args[0], item)
-                key_str = str(key) if not isinstance(key, (str, int, float, bool, type(None))) else key
-                if key_str not in groups:
-                    groups[key_str] = []
-                    group_order.append(key_str)
-                groups[key_str].append(item)
-            return [groups[k] for k in group_order]
+                raise EvaluationError(f"Cannot index {self._type_name(data)} with number")
+            keyed = sorted(
+                ((self._sort_key(self.outputs(args[0], item)), item) for item in data),
+                key=lambda pair: pair[0],
+            )
+            groups: List[List[Any]] = []
+            last_key = None
+            for key, item in keyed:
+                if groups and key == last_key:
+                    groups[-1].append(item)
+                else:
+                    groups.append([item])
+                    last_key = key
+            return groups
 
-        if func_name == "any":
+        if func_name in ("any", "all"):
+            if len(args) == 2:
+                # any(generator; condition)
+                values = (
+                    self._truthy(out)
+                    for item in self.outputs(args[0], data)
+                    for out in self.outputs(args[1], item)
+                )
+                return any(values) if func_name == "any" else all(values)
+            if isinstance(data, dict):
+                data = list(data.values())
             if not isinstance(data, list):
-                return self._truthy(data)
+                raise EvaluationError(f"Cannot iterate over {self._type_name(data)}")
             if args:
-                return any(self._truthy(self.evaluate(args[0], item)) for item in data)
-            return any(self._truthy(item) for item in data)
-
-        if func_name == "all":
-            if not isinstance(data, list):
-                return self._truthy(data)
-            if args:
-                return all(self._truthy(self.evaluate(args[0], item)) for item in data)
-            return all(self._truthy(item) for item in data)
+                values = (
+                    self._truthy(out)
+                    for item in data
+                    for out in self.outputs(args[0], item)
+                )
+            else:
+                values = (self._truthy(item) for item in data)
+            return any(values) if func_name == "any" else all(values)
 
         if func_name == "from_entries":
             if not isinstance(data, list):
-                raise EvaluationError(f"Cannot convert {type(data).__name__} from entries")
-            result = {}
-            for entry in data:
-                if not isinstance(entry, dict):
-                    continue
-                key = entry.get("key") or entry.get("name") or entry.get("k")
-                value = entry.get("value") or entry.get("v")
-                if key is not None:
-                    result[str(key)] = value
-            return result
+                raise EvaluationError(f"Cannot iterate over {self._type_name(data)}")
+            return self._from_entries(data)
 
         if func_name == "to_entries":
+            if isinstance(data, list):
+                return [{"key": i, "value": v} for i, v in enumerate(data)]
             if not isinstance(data, dict):
-                raise EvaluationError(f"Cannot convert {type(data).__name__} to entries")
+                raise EvaluationError(f"{self._type_name(data)} ({tojson(data)}) has no keys")
             return [{"key": k, "value": v} for k, v in data.items()]
 
         if func_name == "with_entries":
-            if len(args) != 1:
-                raise EvaluationError("with_entries() requires exactly 1 argument")
             if not isinstance(data, dict):
-                raise EvaluationError(f"Cannot process {type(data).__name__} with_entries")
-            entries = [{"key": k, "value": v} for k, v in data.items()]
-            transformed = [self.evaluate(args[0], entry) for entry in entries]
-            result = {}
-            for entry in transformed:
-                if isinstance(entry, dict):
-                    key = entry.get("key") or entry.get("name") or entry.get("k")
-                    value = entry.get("value") or entry.get("v")
-                    if key is not None:
-                        result[str(key)] = value
-            return result
+                raise EvaluationError(f"{self._type_name(data)} ({tojson(data)}) has no keys")
+            transformed = []
+            for k, v in data.items():
+                transformed.extend(self.outputs(args[0], {"key": k, "value": v}))
+            return self._from_entries(transformed)
 
         if func_name == "recurse":
-            results = [data]
+            # Depth-first, pre-order, like jq's `def recurse(f): def r: ., (f | r); r;`
+            if args:
+                def children_of(value):
+                    children = self.outputs(args[0], value)
+                    # Shim difference: null children are dropped, so recurse(.a)
+                    # terminates instead of emitting null forever.
+                    return [c for c in children if c is not None]
+            else:
+                def children_of(value):
+                    if isinstance(value, list):
+                        return value
+                    if isinstance(value, dict):
+                        return list(value.values())
+                    return []
+
+            results = []
             to_process = [data]
             while to_process:
-                current = to_process.pop(0)
-                if args:
-                    children = self.evaluate(args[0], current)
-                else:
-                    if isinstance(current, list):
-                        children = current
-                    elif isinstance(current, dict):
-                        children = list(current.values())
-                    else:
-                        continue
-
-                if children is EMPTY:
-                    continue
-                if isinstance(children, list):
-                    for child in children:
-                        if child is not None and child is not EMPTY:
-                            results.append(child)
-                            to_process.append(child)
-                elif children is not None:
-                    results.append(children)
-                    to_process.append(children)
+                current = to_process.pop()
+                results.append(current)
+                self._tick()  # every output counts against the step limit
+                to_process.extend(reversed(children_of(current)))
             return results
 
         if func_name == "walk":
-            if len(args) != 1:
-                raise EvaluationError("walk() requires exactly 1 argument")
             return self._walk(data, args[0])
 
         if func_name == "env":
-            import os
-            if isinstance(data, str):
-                return os.environ.get(data)
             return dict(os.environ)
 
         if func_name == "now":
-            import time
             return time.time()
 
         if func_name == "infinite":
@@ -1188,35 +1739,38 @@ class JQEvaluator:
             return float('nan')
 
         if func_name == "isinfinite":
-            if isinstance(data, float):
-                import math
-                return math.isinf(data)
-            return False
+            return isinstance(data, float) and math.isinf(data)
 
         if func_name == "isnan":
-            if isinstance(data, float):
-                import math
-                return math.isnan(data)
-            return False
+            return isinstance(data, float) and math.isnan(data)
 
         if func_name == "isnormal":
-            if isinstance(data, (int, float)):
-                import math
-                if isinstance(data, int):
-                    return data != 0
-                return not (math.isnan(data) or math.isinf(data) or data == 0)
-            return False
+            if isinstance(data, bool) or not isinstance(data, (int, float)):
+                return False
+            if isinstance(data, int):
+                return data != 0
+            return not (math.isnan(data) or math.isinf(data) or data == 0)
 
-        raise EvaluationError(f"Unknown function: {func_name}")
+        raise UnsupportedError(f"{func_name}/{len(args)} is not defined")
 
     def _walk(self, data: Any, transform: ASTNode) -> Any:
+        """Recursively transform data bottom-up (values that become empty are dropped)."""
         if isinstance(data, list):
-            data = [self._walk(item, transform) for item in data]
+            data = [
+                v for v in (self._walk(item, transform) for item in data)
+                if v is not EMPTY
+            ]
         elif isinstance(data, dict):
-            data = {k: self._walk(v, transform) for k, v in data.items()}
+            walked = {}
+            for k, v in data.items():
+                w = self._walk(v, transform)
+                if w is not EMPTY:
+                    walked[k] = w
+            data = walked
         return self.evaluate(transform, data)
 
     def _truthy(self, value: Any) -> bool:
+        """Check if value is truthy in jq terms."""
         if value is None:
             return False
         if value is False:
@@ -1226,6 +1780,7 @@ class JQEvaluator:
         return True
 
     def _type_name(self, value: Any) -> str:
+        """Get jq type name for a value."""
         if value is None:
             return "null"
         if isinstance(value, bool):
@@ -1240,9 +1795,114 @@ class JQEvaluator:
             return "object"
         return "unknown"
 
+    def _tostring(self, value: Any) -> str:
+        """jq tostring: strings unchanged, everything else as compact JSON."""
+        if isinstance(value, str):
+            return value
+        return tojson(value)
+
+    def _require_number(self, value: Any, name: str) -> None:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise EvaluationError(f"{self._type_name(value)} ({tojson(value)}) number required for {name}")
+
+    def _has(self, container: Any, key: Any) -> bool:
+        """jq has(key) semantics (also used for `key | in(container)`)."""
+        if isinstance(container, dict) and isinstance(key, str):
+            return key in container
+        if isinstance(container, list) and isinstance(key, (int, float)) and not isinstance(key, bool):
+            return 0 <= key < len(container)
+        raise EvaluationError(
+            f"Cannot check whether {self._type_name(container)} has a {self._type_name(key)} key"
+        )
+
+    def _add(self, left: Any, right: Any) -> Any:
+        """jq `+` for the types add() combines (null is the identity)."""
+        if left is None:
+            return right
+        if right is None:
+            return left
+        if isinstance(left, bool) or isinstance(right, bool):
+            pass
+        elif isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            return left + right
+        elif isinstance(left, str) and isinstance(right, str):
+            return left + right
+        elif isinstance(left, list) and isinstance(right, list):
+            return left + right
+        elif isinstance(left, dict) and isinstance(right, dict):
+            return {**left, **right}
+        raise EvaluationError(
+            f"{self._type_name(left)} ({tojson(left)}) and "
+            f"{self._type_name(right)} ({tojson(right)}) cannot be added"
+        )
+
+    def _from_entries(self, entries: List[Any]) -> Dict[str, Any]:
+        """Build an object from {key|k|name|Name|K|Key, value|v} entries."""
+        result = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise EvaluationError(
+                    f"Cannot index {self._type_name(entry)} with \"key\""
+                )
+            key = None
+            for name in ("key", "k", "name", "Name", "K", "Key"):
+                if entry.get(name) is not None:
+                    key = entry[name]
+                    break
+            if key is None:
+                # Shim difference: jq errors on a null key; the entry is skipped.
+                continue
+            if "value" in entry:
+                value = entry["value"]
+            elif "v" in entry:
+                value = entry["v"]
+            else:
+                value = entry.get("Value")
+            result[self._tostring(key)] = value
+        return result
+
+    def _compile_regex(self, pattern: str, flags: Any, allow_global: bool):
+        """Compile a jq regex (Python `re` dialect) with jq's flag letters."""
+        if flags is not None and not isinstance(flags, str):
+            raise EvaluationError(f"{tojson(flags)} is not a string")
+        re_flags = 0
+        for flag in flags or "":
+            if flag == "i":
+                re_flags |= re.IGNORECASE
+            elif flag in ("m", "p"):
+                # Oniguruma's multiline mode lets '.' match newlines
+                re_flags |= re.DOTALL
+            elif flag == "x":
+                re_flags |= re.VERBOSE
+            elif flag in ("s", "n", "l"):
+                # s: ^/$ anchor the whole string, which is already Python's
+                # default; n/l have no Python equivalent and are ignored
+                pass
+            elif flag == "g":
+                if not allow_global:
+                    raise UnsupportedError(
+                        "the 'g' flag of match/capture (multiple outputs) is not supported"
+                    )
+            else:
+                raise EvaluationError(f"{flags} is not a valid modifier string")
+        # Oniguruma's (?<name>...) is Python's (?P<name>...)
+        pattern = _NAMED_GROUP_RE.sub("(?P<", pattern)
+        try:
+            return re.compile(pattern, re_flags)
+        except re.error as e:
+            raise EvaluationError(f"{pattern} (at offset {e.pos}) is not a valid regex: {e.msg}") from None
+
+    def _checked_contains(self, container: Any, needle: Any) -> bool:
+        """jq contains(): the two values must be of the same kind."""
+        if self._sort_key(container)[0] != self._sort_key(needle)[0]:
+            raise EvaluationError(
+                f"{self._type_name(container)} ({tojson(container)}) and "
+                f"{self._type_name(needle)} ({tojson(needle)}) cannot have their containment checked"
+            )
+        return self._contains(container, needle)
+
     def _contains(self, container: Any, needle: Any) -> bool:
-        if container == needle:
-            return True
+        """Check if container contains needle (recursive for objects/arrays)."""
         if isinstance(needle, dict) and isinstance(container, dict):
             for key, value in needle.items():
                 if key not in container:
@@ -1257,9 +1917,10 @@ class JQEvaluator:
             return True
         if isinstance(needle, str) and isinstance(container, str):
             return needle in container
-        return False
+        return self._sort_key(container) == self._sort_key(needle)
 
     def _flatten(self, data: List, depth: int) -> List:
+        """Flatten a list to the given depth."""
         if depth <= 0:
             return data
         result = []
@@ -1271,66 +1932,221 @@ class JQEvaluator:
         return result
 
     def _sort_key(self, value: Any) -> tuple:
-        type_order = {"null": 0, "boolean": 1, "number": 2, "string": 3, "array": 4, "object": 5}
-        type_name = self._type_name(value)
-        type_rank = type_order.get(type_name, 6)
-
+        """
+        Sort/comparison key implementing jq's total order:
+        null < false < true < numbers < strings < arrays < objects.
+        Objects compare by their sorted key lists first, then values key by key.
+        """
         if value is None:
-            return (type_rank, 0)
-        if isinstance(value, bool):
-            return (type_rank, int(value))
+            return (0,)
+        if value is False:
+            return (1,)
+        if value is True:
+            return (2,)
         if isinstance(value, (int, float)):
-            return (type_rank, value)
+            return (3, value)
         if isinstance(value, str):
-            return (type_rank, value)
+            return (4, value)
         if isinstance(value, list):
-            return (type_rank, tuple(self._sort_key(v) for v in value))
+            return (5, tuple(self._sort_key(v) for v in value))
         if isinstance(value, dict):
-            return (type_rank, tuple(sorted((k, self._sort_key(v)) for k, v in value.items())))
-        return (type_rank, str(value))
+            keys = sorted(value.keys())
+            return (6, tuple(keys), tuple(self._sort_key(value[k]) for k in keys))
+        raise EvaluationError(f"Cannot compare {type(value).__name__}")
 
 
-def evaluate(node: ASTNode, data: Any, variables: Optional[Dict[str, Any]] = None) -> Any:
-    """Evaluate an AST node against input data."""
-    variables = variables or {}
-    evaluator = JQEvaluator(variables)
-    return evaluator.evaluate(node, data)
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+_ASCII_UPPER = str.maketrans("abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 
 # =============================================================================
-# CLI Main
+# __main__.py
 # =============================================================================
+
+# Marker present near the top of every copy of this shim (bin/jq, bin/jq.bat),
+# used to skip them when looking for a real jq to delegate to.
+SHIM_MARKER = "Self-contained Python jq shim"
+
+
+class _ArgumentError(Exception):
+    """Raised instead of argparse's exit so unknown options can be delegated."""
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise _ArgumentError(message)
+
+
+def find_real_jq() -> Optional[str]:
+    """
+    Find a real jq binary on PATH, skipping copies of this shim.
+
+    Returns None when JQ_SHIM_NO_FALLBACK is set or no other jq exists.
+    """
+    if os.environ.get("JQ_SHIM_NO_FALLBACK"):
+        return None
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        candidate = shutil.which("jq", path=directory)
+        if not candidate:
+            continue
+        try:
+            with open(candidate, "rb") as f:
+                head = f.read(1024)
+        except OSError:
+            continue
+        if SHIM_MARKER.encode() in head:
+            continue
+        return candidate
+    return None
+
+
+def _delegate_or_fail(argv: List[str], message: str, status: int) -> int:
+    """Hand the whole invocation to a real jq if there is one, else report the error."""
+    real_jq = find_real_jq()
+    if real_jq is not None:
+        sys.stdout.flush()
+        # If that "real" jq is a wrapper that re-enters the shim, stop there
+        env = dict(os.environ, JQ_SHIM_NO_FALLBACK="1")
+        return subprocess.call([real_jq] + argv, env=env)
+    print(f"jq: error: {message}", file=sys.stderr)
+    return status
+
+
+def _parse_json_values(text: str) -> List[Any]:
+    """Parse a stream of whitespace-separated JSON values (jq's input format)."""
+    values = []
+    decoder = json.JSONDecoder()
+    idx = 0
+    while idx < len(text):
+        while idx < len(text) and text[idx] in " \t\n\r":
+            idx += 1
+        if idx >= len(text):
+            break
+        obj, end = decoder.raw_decode(text, idx)
+        values.append(obj)
+        idx = end
+    return values
+
 
 def main(args: Optional[List[str]] = None) -> int:
     """Main entry point for jq shim CLI."""
-    parser = argparse.ArgumentParser(
+    argv = list(sys.argv[1:] if args is None else args)
+    parser = _ArgumentParser(
         prog="jq",
         description="Python jq shim - JSON processor",
         add_help=True,
     )
 
-    parser.add_argument("filter", nargs="?", default=".", help="jq filter expression")
-    parser.add_argument("files", nargs="*", help="Input JSON files")
-    parser.add_argument("-r", "--raw-output", action="store_true", help="Output raw strings")
-    parser.add_argument("-n", "--null-input", action="store_true", help="Use null as input")
-    parser.add_argument("-c", "--compact-output", action="store_true", help="Compact output")
-    parser.add_argument("-e", "--exit-status", action="store_true", help="Exit status on null/false")
-    parser.add_argument("-s", "--slurp", action="store_true", help="Read entire input into array")
-    parser.add_argument("-S", "--sort-keys", action="store_true", help="Sort object keys")
-    parser.add_argument("-j", "--join-output", action="store_true", help="No newline after output")
-    parser.add_argument("--tab", action="store_true", help="Use tabs for indentation")
-    parser.add_argument("--arg", nargs=2, action="append", default=[], metavar=("NAME", "VALUE"), help="Set variable")
-    parser.add_argument("--argjson", nargs=2, action="append", default=[], metavar=("NAME", "JSON"), help="Set JSON variable")
-    parser.add_argument("--slurpfile", nargs=2, action="append", default=[], metavar=("NAME", "FILE"), help="Set variable from file")
-    parser.add_argument("--rawfile", nargs=2, action="append", default=[], metavar=("NAME", "FILE"), help="Set variable to file contents")
-    parser.add_argument("--version", action="store_true", help="Show version")
+    parser.add_argument(
+        "filter",
+        nargs="?",
+        default=".",
+        help="jq filter expression (default: .)",
+    )
+    parser.add_argument(
+        "files",
+        nargs="*",
+        help="Input JSON files (default: stdin)",
+    )
+    parser.add_argument(
+        "-r", "--raw-output",
+        action="store_true",
+        help="Output raw strings without JSON encoding",
+    )
+    parser.add_argument(
+        "-n", "--null-input",
+        action="store_true",
+        help="Use null as single input value",
+    )
+    parser.add_argument(
+        "-c", "--compact-output",
+        action="store_true",
+        help="Compact output (no pretty printing)",
+    )
+    parser.add_argument(
+        "-e", "--exit-status",
+        action="store_true",
+        help="Exit with non-zero status on null/false result",
+    )
+    parser.add_argument(
+        "-s", "--slurp",
+        action="store_true",
+        help="Read entire input into array",
+    )
+    parser.add_argument(
+        "-S", "--sort-keys",
+        action="store_true",
+        help="Sort object keys in output",
+    )
+    parser.add_argument(
+        "-j", "--join-output",
+        action="store_true",
+        help="Raw output with no newline after each output",
+    )
+    parser.add_argument(
+        "--tab",
+        action="store_true",
+        help="Use tabs for indentation",
+    )
+    parser.add_argument(
+        "--arg",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("NAME", "VALUE"),
+        help="Set variable $NAME to string VALUE",
+    )
+    parser.add_argument(
+        "--argjson",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("NAME", "JSON"),
+        help="Set variable $NAME to JSON value",
+    )
+    parser.add_argument(
+        "--slurpfile",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("NAME", "FILE"),
+        help="Set variable $NAME to array of JSON values from FILE",
+    )
+    parser.add_argument(
+        "--rawfile",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("NAME", "FILE"),
+        help="Set variable $NAME to string contents of FILE",
+    )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Show version information",
+    )
 
-    parsed = parser.parse_args(args)
+    try:
+        parsed = parser.parse_args(argv)
+    except _ArgumentError as e:
+        # An option the shim does not implement (e.g. -R, --indent): let a
+        # real jq handle the invocation if one is installed.
+        return _delegate_or_fail(argv, str(e), 2)
 
     if parsed.version:
-        print("jq-shim - Self-contained Python jq implementation")
-        print("Version: 1.1.0")
+        print("jq-shim - Python jq implementation for ai-shuffle")
+        print("Version: 1.2.0")
         return 0
+
+    # Compile the filter before touching stdin, so that a program the shim
+    # cannot run can be handed to a real jq with the input still unread.
+    try:
+        ast = parse_jq_expression(parsed.filter)
+        validate(ast)
+    except (ParseError, EvaluationError) as e:
+        return _delegate_or_fail(argv, str(e), 3)
 
     # Build variables dict
     variables = {}
@@ -1339,130 +2155,56 @@ def main(args: Optional[List[str]] = None) -> int:
     for name, json_value in parsed.argjson:
         try:
             variables[name] = json.loads(json_value)
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, RecursionError) as e:
             print(f"jq: error: --argjson {name}: {e}", file=sys.stderr)
             return 2
     for name, filepath in parsed.slurpfile:
         try:
-            with open(filepath, "r") as f:
-                content = f.read()
-                values = []
-                decoder = json.JSONDecoder()
-                idx = 0
-                while idx < len(content):
-                    while idx < len(content) and content[idx] in " \t\n\r":
-                        idx += 1
-                    if idx >= len(content):
-                        break
-                    obj, end = decoder.raw_decode(content, idx)
-                    values.append(obj)
-                    idx = end
-                variables[name] = values
-        except (OSError, json.JSONDecodeError) as e:
+            with open(filepath, "r", encoding="utf-8") as f:
+                variables[name] = _parse_json_values(f.read())
+        except (OSError, json.JSONDecodeError, RecursionError) as e:
             print(f"jq: error: --slurpfile {name}: {e}", file=sys.stderr)
             return 2
     for name, filepath in parsed.rawfile:
         try:
-            with open(filepath, "r") as f:
+            with open(filepath, "r", encoding="utf-8") as f:
                 variables[name] = f.read()
         except OSError as e:
             print(f"jq: error: --rawfile {name}: {e}", file=sys.stderr)
             return 2
 
-    # Get input data
+    # Get input data (each input is a stream of JSON values, like jq)
     inputs = []
     if parsed.null_input:
         inputs = [None]
     elif parsed.files:
         for filepath in parsed.files:
             try:
-                with open(filepath, "r") as f:
-                    content = f.read().strip()
-                    if content:
-                        if parsed.slurp:
-                            decoder = json.JSONDecoder()
-                            idx = 0
-                            while idx < len(content):
-                                while idx < len(content) and content[idx] in " \t\n\r":
-                                    idx += 1
-                                if idx >= len(content):
-                                    break
-                                obj, end = decoder.raw_decode(content, idx)
-                                inputs.append(obj)
-                                idx = end
-                        else:
-                            inputs.append(json.loads(content))
+                with open(filepath, "r", encoding="utf-8") as f:
+                    inputs.extend(_parse_json_values(f.read()))
             except OSError as e:
                 print(f"jq: error reading {filepath}: {e}", file=sys.stderr)
                 return 2
-            except json.JSONDecodeError as e:
-                print(f"jq: error parsing {filepath}: {e}", file=sys.stderr)
-                return 3
+            except (json.JSONDecodeError, RecursionError) as e:
+                print(f"jq: error parsing {filepath}: {_input_error(e)}", file=sys.stderr)
+                return 2
     else:
-        stdin_data = sys.stdin.read().strip()
-        if stdin_data:
-            try:
-                if parsed.slurp:
-                    decoder = json.JSONDecoder()
-                    idx = 0
-                    while idx < len(stdin_data):
-                        while idx < len(stdin_data) and stdin_data[idx] in " \t\n\r":
-                            idx += 1
-                        if idx >= len(stdin_data):
-                            break
-                        obj, end = decoder.raw_decode(stdin_data, idx)
-                        inputs.append(obj)
-                        idx = end
-                else:
-                    inputs.append(json.loads(stdin_data))
-            except json.JSONDecodeError as e:
-                print(f"jq: error parsing stdin: {e}", file=sys.stderr)
-                return 3
-        else:
+        try:
+            inputs = _parse_json_values(sys.stdin.read())
+        except (json.JSONDecodeError, RecursionError) as e:
+            print(f"jq: error parsing stdin: {_input_error(e)}", file=sys.stderr)
+            return 2
+        if not inputs and not parsed.slurp:
             inputs = [None]
 
-    if parsed.slurp and len(inputs) > 0:
+    # Slurp mode: combine all inputs into array
+    if parsed.slurp:
         inputs = [inputs]
-
-    # Parse the filter expression
-    try:
-        ast = parse_jq_expression(parsed.filter)
-    except ParseError as e:
-        print(f"jq: error: {e}", file=sys.stderr)
-        return 3
 
     # Evaluate and output
     last_result = None
-
-    def is_multi_output(node: ASTNode) -> bool:
-        if node.type == NodeType.ITERATE:
-            return True
-        if node.type == NodeType.PIPE:
-            return is_multi_output(node.children[0]) or is_multi_output(node.children[1])
-        return False
-
-    def output_result(result: Any) -> None:
-        if result is None:
-            output = "null"
-        elif parsed.raw_output and isinstance(result, str):
-            output = result
-        else:
-            if parsed.sort_keys:
-                output = json.dumps(result, sort_keys=True, ensure_ascii=False,
-                                  indent=None if parsed.compact_output else (None if parsed.tab else 2),
-                                  separators=(",", ":") if parsed.compact_output else None)
-            else:
-                if parsed.compact_output:
-                    output = json.dumps(result, separators=(",", ":"), ensure_ascii=False)
-                elif parsed.tab:
-                    output = json.dumps(result, indent="\t", ensure_ascii=False)
-                else:
-                    output = json.dumps(result, indent=2, ensure_ascii=False)
-
-        if parsed.join_output:
-            print(output, end="")
-        else:
-            print(output)
+    produced = False
+    multi = is_stream(ast)
 
     for input_data in inputs:
         try:
@@ -1471,23 +2213,55 @@ def main(args: Optional[List[str]] = None) -> int:
             if result is EMPTY:
                 continue
 
-            results = result if (isinstance(result, list) and is_multi_output(ast)) else [result]
+            # Handle multiple results from generators
+            results = result if multi else [result]
 
             for r in results:
                 if r is EMPTY:
                     continue
+
                 last_result = r
-                output_result(r)
+                produced = True
+                output_result(r, parsed)
 
         except EvaluationError as e:
             print(f"jq: error: {e}", file=sys.stderr)
             return 5
+        except RecursionError:
+            print("jq: error: value is nested too deeply to output", file=sys.stderr)
+            return 5
 
+    # Exit status based on last result (jq -e: 1 for false/null, 4 for no output)
     if parsed.exit_status:
+        if not produced:
+            return 4
         if last_result is None or last_result is False:
             return 1
 
     return 0
+
+
+def _input_error(error: Exception) -> str:
+    if isinstance(error, RecursionError):
+        return "input is nested too deeply"
+    return str(error)
+
+
+def output_result(result: Any, opts: argparse.Namespace) -> None:
+    """Output a single result value."""
+    if (opts.raw_output or opts.join_output) and isinstance(result, str):
+        output = result
+    elif opts.compact_output:
+        output = json.dumps(result, separators=(",", ":"), ensure_ascii=False,
+                            sort_keys=opts.sort_keys)
+    else:
+        output = json.dumps(result, indent="\t" if opts.tab else 2,
+                            ensure_ascii=False, sort_keys=opts.sort_keys)
+
+    if opts.join_output:
+        print(output, end="")
+    else:
+        print(output)
 
 
 if __name__ == "__main__":
