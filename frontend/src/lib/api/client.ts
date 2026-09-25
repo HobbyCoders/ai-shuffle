@@ -89,7 +89,17 @@ async function extractErrorDetail(response: Response): Promise<string> {
 				}
 				return `API error: HTTP ${status}`;
 			}
-			if (json.detail) return json.detail;
+			// FastAPI request validation (422) sends a list of {loc, msg}; the
+			// detail must stay a string, so name each failing field.
+			if (Array.isArray(json.detail)) {
+				const messages = json.detail
+					.filter((d: unknown) => d && typeof d === 'object' && typeof (d as { msg?: unknown }).msg === 'string')
+					.map((d: { loc?: unknown; msg: string }) => {
+						const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : null;
+						return typeof field === 'string' ? `${field}: ${d.msg}` : d.msg;
+					});
+				if (messages.length) return messages.join('; ');
+			} else if (json.detail) return json.detail;
 			if (json.message) return json.message;
 			if (json.error) return typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
 			// Even when `type` is missing, an explicit `retry_after_seconds` on a

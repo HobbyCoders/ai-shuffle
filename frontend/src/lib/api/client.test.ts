@@ -244,6 +244,36 @@ describe('ApiClient', () => {
 			});
 		});
 
+		it('should flatten a FastAPI validation list into a string detail', async () => {
+			// e.g. POST /projects/{id}/git/init with an option-like default_branch.
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 422,
+				json: () => Promise.resolve({ detail: [
+					{ type: 'string_pattern_mismatch', loc: ['body', 'default_branch'], msg: "String should match pattern '^[a-zA-Z0-9_][a-zA-Z0-9._/-]*$'" },
+					{ type: 'missing', loc: ['query', 0], msg: 'Field required' }
+				] })
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: "default_branch: String should match pattern '^[a-zA-Z0-9_][a-zA-Z0-9._/-]*$'; Field required",
+				status: 422
+			});
+		});
+
+		it('should fall back to the status message for a validation list without messages', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 422,
+				json: () => Promise.resolve({ detail: [{ loc: ['body'] }] })
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Validation error — the input data is invalid',
+				status: 422
+			});
+		});
+
 		it('should use status description for unknown status when body is empty', async () => {
 			fetchMock.mockResolvedValueOnce({
 				ok: false,
