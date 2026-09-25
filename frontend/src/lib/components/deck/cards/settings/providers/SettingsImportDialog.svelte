@@ -464,7 +464,6 @@
 										<div class="min-w-0 flex-1">
 											<h4 id={`category-${category.id}`}>{category.label}</h4>
 											{#if category.description}<p>{category.description}</p>{/if}
-											{#if category.id === 'settings_plugins_inventory'}<p class="inventory-note">Inventory only—settings, plugins, and redacted MCP metadata are not activated.</p>{/if}
 										</div>
 										<span class="count-chip">{category.items.length}</span>
 									</div>
@@ -703,7 +702,6 @@
 	.item-diagnostic::before { content: 'Note: '; font-weight: 600; }
 	.item-path { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; font: 10.5px var(--font-mono, monospace); color: var(--muted-foreground); overflow-wrap: anywhere; }
 	.item-path :global(svg) { width: 11px; height: 11px; flex: none; }
-	.inventory-note { color: var(--foreground) !important; }
 	.provenance-chip, .status-chip { border-radius: 999px; padding: 2px 7px; font-size: 9.5px; font-weight: 650; letter-spacing: .025em; text-transform: uppercase; }
 	.provenance-chip { border: 1px solid var(--border); background: var(--card); font-family: var(--font-mono, monospace); color: var(--muted-foreground); }
 	.provenance-chip.claude { border-color: color-mix(in oklch, var(--primary) 24%, var(--border)); color: var(--primary); }
