@@ -470,6 +470,24 @@ async function openConnection(
 	return { pc, dc, callId };
 }
 
+/**
+ * End the call with an error when the LIVE connection fails mid-call. Armed on
+ * the first connection and again on each re-handshake's replacement.
+ */
+function watchForDrop(conn: Connection, owner: string, epoch: number): void {
+	conn.pc.addEventListener('connectionstatechange', () => {
+		if (epoch !== generation || connection !== conn) return;
+		if (conn.pc.connectionState !== 'failed') return;
+		// teardown() resets the store once its awaits settle; the reason is
+		// written after that, or it would be wiped.
+		const ending = teardown({ notifyBackend: true, status: 'error' });
+		const endedGeneration = generation;
+		void ending.then(() => {
+			if (endedGeneration === generation) patch({ sessionId: owner, error: 'The voice connection dropped.' });
+		});
+	});
+}
+
 function closeConnection(conn: Connection | null): void {
 	if (!conn) return;
 	try {
@@ -570,6 +588,7 @@ async function reconnect(): Promise<void> {
 		}
 
 		connection = next;
+		watchForDrop(next, sessionId, myGeneration);
 		applyMicMuted(get(voiceCallState).micMuted);
 		if (next.callId) await attachVoiceCall(sessionId, next.callId);
 		if (myGeneration !== generation) {
@@ -727,14 +746,7 @@ export async function startCall(
 		if (conn.callId) await attachVoiceCall(sessionIdIn, conn.callId);
 		if (myGeneration !== generation) return;
 
-		conn.pc.addEventListener('connectionstatechange', () => {
-			if (myGeneration !== generation) return;
-			const s = conn.pc.connectionState;
-			if (s === 'failed') {
-				void teardown({ notifyBackend: true, status: 'error' });
-				patch({ sessionId: sessionIdIn, status: 'error', error: 'The voice connection dropped.' });
-			}
-		});
+		watchForDrop(conn, sessionIdIn, myGeneration);
 
 		patch({ status: 'live', startedAt: Date.now() });
 		armReconnectTimer();
