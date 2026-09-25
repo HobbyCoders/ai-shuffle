@@ -548,6 +548,9 @@ async def delete_device(device_id: str, token: str = Depends(require_admin)):
     paired_client_id = device.get("paired_client_id")
     if paired_client_id:
         await run_sync(db.revoke_paired_client, paired_client_id)
+        # Every socket the device holds closes now (4001), not at its next re-check.
+        from app.api.ws_key_watch import close_paired_client_sockets
+        close_paired_client_sockets(paired_client_id)
     if not await run_sync(db.delete_mobile_device, device_id):
         raise HTTPException(status_code=404, detail="Device not found")
 

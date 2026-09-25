@@ -334,10 +334,12 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
 # speaking the protocol, and the socket is closed with 1007 (invalid payload).
 MAX_MALFORMED_FRAMES = 10
 MALFORMED_FRAME_CLOSE_CODE = 1007
-# An API key disabled, deleted or rotated while its socket is open.
+# An API key disabled, deleted or rotated, or a paired device unpaired (or its
+# session token replaced), while its socket is open.
 REVOKED_PRINCIPAL_CLOSE_CODE = 4001
-# An API-user socket re-validates its key this often even when the client sends
-# nothing (no pong, idle tab), and at once when the key's admin routes signal it.
+# An API-user or paired-device socket re-validates its principal this often even
+# when the client sends nothing (no pong, idle tab), and at once when the key's
+# admin routes or the device's unpair routes signal it.
 PRINCIPAL_RECHECK_SECONDS = 30.0
 RATE_LIMITED_MESSAGE = "Rate limited: too many messages. Please slow down."
 # The refusal for a session an API key may not act on, known or not.
@@ -369,9 +371,11 @@ class WebSocketRateLimiter:
         return True
 
 
-# Open API-user sockets by api_user_id, so the key's disable/rotate/delete
-# routes can make them re-check at once. Weak: a handler that never ran, or one
-# whose teardown was skipped, is not kept alive by the registry.
+# Open API-user and paired-device sockets by ``ws_key_watch.watch_key`` (the
+# api_user_id, or ``"paired:<client id>"``), so the key's disable/rotate/delete
+# routes and the device's unpair routes can make them re-check at once. Weak: a
+# handler that never ran, or one whose teardown was skipped, is not kept alive
+# by the registry.
 _api_user_sockets: Dict[str, "weakref.WeakSet[ChatWebSocketHandler]"] = {}
 
 
@@ -386,6 +390,15 @@ def recheck_api_user_sockets(api_user_id: str) -> int:
     for handler in handlers:
         handler._request_principal_recheck()
     return len(handlers)
+
+
+def recheck_paired_client_sockets(client_id: str) -> int:
+    """Make every open chat socket of paired device ``client_id`` re-validate now.
+
+    Called after the device is unpaired; a revoked device's sockets close with 4001.
+    """
+    from app.api.ws_key_watch import PAIRED_WATCH_PREFIX
+    return recheck_api_user_sockets(PAIRED_WATCH_PREFIX + client_id)
 
 
 class _Revoked:
@@ -444,18 +457,21 @@ class ChatWebSocketHandler:
         self._close_code: Optional[int] = None
         self._close_reason: str = ""
 
-        # API-user sockets only: a watchdog re-validates the key every
-        # PRINCIPAL_RECHECK_SECONDS and on ``_recheck`` (set by the key's admin
-        # routes), and sets ``_revoked`` so ``run`` stops waiting for a frame
-        # that an idle client may never send.
+        # API-user and paired-device sockets only: a watchdog re-validates the
+        # principal every PRINCIPAL_RECHECK_SECONDS and on ``_recheck`` (set by
+        # the key's admin routes or the device's unpair routes), and sets
+        # ``_revoked`` so ``run`` stops waiting for a frame that an idle client
+        # may never send.
         self._recheck: Optional[asyncio.Event] = None
         self._revoked: Optional[asyncio.Event] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        if (isinstance(trusted_principal, dict) and trusted_principal.get("kind") == "api_user"
-                and api_user_id):
+        from app.api.ws_key_watch import watch_key
+        self._watch_key: Optional[str] = watch_key(trusted_principal)
+        if self._watch_key is not None and (
+                trusted_principal.get("kind") != "api_user" or api_user_id):
             self._recheck = asyncio.Event()
             self._revoked = asyncio.Event()
-            _api_user_sockets.setdefault(api_user_id, weakref.WeakSet()).add(self)
+            _api_user_sockets.setdefault(self._watch_key, weakref.WeakSet()).add(self)
 
         # Message-type dispatch table
         self._handlers: Dict[str, Callable[[dict], Any]] = {
@@ -734,11 +750,11 @@ class ChatWebSocketHandler:
             # running query task fast-fails instead of resurrecting a writer.
             self.connection_healthy = False
             if self._revoked is not None:
-                sockets = _api_user_sockets.get(self.api_user_id)
+                sockets = _api_user_sockets.get(self._watch_key)
                 if sockets is not None:
                     sockets.discard(self)
                     if not sockets:
-                        _api_user_sockets.pop(self.api_user_id, None)
+                        _api_user_sockets.pop(self._watch_key, None)
             writer = self._writer
             if writer is not None:
                 await writer.aclose()
@@ -752,22 +768,33 @@ class ChatWebSocketHandler:
                     logger.debug("Chat WebSocket close failed", exc_info=True)
 
     async def _principal_still_valid(self) -> bool:
-        """Re-validate an API-user principal; False (and a 4001 close) once revoked.
+        """Per inbound frame: re-validate an API-user principal; False (and a 4001 close) once revoked.
 
         Authentication runs at connect only, so without this a key disabled or
-        rotated after connecting keeps its socket. Other principals are checked
-        where they bind a session.
+        rotated after connecting keeps its socket. A paired device is
+        re-validated by the watchdog (its live checks may ask the account hub,
+        too slow for every frame) and where it binds a session.
         """
         principal = self.trusted_principal
         if not isinstance(principal, dict) or principal.get("kind") != "api_user":
             return True
-        from app.core.mobile_tool_identity import validate
+        return await self._revalidate_principal()
+
+    async def _revalidate_principal(self) -> bool:
+        """Re-validate a watched principal; False (and a 4001 close) once it is revoked.
+
+        A hub outage raises (the watchdog retries); only a refusal closes.
+        """
+        principal = self.trusted_principal
+        if self._watch_key is None or not isinstance(principal, dict):
+            return True
+        from app.core.mobile_tool_identity import revalidate
         try:
-            await run_sync(validate, principal)
+            await run_sync(revalidate, principal)
         except PermissionError as exc:
-            logger.info("Closing chat WebSocket of API user %s: %s", self.api_user_id, exc)
+            logger.info("Closing chat WebSocket of %s: %s", self._watch_key, exc)
             self._close_code = REVOKED_PRINCIPAL_CLOSE_CODE
-            self._close_reason = str(exc)
+            self._close_reason = str(exc)[:120]
             return False
         return True
 
@@ -786,7 +813,7 @@ class ChatWebSocketHandler:
             loop.call_soon_threadsafe(self._recheck.set)
 
     async def _principal_watchdog(self) -> None:
-        """Re-validate the key without waiting for a client frame; set ``_revoked`` once it fails."""
+        """Re-validate the principal without waiting for a client frame; set ``_revoked`` once it fails."""
         assert self._recheck is not None and self._revoked is not None
         while True:
             try:
@@ -795,9 +822,9 @@ class ChatWebSocketHandler:
                 pass
             self._recheck.clear()
             try:
-                valid = await self._principal_still_valid()
-            except Exception:  # noqa: BLE001 — a DB hiccup must not end a live socket
-                logger.warning("API key re-check failed; retrying", exc_info=True)
+                valid = await self._revalidate_principal()
+            except Exception:  # noqa: BLE001 — a DB or hub hiccup must not end a live socket
+                logger.warning("Socket principal re-check failed; retrying", exc_info=True)
                 continue
             if not valid:
                 self._revoked.set()

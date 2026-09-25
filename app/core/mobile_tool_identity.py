@@ -53,6 +53,25 @@ def validate(value):
         raise PermissionError('Unknown principal')
 
 
+def revalidate(value):
+    """:func:`validate` for an open socket's periodic re-check.
+
+    A paired device must still be paired (not revoked), its token generation
+    unchanged (the session hash still matches, so an unpair, a logout or a
+    rotation all fail) and its account membership live. The device's live
+    checks refuse with HTTP 401/403; those mean the principal is gone and
+    become ``PermissionError`` like every other refusal. An outage (5xx) is
+    raised as is, so the caller retries instead of dropping a live socket.
+    """
+    from fastapi import HTTPException
+    try:
+        validate(value)
+    except HTTPException as exc:
+        if exc.status_code in (401, 403):
+            raise PermissionError(str(exc.detail)) from exc
+        raise
+
+
 def bind_session(session_id, value, *, new=False, claim=False, conn=None):
     validate(value)
     return store.bind(session_id, value, new=new, claim=claim, conn=conn)
