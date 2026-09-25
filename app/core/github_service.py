@@ -425,8 +425,8 @@ class GitHubService:
 
         Raises:
             GitHubCliError: gh could not answer. Callers MUST NOT treat this as
-                "no PR exists" (that is finding G2: a failure cached as a
-                negative answer flips the UI between Merge-PR and Create-PR).
+                "no PR exists" (a failure cached as a negative answer flips
+                the UI between Merge-PR and Create-PR).
         """
         try:
             cmd = [

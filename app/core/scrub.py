@@ -1,11 +1,11 @@
 """Credential scrubbing for text on its way into durable storage.
 
-Issue R12: a model pasted a full ``DATABASE_URL`` — password included — into a
-code-mode cell. The cell text rode the normal transcript path into
+A model can paste a full ``DATABASE_URL`` — password included — into a
+code-mode cell. The cell text rides the normal transcript path into
 ``fluid_session_nodes`` (and, via the tool-call events that carry the same
-text, into ``fluid_session_events``), where it is now permanently persisted.
-Nothing in the app redacts it, so the secret is readable by anything that can
-read the session store: recall search, session export, a DB dump, a backup.
+text, into ``fluid_session_events``), where it is permanently persisted.
+Unredacted, the secret is readable by anything that can read the session
+store: recall search, session export, a DB dump, a backup.
 
 This module is the redaction boundary. It is deliberately tiny and dependency
 free so the persistence layers can call it from inside their existing jsonb

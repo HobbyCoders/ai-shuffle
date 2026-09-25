@@ -531,10 +531,9 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
 
     # v2-projects: resolve each session's origin-keyed project + origin token
     # with TARGETED reads for just the ids/origins this page references (never a
-    # per-session DB call, and no longer a full ``list_projects_v2`` table scan
+    # per-session DB call, and never a full ``list_projects_v2`` table scan
     # per request). ``origin`` is 1:1 with ``link_group_id`` for grouped
-    # projects, so the board folds identically. Unconditional since PR-B (the
-    # ``v2_projects`` kill switch was removed).
+    # projects, so the board folds identically.
     pv2_by_id, pv2_origin_to_id = _projects_v2_targeted(
         (s.get("project_v2_id") for s in sessions),
         project_origins.values(),

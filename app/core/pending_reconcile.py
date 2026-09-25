@@ -7,14 +7,10 @@ a ``started`` event puts an id in, and ONLY a terminal ``SubagentEvent``
 (``finished``/``failed``/``cancelled``) takes it out. Every ``SessionParked``
 lists whatever is left.
 
-That makes a lost terminal permanent. In the audited session seven tasks came
-to rest without one — six delivered as mid-turn steers before the round-6
-retirement fix shipped, one killed by an interrupt that emitted nothing — and
-those seven ids then appeared in 35 of the next 38 parks, one of them for
-twenty-one hours. The round-6 fix (``turn_scheduler.retire_task_terminals``)
-stops NEW ids leaking, but it is not retroactive: the terminal events are
-absent from the durable log, so each rehydrate faithfully re-creates the
-phantoms.
+That makes a lost terminal permanent: the id is listed on every later park.
+``turn_scheduler.retire_task_terminals`` stops NEW ids leaking, but it is not
+retroactive: once a terminal event is absent from the durable log, each
+rehydrate faithfully re-creates the phantom.
 
 This module closes both halves:
 
@@ -23,7 +19,7 @@ This module closes both halves:
   pending, checks each id against the app's task truth (the in-memory registry
   first, the durable ``background_tasks`` mirror behind it), and submits a
   terminal for every id the app knows is over. The submission goes through
-  ``turn_scheduler.retire_task_terminals`` — the round-6 helper — so there is
+  ``turn_scheduler.retire_task_terminals``, so there is
   exactly one place that talks to ``prepare_background_completions``. Because
   fluid PERSISTS the resulting terminal ``SubagentEvent``, this repair is
   durable: the next rehydrate is clean.
@@ -123,10 +119,8 @@ def settled_task_ids(session_id: str, task_ids: Sequence[str]) -> Set[str]:
     """The subset of ``task_ids`` whose DURABLE row says they are over.
 
     The park gate reads the in-memory registry, which can be a beat behind the
-    row a completion already wrote (the audited park listed a shell whose row
-    had settled four seconds earlier and whose terminal frame landed 0.13 s
-    after the park, buying a no-op wake turn). An id with no durable row is
-    never reported settled.
+    row a completion already wrote; parking on such an id buys a no-op wake
+    turn. An id with no durable row is never reported settled.
     """
     statuses = durable_task_statuses(session_id, task_ids)
     return {

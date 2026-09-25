@@ -1,11 +1,11 @@
-"""Durable end-of-turn side effects (V2 Phase 1).
+"""Durable end-of-turn side effects.
 
-Every turn-END path (the main chat_ws pump, the background query runner, the
-unpark delivery, the drain-pump CLI-turn finalize) calls this to perform the
+Every turn-END path (``SessionRuntime._finalize``, the background query runner,
+the idle reader's CLI-wake finalize) calls this to perform the
 DURABLE write a finished turn owes the session row:
 
 1. Parked marker — if the turn ends with live background work (a running
-   sub-agent or an SDK-backgrounded shell), record the pinning kind on the
+   sub-agent or a background shell), record the pinning kind on the
    session row; otherwise clear it. This is what lets a later boot tell
    "parked awaiting unpark" apart from idle (boot reconcile force-clears
    stale markers, since no background work survives a restart).
@@ -18,8 +18,8 @@ DURABLE write a finished turn owes the session row:
    left the row (and the sidebar's PR state) naming a branch it had left.
    Turn end reads the checkout's real HEAD and corrects the row when it moved.
 
-3. Summary sidecar flush — the ``session_store_summaries`` fold is COALESCED
-   (finding B4): while a turn streams, at most one fold per ~2s runs inside
+3. Summary sidecar flush — the ``session_store_summaries`` fold is COALESCED:
+   while a turn streams, at most one fold per ~2s runs inside
    the append path, so the sidecar is normally a little behind when the turn
    ends and stays behind until the next summary READER flushes it. Folding
    here makes it current the moment the turn completes, which is when the
@@ -178,14 +178,13 @@ async def _write_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
 async def clear_parked_marker_if_idle(session_id: str) -> bool:
     """Drop ``parked_task_kind`` once nothing is left to park on. Never raises.
 
-    The marker is written at turn end and, until now, cleared only by the NEXT
+    The marker is written at turn end and otherwise cleared only by the NEXT
     turn's end or by a boot reconcile. When the last background worker settles
     BETWEEN turns and no wake fires — a worker that died with its wake already
     suppressed, or one killed by a sweep — there is no next turn, so the marker
-    stayed ``agent`` for as long as the process lived. Two sessions in the
-    2026-09-05 audit sat that way with both their tasks terminal;
-    ``lifecycle_state._detect_drift`` already names the state
-    (``parked-marker-while-idle``) and only ever logged it.
+    would stay ``agent`` for as long as the process lived.
+    ``lifecycle_state._detect_drift`` names that state
+    (``parked-marker-while-idle``) but only logs it.
 
     Deliberately CLEAR-ONLY. Setting the marker is the turn's decision — it
     knows about launches that have no registry record yet — and a terminal-task

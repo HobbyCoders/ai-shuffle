@@ -1,4 +1,4 @@
-"""Working-set sync (V2 Phase 4, Q6).
+"""Working-set sync.
 
 Transports a session's dirty working tree between runners via a hidden git
 scratch ref (``refs/aishuffle/sessions/<session_id>``) pushed to ``origin``,

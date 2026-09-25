@@ -1,8 +1,7 @@
 """Retention for the fluid event log (``fluid_session_events``).
 
 The log is append-only and the engine persists every bus event to it
-unfiltered, so streaming deltas dominate it by volume — one audited session
-held 27,510 ``ToolArgsDelta`` rows by itself. Left alone the table becomes the
+unfiltered, so streaming deltas dominate it by volume. Left alone the table becomes the
 largest thing in the database, and it has no timestamp column or secondary
 index to make that cheap to live with.
 

@@ -23,9 +23,9 @@ from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
-# V2 Phase 4 (Q4): permission prompts persist as ``pending_interactions`` rows
-# of this kind, so any install answers them relay-free. TTL is the durable
-# form of the legacy 300s auto-deny (OD-2/Q4-5).
+# Permission prompts persist as ``pending_interactions`` rows of this kind, so
+# any install answers them relay-free. An unanswered prompt is denied when its
+# TTL lapses.
 PERMISSION_KIND = "permission"
 PERMISSION_TTL_SECONDS = 300
 
@@ -36,7 +36,8 @@ class PermissionDecision(str, Enum):
 
 
 class _DeferSentinel:
-    """Returned by request_permission when user defers; query_engine translates to SDK deferred output."""
+    """Returned by request_permission when the user defers; query_engine turns it
+    into a PreToolUse ``defer`` decision."""
 
 
 @dataclass
@@ -49,19 +50,19 @@ class PermissionRequest:
     tool_input: Dict[str, Any]
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-    # SDK context fields (SDK 0.1.52+) — enables disambiguating parallel requests
+    # Permission-context fields — enable disambiguating parallel requests
     tool_use_id: Optional[str] = None
     agent_id: Optional[str] = None
 
-    # SDK 0.1.81 ToolPermissionContext enrichment fields (Slice D)
+    # Permission-context enrichment fields (SDK-shaped)
     title: Optional[str] = None
     display_name: Optional[str] = None
     description: Optional[str] = None
     decision_reason: Optional[str] = None
     blocked_path: Optional[str] = None
 
-    # P3-A3: set ONLY when this prompt was raised by a ProviderAgent worker and
-    # redirected onto its parent's session (see app/core/provider_agent_approvals).
+    # Set ONLY when this prompt was raised by a Task worker and redirected
+    # onto its parent's session (see app/core/provider_agent_approvals).
     # Carries the asking worker's label + session id so the UI can tag it. None
     # on every ordinary permission request, and omitted from payloads/events when
     # None, so the non-worker path is unchanged.
@@ -174,15 +175,15 @@ class PermissionHandler:
             tool_name: Name of the tool being requested
             tool_input: Tool input parameters
             broadcast_func: Async function to broadcast to WebSocket
-            tool_use_id: SDK tool_use_id from ToolPermissionContext (SDK 0.1.52+)
-            agent_id: SDK agent_id from ToolPermissionContext (SDK 0.1.52+)
-            title: SDK 0.1.81 ToolPermissionContext.title
-            display_name: SDK 0.1.81 ToolPermissionContext.display_name
-            description: SDK 0.1.81 ToolPermissionContext.description
-            decision_reason: SDK 0.1.81 ToolPermissionContext.decision_reason
-            blocked_path: SDK 0.1.81 ToolPermissionContext.blocked_path
-            provider_agent: P3-A3 worker tag ({worker_session_id, label, ...})
-                when this prompt was raised by a ProviderAgent worker and
+            tool_use_id: tool_use_id from the permission callback's context
+            agent_id: agent_id from the permission callback's context
+            title: context title
+            display_name: context display_name
+            description: context description
+            decision_reason: context decision_reason
+            blocked_path: context blocked_path
+            provider_agent: worker tag ({worker_session_id, label, ...})
+                when this prompt was raised by a Task worker and
                 redirected onto its parent's session. None otherwise, and then
                 invisible in every payload and WS event.
 
@@ -207,15 +208,14 @@ class PermissionHandler:
         )
 
     # ------------------------------------------------------------------
-    # V2 Phase 4 (Q4) — pending_interactions-backed permission flow
+    # pending_interactions-backed permission flow
     #
     # The durable ``pending_interactions`` row is the single source of truth:
     # the executing runner blocks on it via
     # ``interaction_wait.await_interaction`` while ANY install answers it
     # directly against the shared table (no cloud_relay).
-    # ``_session_rules`` (a purely local convenience) still short-circuits
-    # future prompts on the executing runner exactly as before. All frontend
-    # WebSocket shapes are byte-identical to the legacy path.
+    # ``_session_rules`` (a purely local convenience) short-circuits future
+    # prompts on the executing runner.
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -236,13 +236,13 @@ class PermissionHandler:
         """Assemble the JSONB payload persisted on a permission interaction row.
 
         Carries everything the answer/broadcast/rule-match paths need: the FE
-        ``request_id`` (matched Python-side, Q4-3), the rule-match keys
-        (``profile_id``/``tool_name``/``tool_input``), and the SDK enrichment
-        fields. ``profile_id`` is internal-only and never surfaced in a WS event.
+        ``request_id`` (matched Python-side), the rule-match keys
+        (``profile_id``/``tool_name``/``tool_input``), and the context
+        enrichment fields. ``profile_id`` is internal-only and never surfaced
+        in a WS event.
 
-        ``provider_agent`` (P3-A3) rides the SAME ``is not None`` guard as every
-        enrichment field, so an ordinary prompt's payload is byte-identical to
-        what it was before that parameter existed.
+        ``provider_agent`` rides the SAME ``is not None`` guard as every
+        enrichment field, so an ordinary prompt's payload never carries it.
         """
         payload: Dict[str, Any] = {
             "request_id": request_id,
@@ -306,7 +306,7 @@ class PermissionHandler:
             "description",
             "decision_reason",
             "blocked_path",
-            # P3-A3 worker tag — present only on a redirected worker prompt.
+            # Worker tag — present only on a redirected worker prompt.
             "provider_agent",
         ):
             if payload.get(key) is not None:
@@ -330,12 +330,12 @@ class PermissionHandler:
         blocked_path: Optional[str] = None,
         provider_agent: Optional[Dict[str, Any]] = None,
     ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
-        """Table-backed request_permission (V2 Phase 4)."""
+        """Table-backed request_permission."""
         from app.core import interaction_wait
         from app.db import interactions
 
-        # Saved rules still short-circuit on the executing runner (identical to
-        # legacy — profile rules are shared-DB, session rules are local).
+        # Saved rules short-circuit on the executing runner (profile rules are
+        # shared-DB, session rules are local).
         rule = self._check_rules(session_id, profile_id, tool_name, tool_input)
         if rule:
             logger.debug(f"Permission for {tool_name} auto-resolved by rule: {rule.decision}")
@@ -396,7 +396,7 @@ class PermissionHandler:
                 "connector permission funnel failed", exc_info=True
             )
 
-        # Durable lifecycle event (#653): emit AFTER the WS broadcast, swallowed
+        # Durable lifecycle event: emit AFTER the WS broadcast, swallowed
         # on failure so a log append can never break the permission flow.
         from app.core import interaction_events
 
@@ -404,7 +404,7 @@ class PermissionHandler:
             session_id, interaction_id, request_id, PERMISSION_KIND, payload,
         )
 
-        # Notify watching mobile devices (verbatim from the legacy path).
+        # Notify watching mobile devices.
         try:
             from app.services.push_notification import fire_and_forget_notify
 
@@ -425,7 +425,7 @@ class PermissionHandler:
         # Block on the durable row: a peer install's answer wakes us via the
         # gateway NOTIFY; a local answer wakes us in-process. The adapter also
         # honours its own local expires_at deadline so a dead sweeper never
-        # wedges the turn (Q4-4).
+        # wedges the turn.
         result_row = await interaction_wait.await_interaction(
             interaction_id, session_id, float(PERMISSION_TTL_SECONDS)
         )
@@ -433,7 +433,7 @@ class PermissionHandler:
         state = (result_row or {}).get("state")
         if result_row is None or state in ("expired", "pending"):
             # Timed out — durably expired, or the local deadline lapsed with the
-            # row still pending. Dismiss the modal + deny (legacy timeout arm).
+            # row still pending. Dismiss the modal + deny.
             try:
                 await broadcast_func({
                     "type": "permission_timeout",
@@ -447,7 +447,7 @@ class PermissionHandler:
             return PermissionResultDeny(message="Request cancelled")
 
         answer = result_row.get("answer") or {}
-        # A14: a ``remember: "session"`` answered on ANY install stamps
+        # A ``remember: "session"`` answered on ANY install stamps
         # remember/pattern onto the shared row; replay it into THIS runner's local
         # session rules (BEFORE returning the decision) so identical follow-up
         # requests short-circuit via _check_rules. Idempotent, and a no-op unless
@@ -481,8 +481,8 @@ class PermissionHandler:
         broadcast_func: Optional["callable"],
         answered_by_device: Optional[str],
     ) -> Dict[str, Any]:
-        """Table-backed respond (V2 Phase 4). Resolves against the shared row so
-        any install can answer relay-free (Q4-3/Q4-6)."""
+        """Table-backed respond. Resolves against the shared row so any install
+        can answer relay-free."""
         from app.core import interaction_wait
         from app.db import interactions
 
@@ -498,16 +498,16 @@ class PermissionHandler:
             return {"error": "Request not found"}
         payload = row.get("payload") or {}
 
-        # Defer (Q4-2, option a): answer THIS row {decision: defer}; the requeue
-        # path later mints a fresh pending row with the same request_id. The
-        # awaiting request_permission translates the answered-defer row to a
-        # _DeferSentinel, exactly as the legacy in-memory defer did.
+        # Defer: answer THIS row {decision: defer}; the requeue path later
+        # mints a fresh pending row with the same request_id. The awaiting
+        # request_permission translates the answered-defer row to a
+        # _DeferSentinel.
         if decision == "defer":
             if not await run_sync(
                 interactions.answer_interaction,
                 row["id"], {"decision": "defer"}, answered_by_device
             ):
-                # A15: lost the TOCTOU — a concurrent responder already answered
+                # Lost the TOCTOU — a concurrent responder already answered
                 # this row. A defer must not report success or broadcast when it
                 # did not actually resolve anything.
                 return {"error": "Request not found"}
@@ -520,7 +520,7 @@ class PermissionHandler:
                     "deferred_ids": [request_id],
                     "remaining_count": self._v2_pending_count(session_id),
                 })
-            # Durable lifecycle event (#653): the guarded UPDATE won above, so
+            # Durable lifecycle event: the guarded UPDATE won above, so
             # emit exactly one interaction.answered. AFTER the WS broadcast.
             from app.core import interaction_events
 
@@ -539,18 +539,19 @@ class PermissionHandler:
             answer = {"decision": "allow", "behavior": "allow", "updatedInput": tool_input}
         else:
             answer = {"decision": "deny", "behavior": "deny", "message": "User denied permission"}
-        # A14: ride a session-remember hint on the shared answer JSONB so the
+        # Ride a session-remember hint on the shared answer JSONB so the
         # EXECUTING runner (possibly a different install than the one answering)
         # learns the rule and short-circuits identical follow-ups. Stamp BEFORE
-        # the guarded update so A15's False branch discards it with every other
-        # side effect. (profile rules are DB-persisted and already shared.)
+        # the guarded update so the lost-race branch below discards it with
+        # every other side effect. (profile rules are DB-persisted and already
+        # shared.)
         if remember == "session":
             answer["remember"] = "session"
             answer["pattern"] = pattern
         if not await run_sync(
             interactions.answer_interaction, row["id"], answer, answered_by_device
         ):
-            # A15: lost the TOCTOU — a concurrent responder already answered this
+            # Lost the TOCTOU — a concurrent responder already answered this
             # row, or it expired between the pending read and here. Report the
             # not-resolved shape and leave NO side effects: no remember rule, no
             # defer requeue, no wake.
@@ -570,7 +571,7 @@ class PermissionHandler:
                 decision=PermissionDecision(decision),
             )
             if remember == "session":
-                # Session rules are executing-runner-local (as in legacy); a
+                # Session rules are executing-runner-local; a
                 # rule created on a peer install does not reach the owner.
                 self._session_rules.setdefault(session_id, []).append(rule)
             else:
@@ -596,7 +597,7 @@ class PermissionHandler:
                         "remaining_count": self._v2_pending_count(session_id),
                     })
 
-        # Durable lifecycle events (#653): each guarded UPDATE that won emits
+        # Durable lifecycle events: each guarded UPDATE that won emits
         # exactly one interaction.answered, AFTER the notify_changed + WS
         # broadcast above. The primary row plus every sibling row auto-resolved
         # by a remember rule.
@@ -627,7 +628,7 @@ class PermissionHandler:
         Returns ``(resolved_request_ids, emits)`` where ``emits`` is a list of
         ``(interaction_id, request_id, answer)`` tuples for every row whose
         guarded UPDATE won — the async caller emits the durable
-        ``interaction.answered`` events (#653), one per winning transition.
+        ``interaction.answered`` events, one per winning transition.
         """
         from app.db import interactions
 
@@ -645,7 +646,7 @@ class PermissionHandler:
                 }
             else:
                 answer = {"decision": "deny", "behavior": "deny", "message": "Denied by rule"}
-            # A14: when the triggering rule is a session-remember (session_id set;
+            # When the triggering rule is a session-remember (session_id set;
             # profile rules leave it None), stamp the same hint onto each
             # batch-resolved row so the executing runner installs the rule when
             # that row's waiter wakes — matching the direct-answer stamping.
@@ -666,13 +667,13 @@ class PermissionHandler:
         pattern: Optional[str],
         decision: str,
     ) -> None:
-        """Install a session-scoped rule locally if an identical one is absent (A14).
+        """Install a session-scoped rule locally if an identical one is absent.
 
         A ``remember: "session"`` answer stamps its rule hint into the shared
         interaction row; the EXECUTING runner — which need not be the install that
         answered — replays it here so identical follow-up requests short-circuit in
         :meth:`_check_rules`. Idempotent: repeated waiter wakes add no duplicate.
-        The rule shape matches the local one stored by the legacy/respond path.
+        The rule shape matches the local one stored by the respond path.
         """
         rules = self._session_rules.setdefault(session_id, [])
         for existing in rules:
@@ -698,15 +699,15 @@ class PermissionHandler:
         session_id: str,
         broadcast_func: Optional["callable"],
     ) -> List[str]:
-        """Table-backed requeue (V2 Phase 4, Q4-2): mint a fresh pending row
-        (same request_id, fresh TTL) for each not-yet-requeued deferred row."""
+        """Table-backed requeue: mint a fresh pending row (same request_id,
+        fresh TTL) for each not-yet-requeued deferred row."""
         from app.core import interaction_wait
         from app.db import interactions
 
         requeued_ids: List[str] = []
         new_payloads: List[Dict[str, Any]] = []
         # (new_interaction_id, request_id, payload) for each freshly minted row,
-        # so the durable interaction.requested events (#653) fire after the WS
+        # so the durable interaction.requested events fire after the WS
         # re-broadcast below.
         requested_emits: List[tuple] = []
         for r in await run_sync(
@@ -730,8 +731,7 @@ class PermissionHandler:
         if requeued_ids:
             interaction_wait.notify_changed(session_id)
 
-        # Re-broadcast each requeued request + the queue update (mirrors the
-        # legacy requeue_deferred broadcasts exactly).
+        # Re-broadcast each requeued request + the queue update.
         if broadcast_func:
             for payload in new_payloads:
                 queue_position = self._v2_pending_count(session_id)
@@ -760,7 +760,7 @@ class PermissionHandler:
                     "remaining_count": self._v2_pending_count(session_id),
                 })
 
-        # Durable lifecycle events (#653): a requeue mints a fresh pending row
+        # Durable lifecycle events: a requeue mints a fresh pending row
         # with a NEW interaction_id (same FE request_id), so emitting a second
         # interaction.requested is correct. AFTER the WS re-broadcast.
         from app.core import interaction_events
@@ -788,12 +788,12 @@ class PermissionHandler:
             "queue_position": queue_position,
             "queue_total": queue_position,
         }
-        # Include SDK context fields when available (SDK 0.1.52+)
+        # Include permission-context fields when available
         if request.tool_use_id:
             permission_event["tool_use_id"] = request.tool_use_id
         if request.agent_id:
             permission_event["agent_id"] = request.agent_id
-        # Include SDK 0.1.81 enrichment fields when available (Slice D)
+        # Include context enrichment fields when available
         if request.title is not None:
             permission_event["title"] = request.title
         if request.display_name is not None:
@@ -804,19 +804,16 @@ class PermissionHandler:
             permission_event["decision_reason"] = request.decision_reason
         if request.blocked_path is not None:
             permission_event["blocked_path"] = request.blocked_path
-        # P3-A3: structured worker tag, present ONLY on a ProviderAgent worker's
-        # prompt redirected onto its parent. Absent on every ordinary request, so
-        # the legacy event shape is unchanged.
+        # Structured worker tag, present ONLY on a Task worker's prompt
+        # redirected onto its parent. Absent on every ordinary request.
         if request.provider_agent is not None:
             permission_event["provider_agent"] = request.provider_agent
 
         # ── Delivery leg 1: the origin socket that owns this query ───────────
-        # Best-effort: a dead/closing socket must never propagate out of here.
-        # Before P3-A4 this call was bare, so an origin-socket failure aborted
-        # the whole broadcast — and (worse) left the caller's flow half-done
-        # while a redirected ProviderAgent worker prompt, whose delivery is
-        # already two-legged and individually swallowed, sailed through. That
-        # asymmetry is what this block removes.
+        # Best-effort: a dead/closing socket must never propagate out of here,
+        # or an origin-socket failure would abort the whole broadcast and leave
+        # the caller's flow half-done (a redirected worker prompt's delivery is
+        # two-legged and each leg is individually swallowed; this matches it).
         try:
             await broadcast_func(permission_event)
         except Exception:  # noqa: BLE001 — delivery is best-effort
@@ -889,8 +886,7 @@ class PermissionHandler:
             remember: Scope to remember the decision (ignored when decision == "defer")
             pattern: Optional pattern for the rule (ignored when decision == "defer")
             broadcast_func: Function to broadcast queue updates
-            answered_by_device: Device id of the answering install (V2 Phase 4,
-                Q4-6). Ignored on the legacy path.
+            answered_by_device: Device id of the answering install.
 
         Returns:
             Info about resolved requests
@@ -943,7 +939,7 @@ class PermissionHandler:
         ]
 
     def get_deferred_requests(self, session_id: str) -> List[Dict[str, Any]]:
-        """Get all deferred permission requests for a session (Slice B)"""
+        """Get all deferred permission requests for a session"""
         from app.db import interactions
 
         out: List[Dict[str, Any]] = []
@@ -988,7 +984,7 @@ class PermissionHandler:
         cancelled = await run_sync(interactions.cancel_interaction, row["id"])
         if cancelled:
             interaction_wait.notify_changed(session_id)
-            # Durable lifecycle event (#653): guarded cancel won → emit
+            # Durable lifecycle event: guarded cancel won → emit
             # exactly one interaction.expired (reason="cancelled").
             from app.core import interaction_events
 
@@ -1013,7 +1009,7 @@ class PermissionHandler:
                 )
         if count:
             interaction_wait.notify_changed(session_id)
-            # Durable lifecycle events (#653): one interaction.expired
+            # Durable lifecycle events: one interaction.expired
             # (reason="cancelled") per row whose guarded cancel won.
             from app.core import interaction_events
 

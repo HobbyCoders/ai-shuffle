@@ -3,7 +3,7 @@
 Earlier versions ran their own Claude sign-in and wrote the resulting token
 into the CLI's config dir. That token still works for the CLI, but it did not
 come from the CLI's own sign-in, so this worker asks the owner once to run
-`claude auth logout` and then `claude auth login` (decision D2). The notice is
+`claude auth logout` and then `claude auth login`. The notice is
 per worker, shown until dismissed, and never touches the token itself.
 
 A worker needs the notice when the old in-app sign-in was used against its

@@ -10,16 +10,12 @@ mode          stored value    what it is
 ``chat``      ``'chat'``      a lightweight chat: model, effort, attachments,
                               transcription, usage — the web, plus the files
                               you attach, and no checkout
-``voice``     ``'voice'``     an OpenAI Realtime call (ruling VM4)
+``voice``     ``'voice'``     an OpenAI Realtime call
 ============  ==============  ===========================================
 
-**Why NULL means 'code'.** The column landed in v74 for voice mode and has only
-ever held NULL or ``'voice'``; nothing has ever written ``'chat'``. So the
-mode taxonomy is grafted onto that column by renaming the NULL case rather than
-by migrating rows: every session that exists today is a code session, and a new
-code session keeps storing NULL for exact parity with them. ``'chat'`` is the
-only genuinely new value. That is also why ``storage_session_mode`` exists —
-the storage form and the API form differ for exactly one mode.
+**Why NULL means 'code'.** Rows created before modes existed carry NULL, so
+NULL is the code mode and new code sessions keep storing NULL;
+``storage_session_mode`` maps the API form to storage.
 
 **Why chat mode is enforced server-side.** The user still picks whatever agent
 they like in chat mode; the mode is a CEILING over that agent's own tool
@@ -32,28 +28,19 @@ the one fact that travels with the session everywhere.
 
 **Where the READ fence is actually enforced.** Not, on its own, in the app's
 ``can_use_tool`` callback: neither runtime consults that callback for a call it
-has already decided to allow. fluid's ``PermissionEngine`` auto-allows a
-``risk="safe"`` tool under the ``on_write`` policy without emitting a permission
-event at all, and the delegated CLI both auto-approves a *bare* name in
-``--allowed-tools`` and auto-approves any read whose path sits inside the
-session's working directory. A fence that lived only in the callback would
-therefore never run. So the path half is enforced at the two points the runtimes
-DO consult, with the callback kept as a third line of defence:
+has already decided to allow (fluid auto-allows a ``risk="safe"`` tool under the
+``on_write`` policy; the delegated CLI auto-approves a bare ``--allowed-tools``
+name). So the path half lives in the tool itself, with the callback kept as a
+further line of defence:
 
-* native leg — a ``Read``-scoped fluid rule pair (deny everything, then allow
-  the uploads glob), built in ``provider/harness_adapter._build_permissions``.
-  A rule beats the policy axis, so it fires before the safe-tool auto-allow.
-* delegated leg — the chat session's cwd IS ``chat_uploads_dir()``, so the CLI's
-  in-working-directory read auto-approval covers exactly the uploads folder and
-  nothing else, and ``Read`` is withheld from the CLI's bare ``--allowed-tools``
-  grant so every read outside that folder falls through to the permission-prompt
-  tool, i.e. to the app callback, which denies it.
+* both legs — ``Read`` is served by the handle-confined attachment reader
+  (``app.core.attachment_read``); on the delegated leg the CLI's own Read and
+  shell/file tools are banned outright (``harness_adapter._delegated_disallowed``).
+* native leg — a ``Read``-scoped fluid rule pair (deny, then allow the uploads
+  glob; ``harness_adapter._chat_mode_rules``) remains as defense in depth.
 
-Kept free of DB/SDK imports, exactly like ``app.core.tool_access`` (its only
-import), because ``app.core.models`` and the query builders all need it and any
-heavier dependency would close an import cycle. ``chat_uploads_dir`` needs
-``settings`` and so imports it *inside the function* — that keeps the module's
-import graph exactly as light as it was.
+Import-light on purpose (only ``app.core.tool_access``); ``chat_uploads_dir``
+imports settings lazily to avoid a cycle.
 """
 
 from __future__ import annotations
@@ -104,9 +91,9 @@ CHAT_UPLOADS_DIRNAME = "chat-uploads"
 # Tools whose reads the path half of the ceiling has to gate. Only ``Read`` is
 # on ``CHAT_MODE_TOOL_SURFACE``, so in practice nothing else can reach the
 # callback anyway; the set exists so the gate is keyed on a name it recognises
-# rather than on "everything that is not a web tool". Public because the two
-# real enforcement points (the fluid rule pair and the CLI's withheld grant)
-# have to name the same tools this predicate gates.
+# rather than on "everything that is not a web tool". Public because the fluid
+# rule pair (``harness_adapter._chat_mode_rules``) and the permission callback
+# in ``query_engine`` have to name the same tools this predicate gates.
 CHAT_MODE_READ_TOOLS = frozenset({"Read", "mcp__attachments__Read"})
 
 # Names a chat session must be denied OUTRIGHT rather than merely left off the
@@ -182,17 +169,17 @@ def narrow_tool_access_for_mode(access: ToolAccess, mode: Any) -> ToolAccess:
     """Compose an agent's own ``ToolAccess`` with the ceiling its mode imposes.
 
     Only chat mode has a ceiling. Code mode is the full surface by definition,
-    and voice sessions DISPATCH worker agents (ruling VM10) — clipping their
+    and voice sessions DISPATCH worker agents — clipping their
     tools would break the very thing a voice call is for — so both are returned
     untouched.
 
     For chat, the agent's surface is intersected with ``CHAT_MODE_TOOL_SURFACE``
-    (ruling T3: the narrower of two surfaces wins, and ``intersect_tool_surfaces``
+    (the narrower of two surfaces wins, and ``intersect_tool_surfaces``
     already handles None-means-unrestricted and pattern/exact cross-matching).
     An EMPTY intersection means the agent's own config already denies the web
     tools, and it must not be returned as ``allowed=[]`` — an empty allow list
-    reads as *unrestricted* on the runtime legs, which is precisely the class of
-    bug ruling T2 exists to kill. It becomes a ``["*"]`` deny instead.
+    reads as *unrestricted* on the runtime legs, which would silently widen the
+    surface. It becomes a ``["*"]`` deny instead.
     """
     if normalize_session_mode(mode) != "chat":
         return access
@@ -280,8 +267,9 @@ def chat_mode_read_permitted(tool_name: str, tool_input: Any) -> bool:
       security predicate that has to be read twice to see which base rescued a
       path is one nobody can audit. Nothing is lost by the strictness: a bare
       cwd-relative filename is resolved and admitted by the runtimes themselves
-      (fluid's rule matcher normalizes against cwd; the CLI auto-approves reads
-      inside its working directory), so such a call never reaches this function.
+      (fluid's rule matcher normalizes against cwd; the attachment reader
+      resolves a relative path against the uploads folder), so such a call
+      never reaches this function.
     * Anything unreadable as a path — missing key, blank, non-string, non-dict
       input, an OS that refuses to resolve it — is DENIED. A file read the fence
       cannot evaluate is not a file read it may wave through.

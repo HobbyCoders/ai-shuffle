@@ -185,9 +185,9 @@ def get_system_setting(key: str) -> Optional[str]:
 #
 # A handful of settings are consulted per REQUEST rather than per user action —
 # ``cluster_share_sessions`` is read by every ``get_sessions*`` /
-# ``search_sessions*`` call to decide whether to add the per-install filter, so
-# every sidebar refresh paid a dedicated pool checkout + SELECT + commit for a
-# value that changes approximately never (finding B8).
+# ``search_sessions*`` call to decide whether to add the per-install filter;
+# unmemoized, every sidebar refresh would pay a dedicated pool checkout +
+# SELECT + commit for a value that changes approximately never.
 #
 # The memo is per-process and deliberately short-lived: writes THROUGH this
 # module invalidate it immediately (so an in-process change is visible at once),

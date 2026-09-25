@@ -2,10 +2,9 @@
 
 Persists fluid's branching session node-tree and durable event log in the app's
 PostgreSQL database (tables ``fluid_sessions`` / ``fluid_session_nodes`` /
-``fluid_session_events``, schema v70), giving flag-on sessions the same
-cross-restart durability the SDK path gets from PgSessionStore — resume, fork,
-and event replay all survive a process restart and work from any app instance
-sharing the database.
+``fluid_session_events``), giving native fluid sessions cross-restart
+durability — resume, fork, and event replay all survive a process restart and
+work from any app instance sharing the database.
 
 Semantics mirror ``fluid.store.jsonl.JsonlStore``: per-session lazy load into a
 memory cache, then write-through on every mutation. The cache makes the hot
@@ -32,13 +31,13 @@ from psycopg2.extras import Json
 from app.db.async_database import run_sync
 from app.db.base import get_db
 
-# Same Postgres-illegal code-point scrub the SDK session store applies at its
+# Same Postgres-illegal code-point scrub the Claude session store applies at its
 # own jsonb boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
 # why NUL and lone surrogates have to go before an INSERT sees them.
 from app.core.pg_session_store import _scrub_pg_illegal
 
-# Issue R12: a model pasted a live DATABASE_URL (password included) into a
-# code-mode cell and it was persisted verbatim. Every string on its way into
+# A model can paste a live DATABASE_URL (password included) into a code-mode
+# cell (see app.core.scrub). Every string on its way into
 # these two jsonb columns gets its URL-embedded passwords replaced with ``***``
 # first. New rows only — existing rows are untouched by design.
 from app.core.scrub import scrub_url_credentials
@@ -211,8 +210,8 @@ def _append_events_sync(session_id: str, events: List[Event]) -> None:
 #
 # Two arms, because a session's text lives in one of two places depending on
 # which leg wrote it: ``fluid_session_nodes`` holds the native node tree this
-# store owns, ``session_store_entries`` holds the SDK/delegated transcript
-# mirror. Both are swept in one connection and merged into one per-session
+# store owns, ``session_store_entries`` holds the Claude-format (delegated)
+# transcript. Both are swept in one connection and merged into one per-session
 # accumulator.
 #
 # The SQL is only a PREFILTER — cheap ILIKE over the raw JSON to cut the rows
@@ -285,7 +284,7 @@ def _titles_for(cur, session_ids: List[str]) -> Dict[str, str]:
     """Session titles from the app's ``sessions`` table, keyed by store id.
 
     ``sessions.sdk_session_id`` holds the store-side id for BOTH legs: the
-    fluid ``ses_…`` id on native sessions and the SDK uuid on delegated ones,
+    fluid ``ses_…`` id on native sessions and the Claude uuid on delegated ones,
     so one lookup serves every recall arm.
     """
     ids = [sid for sid in session_ids if sid]
@@ -307,7 +306,7 @@ def _titles_for(cur, session_ids: List[str]) -> Dict[str, str]:
 def _roots_for(cur, session_ids: List[str]) -> Dict[str, str]:
     """Recorded project roots from ``fluid_sessions``, keyed by session id.
 
-    Only native fluid sessions have a row here; SDK-mirror sessions come back
+    Only native fluid sessions have a row here; Claude-transcript sessions come back
     absent, which SessionSearch reads as "unknown project" — never excluded.
     """
     ids = [sid for sid in session_ids if sid]
@@ -357,7 +356,7 @@ def _search_sync(
                 terms,
             )
 
-        # Arm B — the SDK transcript mirror (subpath IS NULL = the main
+        # Arm B — the Claude-format transcript (subpath IS NULL = the main
         # transcript; sidechain files live under a subpath and are not recall).
         where = " OR ".join(["entry::text ILIKE %s"] * len(patterns))
         params = list(patterns)
@@ -425,9 +424,9 @@ def _clip(text: str, cap: int) -> str:
 
 
 def _sse_recall_message(entry: Dict[str, Any], ts: float) -> Optional[RecallMessage]:
-    """One SDK transcript entry as a RecallMessage, or None for non-messages.
+    """One Claude transcript entry as a RecallMessage, or None for non-messages.
 
-    The SDK arm's twin of ``fluid.store.base.recall_message``: user/assistant
+    The Claude arm's twin of ``fluid.store.base.recall_message``: user/assistant
     entries only, sidechain and meta rows invisible, tool_use/tool_result
     blocks compacted to one line each.
     """
@@ -503,7 +502,7 @@ def _fluid_recall_rows(cur, session_id: str) -> Optional[List[RecallMessage]]:
 
 
 def _sse_recall_rows(cur, session_id: str) -> Optional[List[RecallMessage]]:
-    """The session's SDK transcript as RecallMessages, or None when absent."""
+    """The session's Claude transcript as RecallMessages, or None when absent."""
     cur.execute(
         "SELECT entry, created_at FROM session_store_entries "
         "WHERE session_id = %s AND subpath IS NULL ORDER BY id",
@@ -851,7 +850,7 @@ class PgFluidStore:
     ) -> List[SessionSearchHit]:
         """fluid's optional SessionStore recall hook (see
         ``fluid/fluid/store/base.py``) — backs the SessionSearch builtin
-        over both the native fluid node tree and the SDK transcript mirror.
+        over both the native fluid node tree and the Claude transcript store.
         """
         return await run_sync(_search_sync, list(terms), int(limit), exclude_session_id)
 
@@ -876,5 +875,5 @@ class PgFluidStore:
         count: int = 10,
     ) -> Optional[SessionSlice]:
         """SessionView's backend — a message window from whichever transcript
-        store the session wrote (fluid node path, else SDK mirror)."""
+        store the session wrote (fluid node path, else Claude transcript)."""
         return await run_sync(_slice_sync, session_id, int(start), int(count))

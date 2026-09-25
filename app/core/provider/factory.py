@@ -2,8 +2,7 @@
 
 ``make_adapter()`` returns a :class:`HarnessAdapter` (the fluid harness) for
 every spawn path. There is no feature flag and no fallback: fluid is the only
-backend. If the fluid import fails the process must fail loudly here rather
-than silently degrading to the legacy Claude Agent SDK adapter — a degraded
+backend. If the fluid import fails the process fails loudly here: a degraded
 session is far harder to diagnose than a startup error.
 
 Wiring: spawn paths construct their adapter via ``make_adapter()`` rather than

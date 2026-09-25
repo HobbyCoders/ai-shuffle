@@ -79,10 +79,10 @@ def _adopt_orphaned_instance_data() -> None:
     separate named instances.
 
     Runs synchronously at boot, before the server accepts traffic, so it stays
-    ONE round trip: the two ``SELECT DISTINCT instance_id`` scans it used to
-    issue are unioned into a single statement, and both columns are now indexed
+    ONE round trip: the two ``SELECT DISTINCT instance_id`` scans are unioned
+    into a single statement, and both columns are indexed
     (``idx_projects_instance`` / ``idx_sessions_instance``) so each side is an
-    index scan rather than a sequential scan of the table (finding B11).
+    index scan rather than a sequential scan of the table.
     """
     import re
     from app.db.base import get_db
@@ -192,7 +192,7 @@ def init_core() -> None:
         logger.info(f"Promoted to built-in subagents: {', '.join(promoted)}")
 
     # Retire the chat-history-summarizer builtin (superseded by fluid's
-    # session-search tool). Seeding no longer prunes removed builtins, so
+    # session-search tool). Seeding does not prune removed builtins, so
     # drop the stale row explicitly — once; later boots find nothing.
     from app.core.builtin_subagents import get_builtin_subagent_ids
     if "chat-history-summarizer" not in get_builtin_subagent_ids():
@@ -490,7 +490,7 @@ def start_background_tasks() -> List[asyncio.Task]:
         f"(every {int(streaming_status.SWEEP_INTERVAL_SECONDS)}s)"
     )
 
-    # Durable wakeups (#598): rehydrate this install's persisted pending wakeups
+    # Durable wakeups: rehydrate this install's persisted pending wakeups
     # (ScheduleWakeup + idle-watchdog nudges dropped by the restart) and re-arm
     # their timers. Fire-and-forget: claim-on-fire makes a double-arm harmless,
     # so this never needs to block boot.
@@ -498,7 +498,7 @@ def start_background_tasks() -> List[asyncio.Task]:
     tasks.append(asyncio.create_task(wakeup_service.rehydrate_pending()))
     logger.info("Durable-wakeup rehydrate scheduled")
 
-    # Idle-at-edge watchdog (#598): periodic sweep that nudges sessions sitting
+    # Idle-at-edge watchdog: periodic sweep that nudges sessions sitting
     # idle above the context-window edge so the CLI runs its deferred compaction
     # instead of parking forever. Flag-gated (IDLE_WATCHDOG_ENABLED).
     if settings.idle_watchdog_enabled:
@@ -520,7 +520,7 @@ def start_background_tasks() -> List[asyncio.Task]:
 
 
 def install_v2_turns_wiring() -> None:
-    # V2 turns wiring (Phase 2): install the scheduler seams (kick /
+    # V2 turns wiring: install the scheduler seams (kick /
     # on_turn_settled / on_task_terminal) and route turn_manager's interrupt
     # executor to the live SessionRuntime — turn_manager must not import
     # session_runtime, so the routing closure lives here.
@@ -536,12 +536,12 @@ def install_v2_turns_wiring() -> None:
         runtime = session_runtime.get_live_runtime(session_id)
         if runtime is None:
             return
-        # #585: a turn-scoped stop only signals the live runtime when it is
+        # A turn-scoped stop only signals the live runtime when it is
         # actually executing the targeted turn. Belt-and-suspenders behind the
         # DB guard (the durable flip already required id=turn_id, so a mismatch
         # would not have fired the executor); guards the rare window where this
         # process's runtime has already advanced past turn_id. turn_id=None
-        # (legacy session-scoped callers) keeps today's unconditional signal.
+        # (session-scoped callers) keeps the unconditional signal.
         if turn_id is not None and runtime.turn_id != turn_id:
             return
         await runtime.interrupt(mode)
@@ -549,7 +549,7 @@ def install_v2_turns_wiring() -> None:
     turn_manager.register_interrupt_executor(_route_interrupt)
     logger.info("V2 turns wiring installed (scheduler + interrupt executor)")
 
-    # Cross-runner turn-claim loop (V2 Phase 4, Q3). Started here (not
+    # Cross-runner turn-claim loop. Started here (not
     # start_background_tasks) so it is alive BEFORE the boot reconcile sweep:
     # turns recovered on boot for sessions placed on THIS runner are claimed
     # on the first tick instead of waiting out the reconcile's kicks.
@@ -557,15 +557,15 @@ def install_v2_turns_wiring() -> None:
 
     turn_claim.start()
 
-    # Cross-install git-ops claim loop (D5). Poll-only (no NOTIFY wiring — the
-    # spawn path's inline claim covers the one latency-critical case), so it is
-    # a separate loop from turn_claim rather than a second pass inside it.
+    # Cross-install git-ops claim passes. Poll-only (no NOTIFY wiring — the
+    # spawn path's inline claim covers the one latency-critical case); they
+    # register on turn_claim's shared sweep driver.
     from app.core import git_ops_runner
 
     git_ops_runner.start()
 
-    # Pending-interaction expiry sweeper (V2 Phase 4, Q4-4) — dedicated ~10s
-    # loop that flips lapsed permission/question rows to ``expired`` and wakes
+    # Pending-interaction expiry sweeper — a ~10s pass on the shared sweep
+    # driver that flips lapsed permission/question rows to ``expired`` and wakes
     # their waiters. Belt to the in-process waiter's own local deadline
     # (interaction_wait).
     from app.core import interaction_sweeper
@@ -630,7 +630,7 @@ async def shutdown_services() -> None:
     except Exception:
         pass
 
-    # Stop the pending-interaction sweeper (Q4-4) alongside the claim loop.
+    # Stop the pending-interaction sweeper alongside the claim loop.
     # Looked up via sys.modules so a flag-OFF process stays import-free.
     try:
         sweeper_mod = sys.modules.get("app.core.interaction_sweeper")
@@ -647,7 +647,7 @@ async def shutdown_services() -> None:
     except Exception:
         logger.exception("Failed to stop sessions during shutdown")
 
-    # Shutdown SDK session pool (disconnect all live subprocesses)
+    # Shutdown the session pool (disconnect all live adapters)
     try:
         from app.core.session_pool import get_session_pool
         await get_session_pool().shutdown()

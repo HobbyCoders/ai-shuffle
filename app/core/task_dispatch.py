@@ -1,119 +1,55 @@
-"""Task-tool dispatch — the unified agent-orchestration surface (rulings A6-A10).
+"""Task-tool dispatch: the unified agent-orchestration surface.
 
 The ``Task`` tool (fluid builtin on native legs, ``mcp__builtins__Task`` on the
 delegated leg) resolves its target against the unified ``agents`` table and
-runs it as a worker session via :func:`app.core.provider_agent.dispatch_worker`
-— the proven ProviderAgent machinery (real session rows, approval routing,
-supervisor teardown, progress feed, bounded report).
+runs it as a worker session via :func:`app.core.provider_agent.dispatch_worker`.
+This module adds:
 
-What this module adds on top of raw ``dispatch_worker``:
-
-* DB target resolution happens only inside the current provider's configured
-  subagent roster; ``agent_invoke_mode`` and ``enabled_agents`` control that
-  roster as well as the prompt index;
-* the caller provider plus the target's model assignment on that provider are
-  authoritative; a Task call cannot switch providers or choose a model;
-* nesting depth (A9) — max ``settings.task_tool_max_depth`` (5) levels of
-  agent-invokes-agent, counted by walking worker-created ancestor sessions;
-* cycle detection (A9) — an agent already active in the ancestor chain cannot
-  be dispatched again beneath itself;
-* worker budget (A9) — at most ``settings.task_tool_max_workers`` live
-  workers per root session tree. NESTED workers count against it: the budget
-  is about what is running on this box under one human's session, and a
-  worker's worker is still a worker. (What nested dispatch no longer spends on
-  the root is its NOTIFICATION lanes — see "root routing" below.);
-* optional provider-row admission — an administrator can set
-  ``settings.task_worker_max_per_provider`` to queue excess workers. This is
-  a Shuffle concurrency policy, not a provider token quota. It is disabled by
-  default; actual rate-limit feedback and resource guards still apply;
-* worker liveness — a worker that never streams a frame is stopped at
-  ``settings.task_worker_first_frame_seconds`` with a clear no-output summary
-  rather than after fifteen silent minutes.
-  The watchdog interruption is not retried because the admitted provider
-  request may already have started. Explicit transport failures still retry
-  once; provider capacity refusals retry with backoff.
-  A WORKING worker stays unbounded; a SYNCHRONOUS one additionally gets the
-  hard cap ``settings.task_worker_sync_max_seconds``, because it is holding
-  the parent's turn while it waits;
-* pool admission — the worker budget is a per-tree ceiling, not a statement
-  about the box; a dispatch also has to fit on the box. That is checked HERE,
-  before anything is returned: a dispatch at a ceiling waits briefly and is
-  then refused with ``ok=False`` (see :func:`_reserve_admission`), because a
-  background receipt is a promise to wake the parent and a worker that never
-  started keeps no promises. Which ceiling applies depends on the worker's
-  lane: a DELEGATED worker owns a CLI subprocess and is bounded by the session
-  pool's subprocess cap, while a NATIVE (in-process) worker is bounded by the
-  real resource guards plus ``settings.subagent_max_concurrent_per_session``,
-  the per-parent fan-out limit;
-* root routing (A9) — approvals, progress cards, and supervisor registration
-  land on the ROOT session (the one with a human watching), while
-  project/worktree/cwd inheritance still reads the direct caller. The
-  NOTIFICATION lanes are the exception (2026-09-05 audit): the terminal chip,
-  the scheduler wake and the task-notification steer are armed on the
-  DISPATCHING session, not the root — a root that never called Task cannot act
-  on the report, and while it was spending turns trying, the worker that did
-  call Task ended prematurely waiting for a wake that went elsewhere. See
-  ``provider_agent.dispatch_worker``'s "OWNERSHIP vs ROUTING" note;
-* modes (A8) — ``sync`` blocks, writes the worker's full report to a file
-  under the parent's ``.fluid/task-reports/`` and returns ``report_path`` +
-  ``report_chars`` + a bounded ``report_head`` so the parent reads the rest
-  selectively instead of paying for it in context up front;
-  ``background`` pre-allocates and returns the exact worker session id as a
-  Fluid ``BackgroundTaskReceipt``, then announces completion to the parent
-  without a polling loop — and writes its report to the SAME directory
-  (:func:`write_task_report`, called from ``provider_agent``'s completion
-  path), so ``TaskGet`` can hand the woken parent a head plus a path instead
-  of leaving it to guess. A call that names no mode takes the target's own
-  default: Explore-class agents (ones whose declared tool surface cannot write
-  files) go ``background``, since a research child's parent has nothing to wait
-  for and blocking it turns a fan-out into a queue; everything else stays
-  ``sync``. For an Explore-class target the default is not a suggestion — an
-  explicit ``mode`` in the call is IGNORED and the dispatch still goes
-  ``background`` (the round-2 audit found every model defeating the default by
-  passing ``mode="sync"``, and a user Stop then destroyed a finished sync
-  child's research along with its parent). ``build_task_contract`` drops
-  ``mode`` from the tool schema entirely when every reachable target is
-  Explore-class, so on those rosters the key cannot be sent at all; this
-  runtime rule covers the rest — replayed transcripts, retries, and mixed
-  rosters. Everywhere else an explicit ``mode`` still wins.
+* roster scoping: DB targets resolve only inside the current provider's
+  subagent roster (``agent_invoke_mode``, ``enabled_agents``). The caller
+  provider and the target's model on it are authoritative;
+* depth (``settings.task_tool_max_depth``), cycle detection over the ancestor
+  chain, and a per-root-tree worker budget (``settings.task_tool_max_workers``)
+  that counts nested workers;
+* optional per-provider admission (``settings.task_worker_max_per_provider``,
+  0 = off), a concurrency policy rather than a quota;
+* liveness: no first frame by ``settings.task_worker_first_frame_seconds``
+  stops the worker; a sync worker also has the hard cap
+  ``settings.task_worker_sync_max_seconds``. Watchdog stops are not retried;
+  transport failures retry once; capacity refusals back off;
+* pool admission (:func:`_reserve_admission`): a delegated worker must fit the
+  pool's subprocess cap, a native one the resource guards plus
+  ``settings.subagent_max_concurrent_per_session``. At a ceiling it waits
+  briefly, then is refused with ``ok=False`` before anything is returned;
+* routing: approvals, progress cards and supervisor registration land on the
+  ROOT session; cwd inheritance and the notification lanes (terminal chip,
+  scheduler wake, task-notification steer) use the DISPATCHING session;
+* modes: ``sync`` returns ``report_path``, ``report_chars`` and a bounded
+  ``report_head``; ``background`` returns a ``BackgroundTaskReceipt`` with the
+  worker session id and announces completion. Both write the report under the
+  parent's ``.fluid/task-reports/`` (:func:`write_task_report`). Explore-class
+  targets (no file-writing tools) always go background, even when a call names
+  a ``mode`` (:func:`_effective_task_mode`), and ``build_task_contract`` omits
+  ``mode`` when every target is Explore-class. Others default to ``sync``.
 
 File-defined agents (Claude-ecosystem compat, ruling CE6)
 ---------------------------------------------------------
-On a native (fluid) leg the engine reads the user's ``.fluid/agents/**/*.md``
-definitions — project, global, and namespaced ``<plugin>:<agent>`` ones — and
-publishes them on ``ctx.extra["agent_registry"]``. fluid never spawns anything;
-this module is what makes those names dispatchable, as a FALLBACK behind the
-app's own ``agents`` table (host wins a name collision, matching fluid's own
-doctrine and its registry-seam precedence).
+fluid's agent discovery (``~/.fluid/agents``, project ``.fluid/agents`` and
+``.agents/agents``, namespaced ``<plugin>:<agent>``) publishes
+``ctx.extra["agent_registry"]`` on native legs; the delegated leg's
+``mcp__builtins__Task`` runs the same discovery from the session's cwd
+(``app.mcp.builtin_tools._discover_agent_registry``). These names are a
+FALLBACK behind the ``agents`` table. A file agent borrows the caller's profile,
+provider and model (parent turn's model, then the caller profile's model for
+that provider, then the provider's ``default_model``; a provider-bound dispatch
+is refused when none is curated). Its markdown body rides the system prompt.
 
-The DELEGATED (claude CLI) leg runs no fluid engine, so nothing publishes that
-registry there. Its bridged ``mcp__builtins__Task`` runs the same discovery
-itself from the session's cwd (``app.mcp.builtin_tools._discover_agent_registry``)
-and passes the result to ``agent_registry`` below — the two legs therefore
-resolve the same names, which is what the adapter's shared agents index
-promises the model on both.
-
-A file agent has no ``agents`` row, so it borrows the caller's profile,
-effective provider, and selected model. On a provider-bound dispatch the
-borrowed model is resolved as parent turn's model → caller profile's model for
-that provider → provider ``default_model``, and the dispatch is refused when
-none of those is curated (never the registry's first entry). Its markdown body
-rides the worker's system prompt as an override block. Consequences,
-deliberate:
-
-* ``tools:`` in the frontmatter is ENFORCED (ruling CE12), not advisory: the
-  list rides the worker's turn as a ``tool_allowlist`` override and becomes
-  ``NativeLoop(allowed_tools=...)`` on the native leg — a filtered tool's schema
-  never reaches the model, ToolSearch will not load it, and a call naming it
-  comes back as an in-context error. An empty/absent list inherits the caller's
-  full toolset. On the DELEGATED (claude CLI) leg the same list is passed as
-  ``--allowed-tools``, which the CLI reads as permission rules rather than a
-  surface restriction — see :func:`app.core.provider.harness_adapter` for the
-  exact per-leg semantics;
-* ``model:`` metadata cannot move the worker to another provider; the live
-  caller binding remains authoritative;
-* the profile-id cycle check does not apply (the worker runs on the caller's own
-  profile by construction); depth and worker budget both do.
+* ``tools:`` is enforced (ruling CE12) as the worker turn's ``tool_allowlist``:
+  ``NativeLoop(allowed_tools=...)`` on native legs; on the delegated leg its
+  complement goes out as ``--disallowed-tools`` and ``_delegated_tool_policy``
+  refuses off-surface calls. An empty or absent list inherits the caller's tools;
+* ``model:`` cannot move the worker to another provider;
+* the profile-id cycle check does not apply; depth and worker budget do.
 """
 
 from __future__ import annotations
@@ -162,23 +98,18 @@ _EFFORT_UNSET = object()
 
 # ── session-pool admission, checked BEFORE any receipt is returned ───────────
 # A worker is a new pooled session, so it is subject to
-# ``SessionPool.admission_check`` — but that check used to run deep inside the
-# worker's own turn, seconds AFTER this module had already handed the model a
-# background receipt saying "end the turn, you will be woken". The 2026-09-04
-# audit caught the result: seven receipts, then seven "worker failed to start:
-# session pool at hard cap (8/8)" frames, then a re-dispatch that failed the
-# same way. Admission is now decided here, synchronously, and a dispatch that
-# cannot be admitted is refused outright rather than receipted.
+# ``SessionPool.admission_check``. Admission is decided here, synchronously,
+# before the model is handed a background receipt saying "end the turn, you
+# will be woken": a dispatch that cannot be admitted is refused outright
+# rather than receipted, because a worker refused inside its own turn would
+# leave that promise unkept.
 #
-# WHICH CEILING applies depends on the worker's LANE (the same 2026-09-04
-# audit, second finding). The pool's hard cap counts node CLI subprocesses; a
-# DELEGATED worker is one, so it is gated by the cap exactly as before. A
-# NATIVE worker (openai_responses / anthropic / openrouter) is coroutines in
-# this process — it was being refused by a subprocess cap it could never
-# contribute to, which is how two gpt-6-astra fan-outs lost seven dispatches to
-# "8/8". Native workers are gated instead by what actually costs something: the
-# pool's host-memory / descendant-process / tree-RSS guards, and the per-parent
-# fan-out limit below.
+# WHICH CEILING applies depends on the worker's LANE. The pool's hard cap
+# counts CLI subprocesses; a DELEGATED worker is one, so it is gated by the
+# cap. A NATIVE worker (openai_responses / anthropic / openrouter) is
+# coroutines in this process and never contributes to that cap, so it is gated
+# by what actually costs something: the pool's host-memory /
+# descendant-process / tree-RSS guards, and the per-parent fan-out limit below.
 
 #: How long a dispatch waits for a pool slot before refusing. Covers the common
 #: case — a fan-out that is only transiently over the cap because a sibling is
@@ -324,7 +255,7 @@ def _chain_agent_ids(session_id: str) -> List[str]:
 
 
 def _live_worker_count_for_root(root_session_id: str) -> int:
-    """Live Task/ProviderAgent workers anywhere under ``root_session_id``."""
+    """Live Task workers anywhere under ``root_session_id``."""
     from app.core import provider_agent_supervisor as sup
 
     count = 0
@@ -712,18 +643,13 @@ async def _reserve_admission(
 
 
 # ---------------------------------------------------------------------------
-# Automatic re-dispatch (2026-09-05 audit, A + C)
+# Automatic re-dispatch
 # ---------------------------------------------------------------------------
-# A worker that forwarded ZERO frames may have died at provider connect, but a
-# watchdog interruption can also catch an admitted provider request before its
-# first frame reaches the parent. The audit found ten such deaths in seven
-# sessions — transport drops ("peer closed connection without sending complete
-# message body") and org TPM refusals ("Please try again in 1.049s") — each
-# reported ~900s late, each re-dispatched BY THE MODEL, by hand, from a woken
-# turn. Two of them were dispatched three times and executed once.
-#
-# So the harness re-dispatches only explicit preflight/transport failures.
-# Deliberately narrow:
+# A worker that forwarded ZERO frames may have died at provider connect
+# (transport drops, org TPM refusals), but a watchdog interruption can also
+# catch an admitted provider request before its first frame reaches the
+# parent. So the harness re-dispatches only explicit preflight/transport
+# failures and capacity refusals. Deliberately narrow:
 #
 # * only a ZERO-FRAME failure. A worker that streamed anything did real work,
 #   and repeating real work is not free (nor idempotent — it may have edited
@@ -819,10 +745,9 @@ def _capacity_worded(outcome, reschedules: int):
 
     The provider's own string — "Rate limit reached for gpt-5.6-luna in
     organization org-JTwK2… on tokens per min (TPM): Limit 500000, Used
-    494784…" — tells a parent nothing it can act on, and the audited models
-    responded to it by shrinking their own briefs ("MAX 3 tool calls to avoid
-    provider TPM failure"). Say what actually happened instead, and keep the
-    provider's text behind it.
+    494784…" — tells a parent nothing it can act on, and models respond to it
+    by shrinking their own briefs. Say what actually happened instead, and keep
+    the provider's text behind it.
     """
     from app.core import provider_agent
     from dataclasses import replace
@@ -896,9 +821,8 @@ async def _dispatch_worker_with_retries(
         int(getattr(settings, "task_worker_start_retries", 0) or 0)
         if background
         # A synchronous caller is LIVE: it can read the failure, decide, and
-        # re-dispatch in the background (which is what the audited model did,
-        # correctly, within one turn). Silently re-blocking its turn for
-        # another attempt is the opposite of what B asks for.
+        # re-dispatch in the background within one turn. Silently re-blocking
+        # its turn for another attempt would hold the parent even longer.
         else 0
     )
     rate_max = int(getattr(settings, "task_worker_rate_limit_retries", 0) or 0)
@@ -1249,11 +1173,11 @@ def _caller_provider_id(
 def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
     """A ready-to-return error when the resolved leg has no credentials.
 
-    Fix-3 pre-flight: a background dispatch returns ``ok: true`` the moment the
+    Pre-flight: a background dispatch returns ``ok: true`` the moment the
     worker registers, so a worker that dies at provider connect (the
     ``ProviderCredentialError`` raised by
     :func:`app.core.provider.fluid_credentials.resolve_provider_credentials`)
-    used to leave the caller with a success and silence. Checking the same
+    would leave the caller with a success and silence. Checking the same
     *presence* condition here — connection-free, no decryption, mirroring
     ``db.count_configured_model_providers``'s definition of "usable" — turns it
     into a synchronous refusal.
@@ -1315,9 +1239,9 @@ def _file_agent_model_id(
     borrows one. On the native Claude leg ``None`` is a legal answer: the worker
     turn simply inherits the caller's model. On a PROVIDER-bound leg it is not —
     a model-less provider turn resolves downstream to an arbitrary curated entry
-    (the registry's FIRST id, which is how every subagent of a cheap parent
-    silently ran on the roster's most expensive model, 2026-08-20 incident). The
-    provider branch therefore returns only a CURATED id and refuses otherwise;
+    (the registry's FIRST id, which can silently be the roster's most expensive
+    model). The provider branch therefore returns only a CURATED id and refuses
+    otherwise;
     list position is never a model choice.
     """
     launched = str(caller_row.get("launched_model") or "").strip() or None
@@ -1554,10 +1478,9 @@ async def dispatch_task_tool(
         return {"ok": False, "error": credential_error}
 
     label = (args.get("label") or "").strip() or f"Task · {target_name}"
-    # fluid's Task (round 9) hands over ``name``: a short slug derived from
-    # the task ("fix-flaky-login") that the worker is listed and addressed
-    # by. Without it every worker was "General Purpose" and SendMessage by
-    # description failed with "Unknown agent".
+    # fluid's Task hands over ``name``: a short slug derived from the task
+    # ("fix-flaky-login") that the worker is listed and addressed by, so
+    # SendMessage can find it by name.
     roster_name = str(args.get("name") or "").strip()[:60] or None
     kwargs: Dict[str, Any] = dict(
         parent_session_id=root_session_id,
@@ -1660,10 +1583,8 @@ async def dispatch_task_tool(
                 worker_id,
             )
         # PARK-FIRST wording, mirroring the Monitor receipt
-        # (``monitor_spawn.monitor_receipt_text``) that measurably works: the
-        # audited session parked instantly and correctly on Monitor and then
-        # re-derived a background worker's entire brief off the old "continue
-        # useful work" phrasing here.
+        # (``monitor_spawn.monitor_receipt_text``): a "continue useful work"
+        # phrasing invites the parent to re-derive the worker's entire brief.
         note = (
             "Worker dispatched in the background. End the turn now unless you "
             "have genuinely disjoint work — you will be woken with the report "
@@ -1702,9 +1623,8 @@ async def dispatch_task_tool(
         return background_payload
 
     # A SYNC dispatch blocks the parent turn: it cannot park, cannot be steered
-    # and cannot be told the worker went quiet. Two audited sync Tasks held
-    # their parents for 15m03s and 19m28s on a provider connection that never
-    # opened, and both ended only because a human intervened. So this lane gets
+    # and cannot be told the worker went quiet, so a provider connection that
+    # never opens would hold it until a human intervenes. So this lane gets
     # a hard wall-clock cap across every attempt (``dispatch_worker`` also
     # applies the first-frame watchdog, which normally fires long before it),
     # and it returns a worker-failed result the parent can act on.
@@ -1808,15 +1728,13 @@ def write_task_report(
 
     Out-of-band delivery is the point: the parent gets a bounded head in its
     context and reads the rest with ``Read(offset=…, limit=…)`` only if it
-    needs to. A write failure returns None and the caller degrades to the old
-    inline delivery rather than losing the worker's output.
+    needs to. A write failure returns None and the caller degrades to inline
+    delivery rather than losing the worker's output.
 
     ONE writer for both modes. A sync dispatch calls it inline (below); a
     BACKGROUND dispatch calls it from ``provider_agent.dispatch_worker``'s
-    completion path, because there is no longer a caller frame to return to by
-    then. An audited parent whose background child finished with a 27KB report
-    had nowhere to read it from, guessed this exact path, found nothing, and
-    redid the child's work — so background writes it too.
+    completion path, because there is no caller frame to return to by then.
+    Both write it so a woken parent always has a report file to read.
     """
     try:
         directory = task_report_dir(caller_row)

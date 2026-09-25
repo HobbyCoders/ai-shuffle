@@ -16,7 +16,7 @@ one-time default at startup (:func:`ensure_mode_recorded`): ``api_key`` when a
 key is stored and the CLI reports no sign-in, otherwise ``subscription``. That
 default is written down, so a later change in credentials cannot flip it.
 
-The stored key stays on the worker where it was entered (decision D4). This
+The stored key stays on the worker where it was entered. This
 module never reads the CLI's own credential files; CLI sign-in state comes from
 :mod:`app.core.claude_cli_status`, which asks ``claude auth status``.
 """

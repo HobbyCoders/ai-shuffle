@@ -7,13 +7,12 @@ Runs as an asyncio background task, similar to session cleanup and DB maintenanc
 Settings are stored in ~/.fluid/plugins/auto_update_settings.json and can be
 modified via the /api/v1/plugins/auto-update/settings endpoint.
 
-Idle behaviour (F10)
---------------------
+Idle behaviour
+--------------
 * When auto-update is DISABLED the task waits on ``_reschedule_event``
-  INDEFINITELY. It used to wake every 5 minutes to re-read a settings file that
-  only ever changes through the API — and the API already fires
-  :func:`reschedule_auto_update` on every change, so the timer was pure
-  overhead: 288 pointless wake-ups and file reads a day to learn nothing.
+  INDEFINITELY. The settings file only ever changes through the API, and the
+  API fires :func:`reschedule_auto_update` on every change, so a polling timer
+  would be pure overhead.
 * Every wait is JITTERED so this task's git+network burst does not line up with
   the other scheduled work on the box (DB maintenance, session cleanup, the
   background sweep). Coinciding bursts are what a weak machine actually feels.

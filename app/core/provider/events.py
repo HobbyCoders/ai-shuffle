@@ -5,15 +5,9 @@ These dataclasses mirror the ``claude_agent_sdk.types`` message/block classes
 1:1 — same class names, same attribute names, same subclass relationships
 (Task*/Hook messages extend SystemMessage so subclass-before-base isinstance
 chains keep working). The streaming loops in query_engine.py /
-query_background.py dispatch on THESE types; adapters translate their native
-stream into them (SDK messages via ``sdk_event_translation.to_provider_event``,
-HarnessAdapter via its ``_translate``).
-
-Why an exact mirror instead of a redesigned vocabulary: the seam refactor
-must be behavior-identical with the flag off. Identical names/fields make the
-loop diff a pure import + receive-call swap, so every dispatch branch and
-attribute read is provably unchanged. No claude_agent_sdk import appears in
-this module — it must stay importable on any backend.
+query_background.py dispatch on THESE types; HarnessAdapter's ``_translate``
+produces them from the fluid Event stream. No claude_agent_sdk import appears
+in this module: it must stay importable on any backend.
 """
 
 from __future__ import annotations

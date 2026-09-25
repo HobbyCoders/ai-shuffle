@@ -1,8 +1,8 @@
-"""NOTIFY-awaited pending_interactions waiter (V2 Phase 4, Q4).
+"""NOTIFY-awaited pending_interactions waiter.
 
 The v2 permission/question adapters (``permission_handler`` /
 ``user_question_handler``) persist each prompt as a durable
-``pending_interactions`` row and then block the SDK callback in
+``pending_interactions`` row and then block the adapter callback in
 :func:`await_interaction` until the row leaves ``pending``. The wake plumbing
 mirrors ``turn_claim``:
 
@@ -134,7 +134,7 @@ def notify_changed(session_id: str) -> None:
 
     Two legs, both best-effort:
     * same-process fast path: tick local waiters directly (the answering
-      handler usually lives in the same process as the awaiting SDK callback);
+      handler usually lives in the same process as the awaiting adapter callback);
     * cross-process: ``pg_notify`` on the ``session_events`` channel so the
       OWNING runner's gateway listener ticks its waiters.
 

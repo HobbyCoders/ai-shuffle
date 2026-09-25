@@ -52,8 +52,7 @@ def _log_poll_failure(key: str, message: str, *args: Any) -> None:
     debug, and it returns to ERROR once
     :data:`_POLL_FAILURE_REASSERT_SECONDS` have passed.
 
-    Never include a credential in ``message``/``args`` — see the module's S4
-    invariant. Never raises.
+    Never include a credential in ``message``/``args``. Never raises.
     """
     try:
         rendered = message % args if args else message
@@ -81,9 +80,7 @@ def _clear_poll_failure(key: str) -> None:
 def _decrypt_provider_auth_token(provider: Optional[Dict[str, Any]]) -> Optional[str]:
     """Decrypt a provider row's ``auth_token`` blob (or pass plaintext through).
 
-    Relocated here from the retired translator gateway's ``upstream.py`` (it was
-    that module's only remaining consumer besides this one). Never log the
-    return value.
+    Never log the return value.
     """
     raw = (provider or {}).get("auth_token")
     if not raw:
@@ -261,7 +258,7 @@ async def _persist_codex_capture(provider_id: str, headers: Dict[str, str]) -> N
             int(time.time() * 1000),
         )
     except Exception as e:  # noqa: BLE001 — capture must never break a turn
-        # Never log header values (S4) — only the exception's own message.
+        # Never log header values — only the exception's own message.
         _log_poll_failure(
             f"codex-capture:{provider_id}",
             "Codex usage capture failed for provider %s: %s", provider_id, e,
@@ -269,7 +266,7 @@ async def _persist_codex_capture(provider_id: str, headers: Dict[str, str]) -> N
 
 
 # ---------------------------------------------------------------------------
-# OpenAI API-key passive capture (#757)
+# OpenAI API-key passive capture
 # ---------------------------------------------------------------------------
 
 # Header allowlist — ONLY these travel into `raw`; nothing else, never a token.
@@ -400,7 +397,7 @@ async def _persist_openai_capture(provider_id: str, headers: Dict[str, str]) -> 
             int(time.time() * 1000),
         )
     except Exception as e:  # noqa: BLE001 — capture must never break a turn
-        # Never log header values (S4) — only the exception's own message.
+        # Never log header values — only the exception's own message.
         _log_poll_failure(
             f"openai-capture:{provider_id}",
             "OpenAI usage capture failed for provider %s: %s", provider_id, e,
@@ -408,7 +405,7 @@ async def _persist_openai_capture(provider_id: str, headers: Dict[str, str]) -> 
 
 
 # ---------------------------------------------------------------------------
-# Anthropic API-key passive capture (#757)
+# Anthropic API-key passive capture
 # ---------------------------------------------------------------------------
 
 # Header allowlist — ONLY these travel into `raw`; nothing else, never a token.
@@ -500,7 +497,7 @@ async def _persist_anthropic_capture(provider_id: str, headers: Dict[str, str]) 
             int(time.time() * 1000),
         )
     except Exception as e:  # noqa: BLE001 — capture must never break a turn
-        # Never log header values (S4) — only the exception's own message.
+        # Never log header values — only the exception's own message.
         _log_poll_failure(
             f"anthropic-capture:{provider_id}",
             "Anthropic usage capture failed for provider %s: %s", provider_id, e,
@@ -824,8 +821,8 @@ async def _maybe_refresh_grok_on_401(
 ) -> bool:
     """Import-guarded SuperGrok token refresh after a billing 401.
 
-    ``xai_token_refresh`` lands with the sibling Grok-provider PR. Until then
-    this is a no-op (log + skip) so the monitor never crashes.
+    Without ``xai_token_refresh`` this is a no-op (log + skip) so the monitor
+    never crashes.
     """
     try:
         from app.core import xai_token_refresh  # type: ignore[attr-defined]

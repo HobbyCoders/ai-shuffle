@@ -7,10 +7,10 @@ This bypasses the fragile PTY-based approach and directly truncates the conversa
 How it works:
 1. Claude stores all conversation history in ~/.claude/projects/[project]/[session_id].jsonl
 2. Each line is a JSON object with uuid, parentUuid, type, message, etc.
-3. When we truncate the file to a specific message UUID, the SDK will only see messages up to that point
+3. When we truncate the file to a specific message UUID, the CLI will only see messages up to that point
 4. On next resume, Claude rebuilds context from the truncated JSONL = rewound context
 
-Key insight: The Claude Agent SDK reads JSONL fresh on each resume, so truncating the file
+Key insight: The Claude Code CLI reads JSONL fresh on each resume, so truncating the file
 is equivalent to rewinding the conversation.
 """
 
@@ -66,7 +66,7 @@ def _next_real_user_index(
     """Index of the next genuine user prompt after ``start_index``.
 
     Skips ``user`` entries that only carry tool_result blocks (those are the
-    SDK echoing tool output, not a new human turn). Returns ``None`` when no
+    CLI echoing tool output, not a new human turn). Returns ``None`` when no
     further user prompt exists.
     """
     for i in range(start_index + 1, len(entries)):
@@ -293,7 +293,7 @@ class JSONLRewindService:
         Get the path to a session's JSONL file.
 
         Args:
-            sdk_session_id: The Claude SDK session ID (UUID)
+            sdk_session_id: The Claude session ID (UUID)
             working_dir: The working directory used when the session was created
 
         Returns:
@@ -372,7 +372,7 @@ class JSONLRewindService:
         - Rewinding to an assistant message keeps that response and removes everything after
 
         Args:
-            sdk_session_id: The Claude SDK session ID
+            sdk_session_id: The Claude session ID
             working_dir: Working directory for the project
 
         Returns:
@@ -399,7 +399,7 @@ class JSONLRewindService:
         """
         Truncate the JSONL file to a specific checkpoint (user or assistant message).
 
-        This is the core rewind operation. After truncation, the next SDK resume
+        This is the core rewind operation. After truncation, the next resume
         will only see messages up to the target checkpoint.
 
         For user messages:
@@ -410,7 +410,7 @@ class JSONLRewindService:
         - Always keeps the assistant message and removes everything after
 
         Args:
-            sdk_session_id: The Claude SDK session ID
+            sdk_session_id: The Claude session ID
             target_uuid: The UUID of the message to rewind to
             working_dir: Working directory for the project
             include_response: If True, keep the assistant's response to the target message

@@ -2,12 +2,12 @@
 Built-in Subagent Definitions
 
 Complete agent definitions that replace Claude Code CLI's built-in agents.
-These are always passed to the SDK via the `agents` parameter, giving users
+These are always passed to the adapter via the `agents` option, giving users
 full visibility and configuration control (model, tools, prompt) with
 revert-to-defaults capability.
 
-Prompts are modeled on Claude Code's agent prompts (reworked against the
-v2.1.241 corpus, 2026-08-23) and adapted for AI Shuffle: Shuffle identity
+Prompts are modeled on Claude Code's agent prompts and adapted for
+AI Shuffle: Shuffle identity
 lines, template variables resolved, and the report-not-files rule folded in.
 
 NOTE: seeding leaves existing DB rows alone — after changing a definition
@@ -423,15 +423,15 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
             results[subagent_id] = "promoted"
 
         else:
-            # v71: the default_* snapshot columns are gone, so a diff between
-            # the row and the code definition can no longer be disambiguated
-            # (user customization vs new code version). Existing rows are left
+            # There are no default_* snapshot columns, so a diff between the
+            # row and the code definition cannot be disambiguated (user
+            # customization vs new code version). Existing rows are left
             # alone — the revert endpoint restores the code definition on
             # demand, and new installs always seed the current version.
             results[subagent_id] = "exists"
 
-    # v71: NO pruning. The unified ``agents`` table holds builtin PROFILE
-    # agents too (ids the BUILTIN_SUBAGENTS list has never heard of) — the old
+    # NO pruning. The unified ``agents`` table holds builtin PROFILE agents
+    # too (ids the BUILTIN_SUBAGENTS list has never heard of), and a
     # prune-by-id loop would delete them. A builtin subagent removed from code
     # simply lives on as an ordinary agent.
 
@@ -439,10 +439,9 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
 
 
 def _update_builtin_defaults(subagent_id: str, definition: Dict[str, Any]) -> None:
-    """No-op since v71: built-in defaults live in code (BUILTIN_SUBAGENTS) —
-    the old ``default_*`` snapshot columns died in the agents fold. Revert and
-    modified-detection read the code definitions directly
-    (app/db/subagents.py::_code_defaults)."""
+    """No-op: built-in defaults live in code (BUILTIN_SUBAGENTS), not in
+    snapshot columns. Revert and modified-detection read the code definitions
+    directly (app/db/subagents.py::_code_defaults)."""
     return None
 
 

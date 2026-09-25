@@ -6,21 +6,21 @@ Bridges the gap between Claude's JSONL transcript UUIDs and our
 
 Two problems this solves:
 
-A. **User-message UUID backfill.** User rows are persisted before the CLI
-   echoes them back into the JSONL, so ``jsonl_uuid`` is NULL at insert
-   time and ``set_message_jsonl_uuid`` was never called anywhere. Rewind
-   needs that column populated to find the truncation anchor. We scan
-   the JSONL, pair user entries with DB rows by position + content, and
-   backfill the missing uuids.
+A. **User-message UUID backfill.** User rows are inserted before the
+   transcript echoes them, so ``jsonl_uuid`` starts NULL. Rewind needs
+   that column to find the truncation anchor, so
+   :func:`backfill_user_jsonl_uuids` pairs transcript user entries with DB
+   rows by position + content and fills in the missing uuids.
 
-B. **Content-match fallback.** For legacy sessions (rows created before
-   the ``jsonl_uuid`` column existed or where backfill can't run because
-   the JSONL is gone), we fall back to matching the target JSONL entry's
-   text against DB rows and deleting by row id.
+B. **Content-match fallback.** When no row carries the target uuid (legacy
+   rows, or a backfill that stopped on drift), the target transcript
+   entry's text is matched against DB rows and the anchor is taken by row id.
 
-Entry point: :func:`sync_db_to_jsonl_rewind`. Safe to call even when the
-JSONL is missing — falls back to the legacy ``delete_session_messages_after_jsonl_uuid``
-path and returns whatever it finds.
+The transcript is a fluid session's node tree, else the JSONL when present,
+else the Postgres session store (see :func:`_load_transcript_entries`).
+
+Entry points: :func:`resolve_rewind_anchor` then :func:`apply_rewind_delete`;
+:func:`delete_all_session_rows` for a full reset.
 """
 
 from __future__ import annotations

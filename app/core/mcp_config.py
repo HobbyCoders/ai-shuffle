@@ -2,7 +2,7 @@
 MCP server and plugin configuration for Claude queries.
 
 Contains functions that build MCP server dictionaries and plugin lists
-for ClaudeAgentOptions.
+for ``AgentOptions``.
 """
 
 import logging
@@ -18,9 +18,9 @@ logger = logging.getLogger(__name__)
 
 # Env vars injected into the spawned ``browser`` MCP server subprocess, sourced
 # from the session's full_env (built by query_options). Keyed on server name so
-# no other STDIO server is affected. The ANTHROPIC_* subset feeds the future
-# ``browser_find`` cheap-model sub-call (PR A4): it inherits the session's
-# gateway routing (ANTHROPIC_BASE_URL/AUTH_TOKEN) or a direct API key, plus the
+# no other STDIO server is affected. The ANTHROPIC_* subset feeds the
+# ``browser_find`` cheap-model sub-call: it inherits the session's provider
+# routing (ANTHROPIC_BASE_URL/AUTH_TOKEN) or a direct API key, plus the
 # small-fast model id. CHROME_CDP_PORT tells the server which supervised
 # Chromium CDP port to attach to (default 9221); BROWSER_MCP_ENTRY is passed
 # through for dev overrides. BROWSER_UPLOAD_DIR gates browser_upload — the
@@ -78,11 +78,9 @@ def _browser_ssrf_allow(explicit: Optional[str]) -> Optional[str]:
     3. Unset: loopback is ALLOWED. AI Shuffle has no multi-tenant or cloud mode
        to detect — one admin password, one operator, and the agent already has
        a shell on the same host — so a self-hosted install is single-user by
-       construction whether it runs in Docker or natively. The old rule keyed
-       off ``is_local_mode()``, which is a Docker-vs-native probe and not a
-       tenancy signal: on a single-user Unraid deployment it read False and the
-       one model that tried to verify a UI on 127.0.0.1 was refused twice
-       (audit R6/6). An install fronted for other people sets
+       construction whether it runs in Docker or natively. ``is_local_mode()``
+       is a Docker-vs-native probe, not a tenancy signal, so it does not decide
+       this. An install fronted for other people sets
        ``BROWSER_SSRF_ALLOW_LOOPBACK=false``.
 
     Returns None only when loopback is explicitly disabled, leaving browser-mcp
@@ -241,7 +239,7 @@ def _build_mcp_servers_dict(
     session_id: Optional[str] = None,
 ) -> Optional[dict]:
     """
-    Build the mcp_servers dict for ClaudeAgentOptions from registered MCP servers.
+    Build the mcp_servers dict for ``AgentOptions`` from registered MCP servers.
 
     Reads MCP servers from two sources:
     1. Scope-based .mcp.json files (user, local, project) via McpService
@@ -376,9 +374,9 @@ def _build_plugins_list(
     setting_sources: Optional[list] = None
 ) -> Optional[list]:
     """
-    Build the plugins list for ClaudeAgentOptions.
+    Build the plugins list for ``AgentOptions``.
 
-    IMPORTANT: When setting_sources includes "user", the SDK auto-loads plugins from
+    IMPORTANT: When setting_sources includes "user", the Claude Code CLI auto-loads plugins from
     ~/.claude/settings.json. We must NOT pass those same plugins explicitly, or they
     will be loaded twice (causing duplicate skills, agents, etc.).
 
@@ -386,7 +384,7 @@ def _build_plugins_list(
     1. setting_sources does NOT include "user" (we need to load all plugins explicitly)
     2. OR the plugin is specified in profile config but NOT in user settings
 
-    According to the Claude Agent SDK documentation, plugins are specified as:
+    Entries use the SDK plugin shape:
     [{"type": "local", "path": "./my-plugin"}, ...]
 
     Supports two formats for plugin entries:
@@ -404,8 +402,7 @@ def _build_plugins_list(
     from app.core.plugin_service import get_plugin_service
     service = get_plugin_service()
 
-    # Check if SDK will auto-load plugins from user settings
-    # When "user" is in setting_sources, SDK loads plugins from ~/.claude/settings.json
+    # When "user" is in setting_sources, the CLI loads plugins from ~/.claude/settings.json
     sdk_loads_user_plugins = setting_sources and "user" in setting_sources
 
     # Load installed plugins registry to resolve plugin IDs
@@ -429,7 +426,7 @@ def _build_plugins_list(
     all_plugin_entries = []
 
     if sdk_loads_user_plugins:
-        # SDK will auto-load user settings plugins - only add profile-specific plugins
+        # The CLI auto-loads user settings plugins - only add profile-specific plugins
         # that are NOT already in user settings (to avoid duplicates)
         logger.debug("SDK will auto-load user plugins (setting_sources includes 'user')")
         if profile_enabled_plugins:
@@ -438,7 +435,7 @@ def _build_plugins_list(
                     all_plugin_entries.append(entry)
                     logger.debug(f"Adding profile-only plugin (not in user settings): {entry}")
     else:
-        # SDK won't auto-load - we need to pass all plugins explicitly
+        # The CLI won't auto-load - we need to pass all plugins explicitly
         logger.debug("SDK won't auto-load plugins - adding all enabled plugins explicitly")
         for plugin_id, is_enabled in settings_enabled.items():
             if is_enabled:

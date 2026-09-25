@@ -48,11 +48,10 @@ from app.db import turns as turns_db  # noqa: E402
 # ---------------------------------------------------------------------------
 # The device fan-out in ``sync_engine`` gives every connection a bounded queue
 # and a dedicated writer task, so no producer ever awaits a socket. The ORIGIN
-# socket — the one this handler owns — was the last unqueued send path: every
-# ``send_json`` awaited the wire inline, so a half-open client (locked phone,
-# wifi switch) blocked whoever was producing the frame for up to the send
-# timeout. It now goes through the same writer, which means ``send_json`` is a
-# synchronous enqueue and the single bounded ``send_text`` await lives on the
+# socket — the one this handler owns — goes through the same writer: awaiting
+# the wire inline would let a half-open client (locked phone, wifi switch)
+# block whoever was producing the frame for up to the send timeout. So
+# ``send_json`` is a synchronous enqueue and the single bounded ``send_text`` await lives on the
 # writer task, where a dead peer costs exactly one stalled task — its own.
 #
 # Overflow is two-tier, matching sync_engine's policy:
@@ -1060,7 +1059,7 @@ class ChatWebSocketHandler:
                         target_instance_id=target_instance_id,
                         project_v2_id=resolved_pv2_id,
                         # The composer's pick IS the session's binding —
-                        # agents no longer pin a model, so stamp it at birth.
+                        # agents do not pin a model, so stamp it at birth.
                         # A ``prov:`` composite also settles provider_id here,
                         # before anything reads the row.
                         model=(overrides or {}).get("model"),

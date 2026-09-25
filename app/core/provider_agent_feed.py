@@ -1,74 +1,48 @@
-"""Cross-session event forwarding for ProviderAgent workers (chunk P3-A2).
+"""Cross-session event forwarding for Task-dispatched workers.
 
-A ProviderAgent worker (``app/core/provider_agent.py``) runs its turn on its
-OWN session, with its own :class:`~app.core.turn_recorder.TurnRecorder` and its
-own ``session_events`` log. Nothing about that reaches the parent, so before
-this module the parent saw only a tool call that returned text after a long
-silence.
+A worker (:mod:`app.core.provider_agent`) runs its turn on its OWN session, with
+its own :class:`~app.core.turn_recorder.TurnRecorder` and ``session_events``
+log. This module is the tap that renders it as the EXISTING subagent card by
+emitting, on the PARENT session's log, the frames the v2 ``reducer.ts`` builds
+that card from:
 
-This module is the tap that makes the worker render as the EXISTING subagent
-card. It emits, on the PARENT session's log, the contract triple the frontend
-reducer is built from
-(``frontend/src/lib/stores/session/v2/reducer.ts:996/:1026/:1094``):
-
-* ``subagent.started``  — when the worker turn is dispatched;
-* ``task.updated`` (state ``running``) — emitted alongside ``subagent.started``,
-  this is what puts the worker on the v2 background-tasks strip / spinner
-  overlay / StopButton, all of which read ``activeTasks`` and therefore see only
-  ``task.updated`` rows (``reducer.ts`` ``deriveActiveTasks``);
+* ``subagent.started`` — when the worker turn is dispatched;
+* ``task.updated`` (state ``running``) — alongside ``subagent.started``; the
+  background-tasks strip, spinner overlay and StopButton read ``activeTasks``
+  and so see only ``task.updated`` rows (``feed-controller.ts``
+  ``deriveActiveTasks``);
 * ``subagent.progress`` — assistant text / tool calls / tool results, bounded;
 * ``subagent.completed`` — the terminal status plus a bounded result preview,
   paired with the terminal ``task.updated`` that clears the running chip.
 
-Four constraints shape the design; each is load-bearing:
+Four load-bearing constraints:
 
 1. **The parent has a FENCED run in flight.** Appending with a fence token we
-   do not own raises ``FenceViolation`` (``app/db/session_events.py:73-86``),
-   and ``TurnRecorder`` is hard-bound to one ``session_id`` for its whole life
-   (``app/core/session_runtime.py:583-586``) so the parent's recorder cannot be
-   reused. Every append here goes through
+   do not own raises ``session_events.FenceViolation``, and a ``TurnRecorder``
+   is bound to one session for life. Every append here goes through
    :func:`app.core.turn_recorder.record_drained_event`, the sanctioned UNFENCED
-   path (``run_id=None`` skips the fence check entirely). Seq allocation stays
-   with ``session_event_counters``, so parent and worker allocate independently
-   and neither can collide with the other.
+   path (``run_id=None`` skips the fence check). Seq allocation stays with
+   ``session_event_counters``, so parent and worker never collide.
+2. **``record_drained_event`` drops anything outside
+   ``subagent_*``/``task_*``/``system``.** Every event emitted here is one of
+   those shapes, translated by the same ``_translate_shared`` the in-turn
+   recorder uses.
+3. **The worker's own log is read-only here** (``session_events.get_events``
+   from a cursor). The worker session is the full report; this module mirrors
+   a bounded summary to the parent.
+4. **Observation is a poll, not a hook.** The worker may run on another runner;
+   tailing its durable log is the only observation point that works in every
+   placement and cannot perturb what it watches.
 
-2. **``record_drained_event`` silently drops anything outside
-   ``subagent_*``/``task_*``/``system``** (``app/core/turn_recorder.py:1017``).
-   Every event this module emits is deliberately a ``subagent_*`` pump shape
-   (or the ``system``/``task_updated`` settle frame), so nothing is filtered
-   out, and translation to the contract rows is the SAME
-   ``_translate_shared`` the in-turn recorder uses — no second translator.
+The poll is ONE loop per PARENT (:class:`WorkerFeedGroup`), batching all of that
+parent's workers into one :func:`app.db.session_events.get_events_multi` call
+per interval, so a wide fan-out does not multiply DB reads (and pool pressure).
 
-3. **The worker's own log must stay complete.** We only ever READ it
-   (``session_events.get_events`` from a cursor). The worker session IS the
-   persisted full report (plan §2 C.5); this module duplicates a bounded
-   summary stream to the parent, it does not divert the worker's stream.
-
-4. **Observation is a poll, not a hook.** There is no in-process stream from
-   another session's turn — the worker runs under its own runtime, possibly on
-   a different runner. Tailing the durable log from a cursor is the only
-   observation point that works in every placement, needs no new plumbing, and
-   cannot perturb the thing it watches.
-
-That poll is CONSOLIDATED PER PARENT SESSION (P3-A4), not per worker. Ruling
-P12 forbids capping worker fan-out, so a per-worker poller at
-``POLL_INTERVAL_SECONDS`` meant twenty workers = ~13 DB reads/second through
-the sync-executor pool purely to mirror progress — and this repo has a
-documented history of ``PoolError`` bursts when executor count outruns pool
-max. :class:`WorkerFeedGroup` runs ONE loop per parent and batches every one of
-that parent's workers into a single :func:`app.db.session_events.get_events_multi`
-call, turning N queries per interval into 1. Per-worker bounds, coalescing and
-frame shapes are untouched: the group only changes WHO issues the read.
-
-Volume is bounded on three axes (a chatty worker must not flood the parent's
-log): total frames, total forwarded text, and per-frame size. The bounds are
-sized so a normal worker turn — even a long one — never hits them; they exist
-for the pathological case (native-leg subagents stream into the parent log
-UNCAPPED, so these are a backstop, not parity). The caps degrade in two
-stages: exhausting the TEXT budget forwards a single note and stops text only
-— tool activity keeps streaming, so the card stays live; exhausting the FRAME
-budget forwards a final note and silences the tap. The full detail is always
-in the worker session.
+Volume is bounded on three axes: total frames, total forwarded text and
+per-frame size. A normal worker turn never hits them. They degrade in two
+stages: exhausting the TEXT budget forwards one note and stops text only (tool
+activity keeps the card live); exhausting the FRAME budget forwards a final
+note and silences the tap. The full detail is always in the worker session.
 """
 
 from __future__ import annotations
@@ -81,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Bounds (plan §2 C.4: fan-out is UNCAPPED, so per-worker volume must not be)
+# Bounds (fan-out can be wide, so per-worker volume must be capped)
 # ---------------------------------------------------------------------------
 
 #: How often the tap re-reads the worker's event log. The worker's turn runs
@@ -133,7 +107,7 @@ _TOOL_RESULT_TYPE = "tool.result"
 #: Worker rows that prove its provider request is streaming or has answered,
 #: though the tap does not mirror them: reasoning deltas, tool-argument deltas
 #: and a finished model call's usage. A reasoning model can spend minutes on
-#: these before its first text or tool call (#1418). ``turn.provider_alive``
+#: these before its first text or tool call. ``turn.provider_alive``
 #: is the weakest of them: the provider accepted the request and its stream was
 #: open, nothing more. It is the only row an encrypted-only reasoning model
 #: produces before its reasoning item ends. ``turn.started`` is not one: the
@@ -188,9 +162,9 @@ class WorkerFeed:
     :func:`app.core.provider_agent.dispatch_worker`, because that is what the
     frontend actually joins on: the ``/live`` spinner overlay matches
     ``activeTasks[].toolUseId`` against the card's ``toolId``
-    (``SubagentMessage.svelte:37-44`` → ``utils/subagent-status.ts``), and the
-    terminal ``task.updated`` settle joins the same way
-    (``reducer.ts:1203``). One id everywhere, no orphan cards.
+    (``SubagentMessage.svelte`` → ``utils/subagent-status.ts``), and the
+    terminal ``task.updated`` settle joins the same way (``reducer.ts``).
+    One id everywhere, no orphan cards.
 
     Every method is best-effort and never raises: a forwarding failure must
     degrade the parent's card, never the worker or the parent's turn.
@@ -217,7 +191,7 @@ class WorkerFeed:
         self.model_id = model_id
         # The dispatched agent's DISPLAY NAME ("Frontend Designer"). Rides
         # ``subagent.started`` as the card's identity; the model slug stays on
-        # ``agent_type`` as a secondary detail (2026-08-17 ruling).
+        # ``agent_type`` as a secondary detail.
         self.agent_name = agent_name
         self.prompt = prompt
         # The model's Task tool_use_id (fluid native leg), when known. Rides the
@@ -267,7 +241,7 @@ class WorkerFeed:
     # -- emit -------------------------------------------------------------
 
     async def _emit(self, event: Dict[str, Any]) -> None:
-        """Append ONE pump-shaped event to the PARENT, unfenced.
+        """Append ONE ``subagent_*``/``task_*``/``system`` event to the PARENT.
 
         ``record_drained_event`` is the only append path used here: it is
         unfenced by construction (``run_id=None``), it reuses the in-turn
@@ -291,19 +265,17 @@ class WorkerFeed:
         * ``subagent.started`` CREATES the card;
         * a ``task.updated`` with state ``running`` puts the worker on the v2
           active-task surfaces. ``deriveActiveTasks`` is built solely from
-          ``task.updated`` summaries, so before this frame the background-tasks
-          strip, the spinner overlay and the StopButton never saw a
-          ProviderAgent worker as running — only its TERMINAL settle arrived,
-          and a terminal summary adds no chip. The frame is the exact shape
-          ``query_engine`` yields for the SDK's ``TaskStartedMessage``, so
-          ``_translate_shared`` maps it with no new code and
+          ``task.updated`` summaries, so without this frame the background-tasks
+          strip, the spinner overlay and the StopButton would never see the
+          worker as running — a terminal summary adds no chip. The frame is
+          the ``task_started`` system shape the harness emits for a CLI
+          background task, so ``_translate_shared`` maps it with no new code and
           ``record_drained_event`` admits it on the ``task_`` prefix. ``status``
           is explicit ``running`` rather than the per-type ``started`` default,
           because ``deriveActiveTasks`` keeps only ``running``.
 
-        Emitted for EVERY worker, background or synchronous: the pre-v2
-        ``/live`` strip surfaced every registry task, and strict parity with the
-        native leg (background-only chips) was rejected.
+        Emitted for EVERY worker, background or synchronous, so every registry
+        task shows on the strip.
 
         Idempotent: a second call is a no-op (the reducer is idempotent too,
         but a duplicate row would still cost a write).
@@ -323,9 +295,9 @@ class WorkerFeed:
             "agent_id": self.task_id,
             "worker_session_id": self.worker_session_id,
             "launch_tool_use_id": self.launch_tool_use_id,
-            # The card's IDENTITY: the agent's own name. Absent (a bare
-            # ProviderAgent worker with no agent behind it) the card falls back
-            # to the model badge below, which is what it always showed.
+            # The card's IDENTITY: the agent's own name. Absent (a bare worker
+            # with no agent behind it) the card falls back to the model badge
+            # below.
             "agent_name": self.agent_name or "",
             # KEPT for compatibility: every existing consumer (and every card
             # already in a durable log) reads the model id off ``agent_type``,
@@ -360,7 +332,7 @@ class WorkerFeed:
           replay of the parent's log;
         * a terminal ``task.updated`` settle frame (via
           :func:`app.core.turn_recorder.record_task_settle_frame`) is the belt.
-          It joins the card through ``tool_use_id`` (``reducer.ts:1203``) and,
+          It joins the card through ``tool_use_id`` (``reducer.ts``) and,
           because ``deriveActiveTasks`` keeps only ``running`` summaries, it is
           also what CLEARS the active-task chip that :meth:`started`'s running
           frame created.
@@ -368,7 +340,7 @@ class WorkerFeed:
         ``status`` uses the TASK REGISTRY's vocabulary —
         ``completed``/``error``/``killed`` — because it is forwarded verbatim as
         the settle frame's state, and the reducer's terminal test is exactly
-        that set (``reducer.ts:1202``); a "failed" there would never settle.
+        that set (``reducer.ts``); a "failed" there would never settle.
         The ``subagent.completed`` contract event only distinguishes error from
         success, so both failure statuses render the card's error state.
 
@@ -385,7 +357,7 @@ class WorkerFeed:
             "is_error": is_error,
             "result": _clip(result_preview, MAX_RESULT_PREVIEW_CHARS),
             # The worker's authoritative token counts. Without them the card's
-            # usage row rendered nothing at all for ProviderAgent workers.
+            # usage row renders nothing for workers.
             "usage": usage if isinstance(usage, dict) and usage else None,
         })
         try:
@@ -573,7 +545,7 @@ class WorkerFeed:
         """Mirror a worker's ``turn.completed`` usage onto its supervisor record.
 
         This is what makes per-turn worker spend visible WHILE the parent turn
-        runs (plan §2 C.4) rather than only once the tool call returns.
+        runs rather than only once the tool call returns.
         ``dispatch_worker`` still records the authoritative final numbers, and
         the supervisor merges rather than accumulates, so seeing the same
         snapshot twice cannot double-count. Purely additive: never raises, and a
@@ -660,7 +632,7 @@ class WorkerFeed:
 
 
 # ---------------------------------------------------------------------------
-# One poller per PARENT TURN (P3-A4)
+# One poller per PARENT TURN
 # ---------------------------------------------------------------------------
 
 #: parent_session_id -> the single live group for that parent.
@@ -668,15 +640,14 @@ _GROUPS: Dict[str, "WorkerFeedGroup"] = {}
 
 
 class WorkerFeedGroup:
-    """The shared poll loop for every ProviderAgent worker of ONE parent.
+    """The shared poll loop for every worker of ONE parent.
 
-    Replaces the per-worker loop. Each tick issues ONE
-    :func:`app.db.session_events.get_events_multi` covering every member's
-    cursor, then hands each member its own rows through
-    :meth:`WorkerFeed.forward`. Per-worker bounds are preserved exactly: a
-    member still takes at most ``DRAIN_BATCH`` rows per inner batch and at most
+    Each tick issues ONE :func:`app.db.session_events.get_events_multi`
+    covering every member's cursor, then hands each member its own rows
+    through :meth:`WorkerFeed.forward`. Per-worker bounds still apply: a member
+    takes at most ``DRAIN_BATCH`` rows per inner batch and at most
     ``MAX_DRAIN_BATCHES`` batches per tick, and its frame/text caps and text
-    coalescing are entirely unchanged (they live in ``forward``).
+    coalescing live in ``forward``.
 
     The group starts when its first member joins and stops when its last member
     leaves, so an idle parent runs no loop at all.
@@ -828,12 +799,12 @@ def reset_feed_groups() -> None:
 async def emit_shielded(coro: Any) -> None:
     """Await ``coro`` under a shield, swallowing our own cancellation.
 
-    The teardown hazard this exists for: the ProviderAgent MCP handler runs as
-    a tracked child of the parent's SDK client and is CANCELLED when that
-    client closes (eviction / interrupt). The terminal frames are emitted from
+    The teardown hazard this exists for: the Task tool handler runs as a
+    tracked child of the parent's pooled adapter and is CANCELLED when that
+    adapter closes (eviction / interrupt). The terminal frames are emitted from
     a ``finally``, i.e. while the task is already cancelling — and the reducer
     only speculatively settles running cards on ``turn.completed``, NOT on
-    ``turn.aborted`` (``reducer.ts:609``), so a card whose
+    ``turn.aborted`` (``reducer.ts``), so a card whose
     ``subagent.completed`` is lost to an interrupt would spin forever on
     replay.
 

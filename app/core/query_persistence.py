@@ -36,10 +36,10 @@ async def shielded_get_context_usage(adapter: Any) -> Optional[dict]:
     """Run ``adapter.get_context_usage()`` bounded, without cancelling it midflight.
 
     This is the SINGLE copy of the pattern shared by the turn-end capture and
-    the GET context-usage endpoint. The SDK control call runs on a DETACHED task
+    the GET context-usage endpoint. The control call runs on a DETACHED task
     guarded by a SHIELD: on timeout we must NOT cancel the in-flight control
-    request — cancelling it mid-flight leaks the entry in the SDK client's
-    pending_control_responses, which can wedge later control calls. Shielding
+    request — cancelling it mid-flight can leave its entry in the delegated
+    loop's pending-control map, which can wedge later control calls. Shielding
     lets the ``wait_for`` time out while the underlying call keeps running to
     completion in the background.
 
@@ -187,12 +187,9 @@ def log_captured_cli_stderr(
     ``_extract_connection_error`` (it lands in the user-facing error message and
     an ERROR log line). But a subprocess that dies MID-STREAM — the common case
     behind a background task that silently vanishes — raises from
-    ``receive_response()`` where ``cli_stderr_lines`` was previously out of
-    scope. The real reason (exit code, the stack trace the CLI printed before
-    dying) was therefore only ever logged at DEBUG by the stderr callback, and
-    the SDK reader-task error otherwise leaked as "Task exception was never
-    retrieved". Persisting the capture list on ``SessionState`` lets the
-    streaming exception handlers call this so the next exit-1 records WHY.
+    ``receive_events()``, where the connect-scoped ``cli_stderr_lines`` is out
+    of scope. Persisting the capture list on ``SessionState`` lets the
+    streaming exception handlers call this so an exit-1 records WHY.
 
     Best-effort and never raises — a logging helper must not mask the original
     error it is trying to explain.

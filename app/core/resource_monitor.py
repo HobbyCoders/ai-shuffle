@@ -296,8 +296,7 @@ def _check_warnings(metrics: dict) -> list[str]:
     # Session pool at capacity — the SUBPROCESS half of it, which is what
     # pool_max_size bounds. pool_max_size is reported by _collect_metrics
     # straight off the live pool; the fallback reads the CONFIGURED size rather
-    # than a hardcoded constant, which is what previously went stale when the
-    # default moved (it still said 3 long after the default was 8). If neither
+    # than a hardcoded constant, so it cannot go stale. If neither
     # is available the pool is not up yet — there is nothing to warn about.
     pool_size = metrics.get("pool_delegated", metrics.get("pool_size", 0))
     pool_max = metrics.get("pool_max_size")
@@ -377,7 +376,7 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
     # ``lru_force`` (hard-cap eviction of a busy session) and ``dead`` (subprocess
     # died) are the only reasons that can remove a session PARKED on in-flight
     # background work — normal ``lru``/``idle`` eviction skip parked sessions. In
-    # those two cases the pooled SDK client was just destroyed, so the parked
+    # those two cases the pooled adapter was just destroyed, so the parked
     # work can never deliver its terminal notification: the background-work
     # guard below would refuse teardown FOREVER, leaking the registry and
     # stranding the UI's task strip. Force the teardown so the orphaned tasks
@@ -396,7 +395,7 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
                 await persist_turn_end_state(session_id)
 
             if force:
-                # The SDK client is gone — in-flight background work can never
+                # The pooled adapter is gone — in-flight background work can never
                 # finish on its own. Reap it to "killed" so the taskbar shows
                 # the failure (the registry retains killed rows for a short
                 # window past clear_session — see task_registry.get_visible).
@@ -429,7 +428,7 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
                 task_registry.has_active_background_work(session_id)
                 or task_registry.has_running_monitor_shell(session_id)
             ):
-                # A session parked on SDK background work keeps its registry
+                # A session parked on background work keeps its registry
                 # until the work completes (a later turn end, eviction, or
                 # sweep clears it) — this only DEFERS removal, never blocks it.
                 # Monitor shells defer too: they are OS processes independent
@@ -484,7 +483,7 @@ async def _on_pool_eviction(session_id: str, reason: str) -> None:
 
     Fired from SessionPool._do_evict the moment an LRU or idle eviction removes a
     session, so the task registry + Monitor shells are torn down on the SAME
-    event that ends the pooled SDK client — one lifecycle, no separate timer.
+    event that ends the pooled adapter — one lifecycle, no separate timer.
     Dead-eviction does NOT route here (it bypasses _do_evict); the periodic
     sweep cleans those via _cleanup_evicted_sessions.
     """
@@ -735,12 +734,11 @@ async def _monitor_loop(interval_seconds: int):
             # sessions so the sweep stays cheap; the unbounded backfill runs once
             # at startup. Logs an ERROR per heal (recovery implies a prior crash).
             #
-            # F6: this is a RECOVERY sweep, not a hot path, so it runs on its own
+            # This is a RECOVERY sweep, not a hot path, so it runs on its own
             # (hourly by default) cadence rather than every monitor tick. New
             # orphans are prevented at the source by the persist-on-init write,
             # the startup pass covers the whole backlog, and the reconciler
-            # itself now memoizes inconclusive ids — so a 5-minute cadence bought
-            # nothing but a repeated aggregation over the session store.
+            # memoizes inconclusive ids.
             if _orphan_reconcile_due():
                 await reconcile_orphans_once(max_age_days=14)
 
@@ -763,19 +761,17 @@ async def start_resource_monitor(interval_seconds: int = 300) -> asyncio.Task:
     # Wire pool eviction → registry/shell cleanup. This makes LRU + idle
     # eviction (both funnel through SessionPool._do_evict) tear down the
     # per-session task registry and Monitor shells on the same event that ends
-    # the pooled SDK client — one lifecycle, no separate timer.
+    # the pooled adapter — one lifecycle, no separate timer.
     try:
         from app.core.session_pool import get_session_pool
         get_session_pool().set_eviction_callback(_on_pool_eviction)
     except Exception as e:
         logger.error(f"{_PREFIX} Failed to register pool eviction callback: {e}")
 
-    # Start the pool's deadline-driven idle watchdog (F1). Idle eviction used to
-    # ride THIS task's 5-minute tick, which added up to 5 minutes of latency on
-    # top of an already long flat timeout — ~35 minutes of parked subprocesses in
-    # the worst case. The watchdog wakes exactly on the next eviction deadline
-    # (and never while the pool is empty), so RAM comes back on time. The sweep
-    # in _periodic_cleanup stays as a belt in case the watchdog task dies.
+    # Start the pool's deadline-driven idle watchdog. It wakes exactly on the
+    # next eviction deadline (and never while the pool is empty), so RAM comes
+    # back on time instead of on this task's 5-minute tick. The sweep in
+    # _periodic_cleanup stays as a belt in case the watchdog task dies.
     try:
         from app.core.session_pool import get_session_pool
         get_session_pool().start_idle_watchdog()

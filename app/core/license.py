@@ -1,4 +1,4 @@
-"""License leases on the worker (plan items P7 and L2).
+"""License leases on the worker.
 
 The license server (android/license) hands each activated worker an
 Ed25519-signed lease. This module verifies leases offline against the public
@@ -6,7 +6,7 @@ keys built into the app, keeps the lease in the settings store, renews it once
 a day with jittered retry, and answers one question for the rest of the app:
 ``license_allows_agent_runs()``.
 
-Rules it follows (decisions D9 and D10):
+Rules it follows:
 
 - A lease is good for 14 days, so a worker can stay offline for two weeks.
 - After a failed payment the server keeps issuing leases for 14 days with
@@ -340,8 +340,8 @@ def lease_header() -> str | None:
     """The current lease as the value of the ``X-Shuffle-Lease`` header: the
     signed envelope as JSON, base64url. None in beta mode or without a lease.
 
-    Sent only to the account hub: on the gated source feed (D8,
-    android/hub/src/license-gate.ts) and on the worker's activate and
+    Sent only to the account hub: on the gated source feed
+    (android/hub/src/license-gate.ts) and on the worker's activate and
     connector calls, where it lifts the account's tunnel cap
     (android/hub/src/tunnel-capacity.ts, app/core/account_hub.py)."""
     if beta_mode():

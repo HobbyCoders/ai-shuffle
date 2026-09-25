@@ -8,7 +8,7 @@ converts that legacy transcript into typed contract events
 (:mod:`app.contract.events`) and appends them ONCE, so the event log carries the
 full history before any live event lands on top.
 
-Design (``docs/V2_CORE_REARCHITECTURE.md`` Part 1):
+Design:
 
 - Fast path: ``session_events.get_max_seq(session_id) > 0`` → already populated,
   return immediately. A 60s per-process memo suppresses repeated legacy loads

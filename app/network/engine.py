@@ -21,8 +21,9 @@ Read path
     transaction.
 
 Bootstrap
-    ``snapshot_chunks`` serves a member the current records of every
-    collection; ``apply_snapshot_chunk`` applies them. A joining worker keeps
+    ``snapshot_manifest`` / ``snapshot_chunk`` serve a member the current
+    records of every collection; ``open_snapshot_chunk`` + ``apply_snapshot_chunk``
+    apply them. A joining worker keeps
     ``bootstrap_state='syncing'`` (no outbox) until the snapshot is complete.
 """
 from __future__ import annotations

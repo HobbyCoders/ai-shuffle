@@ -1,18 +1,11 @@
 """
-Single isolation point for Claude Agent SDK private attribute access.
+Guarded access to an SDK-style client's subprocess via private attributes.
 
-The SDK doesn't expose a public API for subprocess management (health check,
-PID, graceful shutdown). We access private attributes as a workaround. This
-module is the ONE place in the codebase that touches SDK internals.
-
-If the SDK restructures its internals, only this file needs updating.
-If the SDK exposes a public API, only this file needs updating.
-
-Tested attribute chains (SDK 0.1.50):
+Callers pass ``adapter.sdk_client``; ``HarnessAdapter`` has no such attribute,
+so they get ``None`` and never construct a handle. Kept as the one place that
+reads these internals:
   - client._transport._process          (direct path)
   - client._query.transport._process    (via Query object)
-
-Both reach the same anyio.abc.Process instance.
 """
 
 import asyncio

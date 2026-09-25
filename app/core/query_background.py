@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # Provider-agnostic mirrors of the SDK message vocabulary (identical names —
 # see app/core/provider/events.py). The stream below arrives pre-translated
 # through adapter.receive_events(), so no claude_agent_sdk message class is
-# dispatched here and the old per-SDK-version import guards are gone.
+# dispatched here.
 from app.core.provider.events import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage, RateLimitEvent, HookEventMessage,
@@ -78,14 +78,13 @@ async def _run_background_query(
     device_id: Optional[str],
     api_user_id: Optional[str],
 ):
-    """Recording tap around ``_run_background_query_impl`` (V2 Phase 1).
+    """Recording tap around ``_run_background_query_impl``.
 
-    Mirrors ``query_engine.stream_to_websocket``: for sessions flagged
-    ``sessions.v2_stream`` a ``TurnRecorder`` records the initial user message
-    and every pump-shaped event the impl produces into the typed session event
-    log; ``close()`` runs in the ``finally`` so the crash/abandonment path
-    still records a terminal ``turn.aborted``. For all other sessions
-    (recorder is None) this wrapper is a pure passthrough.
+    Mirrors ``query_engine.stream_to_websocket``: a ``TurnRecorder`` records
+    the initial user message and every pump-shaped event the impl produces into
+    the typed session event log; ``close()`` runs in the ``finally`` so the
+    crash/abandonment path still records a terminal ``turn.aborted``. When no
+    recorder is available this wrapper is a pure passthrough.
     """
     from app.core.turn_recorder import TurnRecorder
 
@@ -162,8 +161,7 @@ async def _run_background_query_impl(
     )
 
     # Build options + wire plugin/DB hooks (incl. blocking PreToolUse guards)
-    # through the shared sdk_options seam — previously only the WebSocket path
-    # attached hooks here (issue #567).
+    # through the shared sdk_options seam, the same as the WebSocket path.
     from app.core.sdk_options import build_session_options
     from app.core.query_options import WorktreeUnavailableError, ensure_pending_checkout
     session_row = await run_sync(database.get_session, session_id)
@@ -205,7 +203,7 @@ async def _run_background_query_impl(
             await recorder.on_event(credential_gate.refusal_event(_refusal))
         return
 
-    # --- Session Pool: Acquire or create SDK client ---
+    # --- Session Pool: Acquire or create the pooled adapter ---
     pool = get_session_pool()
     existing_state = pool.get(session_id)
     reusing_client = False
@@ -249,7 +247,7 @@ async def _run_background_query_impl(
                 if old_opts:
                     new_model = getattr(options, 'model', None)
                     old_model = getattr(old_opts, 'model', None)
-                    # Same-provider-only hot-swap (PA13) — a provider change is
+                    # Same-provider-only hot-swap — a provider change is
                     # caught by requires_reconnect() and respawns instead; a
                     # set_model() across providers would send an unknown model id
                     # to the wrong upstream.
@@ -313,9 +311,9 @@ async def _run_background_query_impl(
 
         logger.debug(f"[Background] Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
 
-        # Attribute this session to the SDK's detached message-reader task, which
-        # is created inside adapter.connect() below and inherits this context, so
-        # a "Fatal error in message reader" carries the session id into error_log.
+        # Attribute this session to any task created inside adapter.connect()
+        # below: it inherits this context, so an error such a task logs (e.g.
+        # "Fatal error in message reader") carries the session id into error_log.
         set_current_session_id(session_id)
 
         # Wrap stderr callback to collect lines for error reporting
@@ -406,11 +404,9 @@ async def _run_background_query_impl(
                     # Stamp the effective launched model on EVERY spawn/init so
                     # the Unraid host-op guard can resolve THIS session's model
                     # authoritatively from sessions.launched_model without waiting
-                    # for turn-end session_messages.metadata['model'] (issue #577).
-                    # The other three spawn paths (execute_query / stream_query /
-                    # stream_to_websocket) already do this via #552; the background
-                    # REST path (POST /conversation/start) was the one that never
-                    # did, persisting launched_model=NULL for its sessions. A None
+                    # for turn-end session_messages.metadata['model']. The other
+                    # spawn paths (execute_query / stream_query /
+                    # stream_to_websocket) do the same. A None
                     # model is a no-op in update_session (never clobbers). The
                     # sdk_session_id link stays owned by end-of-turn
                     # _persist_turn_results on this path (unchanged).
@@ -548,15 +544,15 @@ async def _run_background_query_impl(
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
                 metadata["stop_reason"] = getattr(message, 'stop_reason', None)
-                # SDK 0.2.126: terminal reason + typed per-model usage pass-through
+                # Terminal reason + typed per-model usage pass-through
                 metadata["terminal_reason"] = getattr(message, "terminal_reason", None)
                 metadata["model_usage"] = getattr(message, "model_usage", None)
-                # Surface SDK-reported errors (added in SDK 0.1.51)
+                # Surface provider-reported errors
                 result_errors = getattr(message, 'errors', None)
                 if result_errors:
                     metadata["errors"] = result_errors
                     logger.warning(f"[Background] ResultMessage contains errors: {result_errors}")
-                # Surface HTTP error status code (SDK 0.1.81+); no WS yield — background loop has no direct consumer
+                # Surface HTTP error status code; no WS yield — background loop has no direct consumer
                 api_err = getattr(message, "api_error_status", None)
                 if api_err is not None:
                     metadata["api_error_status"] = api_err
@@ -617,7 +613,7 @@ async def _run_background_query_impl(
                     "metadata": metadata,
                 })
 
-        # Durable end-of-turn writes (parked marker + unpark latch).
+        # Durable end-of-turn writes (parked marker, branch resync, summary flush).
         await persist_turn_end_state(session_id)
 
         # Clean up per-session state that is no longer needed.
@@ -664,7 +660,7 @@ async def _run_background_query_impl(
     except Exception as e:
         logger.warning(f"[Background] Failed to record ad-hoc turn for {session_id}: {e}")
 
-    # Capture the SDK context-usage breakdown so the endpoint can serve a
+    # Capture the context-usage breakdown so the endpoint can serve a
     # persisted snapshot post-eviction. Runs DETACHED (self-guards on the pool's
     # live adapter) so it never delays completion.
     schedule_context_usage_capture(session_id, log_prefix="[Background] ")
@@ -731,14 +727,13 @@ async def start_background_query(
         )
         logger.debug(f"Created new session {session_id} with title: {title}")
 
-    # Persist the run binding the API caller picked (v79). The chat lane does
+    # Persist the run binding the API caller picked. The chat lane does
     # this in turn_manager._submit_blocking for every human-facing source —
     # whose _BINDING_SOURCES already include "api" — but this lane bypasses
-    # turn_manager entirely, so API sessions kept NULL model/provider bindings.
-    # A scheduler-enqueued successor (an unpark wake, auto-continue, failover)
-    # then built its options with no binding and empty overrides, fell back to
-    # the bare launched_model with no provider, and died on the wrong leg with
-    # the wrong credentials (the 2s 401 unpark aborts, 2026-08-31).
+    # turn_manager entirely. Without it a scheduler-enqueued successor (an
+    # unpark wake, auto-continue, failover) would build its options with no
+    # binding and empty overrides, fall back to the bare launched_model with no
+    # provider, and fail on the wrong leg with the wrong credentials.
     if overrides:
         try:
             await run_sync(
@@ -757,7 +752,7 @@ async def start_background_query(
             )
 
     # Generate a message ID for the API response contract (clients key the
-    # in-flight turn on it; the runner itself no longer consumes it).
+    # in-flight turn on it; the runner itself does not consume it).
     assistant_msg_id = f"streaming-{session_id}-{datetime.now(timezone.utc).timestamp()}"
 
     # Start background task

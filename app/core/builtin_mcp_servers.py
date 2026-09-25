@@ -10,11 +10,10 @@ stale ``disabledMcpServers`` entries for it are stripped on read.
 Currently this provides a single built-in:
 
 - ``browser`` — AI Shuffle's own browser-automation tool suite. This IS a normal
-  spawned STDIO MCP server: the SDK launches ``node /opt/browser-mcp/dist/index.js``
+  spawned STDIO MCP server: the harness launches ``node /opt/browser-mcp/dist/index.js``
   once per session and tears it down on exit (session isolation + cleanup for free).
   It exposes tools named ``mcp__browser__<tool>`` (``browser_navigate``,
-  ``browser_snapshot``, ``browser_act``, ``browser_screenshot``; more land in later
-  PRs).
+  ``browser_snapshot``, ``browser_act``, ``browser_screenshot``, ...).
 
 Architecture (the decision record):
   Each spawned server is a thin CDP client built on ``playwright-core``. It calls
@@ -31,10 +30,10 @@ Architecture (the decision record):
   spawnable ``McpServerConfig`` (``command="node"``, ``args=[BROWSER_MCP_ENTRY]``);
   the mcp_servers builder adds it like any other server, and its per-session env
   (``ANTHROPIC_*`` for the future ``browser_find`` sub-call plus ``CHROME_CDP_PORT``)
-  is injected by mcp_config for this server only. The old ``cli_flag`` path is gone.
+  is injected by mcp_config for this server only.
 
   The entry point is installed at ``/opt/browser-mcp/dist/index.js`` in the Docker
-  image (PR A3); ``BROWSER_MCP_ENTRY`` overrides it for local/dev checkouts.
+  image; ``BROWSER_MCP_ENTRY`` overrides it for local/dev checkouts.
 
 SECURITY NOTE (SSRF / local-network reach): browser-mcp intercepts HTTP(S) requests
 and checks resolved addresses against its SSRF policy. Cloud metadata is always
@@ -62,8 +61,8 @@ logger = logging.getLogger(__name__)
 # every tool from it.
 BROWSER_SERVER_NAME = "browser"
 
-# Default path to the spawned STDIO server's entry point inside the Docker image
-# (installed by PR A3). Overridable via the ``BROWSER_MCP_ENTRY`` env var for
+# Default path to the spawned STDIO server's entry point inside the Docker image.
+# Overridable via the ``BROWSER_MCP_ENTRY`` env var for
 # local/dev checkouts where the built package lives elsewhere.
 DEFAULT_BROWSER_MCP_ENTRY = "/opt/browser-mcp/dist/index.js"
 
@@ -98,7 +97,7 @@ def get_browser_server_config() -> McpServerConfig:
     Build the McpServerConfig for the ``browser`` built-in.
 
     Returns a spawnable STDIO server (``command="node"``,
-    ``args=[<entry>]``) — an ordinary MCP server the SDK launches per session,
+    ``args=[<entry>]``) — an ordinary MCP server the harness launches per session,
     NOT a CLI-flag integration. It is surfaced in the admin MCP list and is
     always enabled (stale disable entries are ignored).
     """

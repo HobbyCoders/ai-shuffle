@@ -10,7 +10,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 
 from app.core.plugin_models import MarketplaceInfo
 

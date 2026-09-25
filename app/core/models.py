@@ -44,10 +44,10 @@ class ComputerUseConfig(BaseModel):
 
 
 class ProfileConfig(BaseModel):
-    """Claude Agent configuration stored in profile - maps to ClaudeAgentOptions"""
+    """Agent configuration stored on a profile; query_options maps it onto ``AgentOptions``."""
     # Core settings.
     #
-    # An agent does NOT pin a model any more (v79): the model, effort and
+    # An agent does NOT pin a model: the model, effort and
     # permission mode are picked when a session is created and live on the
     # session row. These fields stay for two consumers only — the built-in
     # "Default AI" agent, whose model still drives internal generation (commit
@@ -75,21 +75,19 @@ class ProfileConfig(BaseModel):
     effort: Optional[str] = None  # low, medium, high, max, xhigh - for Opus 4.6+ models
     max_turns: Optional[int] = None
 
-    # Tool configuration - SDK 0.1.12+ supports new 'tools' option
-    # tools: Explicit list of tools to enable, or "claude_code" preset (new SDK way)
-    # allowed_tools: Legacy - only these tools allowed (if tools not set)
-    # disallowed_tools: Block these tools (can be combined with tools or allowed_tools)
-    tools: Optional[List[str]] = None  # New SDK 0.1.12+ - explicit tool list
-    tools_preset: Optional[str] = None  # "claude_code" to use preset (SDK 0.1.12+)
+    # Tool configuration. ``tools`` / ``tools_preset`` are SDK-shaped fields
+    # the harness adapter ignores; ``tool_selection_mode`` below decides access
+    # and reads allowed_tools / disallowed_tools.
+    tools: Optional[List[str]] = None
+    tools_preset: Optional[str] = None  # "claude_code" preset
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
-    # The RUNTIME AUTHORITY for tool access (ruling T2): "all", "none",
-    # "allow" or "disallow". Both legs resolve through
+    # The RUNTIME AUTHORITY for tool access: "all", "none", "allow" or
+    # "disallow". Both legs resolve through
     # ``app.core.tool_access.resolve_tool_access``, which reads this and only
-    # then the lists — it no longer infers intent from list emptiness, so
-    # "Disable all tools" is a real deny instead of an empty allow list every
-    # path read as unrestricted. Absent (a config the v82 migration never saw)
-    # falls back to the legacy inference.
+    # then the lists, so "Disable all tools" is a real deny instead of an empty
+    # allow list read as unrestricted. Absent (an unmigrated config) falls back
+    # to inferring the mode from the lists.
     tool_selection_mode: Optional[str] = None
 
     # AI tools configuration - individual toggles for each AI tool
@@ -125,8 +123,7 @@ class ProfileConfig(BaseModel):
     # User identification
     user: Optional[str] = None  # User identifier
 
-    # Agent IDs DECLARED into this agent's context (2026-08-17 ruling,
-    # superseding A10): they ride the compiled prompt's agents index as
+    # Agent IDs DECLARED into this agent's context: they ride the compiled prompt's agents index as
     # name+description so the model knows they exist. Never an allowlist —
     # Task dispatch runs any agent that resolves, declared or not. Interpreted
     # together with ``agent_invoke_mode`` below (see
@@ -138,7 +135,7 @@ class ProfileConfig(BaseModel):
     # (a non-empty enabled_agents declares those ids, empty/absent = all).
     agent_invoke_mode: Optional[str] = None
 
-    # Per-agent memory (agents-program ruling A11): durable text owned by THIS
+    # Per-agent memory: durable text owned by THIS
     # agent, injected into the compiled system prompt whenever the agent runs,
     # in any session — "the same agent learning and growing with you". Written
     # by the agent itself through the Memory builtin tool; edited in the
@@ -150,17 +147,16 @@ class ProfileConfig(BaseModel):
     # Paths can be relative (resolved from workspace) or absolute
     enabled_plugins: Optional[List[str]] = None
 
-    # File checkpointing for rewind (SDK 0.1.15+)
-    enable_file_checkpointing: bool = False  # Enable file snapshots for rewind
+    # SDK-shaped flag; the harness adapter ignores it.
+    enable_file_checkpointing: bool = False
 
     # App configuration tools - allows the agent to manage hooks, automations,
     # MCP servers, and profiles through conversation. Only effective for admin
     # sessions (never exposed to API users regardless of this setting).
     app_config_tools: bool = False
 
-    # Lock MCP server set deterministically per session (SDK 0.1.74+).
-    # When True, the SDK validates that no MCP server is added or removed
-    # mid-session; prevents tool-set drift across turns.
+    # SDK-shaped flag carried onto AgentOptions; the harness adapter does not
+    # read it (fluid's DelegatedLoop passes ``--strict-mcp-config`` itself).
     strict_mcp_config: bool = False
 
     @field_validator("agent_invoke_mode")
@@ -354,13 +350,13 @@ class Session(SessionBase):
     worktree_branch: Optional[str] = None  # Branch name of linked worktree
     worktree_path: Optional[str] = None  # Path to worktree directory
     worktree_deleted: bool = False  # True if worktree is not currently materialized; recreated on next send
-    # V2 branch-intake (Phase 3): a NEW branch session records only its logical
+    # Branch intake: a NEW branch session records only its logical
     # branch here (no legacy worktree row); the deterministic per-runner checkout
     # is materialized lazily at spawn. Legacy worktree sessions leave this NULL and
     # keep using worktree_branch. The UI badge falls back to this when
     # worktree_branch is absent.
     branch: Optional[str] = None
-    # Persisted pull-request lifecycle (v85). NULL = unknown. The sidepanel
+    # Persisted pull-request lifecycle. NULL = unknown. The sidepanel
     # renders PR Opened / PR Merged from these so a glance doesn't need GitHub.
     pr_number: Optional[int] = None
     pr_url: Optional[str] = None
@@ -370,16 +366,16 @@ class Session(SessionBase):
     # list badges them to differentiate from interactive chats.
     automation_id: Optional[str] = None
     # Multi-provider provenance — the provider this session is bound to (NULL =
-    # native Claude). Persisted on the row since v66; surfaced on the response
-    # model so clients can tell a ProviderAgent-bound session from a native one
+    # native Claude). Persisted on the row; surfaced on the response
+    # model so clients can tell a provider-bound session from a native one
     # without a second round-trip.
     provider_id: Optional[str] = None
-    # The run binding this session was created with (v79): the model, effort
-    # and permission mode the user picked in the composer. Agents no longer
+    # The run binding this session was created with: the model, effort
+    # and permission mode the user picked in the composer. Agents do not
     # pin any of these, so the client hydrates its controls from here — that is
     # what makes the pick survive a reload and show up the same on every
-    # device. NULL on pre-v79 rows, where resolution falls back to
-    # launched_model and then the agent's legacy config.
+    # device. NULL on rows written before the columns existed, where resolution
+    # falls back to launched_model and then the agent's legacy config.
     model: Optional[str] = None
     effort: Optional[str] = None
     permission_mode: Optional[str] = None
@@ -392,18 +388,18 @@ class Session(SessionBase):
     # written before the column existed.
     launched_model: Optional[str] = None
     first_model: Optional[str] = None
-    # Per-session fast mode (v81): True asks the leg for its expedited service.
-    # NULL on every pre-v81 row, which runs standard — left uncoalesced so the
+    # Per-session fast mode: True asks the leg for its expedited service.
+    # NULL (never picked) runs standard — left uncoalesced so the
     # client can tell "never picked" from an explicit off.
     fast: Optional[bool] = None
     # Sidepanel mode: 'code' (the full agentic surface), 'chat' (web-only chat)
-    # or 'voice' (an OpenAI Realtime call — v74, ruling VM4). The column is
+    # or 'voice' (an OpenAI Realtime call). The column is
     # nullable and NULL means 'code', so the validator below coalesces — that
     # covers every construction site at once (sessions are handed to FastAPI as
     # raw row dicts through ``response_model``, never built field-by-field).
     # See ``app.core.session_modes`` for why NULL is the code case.
     mode: str = "code"
-    # List-visibility flag (v75): True keeps the session out of the sessions
+    # List-visibility flag: True keeps the session out of the sessions
     # list (wake-word "command" voice sessions are born hidden). The column is
     # nullable and NULL means visible, so the validator below coalesces — same
     # single-point coverage as ``mode`` above.
@@ -417,7 +413,7 @@ class Session(SessionBase):
     device_online: bool = True  # Owning install seen recently (heartbeat)
     is_remote: bool = False  # Owned by another install (not this one)
     controllable: bool = True  # Live send/interrupt available (owner install online; DB-relayed, no base_url)
-    # V2 Q7: transient, derive-on-read (never persisted). True when a session has
+    # Transient, derive-on-read (never persisted). True when a session has
     # a queued turn but NO capable runner is online to execute it — i.e. it is
     # waiting, read-only, until an owning device comes back. Derived by the API
     # enrichment layer via ``placement.resolve_placement`` (the single oracle);
@@ -432,15 +428,14 @@ class Session(SessionBase):
     # response model FastAPI strips it and the board falls back to project_id,
     # rendering the same repo as a separate card per install.
     link_group_id: Optional[str] = None
-    # V2 projects (Phase 3): the origin-keyed project this session belongs to
-    # (install-independent identity) and its origin token. Populated by the API
-    # enrichment layer (unconditional since PR-B). ``origin`` is 1:1 with
+    # The origin-keyed project this session belongs to (install-independent
+    # identity) and its origin token. Populated by the API enrichment layer. ``origin`` is 1:1 with
     # ``link_group_id`` for grouped projects, so the board folds identically
     # whether it groups by ``origin`` or ``link_group_id`` (no regroup flash).
     project_v2_id: Optional[str] = None
     origin: Optional[str] = None
-    # V2 streaming path marker. Forced TRUE on every session (V2 Phase 1
-    # deletion); the model default stays False for unset/legacy construction.
+    # V2 streaming path marker. Forced TRUE on every session; the model default
+    # stays False for unset/legacy construction.
     v2_stream: bool = False
 
     @field_validator("mode", mode="before")
@@ -448,7 +443,7 @@ class Session(SessionBase):
     def _coalesce_mode(cls, value):
         """NULL/empty/unknown ``sessions.mode`` reads as 'code'.
 
-        Every session predating v74 carries NULL, and code sessions keep
+        Every session predating the column carries NULL, and code sessions keep
         carrying NULL, so the coalesce lives here rather than at each of the
         many places a row dict is fed to this response model. Routing through
         ``normalize_session_mode`` also means a value the client has no branch
@@ -461,7 +456,7 @@ class Session(SessionBase):
     def _coalesce_hidden(cls, value):
         """NULL ``sessions.hidden`` reads as False (visible).
 
-        Every session predating v75 carries NULL, and normal sessions keep
+        Every session predating the column carries NULL, and normal sessions keep
         carrying NULL/FALSE, so the coalesce lives here — the same
         single-point coverage as ``_coalesce_mode`` above.
         """
@@ -570,7 +565,7 @@ class QueryOverrides(BaseModel):
     thinking_mode: Optional[str] = None  # default, disabled, adaptive, think, think_harder, ultra_think
     effort: Optional[str] = None  # low, medium, high, max, xhigh (xhigh only for Opus 4.7+)
     context_window: Optional[int] = Field(None, gt=0)
-    # Fast mode for this turn (v81). True asks the leg for its expedited
+    # Fast mode for this turn. True asks the leg for its expedited
     # service, False explicitly turns it off, None defers to the session row.
     fast: Optional[bool] = None
 
@@ -868,7 +863,7 @@ class WebhookTestResponse(BaseModel):
 class AgentExportData(BaseModel):
     """Agent configuration data for export.
 
-    Carries only config the fluid harness honors (ruling A12): provider
+    Carries only config the fluid harness honors: provider
     models, max_turns, custom system-prompt content, tool allow/deny lists,
     enabled_agents, ai_tools, memory, include_partial_messages,
     app_config_tools, env. SDK-era fields (thinking_mode, preset prompts,
@@ -876,8 +871,8 @@ class AgentExportData(BaseModel):
     honors it as its scope filter); legacy files are still
     importable via AgentImportData.
 
-    ``model`` / ``permission_mode`` / ``effort`` are no longer part of an
-    agent's identity (v79 — a session carries its own). They round-trip only
+    ``model`` / ``permission_mode`` / ``effort`` are not part of an
+    agent's identity (a session carries its own). They round-trip only
     so an export written by an older build imports without loss, and so the
     built-in "Default AI" agent keeps its internal-generation model.
     """
@@ -891,9 +886,9 @@ class AgentExportData(BaseModel):
     system_prompt_content: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
-    # The tool-access mode (ruling T2). Exported so an agent round-trips its
-    # intent rather than having it re-inferred from list emptiness on import;
-    # a file written before T2 carries None and imports by inference.
+    # The tool-access mode. Exported so an agent round-trips its intent rather
+    # than having it re-inferred from list emptiness on import; an older file
+    # carries None and imports by inference.
     tool_selection_mode: Optional[str] = None
     enabled_agents: Optional[List[str]] = None
     agent_invoke_mode: Optional[str] = None  # None | "all" | "custom" (see ProfileConfig)
@@ -911,7 +906,7 @@ class AgentExportData(BaseModel):
 class AgentImportData(AgentExportData):
     """Legacy-tolerant agent data for the import path.
 
-    Pre-A12 export files carry SDK-era fields the fluid harness ignores. They
+    Older export files carry SDK-era fields the fluid harness ignores. They
     are accepted here so old files still import: a preset-shaped prompt's
     append text is mapped onto the custom prompt content; everything else is
     silently dropped.

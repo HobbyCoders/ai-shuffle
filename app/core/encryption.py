@@ -252,8 +252,8 @@ def is_encrypted(value: str) -> bool:
 # No Claude credential is stored anywhere (the ``claude_accounts`` table was
 # dropped in schema v89).
 #
-# (6 and 7 are the phase-2 Codex OAuth bundle, stored 1:1 on the provider row —
-# plan amendment A1. Missing either from the re-key plan would brick stored Codex
+# (6 and 7 are the Codex OAuth bundle, stored 1:1 on the provider row. Missing
+# either from the re-key plan would brick stored Codex
 # tokens on a password change, exactly the failure class the auth_token entry
 # already guards against.)
 #

@@ -1,12 +1,12 @@
 """Context-boundary auto-continue for autonomous turns.
 
-The bundled Claude CLI runs the agentic loop until it decides the NEXT turn
+The Claude Code CLI runs the agentic loop until it decides the NEXT turn
 would cross the autocompact threshold. Instead of compacting in place and
 continuing, it ends the current agentic loop and DEFERS compaction to the start
-of the next query (internal ``willRetriggerNextTurn`` telemetry that never
-reaches the SDK). From the app's side the turn simply ends: the final assistant
-step was a ``tool_use`` whose ``tool_result`` came back, then the loop stopped
-with no assistant follow-up and ``ResultMessage.stop_reason == "tool_use"`` (the
+of the next query, without surfacing the deferral (verified against the CLI once
+bundled with claude-agent-sdk 0.2.126; re-check on CLI upgrades). From the
+app's side the turn simply ends: the final assistant step was a ``tool_use``
+whose ``tool_result`` came back, then the loop stopped with no assistant follow-up and ``ResultMessage.stop_reason == "tool_use"`` (the
 model wanted to keep going). On an overnight autonomous run the session then
 sits silent mid-task until a human sends a message — that message is what
 triggers the deferred compaction and resumes work.
@@ -26,7 +26,7 @@ Gating (all must hold):
   * this session has not ALREADY been auto-continued at a boundary since the
     last genuine user message (one-shot guard — never chain nudges).
 
-This module now exposes only the detection PRIMITIVES
+This module exposes only the detection PRIMITIVES
 (:func:`auto_continue_enabled`, :func:`is_abnormal_boundary_stop`,
 :func:`context_over_threshold`) and the continuation prompt. The composed
 decision and the per-session one-shot guard live in the v2 turn scheduler.
@@ -78,7 +78,7 @@ def is_abnormal_boundary_stop(final_metadata: Optional[Dict[str, Any]]) -> bool:
 
 
 def usage_over_threshold(usage: Optional[Dict[str, Any]]) -> Tuple[bool, Optional[int]]:
-    """Pure threshold math over a raw SDK ``get_context_usage()`` payload.
+    """Pure threshold math over a raw ``get_context_usage()`` payload.
 
     Returns ``(over, total_tokens)``. Shared by the live auto-continue path and
     the idle-at-edge watchdog (which feeds it a *persisted* snapshot), so the two
@@ -147,15 +147,13 @@ def _persisted_usage(session_id: str) -> Optional[Dict[str, Any]]:
 async def context_over_threshold(session_id: str) -> Tuple[bool, Optional[int]]:
     """Whether context usage is at/over the autocompact threshold.
 
-    Returns ``(over, total_tokens)``. #598 hardening: the degraded-state paths
-    (session not pooled/connected, the SDK control call raising, an empty live
-    payload) no longer *silently* return ``(False, None)`` — each logs WHY and
-    then FALLS BACK to the last persisted ``context_usage_json`` snapshot before
-    declining. Those are exactly the moments the old fail-closed latch dropped a
-    stall (the state was degraded precisely because the session hit the edge), so
-    consulting the last-known usage — rather than skipping the check outright — is
-    the safe fallback. Only when neither a live nor a persisted reading exists do
-    we decline (and say so). We still never auto-continue on a pure guess.
+    Returns ``(over, total_tokens)``. The degraded-state paths (session not
+    pooled/connected, the adapter's control call raising, an empty live payload)
+    each log WHY and then FALL BACK to the last persisted ``context_usage_json``
+    snapshot before declining. The state is often degraded precisely because the
+    session hit the edge, so the last-known usage is the safe fallback. Only when
+    neither a live nor a persisted reading exists do we decline (and say so). We
+    never auto-continue on a pure guess.
     """
     live_usage: Optional[Dict[str, Any]] = None
     fallback_reason: Optional[str] = None

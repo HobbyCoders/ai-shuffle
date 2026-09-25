@@ -1,7 +1,7 @@
 """
 Note file management utilities.
 
-Notes are stored as physical markdown files on disk so the Claude Agent SDK
+Notes are stored as physical markdown files on disk so agents
 can read them natively via file references. The database remains the source
 of truth; files are a materialized view kept in sync via CRUD operations.
 """

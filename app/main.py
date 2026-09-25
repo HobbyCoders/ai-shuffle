@@ -236,7 +236,8 @@ async def lifespan(app: FastAPI):
     init_workspace()
     check_prerequisites()
     # Sync, scan and presence loops need unlocked credential storage (secrets
-    # travel decrypted under the network key), so they start after phase 2.
+    # travel decrypted under the network key), so they start after
+    # ``init_encryption_and_sessions``.
     network_tasks = []
     try:
         from app.network import startup as network_startup
@@ -321,7 +322,7 @@ async def lifespan(app: FastAPI):
         logger.exception("team_transcript_watcher.stop_all failed")
     from app.core import browser_runtime
     await browser_runtime.shutdown()
-    # Close any live voice sideband (VW3): the socket belongs to this process,
+    # Close any live voice sideband: the socket belongs to this process,
     # so a restart must hang up rather than leak a half-open realtime call.
     try:
         from app.core import voice_bridge

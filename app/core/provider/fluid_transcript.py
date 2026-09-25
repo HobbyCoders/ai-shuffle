@@ -33,8 +33,8 @@ point is gated on :func:`looks_like_fluid_session_id` (a cheap ``ses_`` prefix
 test that a CLI UUID can never satisfy) before any DB work, and the module is
 imported lazily at each call site.
 
-One thing here writes OUTSIDE the fluid store: the delegated-CLI re-seed (ruling
-R5). The ``claude`` CLI keeps its own conversation and only reconnects to it by
+One thing here writes OUTSIDE the fluid store: the delegated-CLI re-seed.
+The ``claude`` CLI keeps its own conversation and only reconnects to it by
 uuid, so a head-move alone would leave it replaying the rewound-away turns —
 the module therefore also materializes fluid's post-rewind path as a CLI session
 file and repoints the session's ``--resume`` handle at it. See the "Delegated-CLI
@@ -661,7 +661,7 @@ def delete_fluid_session_data(sdk_session_id: str) -> int:
     return removed
 
 
-# ─── Delegated-CLI re-seed (ruling R5) ───────────────────────────────────────
+# ─── Delegated-CLI re-seed ───────────────────────────────────────────────────
 #
 # The rewind above moves fluid's head, which is the whole truth for a NATIVE
 # session: fluid rebuilds the prompt from ``load_path`` on every turn, so the
@@ -670,9 +670,8 @@ def delete_fluid_session_data(sdk_session_id: str) -> int:
 # The DELEGATED (claude CLI) engine is different. It does not receive the
 # conversation — it receives only the new user turn and reconnects to its own
 # history via ``--resume <cli_session_id>`` (see ``DelegatedLoop._build_argv``;
-# ``EngineCaps.rewind = False``). So after a head-move the CLI happily replays
-# the turns fluid just dropped. PR #815 surfaced that as a warning; ruling R5
-# (docs/FLUID_AGENTS_PLAN.md) resolves it instead: **fluid owns the context**, so
+# ``EngineCaps.rewind = False``). So after a head-move the CLI would replay
+# the turns fluid just dropped. **fluid owns the context**, so
 # the rewind materializes fluid's post-rewind path as a CLI-format session file
 # under a FRESH CLI uuid and points the session at it. The next turn's
 # ``--resume`` then reconnects to a conversation that ends exactly where the
@@ -685,8 +684,8 @@ def delete_fluid_session_data(sdk_session_id: str) -> int:
 # the CLI writes for its own bookkeeping (``version``, ``gitBranch``,
 # ``entrypoint``, ``promptId``, attachment/queue-operation lines, the trailing
 # ``last-prompt`` record) are omitted — they are provenance, not conversation,
-# and the CLI accepts a file without them (verified live against the bundled
-# binary; see the PR body).
+# and the CLI accepts a file without them (verified against the CLI once
+# bundled with claude-agent-sdk; re-check on CLI upgrades).
 
 
 #: CLI transcript entry kinds we can materialize. Everything else fluid's
@@ -1131,7 +1130,7 @@ def fork_fluid_session(
     the fork's next prompt a different context from the parent's.
 
     When ``working_dir`` is set and the source has a delegated CLI handle, the
-    copied path is also materialized as a fresh CLI transcript (ruling R5)
+    copied path is also materialized as a fresh CLI transcript
     so the next ``--resume`` does not start empty.
 
     Raises ``ValueError`` when the fork point is not on the source's path.

@@ -45,7 +45,7 @@ class WorktreeError(Exception):
 
 def _external_worktree_branch_name(git_wt: Dict[str, Any]) -> str:
     """
-    Branch name to store when importing an external worktree (issue #568).
+    Branch name to store when importing an external worktree.
 
     A detached-HEAD worktree has no branch — git's porcelain output carries only
     the HEAD SHA, and list_worktrees fills ``branch`` with None (not a missing
@@ -61,7 +61,7 @@ def _external_worktree_branch_name(git_wt: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Cross-device rebind fetch de-duplication (PR #493 follow-up #1)
+# Cross-device rebind fetch de-duplication
 #
 # A rebind that must recover a branch surviving only on origin needs fresh
 # remote-tracking refs, which means a ``git fetch`` — a slow, network-bound
@@ -148,7 +148,7 @@ def resolve_rebound_branch_plan(
         return False, None
 
     # Reuse a fetch primed at adopt time when it's still fresh, so this decision
-    # doesn't block the send path on another network fetch (PR #493 follow-up #1).
+    # doesn't block the send path on another network fetch.
     fetched = fetch_repo_cached(git_service_obj, main_dir)
     remote_names = [
         b["name"]
@@ -162,7 +162,7 @@ def resolve_rebound_branch_plan(
     # the cache and warns the user to "push it from the other device", so the very
     # next send — within the 60s TTL — would otherwise see stale refs and raise in
     # the exact remediation flow we recommended. Force one fresh fetch and re-list
-    # before concluding the branch is unrecoverable (PR #493 follow-up #1).
+    # before concluding the branch is unrecoverable.
     if not fetched:
         fetch_repo_cached(git_service_obj, main_dir, force=True)
         remote_names = [
@@ -839,10 +839,10 @@ class WorktreeManager:
 
     async def terminate_worktree_sessions(self, worktree_id: str) -> list[str]:
         """
-        Terminate all SDK sessions associated with a worktree.
+        Terminate all pooled sessions associated with a worktree.
 
         Finds all sessions linked to the worktree via DB, removes them from
-        the session pool (which gracefully kills the SDK subprocess), and
+        the session pool (which gracefully disconnects the pooled adapter), and
         tears down their task-registry/Monitor-shell state.
 
         This MUST be called before `git worktree remove` — otherwise the
@@ -870,8 +870,8 @@ class WorktreeManager:
         for session in sessions:
             session_id = session["id"]
 
-            # Remove from session pool — this gracefully disconnects the SDK
-            # subprocess (SIGTERM → wait → SIGKILL)
+            # Remove from session pool — this gracefully disconnects the
+            # pooled adapter and its subprocess
             state = await pool.remove(session_id)
             if state:
                 logger.info(
@@ -889,7 +889,7 @@ class WorktreeManager:
                     f"Ended streaming for session {session_id} (worktree cleanup)"
                 )
 
-            # Reap the session's background work: the SDK client is gone, so
+            # Reap the session's background work: the pooled adapter is gone, so
             # tracked tasks can never complete — flip them to killed (surfaced
             # on the taskbar), drop the registry bucket, and reap any Monitor
             # shells the session spawned.
@@ -919,7 +919,7 @@ class WorktreeManager:
         """
         Remove a worktree and optionally delete its branch.
 
-        Terminates any SDK sessions whose subprocess is running inside the
+        Terminates any pooled sessions whose subprocess is running inside the
         worktree directory before removing it, ensuring no CWD locks block
         the git worktree removal.
 
@@ -969,7 +969,7 @@ class WorktreeManager:
         if early is not None:
             return early
 
-        # Terminate SDK sessions BEFORE removing the worktree folder.
+        # Terminate pooled sessions BEFORE removing the worktree folder.
         # Their subprocess CWD is inside the worktree — if we don't kill
         # them first, `git worktree remove` fails (Windows CWD lock) or
         # leaves a zombie subprocess (Linux).
@@ -1084,8 +1084,7 @@ class WorktreeManager:
         only on the cross-device rebind path: the worktree row is re-pointed at
         this install's clone of the repo, and ONLY the resumed session
         (``rebind_session_id``) is moved onto the local project row — never its
-        sibling forks, which stay bound to their home device (PR #493 follow-up
-        #2).
+        sibling forks, which stay bound to their home device.
         """
         adopt_path = Path(adopted["path"])
         stored_path = self._get_relative_worktree_path_from_full(
@@ -1113,12 +1112,12 @@ class WorktreeManager:
 
         A cross-device rebind physically relocates the worktree onto this
         install's clone, but the shared DB is authoritative for every install:
-        re-pointing *all* sessions on the worktree (as the original #493 code did)
-        would corrupt sibling forks the user isn't resuming here — flipping their
-        project id to a row that is foreign on THEIR home device. So we scope the
+        re-pointing *all* sessions on the worktree would corrupt sibling forks
+        the user isn't resuming here — flipping their project id to a row that
+        is foreign on THEIR home device. So we scope the
         move to the single session being resumed. When no session id is known
         (e.g. the manual ``reopen`` endpoint), we re-point nothing rather than
-        clobber siblings (PR #493 follow-up #2).
+        clobber siblings.
         """
         if session_id and project_id:
             database.set_session_project(session_id, project_id)
@@ -1325,7 +1324,7 @@ class WorktreeManager:
 
         # NOTE: sdk_session_id is intentionally preserved on reopen.
         # JSONL history lives in ~/.claude/projects/ (not in the worktree dir),
-        # so the SDK can resume the conversation with full history intact.
+        # so the CLI can resume the conversation with full history intact.
 
         logger.info(
             f"Recreated worktree {worktree_id} at {worktree_path} "

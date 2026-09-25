@@ -3,7 +3,7 @@
 ``agent_credentials_ready()`` combines the two things a Claude agent run needs:
 
 1. The license allows new agent runs (``license.license_allows_agent_runs``;
-   unlicensed blocks only new runs, never data, decision D10).
+   unlicensed blocks only new runs, never data).
 2. The active Claude Code auth mode has its credential
    (``app.core.claude_auth_mode``): in ``subscription`` mode the stock CLI
    reports a sign-in (``claude auth status``, via ``claude_cli_status``; the
@@ -158,7 +158,7 @@ async def refusal_for_options_async(options) -> Optional[str]:
 
 
 def refusal_event(reason: str) -> dict:
-    """The pump's error frame for a refused turn."""
+    """The stream's error frame for a refused turn."""
     return {"type": "error", "message": reason, "code": SETUP_CODE}
 
 

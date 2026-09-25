@@ -1,26 +1,14 @@
-"""fluid_tool_bridge — port AI-Shuffle's SDK ``@tool`` modules onto fluid's registry.
+"""fluid_tool_bridge: the app's in-process ``@tool`` servers on fluid's ToolRegistry.
 
-AI-Shuffle's ~10 in-process tool modules under ``app/mcp/`` all follow the
-Claude Agent SDK pattern:
+The app's tool modules (``app.mcp.inproc``: ``@tool`` handlers assembled by
+``create_tool_server``) share their surface with fluid's ``fluid.tools.inproc``,
+and ``ToolRegistry._normalize`` accepts the SDK result envelope
+(``{"content": [{"type": "text", "text": ...}]}``), so conversion is mechanical.
 
-    from app.mcp.inproc import tool, create_tool_server
-
-    @tool("Name", "description", {json-schema})
-    async def handler(args: dict) -> dict:            # -> {"content": [{"type":"text",...}]}
-        ...
-
-    server = create_tool_server(name="builtins", version="1.0.0", tools=[handler, ...])
-
-fluid's ``fluid.tools.inproc`` mirrors that surface deliberately, and its
-``ToolRegistry._normalize`` already accepts the SDK envelope
-(``{"content":[{"type":"text","text":...}]}``) as a handler return. So porting a
-module is *mechanical*: hand this bridge the same list of ``@tool``-decorated
-objects the module already passes to ``create_tool_server`` and it produces a
-fluid ``InprocServer`` that ``ToolRegistry.register_inproc`` accepts.
-
-This module ships the generic converters used to port every module, plus a
-worked example (``bridge_builtins_tools``) proving the pattern for
-``app/mcp/builtin_tools.py``. The remaining modules are the same one-liner.
+``register_recorded_sdk_servers`` (called by the harness adapter) re-registers
+every recorded in-proc server with per-tool risk classes. The lower-level
+converters are ``sdk_tool_to_inproc``, ``sdk_tools_to_inproc_server`` and
+``register_sdk_tools``.
 """
 
 from __future__ import annotations
@@ -262,7 +250,7 @@ DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
 })
 
 # Builtins whose ``mcp__builtins__`` copies are skipped on EVERY native leg:
-# fluid registers its own bare-named versions there (ruling A13), so bridging
+# fluid registers its own bare-named versions there, so bridging
 # the copy would show the model two of each. One set, two readers — the harness
 # adapter's ``skip_tools`` (what actually drops them) and the tool catalog's
 # availability marking (what tells the picker why the row is greyed). The

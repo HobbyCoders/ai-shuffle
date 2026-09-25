@@ -1,7 +1,7 @@
 """monitor_spawn — the host-side spawner for fluid's bare Monitor builtin.
 
 Fluid owns the tool's SHAPE (bare name, schema, description); the host owns the
-supervision (ruling A13, Task-parity). The native leg injects the callable
+supervision (Task-parity). The native leg injects the callable
 returned by :func:`make_fluid_monitor_spawner` as
 ``ToolCtx.extra["monitor_spawn"]``; without it fluid's Monitor reports itself
 unavailable.
@@ -15,53 +15,28 @@ the output tail becomes the frame ``summary`` and the terminal handoff goes to
 the same seam a ProviderAgent worker's completion uses — so a parked parent is
 woken with the command's output instead of having to poll.
 
-Three guardrails live here, all from the round-4 park audit:
+Guardrails:
 
-* a DEFAULT TIME BUDGET (``monitor_command_timeout_seconds``) — the completion
-  fires on exit and only on exit, so a command that cannot exit holds the
-  session parked until the session ends. On expiry the process is stopped and
-  the completion fires with a "no result after Ns" summary: parked forever
-  becomes woken with a timeout. Skipped for a ``serves`` process and for a
-  command that already carries its own bound.
-* an HONEST REAP (:func:`settle_monitor_task`) — the registry's recorded
-  status is consulted BEFORE the exit code, so a deliberately stopped shell
-  arrives as a cancellation with a cause line instead of "(no output; exit
-  code None)", which an audited session read as a crash and re-ran by hand.
-* a BOUNDED WAKE SUMMARY (``monitor_summary_max_chars``) — and, for a
-  deliberate stop, the attribution REPLACES the output tail rather than
-  riding along with it. The full buffer stays available via TaskOutput.
-
-Three more from the round-6 audit:
-
-* the SESSION CWD (``ctx.cwd``) when the model named none, exactly as fluid's
-  Bash resolves it. The shell used to inherit the server's directory, and four
-  audited worktree sessions lost a park+wake+turn each to "fatal: not a git
-  repository".
-* an INLINE WAIT (``wait_seconds``) — a command that settles inside the window
-  returns its exit code and output in the receipt, so a six-second test run no
-  longer costs a park, a wake, a fresh turn and a full prompt re-send. The
-  still-running case is unchanged, receipt wording included.
-* an OUTCOME-DERIVED STATUS (:func:`record_settled_status`) — a watcher that
-  swallowed a failure (``… || true``) exits 0 while its own last word is
-  ``EXIT:1``, and the notification said "completed" over a summary that said
-  the run had failed. The row and the notification are now written from, and
-  re-read at, one place.
-
-And four from round 7:
-
-* a NON-ZERO EXIT IS DATA — an inline settle no longer rides on ``is_error``.
-  The code-mode runner raises on that flag, so a red TDD baseline aborted the
-  whole cell and every call queued behind it. The registry row still says
-  ``error`` (the chip and the wake notification must stay honest about a
-  command that failed); only the tool envelope changed.
-* a TAIL-BIASED, VERDICT-PRESERVING SUMMARY (:func:`_summarize`) — head+tail
-  truncation deleted exactly the ``Tests 45 passed`` block, which sits in the
-  MIDDLE of a chained command's buffer, and repeated watch-status lines filled
-  the rest.
-* a SESSION-SCOPED BOUND FOR SERVICES (``monitor_serving_idle_seconds``) — a
-  ``serves`` process outlived its session by 8h15m on an audited runner.
-* an HONEST SERVICE EXIT — a server that goes away on its own settles as a
-  stop with a capped tail, not as a failure with 34k of access log.
+* a default time budget (``monitor_command_timeout_seconds``): on expiry the
+  process is stopped and the completion fires with a timeout summary. Skipped
+  for a ``serves`` process and for a command that carries its own bound.
+* an honest reap (:func:`settle_monitor_task`): the registry's recorded status
+  beats the exit code, so a deliberate stop arrives as a cancellation with a
+  cause line.
+* a bounded, tail-biased, verdict-preserving wake summary
+  (``monitor_summary_max_chars``, :func:`_summarize`); for a deliberate stop
+  the attribution replaces the output tail. The full buffer stays available
+  via TaskOutput.
+* the session cwd (``ctx.cwd``) when the model named none, as fluid's Bash does.
+* an inline wait (``wait_seconds``): a command that settles inside the window
+  returns its exit code and output in the receipt instead of parking.
+* an outcome-derived status (:func:`record_settled_status`): the row and the
+  notification are written from, and re-read at, one place.
+* a non-zero exit is data, not ``is_error``: the registry row still says
+  ``error``, but the tool envelope does not abort a code-mode cell.
+* a session-scoped idle bound for ``serves`` processes
+  (``monitor_serving_idle_seconds``).
+* a service that exits on its own settles as a stop with a capped tail.
 """
 
 from __future__ import annotations
@@ -84,8 +59,11 @@ _SUMMARY_VERDICT_FRACTION = 0.35
 # failure per test file would otherwise fill the whole budget with them.
 _SUMMARY_MAX_VERDICT_LINES = 12
 
-# Preserve command verdicts when summarizing chained output. Test/check summary blocks can sit between command
-# segments rather than at the end of the full buffer, so head-and-tail truncation alone can discard them.
+# Lines that carry the OUTCOME of a command — the one thing a wake turn is
+# being woken to read. Head+tail truncation would put them in the elided middle
+# of every chained command (`npm test && npm run check`, `pytest … ; ruff …`),
+# because a summary block sits at the end of each SEGMENT, not at the end of
+# the buffer.
 _VERDICT_RE = re.compile(
     r"\b\d+\s+(?:passed|failed|skipped|errors?|warnings?|passing|failing"
     r"|pending|todo|xfailed|xpassed|deselected)\b"
@@ -103,9 +81,8 @@ _VERDICT_RE = re.compile(
 )
 
 # Longest repeating BLOCK the collapser looks for. A `--watch` command prints
-# the same two- or three-line status block every poll; one audited summary was
-# ~8KB of `Refreshing checks status every 10 seconds.` and its sibling line,
-# with the two lines that mattered pushed to the very end.
+# the same two- or three-line status block every poll, which would otherwise
+# fill the summary and push the lines that matter to the very end.
 _MAX_REPEAT_PERIOD = 8
 
 # How many times a block must appear before it is collapsed. Three, not two:
@@ -121,8 +98,11 @@ _LOG_TAIL_BYTES = 2_000
 # How often the completion watcher looks at the process (and at its deadline).
 _WATCH_POLL_SECONDS = 0.5
 
-# wait_seconds is a bounded inline-settle window for short commands. Return a completed command in its receipt
-# instead of creating an unnecessary park and wake; detach genuinely longer work.
+# ``wait_seconds`` — the inline settle window. Without it a short command (a
+# six-second test run, a one-line git check) costs a park, a wake, a fresh turn
+# and a full prompt re-send. With a wait the tool blocks for up to this long and
+# returns the result in the receipt, so nothing parks at all. Bounded:
+# past two minutes the park is genuinely the cheaper shape.
 MAX_WAIT_SECONDS = 120
 
 # How often the inline wait looks at the process. Much tighter than the
@@ -141,8 +121,9 @@ _INLINE_OUTPUT_MAX_CHARS = 30_000
 
 
 
-# Bound the stopped-service output tail. The completion notification needs the service verdict, not an unbounded
-# access log.
+# Cap on the output tail folded into a stopped-service summary. A server's
+# buffer is an access log, and the notification's whole news is "the service is
+# gone".
 _SERVING_EXIT_SUMMARY_MAX_CHARS = 400
 
 # How often the serving watcher asks whether its session is still alive, and
@@ -150,17 +131,14 @@ _SERVING_EXIT_SUMMARY_MAX_CHARS = 400
 _SERVING_IDLE_POLL_SECONDS = 60.0
 
 # An explicit exit-code marker a watcher prints for itself — `echo "EXIT:$?"`,
-# the shape audited CI watchers use. When the command's own exit code says 0
-# because the watcher swallowed the failure (`… || true`, or a self-exit after
-# the tool it ran errored), this marker is the only honest outcome in the
-# buffer, and the notification used to carry <status>completed</status> above a
-# summary that said EXIT:1.
+# a common CI-watcher shape. When the command's own exit code says 0 because
+# the watcher swallowed the failure (`… || true`, or a self-exit after the tool
+# it ran errored), this marker is the only honest outcome in the buffer.
 _EXIT_MARKER_RE = re.compile(r"\bEXIT[:=]\s*(-?\d+)")
 
 # Registry ``reason`` stamps this module writes. They are what turns a
-# deliberate stop into a CAUSE the model can read, instead of the bare
-# "(no output; exit code None)" an audited session read as a crash and
-# re-launched work over.
+# deliberate stop into a CAUSE the model can read, instead of a bare
+# "(no output; exit code None)" that reads as a crash.
 MONITOR_TIMEOUT_REASON = "monitor_timeout"
 #: Stamp for a serving process stopped because its session went quiet.
 SERVING_IDLE_REASON = "monitor_serving_idle"
@@ -253,11 +231,10 @@ def monitor_inline_receipt_text(
     the work is done instead of telling the model to end the turn.
 
     A non-zero exit says so plainly AND says it is not a tool malfunction. The
-    receipt used to ride on an ``is_error`` outcome, which the code-mode runner
-    turns into a raised exception: a red TDD baseline — the expected result of
-    the operation the model asked for — aborted the whole cell and every call
-    queued behind it (five Edits lost in one audited session, four dead cells
-    in another, and a third wrapped every later Monitor in try/except).
+    receipt is not an ``is_error`` outcome, because the code-mode runner turns
+    that into a raised exception: a red TDD baseline — the expected result of
+    the operation the model asked for — would abort the whole cell and every
+    call queued behind it.
     """
     code = "unknown" if exit_code is None else str(exit_code)
     verdict = "finished with a failure" if failed else "finished"
@@ -351,10 +328,9 @@ def collapse_repeated_lines(lines: List[str]) -> List[str]:
     """Collapse runs of a repeated line — or a repeated BLOCK of lines.
 
     A `--watch` command re-prints its status block every poll, and the buffer
-    is then mostly the same three lines over and over: one audited wake summary
-    was ~8KB of "Refreshing checks status every 10 seconds." with the two lines
-    that carried the verdict at the very end, one truncation away from being
-    lost. Block-aware because the repetition is rarely a single line — the
+    is then mostly the same three lines over and over, with the lines that
+    carry the verdict at the very end, one truncation away from being lost.
+    Block-aware because the repetition is rarely a single line — the
     period is detected (1..``_MAX_REPEAT_PERIOD``) rather than assumed.
 
     One copy of the block survives, followed by a line saying how many more
@@ -420,31 +396,25 @@ def _summarize(
     """The buffered output, capped at the wake-summary budget, TAIL-BIASED.
 
     ``exit_code`` shapes the truncation notice: a run that exited 0 says so
-    and tells the reader the tail is optional. The round-9 audit found models
-    pulling 40-157 KB through TaskOutput AFTER the exit code was already
-    known, because the old notice ("TaskOutput has the full buffer") read as
-    an instruction.
+    and tells the reader the tail is optional, so a model does not pull the
+    full buffer through TaskOutput after the exit code is already known.
 
     The cap is about what a WAKE TURN has to read, not about what is kept: the
-    full buffer stays available through TaskOutput. Audited wake turns were
-    handed 12KB stack-trace tails from servers the agent had killed itself and
-    spent the entire turn reading them.
+    full buffer stays available through TaskOutput.
 
-    Three round-7 corrections, all from wake summaries that hid their own
-    verdict:
+    So that a summary never hides its own verdict:
 
     * repeated lines and repeated status BLOCKS collapse first, so a watch
       command's poll noise cannot crowd out its result;
-    * the head window is gone — the tail is what a command's outcome is in;
+    * there is no head window — the tail is what a command's outcome is in;
     * verdict lines (``Tests 45 passed``, ``FAILED …``, ``npm ERR!``) are
       rescued out of the elided region and kept above the truncation notice.
       A chained ``npm test && npm run check`` puts its test summary in the
-      MIDDLE of the buffer, which is exactly what head+tail deleted — twice in
-      one audited session, at the cost of a follow-up TaskOutput call each.
+      MIDDLE of the buffer, which head+tail truncation would delete.
     """
     # Scrub BEFORE slicing: escape sequences are gibberish to the model (and
     # to the UI), and counting them against the budget evicts real output.
-    # Ruling A13 makes the app the supervisor here, so fluid's own
+    # The app is the supervisor here, so fluid's own
     # supervisor-side strip never runs for these buffers.
     text = _strip_ansi("\n".join(lines))
     cap = _summary_budget() if budget is None else max(1, int(budget))
@@ -487,9 +457,9 @@ def _redirect_targets(command: str) -> List[str]:
 def _log_tail(command: str, cwd: Optional[str]) -> str:
     """A bounded tail of the log file ``command`` redirected its output into.
 
-    The audited failure: 8 of 9 monitor notifications said "(no output; exit
-    code 0)" because the monitored command sent everything to a log file. The
-    buffer is legitimately empty in that case, and the one thing the parent
+    A monitored command that sends everything to a log file would otherwise
+    notify "(no output; exit code 0)". The buffer is legitimately empty in that
+    case, and the one thing the parent
     wants is the end of that file. Redirect targets are the only path the
     monitor can know without guessing, so that is all this reads — the LAST one
     named (the command's own final sink) that exists and is readable.
@@ -543,11 +513,9 @@ def _recorded_status(session_id: Optional[str], task_id: str) -> Tuple[str, str,
 def _cause_line(reason: str, recorded_summary: str, *, serves: bool) -> str:
     """One line naming WHO stopped this task and why.
 
-    This replaces the output tail for a deliberate stop. The audited case: an
-    agent killed a dev server itself, then burned a whole wake turn reading the
-    12KB starlette traceback that death produced, only to conclude "that's the
-    old process we killed". The traceback carried no information the parent did
-    not already have; the attribution is the whole message.
+    This replaces the output tail for a deliberate stop. The traceback a
+    killed dev server prints carries no information the parent does not
+    already have; the attribution is the whole message.
     """
     if reason == MONITOR_TIMEOUT_REASON:
         return recorded_summary or "Stopped: the monitor's time budget expired."
@@ -565,9 +533,9 @@ def _cause_line(reason: str, recorded_summary: str, *, serves: bool) -> str:
     if reason == USER_STOP_REASON:
         who = "Stopped by the user."
     elif reason == AGENT_STOP_REASON:
-        # The reason the reason-less branch below used to cover: the stop path
-        # now stamps it explicitly so the chip can tell a deliberate stop from
-        # a reap, and the wording it produced stays exactly the same.
+        # The stop path stamps this reason explicitly so the chip can tell a
+        # deliberate stop from a reap; the wording matches the reason-less
+        # branch below.
         who = "Stopped deliberately by the app or by an agent, not by a crash."
     elif reason == SERVER_SHUTDOWN_REASON:
         who = "Stopped because the server restarted."
@@ -590,8 +558,7 @@ def not_executable_hint(exit_code: Optional[int], summary: str) -> str:
 
     A shell script written by a worker that never ``chmod +x``'d it exits 126
     with ``/bin/sh: 1: …/launch-backend.sh: Permission denied`` and nothing
-    else. One audited session lost a whole Monitor cycle plus a steer to it
-    before prefixing ``sh`` by hand. Empty string when this is not that.
+    else. Empty string when this is not that.
     """
     if exit_code != 126 or "permission denied" not in (summary or "").lower():
         return ""
@@ -680,11 +647,9 @@ def record_settled_status(
 ) -> Tuple[str, str]:
     """Write the settled outcome onto the task row and return what the row says.
 
-    The notification and the row are two views of one event and they used to
-    disagree: a TaskStop that raced a self-exit reached the model as
-    ``completed`` in the notification and ``killed`` in the row, and an
-    ``EXIT:1`` run reached it as ``completed`` in both. So the row is re-read
-    HERE, after the settle and immediately before the wake frame is built:
+    The notification and the row are two views of one event and must agree:
+    a TaskStop can race a self-exit, and an ``EXIT:1`` run exits 0. So the row
+    is re-read HERE, after the settle and immediately before the wake frame is built:
 
     * a deliberate stop the registry recorded while the watcher was settling
       still wins — the row is right and the frame adopts it;
@@ -837,11 +802,8 @@ def serving_idle_budget_seconds() -> int:
     """The idle bound for a ``serves`` process — 0 for "no bound".
 
     A serving task is deliberately exempt from the command time budget: it is
-    MEANT to stay up. Nothing else bounded it either, so when the session that
-    started it died, the process outlived it — an audited runner carried a
-    uvicorn fixture and a Vite dev server for 8h15m after their session's wake
-    failed, next to a resource-monitor warning about 17 orphan children and
-    RSS growing 745 MB/hour. The bound is on the SESSION's idleness, not on the
+    MEANT to stay up. Without this bound it would outlive the session that
+    started it. The bound is on the SESSION's idleness, not on the
     process's age: a server tended by a live session is never touched.
     """
     try:
@@ -945,7 +907,7 @@ WAIT_SECONDS_DESCRIPTION_CLAUSE = (
 def amend_native_monitor_spec(registry: Any) -> None:
     """Teach fluid's registered Monitor spec about ``wait_seconds``.
 
-    Ruling A13 splits the tool: fluid owns Monitor's shape, the app owns its
+    The tool is split: fluid owns Monitor's shape, the app owns its
     supervision — and the inline wait is supervision. The parameter is
     therefore added to the vendored spec here rather than in fluid, the
     same way :func:`_amend_native_task_spec` installs the app's Task contract.
@@ -1009,10 +971,9 @@ def make_fluid_monitor_spawner(
         # The session's own working directory when the model named none —
         # exactly what fluid's Bash does (`input.get("cwd") or ctx.cwd`), which
         # is what the shared cwd parameter text promises ("default: the session
-        # cwd"). Without the fallback the shell inherited the SERVER's cwd:
-        # four audited sessions launched `gh pr checks … --watch` from a
-        # worktree and every one died with "fatal: not a git repository",
-        # costing a park, a wake and a turn each.
+        # cwd"). Without the fallback the shell would inherit the SERVER's
+        # cwd, and a git command meant for a worktree would fail with "fatal:
+        # not a git repository".
         cwd = input.get("cwd") or getattr(ctx, "cwd", None) or None
         wait_seconds = clamp_wait_seconds((input or {}).get("wait_seconds"))
         # A SERVICE, not a job (fluid's Monitor `serves` input): a process
@@ -1057,9 +1018,9 @@ def make_fluid_monitor_spawner(
                 failed = status != "completed"
                 # NOT ``is_error``. The command ran and produced a result; a
                 # non-zero exit is that result. ``is_error`` is the code-mode
-                # runner's raise signal, and raising on a red test suite tore
-                # down the whole cell — with every call queued behind it — in
-                # three audited sessions. Spawn/infra failures still raise.
+                # runner's raise signal, and raising on a red test suite would
+                # tear down the whole cell with every call queued behind it.
+                # Spawn/infra failures still raise.
                 return ToolOutcome(
                     text=monitor_inline_receipt_text(
                         task.task_id, exit_code, output, failed=failed
@@ -1167,10 +1128,10 @@ def make_fluid_monitor_spawner(
         except TypeError:
             receipt = BackgroundTaskReceipt(**receipt_kwargs)
         # A ToolOutcome (not the bare receipt) so the app owns the RECEIPT
-        # STRING too: fluid's default renders "Monitoring started (task X)."
-        # and audited sessions read that as permission to keep waiting — one
-        # sleep-polled in foreground Bash after 9 of 10 spawns. The instruction
-        # to park has to be in the receipt itself, the way the TaskList nudge is.
+        # STRING too: fluid's default renders "Monitoring started (task X).",
+        # which models read as permission to keep waiting (sleep-polling in
+        # foreground Bash). The instruction to park has to be in the receipt
+        # itself, the way the TaskList nudge is.
         text = (
             monitor_serving_receipt_text(task.task_id)
             if serves

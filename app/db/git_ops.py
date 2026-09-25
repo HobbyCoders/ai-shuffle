@@ -1,4 +1,4 @@
-"""The ``git_ops`` table — the durable cross-install git-operation queue (D5).
+"""The ``git_ops`` table — the durable cross-install git-operation queue.
 
 A *git op* is one unit of git work targeted at ONE install (``runner_id`` = that
 install's ``effective_instance_id``). It exists because git state lives on a
@@ -292,7 +292,7 @@ def list_stale_running(
 def list_recent_for_project(
     project_v2_id: str, limit: int = 20
 ) -> List[Dict[str, Any]]:
-    """Recent ops for a project across every runner (git-state visibility, D6)."""
+    """Recent ops for a project across every runner (git-state visibility)."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(

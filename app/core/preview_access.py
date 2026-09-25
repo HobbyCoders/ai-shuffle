@@ -4,10 +4,9 @@ Why this exists. The worker's UI sits behind
 :func:`app.core.owner_auth.local_access`, which admits only a direct LAN owner
 and rejects anything that looks proxied — including the branch's own Vite dev
 server proxying ``/api`` to the worker, and the agent browser when it runs on
-another host (the container's Chromium, a shared runner). Nine audited
-sessions hit "only accepts direct connections from its local network" /
-``local_access: false`` when they opened the worker's UI to verify a change,
-and five then built their own preview servers. This module is the narrow door.
+another host (the container's Chromium, a shared runner). Sessions that open
+the worker's UI to verify a change hit "only accepts direct connections from
+its local network" / ``local_access: false``. This module is the narrow door.
 
 Threat model, and what the token is NOT:
 
@@ -21,8 +20,8 @@ Threat model, and what the token is NOT:
   in-memory table that a second process cannot see.
 * It is honoured ONLY on the local ingress listener and ONLY from a private
   network peer (the same address families ``local_access`` trusts). Unlike
-  ``local_access`` it tolerates ``X-Forwarded-*`` headers: the audited
-  failures were the branch's Vite dev server proxying ``/api`` to the worker
+  ``local_access`` it tolerates ``X-Forwarded-*`` headers: the failing case
+  is the branch's Vite dev server proxying ``/api`` to the worker
   (it sets ``x-forwarded-host``), and here the TOKEN is the credential, not
   the transport. A public tunnel still cannot present it — it terminates on
   the remote listener, which refuses the cookie outright.
@@ -65,8 +64,8 @@ COOKIE_NAME = "ais_preview"
 QUERY_PARAM = "token"
 REDIRECT_PATH = "/api/v1/auth/preview-access"
 KEY_FILE = "preview-access.key"
-#: A long working session is still one session; the round-9 audit's longest
-#: ran 6.7 hours. Twenty-four hours covers it without outliving the day.
+#: A long working session is still one session. Twenty-four hours covers one
+#: without outliving the day.
 DEFAULT_TTL = 24 * 3600
 _VERSION = "v1"
 

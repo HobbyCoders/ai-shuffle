@@ -192,7 +192,7 @@ class ConnectorManager:
         cls = prepared["cls"]
 
         # A chat connector with no sender allowlist hands the agent to anyone
-        # who finds the bot, so it does not start (owner decision D14).
+        # who finds the bot, so it does not start.
         from app.core.connector_service import (
             ALLOWLIST_REQUIRED_MESSAGE,
             missing_sender_allowlist,

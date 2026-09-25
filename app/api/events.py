@@ -563,7 +563,7 @@ async def event_stream(session_id: str, from_seq: int = 0):
         #     re-materializes a whole legacy transcript into ``session_events``;
         #     it is needed only when this feed is the render authority AND the
         #     log has nothing to serve. A populated log (the overwhelmingly
-        #     common case) no longer pays even the probing read, and a reconnect
+        #     common case) pays no probing read, and a reconnect
         #     (``from_seq > 0``) never re-seeds history the client already holds
         #     — seeding one there would replay a duplicate legacy prefix past a
         #     cursor the client cannot reconcile.

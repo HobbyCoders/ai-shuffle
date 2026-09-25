@@ -22,12 +22,11 @@ def _share_sessions_across_installs() -> bool:
 
     Default ON: a shared-database fleet sees every install's sessions in one
     place. Set the ``cluster_share_sessions`` system setting to a falsey value
-    ("off"/"false"/"0") to restore the old per-install isolation.
+    ("off"/"false"/"0") for per-install isolation.
 
-    Read through the short-TTL memo (finding B8): this runs on EVERY
-    ``get_sessions*`` / ``search_sessions*`` call — i.e. on every sidebar
-    refresh — and used to cost a dedicated connection checkout + SELECT +
-    commit each time for a value that changes approximately never. Writes
+    Read through the short-TTL memo: this runs on EVERY ``get_sessions*`` /
+    ``search_sessions*`` call — i.e. on every sidebar refresh — for a value
+    that changes approximately never. Writes
     through ``app.db.settings`` invalidate the memo immediately, so a toggle
     from this install takes effect at once; another install's toggle is picked
     up within the memo TTL.
@@ -85,10 +84,10 @@ class SessionRow(TypedDict):
     parent_session_id: Optional[str]
     fork_point_message_index: Optional[int]
     v2_stream: bool
-    # Owning install (v40). Stamped at creation — this install's
+    # Owning install. Stamped at creation — this install's
     # ``effective_instance_id``, or the composer's device pick.
     instance_id: Optional[str]
-    # Explicit placement (v61), e.g. ``{"where": "runner:<id>"}``. NULL means the
+    # Explicit placement, e.g. ``{"where": "runner:<id>"}``. NULL means the
     # implicit "follows its owner" default; a non-NULL value is a deliberate pin
     # (device pick / /move / /adopt) and is never auto-overridden.
     placement: Optional[Dict[str, Any]]
@@ -104,27 +103,27 @@ class SessionRow(TypedDict):
     # that switched mid-flight lost the answer to "what did it start on"
     # entirely. NULL on rows created before the column existed.
     first_model: Optional[str]
-    # The run binding chosen when this session was created (v79). ``model`` is
+    # The run binding chosen when this session was created. ``model`` is
     # the raw pick: a bare id/alias, or a ``prov:<providerId>:<modelId>``
-    # composite that also settles ``provider_id``. NULL on pre-v79 rows, which
+    # composite that also settles ``provider_id``. NULL on older rows, which
     # fall back to ``launched_model`` and then the agent's legacy config.
     model: Optional[str]
     effort: Optional[str]
     permission_mode: Optional[str]
     context_window: Optional[int]
-    # Per-session fast mode (v81): TRUE asks the leg for its expedited service,
+    # Per-session fast mode: TRUE asks the leg for its expedited service,
     # NULL/FALSE runs standard.
     fast: Optional[bool]
     # Sidepanel mode: NULL for a 'code' session (the full agentic surface, and
     # every row predating this column), 'chat' for the web-only chat surface,
-    # 'voice' for an OpenAI Realtime call (v74, ruling VM4). See
+    # 'voice' for an OpenAI Realtime call. See
     # ``app.core.session_modes``.
     mode: Optional[str]
     voice_config: Optional[Dict[str, Any]]
-    # List-visibility flag (v75): TRUE keeps the row out of the sessions-list
+    # List-visibility flag: TRUE keeps the row out of the sessions-list
     # queries (wake-word "command" voice sessions); NULL/FALSE = visible.
     hidden: Optional[bool]
-    # Persisted PR lifecycle (v85). NULL = unknown; the sidepanel may still
+    # Persisted PR lifecycle. NULL = unknown; the sidepanel may still
     # infer an open PR from GitHub. pr_state is 'open' / 'merged' / 'closed'.
     pr_number: Optional[int]
     pr_url: Optional[str]
@@ -243,7 +242,7 @@ def get_sessions(
 ) -> List[SessionRow]:
     """Get sessions with optional filters.
 
-    Hidden sessions (v75 — wake-word "command" voice sessions) are excluded
+    Hidden sessions (wake-word "command" voice sessions) are excluded
     unless ``include_hidden`` is True; they stay fetchable via get_session.
     """
     _ph = ph()
@@ -280,12 +279,11 @@ def get_sessions(
         else:
             query += " AND s.api_user_id IS NULL" if tag_id else " AND api_user_id IS NULL"
     if not include_hidden:
-        # NULL = visible (every pre-v75 row), so coalesce rather than = FALSE.
-        # ``is_worker`` (v84) is the MATERIALIZED delegated-worker flag: it
-        # replaces the correlated ``NOT EXISTS (SELECT 1 FROM turns ...)``
-        # probe this filter used to run per listed row, and covers the same
-        # population (workers created before v75 stamped hidden=TRUE at
-        # creation; backfilled once by _backfill_sessions_is_worker).
+        # NULL = visible (older rows), so coalesce rather than = FALSE.
+        # ``is_worker`` is the MATERIALIZED delegated-worker flag, so the list
+        # filter needs no correlated ``NOT EXISTS (SELECT 1 FROM turns ...)``
+        # probe per row (older workers were backfilled once by
+        # _backfill_sessions_is_worker).
         query += " AND COALESCE(s.hidden, FALSE) = FALSE" if tag_id else " AND COALESCE(hidden, FALSE) = FALSE"
         query += " AND COALESCE(s.is_worker, FALSE) = FALSE" if tag_id else " AND COALESCE(is_worker, FALSE) = FALSE"
 
@@ -312,7 +310,7 @@ def get_sessions_paginated(
 ) -> tuple[List[SessionRow], int]:
     """Get sessions with optional filters, returning items and total count.
 
-    Hidden sessions (v75) are excluded from BOTH the items and the total
+    Hidden sessions are excluded from BOTH the items and the total
     unless ``include_hidden`` is True — the filter lives in the shared WHERE
     clause so hidden rows never inflate the count.
 
@@ -354,11 +352,10 @@ def get_sessions_paginated(
         else:
             base_query += f" AND {col_prefix}api_user_id IS NULL"
     if not include_hidden:
-        # NULL = visible (every pre-v75 row). Shared by the COUNT query below,
-        # so hidden rows never inflate the total. ``is_worker`` (v84) is the
-        # materialized delegated-worker flag that replaced the per-row
-        # ``NOT EXISTS (... turns ...)`` probe — which the COUNT paid for EVERY
-        # matching row on every sidebar refresh (finding B7).
+        # NULL = visible (older rows). Shared by the COUNT query below,
+        # so hidden rows never inflate the total. ``is_worker`` is the
+        # materialized delegated-worker flag, so neither query needs a per-row
+        # ``NOT EXISTS (... turns ...)`` probe.
         base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
         base_query += f" AND COALESCE({col_prefix}is_worker, FALSE) = FALSE"
 
@@ -402,7 +399,7 @@ def get_sessions_cursor(
 
     Uses (updated_at, id) as the cursor key for deterministic ordering.
 
-    Hidden sessions (v75) are excluded unless ``include_hidden`` is True —
+    Hidden sessions are excluded unless ``include_hidden`` is True —
     the filter is part of the shared WHERE clause, so the limit+1 has_more
     probe never counts hidden rows.
 
@@ -443,9 +440,9 @@ def get_sessions_cursor(
         else:
             base_query += f" AND {col_prefix}api_user_id IS NULL"
     if not include_hidden:
-        # NULL = visible (every pre-v75 row). ``is_worker`` (v84) is the
-        # materialized delegated-worker flag that replaced the per-row
-        # ``NOT EXISTS (... turns ...)`` probe (finding B7).
+        # NULL = visible (older rows). ``is_worker`` is the materialized
+        # delegated-worker flag, so no per-row ``NOT EXISTS (... turns ...)``
+        # probe is needed.
         base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
         base_query += f" AND COALESCE({col_prefix}is_worker, FALSE) = FALSE"
 
@@ -535,14 +532,13 @@ def create_session(
         provider_id: Explicit model_providers binding for this session. When
             supplied it WINS over the profile-derived value below — the caller
             is binding the session to a provider the profile knows nothing
-            about (ProviderAgent cross-provider workers, phase-3 chunk P3-A).
-            ``None`` (or "") keeps the pre-existing profile-derived behaviour
-            exactly.
+            about (ProviderAgent cross-provider workers). ``None`` (or "")
+            falls back to a ``prov:`` model composite, then the profile.
         derive_provider_from_profile: When false, preserve an explicit native
             binding (``provider_id=None``) instead of falling back to the
             profile's top-level provider. Task workers use this because their
             provider comes from the caller, not the target profile.
-        model: The model chosen for THIS session (v79). Agents no longer pin
+        model: The model chosen for THIS session. Agents do not pin
             one, so this is the session's binding: a bare id/alias, or a
             ``prov:<providerId>:<modelId>`` composite. A composite also
             supplies the session's provider when no explicit ``provider_id``
@@ -553,34 +549,29 @@ def create_session(
         permission_mode: Permission mode chosen for this session, or ``None``.
         context_window: Explicit input-window limit in tokens, or ``None`` to use
             the selected model/provider's registered default.
-        fast: Fast mode chosen for this session (v81), or ``None`` to leave the
+        fast: Fast mode chosen for this session, or ``None`` to leave the
             row unbound (the session runs at standard speed).
         mode: Sidepanel mode for this session — ``'chat'`` for the web-only
-            chat surface, ``'voice'`` for an OpenAI Realtime voice call (ruling
-            VM4), ``'code'``/``None`` for the ordinary agentic surface.
-            ``'code'`` (and anything unrecognized) persists as NULL, which is
-            what every pre-existing row carries; the API model coalesces it
-            back to ``'code'``.
-        hidden: Keep this session out of the sessions-list queries (v75) —
+            chat surface, ``'voice'`` for an OpenAI Realtime voice call,
+            ``'code'``/``None`` for the ordinary agentic surface.
+            ``'code'`` (and anything unrecognized) persists as NULL; the API
+            model coalesces it back to ``'code'``.
+        hidden: Keep this session out of the sessions-list queries —
             wake-word "command" voice sessions are born hidden so they never
             flash into "recent sessions". List-visibility only: the row is
             still fetchable by id.
-        is_worker: Mark this session as a delegated ProviderAgent worker (v84).
-            Workers are also created ``hidden=True``, which is what keeps them
-            out of the lists today; this flag is the durable, queryable fact
-            behind that — it is what the list queries now filter on instead of
-            the correlated ``NOT EXISTS (... turns ...)`` probe they used to run
-            for every row (finding B7). ``False`` (the default) = a normal
-            session.
+        is_worker: Mark this session as a delegated ProviderAgent worker.
+            Workers are also created ``hidden=True``; this flag is the durable,
+            queryable fact the list queries filter on. ``False`` (the default)
+            = a normal session.
         target_instance_id: Create this session OWNED BY another install (the
             composer's device picker). The row is stamped with that install as
             ``instance_id`` AND with an EXPLICIT sticky ``placement`` pin
             (``{"where": "runner:<id>"}``), exactly like
             :func:`pin_session_placement` writes — the user chose this device,
             so the choice must survive sends from any other device (an implicit
-            NULL-placement pin would be auto-adoptable). ``None`` (the default)
-            keeps the pre-existing behaviour byte-for-byte: this install owns
-            the row and ``placement`` stays NULL.
+            NULL-placement pin would be auto-adoptable). ``None`` (the default):
+            this install owns the row and ``placement`` stays NULL.
         _conn: Optional existing DB connection for transaction grouping
     """
     from app.core.config import settings
@@ -588,21 +579,20 @@ def create_session(
     target_instance_id = (target_instance_id or "").strip() or None
     project_v2_id = (project_v2_id or "").strip() or None
     instance_id = target_instance_id or settings.effective_instance_id
-    # Per-session provider binding (Chunk E / G2-r): resolve the profile's
+    # Per-session provider binding: resolve the profile's
     # configured provider ONCE, at creation, and stamp it into
     # sessions.provider_id. Every subsequent turn/spawn reads THIS binding (see
     # query_options.build_options_from_profile), so editing the profile later
-    # never reroutes a live session. NULL = native Claude (gateway bypass, F1);
+    # never reroutes a live session. NULL = no provider binding;
     # a native profile (no config.provider) and an unresolvable profile both
     # stay NULL.
     #
     # An EXPLICIT ``provider_id`` argument short-circuits that resolution and
-    # wins (P3-A): a ProviderAgent worker session is bound to the provider the
+    # wins: a ProviderAgent worker session is bound to the provider the
     # tool call named, not to whatever its (inherited) profile happens to
-    # configure. With no argument the code below is byte-identical to the
-    # pre-parameter behaviour.
+    # configure.
     resolved_provider_id = (provider_id or "").strip() or None
-    # The session's own run binding (v79). A ``prov:`` composite carries the
+    # The session's own run binding. A ``prov:`` composite carries the
     # provider with the model, so an explicit provider_id aside, the user's
     # model pick is what binds the session to a provider — the agent's legacy
     # config.provider is only consulted when neither says anything.
@@ -662,7 +652,7 @@ def create_session(
         columns.append("placement")
         params.append(json.dumps({"where": f"runner:{target_instance_id}"}))
     # RETURNING * instead of a follow-up get_session(): one round trip, and the
-    # row returned is exactly the one just written (finding B8).
+    # row returned is exactly the one just written.
     sql = f"""INSERT INTO sessions ({", ".join(columns)})
                VALUES ({", ".join([_ph] * len(columns))})
                RETURNING *"""
@@ -852,8 +842,8 @@ def update_session(
 
     values.append(session_id)
 
-    # RETURNING * folds the old UPDATE-then-SELECT into one statement on a path
-    # every turn hits several times (finding B8).
+    # RETURNING * makes this ONE statement instead of UPDATE-then-SELECT, on a
+    # path every turn hits several times.
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = get_cursor(conn)
         cursor.execute(
@@ -915,9 +905,9 @@ def set_session_run_binding(
     workspace_project_ids: Optional[List[str]] = None,
     preserve_provider: bool = False,
 ) -> None:
-    """Persist the run binding a turn actually used onto its session (v79).
+    """Persist the run binding a turn actually used onto its session.
 
-    Agents no longer pin a model, so the session row carries the choice. The
+    Agents do not pin a model, so the session row carries the choice. The
     composer sends its current selection with every send; writing it back here
     makes a mid-session switch stick server-side, which is what lets another
     device — and a server-initiated turn such as a wakeup, automation, or
@@ -966,7 +956,7 @@ def set_session_run_binding(
     if clean_context_window is not None and clean_context_window > 0:
         updates.append(f"context_window = {_ph}")
         values.append(clean_context_window)
-    # Boolean binding (v81): False is a real pick ("turn fast mode off"), so it
+    # Boolean binding: False is a real pick ("turn fast mode off"), so it
     # must reach the row. Only an absent field (None) is a no-op.
     if fast is not None:
         updates.append(f"fast = {_ph}")
@@ -1066,16 +1056,15 @@ def adopt_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
 
     Backs the sessions-board "Resume here" action: on a shared database a
     session created by another install can be taken over locally by rewriting
-    its ``instance_id`` to this install's id. V2 Phase 4 (A12): the same UPDATE
-    also dual-writes ``placement = {"where": "runner:<instance_id>"}`` —
+    its ``instance_id`` to this install's id. The same UPDATE also dual-writes ``placement = {"where": "runner:<instance_id>"}`` —
     unconditionally, matching the unconditional ``instance_id`` rewrite and
     applying even to ``"anywhere"`` sessions, because adopt MEANS "resume
-    locally". Without this, the v61 backfill's ``runner:<old-owner>`` pin would
+    locally". Without this, an existing ``runner:<old-owner>`` pin would
     survive the adopt and the placement resolver would keep routing turns to
     the OLD owner. ``sdk_session_id`` / ``worktree_id`` / ``worktree_branch``
     stay put so history resumes and the existing ``recreate_worktree``
     adopt-on-disk path (worktree_manager) rebinds any worktree; ``cloud_branch``
-    is deliberately NEVER written (OD-9 amendment). ``updated_at`` IS bumped so
+    is deliberately NEVER written. ``updated_at`` IS bumped so
     the adopted session surfaces at the top of the board on the new device.
     Returns the updated row, or ``None`` if no such session exists.
 
@@ -1103,13 +1092,13 @@ def adopt_session_follow(session_id: str, instance_id: str) -> Optional[SessionR
     The quiet counterpart of :func:`adopt_session`: the sending install becomes
     the owner (``instance_id``) so the turn runs here, but ``placement`` is
     deliberately LEFT ALONE. Callers only ever reach this for a session whose
-    placement is already NULL — an IMPLICIT A11 pin — so not writing one keeps
+    placement is already NULL — an IMPLICIT pin — so not writing one keeps
     the session implicitly pinned to whoever last sent from it, i.e. still
     auto-adoptable by the next device. Writing a ``runner:<id>`` pin here would
     silently upgrade a "follows me" session into a sticky one.
 
     ``sdk_session_id`` / ``worktree_*`` / ``cloud_branch`` stay untouched exactly
-    like ``adopt_session`` (history resumes; OD-9 keeps ``cloud_branch`` unwritten).
+    like ``adopt_session`` (history resumes; ``cloud_branch`` is never written).
     ``updated_at`` IS bumped, mirroring adopt. Returns the updated row, or
     ``None`` if no such session exists.
     """
@@ -1129,7 +1118,7 @@ def unpin_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
     """Take ownership and drop the sticky pin (follow-me / unpin).
 
     Writes ``instance_id`` AND ``placement = NULL`` so the session follows
-    whoever sends next (D2 auto-adopt). Used by ``POST /adopt {follow: true}``.
+    whoever sends next (send-path auto-adopt). Used by ``POST /adopt {follow: true}``.
     ``sdk_session_id`` is left for the caller to apply the keep-predicate.
     ``updated_at`` is bumped, mirroring adopt. Returns the updated row, or
     ``None`` if no such session exists.
@@ -1147,21 +1136,20 @@ def unpin_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
 
 
 def pin_session_placement(session_id: str, runner_id: str) -> bool:
-    """Sticky-pin a session to ``runner_id`` (V2 Phase 4, OD-6 + OD-9).
+    """Sticky-pin a session to ``runner_id``.
 
     One UPDATE writes both halves of the dual-write: ``placement`` becomes the
     canonical ``{"where": "runner:<id>"}`` pin AND the legacy ``instance_id``
-    owner column is re-pointed so every un-migrated reader (board filters,
-    relay routing while the flag is off elsewhere) agrees with the new truth.
-    ``cloud_branch`` is deliberately NEVER written (OD-9 amendment).
+    owner column is re-pointed so every ``instance_id`` reader (board filters)
+    agrees with the new truth. ``cloud_branch`` is deliberately NEVER written.
 
     Called by the FIRST winner of ``start_turn`` on an "anywhere"/capability
     placement — after this the session is runner-pinned and stays put (CLI
     state now lives on that runner's disk). Any capability ``constraints`` in
-    the prior placement are INTENTIONALLY dropped at pin time (rF3): per OD-6 a
-    pin means "the CLI conversation state lives here", and per A10 pins are
-    validated by online + capability only at resolve time — capability
-    re-validation does not apply to pins, so carrying the constraints forward
+    the prior placement are INTENTIONALLY dropped at pin time: a pin means
+    "the CLI conversation state lives here", and pins are validated by
+    online + capability only at resolve time — capability re-validation does
+    not apply to pins, so carrying the constraints forward
     would add nothing and could wedge a session whose winner later loses an
     incidental capability. ``updated_at`` is not bumped: a claim is not a
     user-visible edit and must not resort the board. Returns True if a row was
@@ -1408,7 +1396,7 @@ def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
 
 def set_working_set_ref(session_id: str, value: Optional[str]) -> bool:
     """Persist (or clear, with ``None``) the session's working-set scratch-ref
-    pointer (V2 Phase 4, Q6).
+    pointer.
 
     Non-NULL is a JSON blob (``{"ref", "sha", "runner_id"}``) recording the
     dangling stash the last runner pushed to ``origin`` for this session;
@@ -1473,7 +1461,7 @@ def delete_session(session_id: str) -> bool:
     All of it runs in the single transaction that drops the session row, so a
     failure leaves the session and its dependents intact together.
     """
-    # V2 Phase 4 (Q6): best-effort scratch-ref cleanup before the row dies, so a
+    # Best-effort scratch-ref cleanup before the row dies, so a
     # hard-deleted session leaves no dangling working-set ref on origin. Fully
     # flag-gated and failure-swallowed — flag OFF (or no ref) issues ZERO git
     # commands, and any git failure never blocks the delete.
@@ -1554,7 +1542,7 @@ def set_session_active(session_id: str, is_active: bool) -> Optional[SessionRow]
 
 
 def set_session_hidden(session_id: str, hidden: bool) -> Optional[SessionRow]:
-    """Set the list-visibility flag (v75) for a session and return the updated
+    """Set the list-visibility flag for a session and return the updated
     session. Hidden sessions drop out of the list queries but stay fully
     functional and fetchable by id."""
     _ph = ph()
@@ -1830,8 +1818,7 @@ def upsert_team_member_message(
     with get_db() as conn:
         cursor = get_cursor(conn)
         # Find the most recent existing row for this teammate. ONE query for
-        # id + metadata (finding B10): this used to list every team_member id
-        # and then re-SELECT each row's metadata one at a time.
+        # id + metadata.
         cursor.execute(
             f"""SELECT id, metadata FROM session_messages
                  WHERE session_id = {_ph} AND role = 'team_member'

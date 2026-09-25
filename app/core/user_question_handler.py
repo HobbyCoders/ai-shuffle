@@ -4,7 +4,7 @@ User Question Handler
 Handles AskUserQuestion tool calls by:
 1. Broadcasting questions to the frontend via WebSocket
 2. Waiting for user responses
-3. Returning answers back to the SDK
+3. Returning answers back to the adapter
 """
 
 import asyncio
@@ -16,16 +16,15 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# V2 Phase 4 (Q4): AskUserQuestion prompts persist as ``pending_interactions``
-# rows of this kind, so any install answers them relay-free. TTL is the
-# durable form of the legacy user_question_timeout auto-reap (Q4-5, default
-# 3600s).
+# AskUserQuestion prompts persist as ``pending_interactions`` rows of this
+# kind, so any install answers them relay-free. TTL is the durable form of the
+# legacy user_question_timeout auto-reap (default 3600s).
 QUESTION_KIND = "question"
 
 # Dismiss / skip envelope (AskUserQuestion modal "X" and per-question "Skip").
 #
 # The stored ``pending_interactions.answer`` payload is normally a flat
-# ``{question_text: answer_string}`` map — exactly the shape the SDK's
+# ``{question_text: answer_string}`` map — exactly the shape the CLI's
 # AskUserQuestion tool consumes. Dismissal and per-question skips are two
 # outcomes that map cannot express, so they ride as reserved marker keys that
 # ``_request_answers_v2`` resolves before the answers ever reach the tool:
@@ -77,7 +76,7 @@ def resolve_answer_envelope(envelope: Any) -> Dict[str, Any]:
     return resolved
 
 
-# Fluid's AskUser rides QuestionRequest events, not the SDK's
+# Fluid's AskUser rides QuestionRequest events, not the CLI's
 # AskUserQuestion permission gate. The adapter translates each event into the
 # same {question, schema} shape and expects a single string back on
 # RespondQuestion. These helpers normalize that shape onto the existing
@@ -92,9 +91,9 @@ QUESTION_TOOLS = frozenset({"AskUserQuestion"}) | FLUID_QUESTION_TOOLS
 
 
 def questions_from_tool_input(tool_input: Any) -> List[Dict[str, Any]]:
-    """Build the UserQuestion payload from either SDK or fluid tool input.
+    """Build the UserQuestion payload from either CLI or fluid tool input.
 
-    SDK AskUserQuestion already carries questions: [...]. Fluid
+    The CLI's AskUserQuestion already carries questions: [...]. Fluid
     QuestionRequest carries a single question dict or {questions: [...]} in
     schema. Preserve that structure, including choices; question is only the
     terminal's plain-text rendering, not the UI question text.
@@ -163,7 +162,7 @@ class UserQuestionHandler:
 
         Args:
             request_id: Unique ID for this request
-            tool_use_id: The tool use ID from the SDK
+            tool_use_id: The tool use ID from the adapter
             session_id: The chat session ID
             questions: List of question objects with question, header, options, multiSelect
             broadcast_func: Async function to broadcast to WebSocket (origin socket)
@@ -189,7 +188,7 @@ class UserQuestionHandler:
         )
 
     # ------------------------------------------------------------------
-    # V2 Phase 4 (Q4) — pending_interactions-backed question flow
+    # pending_interactions-backed question flow
     #
     # The durable ``pending_interactions`` row is the single source of truth:
     # the executing runner blocks on it via
@@ -297,7 +296,7 @@ class UserQuestionHandler:
                     exc_info=True,
                 )
 
-        # Durable lifecycle event (#653): emit AFTER the WS broadcast + fanout,
+        # Durable lifecycle event: emit AFTER the WS broadcast + fanout,
         # swallowed on failure so it can never break the question flow.
         from app.core import interaction_events
 
@@ -556,7 +555,7 @@ class UserQuestionHandler:
                 f"User question answered: {request_id}"
                 + (" (dismissed)" if dismissed else "")
             )
-            # Durable lifecycle event (#653): guarded answer won → emit exactly
+            # Durable lifecycle event: guarded answer won → emit exactly
             # one interaction.answered. AFTER notify_changed.
             from app.core import interaction_events
 
@@ -581,8 +580,7 @@ class UserQuestionHandler:
             request_id: The question request ID
             session_id: The session ID
             answers: Dict of answers keyed by the full question text
-            answered_by_device: Device id of the answering install (V2 Phase 4,
-                Q4-6).
+            answered_by_device: Device id of the answering install.
             dismissed: The user closed the dialog (the modal's "X") without
                 answering. Resolves the tool call with ``DISMISS_MESSAGE``;
                 ``answers`` is ignored.
@@ -627,7 +625,7 @@ class UserQuestionHandler:
         if cancelled:
             interaction_wait.notify_changed(session_id)
             logger.debug(f"Cancelled all pending questions for session {session_id}")
-            # Durable lifecycle events (#653): one interaction.expired
+            # Durable lifecycle events: one interaction.expired
             # (reason="cancelled") per row whose guarded cancel won.
             from app.core import interaction_events
 

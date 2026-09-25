@@ -1,4 +1,4 @@
-"""Per-runner lazy materialization of project_v2 checkouts (v2 core, Phase 3).
+"""Per-runner lazy materialization of project_v2 checkouts.
 
 A *checkout* is the physical working tree of a ``projects_v2`` project on ONE
 runner (``runner_id`` = this install's ``effective_instance_id``). The origin-keyed
@@ -7,8 +7,8 @@ per-runner materialization — ``branch`` NULL/'' is the *base* checkout, a non-
 ``branch`` is a logical worktree materialized at its own deterministic path.
 
 This module owns the ONE lazy-materialization entrypoint, ``ensure_checkout``,
-which the send/resume cwd seam (P4) will call on every send. It is idempotent and
-safe to call repeatedly. Design commitments (Phase 3):
+which ``project_resolver.resolve_cwd`` and ``git_ops_runner`` call. It is
+idempotent and safe to call repeatedly. Design commitments:
 
 - **Deterministic per-runner path** — ``{base_checkout_dir}/.fluid/worktrees/
   {sanitized_branch}`` — nested inside the project's own clone on this runner,
@@ -16,15 +16,15 @@ safe to call repeatedly. Design commitments (Phase 3):
   workspace-root ``checkouts/{project_slug}/{branch}`` layout. A materialization,
   never identity, so the same branch resolves per-machine without cross-host
   orphaning.
-- **Phase 3 NEVER clones from a remote.** A project with no local base checkout on
-  this runner is simply not materializable here (adopt surfaces a 409). Remote
-  placement is Phase 4. So ``ensure_checkout`` returns ``None`` — honestly
-  "not on this device" — rather than fabricating a clone.
+- **Clones only through the gated self-seed.** A project with no local base
+  checkout on this runner is cloned from its remote by ``_seed_base_checkout``
+  when ``settings.self_seed_checkouts`` and the per-project opt-out allow it and a
+  cloneable URL resolves. Otherwise ``ensure_checkout`` returns ``None`` —
+  honestly "not on this device" — rather than fabricating a checkout.
 - **Never destructive.** If a directory exists but is not a valid worktree, we log
   and return ``None`` rather than tearing anything down.
 
-No callers are wired in this commit (P4 does that). Reuses ``git_service`` and
-``worktree_manager._sanitize_branch_name`` by import (both survive PR-B).
+Reuses ``git_service`` and ``worktree_manager._sanitize_branch_name`` by import.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 _CHECKOUTS_SUBDIR = "checkouts"
 
 # The reserved directory name for a project's base (branch-NULL) checkout under
-# its per-project slug dir (#607, ruling 4). A logical branch that sanitizes to
+# its per-project slug dir. A logical branch that sanitizes to
 # this literal is renamed by ``_branch_checkout_path``'s collision guard so it can
 # never land on — and clobber — the base dir.
 _BASE_DIR_NAME = "__base__"
@@ -79,7 +79,7 @@ def _resolve_checkout_path(path: str) -> str:
     """Resolve a ``checkouts.path`` read from the DB against this runner's workspace.
 
     A ``checkouts.path`` is authoritative and, for rows written by V2, absolute.
-    But the v60 collapse migration (#654) seeded some rows verbatim from legacy
+    But the v60 collapse migration seeded some rows verbatim from legacy
     ``projects.path``, which could be workspace-RELATIVE (e.g. ``ai-shuffle``);
     pre-V2 ``get_project_working_dir`` resolved those against ``workspace_dir`` at
     runtime. Mirror that here: an ABSOLUTE path is returned unchanged; a RELATIVE
@@ -128,7 +128,7 @@ def _branch_checkout_path(base_dir: str, branch: str) -> Path:
     """
     sanitized = worktree_manager._sanitize_branch_name(branch)
     if sanitized == _BASE_DIR_NAME:
-        # Collision guard (#607, ruling 4): the base checkout reserves
+        # Collision guard: the base checkout reserves
         # ``__base__``. A logical branch whose name sanitizes to that exact literal
         # is renamed so it can never resolve onto — and overwrite — the base dir.
         sanitized = f"{sanitized}-branch"
@@ -208,15 +208,14 @@ def _branch_plan(
 def _resolve_clone_url(origin: str) -> Optional[str]:
     """Recover a cloneable remote URL for a project_v2 ``origin`` from legacy data.
 
-    Consumed by the PR-2 self-seed slice (#607) to clone a base checkout on demand
-    when a pinned runner has no local materialization. Has NO callers yet — this is
-    the inert PR-1 plumbing; PR-2 wires it into ``_ensure_base_checkout``.
+    Consumed by ``_seed_base_checkout`` to clone a base checkout on demand when a
+    pinned runner has no local materialization.
 
     A v2 ``origin`` is the collapse key ``project_resolver.origin_for_legacy_project``
     seeds: the legacy ``link_group_id`` (a ``git:…`` / ``manual:…`` token) or a synth
     ``'local:' + id`` for remote-less rows. Only a ``git:…`` origin can ever name a
     remote, so ``local:`` / ``manual:`` origins are hard-fail excluded up front
-    (ruling 5) with no DB lookup. For the rest we scan legacy ``projects`` ->
+    with no DB lookup. For the rest we scan legacy ``projects`` ->
     ``git_repositories.remote_url`` and return the first URL whose
     ``auto_link_group_id(remote_url)`` reproduces this exact ``origin`` — the same
     deterministic, install-independent hash the v60 collapse used to assign origins,
@@ -254,7 +253,7 @@ def _resolve_clone_url(origin: str) -> Optional[str]:
 
 
 def _project_self_seed_enabled(project_v2_row: Dict[str, Any]) -> bool:
-    """Whether this project permits lazy self-seed (#607, ruling 2 per-project opt-out).
+    """Whether this project permits lazy self-seed (the per-project opt-out).
 
     Default ON: only an EXPLICIT ``projects_v2.settings.self_seed = false`` disables
     on-demand cloning for THIS project (a missing key, ``None``, or any truthy value
@@ -274,13 +273,13 @@ def _seed_base_checkout(
     project_id: str,
     runner_id: str,
 ) -> Optional[str]:
-    """Lazily self-seed a MISSING base checkout by cloning the project's remote (#607).
+    """Lazily self-seed a MISSING base checkout by cloning the project's remote.
 
     Called by ``_ensure_base_checkout`` only when no base checkout is materialized on
     this runner (the pinned-runner-never-cloned case). Gated behind
     ``AI_SHUFFLE_SELF_SEED`` (``settings.self_seed_checkouts``, default ON) AND a
     per-project opt-out (``projects_v2.settings.self_seed`` — an explicit ``false``
-    disables it for THIS project only, #607 ruling 2). When either gate is off,
+    disables it for THIS project only). When either gate is off,
     NOTHING is cloned and the caller falls through to today's honest "not
     materialized here" (``None``).
 
@@ -324,8 +323,8 @@ def _seed_base_checkout(
     base_str = str(base_path)
 
     # Idempotency / never-destroy: if something already occupies the base path,
-    # adopt it when it is a valid checkout, else refuse to touch it (standing #581
-    # / never-destructive rule) rather than clobbering it with a fresh clone.
+    # adopt it when it is a valid checkout, else refuse to touch it (the
+    # never-destructive rule) rather than clobbering it with a fresh clone.
     if base_path.exists():
         if _dir_is_worktree(base_str):
             checkouts_db.upsert_checkout(project_id, runner_id, base_str, status="active")
@@ -441,9 +440,8 @@ def _adopt_legacy_worktree(
     path. Two live sources still produce them post-collapse:
 
     * an un-upgraded install sharing the DB, still writing ``worktrees`` rows; and
-    * the not-yet-cut-over ExecutionModeBar/WS ``worktree_id`` intake (legacy until
-      the Phase 4 worktree-UI redesign), which materializes into the old md5-hash
-      worktree dir and sets ``sessions.worktree_branch``.
+    * the legacy ExecutionModeBar/WS ``worktree_id`` intake, which materializes
+      into the old md5-hash worktree dir and sets ``sessions.worktree_branch``.
 
     Such a branch is ALREADY checked out on disk in its legacy dir. Falling through
     to deterministic materialization would run ``git worktree add`` at a fresh path
@@ -512,7 +510,7 @@ def _ensure_branch_checkout(
     """Resolve (materializing if needed) the (project, runner, branch) checkout."""
     # A branch checkout requires a materialized base checkout to `git worktree add`
     # from. No base here → not materializable (return None; caller may 409/fallback).
-    # Pass the row so a missing base can lazily self-seed (#607) before the worktree.
+    # Pass the row so a missing base can lazily self-seed before the worktree.
     base_path = _ensure_base_checkout(project_id, runner_id, project_v2_row)
     if not base_path:
         return None
@@ -522,7 +520,7 @@ def _ensure_branch_checkout(
     row = checkouts_db.get_checkout(project_id, runner_id, branch=branch)
     if row:
         path = row.get("path")
-        # Normalize a workspace-relative legacy path (#654) for the on-disk checks
+        # Normalize a workspace-relative legacy path for the on-disk checks
         # and return; the raw DB value is left untouched (read-only normalization).
         resolved = _resolve_checkout_path(path) if path else path
         if resolved and os.path.isdir(resolved):
@@ -655,7 +653,7 @@ def _ensure_branch_checkout(
 # on the old install, and every frontend command in that worktree failed in a
 # way that reads like a code bug rather than a provisioning one: "Cannot
 # optimize dependency", "Can't resolve 'tailwindcss'", 152 phantom svelte-check
-# errors. Three audited sessions burned minutes and a diagnosis sub-agent on it.
+# errors.
 #
 # So provisioning checks freshness before it links: npm's own record of the
 # installed tree (node_modules/.package-lock.json) against the WORKTREE's
@@ -1302,7 +1300,7 @@ def ensure_checkout(
             not-materializable rather than fabricated.
 
     Returns the absolute checkout path, or ``None`` when it is not materializable
-    on this device (no base checkout here — Phase 3 never clones — or a branch that
+    on this device (no base checkout here and none self-seeded, or a branch that
     exists nowhere and was not requested as new). Idempotent and safe to call on
     every send.
     """

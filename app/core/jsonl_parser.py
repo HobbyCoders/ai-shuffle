@@ -1,11 +1,11 @@
 """
 JSONL History Parser
 
-Parses Claude SDK session history files (*.jsonl) to reconstruct chat messages
+Parses Claude Code session history files (*.jsonl) to reconstruct chat messages
 in the same format as live streaming, ensuring visual consistency between
 resumed and live sessions.
 
-JSONL Format (from Claude SDK ~/.claude/projects/[project]/[session_id].jsonl):
+JSONL Format (from Claude Code ~/.claude/projects/[project]/[session_id].jsonl):
 - User messages: {"type":"user", "message":{"role":"user","content":"..."}, "uuid":"...", "timestamp":"..."}
 - Assistant messages: {"type":"assistant", "message":{"role":"assistant","content":[blocks]}, "uuid":"...", "timestamp":"..."}
 - Tool results: {"type":"user", "message":{"role":"user","content":[{"tool_use_id":"...","type":"tool_result","content":"..."}]}, "toolUseResult":{...}}
@@ -256,7 +256,7 @@ _agent_paths_cache_lock = threading.Lock()
 # all (the transcript lives in Postgres, and the CLI writes to a tmpfs config
 # dir), and pg_session_store's lazy backfill probes this on every store miss —
 # i.e. on every open/poll of such a session. Without a negative memo that is a
-# full directory scan per request (finding B9). Mirrors the ``_empty_memo``
+# full directory scan per request. Mirrors the ``_empty_memo``
 # pattern in app/core/history_backfill.py.
 _JSONL_MISS_TTL_SECONDS = 30.0
 #: (sdk_session_id, working_dir, projects_root) -> monotonic time of the miss.
@@ -533,13 +533,13 @@ def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace")
     Get the path to a session's JSONL history file.
 
     Args:
-        sdk_session_id: The Claude SDK session ID (UUID)
+        sdk_session_id: The Claude session ID (UUID)
         working_dir: The working directory used when the session was created
 
     Returns:
         Path to the JSONL file, or None if not found
     """
-    # A recent miss short-circuits the whole probe (finding B9): the fallback
+    # A recent miss short-circuits the whole probe: the fallback
     # below stats EVERY project directory, and this is called on every store
     # miss — i.e. on every open/poll of a session whose transcript lives only in
     # Postgres. The memo is negative-only and TTL'd, so a transcript that
@@ -590,7 +590,7 @@ def get_hooks_jsonl_path(sdk_session_id: str, working_dir: str) -> Path:
     in the main session JSONL.
 
     Args:
-        sdk_session_id: The Claude SDK session ID (UUID)
+        sdk_session_id: The Claude session ID (UUID)
         working_dir: The working directory for the project
 
     Returns:
@@ -616,11 +616,11 @@ def write_system_message(
     """
     Append a system message to the session's main JSONL file.
 
-    This writes messages in the Claude SDK's JSONL format for system entries.
+    This writes messages in Claude Code's JSONL format for system entries.
     These messages are displayed in chat history and persist across session loads.
 
     Args:
-        sdk_session_id: The Claude SDK session ID (UUID)
+        sdk_session_id: The Claude session ID (UUID)
         working_dir: The working directory for the project
         subtype: Message subtype (e.g., 'worktree_context', 'plugin_warning')
         content: Human-readable message content
@@ -773,7 +773,7 @@ def parse_hooks_jsonl(sdk_session_id: str, working_dir: str) -> List[Dict[str, A
     Parse a session's hooks JSONL file and return plugin warning messages.
 
     Args:
-        sdk_session_id: The Claude SDK session ID
+        sdk_session_id: The Claude session ID
         working_dir: The working directory for the project
 
     Returns:
@@ -872,7 +872,7 @@ def _parse_slash_command(content: str) -> Optional[Dict[str, Any]]:
     """
     Parse slash command XML tags into structured data.
 
-    Slash commands from Claude SDK have this format:
+    Slash commands from Claude Code have this format:
     <command-message>plugin:command</command-message>
     <command-name>/plugin:command</command-name>
     <command-args>arguments here</command-args>
@@ -911,10 +911,10 @@ def _parse_slash_command(content: str) -> Optional[Dict[str, Any]]:
 
 def _is_task_notification(content: str) -> bool:
     """
-    Check if content is a Claude SDK task-notification message.
+    Check if content is a Claude Code task-notification message.
 
     These are internal async completion callbacks from the Task/subagent system.
-    The SDK injects them as user-role messages when a background agent finishes,
+    The CLI injects them as user-role messages when a background agent finishes,
     but they're only meant for Claude's internal context — the subagent's work
     is already displayed via the tool_use/tool_result pair in SubagentMessage.
     """
@@ -1191,7 +1191,7 @@ def parse_session_history(
         return [], {}
 
     # Check cache. A hit returns a shallow copy of the cached message list —
-    # no deserialization at all (finding B5).
+    # no deserialization at all.
     cached = _parse_cache.get(sdk_session_id)
     if cached is not None:
         c_mtime, c_size, c_messages, c_usage = cached
@@ -1261,7 +1261,7 @@ def invalidate_parse_cache(sdk_session_id: str = None) -> None:
         sdk_session_id: If provided, invalidate only this session. If None, clear all.
     """
     # A transcript that just changed may also have just APPEARED on disk, so
-    # the negative JSONL memo has to go with it (finding B9).
+    # the negative JSONL memo has to go with it.
     _forget_jsonl_miss(sdk_session_id or None)
 
     with _parse_cache_lock:
@@ -1311,7 +1311,7 @@ def pre_seed_parse_cache(
     the cache will be re-populated normally.
 
     Args:
-        sdk_session_id: The Claude SDK session ID
+        sdk_session_id: The Claude session ID
         messages: Final messages for the completed turn
         usage_data: Usage data dict
         working_dir: Working directory for finding the JSONL file
@@ -1393,7 +1393,7 @@ def pre_seed_parse_cache(
     try:
         # Turn end is exactly when a transcript can have APPEARED on disk for a
         # session that had none, so re-probe instead of trusting the negative
-        # memo (finding B9). Once per turn, not once per poll.
+        # memo. Once per turn, not once per poll.
         _forget_jsonl_miss(sdk_session_id)
         jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
         if not jsonl_path:
@@ -1461,7 +1461,7 @@ def _transform_entries(
 
     Args:
         entries: Iterable of raw transcript dicts (JSONL lines or store rows).
-        sdk_session_id: The Claude SDK session ID (used for ids/logging).
+        sdk_session_id: The Claude session ID (used for ids/logging).
         working_dir: The working directory (passed through for context).
         agent_children_loader: Optional ``callable(agent_id) -> list[dict] | None``
             returning the parsed child messages for a subagent. Returns ``None``
@@ -1550,7 +1550,7 @@ def _transform_entries(
             if is_hidden_system_subtype(subtype):
                 continue
             system_content = entry.get("content", "")
-            # SDK system messages store fields at the top level of the entry,
+            # Claude system messages store fields at the top level of the entry,
             # not under a nested "data" key. Pass the entire entry as systemData
             # so the frontend has access to all fields (e.g., compactMetadata,
             # durationMs, permissionMode, etc.)
@@ -1862,7 +1862,7 @@ def _transform_entries(
                     })
 
         elif entry_type == "assistant" and role == "assistant":
-            # Check for API error messages (synthetic messages from SDK)
+            # Check for API error messages (synthetic messages from the CLI)
             # These have isApiErrorMessage: true and model: "<synthetic>"
             if entry.get("isApiErrorMessage"):
                 # Extract the error text from the content
@@ -2194,7 +2194,7 @@ def _parse_session_history_uncached(
     refactored core.
 
     Args:
-        sdk_session_id: The Claude SDK session ID
+        sdk_session_id: The Claude session ID
         working_dir: The working directory for finding the project
         jsonl_path: Path to the JSONL file (caller is responsible for resolving this)
 
@@ -2273,7 +2273,7 @@ def parse_session_history_from_store(
     (a known, accepted parity gap; see PR C.1).
 
     Args:
-        sdk_session_id: The Claude SDK session ID.
+        sdk_session_id: The Claude session ID.
         working_dir: The working directory (passed through for context only;
             NOT used to reconstruct a project_key — the store reads match on
             session_id alone).
@@ -2322,7 +2322,7 @@ def parse_session_history_from_store(
                     _store_parse_cache.move_to_end(sdk_session_id)
                     c_messages, c_usage, _ = cached
                     # Legacy JSON-string entries (older build, or a test
-                    # planting the pre-B5 shape) are re-parsed rather than
+                    # planting the old shape) are re-parsed rather than
                     # served: the value shape is part of the cache contract.
                     if isinstance(c_messages, str) or isinstance(c_usage, str):
                         _store_parse_cache.pop(sdk_session_id, None)
@@ -2451,7 +2451,7 @@ def _entries_are_window_safe(entries) -> bool:
     BEFORE it. In a full parse the fallback is stable; in a windowed parse the
     same entry would be labelled differently, and ``uuid`` is the anchor a
     REWIND resolves against — a mislabelled one could truncate a session at the
-    wrong point. Real SDK entries always carry a uuid; the pre-cutover and
+    wrong point. Real CLI entries always carry a uuid; the pre-cutover and
     hand-built ones that do not are rare and are worth the slower, whole-
     transcript path.
     """
@@ -2515,7 +2515,7 @@ def parse_session_window_from_store(
     small constant merge context) are transformed.
 
     Args:
-        sdk_session_id: The Claude SDK session ID.
+        sdk_session_id: The Claude session ID.
         working_dir: Passed through for context (never used to rebuild a
             project_key — store reads match on session_id alone).
         window_loader: ``loader(session_id, subpath=None, *, limit, before_seq)``

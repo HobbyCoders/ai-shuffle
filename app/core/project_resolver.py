@@ -1,4 +1,4 @@
-"""The single origin / checkout / cwd authority (v2 core, Phase 3).
+"""The single origin / checkout / cwd authority.
 
 Replaces the legacy ``project_links`` heuristic chains, the ``message_resolver``
 path-existence cwd walk, and the ``project_utils`` worktree-cwd fallbacks with one
@@ -13,8 +13,6 @@ collapse migration:
 Pure DB reads plus ``checkout_manager`` calls for lazy materialization. It imports
 NO legacy resolution module (``project_links`` / ``message_resolver`` /
 ``project_utils``) and NO in-memory store — old and new paths meet only at the DB.
-
-No callers are wired in this commit (P4 does that).
 """
 
 from __future__ import annotations

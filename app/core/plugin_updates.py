@@ -19,7 +19,7 @@ from app.core.plugin_models import (
 logger = logging.getLogger(__name__)
 
 
-# ─── Auto-update defaults (F10) ───────────────────────────────────────────
+# ─── Auto-update defaults ─────────────────────────────────────────────────
 #
 # DELIBERATE DEFAULT CHANGE: auto-update is OFF unless the user turns it on.
 #

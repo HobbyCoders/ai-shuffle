@@ -1,4 +1,4 @@
-"""Live tool-surface discovery — the one inventory (ruling T1).
+"""Live tool-surface discovery — the one inventory.
 
 Everything a session can be given, enumerated from the registries that actually
 build it, never from a hardcoded list. Seven group kinds:
@@ -24,7 +24,7 @@ fails to answer appears as a group with ``tools: []`` plus an entry in
 ``errors`` — never silently dropped, so the editor can show it as broken.
 
 Descriptions are the first sentence of the spec description (see
-``first_sentence``). Risk is normalized onto the T1 vocabulary:
+``first_sentence``). Risk is normalized onto the response vocabulary:
 ``safe`` → ``read``, ``write`` → ``write``, ``destructive`` → ``exec``; a tool
 whose source carries no risk at all reports ``None``.
 
@@ -46,14 +46,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# How long an MCP server's ``tools/list`` answer is reused (ruling T1).
+# How long an MCP server's ``tools/list`` answer is reused.
 MCP_CACHE_TTL_S = 600.0
 
 # How long one server may take to spawn/handshake/answer before it is recorded
 # as an error group.
 MCP_LIST_TIMEOUT_S = 25.0
 
-# fluid's ToolSpec risk vocabulary → the T1 response vocabulary.
+# fluid's ToolSpec risk vocabulary → the response vocabulary.
 _RISK_MAP = {"safe": "read", "write": "write", "destructive": "exec"}
 
 # server name -> (expires_at_monotonic, tools, error)
@@ -65,7 +65,7 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s")
 def first_sentence(text: Optional[str]) -> Optional[str]:
     """The first sentence of a tool description, whitespace-collapsed.
 
-    Tool descriptions in both fluid and the SDK are multi-paragraph prompts;
+    Tool descriptions in both fluid and MCP servers are multi-paragraph prompts;
     the picker shows one line per tool.
     """
     if not text:
@@ -99,8 +99,9 @@ def harness_tools() -> List[Dict[str, Any]]:
     """fluid's builtins, from a throwaway registry.
 
     Registering into a fresh ``ToolRegistry`` is the only honest source: adding
-    a builtin upstream changes this list with no edit here (and the T8 endpoint
-    test iterates the same registry, so no test needs an edit either).
+    a builtin upstream changes this list with no edit here (and
+    ``tests/api/test_tools_surface.py`` iterates the same registry, so no test
+    needs an edit either).
     """
     from fluid.tools.builtins import register_builtins
     from fluid.tools.registry import ToolRegistry
@@ -266,7 +267,7 @@ def ai_tool_names_for_config(
 def ai_tools_config_from_names(names: List[str]) -> Dict[str, bool]:
     """The legacy ``ai_tools`` toggle map implied by a set of permitted tools.
 
-    ``create_ai_tools_server`` still gates on the per-category booleans, so T5's
+    ``create_ai_tools_server`` still gates on the per-category booleans, so
     "attach the server when at least one AI tool is permitted" is expressed by
     synthesizing the map the picker's selection implies. The two catch-all tools
     (``runFalModel`` / ``searchModels``) map to EVERY category, so they are
@@ -469,7 +470,7 @@ def _group(
 
 
 async def build_tool_surface(*, refresh: bool = False) -> Dict[str, Any]:
-    """Every tool a session can be given, grouped (ruling T1).
+    """Every tool a session can be given, grouped.
 
     Group order is the editor's: harness, app, ai, browser, computer_use,
     app_config, then MCP servers alphabetically.

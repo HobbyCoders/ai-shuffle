@@ -1,10 +1,9 @@
-"""Durable background-task snapshots (v55).
+"""Durable background-task snapshots.
 
 ``task_registry`` (in-memory, rebuilt empty on restart) mirrors every task
 transition into the ``background_tasks`` table through
-``app.core.task_persistence``. These rows started life WRITE-ONLY, but two
-recovery readers now depend on them — both keyed off the fact that the
-in-memory registry is empty after a restart:
+``app.core.task_persistence``. Two recovery readers depend on these rows —
+both keyed off the fact that the in-memory registry is empty after a restart:
 
 - boot reconcile marks this install's stale non-terminal rows killed
   (``mark_stale_background_tasks_killed``);
@@ -13,7 +12,7 @@ in-memory registry is empty after a restart:
   the UI still shows "running" when nothing survives in memory.
 
 Sidebar list/search reads and user-scoped updates use shared running-task
-presence. The general live-view read cutover is still a later phase.
+presence.
 """
 
 from __future__ import annotations

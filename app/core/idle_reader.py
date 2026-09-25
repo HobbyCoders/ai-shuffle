@@ -1,13 +1,12 @@
-"""app/core/idle_reader.py — the between-turns single reader (v2 core, Phase 2 A4).
+"""The between-turns single reader.
 
 When a turn parks (its foreground stream ended but background sub-agents / shells
-are still running), the pooled SDK client keeps buffering messages that nobody is
+are still running), the pooled adapter keeps buffering messages that nobody is
 reading: the slow sub-agent's inner activity and, eventually, its terminal
 ``TaskNotificationMessage``. This module is the reader that runs BETWEEN turns to
-consume those messages so they are not lost.
-
-It is a trimmed port of the legacy ``chat_ws_handler._drain_notifications_impl``,
-keeping only the v2 essentials:
+consume those messages so they are not lost. An adapter with no ``sdk_client``
+stream (the fluid ``HarnessAdapter``) has nothing to read here; for it only
+drain mode's settle path runs. What it does:
 
 * **registry taps** — every message is fed to ``task_registry`` (this is what
   unfreezes the running-task indicator) via ``_record_subagent_lane_launches`` +
@@ -17,24 +16,18 @@ keeping only the v2 essentials:
   session event log via :func:`turn_recorder.record_drained_event` (the sole v2
   render path — there is no live-store re-dispatch);
 * **terminal handoff** — a terminal ``TaskNotificationMessage`` is recorded and
-  then handed to the injectable :func:`register_on_task_terminal` callback (the
-  Phase-2 scheduler, commit A5, registers the real one; default is a no-op).
-  This REPLACES the legacy ``mark_unparked`` / ``deliver_unpark`` latch machinery;
+  then handed to the injectable :func:`register_on_task_terminal` callback
+  (``turn_scheduler`` registers the real one; default is a no-op);
 * **drain mode** — when started with a ``drain_turn_id`` (an escalated interrupt
   whose wedged runner was kept, not evicted), a stale ``ResultMessage`` for that
   turn settles it ``aborted`` and fires the settlement callback;
-* **broken-client eviction** — a dead read stream evicts the pooled client with
-  the SAME predicate the legacy pump used.
+* **broken-client eviction** — a dead read stream evicts the pooled client
+  (:func:`_evict_broken_client`).
 
 SINGLE-READER INVARIANT: the reader acquires the session's **reader token**
 (:func:`app.core.session_runtime.get_reader_lock`) for its whole run, exactly as
 a turn pump does — so a starting turn (which stops the idle reader AND takes the
 token) can never read the pooled client concurrently with this reader.
-
-Deliberately NOT ported (see the A4 brief): the ``stale_turn_undrained`` flag
-dance, the batch/consolidation window, ``suppress_queue_kick``, the legacy
-unpark-pending latch, live-store re-dispatch, and the self-removal-before-kick
-self-deadlock guard (v2 settlement/kick is the scheduler's job via the seams).
 """
 
 from __future__ import annotations
@@ -49,8 +42,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Terminal statuses that constitute "this background task is done" — mirrors the
-# legacy _TERMINAL_TASK_STATUSES.
+# Terminal statuses that constitute "this background task is done".
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "killed", "stopped", "cancelled"})
 
 # How long a single read may block before the loop wakes to re-check whether it
@@ -67,7 +59,7 @@ CLI_OWNED_WAKE_SIGNAL = "cli-owned-wake"
 
 
 # ---------------------------------------------------------------------------
-# Terminal-task handoff seam (the real handler is commit A5's scheduler).
+# Terminal-task handoff seam (the real handler is turn_scheduler.on_task_terminal).
 # ---------------------------------------------------------------------------
 _on_task_terminal: Optional[Callable[..., Any]] = None
 
@@ -76,7 +68,7 @@ def register_on_task_terminal(hook: Optional[Callable[[str, Dict[str, Any]], Any
     """Register (or clear, with ``None``) the terminal-task callback.
 
     Called ``(session_id, frame)`` when a background task's terminal
-    notification is drained. Commit A5's scheduler registers the real handler
+    notification is drained. ``turn_scheduler`` registers the real handler
     (which decides whether to wake the parent with a follow-up turn); tests
     inject a spy. Default: no-op — the completion is still recorded to the event
     log regardless.
@@ -93,7 +85,7 @@ async def _fire_on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Any:
 
     Also settles the durable parked marker (see the comment below) — that runs
     whether or not a hook is registered, because a terminal with no wake behind
-    it is exactly the case that used to leave the marker stuck."""
+    it would otherwise leave the marker stuck."""
     result = None
     hook = _on_task_terminal
     if hook is not None:
@@ -108,11 +100,10 @@ async def _fire_on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Any:
             )
             result = None
     # Settle the durable parked marker on the SAME terminal that the scheduler
-    # just judged. ``turn_finalize`` writes the marker at turn end and, until
-    # this call existed, only the NEXT turn end cleared it — so a session whose
-    # last worker settled between turns with no wake behind it stayed marked
-    # "parked on an agent" forever (2026-09-05 audit F3: two sessions sat that
-    # way with both their tasks terminal). Clear-only and idempotent: it does
+    # just judged. ``turn_finalize`` writes the marker at turn end, and without
+    # this call only the NEXT turn end would clear it — so a session whose last
+    # worker settled between turns with no wake behind it would stay marked
+    # "parked on an agent" forever. Clear-only and idempotent: it does
     # nothing while other background work is still running, and nothing when
     # there is no marker to drop.
     try:
@@ -128,7 +119,7 @@ async def _fire_on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Eviction (same predicate as the legacy pump).
+# Eviction.
 # ---------------------------------------------------------------------------
 
 async def _evict_broken_client(session_id: str) -> None:
@@ -188,7 +179,7 @@ def _wake_usage_summary(message: Any) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def run_idle_reader(session_id: str, *, drain_turn_id: Optional[str] = None) -> None:
-    """Drain the pooled SDK client between turns for ``session_id``.
+    """Drain the pooled adapter between turns for ``session_id``.
 
     Holds the session's reader token for the whole run (single-reader invariant).
     In *drain mode* (``drain_turn_id`` set) a stale ``ResultMessage`` for that
@@ -271,15 +262,14 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
         return
     client = state.client
     if client is None:
-        # Fluid/harness adapters expose no SDK client, so there is no
-        # receive_messages() stream to drain between turns. Porting the tail to
-        # the fluid engine is a known follow-up; but a DRAINING turn must still
-        # be settled here. Returning without settling used to leave the turn
-        # 'draining' after execute() released its run lease — 15s later
-        # ``reap_expired`` requeued the user turn and the scheduler RE-RAN it
-        # from scratch: the interrupted prompt was re-recorded (duplicate user
-        # bubble) and re-executed (Task workers re-spawned) on a session the UI
-        # already showed as stopped. Mirror the drain-mode semantics instead:
+        # Fluid/harness adapters expose no ``sdk_client``, so there is no
+        # receive_messages() stream to drain between turns — but a DRAINING
+        # turn must still be settled here. Returning without settling would
+        # leave the turn 'draining' after execute() released its run lease;
+        # ``reap_expired`` would then requeue the user turn and the scheduler
+        # would RE-RUN it from scratch (duplicate user bubble, re-spawned Task
+        # workers) on a session the UI already shows as stopped. Mirror the
+        # drain-mode semantics instead:
         # wait for the wedge (the registered background work) to resolve, then
         # evict the client and settle the turn aborted.
         if drain_turn_id is not None:
@@ -306,7 +296,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
     )
 
     agen = client.receive_messages()
-    # PERSISTENT READ FUTURE (F1, ported): ONE future per __anext__ kept alive
+    # PERSISTENT READ FUTURE: ONE future per __anext__ kept alive
     # across timeouts via ``asyncio.wait`` (which never cancels it). Cancelling a
     # pending __anext__ throws into the generator frame, closing it permanently —
     # so the loop NEVER cancels ``next_fut``; only the exit ``finally`` does.
@@ -350,7 +340,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                     continue
                 # Normal idle: keep reading while background work survives; once
                 # it is all done there is nothing more to drain — UNLESS a
-                # CLI-owned wake is still in flight (LEG 1). The last background
+                # CLI-owned wake is still in flight. The last background
                 # task's completion suppressed the app wake because the CLI
                 # delivers its own wake turn 7-60s later; exiting now would leave
                 # that wake buffered and unread. Keep reading if (i) a CLI-wake
@@ -394,13 +384,13 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
 
             _fut, next_fut = next_fut, None
             try:
-                # Translate at the boundary: this loop reads the raw SDK client
-                # (receive_messages()), but every helper it shares with the
-                # streaming loops now dispatches on the provider mirror types
+                # Translate at the boundary: this loop reads the raw
+                # ``sdk_client`` stream (receive_messages()), but every helper it
+                # shares with the streaming loops dispatches on the provider mirror types
                 # (app/core/provider/events.py).
                 message = to_provider_event(_fut.result())
             except StopAsyncIteration:
-                # The SDK generator ended — a finished stream cannot serve another
+                # The message generator ended — a finished stream cannot serve another
                 # turn. In drain mode the killed turn's ResultMessage will now
                 # never arrive: settle it aborted. Evict the finished client.
                 logger.info("idle_reader: message stream ended [session=%s]", session_id)
@@ -410,7 +400,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                 return
             except Exception:  # noqa: BLE001
                 # Read error — the client's read loop is dead, so the client is
-                # broken by definition (same predicate as the legacy pump). In
+                # broken by definition. In
                 # drain mode settle the drained turn; evict either way.
                 logger.warning(
                     "idle_reader: read failed — evicting broken client [session=%s]",
@@ -442,10 +432,10 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
             try:
                 inner_parent = getattr(message, "parent_tool_use_id", None)
                 if inner_parent and task_registry.was_background_launch(session_id, inner_parent):
-                    # B-prime item b: this drained message is inner activity of a
-                    # still-running own background sub-agent (an owner). Stamp its
-                    # activity so the deferred-pump discriminator can tell a running
-                    # owner (keeps emitting) from a parked one (goes silent).
+                    # This drained message is inner activity of a still-running
+                    # own background sub-agent (an owner). Stamp its activity so a
+                    # running owner (keeps emitting) can be told from a parked one
+                    # (goes silent).
                     task_registry.note_owner_activity(session_id, inner_parent)
                     for sub_ev in _subagent_events_from_message(message):
                         await record_drained_event(session_id, sub_ev)
@@ -467,8 +457,8 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
             # A top-level backgrounded Task/Agent coming to rest while parked makes
             # the CLI start its OWN follow-up turn on the pooled client; this reader
             # is its only reader. Forward that wake turn's top-level events so an
-            # already-open client renders them live (else they reach only the SDK
-            # transcript, surfacing on reload — issue #691). Route through
+            # already-open client renders them live (else they reach only the CLI's
+            # JSONL transcript, surfacing on reload). Route through
             # record_cli_wake_event, which — unlike record_drained_event's narrow
             # subagent_*/task_*/system filter — accepts the full render surface
             # (chunk/tool_use/tool_result), and BRACKET the wake as a first-class
@@ -487,7 +477,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                     for cli_ev in cli_evs:
                         etype = cli_ev.get("type")
                         if etype == "thinking_block":
-                            # Never rendered live (surfaces on reload via the SDK
+                            # Never rendered live (surfaces on reload via the CLI's
                             # transcript); skip WITHOUT counting it as a drop.
                             continue
                         # Open the wake turn on its first renderable event so
@@ -535,7 +525,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                 # A CLI-owned wake turn came to rest. If we bracketed a wake turn
                 # (its first renderable event opened one), close it with a
                 # synthetic turn.completed so the FE reducer flips streaming off
-                # and settles speculative subagent cards (#691 symptom 2). Then
+                # and settles speculative subagent cards. Then
                 # persist end-of-turn state so park-pollers render the wake, and
                 # keep draining for any further background work.
                 cli_wake_closed = wake_turn_id is not None
@@ -546,7 +536,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                     )
                     wake_turn_id = None
                     # The CLI-owned wake we were holding the grace window for has
-                    # landed and closed — disarm it (LEG 1).
+                    # landed and closed — disarm it.
                     if wake_deadline is not None:
                         logger.info(
                             "idle_reader: CLI-wake captured — disarming grace "
@@ -559,7 +549,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                     await persist_turn_end_state(session_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("idle_reader: CLI-turn finalize failed: %s", exc)
-                # LEG 2 call site A: the CLI-owned wake has come to rest. If no
+                # The CLI-owned wake has come to rest. If no
                 # background work remains, settle this session's parked turn rows
                 # to 'completed' so lifecycle_state stops showing the session
                 # parked forever ('parked' is terminal and nothing else moves a
@@ -581,7 +571,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                     logger.debug("idle_reader: settle_parked_turns failed: %s", exc)
                 if cli_wake_closed:
                     await _deliver_held_after_cli_wake(session_id)
-                # Capture the SDK context-usage breakdown for this CLI-owned wake
+                # Capture the context-usage breakdown for this CLI-owned wake
                 # turn while its adapter is still live and pooled. Detached and
                 # self-guarding, so it never delays draining.
                 from app.core.query_persistence import schedule_context_usage_capture
@@ -643,8 +633,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
             # Updated" chip in the parent chat. But an UNKNOWN task (no lane
             # armed either way) keeps the pre-existing always-chip behavior — the
             # terminal chip is a settle path for subagent cards, so an
-            # ownership-arming MISS must not leave a card stuck-active
-            # (#617/#659 failure class).
+            # ownership-arming MISS must not leave a card stuck-active.
             n_task_id = frame.get("task_id")
             if tool_use_id and not (
                 task_registry.is_subagent_background_task(session_id, n_task_id)
@@ -667,13 +656,12 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                 "idle_reader: terminal task notification [task=%s status=%s session=%s]",
                 frame.get("task_id"), status, session_id,
             )
-            # Hand the terminal off to the scheduler seam (default no-op). This
-            # REPLACES the legacy unpark latch/deliver machinery.
+            # Hand the terminal off to the scheduler seam (default no-op).
             _signal = await _fire_on_task_terminal(session_id, frame)
             if _signal == CLI_OWNED_WAKE_SIGNAL:
                 # The CLI owns this completion's at-rest wake and delivers it
                 # 7-60s later. Arm the grace window so we keep draining until it
-                # lands instead of exiting on the next poll (LEG 1).
+                # lands instead of exiting on the next poll.
                 wake_deadline = time.monotonic() + settings.cli_wake_grace_seconds
                 logger.info(
                     "idle_reader: arming CLI-wake grace window %.1fs [session=%s]",

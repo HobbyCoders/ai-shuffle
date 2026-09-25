@@ -1,71 +1,29 @@
-"""Install-wide per-provider rate-limit circuit breaker.
+"""Install-wide, per-provider rate-limit circuit breaker.
 
-RELOCATION NOTE (2026-08-12)
-----------------------------
-This module was ``app/core/translator_gateway/circuit_breaker.py`` until the
-translator gateway was retired (fluid now serves every provider natively). The
-state machine below is unchanged; only its RECORDING seam moved. 429s are now
-observed by the fluid harness's usage-capture response hook
-(``app/core/provider/harness_adapter.py::_usage_capture_http_client``), which
-sees every native-leg response — the forensics below still describe exactly
-what the breaker is for, with "the gateway" now meaning "the app process that
-owns the native provider leg". ACCEPTED GAP: the delegated (claude CLI) leg is
-not covered, because its HTTP traffic happens inside the CLI child process
-where the app has no response hook.
+* **Trip condition:** the FIRST HTTP 429 for a ``provider_id`` trips it. Never
+  401 (Codex token rotation must keep working) and never 5xx.
+* **Scope: install-wide.** While tripped, the provider counts as rate limited
+  for every session and turn: a runaway fan-out spans many sessions, so a
+  session-scoped breaker would not contain it.
+* **Cooldown:** honours ``Retry-After`` (delta-seconds or HTTP-date), with a
+  default when absent and a cap so a hostile or malformed value cannot lock a
+  provider out indefinitely.
+* **The breaker refuses; it never reroutes.** No account rotation, no
+  failover, no provider switching.
 
-WHY THIS EXISTS (2026-07-22 rate-limit storm, forensics 2026-07-25)
--------------------------------------------------------------------
-A single runaway fan-out burned a user's whole weekly provider quota:
-**3,172 upstream POSTs in ~11 minutes — 1,422 x HTTP 200 and 1,750 x HTTP 429**
-— every one of them AFTER the parent turn had already ended, from ~122 distinct
-background tasks spread across multiple ``claude.exe`` processes.
+Recording seam: ``harness_adapter._usage_capture_http_client``, which sees every
+native-leg response. The delegated (claude CLI) leg is not covered: its HTTP
+traffic happens inside the CLI child process, where the app has no hook.
+Consumer today: ``provider_agent._await_worker_idle`` fails a worker fast while
+its provider is tripped. There is no pre-dispatch refusal, so the breaker is a
+record-and-signal surface rather than a request gate.
 
-The critical finding: **the retry loop lives inside the CLI processes, not in
-this gateway.** ``upstream.stream_responses_events`` retries only on a Codex 401
-(token rotation) and otherwise raises ``UpstreamError`` — so each of those 1,750
-rate-limit responses was a SEPARATE inbound request from a CLI that decided to
-retry on its own. Killing the app-side tasks does not help either: both
-registered root tasks reached terminal status at 20:06:43 and 410 more upstream
-POSTs still flowed over the following two minutes.
+State is in-memory and process-local. :class:`ProviderCircuitBreaker` is the
+seam for a persisted store: swap its ``_state`` dict for a DB-backed one and
+every caller is unchanged.
 
-The gateway is therefore the ONLY chokepoint that sees all of that traffic, and
-refusing at the gateway is the only thing that can actually stop it.
-
-DESIGN (decided, not to be redesigned here)
--------------------------------------------
-* **Trip condition:** the FIRST HTTP 429 from an upstream provider trips the
-  breaker for that ``provider_id``. Only 429 — never 401 (that is the existing
-  Codex token-rotation retry path and must keep working untouched) and never
-  5xx.
-* **Scope: INSTALL-WIDE** (user decision, 2026-07-25). While tripped, EVERY
-  request routed to that provider is refused regardless of which session or turn
-  it came from. Deliberate: a wide fan-out spread across many sessions is
-  exactly the failure mode above, so a session-scoped breaker would not have
-  prevented it.
-* **Duration: time-based cooldown.** The upstream ``Retry-After`` header is
-  honoured when present (both the delta-seconds and the HTTP-date forms). When
-  absent/unusable a default is used. The cooldown is CAPPED so a hostile or
-  malformed value cannot lock a provider out indefinitely.
-* **The breaker REFUSES; it never reroutes.** No account rotation, no failover,
-  no provider switching (standing ruling P10).
-* **While tripped (current consumers):**
-  :func:`app.core.provider_agent` stops waiting on a ProviderAgent worker whose
-  provider is rate limited and reports it to the parent immediately. The
-  gateway's request-level pre-flight refusal died with the gateway — under fluid
-  there is no single in-app chokepoint in front of the CLI's own retry loop, so
-  today the breaker is a RECORD + SIGNAL surface rather than a hard request
-  gate. Re-adding a pre-dispatch refusal in the fluid adapter is deliberately
-  left as follow-up work, not smuggled into the retirement.
-
-State is in-memory and process-local, which is sufficient for the failure mode
-above (all the traffic arrives at this one app process). Persisting the
-cooldown beside the credential so it survives a restart and is shared across
-installs is a later chunk (P3-G): the persistence seam is the
-:class:`ProviderCircuitBreaker` class — swap the ``_state`` dict for a
-DB-backed store and every caller below is unchanged.
-
-Kill switch: ``PROVIDER_CIRCUIT_BREAKER_ENABLED=false`` restores the previous
-behaviour exactly (nothing is recorded, nothing is ever refused).
+Kill switch: ``PROVIDER_CIRCUIT_BREAKER_ENABLED=false`` (nothing is recorded,
+nothing is reported as tripped).
 """
 
 from __future__ import annotations
@@ -211,7 +169,7 @@ def cooldown_seconds(
 class ProviderCircuitBreaker:
     """Thread-safe, install-wide, per-provider open-circuit state.
 
-    Safe under concurrent access from the gateway's async request handlers and
+    Safe under concurrent access from the native legs' HTTP response hooks and
     from any other thread: every read and write of ``_state`` happens under one
     lock, and expired entries are pruned on read.
     """
@@ -303,9 +261,9 @@ class ProviderCircuitBreaker:
 
 
 # ─── Process-wide singleton + module-level convenience API ───────────────────
-# The gateway server and its request handlers all run in this one process, so a
-# single instance is the install-wide breaker. (P3-G will swap the backing store
-# for a persisted one behind this same surface.)
+# Every native provider leg runs in this one process, so a single instance is
+# the install-wide breaker. A persisted backing store would slot in behind this
+# same surface.
 
 _BREAKER = ProviderCircuitBreaker()
 

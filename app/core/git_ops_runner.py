@@ -1,4 +1,4 @@
-"""Git-ops claim loop — this install's executor for the ``git_ops`` queue (D5).
+"""Git-ops claim loop — this install's executor for the ``git_ops`` queue.
 
 The mirror image of :mod:`app.core.turn_claim`, one layer down: where that loop
 claims *turns* placed on this runner, this one claims *git operations* targeted
@@ -9,7 +9,7 @@ this loop notices it, claims it with a single conditional UPDATE, runs
 ``checkout_manager.ensure_checkout`` locally, and records the resulting path (or
 the failure) back on the row.
 
-**Poll-only by design (the v1 ruling).** Unlike ``turn_claim`` there is no
+**Poll-only by design.** Unlike ``turn_claim`` there is no
 NOTIFY wake here: git ops are rare, not latency-critical, and the one place
 where latency WOULD matter — the first turn of a freshly created remote worktree
 session racing this loop — is covered by the spawn path's INLINE claim in
@@ -20,7 +20,7 @@ for the same row through ``git_ops.claim_op``; the database picks one winner.
 Started from ``startup.install_v2_turns_wiring``, stopped from
 ``startup.shutdown_services`` — the same lifecycle as the turn-claim loop.
 
-**No private timer (F5).** ``start()`` registers two passes — the claim poll and
+**No private timer.** ``start()`` registers two passes — the claim poll and
 the daily retention purge — on the shared background sweep driver in
 :mod:`app.core.turn_claim`, instead of spawning two asyncio tasks of its own.
 The claim cadence is unchanged (5s) whenever the install registry shows a peer,
@@ -48,7 +48,7 @@ CLAIM_POLL_SECONDS = 5.0
 REFRESH_STATUS_MAX_CHECKOUTS = 3
 REFRESH_STATUS_DEADLINE_SECONDS = 20.0
 
-# Daily sweep of the durable carrier tables (D8's required cleanup). Kept on
+# Daily sweep of the durable carrier tables. Kept on
 # this loop because it is the only always-on background loop this feature owns.
 SWEEP_INTERVAL_SECONDS = 24 * 60 * 60
 RETENTION_DAYS = 7
@@ -64,7 +64,7 @@ def _record_checkout_state(
 ) -> None:
     """Stamp ``head_sha``/``dirty`` onto a checkout row.
 
-    W3-5: the ONLY git subprocesses added for git-state live here, called from
+    The ONLY git subprocesses added for git-state live here, called from
     ``ensure_worktree`` and ``refresh_status``. Spawn, heartbeat, and git-state
     GET stay subprocess-free.
 
@@ -278,9 +278,9 @@ def sweep_once() -> Dict[str, int]:
 def start() -> None:
     """Register this install's git-ops passes on the shared sweep driver.
 
-    F5: the claim poll and the daily retention purge used to own two private
-    asyncio tasks. They are now :class:`app.core.turn_claim.SweepPass` entries on
-    the one background driver, which keeps their cadences (5s claim / 24h purge)
+    The claim poll and the daily retention purge are
+    :class:`app.core.turn_claim.SweepPass` entries on the one background driver
+    (no private asyncio tasks), which keeps their cadences (5s claim / 24h purge)
     when peer installs exist and stretches the claim poll to the single-install
     cadence when the registry shows none.
 

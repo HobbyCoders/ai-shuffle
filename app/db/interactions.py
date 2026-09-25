@@ -172,7 +172,7 @@ def get_answered_interactions(session_id: str, kind: Optional[str] = None) -> Li
 def mark_interaction_requeued(interaction_id: str) -> bool:
     """Stamp ``requeued: true`` into an answered interaction's answer JSON.
 
-    Requeue of a deferred permission (Q4-2 ruling, option a) creates a NEW
+    Requeue of a deferred permission creates a NEW
     pending row carrying the same FE request_id; this stamp on the OLD
     answered-defer row keeps it out of the derived deferred set so the FE
     never sees the same request as both deferred and pending. Read-modify-write

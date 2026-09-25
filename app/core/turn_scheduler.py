@@ -1,17 +1,14 @@
-"""app/core/turn_scheduler.py — the settlement policies (v2 core, Phase 2 A5).
+"""The settlement policies.
 
 The scheduler is the component that decides *what happens next* after a turn
 settles. It owns no state machine of its own — every decision is a **durable
 derivation** over the ``turns`` table and the ``session_events`` log ("the log
-is the record"), replacing the legacy in-memory latches (the #557
-auto-continue latch, the per-turn ``failover_attempted`` set, the
-``unpark_pending`` latch). Four policies, per the Phase 2 plan §1.6, evaluated
-in this order on every settlement:
+is the record"). Four policies, evaluated in this order on every settlement:
 
 1. **FAILOVER** — a settled-``completed`` turn whose terminal ``turn.completed``
    event carries a usage-limit ``api_error_status`` (429) surfaces the
    rate-limited state through ``account_failover.attempt_failover``. Account
-   rotation is retired (OC-1), so no retry is enqueued and the remaining
+   rotation is retired, so no retry is enqueued and the remaining
    policies run. The scheduler appends NO ``message.user`` and persists NO
    session message — user-visible message rows exist only for
    ``source in (user, queue)`` turns (enforced where messages are recorded),
@@ -22,9 +19,8 @@ in this order on every settlement:
    the current one comes to rest, matching Claude Code's own semantics. On a
    ``parked`` settlement the queued turn runs CONCURRENTLY with the session's
    still-running background work (park releases the run lease and the live-turn
-   slot). A user stop settles ``aborted`` and now drains too — this supersedes
-   the old preserve-on-stop rule (F4, retired).
-3. **AUTO-CONTINUE (#557)** — a settled-``completed`` turn cut at the CLI's
+   slot). A user stop settles ``aborted`` and drains too.
+3. **AUTO-CONTINUE** — a settled-``completed`` turn cut at the CLI's
    lazy-compaction boundary (``stop_reason == "tool_use"`` + live context over
    the autocompact threshold) enqueues ONE ``source=auto_continue``
    continuation. The one-shot latch is a durable derivation: skip if the
@@ -38,7 +34,7 @@ in this order on every settlement:
    When the parent is MID-TURN rather than at rest, that same prompt is instead
    STEERED into the running turn (:func:`_try_steer_terminal_notification`), so
    it lands at the next cell boundary rather than waiting out a turn that may
-   run for another hour. See "Mid-turn delivery" below.
+   run for another hour. See the "Mid-turn delivery" section below.
 
 The FAILOVER and AUTO-CONTINUE derivations share ONE read of the settled
 turn's terminal ``turn.completed`` payload from ``session_events``
@@ -50,12 +46,11 @@ done once per settlement and fed to both policies.
 queued row (``pop_ready`` — a non-mutating peek) and hand it to
 :func:`app.core.session_runtime.execute`, which claims ownership at the DB
 (run lease + guarded ``start_turn``). Duplicate kicks are harmless — start
-races resolve at the database, and a losing kick leaves the row queued. The
-legacy ``startup.is_shutting_down`` guard moves here: a shutting-down process
-refuses to start new work; queued rows stay durable for the next boot's sweep.
+races resolve at the database, and a losing kick leaves the row queued. A
+shutting-down process (``startup.is_shutting_down``) refuses to start new
+work; queued rows stay durable for the next boot's sweep.
 
-Nothing calls :func:`install` yet — the transport commit (A6) wires it at
-boot; tests call it directly.
+Installed at boot by ``app.core.startup.install_v2_turns_wiring``.
 """
 
 from __future__ import annotations
@@ -76,8 +71,7 @@ from app.db.base import get_db
 logger = logging.getLogger(__name__)
 
 # Payload key carrying the accumulated set of account ids a prompt has already
-# 429'd on across its failover retry chain (plan §1.6(1): "attempts in
-# payload" — durable, replacing the legacy per-turn in-memory set).
+# 429'd on across its failover retry chain (durable, in the turn payload).
 FAILOVER_ATTEMPTED_KEY = "failover_attempted"
 
 # Transport-context payload keys copied from a settled/parked turn onto a
@@ -86,7 +80,7 @@ FAILOVER_ATTEMPTED_KEY = "failover_attempted"
 _CONTEXT_PAYLOAD_KEYS = ("api_user_id", "user_id")
 
 # Turn sources authored by a human (directly or via the send-queue). Used by
-# the #557 durable latch derivation: any of these settling re-arms
+# the durable auto-continue latch derivation: any of these settling re-arms
 # auto-continue; everything else (auto_continue/failover/unpark/automation/…)
 # is server-originated.
 _USER_SOURCES = ("user", "queue")
@@ -95,13 +89,13 @@ _USER_SOURCES = ("user", "queue")
 # mid-flight (asyncio keeps only weak refs to tasks).
 _kick_tasks: Set[asyncio.Task] = set()
 
-# Content-empty guard (#690): the fields that carry a terminal task frame's
+# Content-empty guard: the fields that carry a terminal task frame's
 # renderable content. A frame with NONE of them populated has nothing to render
 # in a ``<task-notification>`` and must never be enqueued as a parent-visible
 # wake (the reference harness never emits empty notifications). ``task_id`` /
 # ``tool_use_id`` are identity — a bare TaskUpdated frame carrying only those
 # still identifies WHICH background unit came to rest (and is later upgraded by
-# its rich frame, #688 A-2), so it counts as renderable; a frame with not even
+# its rich frame), so it counts as renderable; a frame with not even
 # an id is dropped at the single ``on_task_terminal`` choke point.
 _FRAME_CONTENT_FIELDS = ("task_id", "tool_use_id", "summary", "output_file")
 
@@ -134,8 +128,8 @@ def _turn_terminal_payload(session_id: str, turn_id: str) -> Dict[str, Any]:
     log (``{}`` when the turn has no terminal event — e.g. recorder never ran).
 
     This single read feeds BOTH the failover derivation (``api_error_status``,
-    per the §1.6(1) amendment: the recorder copies it from the pump's ``done``
-    metadata) and the auto-continue boundary derivation (``stop_reason``).
+    which the recorder copies from the pump's ``done`` metadata) and the
+    auto-continue boundary derivation (``stop_reason``).
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -153,7 +147,7 @@ def _turn_terminal_payload(session_id: str, turn_id: str) -> Dict[str, Any]:
 
 
 def _auto_continued_since_last_user(session_id: str) -> bool:
-    """#557 one-shot latch, derived durably from the ``turns`` table.
+    """Auto-continue one-shot latch, derived durably from the ``turns`` table.
 
     Walk the session's settled turns newest-first: an ``auto_continue`` turn
     seen before any ``user``/``queue`` turn means this session has already been
@@ -227,7 +221,7 @@ def kick(session_id: str) -> None:
     """Nudge a session: try to start its front queued turn.
 
     Non-blocking / fire-and-forget (turn_manager calls it synchronously right
-    after enqueue). The legacy shutdown guard lives here (plan §1.6(4)): while
+    after enqueue). The shutdown guard lives here: while
     the process is tearing down, no new work starts — the queued rows are
     durable and the next boot's sweep/kick picks them up.
     """
@@ -273,10 +267,10 @@ def _kick_done(task: asyncio.Task) -> None:
 #
 # The merge branches below already batch near-simultaneous terminals into ONE
 # wake — but only while that wake is still QUEUED. Kicking it the instant it is
-# enqueued closes that window immediately: the audit watched three tasks killed
-# within 1.3 seconds of each other wake three separate turns, because the first
-# wake had already started running by the time the second terminal arrived and
-# there was nothing left to merge into. Holding the kick for a breath keeps the
+# enqueued closes that window immediately: tasks that end within a second or
+# two of each other would each wake a separate turn, because the first wake has
+# already started running by the time the second terminal arrives and there is
+# nothing left to merge into. Holding the kick for a breath keeps the
 # row mergeable for exactly as long as a burst takes to land. Nothing is
 # delayed but the START of a wake turn, which is never the thing a user waits
 # on; a user message kicks the session on its own path regardless.
@@ -321,10 +315,9 @@ def _kick_after_batch_window(session_id: str) -> None:
     _batch_kick_tasks[session_id] = task
     _kick_tasks.add(task)
     # NEVER read task.exception() here: the task was created one line ago and
-    # is always PENDING, so the read raises InvalidStateError — which aborted
-    # on_task_terminal at this statement on every single background-task
-    # completion in production (round-6 regression, PR #1093). The retrieval
-    # this line was reaching for is what _kick_done does once the task is done.
+    # is always PENDING, so the read raises InvalidStateError and would abort
+    # on_task_terminal on every background-task completion. _kick_done
+    # retrieves the exception once the task is done.
     task.add_done_callback(_kick_done)
 
 
@@ -376,8 +369,7 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
     # the run lease and the live-turn slot, so the queued turn runs CONCURRENTLY
     # with that background work (a message queued AFTER park already starts
     # immediately; this makes queued-BEFORE-park consistent). A user STOP settles
-    # aborted and now drains too — this deliberately supersedes the old
-    # preserve-on-stop rule (F4). Each drain consumes one queued row, so an error
+    # aborted and drains too. Each drain consumes one queued row, so an error
     # settlement carries no retry-loop risk. The park→unpark machinery
     # (on_task_terminal) is untouched: a queued message naturally orders ahead of
     # a later source=unpark wake by queue position, no special ordering needed.
@@ -391,7 +383,7 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
     terminal = await asyncio.to_thread(_turn_terminal_payload, session_id, turn_id)
 
     # (1) FAILOVER — surfaces the rate-limited state only; account rotation is
-    # retired (OC-1), so it never enqueues a retry and the drain below runs.
+    # retired, so it never enqueues a retry and the drain below runs.
     await _maybe_failover(session_id, settled, terminal)
 
     # (1b) WAKE RECOVERY — a source=unpark turn that died on a provider error
@@ -410,8 +402,8 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
         kick(session_id)
         return
 
-    # (3) AUTO-CONTINUE (#557) — only when nothing is queued (a queued turn
-    # resumes work on its own, same gate as the legacy path).
+    # (3) AUTO-CONTINUE — only when nothing is queued (a queued turn
+    # resumes work on its own).
     if await _maybe_auto_continue(session_id, settled, terminal):
         return
 
@@ -429,8 +421,8 @@ async def _maybe_failover(
     terminal: Dict[str, Any],
 ) -> None:
     """Policy (1): usage-limit fail + not user-stopped → surface the
-    rate-limited state via ``attempt_failover``. Account rotation is retired
-    (OC-1): ``attempt_failover`` always returns ``retry=False``, so no
+    rate-limited state via ``attempt_failover``. Account rotation is retired:
+    ``attempt_failover`` always returns ``retry=False``, so no
     ``source=failover`` retry is enqueued.
 
     "Not user-stopped" holds by construction: the usage-limit signal lives in a
@@ -445,7 +437,7 @@ async def _maybe_failover(
         # Belt and braces for the Stop latch: a user stop settles the turn
         # ``aborted`` so the terminal payload never qualifies here, but a
         # turn that completed in the instant Stop landed must not respawn
-        # the session either (2026-09-05 audit, Stop semantics).
+        # the session either.
         return
 
     if not account_failover.is_usage_limit_error(terminal):
@@ -519,13 +511,12 @@ async def _maybe_recover_failed_wake(
 ) -> bool:
     """Policy (1b): re-run a ``source=unpark`` wake that died doing nothing.
 
-    The failure this repairs, from production: a background task finishes, the
+    The failure this repairs: a background task finishes, the
     scheduler enqueues the wake, the wake turn starts and dies 10ms later with
     ``RuntimeError('Cannot send a request, as the client has been closed.')`` —
     ``retriable=False``, ``num_model_calls=0``, no assistant text, no retry, no
     notification. The finished task's report never reaches the model, and the
-    session sits silent until the user types "Resume". One audited session lost
-    8 hours that way; three others lost 28 minutes across three wakes.
+    session sits silent until the user types "Resume".
 
     Bounded at exactly one retry (``WAKE_RETRY_KEY`` on the payload), and only
     when the turn made ZERO model calls — a wake that died halfway through real
@@ -647,13 +638,13 @@ async def _maybe_auto_continue(
         # Belt and braces for the Stop latch: a user stop settles the turn
         # ``aborted`` so the terminal payload never qualifies here, but a
         # turn that completed in the instant Stop landed must not respawn
-        # the session either (2026-09-05 audit, Stop semantics).
+        # the session either.
         return False
 
     if settled.get("source") == "auto_continue":
         # The continuation itself cut at the boundary again: compaction already
         # ran at its start, so a second cut is something else — never chain
-        # nudges (#557), just log it.
+        # nudges, just log it.
         if compact_continue.is_abnormal_boundary_stop(terminal):
             logger.warning(
                 "turn_scheduler: auto-continue turn %s for %s cut at the "
@@ -815,12 +806,12 @@ def _session_has_parked_turn(session_id: str) -> bool:
 
 #: ``frame["origin"]`` stamped by :mod:`app.core.provider_agent` on the terminal
 #: frame it hands to :func:`on_task_terminal`. Additive — no other frame producer
-#: sets ``origin``, so every pre-existing frame behaves exactly as before.
+#: sets ``origin``, so every other frame is unaffected.
 #:
 #: It exists for ONE decision: a ProviderAgent worker is registered
 #: ``kind == "agent"`` (load-bearing — it is what pins the parent in the session
 #: pool), so a COMPLETED worker resting under a parked parent matches every
-#: condition of the A-1 CLI-owned-wake suppression below. But that suppression is
+#: condition of the CLI-owned-wake suppression below. But that suppression is
 #: predicated on the CLI delivering its own rich ``<task-notification>`` follow-up
 #: turn, and there is NO CLI task here at all: the worker is a separate session
 #: dispatched from an MCP tool handler. Suppressing the app's wake would strand
@@ -829,7 +820,7 @@ def _session_has_parked_turn(session_id: str) -> bool:
 PROVIDER_AGENT_ORIGIN = "provider_agent"
 
 
-# A-1 (bug 1): the CLI-native duplicate. When a TOP-LEVEL backgrounded Task/Agent
+# The CLI-native duplicate. When a TOP-LEVEL backgrounded Task/Agent
 # comes to rest while the parent turn is PARKED, the CLI itself starts a follow-up
 # turn injecting the rich ``[SYSTEM NOTIFICATION] … <task-notification>`` string
 # (query_engine ``_cli_turn_events_from_message``). The app's own consolidated
@@ -837,12 +828,12 @@ PROVIDER_AGENT_ORIGIN = "provider_agent"
 # SECOND (empty) delivery of the same completion. When the CLI owns the at-rest
 # wake we suppress the app's enqueue entirely so the model sees ONE (rich) wake.
 #
-# Scope (conservative — a wrong suppression strands a real completion, R1):
+# Scope (conservative — a wrong suppression strands a real completion):
 #   * status == "completed" ONLY. failed/killed/stopped keep the app wake — the
 #     CLI has no at-rest resume for a kill (chat_ws_handler), so its notification
 #     is the ONLY delivery.
 #   * registry record ``kind == "agent"`` ONLY. Backgrounded SHELLS (kind
-#     "shell", incl. SDK-backgrounded local_bash) keep the app wake — the CLI does
+#     "shell", incl. a backgrounded local_bash) keep the app wake — the CLI does
 #     not own a shell's at-rest resume the way it owns a sub-agent's.
 #   * parent PARKED ONLY. The CLI's rich follow-up turn exists only in the parked
 #     state; with no parked turn the app wake is the sole delivery and must fire
@@ -871,7 +862,7 @@ def _cli_owns_at_rest_wake(session_id: str, frame: Dict[str, Any]) -> bool:
     return _session_has_parked_turn(session_id)
 
 
-# A-2: a frame is "richer" than a stored one when it POPULATES any content field
+# A frame is "richer" than a stored one when it POPULATES any content field
 # the stored frame left falsy. Purely additive — it never demotes a populated
 # field to empty. Used to upgrade a bare TaskUpdated-built wake (task_id/status/
 # tool_use_id only) in place when the rich TaskNotification frame arrives after.
@@ -897,11 +888,11 @@ def _dedupe_frames_by_task_id(
 
     A task can produce several terminal frames in a single wake batch — a bare
     ``TaskUpdated`` and the rich ``TaskNotification`` that follows it, or the same
-    frame arriving down two seams — and every one of them used to become its own
+    frame arriving down two seams — and each would otherwise become its own
     ``<task-notification>`` block carrying the same result. The richer frame wins
     (:func:`_frame_is_richer`) and keeps the FIRST occurrence's position, so batch
     order is preserved. Frames with no task_id cannot be identified and are all
-    kept, exactly as before.
+    kept.
     """
     out: List[Dict[str, Any]] = []
     index: Dict[tuple, int] = {}
@@ -924,9 +915,8 @@ def _dedupe_frames_by_task_id(
 # Held peer messages — a parked parent is not woken for an interim message
 # ---------------------------------------------------------------------------
 #
-# A worker's progress note to a parent that is parked on that same worker used
-# to start a turn for the parent to read it, causing needless wakes in an
-# audit. The message is held instead. The durable copy is ONE
+# A worker's progress note to a parent that is parked on that same worker does
+# not start a turn for the parent to read it: the message is held instead. The durable copy is ONE
 # ``pending_wakeups`` row per session (``source=HELD_PEER_SOURCE``) whose prompt
 # is every held message so far and whose ``fire_at`` is the promotion deadline.
 #
@@ -1403,7 +1393,7 @@ async def _enqueue_context_wake(
     profile/project/worktree/parent linkage, attaches the ``frames`` and their
     ``task_ids`` to the payload, and returns the enqueued turn.
 
-    Belt and braces on the round-7 Stop contract: the caller already refuses to
+    Belt and braces on the Stop contract: the caller already refuses to
     reach here for a user-stopped session, and this is the last gate before a
     row is actually written, so it refuses too. Answers a turn-shaped dict with
     ``id=None`` — the caller only logs the id and kicks — so a refusal enqueues
@@ -1499,11 +1489,10 @@ def note_wake_pending(session_id: str) -> None:
     Nothing else marks the session busy across that gap: the parked turn has
     returned (``is_streaming`` False), the task that fired this wake is now
     terminal (``_has_background_work`` False), and ``last_activity`` is as old
-    as the park. The pool's idle sweep therefore evicted the client
-    milliseconds before the wake tried to use it — a crash before PR #1104, and
-    a full respawn plus conversation resume after it, on EVERY park longer than
-    the idle tier. Never raises: the hold is an optimisation, not a
-    correctness requirement.
+    as the park. Without this hold the pool's idle sweep would evict the client
+    just before the wake uses it, forcing a full respawn plus conversation
+    resume on EVERY park longer than the idle tier. Never raises: the hold is
+    an optimisation, not a correctness requirement.
     """
     try:
         from app.core.session_pool import get_session_pool
@@ -1540,14 +1529,13 @@ async def retire_task_terminals(
 
     fluid keeps its own ``_background_pending`` set: every task it started for
     a session stays in it until a ``BackgroundTaskFinished`` is submitted, and
-    every ``SessionParked`` it emits lists whatever is still in there. The app
-    submits those frames in exactly ONE place today —
-    ``harness_adapter.prepare_background_completions``, called at the start of
-    a wake turn with ``options.aih_background_task_completions`` — so a task
-    that came to rest while a turn was RUNNING (delivered as a mid-turn steer)
-    was never retired: the app's own park state moved on, fluid's did not, and
-    the id was listed as "parked on" forever (one audited session was parked on
-    a task twelve hours dead, another listed twenty-one).
+    every ``SessionParked`` it emits lists whatever is still in there. A wake
+    turn submits those frames through
+    ``harness_adapter.prepare_background_completions`` at its start (with
+    ``options.aih_background_task_completions``). A task that comes to rest
+    while a turn is RUNNING (delivered as a mid-turn steer) never goes through
+    a wake turn, so without this the app's park state moves on, fluid's does
+    not, and the id stays listed as "parked on" forever.
 
     This is that same submission, reachable from every delivery path that does
     not go through a wake turn: the mid-turn steer receipt, an agent-initiated
@@ -1600,11 +1588,11 @@ async def retire_task_terminals(
 # Mid-turn delivery — steer the notification into the RUNNING turn
 # ---------------------------------------------------------------------------
 #
-# The bug this closes: a wake enqueued while the parent is MID-TURN cannot run
-# until that turn settles (the session has one live-turn slot), so a sub-agent
-# that finished in two minutes was delivered fifty-two minutes later, at the
-# next turn boundary — while the parent, seeing ``status=completed`` on the
-# task list and no report, redid the child's work by hand.
+# A wake enqueued while the parent is MID-TURN cannot run until that turn
+# settles (the session has one live-turn slot), so a finished sub-agent's
+# report would wait for the next turn boundary — while the parent, seeing
+# ``status=completed`` on the task list and no report, may redo the child's
+# work by hand.
 #
 # The delivery channel already exists: a user's own mid-turn message is handed
 # to the live engine as a fluid ``Steer`` and folded into the next tool result
@@ -1613,7 +1601,7 @@ async def retire_task_terminals(
 #
 # Ownership of the delivery is settled by the RECEIPT, never by the submit:
 # fluid drops an undelivered steer at turn end, so treating submission as
-# delivery would strand a real completion (R1). Hence:
+# delivery would strand a real completion. Hence:
 #
 #   * submit succeeds  → return here; ``mark_woken`` (latched by the caller just
 #     above) keeps the later park/idle wake from re-delivering the same task;
@@ -1623,7 +1611,7 @@ async def retire_task_terminals(
 #     ``on_task_notification_stranded``, which enqueues the ordinary at-rest
 #     wake after all;
 #   * submit fails (no live runtime, no adapter, a dying turn) → the caller
-#     falls straight through to the ordinary enqueue, exactly as before.
+#     falls straight through to the ordinary enqueue.
 #
 #: Steer-id prefix for a mid-turn ``<task-notification>``. A steer id is
 #: normally a QUEUED TURN's row id, which the receipt handler loads to record
@@ -1636,10 +1624,9 @@ TASK_STEER_ID_PREFIX = "task-notify:"
 def _mark_terminal_notified(session_id: str, task_ids: List[str]) -> None:
     """Latch ``terminal_notified`` for every task whose notification just landed.
 
-    ``background_tasks.terminal_notified`` used to stay False forever: the only
-    caller of ``mark_terminal_notified`` is ``complete_task``, and only on the
-    FAILURE statuses that fire the chat-layer chip — a clean completion delivered
-    as a wake or a steer never touched the latch. This is the missing write, on
+    Inside the registry, ``mark_terminal_notified`` is reached only on the
+    paths that fire the chat-layer chip (failure statuses and app-side kills),
+    so a clean completion delivered as a wake or a steer is latched here, on
     both delivery paths.
 
     ``update_task`` with no field to change is the registry's public flush: it
@@ -1831,7 +1818,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
     turns. Fold the terminal task into ONE consolidated ``source=unpark`` wake.
 
     Returns ``idle_reader.CLI_OWNED_WAKE_SIGNAL`` ("cli-owned-wake") when it
-    takes the A-1 suppression branch (the CLI owns this completion's at-rest
+    takes the CLI-owned-wake suppression branch (the CLI owns this completion's at-rest
     wake and will deliver it itself); the idle reader uses that to arm a grace
     window so it keeps draining until the CLI's wake turn lands instead of
     exiting on its next poll. Every other path returns ``None``.
@@ -1853,25 +1840,23 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
 
     Kicks after a merge/enqueue (never after the (a) no-op or a steer).
 
-    Two lanes, by ownership (#690 retired the PUMP lane — see below):
+    Two lanes, by ownership:
 
     * OWN — ``is_own_background_task`` true: the parent's own background work came
-      to rest. Rich ``source=unpark`` wake, with the #688 merge + idempotency
+      to rest. Rich ``source=unpark`` wake, with the merge + idempotency
       branches below.
     * else — NOT the parent's own background work (a child/grandchild step of a
       still-running sub-agent, an orphan, or a synchronous sub-agent at rest):
-      SUPPRESS. #690 deleted the per-child immediate/deferred PUMP lane that used
-      to enqueue a ``source=unpark_pump`` turn here: a child completion while its
-      owner is alive produced one parent-visible wake per child (the "3 shells →
-      3 wakes" storm) and, for shells with no tool_use_id, fired blindly. The
-      parent now hears about delegated work ONLY via its owner task's OWN-lane
+      SUPPRESS. A wake per child completion while its owner is alive would give
+      the parent one visible wake per child and, for shells with no tool_use_id,
+      fire blindly. The parent hears about delegated work ONLY via its owner task's OWN-lane
       terminal (the reference-harness contract: a background child notifies only
       its owning agent; the CLI resumes a parked owner natively). A silent turn
       is valid.
 
     A wholly-contentless frame (no ``task_id``/``tool_use_id``/``summary``/
     ``output_file``) is dropped at the choke point below with a DEBUG log — an
-    empty notification is never enqueued (#690)."""
+    empty notification is never enqueued."""
     try:
         task_id = frame.get("task_id")
         from app.core.swarm import workers as swarm_workers
@@ -1883,7 +1868,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
         # Swarm must neither swallow it nor rerun its already-finished successors.
         from app.core.task_registry import task_registry
 
-        # STOP SEMANTICS (round 7). The user pressed Stop and has not messaged
+        # STOP SEMANTICS. The user pressed Stop and has not messaged
         # this session since, so NOTHING here schedules a turn — not a task the
         # per-task suppression below never saw (a nested worker registered after
         # the sweep, a shell whose watcher was mid-settle), not a late frame for
@@ -1906,7 +1891,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
                 session_id, task_id,
             )
             return
-        # Content-empty guard (#690): the single enqueue choke point. A frame that
+        # Content-empty guard: the single enqueue choke point. A frame that
         # carries nothing renderable can only produce an empty <task-notification>
         # turn — drop it (DEBUG) before any lane decides to enqueue.
         if not _frame_has_renderable_content(frame):
@@ -1918,15 +1903,15 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
         if task_registry.is_own_background_task(session_id, task_id):
             # Explicit Stop is suppressed above; an unattributed kill is news.
             # ── OWN lane — rich consolidated source=unpark wake ──
-            # A-1 (bug 1): if the CLI owns this completion's at-rest wake (a
+            # If the CLI owns this completion's at-rest wake (a
             # top-level backgrounded agent resting while the parent is parked),
             # the CLI already injects the rich <task-notification> follow-up turn;
             # the app's own wake would be a SECOND, content-poor delivery. Suppress
             # it. Shells and non-completed terminals (failed/killed/stopped) keep
             # the app wake — the CLI does not own their at-rest resume.
             if await asyncio.to_thread(_cli_owns_at_rest_wake, session_id, frame):
-                # A-1 latch: the CLI emits a rest-notification each time the agent
-                # rests; latching the woken mark here lets the A-3 late-frame guard
+                # Latch: the CLI emits a rest-notification each time the agent
+                # rests; latching the woken mark here lets the late-frame guard
                 # drop post-unpark duplicate frames instead of enqueueing an empty
                 # wake. (Return value ignored — this is a suppression path.)
                 if task_id:
@@ -1954,7 +1939,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
                     task_id in existing_task_ids and not existing_pending
                     and not frame.get("agent_message_turn_id")
                 )):
-                    # (a) this task is already folded into the wake. A-2: if the
+                    # (a) this task is already folded into the wake. If the
                     # incoming frame is RICHER than the one already stored for it
                     # (e.g. the rich TaskNotification arriving after the bare
                     # TaskUpdated built the wake), upgrade the stored frame in place
@@ -1982,7 +1967,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
                             _kick_after_batch_window(session_id)
                             return
                         # The guarded UPDATE lost (the wake left the queue) — the
-                        # task already woke, so fall through to the A-3 latch below.
+                        # task already woke, so fall through to the late-frame latch below.
                     else:
                         logger.info(
                             "turn_scheduler: unpark for %s — task %s already in "
@@ -2017,7 +2002,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
                         existing["id"], prompt, merged_payload,
                     )
                     if updated is not None:
-                        # A-3: record the merged task woke so a later late frame
+                        # Record the merged task woke so a later late frame
                         # for it can't re-enqueue.
                         task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
                         logger.info(
@@ -2029,9 +2014,9 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
                         _kick_after_batch_window(session_id)
                         return
                     # The guarded UPDATE lost (the wake left the queue) — enqueue
-                    # fresh (guarded by the A-3 latch below).
+                    # fresh (guarded by the late-frame latch below).
 
-            # (c) enqueue a new consolidated unpark wake. A-3: the late-frame latch
+            # (c) enqueue a new consolidated unpark wake. The late-frame latch
             # (mark_woken returns False) means this task ALREADY produced a wake
             # that has since left the queue — a late/duplicate frame that must not
             # spawn a second wake. Guarded on a truthy task_id: a task_id-less frame
@@ -2073,12 +2058,10 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
             _kick_after_batch_window(session_id)
             return
 
-        # ── else — NOT the parent's own background work → suppress (#690) ──
+        # ── else — NOT the parent's own background work → suppress ──
         # A child/grandchild step of a still-running sub-agent, an orphan, or a
-        # synchronous sub-agent at rest. The retired PUMP lane used to enqueue a
-        # source=unpark_pump turn here; that produced the parent-visible
-        # notification storm and, for tool_use_id-less shells, fired blindly. The
-        # parent hears about this work only via its owner task's OWN-lane terminal.
+        # synchronous sub-agent at rest. The parent hears about this work only
+        # via its owner task's OWN-lane terminal.
         logger.info(
             "turn_scheduler: unpark-decision suppressed for %s — task %s "
             "not the parent's background work (pump lane retired, #690)",
@@ -2096,7 +2079,7 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Op
 # ---------------------------------------------------------------------------
 
 def install() -> None:
-    """Wire the scheduler into the three seams. Called once at boot (A6)."""
+    """Wire the scheduler into the three seams. Called once at boot."""
     from app.core import idle_reader, session_runtime, turn_manager
     session_runtime.register_scheduler(on_turn_settled)
     idle_reader.register_on_task_terminal(on_task_terminal)
@@ -2105,9 +2088,7 @@ def install() -> None:
 
 
 # ---------------------------------------------------------------------------
-# <task-notification> prompt synthesis — RELOCATED from app/api/chat_ws_handler
-# (plan §4: the builder survives V2; the legacy copy goes with the PR-B
-# deletion of the old unpark path).
+# <task-notification> prompt synthesis
 # ---------------------------------------------------------------------------
 
 # Guidance attached to every consolidated <task-notification> follow-up turn.
@@ -2144,9 +2125,13 @@ _TASK_NOTIFICATION_PUMP_NOTE = (
 
 _MAX_TASK_RESULT_CHARS = 60_000
 
-# A summary beside a distinct result is a label, not another full payload. Keep the full _MAX_TASK_RESULT_CHARS
-# allowance only when the summary is the sole result; otherwise bound the label to avoid repeating an already
-# consumed report.
+# A ``<summary>`` standing BESIDE a distinct ``<result>`` is a label, not a
+# payload — it names the work so the model can tell one notification from
+# another. Unbounded, a worker whose frame carried only a summary would have its
+# whole report emitted twice at full length (once as ``<summary>``, once as the
+# summary-sourced ``<result>``). When the
+# summary IS the only payload it keeps the full ``_MAX_TASK_RESULT_CHARS``
+# budget; when a real result exists alongside it, this is all it gets.
 _MAX_TASK_SUMMARY_CHARS = 400
 
 
@@ -2287,13 +2272,13 @@ def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
         result_is_summary = result_text == summary_text
         # A monitored SHELL command is not a sub-agent: it has no transcript, no
         # tool-use id of its own, and no token accounting. Saying "subagent" at
-        # it — which an empty <usage> block's <subagent_tokens> did — misnames
+        # it — which an empty <usage> block's <subagent_tokens> would — misnames
         # the work the parent is being woken about.
         is_monitor = str(note.get("kind") or "").lower() in ("shell", "monitor")
         # PUMP: nested <kind>pump</kind> right after the opening tag; no <usage>.
         # MONITOR: <kind>monitor</kind>, so the model reads the block as a shell
         # command's exit rather than a sub-agent's report.
-        # OWN AGENT: no <kind> element (byte-identical to before).
+        # OWN AGENT: no <kind> element.
         if is_pump:
             kind_xml = "  <kind>pump</kind>\n"
         elif is_monitor:

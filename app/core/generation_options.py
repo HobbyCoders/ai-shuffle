@@ -8,7 +8,7 @@ Settings → Providers, shared by every internal generation call.
 
 All generation calls run through the provider adapter seam
 (`app.core.provider.factory.make_adapter`), exactly like chat: a
-Claude-subscription binding takes the delegated `claude.exe` leg, anything else
+Claude-subscription binding takes the delegated Claude Code CLI leg, anything else
 takes the fluid native leg. One throwaway adapter per call — no warm pool, no
 cross-call context bleed.
 
@@ -113,17 +113,14 @@ def _resolve_setting_sources(
     prompt vs 1-3s baseline). Chat sessions use their own options builder and
     are unaffected by this default.
 
-    SDK quirk worked around here: `subprocess_cli.py:283` uses
-    `if self._options.setting_sources:` to decide whether to emit
-    `--setting-sources`. An empty list is falsy, so the flag is omitted and
-    `claude.exe` falls back to loading ALL scopes. We therefore always return a
-    non-empty list so the flag is emitted.
+    An empty list is never returned: `["local"]` pins the scope filter to one
+    explicit, usually absent file.
 
     Behavior:
     - Non-empty list in profile: pass through unchanged — user explicitly opted
       in to loading those scopes for generation tasks.
-    - `None`, `[]`, missing key, or non-list value: return `["local"]`. Forces
-      the flag to be emitted and scopes it to `.claude/settings.local.json` in
+    - `None`, `[]`, missing key, or non-list value: return `["local"]`, which
+      scopes loading to `.claude/settings.local.json` in
       the working directory (usually absent), cutting off the user-global
       leak path.
     """
@@ -131,8 +128,8 @@ def _resolve_setting_sources(
         sources = profile_config.get("setting_sources")
         if isinstance(sources, list) and len(sources) > 0:
             return sources
-    # All "fall back to default" cases — still return a non-empty list so the
-    # SDK emits the flag. `local` is the safest sentinel since the file it
+    # All "fall back to default" cases — still return a non-empty list.
+    # `local` is the safest sentinel since the file it
     # points at rarely exists and never carries `effortLevel`.
     return ["local"]
 
@@ -160,7 +157,7 @@ def _resolve_thinking_and_effort(
             "type": "enabled",
             "budget_tokens": _THINKING_TOKEN_BUDGETS[thinking_mode],
         }
-    # "default" or unrecognized: omit, let SDK use its default.
+    # "default" or unrecognized: omit, so the leg uses its default.
 
     effort = profile_config.get("effort")
     if effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
@@ -229,8 +226,8 @@ def _resolve_env(
     except Exception as e:  # noqa: BLE001 - auth injection is best-effort
         logger.debug(f"Could not inject Claude Code auth for generation: {e}")
 
-    # Overlay the model-provider gateway env when a provider is set. NOT wrapped
-    # in a best-effort try/except: a misconfigured provider must surface (R5),
+    # Overlay the model-provider env when a provider is set. NOT wrapped
+    # in a best-effort try/except: a misconfigured provider must surface,
     # never silently route generation through native Anthropic.
     if provider_id:
         from app.core.environment import apply_provider_env
@@ -324,8 +321,8 @@ def build_generation_options(
     # Model: explicit override > profile > hard fallback
     model = model_override or config.get("model") or DEFAULT_MODEL
 
-    # Model provider (multi-provider phase-2, Chunk E / ruling G2-r). None =
-    # native Anthropic; when set, the env is overlaid with the gateway vars
+    # Model provider. None =
+    # native Anthropic; when set, the env is overlaid with the provider's vars
     # inside _resolve_env. When a caller supplies a per-session binding
     # (session_provider_id) it is authoritative — the session's bound provider
     # wins over the profile's config.provider, and an explicit None keeps the
@@ -352,15 +349,14 @@ def build_generation_options(
     if max_turns is not None:
         kwargs["max_turns"] = max_turns
 
-    # `_resolve_setting_sources` always returns a non-empty list so the SDK
-    # reliably emits `--setting-sources` (workaround for falsy-check quirk).
+    # `_resolve_setting_sources` always returns a non-empty list.
     kwargs["setting_sources"] = _resolve_setting_sources(config)
 
     # Thinking / effort / max_thinking_tokens — spread into options.
     kwargs.update(_resolve_thinking_and_effort(config))
 
     # System prompt — only forward when the user actually set one. An empty
-    # string or missing field means "use SDK default" so we don't accidentally
+    # string or missing field means "use the default prompt" so we don't accidentally
     # pass a blank custom prompt that overrides Claude's built-in behavior.
     system_prompt = config.get("system_prompt")
     if isinstance(system_prompt, dict):
@@ -390,14 +386,10 @@ def build_generation_options(
     # still loads if present, but `enabledPlugins` is forcibly emptied.
     kwargs["settings"] = _GEN_SETTINGS_OVERRIDE
 
-    # Hook event forwarding (SDK 0.1.81+) — enable so callers can observe
-    # hook decisions even on one-shot generation paths.
+    # SDK-shaped fields the harness adapter ignores. session_store is not set:
+    # generation sessions are one-shot and never persisted.
     kwargs["include_hook_events"] = True
 
-    # Strict MCP config (SDK 0.1.81+) — generation calls have no profile-level
-    # toggle; default to False.  session_store is intentionally NOT set here:
-    # generation sessions are one-shot fire-and-forget and must not be
-    # persisted to the session store (would pollute the transcript history).
     kwargs["strict_mcp_config"] = False
 
     options = AgentOptions(**kwargs)
@@ -407,8 +399,8 @@ def build_generation_options(
     # these four attributes in `connect_with_sdk_options` and projects them onto
     # SessionOptions.extra, which is how `_decide_provider_kind` picks the leg
     # from the bound provider ROW instead of sniffing the model string. Without
-    # them a generation call on a non-Claude profile model still fell through to
-    # the delegated `claude.exe` leg and hung.
+    # them a generation call on a non-Claude profile model would fall through to
+    # the delegated CLI leg and hang.
     #
     # The env overlay above (`_resolve_env` → `apply_provider_env`) has already
     # validated the row for a provider-bound call, so this lookup cannot see a

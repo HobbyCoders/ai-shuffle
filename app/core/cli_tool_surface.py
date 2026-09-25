@@ -1,4 +1,4 @@
-"""Last-seen Claude CLI tool surface, cached per install (ruling T4).
+"""Last-seen Claude CLI tool surface, cached per install.
 
 Why this exists
 ---------------
@@ -13,9 +13,9 @@ Where the surface comes from
 ----------------------------
 The CLI announces it in the ``{"type":"system","subtype":"init"}`` frame — but
 only AFTER the first user message of a session, so the list is never knowable at
-spawn time on a cold process. Since fluid 5248b2e the vendored ``DelegatedMapper``
-does read the tool list out of that frame and ``DelegatedLoop`` republishes it as
-a ``DelegatedSurface`` event, so there IS a live feed; it just arrives too late
+spawn time on a cold process. The vendored ``DelegatedMapper`` reads the tool
+list out of that frame and ``DelegatedLoop`` republishes it as a
+``DelegatedSurface`` event, so there IS a live feed; it just arrives too late
 to shape the argv of the connect that produced it.
 
 Reconnecting mid-session to apply a subtraction learned from the init frame is
@@ -27,19 +27,17 @@ So this module is a plain module-level cache with an explicit ingest point:
   place.
 * ``cached_cli_tools()`` — what the adapter reads at argv-build time.
 
-Cold-cache behaviour is stated in the ruling: pass only ``--allowed-tools``
-(a grant, not a wall) for that connect and let the next observation fill the
-cache. The app's own ``can_use_tool`` permission callback still runs on every
-tool call regardless, so a cold cache degrades the surface wall, never the
-permission gate.
+On a cold cache only ``--allowed-tools`` (a grant, not a wall) goes out for
+that connect, and the next observation fills the cache. The delegated PreToolUse
+hook (``harness_adapter._delegated_tool_policy``) still refuses tools outside the
+surface, so a cold cache weakens only the argv wall.
 
-"none" mode does not need any of this: the pinned CLI glob-matches deny rules,
-so a single ``--disallowed-tools "*"`` denies every tool. Verified by reading
-the bundled binary (``claude_agent_sdk/_bundled/claude.exe``): rule matching
-runs through ``nJd(..., {globMatching:true})`` for deny/ask/allow lookups, a
-pattern is anything containing ``*``, and the pattern is compiled to
-``^.*$``-style regex against the tool name. The single exemption is the CLI's
-internal end-conversation tool.
+"none" mode does not need any of this: the Claude Code CLI glob-matches deny
+rules, so a single ``--disallowed-tools "*"`` denies every tool. Deny/ask/allow
+lookups treat any rule containing ``*`` as a glob matched against the whole
+tool name; the single exemption is the CLI's internal end-conversation tool
+(verified against the CLI once bundled with claude-agent-sdk 0.2.126; re-check
+on CLI upgrades).
 
 The cache is per PROCESS, which is per install — every install runs its own CLI
 binary and its own MCP config, so surfaces legitimately differ between them and

@@ -168,11 +168,11 @@ def _savepoint(cursor, name: str):
 #     codex_refresh_token, codex_account_id, codex_id_token_expires_at,
 #     codex_last_refresh, needs_reauth. All additive/nullable.
 # 66 (2026-07-18): add sessions.provider_id TEXT — per-session provider
-#     binding (multi-provider phase-2 Chunk E, ruling G2-r). Stamped at session
+#     binding. Stamped at session
 #     creation from the profile's configured provider; every subsequent
 #     turn/spawn resolves the provider from THIS binding, not the live profile
-#     (editing a profile never reroutes an existing session). NULL = native
-#     Claude (gateway bypass, F1) — existing pre-migration sessions stay native.
+#     (editing a profile never reroutes an existing session). NULL = no
+#     provider binding; existing pre-migration sessions stay unbound.
 #     One nullable column only (one account per provider, amendment A1 — no
 #     provider_account_id). Additive/nullable, no index.
 # 67 (2026-07-19): add provider_usage_snapshots table — single row per
@@ -194,7 +194,7 @@ def _savepoint(cursor, name: str):
 #     uuid, NOT the fluid session id). It was previously in-process only, so
 #     after a restart the adapter resumed the CLI with the fluid session id and
 #     every turn died instantly. Additive/nullable, no index.
-# v71: agents unification (ruling A4). ``profiles`` is RENAMED in place to
+# v71: agents unification. ``profiles`` is RENAMED in place to
 #     ``agents`` (all seven FK consumers follow the rename automatically);
 #     ``subagents`` rows are FOLDED into ``agents`` (prompt -> custom
 #     system_prompt, tools -> allowed_tools list, memory -> config.memory,
@@ -211,8 +211,8 @@ def _savepoint(cursor, name: str):
 #     harness adapter's leg decision; lands via the always-run guarded ADD
 #     COLUMN in _run_column_migrations.
 # 74 (2026-08-14): add sessions.mode TEXT — the session's interaction mode,
-#     'chat' (default when NULL — every pre-existing session) or 'voice' (an
-#     OpenAI Realtime voice call, ruling VM4 of docs/VOICE_MODE_PLAN.md).
+#     NULL is the default code mode (every pre-existing session); 'chat' and
+#     'voice' (an OpenAI Realtime voice call) are stored explicitly.
 #     Additive/nullable with no index, same discipline as sessions.provider_id;
 #     lands via the always-run guarded ADD COLUMN in _run_column_migrations.
 # 75 (2026-08-15): add sessions.hidden BOOLEAN — list-visibility flag. TRUE
@@ -384,7 +384,7 @@ def subagent_row_to_agent_config(row: dict) -> dict:
     """Map an old ``subagents`` row onto an agent config blob (v71 fold shape).
 
     Shared by the in-place v71 migration and the sqlite->postgres import tool.
-    ``prov:`` model composites (inert since ruling D4) are dropped — the agent
+    ``prov:`` model composites (inert) are dropped — the agent
     inherits the session model instead.
     """
     import json as _json
@@ -420,7 +420,7 @@ def subagent_row_to_agent_config(row: dict) -> dict:
 
 
 def _migrate_agent_tool_access(cursor, migrations_applied=None):
-    """v82 (rulings T2 + T5): stamp ``tool_selection_mode`` onto every agent
+    """v82: stamp ``tool_selection_mode`` onto every agent
     config and fold the retired ``ai_tools`` / ``app_config_tools`` switches
     into the tool lists.
 
@@ -674,7 +674,7 @@ def _run_column_migrations(cursor):
         if not column_exists(cursor, "sessions", "first_model"):
             cursor.execute("ALTER TABLE sessions ADD COLUMN first_model TEXT")
             migrations_applied.append("sessions.first_model")
-        # True token accounting (audit P8). `total_tokens_in` holds FRESH input
+        # True token accounting. `total_tokens_in` holds FRESH input
         # only — the provider normalizes usage Anthropic-style, so cache reads are
         # excluded — while the per-turn cache numbers only ever landed in the
         # OVERWRITE snapshot columns (cache_read_tokens / cache_creation_tokens).
@@ -752,7 +752,7 @@ def _run_column_migrations(cursor):
             if backfilled > 0:
                 logger.info(f"Backfilled worktree_branch/worktree_path for {backfilled} sessions")
 
-    # Per-turn cache usage on the usage log (audit P8). Without these a usage row
+    # Per-turn cache usage on the usage log. Without these a usage row
     # records only the fresh input tokens, so replaying the log can never
     # reconstruct what a cache-heavy turn actually sent to the provider.
     if table_exists(cursor, "usage_log"):
@@ -2042,7 +2042,7 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE connectors ADD COLUMN IF NOT EXISTS runner_id TEXT")
         migrations_applied.append("connectors.runner_id")
 
-    # Step B: placement backfill (hazard 1; A9 ruling, 07-14). Single
+    # Step B: placement backfill. Single
     # deterministic arm — idempotent via WHERE placement IS NULL:
     #   * Every session with a non-empty `instance_id` (this install's own
     #     included) is pinned to its owner: {"where": "runner:<instance_id>"}.
@@ -2093,19 +2093,18 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context_usage_json JSONB")
         migrations_applied.append("sessions.context_usage_json")
 
-    # Per-session provider binding (v66, multi-provider phase-2 Chunk E / ruling
-    # G2-r). One nullable TEXT column: the model_providers id this session is
-    # bound to, stamped at creation from the profile's configured provider. NULL
-    # = native Claude (gateway bypass). Additive/nullable, no index — same
+    # Per-session provider binding (v66). One nullable TEXT column: the
+    # model_providers id this session is bound to, stamped at creation from the
+    # profile's configured provider. NULL = no provider binding. Additive/nullable, no index — same
     # discipline as cloud_branch / context_usage_json above; guarded so the
     # ALTER never re-runs.
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "provider_id"):
         cursor.execute("ALTER TABLE sessions ADD COLUMN provider_id TEXT")
         migrations_applied.append("sessions.provider_id")
 
-    # Session interaction mode (v74, voice-mode ruling VM4). One nullable TEXT
-    # column: 'chat' (the implicit default — NULL means chat, so every existing
-    # row keeps working untouched) or 'voice' (an OpenAI Realtime voice call).
+    # Session interaction mode (v74). One nullable TEXT
+    # column: NULL is the default code mode (so every existing row keeps
+    # working untouched); 'chat' and 'voice' are stored explicitly.
     # Additive/nullable with NO index, exactly like provider_id above, so it is
     # immune to the schema-pass-before-column-migrations ordering trap; guarded
     # so the ALTER never re-runs.
@@ -2183,7 +2182,7 @@ def _run_column_migrations(cursor):
     # via guarded DROP+CREATE rather than ALTER INDEX: SQLite (the test pg_shim)
     # has no ALTER INDEX ... RENAME, and DROP/CREATE IF [NOT] EXISTS is
     # equivalent and idempotent on both backends.
-    # git_ops (v76) — the durable cross-install git-operation queue (D5). Each
+    # git_ops (v76) — the durable cross-install git-operation queue. Each
     # install's claim loop polls for rows targeted at itself and flips
     # queued -> running with a single conditional UPDATE. Idempotent so upgrades
     # from any older version land the table without needing the SCHEMA_VERSION
@@ -2209,7 +2208,7 @@ def _run_column_migrations(cursor):
         "ON git_ops(runner_id, status)"
     )
 
-    # upload_blobs (v76) — DB-mediated cross-install upload delivery (D8),
+    # upload_blobs (v76) — DB-mediated cross-install upload delivery,
     # modeled on note_attachments (bytes in the shared DB are the source of
     # truth; local disk is a cache). Same idempotent guard as git_ops above.
     if not table_exists(cursor, "upload_blobs"):
@@ -2232,7 +2231,7 @@ def _run_column_migrations(cursor):
         "ON upload_blobs(session_id)"
     )
 
-    # Tool access (v82, rulings T2 + T5). Stamp ``tool_selection_mode`` into
+    # Tool access (v82). Stamp ``tool_selection_mode`` into
     # every agent config so the runtime rule has no legacy branch, and fold the
     # two retired switches (``ai_tools`` / ``app_config_tools``) into the tool
     # lists. Runs once — an agent that already carries a valid mode is skipped,
@@ -2391,7 +2390,7 @@ def _retire_claude_accounts(cursor) -> List[str]:
     AI Shuffle no longer stores Claude credentials; the Claude Code CLI owns
     its own login. Before deleting anything, a database the old sign-in used
     (account rows or active-account pointers) records the one-time
-    ``claude auth logout`` / ``claude auth login`` notice (decision D2) for
+    ``claude auth logout`` / ``claude auth login`` notice for
     every worker that had a pointer and for this one, plus a database-wide
     flag other workers sharing it read at startup. An existing notice
     (pending or dismissed) is never overwritten.

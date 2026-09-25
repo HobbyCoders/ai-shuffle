@@ -1,11 +1,11 @@
 """The ``checkouts`` table — per-runner working-tree materializations of a
-project_v2 (v2 core, Phase 3).
+project_v2 (v2 core).
 
 A *checkout* is the physical materialization of a project_v2 on ONE runner
 (``runner_id`` = the install's ``effective_instance_id``). Each row records
 where that project's ``branch`` is checked out on that runner (``path``), plus
 optional working-tree state (``head_sha``, ``dirty``). ``branch`` NULL (or the
-empty string) is the *base* checkout (D7); a non-empty ``branch`` is a logical
+empty string) is the *base* checkout; a non-empty ``branch`` is a logical
 worktree materialized at its own ``path``. Uniqueness is
 ``(project_id, runner_id, path)`` — the same key the collapse migration and this
 module upsert against.
@@ -66,10 +66,9 @@ def upsert_checkout(
     ``status`` (which always has a value) and ``updated_at`` are always set.
     Returns the resulting row.
 
-    ``path`` MUST be absolute. The v60 collapse migration once seeded workspace-
-    RELATIVE paths verbatim from legacy ``projects.path`` (#654), which the V2
-    resolver — treating ``checkouts.path`` as absolute — could not resolve. Reject
-    a relative path here so no new relative row can ever be written.
+    ``path`` MUST be absolute: the V2 resolver treats ``checkouts.path`` as
+    absolute and cannot resolve a relative one. Reject a relative path here so
+    no new relative row can ever be written.
     """
     if not os.path.isabs(path):
         raise ValueError(
@@ -232,8 +231,8 @@ def has_active_base_checkout(project_id: str, runner_id: str) -> bool:
     even an archived one), and never when ``runner_id`` is itself ''.
 
     Deliberately NOT ``capable_runners``: that matches ANY active checkout row
-    including a branch-only worktree, and Phase 3 never clones — a new branch
-    needs a base checkout to fork from.
+    including a branch-only worktree, and a new branch needs a base checkout to
+    fork from.
     """
     with get_db() as conn:
         cursor = conn.cursor()

@@ -1,12 +1,11 @@
-"""Durable wakeups + the idle-at-edge watchdog (#598).
+"""Durable wakeups + the idle-at-edge watchdog.
 
 Two problems this module solves, both facets of the edge-of-context stall where
-the bundled CLI cuts a turn silently at the compaction boundary and the session
+the Claude Code CLI cuts a turn silently at the compaction boundary and the session
 parks forever because no next turn arrives:
 
-1. **Durable wakeups.** ``ScheduleWakeup`` used to be a bare in-process
-   ``asyncio.create_task(sleep(...))`` — an app restart dropped every pending
-   wake. :func:`schedule` now persists the wake to ``pending_wakeups`` first, and
+1. **Durable wakeups.** :func:`schedule` persists the wake to
+   ``pending_wakeups`` first, so an app restart does not drop it, and
    :func:`rehydrate_pending` re-arms this install's rows on boot. Firing is a
    *claim* (delete the row, then run) so a rehydrated timer and a peer install
    cannot double-fire — and because the claim is destructive, a submit that
@@ -18,14 +17,14 @@ parks forever because no next turn arrives:
    edge and arms a synthetic nudge through the SAME wakeup machinery. Firing a
    real turn is what makes the CLI run its deferred compaction — the
    belt-and-braces backstop that covers the cases the opt-in ScheduleWakeup and
-   the #557 auto-continue latch miss.
+   the turn scheduler's boundary auto-continue miss.
 
 A wake does NOT run a query of its own. :func:`_fire` enrolls the prompt in the
 v2 turn queue (``await turn_manager.submit_async(..., source="wakeup")``), so the wake goes
 through the same run lease and one-live-turn-per-session index every other turn
-obeys. Firing straight at the query engine — as this module used to — created a
-second agent loop against a session that already had one running: a forked
-conversation DAG, no ``turns`` row, no lease, and untracked spend.
+obeys. Firing straight at the query engine would create a second agent loop
+against a session that already has one running: a forked conversation DAG, no
+``turns`` row, no lease, and untracked spend.
 
 Two cancellation rules keep armed wakes from stacking up:
 
@@ -127,11 +126,11 @@ _watchdog_cooldown: "dict[str, _WatchdogLatch]" = {}
 # Required drop (as a fraction, e.g. 0.02 == 2 percentage points) between the
 # fraction latched at the last nudge and the current persisted fraction
 # before a session is eligible to be re-nudged. Guards against re-nudging a
-# session whose compaction was deferred and never actually landed (#793).
+# session whose compaction was deferred and never actually landed.
 _WATCHDOG_DECREASE_EPSILON = 0.02
 
 # Max nudges armed for a single session over this process's lifetime. A
-# session that hits this cap is muted rather than nudged forever (#793).
+# session that hits this cap is muted rather than nudged forever.
 _WATCHDOG_LIFETIME_CAP = 3
 
 _watchdog_task: "Optional[asyncio.Task]" = None
@@ -173,9 +172,8 @@ async def _resolve_profile_id(row: Dict[str, Any]) -> Optional[str]:
 async def _announce_dropped_wake(row: Dict[str, Any], reason: str) -> None:
     """Tell the SESSION that a wake it was promised will never run.
 
-    A dropped wake used to be a log line and nothing else: the agent had parked
-    expecting to be woken, so the session simply sat there until a human typed
-    something (the 2026-09-04 audit measured 15.6 minutes of that). The note is
+    The agent parked expecting to be woken, so without a note the session sits
+    silent until a human types something. The note is
     an unfenced ``system`` frame on the session's own log — the same seam the
     supervisor's teardown note uses — so the stall is visible where the user is
     already looking. Strictly best-effort: never raises.
@@ -300,7 +298,7 @@ async def _fire(row: Dict[str, Any]) -> None:
     simply queues behind it and drains at settlement, instead of racing it with
     a second agent loop.
 
-    Failure-safe since the 2026-09-04 audit: the claim is destructive, so every
+    Failure-safe: the claim is destructive, so every
     way the submit can fail to produce a turn — it raises, or it refuses and
     returns no turn id — re-inserts the row with a backed-off ``fire_at`` and
     re-arms it (:func:`_rearm_after_failed_submit`). A wake that is ultimately
@@ -311,7 +309,7 @@ async def _fire(row: Dict[str, Any]) -> None:
     wakeup_id = row.get("id")
     session_id = row.get("session_id")
 
-    # STOP SEMANTICS (round 7): a session the user stopped stays stopped until
+    # STOP SEMANTICS: a session the user stopped stays stopped until
     # they speak again. Stop already DELETES the session's pending wakeup rows,
     # which is the cross-runner half of this; the latch is the local race-closer
     # for a timer that had already fired (or was mid-flight) when Stop landed.

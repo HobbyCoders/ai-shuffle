@@ -1122,9 +1122,8 @@ async def get_live_session(
     # NOTE: the legacy DB fast path (load_messages_from_db) is deliberately
     # absent here: the legacy `session_messages` table only holds the USER rows
     # — assistant/system turns live exclusively in the session store
-    # (session_store_entries). Reading the legacy
-    # table first returned a user-only transcript (the "assistant replies
-    # vanish on reopen" bug).
+    # (session_store_entries). Reading the legacy table first would return a
+    # user-only transcript.
 
     # Primary read: the Postgres session store.
     store_parse_failed = False

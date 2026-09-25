@@ -1,10 +1,8 @@
 """Subagent-shaped compat layer over the unified ``agents`` table + permission rules.
 
-v71 (agents-program ruling A4): the ``subagents`` table is gone — every former
-subagent row now lives in ``agents`` with its prompt/tools/model/memory folded
-into the config blob. Existing callers (the /subagents API until the P2b hard
-rename, query_options' enabled_agents resolution until P2c) keep working
-through this module, which projects agent rows into the old subagent dict
+The ``subagents`` table is gone — every former subagent row lives in
+``agents`` with its prompt/tools/model/memory folded into the config blob.
+Existing callers keep working through this module, which projects agent rows into the old subagent dict
 shape and maps writes back onto agent configs.
 
 Built-in subagents' "revert to defaults" now compares against the CODE

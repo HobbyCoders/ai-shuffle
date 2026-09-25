@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.db.base import get_db, rows_to_list
 
-# Same Postgres-illegal code-point scrub the SDK session store applies at its
+# Same Postgres-illegal code-point scrub the Postgres session store applies at its
 # own JSON boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
 # why NUL and lone surrogates have to go before an INSERT sees them.
 from app.core.pg_session_store import _scrub_pg_illegal
@@ -269,12 +269,10 @@ def get_events_multi(
     come back ordered by ``seq`` then ``session_id``, and ``limit`` is a GLOBAL
     row cap the caller sizes for the whole batch.
 
-    Exists for the ProviderAgent worker feed (multi-provider phase 3, P3-A4).
-    Ruling P12 forbids a cap on worker fan-out, and the feed originally ran one
-    poller per worker at 1.5s — twenty workers meant ~13 reads/second through
-    the sync-executor pool purely to mirror progress, against a codebase with a
-    documented history of ``PoolError`` bursts when executor count outruns pool
-    max. One query per parent turn replaces N.
+    Exists for the ProviderAgent worker feed. Worker fan-out is uncapped, and
+    one poller per worker would put N reads per tick through the sync-executor
+    pool purely to mirror progress, risking ``PoolError`` bursts when executor
+    count outruns pool max. One query per parent turn replaces N.
 
     Ordering by ``seq`` first (not ``session_id``) is deliberate: ``seq`` is
     per-session and every worker starts near 1, so a global ``LIMIT`` is shared
@@ -372,7 +370,7 @@ def get_max_seq(session_id: str) -> int:
 
 def notify_session(session_id: str) -> None:
     """Fire a best-effort NOTIFY tick on the events channel WITHOUT appending
-    an event (V2 Phase 4 turn-claim wake).
+    an event (turn-claim wake).
 
     Used by the placement submit/interrupt seams to wake peer runners' claim
     loops instantly instead of waiting out their 5s slow poll. The payload
@@ -478,7 +476,7 @@ def copy_session_events(
 
 
 # ----------------------------------------------------------------------
-# Retention: lossless delta compaction for long-idle sessions (B6)
+# Retention: lossless delta compaction for long-idle sessions
 # ----------------------------------------------------------------------
 
 # The delta types the SSE replay already merges at read time
@@ -558,7 +556,7 @@ def compact_session_deltas(
     """Merge historical streaming-delta runs in place. Returns ``(runs, rows)``.
 
     ``session_events`` grows forever: a streamed answer costs one row per ~100 ms
-    chunk, and nothing has ever pruned them. This is the retention pass, and it
+    chunk, and nothing else prunes them. This is the retention pass, and it
     is deliberately a COMPACTION rather than a deletion.
 
     What it does, per run of consecutive same-key delta rows: joins their text
@@ -699,9 +697,8 @@ def compact_idle_session_deltas(
 ) -> Dict[str, int]:
     """Compact delta runs for sessions idle longer than ``older_than_days``.
 
-    The maintenance entry point (``app.db.database.periodic_maintenance`` must
-    call this — see the wiring note there). ``older_than_days <= 0`` disables the
-    pass and touches nothing.
+    Called from ``app.db.database.run_database_maintenance`` (step 2d).
+    ``older_than_days <= 0`` disables the pass and touches nothing.
 
     Idleness comes from ``sessions.updated_at``, the same signal
     ``prune_fluid_delta_events`` uses: a streaming session bumps it constantly,

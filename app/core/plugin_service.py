@@ -2,7 +2,7 @@
 Plugin Service - Core business logic for plugin management.
 
 User-global plugins live in Fluid's home so native legs pick them up
-(fluid.context.plugins, ruling CE5). Package format is still Claude's.
+(fluid.context.plugins, CE5). Package format is still Claude's.
 
 Plugin Scopes:
 - USER: ~/.fluid/plugins/ (user-global plugins)
@@ -18,14 +18,11 @@ and enabling/disabling plugins.
 import json
 import logging
 import re
-import stat
-import shutil
 import threading
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List, Optional, Dict, Any
 
-import os
 
 # Re-export all models and helpers for backward compatibility
 from app.core.plugin_models import (  # noqa: F401

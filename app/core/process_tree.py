@@ -9,12 +9,11 @@ session-teardown reap and the per-task stop button.
 
 Why it exists: on Windows ``proc.terminate()`` kills exactly one process. The
 command the model writes runs under Git Bash, which nests a *second* bash, and
-a dev server is a third generation below that — so terminating the shell left
-``python run_local.py`` holding its listening socket while the harness happily
-reported ``{"success": true, "running": false}``. Audited sessions had to
-``taskkill`` by hand, twice.
+a dev server is a third generation below that — so terminating the shell
+leaves ``python run_local.py`` holding its listening socket while the harness
+reports ``{"success": true, "running": false}``.
 
-The approach mirrors fluid's ``kill_tree`` (upstream PR #28): POSIX gets a
+The approach mirrors fluid's ``kill_tree``: POSIX gets a
 fresh session so ``killpg`` reaches the whole group; Windows gets
 ``CREATE_NEW_PROCESS_GROUP`` at spawn (making a graceful CTRL_BREAK possible)
 and ``taskkill /F /T`` as the escalation. On top of fluid's version this module
@@ -79,9 +78,8 @@ def child_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     so the first ``print`` containing a box-drawing character or an emoji dies
     with ``UnicodeEncodeError`` — the process is gone before it ever binds its
     port, and the buffer the model reads back shows a traceback with no
-    obvious cause. An audited session lost two launch attempts to exactly that
-    and only recovered by guessing ``PYTHONIOENCODING``. Force UTF-8 for
-    children so their output survives the trip.
+    obvious cause. Force UTF-8 for children so their output survives the
+    trip.
 
     Anything the caller (or the operator) already set wins: these are
     ``setdefault``s, not overrides.
@@ -165,7 +163,7 @@ def listening_ports(pids: Iterable[int]) -> List[int]:
     """TCP ports the given pids are still LISTENing on.
 
     Purely for the honesty message — "task 4f2a1b left pid 91234 listening on
-    8010" is the sentence the audited session needed and did not get. Empty
+    8010". Empty
     whenever psutil is missing or the platform refuses the lookup.
     """
     ps = _psutil()

@@ -2,7 +2,7 @@
 Notes disk-sync worker.
 
 Notes live in a shared database (the source of truth) but are also materialized
-as per-install ``.md`` files on local disk, so the Claude Agent SDK — and the
+as per-install ``.md`` files on local disk, so agents — and the
 user, over SSH/SMB/any text editor — can edit them as plain files. The problem:
 nothing actively pushes a direct file edit back into the database, and nothing
 pulls a database change (made on another install) down to this install's files.
@@ -34,13 +34,12 @@ tracking a baseline instead of comparing mtime alone.
 The worker never deletes a database note from a missing local file: a missing
 file is treated as an absent local view and re-materialized from the DB.
 
-Cost shape (F7). A pass is METADATA-FIRST: one projection read of
+Cost shape. A pass is METADATA-FIRST: one projection read of
 ``(id, title, file_path, updated_at)`` for every note plus one ``stat`` per
 note, and a full-row read (the multi-KB ``content`` column) ONLY for notes whose
 file mtime or DB ``updated_at`` actually moved since the last pass. In the
 steady state — which is every pass, on every install, almost always — that is
-zero content bytes off the database. The previous implementation paged every
-note's full row on every tick and then discarded it in the fast path.
+zero content bytes off the database.
 """
 
 from __future__ import annotations
@@ -217,7 +216,7 @@ def _reconcile_one(note: Dict[str, Any]) -> None:
 
 
 def _fetch_note_metadata() -> List[Dict[str, Any]]:
-    """Every note's CHANGE-DETECTION fields — never its ``content`` (F7).
+    """Every note's CHANGE-DETECTION fields — never its ``content``.
 
     ``(id, title, file_path, updated_at)`` is everything a pass needs to decide
     whether a note can take the fast path: ``updated_at`` moves on any DB-side
@@ -225,10 +224,10 @@ def _fetch_note_metadata() -> List[Dict[str, Any]]:
     The multi-KB ``content`` column is then read only for the rows that actually
     changed (see :func:`_fetch_note`).
 
-    Why this matters: the worker used to page every note's FULL row — content
-    included — out of the database on every tick, then throw ~all of it away in
-    the fast path. On an install with a few hundred notes that is megabytes of
-    row traffic per pass, several times a minute, forever.
+    Why this matters: paging every note's FULL row — content included — on
+    every tick would throw ~all of it away in the fast path. On an install with
+    a few hundred notes that is megabytes of row traffic per pass, several
+    times a minute.
 
     Read directly against the ``notes`` table (same pattern as
     ``app.core.orphan_reconciler``) because no projection-only accessor exists in
@@ -268,7 +267,7 @@ def _needs_content(meta: Dict[str, Any], mtime: Optional[float]) -> bool:
 def sync_notes_once() -> Dict[str, int]:
     """Run one reconcile pass over all notes. Best-effort per note.
 
-    METADATA-FIRST (F7): one small projection read tells us which notes could
+    METADATA-FIRST: one small projection read tells us which notes could
     possibly have changed; only those pay for a full-row read. A steady-state
     pass therefore costs one indexed SELECT plus one ``stat`` per note and
     fetches zero content.

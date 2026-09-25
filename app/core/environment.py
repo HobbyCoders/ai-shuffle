@@ -327,7 +327,7 @@ class ProviderConfigError(ValueError):
     ``except (WorktreeUnavailableError, ValueError)`` guards) into a
     user-visible spawn/config error event. Reusing that channel means a
     misconfigured provider surfaces as a clear error instead of an opaque
-    subprocess failure — and, per R5, we NEVER silently fall back to native
+    subprocess failure — and we NEVER silently fall back to native
     Anthropic (which would leak the prompt to / bill the wrong upstream).
     """
 
@@ -354,7 +354,7 @@ def inject_claude_code_auth(
     passes on.
 
     When ``provider_id`` is truthy the session targets a non-Anthropic model
-    provider: ``apply_provider_env`` owns auth for those spawns (gateway token
+    provider: ``apply_provider_env`` owns auth for those spawns (provider token
     plus an explicitly empty ``ANTHROPIC_API_KEY``), so nothing happens here.
     Returns the same dict for convenience.
     """
@@ -405,29 +405,19 @@ def is_provider_servable(provider: Optional[ModelProviderRow]) -> bool:
 
     True iff ``provider_type`` is one of ``openai`` / ``chatgpt`` / ``xai`` /
     ``grok`` / ``anthropic`` / ``openrouter`` (or ``auth_mode`` in
-    ``chatgpt`` / ``grok``).
+    ``chatgpt`` / ``grok``). It is the admission rule for cross-provider MODEL
+    selection (``provider_agent.validate_provider_model``).
 
-    Formerly ``is_gateway_servable``: the accepted set was defined by what the
-    translator gateway could translate. The gateway is gone, but the predicate
-    outlived it as the admission rule for cross-provider MODEL selection —
-    ProviderAgent worker models (``provider_agent.validate_provider_model``) and
-    the profile-level subagent-leg validator both gate on it.
+    A ``provider_type`` is admitted when it alone names a fluid client the native
+    leg can drive (``provider.harness_adapter._provider_row_kind``):
+    ``openai``/``chatgpt``/``xai``/``grok`` → OpenAI Responses, ``openrouter`` →
+    ``OpenRouterClient``, ``anthropic`` → ``AnthropicClient`` (or the delegated
+    CLI leg for a subscription ``auth_mode``).
 
-    ``openrouter`` was admitted by the 2026-08-17 ruling ("an agent bound to an
-    OpenRouter model must be spawnable as a subagent"). The criterion for the set
-    is now mechanical: a ``provider_type`` is admitted when it alone names a fluid
-    client the native leg can drive — see
-    ``provider.harness_adapter._provider_row_kind``, which maps
-    ``openai``/``chatgpt``/``xai``/``grok`` → ``OpenAIResponsesClient``,
-    ``openrouter`` → ``OpenRouterClient``, and ``anthropic`` →
-    ``AnthropicClient`` (or the delegated CLI leg for a subscription
-    ``auth_mode``).
-
-    ``custom`` stays OUT on purpose: its leg is not implied by the type at all —
-    it depends on the row's ``api_dialect`` plus a user-supplied ``base_url``
-    whose wire format the app cannot vouch for, so a worker bound to one can
-    still 401 at connect. The ``auth_mode == "chatgpt"`` clause below is the
-    deliberate exception: such a custom row IS a Codex subscription row wearing a
+    ``custom`` stays OUT on purpose: its leg depends on the row's ``api_dialect``
+    plus a user-supplied ``base_url`` whose wire format the app cannot vouch for,
+    so a worker bound to one can still 401 at connect. The ``auth_mode`` clause is
+    the deliberate exception: such a row IS a subscription row wearing a
     different type, and its leg is known.
     """
     if not provider:
@@ -444,11 +434,7 @@ def _small_fast_model(provider: Optional[ModelProviderRow]) -> Optional[str]:
     """The STABLE provider-scoped small/fast model id, or None.
 
     Resolution chain (never the per-turn ``model``): the provider's
-    ``small_fast_model`` → ``default_model`` → first curated model id. Shared by
-    the ``ANTHROPIC_SMALL_FAST_MODEL`` overlay and the S3 leg assembler's
-    session-default fallback so both agree on one value. Forward-references
-    ``_first_curated_model_id`` (defined below) — resolved at call time, matching
-    the module's existing helper-ordering convention.
+    ``small_fast_model`` → ``default_model`` → first curated model id.
     """
     if not provider:
         return None
@@ -466,76 +452,37 @@ def apply_provider_env(
     session_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """Overlay a non-Anthropic model-provider's env vars onto ``env`` (in place)
-    so the bundled Claude Code CLI talks to that provider's endpoint instead of
+    so the Claude Code CLI talks to that provider's endpoint instead of
     api.anthropic.com. Returns the same dict for convenience.
 
-    Looks up the enabled provider row (with its encrypted token) and applies the
-    officially-supported LLM-gateway env vars:
+    The row's ``extra_env_json`` is applied FIRST, then these forced values, so
+    extra_env can never clobber the ``ANTHROPIC_API_KEY=""`` guard:
 
-    - ``ANTHROPIC_BASE_URL`` — the provider endpoint (CLI appends ``/v1/messages``)
-    - ``ANTHROPIC_AUTH_TOKEN`` — the decrypted key (sent as ``Authorization: Bearer``)
-    - ``ANTHROPIC_API_KEY=""`` — MUST be explicitly empty to prevent an
-      Anthropic fallback
-    - mitigation flags for non-Anthropic upstreams
-      (``CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS``,
-      ``CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC``,
-      ``CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK``)
-    - optional ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``
-    - context-window vars (ALL provider modes), driven by the window resolved
-      FOR ``model`` via ``model_registry.resolve_provider_context_window`` (the
-      model's own ``models_json`` entry → the preset roster → the row's
-      ``context_window`` column — never the raw row value, which is one number
-      shared by every model on the row):
-      ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` (``"0"`` iff the window is ≥1M),
-      ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` and ``CLAUDE_CODE_MAX_CONTEXT_TOKENS``
-      pinned to the EXACT window (no clamps, no hardcoded fallback — the
-      max-context pin stops the CLI's 200k belief for non-``claude-*`` ids from
-      truncating a larger window into "Prompt is too long"), and
-      ``CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE`` at 2x the window. When NO window
-      is known for the model, every window var is left unset (CLI defaults).
-      All use ``setdefault`` so an explicit profile/user/extra_env value wins.
-    - ``AIH_GATEWAY_TRANSLATED_MAIN=1`` — set IFF the MAIN provider is translated
-      (openai/chatgpt/xai/grok ``provider_type`` or chatgpt/grok ``auth_mode``);
-      consumed by
-      :func:`attach_hooks_to_options` to register the S8-R1 Agent-arg-strip
-      PreToolUse hook
-    - R4: ``ANTHROPIC_SMALL_FAST_MODEL`` set to ``small_fast_model or
-      default_model or first curated model id`` (a STABLE provider-scoped value,
-      NEVER the per-turn ``model``) so background probes / title-gen never send an
-      unknown Claude alias to the gateway, and a within-provider composer switch
-      doesn't churn the key into a subagent-killing respawn. Left unset if no
-      curated models either. ``CLAUDE_CODE_SUBAGENT_MODEL`` is NO LONGER emitted
-      (S3): subagent model selection moved to per-agent frontmatter stamping, so
-      an unstamped CLI built-in Task subagent inherits the MAIN model.
+    - ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN`` — the provider endpoint
+      (CLI appends ``/v1/messages``) and the decrypted key (``Authorization: Bearer``)
+    - ``ANTHROPIC_API_KEY=""`` — MUST be explicitly empty to block an Anthropic fallback
+    - ``CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`` / ``CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC``
+      / ``CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK`` — mitigations for non-Anthropic upstreams
+    - ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` when the row sets one
+    - ``AIH_GATEWAY_TRANSLATED_MAIN=1`` on a translated row, which
+      ``hook_service.attach_hooks_to_options`` reads to register the Agent-arg-strip hook
+    - ``ANTHROPIC_SMALL_FAST_MODEL`` — a STABLE provider-scoped id (``_small_fast_model``)
 
-    The provider's ``extra_env_json`` entries are applied FIRST, then the forced
-    values LAST, so extra_env can never clobber the ``ANTHROPIC_API_KEY=""``
-    guard (or any other overlay-controlled key).
+    The context-window vars are ``setdefault`` (a profile/user/extra_env value
+    wins) and pinned to the window resolved FOR ``model`` by
+    ``model_registry.resolve_provider_context_window``; see the inline comments.
+    With no known window, none is set and the CLI defaults apply.
 
-    Codex/OpenAI/Grok providers (``provider_type`` in
-    ``{"openai", "chatgpt", "xai", "grok"}`` or ``auth_mode`` in
-    ``{"chatgpt", "grok"}``) do NOT speak the
-    Anthropic wire protocol. They used to be pointed at the loopback translator
-    gateway with a per-session routing token; the gateway is retired and the fluid
-    harness now serves them natively, resolving their REAL credentials itself
-    (``provider/fluid_credentials.resolve_provider_credentials`` reads the row /
-    the Codex OAuth bundle). So no upstream secret belongs in the CLI env for
-    these rows: ``ANTHROPIC_BASE_URL``/``ANTHROPIC_AUTH_TOKEN`` are left empty
-    (their credentials are not Anthropic-wire usable anyway) while every
-    guard/mitigation/window/small-fast key is applied identically.
-    openrouter/custom/anthropic keep the direct-decrypted-token path unchanged.
+    Translated rows (``provider_type`` openai/chatgpt/xai/grok or ``auth_mode``
+    chatgpt/grok) do not speak the Anthropic wire protocol: the fluid native leg
+    serves them and resolves their credentials through ``fluid_credentials``, not
+    the CLI env, so ``ANTHROPIC_AUTH_TOKEN`` stays blank.
 
-    R5 (binding): a missing/disabled provider, or a token that cannot be
-    decrypted (encryption not ready / corrupt), raises :class:`ProviderConfigError`
-    — surfaced to the user as a spawn/config error. We NEVER silently fall back
-    to native Anthropic. On the direct path a provider with NO stored token is
-    allowed only when a ``base_url`` is set (some self-hosted gateways are
-    unauthenticated); the token is then the empty string. The
-    no-token-and-no-base_url check does NOT apply to a translated row, whose
-    credentials legitimately live outside those two columns.
-
-    ``session_id`` is retained for signature stability (the routing token it used
-    to key is gone); it no longer affects the overlay.
+    Fail-closed: a missing/disabled provider, or a token that cannot be decrypted,
+    raises :class:`ProviderConfigError`; we NEVER silently fall back to native
+    Anthropic. On the direct path a row with NO stored token is allowed only with
+    a ``base_url`` (an unauthenticated self-hosted endpoint). ``session_id`` does
+    not affect the overlay.
     """
     provider = database.get_model_provider(provider_id, include_token=True)
     if not provider:
@@ -553,11 +500,8 @@ def apply_provider_env(
     # protocol. Its session is served by the fluid harness's NATIVE
     # openai_responses leg, which resolves the row's real credentials itself
     # (decrypted API key, or the Codex OAuth bundle) — so nothing usable, and no
-    # secret, goes into the CLI env here. Before the translator gateway was
-    # retired these two keys pointed at the loopback gateway plus a per-session
-    # routing token; now they are simply blank. openrouter/custom/anthropic keep
-    # the direct-decrypted-token path below UNCHANGED (they are already
-    # Anthropic-compatible endpoints).
+    # secret, goes into the CLI env here. openrouter/custom/anthropic take the
+    # direct-decrypted-token path below (they are Anthropic-compatible endpoints).
     provider_type = provider.get("provider_type")
     auth_mode = provider.get("auth_mode")
     is_translated = (
@@ -621,7 +565,7 @@ def apply_provider_env(
     env["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"] = "1"
 
     # A translated (Responses-coerced) main forces the CLI to fill every Agent-tool
-    # property on every call. This marker wires the downstream S8-R1 PreToolUse hook
+    # property on every call. This marker wires the downstream PreToolUse hook
     # (via attach_hooks_to_options) that strips the grammar-coerced Agent-tool
     # `model`/`isolation` args so stamped-frontmatter subagent pins survive.
     if is_translated:
@@ -643,8 +587,8 @@ def apply_provider_env(
     # The window is resolved FOR THE SELECTED MODEL (its own ``models_json``
     # entry → the preset roster → the row's column) via the shared
     # ``resolve_provider_context_window`` — the same resolution the registry
-    # payload shows the UI. Using the raw row column here was the bug: a row that
-    # advertises 272k pinned a 1M model down to 272k for every session.
+    # payload shows the UI. The raw row column is one number shared by every
+    # model on the row, so it would pin a 1M model down to the row's value.
     # ``setdefault`` throughout so an explicit profile/user/extra_env value still
     # wins (preset-wins parity with the native path).
     #
@@ -685,25 +629,22 @@ def apply_provider_env(
         # estimator (~3 chars/token vs o200k's ~4 for prose), so a turn
         # that REALLY fits the provider window can overshoot the local
         # estimate by ~33% and be hard-blocked before any request is sent
-        # (observed: the bundled ``claude-api`` skill's ~800k-char doc
-        # injection ≈ 200k real tokens estimated as ~280k). The same
+        # (e.g. the CLI's ``claude-api`` skill injects ~800k chars ≈ 200k
+        # real tokens, estimated locally as ~280k). The same
         # ceiling also blocks the reactive-compaction request itself, so
         # autocompact can't rescue the turn either. Lift the local ceiling
         # to 2x the window: the local estimate is protecting against an
-        # overflow the UPSTREAM already rejects cleanly (and, before it
-        # was retired, the translator gateway rejected with an accurate
-        # tiktoken count), so it adds nothing here — it only misfires.
+        # overflow the UPSTREAM already rejects cleanly, so it adds
+        # nothing here — it only misfires.
         # Autocompaction thresholds are unaffected (they key off
         # CLAUDE_CODE_AUTO_COMPACT_WINDOW above).
         env.setdefault("CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE", str(cw * 2))
     # No window known for this model (no per-model value, no preset, NULL row
     # column) → set NOTHING and leave every window var to the CLI's own
-    # defaults. This used to fall back to the app's ``[1m]`` opt-in gate; that
-    # mechanism is retired (Claude slugs are natively 1M), and forcing
-    # ``DISABLE_1M=1`` here would clamp a claude-* id on an anthropic row back
-    # to 200k — the opposite of the current ruling.
+    # defaults. Forcing ``DISABLE_1M=1`` here would clamp a claude-* id on an
+    # anthropic row (natively 1M) back to 200k.
 
-    # R4: point the small/fast model at something the gateway knows. Fall back to
+    # Point the small/fast model at a model this provider serves. Fall back to
     # a STABLE provider-scoped value (never the per-turn `model`): a within-provider
     # composer model switch must not change this overlay key, or
     # requires_reconnect() forces a respawn that kills background subagents.
@@ -711,12 +652,9 @@ def apply_provider_env(
     if small_fast:
         env["ANTHROPIC_SMALL_FAST_MODEL"] = small_fast
 
-    # S3: CLAUDE_CODE_SUBAGENT_MODEL is intentionally NOT emitted here. Subagent
-    # model selection moved to per-agent frontmatter stamping (the caller stamps
-    # each enabled subagent's `model:` via the S2 resolver, and threads the
-    # honored leg map into the routing token above). An unstamped CLI built-in
-    # Task subagent therefore inherits the MAIN model rather than a provider-wide
-    # small/fast override.
+    # CLAUDE_CODE_SUBAGENT_MODEL is intentionally not set: subagents take their
+    # model from per-agent frontmatter, and an unstamped CLI Task subagent
+    # inherits the main model.
 
     return env
 
@@ -806,10 +744,9 @@ def _build_env_with_ai_tools(
     # (provider_id set) nothing is touched; apply_provider_env owns auth.
     inject_claude_code_auth(env, provider_id)
 
-    # NOTE: The browser integration is now "Claude in Chrome" (the bundled CLI's
-    # --chrome flag), not the Playwright MCP server. The CLI manages its own
-    # native-messaging host and browser connection, so no browser env vars need
-    # to be threaded here (the old PLAYWRIGHT_BROWSERS_PATH threading was removed).
+    # Browser automation is the ``browser`` STDIO MCP server
+    # (app.core.builtin_mcp_servers); mcp_config threads its env
+    # (``_BROWSER_ENV_KEYS``), so no browser env vars are set here.
 
     if not ai_tools_config:
         return env
@@ -1085,8 +1022,8 @@ def generate_turn_environment_note(
 
 # ─── "# Workspace facts" — the first-turn bootstrap card ─────────────────────
 #
-# The round-9 audit found the same environment facts rediscovered by probing in
-# 12+ sessions each: node_modules missing in a fresh worktree, which interpreter
+# Without it, agents rediscover the same environment facts by probing in session
+# after session: node_modules missing in a fresh worktree, which interpreter
 # has pytest, that the agent browser lives on another host, that the app's own
 # UI rejects proxied requests, that frontend/vite.config.ts does not exist.
 # This card states the ones that are TRUE for this worker, probed once per

@@ -55,7 +55,7 @@ def _reap_task_killed(session_id: str, task_id: str) -> None:
 def _mark_task_stopped_by_user(session_id: str, task_id: str, *, source: str = "user_stop") -> None:
     """Mark a background task ``killed`` in the registry on an EXPLICIT user stop.
 
-    Called after the SDK ``stop_task`` control request is issued for a LIVE
+    Called after the client ``stop_task`` control request is issued for a LIVE
     background sub-agent. Records the terminal transition (with user attribution)
     directly instead of relying on a CLI ``stopped`` frame — the row must reach a
     terminal status exactly once even when no such frame flows back. ``killed``
@@ -83,8 +83,8 @@ def _mark_task_stopped_by_user(session_id: str, task_id: str, *, source: str = "
 async def interrupt_session(session_id: str) -> bool:
     """Interrupt an active streaming session.
 
-    This calls the SDK's interrupt() method which signals the Claude API
-    to stop processing. This is more reliable than just cancelling the
+    This calls the adapter's interrupt(), which signals the provider to stop
+    processing. This is more reliable than just cancelling the
     asyncio task, which only takes effect at the next await point.
     """
     # Use peek() to avoid promoting to MRU — interrupt is a read-only check
@@ -104,17 +104,16 @@ async def interrupt_session(session_id: str) -> bool:
     # and it's better to try to interrupt anyway
     logger.debug(f"Attempting to interrupt session {session_id} (streaming={state.is_streaming})")
 
-    # Run the SDK interrupt on a DETACHED task guarded by a SHIELD: on timeout we
-    # must NOT cancel the in-flight interrupt() — cancelling it mid-flight leaks the
-    # entry in the SDK client's pending_control_responses (the control request was
-    # sent but its response future is abandoned), which can wedge the client for
+    # Run the interrupt on a DETACHED task guarded by a SHIELD: on timeout we
+    # must NOT cancel the in-flight interrupt() — cancelling a control request
+    # mid-flight abandons its pending response, which can wedge the client for
     # every subsequent control call. Shielding lets the wait_for time out while the
     # underlying interrupt keeps running to completion in the background.
     # Interrupt via the ADAPTER interface: state.client resolves through the
     # legacy-only ``sdk_client`` attribute and raises AttributeError on the
     # fluid HarnessAdapter. All active providers implement interrupt().
     interrupt_task = asyncio.create_task(state.adapter.interrupt())
-    # Attach the swallow/log done-callback AT CREATION (F8): if the CALLER of
+    # Attach the swallow/log done-callback AT CREATION: if the CALLER of
     # this coroutine is cancelled while awaiting the shielded wait below, the
     # except branches never run and a later interrupt() failure would surface
     # as an "exception was never retrieved" event-loop warning. Registering
@@ -249,13 +248,14 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
 
     - **shell** (Monitor subprocess): terminated directly via its tracked
       process and marked ``killed`` in the registry immediately.
-    - **agent** (background sub-agent): stopped through the SDK client's
-      ``stop_task()``. The CLI then emits a ``task_notification`` with status
-      ``stopped`` which the streaming loop maps to ``killed`` in the registry —
+    - **agent** (background sub-agent): stopped through the pooled client's
+      ``stop_task()`` (``SessionState.client``). The CLI then emits a
+      ``task_notification`` with status ``stopped`` which the streaming loop
+      maps to ``killed`` in the registry —
       so the task drops off the next ``/live`` poll without us pre-marking it.
-      A PROVIDER-LANE worker is an agent task too, but it has no SDK task to
+      A PROVIDER-LANE worker is an agent task too, but it has no CLI task to
       stop — it runs as its own session under the ProviderAgent supervisor, so
-      it is torn down there instead (checked before the SDK path).
+      it is torn down there instead (checked before the client path).
 
     "Ghost" tasks — ones already terminated by outside forces (idle eviction,
     process death, session teardown) but still parked ``running`` in the
@@ -283,7 +283,7 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
 
     # 1) Monitor shell task — terminate the subprocess directly. Attributed as
     # a user stop so the terminal chip reads "Stopped by user" instead of the
-    # blank bubble an unattributed shell kill used to produce; an attribution
+    # blank bubble an unattributed shell kill would produce; an attribution
     # already on the row (a monitor timeout, say) still wins.
     from app.mcp.builtin_tools import stop_background_shell_task
     from app.core.task_registry import USER_STOP_REASON, USER_STOP_SUMMARY
@@ -304,7 +304,7 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
 
     # A registry shell task with no tracked subprocess is a ghost (the shell
     # already exited without the registry being told). Reap it rather than
-    # mis-routing a shell id to the SDK's agent-task stop (which would error).
+    # mis-routing a shell id to the client's agent-task stop (which would error).
     if existing is not None and existing.get("kind") == "shell":
         _reap_task_killed(session_id, task_id)
         return {
@@ -314,7 +314,7 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
             "detail": "reaped (shell gone)",
         }
 
-    # 2) ProviderAgent worker — a provider-lane subagent has no SDK task to
+    # 2) ProviderAgent worker — a provider-lane subagent has no CLI task to
     # stop: it is its OWN session, tracked by the supervisor and keyed by
     # (parent session id, worker session id). Its task id IS the worker session
     # id (``dispatch_worker`` sets both), so the registry key the strip's "x"
@@ -334,9 +334,9 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
         )
         return {"ok": True, "kind": "agent", "task_id": task_id}
 
-    # 3) Background sub-agent — ask the SDK to stop it.
+    # 3) Background sub-agent — ask the pooled client to stop it.
     state = get_session_pool().peek(session_id)
-    # Fluid/harness adapters expose no SDK client at all, so the SDK stop_task
+    # Fluid/harness adapters expose no ``sdk_client``, so the client stop_task
     # path is simply unavailable there. Treat that exactly like a torn-down
     # client (reap the registry row / report honestly) instead of letting the
     # missing attribute blow up the stop request.
@@ -347,7 +347,7 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
             f"[session={session_id} task={task_id}]"
         )
     if not state or not state.is_connected or not client:
-        # Outside forces tore down the live session / SDK client, but the task
+        # Outside forces tore down the live session / client, but the task
         # can still be parked "running" in the registry — a ghost the UI shows
         # forever with no client left to stop it. Reap it so the close button
         # works: mark it killed (drops off the next /live poll) and report
@@ -379,12 +379,11 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
         await client.stop_task(task_id)
         logger.debug(f"Requested SDK stop_task for {task_id} in session {session_id}")
         # Record the terminal transition on the registry row OURSELVES rather than
-        # waiting for a CLI "stopped" frame to flow back through the streaming loop.
-        # The historical design relied on that frame reaching
-        # ``query_engine._record_task_message`` — but a parked session (its turn's
-        # receive_response already returned) has no in-stream reader, and the
-        # scoped ``stop_task`` may emit no terminal frame at all, so the row stayed
-        # ``running`` forever (frozen "phantom running" agent until restart). This
+        # waiting for a CLI "stopped" frame to flow back through the streaming loop
+        # to ``query_engine._record_task_message``: a parked session (its turn's
+        # receive_events already returned) has no in-stream reader, and the
+        # scoped ``stop_task`` may emit no terminal frame at all, so the row would
+        # stay ``running`` forever (a "phantom running" agent until restart). This
         # mirrors the shell / ghost-reap branches above, which already mark the
         # registry immediately. Idempotent: any later CLI ``stopped`` frame that
         # DOES arrive re-completes to the same terminal state as a harmless no-op,
@@ -397,16 +396,14 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
             f"Failed to stop task {task_id} in session {session_id}: {e}",
             exc_info=True,
         )
-        # A FAILED stop still has to leave a terminal row (087d3809 F2). The
+        # A FAILED stop still has to leave a terminal row. The
         # control request is the only thing that failed here — the caller
         # (Stop, an interrupt, the strip's "x") is tearing the session's work
         # down either way, and a client that refused ``stop_task`` is usually
         # a client that is already being evicted. Leaving the row ``running``
-        # is what produced the audited corpse: no terminal SubagentEvent, no
-        # notification, ``terminal_notified=false``, and a model that kept
-        # reporting the dead worker as its outstanding delegated task for
-        # four and a half minutes. The shell branch has always marked its row
-        # unconditionally; this removes the asymmetry.
+        # would leave no terminal SubagentEvent, no notification, and a model
+        # that keeps reporting the dead worker as its outstanding delegated
+        # task. The shell branch marks its row unconditionally too.
         _mark_task_stopped_by_user(session_id, task_id, source=source)
         return {"ok": False, "kind": "agent", "task_id": task_id, "detail": str(e)}
 
@@ -414,10 +411,10 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
 async def enter_user_stop(session_id: str) -> dict:
     """Quiesce a session the user just stopped — everything BESIDES killing tasks.
 
-    STOP SEMANTICS (round 7). Stop means: everything this session is doing ends
+    STOP SEMANTICS. Stop means: everything this session is doing ends
     now, and nothing restarts it until the user sends a new message. Killing the
     background tasks (``stop_all_background_tasks``, which calls this first) is
-    only half of that — a stopped session still had four ways to come back to
+    only half of that — a stopped session has four other ways to come back to
     life on its own, and all four are closed here:
 
     1. **The session-wide stop latch.** ``task_registry.mark_user_stopped``
@@ -533,7 +530,7 @@ def _keep_monitor_shells_on_stop() -> bool:
 async def _settle_stopped_task(session_id: str, task_id: str, *, source: str = "user_stop") -> Optional[dict]:
     """Guarantee ONE terminal row + ONE terminal frame for a task Stop killed.
 
-    Two guarantees, both of which were missing somewhere (087d3809 F2):
+    Two guarantees:
 
     * the registry row is terminal — a task whose stop path bailed out before
       marking it (a raising ``stop_task``, a ProviderAgent teardown that took an
@@ -541,9 +538,9 @@ async def _settle_stopped_task(session_id: str, task_id: str, *, source: str = "
       nothing sits ``running`` forever;
     * the terminal SURFACE fires — ``force_terminal_surface`` drives the same
       chip + durable row every other terminal takes, bypassing the
-      ``is_own_background_task`` / ``notify=False`` gates that silenced
-      interrupt-killed agent workers while their sibling shells got a proper
-      ``cancelled`` event. Bounded by the one-shot ``mark_terminal_notified``
+      ``is_own_background_task`` / ``notify=False`` gates that would otherwise
+      silence interrupt-killed agent workers while their sibling shells get a
+      proper ``cancelled`` event. Bounded by the one-shot ``mark_terminal_notified``
       latch, so a task that already surfaced is left alone.
 
     Returns the wire record of the task (for the engine-retirement frame), or
@@ -580,20 +577,18 @@ async def stop_all_background_tasks(
 
     Used by the Stop path: after the main turn is interrupted, iterate the
     running-tasks view and drive each through the existing per-task
-    ``stop_session_task`` (sub-agents via the SDK client's ``stop_task``,
+    ``stop_session_task`` (sub-agents via the pooled client's ``stop_task``,
     ProviderAgent workers — including nested ones, which register under the ROOT
     session id — via the supervisor's ``teardown_worker``, Monitor shells via
     their tracked subprocess). Reuses that path verbatim — no re-implementation
     of client stop logic — so ghost-reaping and idempotency behave identically
     to a single "x" click.
 
-    STOP SEMANTICS (round 7). ``user_stop=True`` is the Stop button, and it now
-    kills ALL of the session's work: sub-agents and their descendants, provider-
-    lane workers, and Monitor shells — serving tasks and CI watchers included.
-    The previous rule spared a healthy Monitor shell ("a dev server the user
-    asked to keep up is not part of the turn"); the user's verdict on living
-    with it was that Stop must mean stop, so that behaviour is now an explicit
-    opt-in (``STOP_KEEPS_MONITOR_SHELLS=true``) that defaults to OFF. Typing
+    STOP SEMANTICS. ``user_stop=True`` is the Stop button, and it kills ALL of
+    the session's work: sub-agents and their descendants, provider-lane
+    workers, and Monitor shells — serving tasks and CI watchers included.
+    Sparing a healthy Monitor shell is an explicit opt-in
+    (``STOP_KEEPS_MONITOR_SHELLS=true``) that defaults to OFF. Typing
     mid-stream still goes through ``interrupt_for_query``, which sets no
     ``stop_background`` bit and never reaches here — a steer is not a Stop.
 
@@ -736,8 +731,7 @@ async def stop_all_background_tasks(
             from app.core import turn_scheduler
 
             # ``wake=False`` by construction: this only tells fluid the ids are
-            # terminal so they stop appearing in every later SessionParked (the
-            # audited session was parked on seven dead ids for a full day). It
+            # terminal so they stop appearing in every later SessionParked. It
             # schedules nothing — a stop the user just asked for stays stopped.
             await turn_scheduler.retire_task_terminals(session_id, frames)
         except Exception:  # noqa: BLE001

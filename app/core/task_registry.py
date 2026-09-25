@@ -219,11 +219,11 @@ class TaskRegistry:
         # ``reset_started_this_turn``). This scopes the in-stream "unpark" stash
         # to the genuine FAST path — a background agent SPAWNED and COMPLETED
         # before the parent's ResultMessage. A terminal notification for a task
-        # NOT in this set is a prior-turn orphan leaking from the SDK's pooled-
-        # client buffer; it must NOT fire a spurious in-stream unpark in this
+        # NOT in this set is a prior-turn orphan leaking from the pooled
+        # adapter's buffer; it must NOT fire a spurious in-stream unpark in this
         # later, unrelated turn. (The slow path — a genuinely in-flight agent that
-        # completes AFTER its spawning turn — is handled by the between-turns
-        # drain pump, which is unaffected by this set.)
+        # completes AFTER its spawning turn — is handled by the idle reader,
+        # which is unaffected by this set.)
         self._started_this_turn: Dict[str, set] = {}
         # session_id -> set of PARENT launch tool_use_ids that the parent issued
         # with run_in_background=true. This is the gate that distinguishes a
@@ -233,7 +233,7 @@ class TaskRegistry:
         #      received its FULL result INLINE as a tool_result during the turn (the
         #      node was completed at query_engine yield "subagent_done"). The SDK
         #      STILL emits an at-rest TaskNotificationMessage for it AFTER the turn's
-        #      receive_response() returns; that notification carries no NEW info and
+        #      receive_events() returns; that notification carries no NEW info and
         #      must not wake the model to say "nothing to act on."
         #   2. A grandchild background task launched BY a sub-agent: the parent never
         #      processed that launch tool_use, so its tool_use_id is absent here.
@@ -246,15 +246,15 @@ class TaskRegistry:
         self._background_launches: Dict[str, set] = {}
         # session_id -> {task_id, ...} for SDK-managed BACKGROUND tasks that PARK
         # the parent and unpark via a terminal TaskNotificationMessage on the
-        # pooled SDK client — i.e. backgrounded shell commands (Bash/PowerShell
+        # pooled adapter — i.e. backgrounded shell commands (Bash/PowerShell
         # ``run_in_background``, SDK ``task_type=="local_bash"``). These register
         # in the registry as ``kind="shell"`` (for the SHELL badge), SAME as the
         # app's own Monitor-tool background shells (see ``mcp/builtin_tools.py``) —
         # but ONLY the SDK ones depend on the pooled client's lifecycle: evicting
         # the session would kill the subprocess and drop the completion
         # notification the parent is parked awaiting. This set lets the pool busy
-        # signal + the unpark drain pump tell the two apart (Monitor shells are
-        # app-managed, independent of the SDK client, and must NOT pin a session).
+        # signal + the idle reader tell the two apart (Monitor shells are
+        # app-managed, independent of the adapter, and must NOT pin a session).
         # Populated from ``query_engine._record_task_message`` on the shell's
         # TaskStartedMessage; cleared with the session (status is checked live, so
         # a completed task in the set is simply ignored — no per-completion prune).
@@ -264,18 +264,14 @@ class TaskRegistry:
         # run_in_background=true. Kept SEPARATE from ``_background_launches``
         # on purpose — that set means "the PARENT's own backgrounded work" and
         # feeds pool pinning + chip scoping (``is_own_background_task``), which
-        # a grandchild must never do. This set exists ONLY so the unpark drain
-        # pump can recognize the grandchild's terminal notification as a real
-        # wake (2026-07-10 incident: a Monitor-pattern task launched from a
-        # subagent sidechain completed between turns, both unpark predicates
-        # missed it — decision=suppress-foreground — and the subagent parked
-        # awaiting it was stranded forever; the #470 top-level-only gate on
-        # ``mark_background_launch`` is what kept both predicates false).
+        # a grandchild must never do. This set exists ONLY so the idle reader
+        # can recognize the grandchild's terminal notification as a real wake;
+        # without it a sub-agent parked awaiting that task would never resume.
         self._subagent_background_launches: Dict[str, set] = {}
         # session_id -> {task_id, ...} for background tasks whose launch was
         # recorded in ``_subagent_background_launches`` (armed at the SDK
         # TaskStarted, mirroring ``_sdk_background_tasks``). Consumed ONLY by
-        # the unpark gates (drain pump + in-stream latch) — never by pool
+        # the unpark gates (idle reader + in-stream latch) — never by pool
         # pinning (the launching sub-agent's own kind=="agent" running record
         # already pins) or chip eligibility. Cleared with the session.
         self._subagent_background_tasks: Dict[str, set] = {}
@@ -291,7 +287,7 @@ class TaskRegistry:
         # session_id -> {task_id -> {"task": <wire dict>, "recorded_at": <epoch>}}
         # for tasks that reached a FAILURE terminal status ("error"/"killed").
         # This is the retention store that fixes the "background task vanished
-        # from the UI with no failed indication" bug: when the pooled SDK client
+        # from the UI with no failed indication" bug: when the pooled adapter
         # dies, force-cleanup reaps the session's running tasks to "killed"
         # (``complete_task``) and then immediately ``clear_session`` wipes
         # ``_tasks`` — so the very next ``/live`` poll saw no tasks and the
@@ -405,7 +401,7 @@ class TaskRegistry:
 
         Distinguishes SDK-backgrounded shells (which DO pin a parked session and
         DO drive an unpark) from the app's Monitor-tool background shells (which
-        share ``kind="shell"`` but are independent of the pooled SDK client and
+        share ``kind="shell"`` but are independent of the pooled adapter and
         must NOT pin). Defensive: a missing id is a no-op.
         """
         if not session_id or not task_id:
@@ -440,13 +436,11 @@ class TaskRegistry:
 
         The routine (non-force) eviction cleanup consults this before tearing
         down a session's registry state. A Monitor shell is an OS process
-        independent of the pooled SDK client, and its completion watcher wakes
+        independent of the pooled adapter, and its completion watcher wakes
         the parked parent through a durable turn — but only while the registry
-        still holds the task's OWN-lane mark. Clearing the bucket mid-run both
-        suppressed that wake (the terminal frame failed
-        ``is_own_background_task``) and stranded the task "running" forever
-        (live 2026-08-29, task a0270e18: a CI-watch loop killed by an idle
-        eviction 3.5 minutes in, its chip stuck running for 45+ minutes).
+        still holds the task's OWN-lane mark. Clearing the bucket mid-run would
+        both suppress that wake (the terminal frame fails
+        ``is_own_background_task``) and strand the task "running" forever.
         Defensive: a missing ``session_id`` returns ``False``.
         """
         if not session_id:
@@ -480,12 +474,11 @@ class TaskRegistry:
         """Record that a SUB-AGENT sidechain launched ``tool_use_id`` with
         run_in_background=true.
 
-        The subagent-lane sibling of ``mark_background_launch``: the #470 gate
-        deliberately keeps grandchild launches out of ``_background_launches``
-        (they must not pin the pool or chip as the parent's own work), but that
-        also made the drain pump drop the grandchild's terminal notification as
-        ``suppress-foreground`` — stranding a sub-agent parked awaiting it
-        (2026-07-10 incident). Recording the launch here lets
+        The subagent-lane sibling of ``mark_background_launch``: grandchild
+        launches stay out of ``_background_launches`` (they must not pin the
+        pool or chip as the parent's own work), so without this the idle reader
+        would suppress the grandchild's terminal notification and strand a
+        sub-agent parked awaiting it. Recording the launch here lets
         ``_record_task_message`` arm the task_id-keyed marker below, which the
         unpark gates alone consume. Defensive: missing ids are a no-op.
         """
@@ -504,7 +497,7 @@ class TaskRegistry:
         sidechain (its TaskStarted's tool_use_id was in
         ``_subagent_background_launches``).
 
-        Consumed ONLY by the unpark gates (drain pump foreground gate + the
+        Consumed ONLY by the unpark gates (idle reader foreground gate + the
         in-stream latch) so the grandchild's terminal notification wakes the
         parent instead of being suppressed. Deliberately NOT part of
         ``is_own_background_task`` / ``get_active_background_work``: no pool
@@ -862,7 +855,8 @@ class TaskRegistry:
     def reset_started_this_turn(self, session_id: str) -> None:
         """Clear the "started this turn" set for a session.
 
-        Called at the START of every turn (right after ``stop_drain_pump``) so the
+        Called at the start of every turn (``SessionRuntime``, alongside
+        ``stop_idle_reader``) so the
         in-stream unpark stash only ever fires for a background agent that both
         started AND finished within the turn currently streaming. Defensive: a
         missing ``session_id`` is a no-op.
@@ -913,7 +907,7 @@ class TaskRegistry:
     def was_background_launch(self, session_id: str, tool_use_id: str) -> bool:
         """True iff the parent launched ``tool_use_id`` with run_in_background=true.
 
-        The unpark gate (both the in-stream stash and the between-turns drain pump)
+        The unpark gate (both the in-stream stash and the idle reader)
         uses this to suppress the spurious at-rest follow-up turn for synchronous
         sub-agents (result already inline) and sub-agent-launched grandchildren
         (never recorded → False).
@@ -947,12 +941,11 @@ class TaskRegistry:
         The only surgical way to undo an entry in ``_background_launches`` /
         ``_subagent_background_launches``. Both sets are deliberately CUMULATIVE
         — never reset per turn, cleared only by ``clear_session`` — and the
-        ``_finalize`` park gate ORs the first of them
-        (``app/core/session_runtime.py:674``), so any id left behind parks the
+        park gate in ``SessionRuntime._finalize`` ORs the first of them, so
+        any id left behind parks the
         turn that dropped it AND every later turn.
 
-        That is exactly the trap ProviderAgent worker teardown has to avoid
-        (multi-provider phase 3, plan §2 C.4): the worker is gone, but its
+        That is exactly the trap worker teardown has to avoid: the worker is gone, but its
         launch id would keep the session parked forever. Discarding ONLY the
         torn-down worker's own id leaves ordinary CLI-native subagent launches
         untouched, so their parking — a deliberate feature — is unchanged.
@@ -1136,8 +1129,8 @@ class TaskRegistry:
 
         ``notify=False`` suppresses that chip for THIS transition only. Its one
         caller is ProviderAgent worker teardown
-        (:mod:`app.core.provider_agent_supervisor`), where fan-out is uncapped
-        by ruling P12: a wide turn ending would otherwise fire one durable chip
+        (:mod:`app.core.provider_agent_supervisor`), where fan-out is uncapped:
+        a wide turn ending would otherwise fire one durable chip
         per killed worker in a single burst. Teardown emits ONE coalesced note
         instead. The terminal record, the retention snapshot and the durable
         mirror are all still written — only the chip is skipped, and the
@@ -1181,7 +1174,7 @@ class TaskRegistry:
                     "terminal notification callback failed", exc_info=True
                 )
 
-        # Durable mirror AFTER the guaranteed-notification block (the #514
+        # Durable mirror AFTER the guaranteed-notification block (the terminal
         # callback point) so the snapshot carries the final terminal_notified
         # latch state alongside the terminal status.
         self._persist_task_state(session_id, task_id)
@@ -1295,16 +1288,16 @@ class TaskRegistry:
         evicts/disconnects a PARKED session out from under a live sub-agent.
 
         A parked session looks idle to every other signal: its parent turn's
-        ``receive_response()`` already returned at the parent ResultMessage, so
+        ``receive_events()`` already returned at the parent ResultMessage, so
         ``is_streaming`` is False and there are no team members — yet a backgrounded
         sub-agent is still executing and its terminal TaskNotificationMessage has
-        not yet arrived (it is caught by the between-turns drain pump). Evicting the
-        pooled SDK client now would kill the sub-agent mid-run, strand its live-store
+        not yet arrived (the idle reader catches it). Evicting the
+        pooled adapter now would kill the sub-agent mid-run, strand its live-store
         node "running", and wipe the unpark gate so the parent never resumes. Gating
         eviction on this predicate closes that hole.
 
         Only ``kind=="agent"`` counts: shell subprocesses (the Monitor tool family)
-        are independent of the pooled SDK client's lifecycle and must not pin a
+        are independent of the pooled adapter's lifecycle and must not pin a
         session in the pool.
 
         Defensive: a missing ``session_id`` returns ``False``.
@@ -1325,10 +1318,9 @@ class TaskRegistry:
         commands (``kind=="shell"`` AND in ``_sdk_background_tasks`` — i.e. a
         ``local_bash`` ``run_in_background`` Bash/PowerShell command, NOT an
         app-managed Monitor shell). Both flavours are in-flight work whose terminal
-        TaskNotificationMessage lands LATER on the pooled SDK client and which the
-        parent turn has parked awaiting — so both must pin the session in the pool
-        and warrant a between-turns unpark drain pump. The session pool busy signal
-        and the pump-start guard share this view.
+        TaskNotificationMessage lands LATER on the pooled adapter and which the
+        parent turn has parked awaiting — so both must pin the session in the pool.
+        The session pool busy signal and ``turn_finalize`` read this view.
         """
         bucket = self._tasks.get(session_id)
         if not bucket:
@@ -1348,11 +1340,9 @@ class TaskRegistry:
         The session-pool busy predicate (``_has_background_work``) honors this so it
         never evicts/disconnects a PARKED session out from under in-flight work —
         whether that work is a sub-agent (``kind=="agent"``) or a backgrounded shell
-        command (``local_bash``, tracked in ``_sdk_background_tasks``). The original
-        ``has_active_background_agent`` covered only sub-agents, which let a session
-        parked on a backgrounded Bash/PowerShell command get idle-evicted mid-run —
-        killing the pooled SDK client that owns the shell's completion notification,
-        so the parent never unparked. See ``get_active_background_work``.
+        command (``local_bash``, tracked in ``_sdk_background_tasks``); evicting
+        either would kill the pooled adapter that owns the completion notification,
+        so the parent would never unpark. See ``get_active_background_work``.
         """
         return bool(self.get_active_background_work(session_id))
 

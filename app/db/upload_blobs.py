@@ -1,4 +1,4 @@
-"""The ``upload_blobs`` table — DB-mediated cross-install upload delivery (D8).
+"""The ``upload_blobs`` table — DB-mediated cross-install upload delivery.
 
 Modeled byte-for-byte on the ``note_attachments`` pattern (see
 ``app/db/notes.py``): the bytes in shared Postgres are the source of truth and
@@ -136,7 +136,7 @@ def delete_blob(blob_id: str) -> bool:
 
 
 def purge_old(older_than_days: int = 7) -> int:
-    """Delete blob rows older than ``older_than_days`` (D8's required sweeper —
+    """Delete blob rows older than ``older_than_days`` (the required sweeper —
     the bytes column means this table must never grow unboundedly). Returns the
     number of rows removed."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()

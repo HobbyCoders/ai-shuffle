@@ -441,8 +441,8 @@ async def test_connector(connector_id: str) -> Dict:
 # ---------------------------------------------------------------------------
 
 # Chat connectors where anyone who finds the bot can message it. Each must have
-# at least one of these allowlist fields filled before it may start (owner
-# decision D14). Discord and Slack only filter by server/channel, so a channel
+# at least one of these allowlist fields filled before it may start. Discord
+# and Slack only filter by server/channel, so a channel
 # allowlist counts; LINE's group list does not cover direct messages, so only
 # its user list counts.
 SENDER_ALLOWLIST_KEYS: Dict[str, tuple] = {

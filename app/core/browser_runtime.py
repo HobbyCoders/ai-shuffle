@@ -35,8 +35,8 @@ TOOL_NAMES = frozenset({
 
 # Tools the startup handshake itself depends on. A build that predates the
 # shared-workspace runtime exposes neither, so the handshake would otherwise
-# fail with an undiagnosable parse error (audit R7: a stale dist shipped a 503
-# reading only "startup failed (KeyError)").
+# fail with an undiagnosable parse error (a 503 reading only "startup failed
+# (KeyError)").
 HANDSHAKE_TOOLS = ("browser_status", "browser_tabs")
 
 STALE_BUILD_DETAIL = (
@@ -49,8 +49,7 @@ STALE_BUILD_DETAIL = (
 # Wall clock for one agent-facing browser tool call, measured at this host-call
 # boundary. A page that stops answering (a modal dialog, a hung renderer, a
 # navigation that never commits) must return an error to the model instead of
-# holding the turn open — audit R7 saw a browser_eval + four browser_act calls
-# leave a session "running" for three hours. Override with
+# holding the turn open. Override with
 # BROWSER_TOOL_TIMEOUT_SECONDS; the underlying MCP call gets a slightly longer
 # deadline so this boundary is the one that normally fires.
 DEFAULT_CALL_TIMEOUT = 30.0

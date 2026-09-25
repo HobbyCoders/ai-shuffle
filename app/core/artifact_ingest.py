@@ -1,6 +1,6 @@
-"""V2 Q5 — screenshot artifact ingest at the SDK-output pump.
+"""Screenshot artifact ingest for streamed tool results.
 
-The :class:`app.core.turn_recorder.TurnRecorder` taps every yielded pump event.
+The :class:`app.core.turn_recorder.TurnRecorder` taps every yielded stream event.
 When a top-level ``tool_result`` carries a decoded screenshot data URI (the
 Claude-in-Chrome / computer-use image results surfaced by
 ``extract_mcp_image``), the recorder content-addresses the bytes into the

@@ -1,7 +1,7 @@
 """Per-model guidance: the read path, and the commit gate's server-side surface.
 
-This is Phase 2 of the continual harness (fluid's
-``docs/research/anchor-gate-design.md``), wired for an embedding host. Fluid
+This is Phase 2 of the continual harness
+(``fluid/docs/research/anchor-gate-design.md``), wired for an embedding host. Fluid
 splits the loop across two timescales and the app follows that split exactly:
 
 - **Drafting is cheap and in-band.** The ``Synthesizer`` — constructed in

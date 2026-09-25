@@ -1,66 +1,47 @@
-"""Route a ProviderAgent worker's tool approvals to the PARENT session (P3-A3).
+"""Route a worker's tool approvals to the PARENT session.
 
-A ProviderAgent worker (:mod:`app.core.provider_agent`) runs its turn on its OWN
-session. Its ``can_use_tool`` callback is therefore built by
-``query_engine._stream_to_websocket_impl`` closed over the WORKER's session id,
-so without this module a worker's tool-approval prompt would be raised — and
-would have to be answered — on a session nobody is looking at. The worker would
-sit blocked until its 5-minute TTL lapsed and then be denied.
+A Task-dispatched worker (:mod:`app.core.provider_agent`) runs its turn on its
+OWN session, so its ``can_use_tool`` callback (built by
+``query_engine._stream_to_websocket_impl``) is closed over the WORKER's session
+id. Without this module its approval prompt would be raised on a session nobody
+is looking at, and the worker would sit blocked until the TTL denied it.
 
-**The user's decision** (``docs/MULTI_PROVIDER_PHASE3_PLAN.md`` §2 C.3): the
-prompt surfaces on the **parent** session's UI, tagged with the worker's label,
-through the existing ``pending_interactions`` machinery; unanswered prompts fall
-to the existing 5-minute TTL sweeper. One surface to watch. Rejected: per-worker
-approval surfaces (more places to watch, new UI) and auto-deny with a static
-allowlist (workers die on anything unanticipated).
+The rule: the prompt surfaces on the **parent** session's UI, tagged with the
+worker's label, through the existing ``pending_interactions`` machinery;
+unanswered prompts fall to the existing TTL sweeper
+(``permission_handler.PERMISSION_TTL_SECONDS``). One surface to watch.
 
-Why raising on another session's id is legitimate
--------------------------------------------------
-``pending_interactions`` has **no ownership check**. ``answer_interaction``'s
-guard is ``id=%s AND state='pending' AND expires_at >= NOW()`` and nothing else
-(``app/db/interactions.py:82-88``), and cross-device answering is a documented
-feature (``docs/INTERACTION_PERSISTENCE.md``). The table never assumed the
-requester is the session's own CLI, so an in-process caller may raise an
-interaction on any session's behalf.
+Raising on another session's id is legitimate: ``pending_interactions`` has
+**no ownership check** (``interactions.answer_interaction`` guards only on id,
+``pending`` state and expiry), so an in-process caller may raise an interaction
+on any session's behalf.
 
-The two ids, and why concurrent workers cannot cross-resolve
-------------------------------------------------------------
 Correlation uses TWO ids. The waiter blocks on ``pending_interactions.id``; the
-UI only ever sees ``payload["request_id"]``. The answer path re-derives the row
-by scanning ``(session_id, kind, payload.request_id)``
-(``permission_handler.py:554-561``) and then calls ``notify_changed(session_id)``,
-which wakes EVERY waiter registered on that session — each of which re-reads its
-OWN row by interaction id and only resolves on its own state change
-(``interaction_wait.py:164-166``).
+UI only sees ``payload["request_id"]``. The answer path
+(``PermissionHandler._respond_v2``) re-derives the row by scanning
+``(session_id, kind, payload.request_id)`` and calls
+``interaction_wait.notify_changed(session_id)``, which wakes EVERY waiter on
+that session; each re-reads its OWN row and resolves only on its own change. So
+the one invariant with many workers prompting the same parent is that no two
+live prompts on that parent share a ``request_id``. :func:`scoped_request_id`
+guarantees it by namespacing every redirected id by the worker's session id (a
+fresh uuid4). The id ``query_engine`` mints (``perm-<session_id>-<8 hex>``)
+already contains it, so normalization is a no-op there.
 
-So the ONE thing that must hold with many workers prompting the same parent is
-that no two live prompts on that parent share a ``request_id``. Fan-out is
-uncapped (ruling P12), so this is the sharpest edge in the chunk.
-:func:`scoped_request_id` guarantees it: every redirected request id is
-namespaced by the worker's session id, which is a fresh uuid4 per worker. The
-production id minted in ``query_engine`` (``perm-<worker_session_id>-<8 hex>``)
-already contains it, so the normalization is a no-op there and a hard namespace
-for anything else.
+Delivery to the parent's UI has two best-effort legs, because the parent may or
+may not have a live socket:
 
-Delivery to the parent's UI
----------------------------
-Two best-effort legs, because the parent may or may not have a live socket:
-
-1. the parent's own pooled ``callback_refs["broadcast_func"]`` — the parent IS
-   mid-turn (it is blocked in the ProviderAgent MCP tool call), so this is the
-   socket that owns the tab the user is looking at;
+1. the parent's own pooled ``callback_refs["broadcast_func"]`` — the parent is
+   mid-turn (blocked in the Task tool call), so this is the socket that owns
+   the tab the user is looking at;
 2. a user-level fan-out (``sync_engine.broadcast_user_permission``) for every
-   other device, mirroring the AskUserQuestion fan-out
-   (``sync_engine.broadcast_user_question``) that exists for exactly this reason.
+   other device, mirroring ``sync_engine.broadcast_user_question``.
 
 Neither leg is required for correctness: the durable row plus the parent's
 ``interaction.requested`` log event let any device restore the prompt.
 
-Scope
------
-This module touches ONLY the permission path. It deliberately does NOT redirect
-``AskUserQuestion`` (a different handler with its own TTL), and it owns no
-teardown, attribution or circuit-breaker behaviour — those are other chunks.
+Scope: the permission path only. ``AskUserQuestion`` (a different handler with
+its own TTL) is not redirected; ``query_options`` withholds it from workers.
 """
 
 from __future__ import annotations
@@ -82,7 +63,7 @@ logger = logging.getLogger(__name__)
 #: occur in the production ``perm-<uuid>-<hex>`` shape.
 SCOPE_SEPARATOR = "@w:"
 
-#: Returned to the worker's SDK when the redirect itself fails (a vanished
+#: Returned to the worker's engine when the redirect itself fails (a vanished
 #: parent, a DB error raising the row). The tool call must resolve, never hang.
 ROUTE_FAILURE_MESSAGE = (
     "Approval could not be routed to the parent session, so the tool call was "
@@ -202,7 +183,7 @@ def scoped_request_id(route: WorkerApprovalRoute, request_id: Optional[str]) -> 
 
     Idempotent, and a NO-OP on the production id (``query_engine`` mints
     ``perm-<worker_session_id>-<8 hex>``, which already contains the worker id) so
-    the redirected id stays the one the SDK/logs already reference.
+    the redirected id stays the one the engine/logs already reference.
     """
     rid = (request_id or "").strip()
     if not rid:
@@ -224,8 +205,8 @@ def tagged_title(route: WorkerApprovalRoute, title: Optional[str]) -> str:
     ``PermissionRequest.svelte`` renders ``title || display_name || <tool label>``
     as the modal heading (with the tool name on the line beneath), and
     ``PermissionQueue.svelte`` uses the same precedence for queued items — so a
-    label here tags BOTH surfaces with no frontend change. An SDK-provided title
-    is kept, never replaced.
+    label here tags BOTH surfaces with no frontend change. A caller-provided
+    title is kept, never replaced.
     """
     base = (title or "").strip()
     label = route.display_label
@@ -237,7 +218,7 @@ def tagged_description(route: WorkerApprovalRoute, description: Optional[str]) -
 
     Kept short deliberately: the frontend collapses descriptions past 120 chars
     behind a "Show more" toggle, and the tag must be readable without expanding.
-    An SDK-provided description is preserved after a blank line.
+    A caller-provided description is preserved after a blank line.
     """
     binding = route.binding
     tag = f"Requested by ProviderAgent worker “{route.display_label}”"
@@ -340,13 +321,12 @@ async def route_permission(kwargs: Dict[str, Any], request_fn: Callable) -> Any:
     """Raise a permission prompt, on the parent when the caller is a worker.
 
     ``request_fn`` is the caller's own ``permission_handler.request_permission``.
-    A NON-worker session gets the byte-identical legacy call — the SAME function
-    with the SAME kwargs — so this is a pure pass-through for every ordinary
-    session.
+    A NON-worker session gets the unmodified call — the SAME function with the
+    SAME kwargs — so this is a pure pass-through for every ordinary session.
 
     A worker's prompt is redirected and failure-contained: a vanished parent or a
     DB error raising the row resolves the worker's tool call as a DENY rather
-    than propagating into the SDK, where it would surface as a broken turn.
+    than propagating into the engine, where it would surface as a broken turn.
     Deny, TTL expiry and cancellation already resolve through
     ``request_permission``'s own arms.
     """
@@ -394,7 +374,7 @@ def cancel_worker_prompts(worker_session_id: str, parent_session_id: str) -> int
     this module), so killing the worker's session does NOT touch them: the row
     stays pending on a surface the user is still looking at, for a prompt whose
     asker no longer exists, until the 5-minute TTL sweeps it. Worse, the worker's
-    ``await_interaction`` waiter runs in a DETACHED SDK task that only the row
+    ``await_interaction`` waiter runs in a DETACHED task that only the row
     flipping out of ``pending`` can unblock.
 
     Selection is by the ``payload.provider_agent.worker_session_id`` tag rather
