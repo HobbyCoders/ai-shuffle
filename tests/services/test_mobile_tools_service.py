@@ -182,9 +182,12 @@ def test_list_devices_online_state(devices, monkeypatch):
     table["on"] = _device("on")
     table["off"] = _device("off")
     table["new"] = _device("new")
+    # The online rule is "heartbeat within 30 s of now", so take now at test
+    # time; the module-level NOW is minutes old on a long parallel run.
+    now = datetime.now(timezone.utc)
     states = {
-        "on": {"enabled": True, "tools": '["read_screen"]', "heartbeat_at": NOW.isoformat()},
-        "off": {"enabled": True, "tools": "[]", "heartbeat_at": NOW - timedelta(minutes=5)},
+        "on": {"enabled": True, "tools": '["read_screen"]', "heartbeat_at": now.isoformat()},
+        "off": {"enabled": True, "tools": "[]", "heartbeat_at": now - timedelta(minutes=5)},
     }
     monkeypatch.setattr(service.queue, "state", states.get)
     out = {d["device_id"]: d for d in service.list_devices("s")["devices"]}
