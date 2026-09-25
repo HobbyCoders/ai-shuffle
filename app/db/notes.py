@@ -228,7 +228,13 @@ def get_notes_autocomplete(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        query = "SELECT id, title, content, tags, file_path FROM notes WHERE 1=1"
+        # Only the preview's worth of each body crosses the wire: one character
+        # past the 100-char cut is enough to know whether to add "...". Notes
+        # can be large, and this runs on every @-mention keystroke.
+        query = (
+            "SELECT id, title, SUBSTR(content, 1, 101) AS content_head, tags, file_path "
+            "FROM notes WHERE 1=1"
+        )
         params: List[Any] = []
 
         if search:
@@ -244,8 +250,8 @@ def get_notes_autocomplete(
 
         result = []
         for row in rows:
-            content = row["content"] or ""
-            preview = content[:100] + "..." if len(content) > 100 else content
+            head = row["content_head"] or ""
+            preview = head[:100] + "..." if len(head) > 100 else head
             tags = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
             result.append({
                 "id": row["id"],

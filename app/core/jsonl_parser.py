@@ -2912,14 +2912,30 @@ def list_chat_history_sessions(
     if not project_dir.exists():
         return sessions
 
+    # Stat every candidate (cheap), order newest first, and only then parse —
+    # stopping once ``limit`` sessions are collected. Parsing is a full read of
+    # each transcript, so parsing every file just to keep the newest ``limit``
+    # cost O(total history size) per @-mention lookup. The sort key and the
+    # stable sort are exactly the ones the listing was always ordered by, and
+    # the search filter is per-file, so the result is unchanged.
+    candidates = []
     for jsonl_file in project_dir.glob("*.jsonl"):
+        # Skip agent files (subagent logs) and ``<sid>.hooks.jsonl``
+        # sidecars (plugin warnings, not a session of their own).
+        if jsonl_file.name.startswith("agent-") or jsonl_file.name.endswith(".hooks.jsonl"):
+            continue
         try:
-            # Skip agent files (subagent logs) and ``<sid>.hooks.jsonl``
-            # sidecars (plugin warnings, not a session of their own).
-            if jsonl_file.name.startswith("agent-") or jsonl_file.name.endswith(".hooks.jsonl"):
-                continue
-
             stat = jsonl_file.stat()
+        except Exception as e:
+            logger.warning(f"Failed to process {jsonl_file}: {e}")
+            continue
+        candidates.append((datetime.fromtimestamp(stat.st_mtime).isoformat(), stat, jsonl_file))
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    for modified_at, stat, jsonl_file in candidates:
+        if len(sessions) >= limit:
+            break
+        try:
             title, preview, message_count = _get_session_title_and_preview(jsonl_file)
 
             # Apply search filter
@@ -2940,15 +2956,11 @@ def list_chat_history_sessions(
                 "title": title,
                 "preview": preview,
                 "message_count": message_count,
-                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "modified_at": modified_at,
                 "size_bytes": stat.st_size
             })
 
         except Exception as e:
             logger.warning(f"Failed to process {jsonl_file}: {e}")
 
-    # Sort by modified time, newest first
-    sessions.sort(key=lambda x: x["modified_at"], reverse=True)
-
-    # Apply limit
-    return sessions[:limit]
+    return sessions
