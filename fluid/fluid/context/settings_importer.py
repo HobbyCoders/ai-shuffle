@@ -516,6 +516,22 @@ def _project_registration(
     return replace(item, id=f"{item.id}-{suffix}")
 
 
+def _plain_component(value: str) -> bool:
+    """One ordinary path segment: no separators, no ``.``/``..``, no NUL.
+
+    Plugin and marketplace names come from ``enabledPlugins`` keys and are
+    joined onto both the source plugins root and ``~/.fluid/plugins``; a
+    ``../`` in either would read and write outside those roots.
+    """
+    return (
+        bool(value)
+        and value not in (".", "..")
+        and "/" not in value
+        and "\\" not in value
+        and "\0" not in value
+    )
+
+
 def _claude_plugin_root(plugins: Path, name: str, marketplace: str) -> Path | None:
     """Resolve one enabled plugin's on-disk root inside the SOURCE home.
 
@@ -577,6 +593,10 @@ def _claude_plugins(items: list[SettingsImportItem], root: Path, fluid: Path) ->
         name, sep, marketplace = str(ref).partition("@")
         name = name.strip()
         marketplace = (marketplace.strip() if sep else "") or DEFAULT_MARKETPLACE
+        if name and not (_plain_component(name) and _plain_component(marketplace)):
+            items.append(_diagnostic("claude", "plugin", plugins,
+                                     f"enabled plugin {ref!r} is not a plain name@marketplace; rejected"))
+            continue
         source = _claude_plugin_root(plugins, name, marketplace) if name else None
         if source is None:
             items.append(_diagnostic("claude", "plugin", plugins / marketplace / (name or "?"),

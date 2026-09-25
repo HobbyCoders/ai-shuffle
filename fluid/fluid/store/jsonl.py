@@ -736,9 +736,18 @@ class JsonlStore:
                     if not isinstance(rec, dict) or rec.get("t") != "node":
                         continue
                     node = rec.get("node") or {}
-                    hit.last_ts = max(hit.last_ts, float(node.get("ts") or 0.0))
-                    message = node.get("message") or {}
-                    for text in message_texts(message):
+                    message = node.get("message") if isinstance(node, dict) else None
+                    if not isinstance(message, dict):
+                        continue  # parsable but not a node record; the loader skips it too
+                    try:
+                        hit.last_ts = max(hit.last_ts, float(node.get("ts") or 0.0))
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        texts = message_texts(message)
+                    except TypeError:  # content that is not a list of blocks
+                        continue
+                    for text in texts:
                         lowered = text.lower()
                         n_hit = sum(1 for t in terms if t in lowered)
                         if not n_hit:

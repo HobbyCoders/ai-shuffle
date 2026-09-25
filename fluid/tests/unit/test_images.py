@@ -27,7 +27,7 @@ def _png(width: int, height: int, color=(120, 40, 200)) -> str:
 def test_oversized_image_downscaled_to_cap() -> None:
     mt, b64 = condition_image("image/png", _png(3000, 1600))
     assert mt == "image/png"
-    img = PILImage.open(io := __import__("io").BytesIO(base64.b64decode(b64)))
+    img = PILImage.open(__import__("io").BytesIO(base64.b64decode(b64)))
     assert max(img.size) == MAX_IMAGE_EDGE
 
 

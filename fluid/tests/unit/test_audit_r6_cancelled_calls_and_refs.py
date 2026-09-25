@@ -168,7 +168,7 @@ class _MiniLoop:
 
 
 def _bookkeeping_registry():
-    from fluid.tools.inproc import create_inproc_server, tool
+    from fluid.tools.inproc import tool
 
     @tool("Read", "Read a file.",
           {"type": "object", "properties": {"file_path": {"type": "string"}},

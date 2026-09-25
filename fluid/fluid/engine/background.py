@@ -146,7 +146,12 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         recover_host = self.ctx.extra.get("recover_background")
         if recover_host is not None:
             for op in await recover_host(tuple(self._background_pending)):
-                if op.task_id in self._background_pending:
+                # A non-terminal status would be recorded as "terminal" here
+                # but replay as still pending after the next restart.
+                if (
+                    op.task_id in self._background_pending
+                    and op.status in _TERMINAL_TASK_KINDS
+                ):
                     await self._finalize_background_task_unlocked(op)
 
     def _park_pending_ids(self) -> tuple[str, ...]:

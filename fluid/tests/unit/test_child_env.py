@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 
-import pytest
 
 from fluid.engine.delegated import DelegatedLoop
 from fluid.tools.builtins.bash import handler as bash_handler

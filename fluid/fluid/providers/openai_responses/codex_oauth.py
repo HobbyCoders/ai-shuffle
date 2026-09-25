@@ -475,6 +475,11 @@ def save_bundle(bundle: StoredBundle, path: Path | None = None) -> Path:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            if sys.platform != "win32":
+                # The mode argument only applies when the file is created; a
+                # stale temp file left with wider permissions would otherwise
+                # hold the secret world-readable until the rename.
+                os.fchmod(fh.fileno(), 0o600)
             fh.write(json.dumps(asdict(bundle), indent=2))
             fh.flush()
             os.fsync(fh.fileno())
@@ -504,7 +509,10 @@ def load_bundle(path: Path | None = None) -> StoredBundle | None:
     if not isinstance(raw, dict) or not raw.get("access_token"):
         return None
     known = {f for f in StoredBundle.__dataclass_fields__}  # type: ignore[attr-defined]
-    return StoredBundle(**{k: v for k, v in raw.items() if k in known})
+    try:
+        return StoredBundle(**{k: v for k, v in raw.items() if k in known})
+    except TypeError:  # a required field (refresh_token) is missing
+        return None
 
 
 def _needs_refresh(bundle: StoredBundle) -> bool:

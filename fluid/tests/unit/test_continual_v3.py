@@ -10,8 +10,6 @@ out-of-band) — no model-facing call ever writes memories.json directly.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import time
 
 import pytest

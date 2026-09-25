@@ -867,7 +867,7 @@ async def test_interrupted_turn_falls_back_to_provider_estimate() -> None:
 
 @pytest.mark.parametrize("completed_tool", [False, True])
 async def test_interrupted_transport_keeps_partial_output_without_replaying_tools(completed_tool):
-    from fluid.messages import Text, ToolUseBlock
+    from fluid.messages import ToolUseBlock
     calls = []
 
     @tool("touch", "Record a side effect", {"type": "object", "properties": {}})
