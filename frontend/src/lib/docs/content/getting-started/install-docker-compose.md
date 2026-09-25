@@ -54,6 +54,14 @@ services:
     # A burst of short-lived agent processes must not exhaust the process table.
     pids_limit: 8192
 
+    # Optional: lets the code-mode sandbox around agents' Python code start. The
+    # trade: Docker's default seccomp and AppArmor filters are off for the whole
+    # container. See "The code-mode sandbox" in the install guide.
+    # security_opt:
+    #   - seccomp=unconfined
+    #   # Only on hosts that use AppArmor, such as Ubuntu and Debian:
+    #   - apparmor=unconfined
+
     environment:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
@@ -63,6 +71,19 @@ services:
       OWNER_PASSWORD: ${OWNER_PASSWORD:-}
       # Activates your license on the first start (see env.example).
       LICENSE_KEY: ${LICENSE_KEY:-}
+      # Optional: each applies only once uncommented here (a line in .env alone
+      # does not reach the container). The install guide explains each one.
+      # The reverse proxy's address, as AI Shuffle sees it:
+      # TRUSTED_PROXIES: "172.18.0.1"
+      # The code-mode sandbox: auto (the default), required or off:
+      # CODE_MODE_OS_SANDBOX: "auto"
+      # Ranges the built-in browser may open. This list replaces the localhost
+      # default, so keep the first two ranges to still allow localhost:
+      # BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,192.168.1.20/32"
+      # Refuse localhost too (no effect when BROWSER_SSRF_ALLOW is set):
+      # BROWSER_SSRF_ALLOW_LOOPBACK: "false"
+      # Ranges to refuse even if BROWSER_SSRF_ALLOW lists them:
+      # BROWSER_SSRF_BLOCK: "192.168.1.1/32"
 
     # Loopback only by default: the web UI is reachable from this computer.
     # To use it from another device, set BIND_HOST in .env to one address of
@@ -172,6 +193,33 @@ WORKSPACE_DIR=./workspace
 # print yours. Leave 1000 on a single-user machine.
 PUID=1000
 PGID=1000
+
+# --- Advanced: set in compose.yaml, not here ---------------------------------
+
+# Optional: leave them unset for the defaults. A line in this file alone does
+# not reach the container: uncomment the matching example under `environment:` in
+# compose.yaml instead, then run `docker compose up -d`. The install guide
+# explains each one.
+
+# The address of a reverse proxy in another container or on this host (Tailscale
+# Serve included), as AI Shuffle sees it. IPs or ranges, comma-separated.
+# Never list your whole LAN.
+#TRUSTED_PROXIES=172.18.0.1
+
+# The sandbox around agents' Python code: auto (the default), required or off.
+# It needs the security_opt lines in compose.yaml; without them, auto runs
+# the code unsandboxed and says so once in the log.
+#CODE_MODE_OS_SANDBOX=auto
+
+# Address ranges the built-in browser may open. Replaces the localhost default,
+# so keep the first two ranges to still allow localhost.
+#BROWSER_SSRF_ALLOW=127.0.0.0/8,::1/128,192.168.1.20/32
+
+# false refuses localhost too. No effect when BROWSER_SSRF_ALLOW is set.
+#BROWSER_SSRF_ALLOW_LOOPBACK=false
+
+# Ranges the browser refuses even if BROWSER_SSRF_ALLOW lists them.
+#BROWSER_SSRF_BLOCK=192.168.1.1/32
 ```
 
 ## 2. Set your pull token
