@@ -243,6 +243,31 @@ def decrypt_webhook_secret(trigger_config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+def reveal_webhook_secrets(automation: Any) -> Any:
+    """Return a copy of ``automation`` with its webhook secrets decrypted.
+
+    For owner-only API responses: the edit form shows the secret so the
+    owner can sign requests, and ciphertext is useless for that. Covers the
+    legacy ``trigger_config`` and every webhook entry in ``triggers``. A
+    secret that cannot be decrypted is left as stored, so a save round-trips
+    it unchanged instead of rotating it.
+    """
+    if not isinstance(automation, dict):
+        return automation
+    revealed = dict(automation)
+    if revealed.get("trigger_type") == "webhook" and isinstance(revealed.get("trigger_config"), dict):
+        revealed["trigger_config"] = decrypt_webhook_secret(revealed["trigger_config"])
+    triggers = revealed.get("triggers")
+    if isinstance(triggers, list):
+        revealed["triggers"] = [
+            {**trig, "config": decrypt_webhook_secret(trig["config"])}
+            if isinstance(trig, dict) and trig.get("type") == "webhook" and isinstance(trig.get("config"), dict)
+            else trig
+            for trig in triggers
+        ]
+    return revealed
+
+
 # ---------------------------------------------------------------------------
 # CRUD operations
 # ---------------------------------------------------------------------------

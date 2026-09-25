@@ -4,6 +4,8 @@ Tests for automation API endpoints.
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 
 # =============================================================================
 # Helpers
@@ -541,3 +543,121 @@ class TestApprovals:
     def test_deny_not_found(self, authenticated_client):
         response = authenticated_client.post("/api/v1/automations/approvals/nonexistent/deny")
         assert response.status_code == 404
+
+
+# =============================================================================
+# Webhook secret exposure
+# =============================================================================
+
+
+@pytest.fixture
+def enc_prefix_encryption():
+    """Encryption that marks ciphertext with the real ``enc:`` prefix, so
+    ``encryption.is_encrypted`` recognises it (``mock_encryption`` does not)."""
+    with patch("app.core.encryption.encrypt_value", side_effect=lambda v: f"enc:{v[::-1]}"), \
+         patch("app.core.encryption.decrypt_value", side_effect=lambda v: v[len("enc:"):][::-1]), \
+         patch("app.core.encryption.is_encryption_ready", return_value=True):
+        yield
+
+
+SECRET = "plain-webhook-secret"
+CIPHERTEXT = f"enc:{SECRET[::-1]}"
+
+
+def _create_webhook_automation(client):
+    profile_id = _create_profile(client)
+    resp = client.post(
+        "/api/v1/automations",
+        json={
+            "name": "Signed Hook",
+            "triggers": [
+                {"type": "webhook", "config": {"secret": SECRET}},
+                {"type": "cron", "config": {"expression": "0 9 * * *"}},
+            ],
+            "prompt": "test",
+            "profile_id": profile_id,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def _secrets_in(automation):
+    return automation["trigger_config"].get("secret"), [
+        t["config"].get("secret") for t in automation["triggers"] if t["type"] == "webhook"
+    ]
+
+
+class TestWebhookSecretExposure:
+    def test_stored_encrypted(self, authenticated_client, enc_prefix_encryption):
+        from app.db import database
+        aid = _create_webhook_automation(authenticated_client)["id"]
+        assert _secrets_in(database.get_automation(aid)) == (CIPHERTEXT, [CIPHERTEXT])
+
+    def test_owner_get_returns_plaintext(self, authenticated_client, enc_prefix_encryption):
+        aid = _create_webhook_automation(authenticated_client)["id"]
+        resp = authenticated_client.get(f"/api/v1/automations/{aid}")
+        assert resp.status_code == 200
+        assert _secrets_in(resp.json()) == (SECRET, [SECRET])
+        assert "enc:" not in resp.text
+
+    def test_every_owner_response_agrees_with_get(self, authenticated_client, enc_prefix_encryption):
+        """The edit form is filled from the list, so list, create, update,
+        enable and disable all return the same plaintext as GET."""
+        created = _create_webhook_automation(authenticated_client)
+        aid = created["id"]
+        assert _secrets_in(created) == (SECRET, [SECRET])
+
+        listed = authenticated_client.get("/api/v1/automations").json()
+        assert [_secrets_in(a) for a in listed] == [(SECRET, [SECRET])]
+
+        with patch("app.core.automation_manager.automation_manager.schedule_automation", new_callable=AsyncMock), \
+             patch("app.core.automation_manager.automation_manager.unschedule_automation", new_callable=AsyncMock):
+            for action in ("enable", "disable"):
+                resp = authenticated_client.post(f"/api/v1/automations/{aid}/{action}")
+                assert resp.status_code == 200
+                assert _secrets_in(resp.json()) == (SECRET, [SECRET])
+
+    def test_saving_the_form_keeps_the_same_secret(self, authenticated_client, enc_prefix_encryption):
+        """Echoing the plaintext back on save re-encrypts it; it is not rotated."""
+        from app.db import database
+        automation = _create_webhook_automation(authenticated_client)
+        aid = automation["id"]
+        resp = authenticated_client.patch(
+            f"/api/v1/automations/{aid}", json={"triggers": automation["triggers"]}
+        )
+        assert resp.status_code == 200
+        assert _secrets_in(resp.json()) == (SECRET, [SECRET])
+        assert _secrets_in(database.get_automation(aid)) == (CIPHERTEXT, [CIPHERTEXT])
+
+    def test_runs_never_carry_the_secret(self, authenticated_client, enc_prefix_encryption):
+        from app.db import database
+        aid = _create_webhook_automation(authenticated_client)["id"]
+        database.create_automation_run(
+            "run-secret-check", aid, trigger_data={"trigger": "webhook", "payload": {"a": 1}}
+        )
+        for url in (f"/api/v1/automations/{aid}/runs", f"/api/v1/automations/{aid}/runs/run-secret-check"):
+            resp = authenticated_client.get(url)
+            assert resp.status_code == 200
+            assert SECRET not in resp.text and CIPHERTEXT not in resp.text
+
+    def test_api_key_caller_is_refused(self, client, enc_prefix_encryption):
+        from app.api.auth import hash_api_key
+        from app.db import database
+        _create_profile(client)
+        database.create_automation(
+            automation_id="auto-keyed",
+            name="Keyed",
+            trigger_type="webhook",
+            trigger_config={"secret": CIPHERTEXT},
+            triggers=[{"type": "webhook", "config": {"secret": CIPHERTEXT}}],
+            profile_id="test-profile",
+            prompt="test",
+        )
+        api_key = "aih_test_key_for_automation_secrets"
+        database.create_api_user(user_id="u-auto", name="Bot", api_key_hash=hash_api_key(api_key))
+        headers = {"Authorization": f"Bearer {api_key}"}
+        for url in ("/api/v1/automations", "/api/v1/automations/auto-keyed"):
+            resp = client.get(url, headers=headers)
+            assert resp.status_code == 403
+            assert SECRET not in resp.text and CIPHERTEXT not in resp.text

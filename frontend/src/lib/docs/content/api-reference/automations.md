@@ -106,7 +106,7 @@ curl -X POST http://localhost:8000/api/v1/automations \
 }
 ```
 
-A webhook trigger generates a secret when you omit one. See the `/trigger` endpoint below for how to sign requests.
+A webhook trigger generates a secret when you omit one. The secret is stored encrypted, and the automation responses (all owner-only) return it in plaintext so you can sign with it. Run records never include it. See the `/trigger` endpoint below for how to sign requests.
 
 **Connector Event:**
 ```json

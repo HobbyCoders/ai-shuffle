@@ -19,7 +19,7 @@ An automation consists of:
 - An optional **approval workflow** for human-in-the-loop oversight
 - **Output configuration** that routes results to a connector, webhook, session, or nowhere
 
-Automations are owner-only. All CRUD operations require the owner's sign-in.
+Automations are owner-only. Every automation endpoint, including the webhook trigger, requires the owner's sign-in.
 
 ## Trigger Types
 
@@ -69,7 +69,7 @@ This example runs every 5 minutes.
 
 ### Webhook
 
-Triggered by an HTTP POST request. The automation generates a secret when you create it (unless you set one). Sign each request with it: compute the HMAC-SHA256 of the JSON body, keyed by the secret, and send it as `X-Webhook-Signature: sha256=<hex digest>`. The body is signed with its keys sorted and no whitespace, as `json.dumps(body, separators=(',', ':'), sort_keys=True)` produces in Python. A wrong signature is refused with 403. Without the header, the call counts as a manual trigger and no payload reaches the prompt.
+Triggered by a POST to `/api/v1/automations/{automation_id}/trigger`. That endpoint needs owner access (an owner token; API-user keys get 403) as well as the signature, so this is not an open public webhook. The automation generates a secret when you create it (unless you set one). It is stored encrypted; the edit form and the owner-only automation responses show it in plaintext. Sign each request with it: compute the HMAC-SHA256 of the JSON body, keyed by the secret, and send it as `X-Webhook-Signature: sha256=<hex digest>`. The body is signed with its keys sorted and no whitespace, as `json.dumps(body, separators=(',', ':'), sort_keys=True)` produces in Python. A wrong signature is refused with 403. Without the header, the call counts as a manual trigger and no payload reaches the prompt.
 
 **trigger_config:**
 

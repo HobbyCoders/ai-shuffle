@@ -16,6 +16,7 @@ from app.core.models import (
     AutomationTestResult, VALID_AUTOMATION_TRIGGER_TYPES,
 )
 from app.api.auth import require_admin
+from app.core.automation_service import reveal_webhook_secrets
 from app.db import database
 from app.db.async_database import run_sync
 
@@ -49,8 +50,14 @@ async def _with_notices(automation):
 
 @router.get("", response_model=List[Automation])
 async def list_automations(token: str = Depends(require_admin)):
-    """List all automations."""
-    return await run_sync(database.get_all_automations)
+    """List all automations.
+
+    Owner-only, like every route here, so webhook secrets come back in
+    plaintext: the edit form is filled from this list and must show a secret
+    the owner can sign with. Run records never carry secrets.
+    """
+    automations = await run_sync(database.get_all_automations)
+    return [reveal_webhook_secrets(a) for a in automations]
 
 
 @router.post("", response_model=Automation, status_code=status.HTTP_201_CREATED)
@@ -97,7 +104,7 @@ async def create_automation_endpoint(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    return await _with_notices(created)
+    return await _with_notices(reveal_webhook_secrets(created))
 
 
 @router.get("/trigger-types")
@@ -169,7 +176,7 @@ async def get_automation(automation_id: str, token: str = Depends(require_admin)
     automation = await run_sync(database.get_automation, automation_id)
     if not automation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
-    return automation
+    return reveal_webhook_secrets(automation)
 
 
 @router.patch("/{automation_id}", response_model=Automation)
@@ -200,7 +207,7 @@ async def update_automation_endpoint(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
-    return await _with_notices(result)
+    return await _with_notices(reveal_webhook_secrets(result))
 
 
 @router.delete("/{automation_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -245,7 +252,7 @@ async def enable_automation(automation_id: str, token: str = Depends(require_adm
         await automation_manager.schedule_automation(automation_id)
         automation = await run_sync(database.get_automation, automation_id)
 
-    return automation
+    return reveal_webhook_secrets(automation)
 
 
 @router.post("/{automation_id}/disable", response_model=Automation)
@@ -265,7 +272,7 @@ async def disable_automation(automation_id: str, token: str = Depends(require_ad
         database.update_automation(automation_id, is_enabled=False, status="idle")
         return database.get_automation(automation_id)
 
-    return await run_sync(_disable)
+    return reveal_webhook_secrets(await run_sync(_disable))
 
 
 @router.post("/{automation_id}/trigger")
