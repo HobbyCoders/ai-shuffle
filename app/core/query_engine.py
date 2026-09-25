@@ -1220,6 +1220,9 @@ async def stream_query(
         # orphan the session.
         sdk_link_persisted = False
         interrupted = False
+        # Set when the turn dies mid-stream; the `error` frame is then the
+        # terminal frame and no `done` follows (same as the WS path).
+        crashed = False
     except BaseException:
         state.is_streaming = False
         state.streaming_started_at = None
@@ -1457,6 +1460,7 @@ async def stream_query(
         log_captured_cli_stderr(session_id, state.cli_stderr_lines, context="rest-stream mid-stream")
         # Mark client as disconnected on error
         state.is_connected = False
+        crashed = True
         yield {"type": "error", "message": str(actual)}
 
     finally:
@@ -1525,11 +1529,11 @@ async def stream_query(
     )
 
     # Yield terminal event. CancelledError path already yielded 'interrupted'
-    # at the top of the except block; only yield here for an adapter interrupt (no
-    # CancelledError) or normal completion.
+    # at the top of the except block, and a crash already yielded 'error'; only
+    # yield here for an adapter interrupt (no CancelledError) or normal completion.
     if sdk_interrupted:
         yield {"type": "interrupted", "message": "Query was interrupted"}
-    elif not interrupted:
+    elif not interrupted and not crashed:
         yield {
             "type": "done",
             "session_id": session_id,
