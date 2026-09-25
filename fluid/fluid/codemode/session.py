@@ -130,6 +130,58 @@ def _run_python_desc(stdout_cap: int = KernelConfig.stdout_cap) -> str:
         "recover it from `_refs[N]`) rather than re-running the tool."
     )
 
+# ── the permission prompt for a cell ──
+# Ask mode prompts for a cell only while the kernel runs unsandboxed (see
+# ``CodeModeSession.run_python_risk``). The host renders these instead of the
+# raw tool name and a JSON-escaped, 100-character cut of the input.
+RUN_PYTHON_TITLE = "Run Python code"
+RUN_PYTHON_UNSANDBOXED_REASON = (
+    "The code sandbox is not active on this host, so each Python cell asks "
+    "first: it would run with the app's own file and network access. Review "
+    "the code before approving; a tool the cell calls may ask again."
+)
+PROMPT_PREVIEW_LINES = 20
+PROMPT_PREVIEW_CHARS = 1500
+
+
+def code_preview(
+    code: str, *, max_lines: int = PROMPT_PREVIEW_LINES, max_chars: int = PROMPT_PREVIEW_CHARS,
+) -> str:
+    """The first ``max_lines`` lines / ``max_chars`` characters of ``code`` as
+    plain text, with a closing note saying how much is not shown."""
+    text = code.rstrip()
+    lines = text.splitlines()
+    shown = "\n".join(lines[:max_lines])
+    cut_chars = len(shown) > max_chars
+    if cut_chars:
+        shown = shown[:max_chars].rstrip()
+    hidden_lines = len(lines) - shown.count("\n") - 1
+    if hidden_lines > 0:
+        noun = "line" if hidden_lines == 1 else "lines"
+        shown += f"\n… ({hidden_lines} more {noun} not shown)"
+    elif cut_chars:
+        shown += " … (truncated)"
+    return shown
+
+
+def run_python_prompt(input: Any, *, sandboxed: bool) -> dict[str, str]:
+    """``title``/``display_name`` and ``description`` for a ``run_python``
+    permission prompt.
+
+    The description leads with why this host asks (only when the cell is
+    unsandboxed, i.e. its risk was not lowered to ``safe``), then the code as
+    plain text, cut by :func:`code_preview`.
+    """
+    code = input.get("code") if isinstance(input, dict) else None
+    parts = [] if sandboxed else [RUN_PYTHON_UNSANDBOXED_REASON]
+    if isinstance(code, str) and code.strip():
+        parts.append(code_preview(code))
+    out = {"title": RUN_PYTHON_TITLE, "display_name": RUN_PYTHON_TITLE}
+    if parts:
+        out["description"] = "\n\n".join(parts)
+    return out
+
+
 class _HumanWait:
     """A stopwatch for the parts of a cell that are waiting on a person.
 

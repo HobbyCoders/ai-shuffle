@@ -202,6 +202,25 @@ _PERMISSION_POLICY = {
 }
 
 
+def _prompt_enrichment(tool_name: str, ev: PermissionRequestEvent) -> Dict[str, str]:
+    """``title``/``display_name``/``description`` for a native tool's prompt.
+
+    The can_use_tool callback reads these off its context the way the SDK's
+    ``ToolPermissionContext`` carries them. Only ``run_python`` has any: a
+    readable title and the cell's code as plain text instead of the raw tool
+    name and a JSON-escaped 100-character cut of the input.
+    """
+    if tool_name != "run_python":
+        return {}
+    try:
+        from fluid.codemode.session import run_python_prompt
+
+        return run_python_prompt(ev.input, sandboxed=ev.risk == "safe")
+    except Exception:  # noqa: BLE001 — a prettier prompt is never worth a denial
+        logger.debug("run_python prompt enrichment failed", exc_info=True)
+        return {}
+
+
 class HarnessAdapter(ProviderAdapter):
     """ProviderAdapter implementation backed by the fluid harness."""
 
@@ -1942,14 +1961,16 @@ class HarnessAdapter(ProviderAdapter):
             # Only reached from receive_events(), which spawns this bridge under
             # an ``and self._can_use_tool`` guard — non-None by construction.
             can_use_tool = cast(Any, self._can_use_tool)
+            tool_name = self._permission_tool_name(ev.name)
             result = await can_use_tool(
-                self._permission_tool_name(ev.name),
+                tool_name,
                 ev.input,
                 # ``delegated`` lets the approver read the session's mode
                 # the way this leg runs it (``effective_permission_mode``).
                 SimpleNamespace(
                     tool_use_id=ev.tool_use_id, agent_id=None,
                     delegated=self._is_delegated,
+                    **_prompt_enrichment(tool_name, ev),
                 ),
             )
             allow = type(result).__name__ == "PermissionResultAllow"

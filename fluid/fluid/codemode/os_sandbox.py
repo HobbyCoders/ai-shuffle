@@ -432,6 +432,12 @@ def is_active(mode: str, python: str, *, allow_fs: bool = False) -> bool:
     self-test for this bwrap/python pair is cached. Never runs the self-test
     (see :func:`prewarm`), so it is cheap enough for a per-call permission
     check; an unknown or failed self-test reads as inactive.
+
+    It never waits on ``_cache_lock``: :func:`self_test` holds that lock for
+    the whole probe (up to two ``_SELFTEST_TIMEOUT`` runs), and this is called
+    synchronously on the event loop. A single dict read is atomic, and while a
+    probe runs the entry is either absent or a stale failure (a pass is never
+    re-probed), so an in-progress self-test reads as inactive.
     """
     mode = normalize_mode(mode)
     if mode == "off" or sys.platform != "linux":
@@ -441,8 +447,7 @@ def is_active(mode: str, python: str, *, allow_fs: bool = False) -> bool:
     bwrap = find_bwrap()
     if not bwrap:
         return False
-    with _cache_lock:
-        cached = _cache.get((bwrap, os.path.realpath(python)))
+    cached = _cache.get((bwrap, os.path.realpath(python)))
     return cached is not None and cached[0].ok
 
 

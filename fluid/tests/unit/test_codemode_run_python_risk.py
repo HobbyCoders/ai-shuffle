@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import threading
+import time
 
 import pytest
 
@@ -109,6 +111,35 @@ def test_is_active_false_after_a_failed_self_test_or_off_linux(monkeypatch) -> N
     assert os_sandbox.is_active("auto", python) is False
 
 
+def test_is_active_does_not_wait_for_a_running_self_test(monkeypatch) -> None:
+    """R13-4: the self-test holds the cache lock for the whole probe (up to two
+    15 s runs); the per-call check runs on the event loop and must not wait for
+    it. While a probe is in flight the answer is "inactive"."""
+    python = sys.executable
+    monkeypatch.setattr(os_sandbox, "find_bwrap", lambda: "/fake/bwrap")
+    monkeypatch.setattr(os_sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(os_sandbox, "_supports_disable_userns", lambda b: False)
+    started, release = threading.Event(), threading.Event()
+
+    def _slow_probe(bwrap, py, flag):
+        started.set()
+        release.wait(10)
+        return os_sandbox.SelfTest(True, "", flag)
+
+    monkeypatch.setattr(os_sandbox, "_probe_once", _slow_probe)
+    thread = os_sandbox.prewarm("auto", python)
+    assert thread is not None
+    try:
+        assert started.wait(5)
+        t0 = time.monotonic()
+        assert os_sandbox.is_active("auto", python) is False
+        assert time.monotonic() - t0 < 0.5
+    finally:
+        release.set()
+        thread.join(10)
+    assert os_sandbox.is_active("auto", python) is True
+
+
 def test_prewarm_fills_the_cache(monkeypatch) -> None:
     python = sys.executable
     monkeypatch.setattr(os_sandbox, "find_bwrap", lambda: "/fake/bwrap")
@@ -163,3 +194,22 @@ async def test_ask_mode_prompts_for_run_python_only_without_the_sandbox(
     finally:
         watcher.cancel()
         await loop.aclose()
+
+
+def test_run_python_prompt_shows_plain_code_and_why() -> None:
+    """R13-6: a readable title, the reason on an unsandboxed host, and the
+    code as plain text cut at 20 lines / 1500 characters."""
+    from fluid.codemode.session import RUN_PYTHON_TITLE, code_preview, run_python_prompt
+
+    twenty = "\n".join(f"a{i} = {i}" for i in range(20))
+    assert code_preview(twenty) == twenty
+    assert code_preview(twenty + "\nb = 1").endswith("\n… (1 more line not shown)")
+    assert code_preview("x" * 2000) == "x" * 1500 + " … (truncated)"
+    unsafe = run_python_prompt({"code": 'print("hi")\n'}, sandboxed=False)
+    assert unsafe["title"] == RUN_PYTHON_TITLE == "Run Python code"
+    assert unsafe["description"].endswith('\n\nprint("hi")')
+    assert "sandbox is not active" in unsafe["description"]
+    safe = run_python_prompt({"code": "1"}, sandboxed=True)
+    assert safe["description"] == "1"
+    assert "description" not in run_python_prompt({"code": "  "}, sandboxed=True)
+    assert run_python_prompt("junk", sandboxed=False)["description"].startswith("The code sandbox")

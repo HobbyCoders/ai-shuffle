@@ -70,3 +70,61 @@ def test_delegated_safe_grants_never_carry_run_python(monkeypatch, tmp_path, act
     grants = _delegated_permission_grants(options) or []
     assert not any(g.endswith("run_python") for g in grants)
     assert "mcp__fluid_bundled__mcp__builtins__Recall" in grants
+
+
+# ─── R13-6: the Ask prompt for a cell says what it asks about ────────────────
+
+
+async def _bridged_context(risk: str, tool_input: dict, name: str = "run_python"):
+    """The context the app's can_use_tool callback receives for one prompt."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.core.agent_types import PermissionResultDeny
+    from app.core.provider.types import PermissionRequestEvent
+
+    adapter = HarnessAdapter()
+    adapter._engine = SimpleNamespace(_registry_spec=lambda _n: None)
+    adapter._can_use_tool = AsyncMock(return_value=PermissionResultDeny(message="no"))
+    adapter.respond_to_permission = AsyncMock()
+    await adapter._bridge_permission(
+        PermissionRequestEvent(tool_use_id="call", name=name, input=tool_input, risk=risk)
+    )
+    args = adapter._can_use_tool.await_args.args
+    assert args[0] == name and args[1] == tool_input
+    return args[2]
+
+
+@pytest.mark.asyncio
+async def test_unsandboxed_cell_prompt_has_a_title_reason_and_plain_code():
+    code = 'import os\nprint("a\\tb", os.getcwd())\n' + "".join(f"x{i} = {i}\n" for i in range(40))
+    ctx = await _bridged_context("write", {"code": code})
+    assert ctx.title == "Run Python code" and ctx.display_name == "Run Python code"
+    reason, preview = ctx.description.split("\n\n", 1)
+    assert "sandbox is not active" in reason
+    # Plain text, not JSON: real newlines and quotes, no \n / \" escapes.
+    assert preview.startswith('import os\nprint("a\\tb", os.getcwd())\nx0 = 0\n')
+    assert '\\"' not in preview and "{\"code\"" not in preview
+    lines = preview.splitlines()
+    assert lines[:20] == code.splitlines()[:20]
+    assert lines[-1] == "… (22 more lines not shown)"
+    assert ctx.tool_use_id == "call"
+
+
+@pytest.mark.asyncio
+async def test_long_single_line_cell_is_cut_at_the_char_budget():
+    from fluid.codemode.session import PROMPT_PREVIEW_CHARS
+
+    ctx = await _bridged_context("write", {"code": "y = '" + "z" * 5000 + "'"})
+    preview = ctx.description.split("\n\n", 1)[1]
+    assert preview.endswith(" … (truncated)")
+    assert len(preview) <= PROMPT_PREVIEW_CHARS + len(" … (truncated)")
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_cell_prompt_has_no_sandbox_reason_and_other_tools_none():
+    ctx = await _bridged_context("safe", {"code": "print(1)"})
+    assert ctx.title == "Run Python code"
+    assert ctx.description == "print(1)"
+    other = await _bridged_context("write", {"command": "ls"}, name="Bash")
+    assert not hasattr(other, "title") and not hasattr(other, "description")
