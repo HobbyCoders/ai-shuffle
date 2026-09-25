@@ -71,6 +71,8 @@ async def forget_connection(session_id: str, connection_id: str, request: Reques
         for grant in list(broker.grants.values()):
             if grant.owner[2:] == owner[2:] and grant.saved_id == connection_id:
                 broker.revoke(grant.session_id, grant.id)
+        # Clients no longer poll empty snapshots, so tell them the saved list changed.
+        broker._notify(session_id, owner)
         return {"deleted": True}
     except AccessDenied as exc:
         raise HTTPException(409, str(exc)) from None
