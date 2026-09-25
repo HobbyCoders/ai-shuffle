@@ -26,14 +26,30 @@ function isOwnerStatus(value: unknown): value is OwnerStatus {
 		.every((key) => typeof v[key] === 'boolean');
 }
 
+/**
+ * The owner status, or why it is missing: `unsupported` when the worker
+ * predates owner passwords (no route, or a reply without the owner fields),
+ * `unreachable` for any other failure (offline, 5xx, refused).
+ */
+export type OwnerStatusResult =
+	| { ok: true; status: OwnerStatus }
+	| { ok: false; reason: 'unsupported' | 'unreachable' };
+
+export async function fetchOwnerStatus(): Promise<OwnerStatusResult> {
+	let body: unknown;
+	try {
+		body = await api.get<unknown>('/owner/status', { cache: 'no-store' });
+	} catch (e: unknown) {
+		const code = e && typeof e === 'object' && 'status' in e ? (e as { status: unknown }).status : null;
+		return { ok: false, reason: code === 404 || code === 405 ? 'unsupported' : 'unreachable' };
+	}
+	return isOwnerStatus(body) ? { ok: true, status: body } : { ok: false, reason: 'unsupported' };
+}
+
 /** Null when the worker does not answer or predates owner passwords. */
 export async function getOwnerStatus(): Promise<OwnerStatus | null> {
-	try {
-		const status = await api.get<unknown>('/owner/status', { cache: 'no-store' });
-		return isOwnerStatus(status) ? status : null;
-	} catch {
-		return null;
-	}
+	const result = await fetchOwnerStatus();
+	return result.ok ? result.status : null;
 }
 
 export function createOwnerPassword(password: string): Promise<{ status: string }> {

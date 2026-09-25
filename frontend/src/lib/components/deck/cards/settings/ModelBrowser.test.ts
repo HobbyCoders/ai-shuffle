@@ -67,6 +67,25 @@ describe('ModelBrowser', () => {
 		expect(onselect).toHaveBeenLastCalledWith(catalog[2], 'audio');
 	});
 
+	it('greys out models outside the selectable tool types, explains why and does not emit them', async () => {
+		const onselect = vi.fn();
+		render(ModelBrowser, { onselect, selectableToolTypes: ['image_generation'] });
+		await waitFor(() => expect(cards()).toHaveLength(3));
+		const flux = screen.getByTitle('fal-ai/flux-pro');
+		expect(flux.getAttribute('aria-disabled')).toBeNull();
+		expect(flux.textContent).not.toContain('No tool uses this model');
+		for (const id of ['fal-ai/kling-video', 'fal-ai/odd-one']) {
+			const card = screen.getByTitle(`${id} — No tool uses this model`);
+			expect(card.getAttribute('aria-disabled')).toBe('true');
+			expect(card.classList.contains('unusable')).toBe(true);
+			expect(card.textContent).toContain('No tool uses this model');
+			await fireEvent.click(card);
+		}
+		expect(onselect).not.toHaveBeenCalled();
+		await fireEvent.click(flux);
+		expect(onselect).toHaveBeenCalledExactlyOnceWith(catalog[0], 'image_generation');
+	});
+
 	it('shows a load failure with a working retry', async () => {
 		api.get.mockRejectedValueOnce(new Error('catalog offline'));
 		render(ModelBrowser);

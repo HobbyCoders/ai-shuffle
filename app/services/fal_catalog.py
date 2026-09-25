@@ -16,6 +16,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 import httpx
+# Bound at import: tests swap the module's ``httpx`` for a stub client factory.
+from httpx import HTTPStatusError, TimeoutException
 
 from app.db.async_database import run_sync
 from app.db.base import get_db
@@ -33,6 +35,7 @@ CATEGORY_TO_TOOL_TYPE = {
     "image-to-3d": "image_to_3d",
     "3d-to-3d": "text_to_3d",
     "text-to-speech": "tts",
+    "speech-to-text": "stt",
     "text-to-audio": "audio_generation",  # music / sound generation (Lyria, Stable Audio, ACE-Step, ...)
     "text-to-music": "audio_generation",
     "audio-to-audio": "audio_to_audio",  # remix / style transfer / restoration
@@ -185,6 +188,15 @@ class CatalogModel:
         )
 
 
+def _describe_refresh_error(error: Exception) -> str:
+    """A short, key-free reason a catalog fetch failed."""
+    if isinstance(error, HTTPStatusError):
+        return f"fal.ai answered HTTP {error.response.status_code}"
+    if isinstance(error, TimeoutException):
+        return "fal.ai did not answer in time"
+    return f"could not reach fal.ai ({type(error).__name__})"
+
+
 class FalCatalogService:
     """
     Service that manages the fal.ai model catalog.
@@ -257,18 +269,29 @@ class FalCatalogService:
         Paginates through all results, filters to inference models only,
         and persists to both memory and PostgreSQL.
 
-        Returns the number of models fetched.
+        Returns the number of models in the catalog afterwards (the cached
+        count when the fetch fails; see ``refresh_with_status``).
+        """
+        count, _error = await self.refresh_with_status(api_key)
+        return count
+
+    async def refresh_with_status(self, api_key: Optional[str] = None) -> tuple[int, Optional[str]]:
+        """``refresh`` that also says why it kept the cache.
+
+        Returns ``(model count, error)``: ``error`` is ``None`` when fal.ai
+        answered with models (or another refresh is already running), else a
+        short reason with no key material, and the count is the cached one.
         """
         if self._refreshing:
             logger.debug("Catalog refresh already in progress, skipping")
-            return len(self._cache)
+            return len(self._cache), None
 
         self._refreshing = True
         try:
             models = await self._fetch_all_models(api_key)
             if not models:
                 logger.warning("fal.ai catalog API returned no models, keeping existing cache")
-                return len(self._cache)
+                return len(self._cache), "fal.ai returned no models"
 
             self._cache = models
             self._last_refresh = time.time()
@@ -281,11 +304,11 @@ class FalCatalogService:
             await run_sync(self._persist_to_db, models)
 
             logger.info(f"Refreshed fal.ai catalog: {len(models)} models across {len(self.get_categories())} categories")
-            return len(models)
+            return len(models), None
         except Exception as e:
             logger.error(f"Failed to refresh fal.ai catalog: {e}")
             # Keep existing cache on failure
-            return len(self._cache)
+            return len(self._cache), _describe_refresh_error(e)
         finally:
             self._refreshing = False
 

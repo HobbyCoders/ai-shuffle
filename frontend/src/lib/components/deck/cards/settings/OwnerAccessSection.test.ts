@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import type { OwnerStatus } from '$lib/api/owner';
 
 const owner = vi.hoisted(() => ({
-	getOwnerStatus: vi.fn(), changeOwnerPassword: vi.fn(), createOwnerPassword: vi.fn(), setTrustedLan: vi.fn()
+	fetchOwnerStatus: vi.fn(), changeOwnerPassword: vi.fn(), createOwnerPassword: vi.fn(), setTrustedLan: vi.fn()
 }));
 vi.mock('$lib/api/owner', () => owner);
 const refresh = vi.hoisted(() => vi.fn());
@@ -15,6 +15,7 @@ const status = (over: Partial<OwnerStatus> = {}): OwnerStatus => ({
 	password_set: true, setup_allowed: false, required: false, trusted_lan: false,
 	login_available: true, desktop_handoff: false, min_length: 12, ...over
 });
+const loaded = (over: Partial<OwnerStatus> = {}) => ({ ok: true as const, status: status(over) });
 const input = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
 async function fill(values: Record<string, string>) {
 	for (const [name, value] of Object.entries(values)) await fireEvent.input(input(name), { target: { value } });
@@ -23,7 +24,7 @@ async function fill(values: Record<string, string>) {
 
 beforeEach(() => {
 	vi.clearAllMocks();
-	owner.getOwnerStatus.mockResolvedValue(status());
+	owner.fetchOwnerStatus.mockResolvedValue(loaded());
 	owner.changeOwnerPassword.mockResolvedValue({ status: 'ok' });
 	owner.createOwnerPassword.mockResolvedValue({ status: 'ok' });
 	owner.setTrustedLan.mockResolvedValue({ trusted_lan: true });
@@ -51,13 +52,13 @@ describe('owner password change', () => {
 		expect(owner.changeOwnerPassword).toHaveBeenCalledWith('old-secret', 'long-enough-pass');
 		expect(owner.createOwnerPassword).not.toHaveBeenCalled();
 		expect(refresh).toHaveBeenCalledOnce();
-		expect(owner.getOwnerStatus).toHaveBeenCalledTimes(2);
+		expect(owner.fetchOwnerStatus).toHaveBeenCalledTimes(2);
 		expect([input('Current password').value, input('New password').value, input('Repeat the new password').value]).toEqual(['', '', '']);
 		expect(screen.queryByRole('alert')).toBeNull();
 	});
 
 	it('creates the first password without asking for a current one', async () => {
-		owner.getOwnerStatus.mockResolvedValue(status({ password_set: false, min_length: 8 }));
+		owner.fetchOwnerStatus.mockResolvedValue(loaded({ password_set: false, min_length: 8 }));
 		render(OwnerAccessSection);
 		expect(await screen.findByText('Set an owner password')).toBeTruthy();
 		expect(screen.queryByLabelText('Current password')).toBeNull();
@@ -97,7 +98,7 @@ describe('trusted LAN', () => {
 	it('turns off without a prompt and reloads the owner status', async () => {
 		const confirm = vi.fn();
 		vi.stubGlobal('confirm', confirm);
-		owner.getOwnerStatus.mockResolvedValue(status({ trusted_lan: true }));
+		owner.fetchOwnerStatus.mockResolvedValue(loaded({ trusted_lan: true }));
 		render(OwnerAccessSection);
 		const box = (await screen.findByRole('checkbox', { name: 'Trusted LAN, no login' })) as HTMLInputElement;
 		expect(box.checked).toBe(true);
@@ -105,5 +106,48 @@ describe('trusted LAN', () => {
 		await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
 		expect(confirm).not.toHaveBeenCalled();
 		expect(owner.setTrustedLan).toHaveBeenCalledWith(false);
+	});
+});
+
+describe('status load failures', () => {
+	it('shows an error with a retry instead of loading forever when the worker does not answer', async () => {
+		owner.fetchOwnerStatus.mockResolvedValueOnce({ ok: false, reason: 'unreachable' });
+		render(OwnerAccessSection);
+		expect((await screen.findByRole('alert')).textContent).toContain('Could not load owner access status');
+		expect(screen.queryByText('Loading…')).toBeNull();
+		expect(screen.queryByRole('form', { name: 'Owner password' })).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+		expect(await screen.findByText('Change the owner password')).toBeTruthy();
+		expect(owner.fetchOwnerStatus).toHaveBeenCalledTimes(2);
+		expect(screen.queryByRole('alert')).toBeNull();
+	});
+
+	it('stays on the error when the retry fails too', async () => {
+		owner.fetchOwnerStatus.mockResolvedValue({ ok: false, reason: 'unreachable' });
+		render(OwnerAccessSection);
+		await screen.findByRole('button', { name: 'Try again' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+		await waitFor(() => expect(owner.fetchOwnerStatus).toHaveBeenCalledTimes(2));
+		expect((await screen.findByRole('button', { name: 'Try again' })).hasAttribute('disabled')).toBe(false);
+		expect(screen.getByRole('alert').textContent).toContain('Could not load owner access status');
+		expect(screen.queryByText('Loading…')).toBeNull();
+	});
+
+	it('explains that an older worker has no owner passwords', async () => {
+		owner.fetchOwnerStatus.mockResolvedValueOnce({ ok: false, reason: 'unsupported' });
+		render(OwnerAccessSection);
+		expect((await screen.findByRole('alert')).textContent).toContain('does not support owner passwords');
+		expect(screen.queryByText('Loading…')).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+	});
+
+	it('keeps the form when the reload after a save fails', async () => {
+		owner.fetchOwnerStatus.mockResolvedValueOnce(loaded()).mockResolvedValueOnce({ ok: false, reason: 'unreachable' });
+		render(OwnerAccessSection);
+		await screen.findByText('Change the owner password');
+		await fill({ 'Current password': 'old-secret', 'New password': 'long-enough-pass', 'Repeat the new password': 'long-enough-pass' });
+		await waitFor(() => expect(screen.getByRole('status').textContent).toBe('Password changed. Every other browser was signed out.'));
+		expect(screen.getByText('Change the owner password')).toBeTruthy();
+		expect(screen.queryByRole('alert')).toBeNull();
 	});
 });

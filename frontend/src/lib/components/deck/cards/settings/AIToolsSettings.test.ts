@@ -67,4 +67,25 @@ describe('AIToolsSettings', () => {
 		await waitFor(() => expect(api.patch).toHaveBeenCalledOnce());
 		expect(screen.getByTitle('fal-ai/new-image').textContent).not.toContain('Default');
 	});
+
+	it('greys out a model no tool uses (the catalog\'s generic fallback) and ignores clicks on it', async () => {
+		const generic = model('fal-ai/image-to-text', {
+			display_name: 'Captioner', category: 'image-to-text', tool_type: 'generic', output_type: null
+		});
+		const get = vi.mocked(api.get).getMockImplementation()!;
+		vi.mocked(api.get).mockImplementation(async (url: string) =>
+			url.startsWith('/catalog/models') ? { models: [...catalog, generic], total: 3, catalog_size: 3 } : get(url));
+		render(AIToolsSettings);
+		await fireEvent.click(await screen.findByRole('button', { name: /Browse All/ }));
+		const card = await screen.findByTitle('fal-ai/image-to-text — No tool uses this model');
+		expect(card.getAttribute('aria-disabled')).toBe('true');
+		expect(card.classList.contains('unusable')).toBe(true);
+		expect(card.textContent).toContain('No tool uses this model');
+		await fireEvent.click(card);
+		await fireEvent.click(screen.getByTitle('fal-ai/new-image'));
+		await waitFor(() => expect(api.patch).toHaveBeenCalledOnce());
+		expect(api.patch).toHaveBeenCalledWith('/settings/integrations/image/model', { model: 'fal-ai/new-image' });
+		// Every model a tool uses stays pickable.
+		expect(screen.getByTitle('fal-ai/wizper').getAttribute('aria-disabled')).toBeNull();
+	});
 });

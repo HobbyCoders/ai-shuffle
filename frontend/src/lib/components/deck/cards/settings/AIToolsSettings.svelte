@@ -52,6 +52,11 @@
 		return catalogStore.catalogSize;
 	});
 
+	// Catalog tool types a browser pick can be saved to; anything else (the
+	// catalog's `generic` fallback for unmapped fal.ai categories) is shown but
+	// cannot be picked, since no tool here would use it.
+	const selectableToolTypes = AI_TOOL_CATEGORIES.flatMap(cat => cat.tools.map(tool => tool.catalogToolType));
+
 	// Map from modelSettingKey to catalog tool_type for browser selection
 	let selectedModelsForBrowser = $derived.by(() => {
 		const map: Record<string, string> = {};
@@ -209,6 +214,7 @@
 		<div class="browser-wrapper">
 			<ModelBrowser
 				selectedModels={selectedModelsForBrowser}
+				{selectableToolTypes}
 				onselect={handleBrowserSelect}
 			/>
 		</div>
