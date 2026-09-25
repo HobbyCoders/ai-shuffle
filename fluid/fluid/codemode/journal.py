@@ -15,19 +15,16 @@ available the moment code mode is on. Failure posture matches the rest of the
 continual harness: journaling is best-effort and must never break a turn.
 
 :class:`FrictionDetector` is the second recorder here, shared by both surfaces
-(``ToolJournal`` for JSON mode, ``CodeModeSession`` for in-kernel calls). Small
-models never call Remember after an expensive harness mistake — audited
-sessions show a model naming the problem in its own thinking and then burning
-half an hour redoing work, with nothing durable left behind. So the harness
-detects the mistake MECHANICALLY instead of hoping for self-report: a
+(``ToolJournal`` for JSON mode, ``CodeModeSession`` for in-kernel calls).
+Models rarely self-report an expensive harness mistake, so the harness
+detects it MECHANICALLY: a
 not-found on a path the model constructed, a tool failing over and over, a
 re-read of content already delivered, a no-match search re-run with
 near-identical arguments. Each observation lands as a ``friction`` journal
 entry carrying the mechanical facts and no interpretation — deciding what the
 facts MEAN is the synthesizer's job, not the detector's. Friction does NOT
-make the next synthesis pass urgent (round 9: that spent the daily inference
-budget on three-entry slices); it waits for the normal slice like any other
-entry, and only an explicit Remember pulls a pass forward.
+make the next synthesis pass urgent; it waits for the normal slice like any
+other entry.
 """
 
 from __future__ import annotations
@@ -46,8 +43,8 @@ _OUTPUT_CAP = 400
 
 # A <system-reminder> block, closed or cut off before its end tag. The app
 # appends its "# Memory" snapshot to the user prompt and the engine adds its
-# own reminders, so a journaled user entry used to be mostly an echo of saved
-# facts (27 of 34 entries on the desktop store, 84% of their characters).
+# own reminders; stripping them keeps journaled user entries from echoing saved
+# facts.
 _REMINDER_RE = re.compile(r"\n*<system-reminder>.*?(?:</system-reminder>|\Z)", re.S)
 
 
@@ -64,8 +61,6 @@ def strip_reminders(text: str) -> str:
 
 #: Journal ``kind`` for a mechanically-detected harness-usage mistake.
 FRICTION_KIND = "friction"
-#: Journal kinds the synthesizer treats as high-salience (see continual.py).
-SALIENT_KINDS = ("remember", FRICTION_KIND)
 
 #: A pathological turn must not flood the journal — the synthesizer reads a
 #: bounded slice, and 40 copies of the same failure would crowd out the rest.
@@ -264,17 +259,9 @@ def append_friction(
 ) -> None:
     """Write friction entries to the journal. Never raises.
 
-    Friction used to ``mark_urgent()`` the synthesizer so it landed in the
-    very next pass. That was the wrong lever: nearly every turn produces
-    some friction, so every turn became an urgent pass over three to eight
-    entries, and the 48-call daily budget (``facts.MAX_INFERENCE_CALLS_PER_
-    DAY``) was gone by late morning with nothing to show. The synthesis
-    prompt itself says a single friction event is noise and only repeated
-    friction points at a durable fact — which is exactly what waiting for
-    the normal ``MIN_NEW_ENTRIES`` slice gives it. Urgency stays reserved
-    for an explicit Remember. This also deliberately does NOT ``kick()``: a
-    mid-turn pass would race the rest of the turn's evidence, and the
-    turn-end kick is moments away.
+    Deliberately neither ``mark_urgent()`` nor ``kick()``: friction waits for
+    the normal ``MIN_NEW_ENTRIES`` slice (a single event is noise), and a
+    mid-turn pass would race the rest of the turn's evidence.
     """
     if skills is None or not entries:
         return

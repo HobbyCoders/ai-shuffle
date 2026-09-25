@@ -562,10 +562,6 @@ def plugin_commands(plugins: list[Plugin]) -> list[Command]:
     return [c for p in plugins for c in p.commands]
 
 
-def plugin_agents(plugins: list[Plugin]) -> list[PluginAgent]:
-    return [a for p in plugins for a in p.agents]
-
-
 def plugin_mcp_servers(plugins: list[Plugin]) -> dict[str, dict[str, Any]]:
     """All plugin servers, name-keyed. The first plugin to claim a name keeps
     it — discovery order is deterministic, so the winner is stable."""

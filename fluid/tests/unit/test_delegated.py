@@ -1634,9 +1634,8 @@ async def test_delegated_turns_feed_the_continual_journal() -> None:
 
 
 def test_delegated_engine_is_built_with_the_journal_and_recall_wiring(tmp_path) -> None:
-    """The loader used to return the delegated engine before any continual
-    wiring: no journal, no Recall, no Remember. Now the leg gets all three,
-    and a synthesizer only when a native provider is named for it."""
+    """The delegated leg gets the journal plus Recall/Remember wiring, and a
+    synthesizer only when a native provider is named for it."""
     from fluid.config.loader import BUILTIN_DEFAULTS, build_engine, deep_merge
     from fluid.config.model import HarnessConfig
 
@@ -1647,7 +1646,7 @@ def test_delegated_engine_is_built_with_the_journal_and_recall_wiring(tmp_path) 
     engine = build_engine(config, MemoryStore(), provider_name="claude")
     assert isinstance(engine, DelegatedLoop)
     assert engine._journal is not None and engine._journal._synthesizer is None
-    assert "recall_store" in engine.ctx.extra and "continual_journal" in engine.ctx.extra
+    assert "recall_store" in engine.ctx.extra and "memory_store" in engine.ctx.extra
 
     with_provider = HarnessConfig.from_dict(deep_merge(
         BUILTIN_DEFAULTS, {**base, "continual_provider": "anthropic"},

@@ -268,9 +268,7 @@ class ContextConfig:
     """The mechanical eviction ladder + recall, from ``[context]``.
 
     Scalar mirror of :class:`fluid.context.compaction.CompactionConfig` (plus
-    the tier-1 trim knobs) so the trigger and headroom are finally
-    configurable — before this section, ``build_engine`` never passed a trim
-    config and the 120k trigger was effectively hardcoded.
+    the tier-1 trim knobs), so the trigger and headroom are configurable.
     """
 
     enabled: bool = True
@@ -390,10 +388,9 @@ class HarnessConfig:
     # ``0`` means unlimited (normalized to None for NativeLoop), leaving the
     # provider as the sole authority on when a turn has to stop.
     max_model_calls: int = 200
-    # Model context window, when the host app knows it (model ids come and go
-    # faster than any table fluid could ship, so nothing is inferred). Feeds
+    # Model context window, when the host app knows it. Feeds
     # maxTokens/rawMaxTokens/percentage in the context-usage breakdown; None
-    # leaves those None rather than guessing a window.
+    # falls back to fluid.providers.windows.context_window_for(model).
     context_window: int | None = None
     # Prompt-cache affinity key (OpenAI Responses ``prompt_cache_key`` /
     # OpenRouter ``session_id``). None = the fluid session id, which is right
@@ -535,6 +532,7 @@ class HarnessConfig:
                 "headroom_tokens": self.context.headroom_tokens,
                 "target_ratio": self.context.target_ratio,
                 "keep_recent_turns": self.context.keep_recent_turns,
+                "image_trigger_ratio": self.context.image_trigger_ratio,
                 "max_resident_span_digests": self.context.max_resident_span_digests,
                 "epoch_fold_spans": self.context.epoch_fold_spans,
                 "intake_stub_chars": self.context.intake_stub_chars,
@@ -550,6 +548,7 @@ class HarnessConfig:
                     "base_url": pc.base_url,
                     "api_key_env": pc.api_key_env,
                     "tool_style": pc.tool_style,
+                    "stream_deadline": pc.stream_deadline,
                     "extra": dict(pc.extra),
                 }
                 for name, pc in self.providers.items()

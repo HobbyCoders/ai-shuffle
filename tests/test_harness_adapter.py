@@ -5651,7 +5651,6 @@ def test_vendored_native_loop_accepts_the_restriction_kwargs():
     loop = _RealNative(
         provider=FakeProvider([]), store=MemoryStore(), model="fake",
         allowed_tools=["Read", "mcp__x__*"], disallowed_tools=["mcp__x__danger"],
-        claude_settings=False, claude_plugins=False, claude_agents=False,
     )
     assert loop._tool_permitted("Read") is True
     assert loop._tool_permitted("Bash") is False            # outside the allowlist

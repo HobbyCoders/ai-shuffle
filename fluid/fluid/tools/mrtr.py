@@ -1,16 +1,15 @@
 """MRTR (Multi Round-Trip Request) resolution — one loop, every gate.
 
 A ``tools/call`` may answer ``input_required`` (MCP spec 2026-07-28) instead of
-a result: the tool needs something from the human before it can finish. The
-``AskUser`` builtin rides the same seam to ask questions mid-tool.
+a result: the tool needs something from the human before it can finish. A
+builtin or in-proc tool may return the same marker.
 
 The marker is only half a call. Whoever dispatches a tool MUST resolve it:
 collect one answer per request, then re-dispatch the *same* call with those
 answers plus the echoed ``request_state``. A gate that dispatches once and
 returns the first leg hands the model an empty string — which reads as "the
-tool ran and said nothing", the single worst thing it could mean. That bug
-shipped once (code mode's host-call gate); this module exists so the loop has
-one implementation both gates call.
+tool ran and said nothing". This module is the one implementation both gates
+(the JSON path and code mode's host-call gate) call.
 
 Bounded at :data:`MAX_ROUNDS`: a tool that keeps pausing gets its marker
 surfaced as an in-context error instead of wedging the turn.

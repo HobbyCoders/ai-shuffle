@@ -120,6 +120,100 @@ def test_provider_ecosystem_switches_are_not_runtime_config() -> None:
     assert "claude_ecosystem" not in env_overrides({"FLUID_CLAUDE_SETTINGS": "true"})
 
 
+def _non_default_config_dict() -> dict:
+    """Every HarnessConfig field (nested ones too) set away from its default."""
+    return {
+        "default_provider": "p1",
+        "default_model": "m",
+        "model_override": "mo",
+        "providers": {
+            "p1": {
+                "kind": "openrouter",
+                "model": "x",
+                "base_url": "http://h",
+                "api_key_env": "K",
+                "tool_style": "text",
+                "stream_deadline": 12.5,
+                "extra": {"a": 1},
+            },
+        },
+        "permission": {
+            "approval_policy": "always_ask",
+            "protect_sensitive_files": False,
+            "rules": [{"tool": "Bash", "decision": "deny", "input_globs": {"command": "rm*"}}],
+        },
+        "code_mode": True,
+        "skills_dir": "/s",
+        "continual": True,
+        "continual_model": "cm",
+        "continual_provider": "p1",
+        "anchor_budget": 3,
+        "instruction_files": {
+            "enabled": False, "global": False, "project": False, "skills": False,
+            "commands": False, "nested": False, "plugins": False,
+        },
+        "setting_sources": ["user"],
+        "tools": {"allowed": ["Read"], "disallowed": ["Bash"]},
+        "context": {
+            "enabled": False,
+            "trim_only": True,
+            "trigger_tokens": 1,
+            "trigger_window_ratio": 0.1,
+            "headroom_tokens": 2,
+            "target_ratio": 0.2,
+            "keep_recent_turns": 4,
+            "image_trigger_ratio": 0.3,
+            "max_resident_span_digests": 5,
+            "epoch_fold_spans": 6,
+            "intake_stub_chars": 7,
+            "tool_result_stub_chars": 8,
+            "keep_recent_tool_results": 9,
+            "min_result_chars": 10,
+        },
+        "hooks": [{"event": "PreToolUse", "command": "echo", "matcher": "Bash", "timeout": 5.0}],
+        "cwd": "/w",
+        "max_tokens": 1000,
+        "max_model_calls": 50,
+        "context_window": 200_000,
+        "cache_key": "ck",
+        "system": "sys",
+        "base_prompt": False,
+        "identity": "id",
+        "identity_file": False,
+        "model_guidance": ["gpt"],
+        "mcp": {"srv": {"transport": "stdio", "command": "x"}},
+    }
+
+
+def _assert_every_field_non_default(obj) -> None:
+    from dataclasses import MISSING, fields
+
+    for f in fields(obj):
+        if f.default is not MISSING:
+            default = f.default
+        elif f.default_factory is not MISSING:
+            default = f.default_factory()
+        else:
+            continue
+        assert getattr(obj, f.name) != default, (
+            f"{type(obj).__name__}.{f.name} is at its default; add it to "
+            "_non_default_config_dict so the to_dict round trip covers it"
+        )
+
+
+def test_to_dict_round_trips_every_field() -> None:
+    config = HarnessConfig.from_dict(_non_default_config_dict())
+    # A new field fails here until the fixture sets it, so to_dict can't drift.
+    for obj in (
+        config, config.permission, config.instruction_files, config.tools,
+        config.context, *config.providers.values(), *config.permission.rules,
+        *config.hooks,
+    ):
+        _assert_every_field_non_default(obj)
+    dumped = config.to_dict()
+    assert HarnessConfig.from_dict(json.loads(json.dumps(dumped))) == config
+
+
 def test_native_mcp_json_loads_and_toml_wins_same_name(tmp_path, monkeypatch) -> None:
     home = tmp_path / "home"
     fluid_home = home / ".fluid"
@@ -152,7 +246,6 @@ def test_provider_settings_are_inert_until_explicit_import(tmp_path, monkeypatch
 
     config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)}))
     engine = build_engine(config, MemoryStore(), provider=FakeProvider())
-    assert engine.claude_settings == {}
     assert "settings_env" not in engine.ctx.extra
     assert all(r.tool != "Bash" for r in engine.permissions.rules)
 
@@ -414,13 +507,7 @@ def test_build_engine_shares_a_synthesizer_and_stamps_the_agent(tmp_path) -> Non
     from fluid.codemode.skills import SkillStore
 
     class Learner:
-        kicked = 0
-
-        def mark_urgent(self) -> None:
-            pass
-
-        def kick(self) -> None:
-            self.kicked += 1
+        pass
 
     learner = Learner()
     config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {
@@ -431,11 +518,10 @@ def test_build_engine_shares_a_synthesizer_and_stamps_the_agent(tmp_path) -> Non
         synthesizer=learner, agent="worker",
     )
     assert engine._journal._synthesizer is learner
-    engine.ctx.extra["continual_journal"]("the user likes short replies")
+    engine.ctx.extra["memory_store"].journal_append(
+        {"kind": "user", "text": "the user likes short replies"})
     entry = SkillStore(tmp_path / "skills").journal_entries(0)[0]
-    assert entry["kind"] == "remember"
     assert entry["session"] == "ses_child" and entry["agent"] == "worker"
-    assert learner.kicked == 1
 
 
 def test_cli_host_hands_the_parent_learner_to_children() -> None:

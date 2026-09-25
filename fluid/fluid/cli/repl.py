@@ -3,10 +3,8 @@
 Reads a line, submits a ``UserTurn``, subscribes to the engine's EventBus, and
 renders the stream: ``TextDelta``/``ThinkingDelta`` inline, tool use + results,
 permission prompts (y/n on stdin → ``RespondPermission``), and per-turn usage on
-``TurnComplete``. Slash commands ``/model``, ``/fork``, ``/rewind``, ``/exit`` map
-to the corresponding ops; ``/context`` (alias ``/usage``), ``/tools`` and
-``/skills`` are read-only views over the engine's context breakdown, tool
-registry and discovered skills.
+``TurnComplete``. Slash commands are handled by :meth:`Repl.dispatch_slash`
+(full list in docs/cli.md).
 
 Everything routes through :func:`stream_turn` and the small ``on_permission`` /
 ``input_fn`` seams so the one-shot ``run`` path and the unit tests reuse the exact
@@ -77,8 +75,6 @@ NO_USER_ANSWER = (
 async def auto_answer(event: QuestionRequest) -> str:
     """Non-interactive question responder: unblock the turn, never guess."""
     return NO_USER_ANSWER
-
-_TERMINAL = (TurnComplete, Interrupted, ErrorEvent)
 
 # A second Ctrl-C inside this many seconds quits instead of interrupting again.
 SIGINT_EXIT_WINDOW = 2.0

@@ -145,7 +145,6 @@ PROTECTED_WRITE_PREFIXES: tuple[str, ...] = (
 
 # Template/sample variants are meant to be read; they carry no real values.
 SENSITIVE_EXCEPTIONS = frozenset({".env.example", ".env.sample", ".env.template"})
-_SENSITIVE_EXCEPTIONS = SENSITIVE_EXCEPTIONS
 
 
 def is_sensitive_path(path: str) -> bool:
@@ -154,7 +153,7 @@ def is_sensitive_path(path: str) -> bool:
 
     normalized = str(path).replace("\\", "/").rstrip("/")
     basename = normalized.rsplit("/", 1)[-1]
-    if basename.lower() in _SENSITIVE_EXCEPTIONS:
+    if basename.lower() in SENSITIVE_EXCEPTIONS:
         return False
     if any(fnmatch(basename, pattern) for pattern in SENSITIVE_BASENAME_GLOBS):
         return True
@@ -166,15 +165,6 @@ def is_sensitive_path(path: str) -> bool:
         return True
     components = lowered.split("/")
     return any(name in components for name in SENSITIVE_DIR_NAMES)
-
-
-def is_protected_write_path(path: str) -> bool:
-    """True when writing ``path`` would modify the running app's own code."""
-    normalized = str(path).replace("\\", "/")
-    return any(
-        normalized.startswith(prefix) or normalized == prefix.rstrip("/")
-        for prefix in PROTECTED_WRITE_PREFIXES
-    )
 
 
 # ─── provider-side elision detection ─────────────────────────────────────────

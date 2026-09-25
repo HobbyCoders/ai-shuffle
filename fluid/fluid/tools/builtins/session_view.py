@@ -15,6 +15,7 @@ import inspect
 from datetime import datetime
 from typing import Any
 
+from fluid.store.base import clip_text
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 _DEFAULT_COUNT = 10
@@ -79,11 +80,6 @@ SPEC = ToolSpec(
 )
 
 
-def _clip(text: str, cap: int) -> str:
-    flat = " ".join(text.split())
-    return flat if len(flat) <= cap else flat[: cap - 1] + "…"
-
-
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     slice_fn = (ctx.extra or {}).get("session_view")
     if slice_fn is None:
@@ -126,7 +122,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         f"{window.total} messages; showing {window.start}–{last}:"
     ]
     for i, msg in enumerate(window.messages):
-        text = _clip(msg.text, _TEXT_CAP) if msg.text.strip() else ""
+        text = clip_text(msg.text, _TEXT_CAP) if msg.text.strip() else ""
         lines.append(f"[{window.start + i} {msg.role}] {text}".rstrip())
         for tool_line in msg.tools[:_TOOLS_SHOWN]:
             lines.append(f"    {tool_line}")

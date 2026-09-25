@@ -63,6 +63,11 @@ def test_caps_advertise_context_usage() -> None:
     assert DelegatedLoop.caps.context_usage is True
 
 
+def test_native_caps_advertise_code_mode_and_subagents() -> None:
+    assert NativeLoop.caps.code_mode is True
+    assert NativeLoop.caps.subagents is True
+
+
 # ─── Compiler: sections without changing the joined string ───────────────────
 
 

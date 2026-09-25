@@ -40,6 +40,7 @@ def _replace_text(path: Path, text: str) -> None:
     finally:
         tmp.unlink(missing_ok=True)
 
+
 SPEC = ToolSpec(
     name="Ledger",
     description=(
@@ -285,16 +286,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         rendered = _render(sections)
         try:
             if rendered:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(rendered + "\n", encoding="utf-8")
+                _replace_text(path, rendered + "\n")
             else:
                 path.unlink(missing_ok=True)
         except OSError as exc:
             return ToolOutcome(text=f"failed to write ledger: {exc}", is_error=True)
-        # A delta, not the ledger. Echoing the whole rendered ledger after
-        # every mutation put 1.18 MB of tool output into one audited session —
-        # 19% of all its tool-result bytes — for state the engine already
-        # recites onto every user turn.
+        # A delta, not the ledger: the engine already recites the ledger onto
+        # every user turn.
         return ToolOutcome(text=delta)
     if action != "show":
         return ToolOutcome(text=f"unknown action: {action}", is_error=True)

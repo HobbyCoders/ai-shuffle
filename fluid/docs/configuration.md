@@ -251,12 +251,13 @@ and searches past sessions, `SessionView` opens one.
 
 ### `[[hooks]]`
 
-Shell commands run before and after tool calls and at turn boundaries. Full
+Shell commands run on lifecycle events: around tool calls, at turn and session
+boundaries, before compaction, when a subagent stops, and on notifications. Full
 contract (stdin payload, exit codes, `updated_input`) in [hooks.md](hooks.md).
 
 | Key | Required | Default | Meaning |
 |---|---|---|---|
-| `event` | yes | | `PreToolUse`, `PostToolUse`, `TurnStart`, or `TurnEnd`. |
+| `event` | yes | | `PreToolUse`, `PostToolUse`, `TurnStart`, `TurnEnd`, `SessionStart`, `SessionEnd`, `PreCompact`, `SubagentStop`, or `Notification`. Claude Code's `UserPromptSubmit` and `Stop` are accepted as `TurnStart` and `TurnEnd`. |
 | `command` | yes | | Shell string, run through the same shell as the `Bash` tool with `cwd` as its working directory. |
 | `matcher` | no | every tool | Tool-name filter for tool events: a glob, or a regex when it contains `^`, `|`, or `(`. |
 | `timeout` | no | `60` | Seconds before the hook is killed and treated as allow. |
@@ -432,7 +433,7 @@ extra (`uv sync --extra mcp`), which installs `mcp>=2.0`.
 
 ## Environment variables
 
-Config overrides, applied as layer 5 (`env_overrides` in the loader):
+Config overrides, applied as layer 6 (`env_overrides` in the loader):
 
 | Variable | Sets |
 |---|---|

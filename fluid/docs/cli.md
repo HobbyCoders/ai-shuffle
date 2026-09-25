@@ -1,7 +1,8 @@
 # CLI reference
 
 `fluid` is the standalone command-line host: an interactive REPL, a one-shot
-runner, a session lister, and two inspection commands. Everything here is
+runner, a session lister, config inspection, settings import, and the
+anchor/evolution commands. Everything here is
 wired in `fluid/cli/__main__.py`; the REPL and its slash commands live in
 `fluid/cli/repl.py`.
 
@@ -12,6 +13,8 @@ fluid chat [common options] [--tui]
 fluid run  [common options] "<prompt>"
 fluid sessions [--store DIR] [--limit N]
 fluid config [common options]
+fluid anchors {list,add,rm,run,harvest} [common options] ...
+fluid evolve  {propose,run,pending,parked,log} [common options] ...
 fluid import-settings [--source claude|codex] [--source-home DIR]
                       [--destination-home DIR] [--select ID] [--apply]
 ```
@@ -25,9 +28,9 @@ fluid import-settings [--source claude|codex] [--source-home DIR]
 Starts a session and reads prompts from stdin until `/exit` or EOF. Prints
 `fluid chat — session <id> (/help, /exit)` on stderr so the id is easy to copy
 for a later `--resume`. Add `--tui` for the Textual interface (needs the `tui`
-extra); the TUI handles `/exit`, `/quit`, and the read-only slash commands
-(`/help`, `/context`, `/usage`, `/tools`, `/skills`, `/model`) and submits
-everything else as a turn.
+extra); the TUI handles `/exit`, `/quit`, and answers `/help`, `/context`,
+`/usage`, `/tools`, `/skills`, `/model`, `/questions` and `/answer` in place,
+and submits everything else as a turn.
 
 ### `fluid run "<prompt>"`
 
@@ -58,6 +61,34 @@ system, user, project, environment, flags) has been applied. Useful for
 checking which provider block and model a run will actually use. See
 [configuration.md](configuration.md).
 
+### `fluid anchors`
+
+Manages the anchor set: replayable tasks the evolution gate checks for
+regressions. Anchors live in `anchors.json` in the skills root.
+
+| Action | What it does |
+|---|---|
+| `list` | Shows each anchor with its baseline, prompt, checks and last result. |
+| `add "<prompt>"` | Adds one anchor. `--title`, `--expect REGEX`, `--forbid REGEX`, `--tool NAME`, `--check-file PATH[:REGEX]` (the last four repeatable), `--tools a,b` to override the replay tool surface, `--anchor-model` to pin the replay model. |
+| `rm <id>` | Removes an anchor. |
+| `run [id]` | Replays anchors (or one) against the live model and records baselines. Exits 1 if any fails. |
+| `harvest` | Drafts candidates from recent project sessions (`--limit N`, default 10) and asks before saving each; `--yes` accepts every valid draft. |
+
+### `fluid evolve`
+
+Guarded harness evolution. A proposed per-model guidance edit
+(`~/.fluid/guidance/<stem>.md`) commits only if it passes validity,
+improvement and retention (the anchor replays) in the commit gate; otherwise
+it is parked with reasons.
+
+| Action | What it does |
+|---|---|
+| `propose --stem S` | Proposes content from `--file` or `--content`, with `--why`, a motivating case (`--motivation-prompt`, `--motivation-expect`, `--motivation-tool`) or `--no-motivation`, `--budget N`, `--allow-no-anchors`. Exits 1 when parked. |
+| `run` | Evaluates synthesizer-queued proposals through the gate (live replays). `--budget`, `--allow-no-anchors`. Exits 1 if any was parked. |
+| `pending` | Lists synthesizer-drafted proposals awaiting the gate. |
+| `parked` | Lists proposals the gate refused, with reasons. |
+| `log` | Lists committed evolutions. |
+
 ### `fluid import-settings`
 
 Previews (and with `--apply`, copies) portable Claude Code and Codex content
@@ -76,9 +107,10 @@ enabled. `import-claude` and
 
 ## Common options
 
-`chat`, `run`, and `config` share these flags. Flags are the highest-precedence
-config layer, so they beat `FLUID_*` environment variables and every config
-file.
+`chat`, `run`, `config`, and every `anchors` and `evolve` action share these
+flags (`--resume`/`--continue` only matter to `chat` and `run`). Flags are the
+highest-precedence config layer, so they beat `FLUID_*` environment variables
+and every config file.
 
 | Flag | Config key it sets | Meaning |
 |---|---|---|
@@ -110,9 +142,14 @@ model.
 | `/tasks` | Background workers known to the CLI host: task id, kind (`task` or `monitor`), status, description. |
 | `/cancel <task_id>` | Kills a running worker (the whole process tree for `Monitor`). Reports `cancelled <id>` or `no running task <id>`. |
 | `/model [name]` | Shows the current model, or switches to `name` for the rest of the session. |
+| `/questions` | Lists questions the model asked that are still waiting for an answer. |
+| `/answer <request_id> <text>` | Answers a pending question. |
 | `/fork <node_id>` | Forks the session at a node; later turns grow from the fork. |
 | `/rewind <node_id>` | Moves the session head back to a node. |
-| `/exit`, `/quit` | Leaves the REPL. Ctrl-D and Ctrl-C do the same. |
+| `/exit`, `/quit` | Leaves the REPL. Ctrl-D does the same. |
+
+Ctrl-C during a turn interrupts it; a second Ctrl-C within 2 seconds, or
+Ctrl-C at the prompt, quits with exit code 130.
 
 Any other `/name` is looked up as a user-defined command: a
 `~/.fluid/commands/<name>.md` or `.agents/commands/<name>.md` file, rendered
@@ -177,9 +214,10 @@ when the turn ends. Console output is forced to UTF-8 on Windows.
 
 | Code | When |
 |---|---|
-| `0` | `chat` ended normally; `run`'s turn completed (including a user-denied permission or an interrupted turn). |
-| `1` | `run`'s turn ended with an engine error (`[error] ...`). |
-| `2` | Bad arguments (argparse), or `--resume`/`--continue` named a session that does not exist. |
+| `0` | `chat` ended normally; `run`'s turn completed (including a user-denied permission). |
+| `1` | `run`'s turn ended with an engine error (`[error] ...`); `--tui` without the `tui` extra; `anchors run` had a failing anchor; `evolve propose`/`evolve run` parked a proposal. |
+| `2` | Bad arguments (argparse); `--resume`/`--continue` named a session that does not exist; the session is locked by another process; `anchors rm`/`anchors run` named an unknown anchor; `anchors add` rejected the anchor; `evolve propose --file` could not be read. |
+| `130` | Ctrl-C ended `chat` or `run`. |
 
 ## Environment variables the CLI reads directly
 

@@ -238,7 +238,6 @@ def test_default_permission_mode_is_not_applied_to_a_session(tmp_path, monkeypat
     assert default_permission_mode(load_settings_stack(proj)) == "default"
 
     loop = _loop(proj)
-    assert loop.claude_settings == {}
     assert loop.permissions.approval_policy == "never_ask"
 
 
@@ -257,7 +256,7 @@ def test_mcp_toggles_accessor(tmp_path, monkeypatch) -> None:
 # ─── session seams (NativeLoop / Bash / MCP) ─────────────────────────────────
 
 
-def _loop(cwd, *, rules=None, claude_settings=True):
+def _loop(cwd, *, rules=None):
     from fluid.engine.native import NativeLoop
     from fluid.permissions.engine import PermissionEngine
     from fluid.providers.base import ProviderCaps
@@ -278,7 +277,6 @@ def _loop(cwd, *, rules=None, claude_settings=True):
         model="m",
         ctx=ToolCtx(cwd=str(cwd)),
         permissions=PermissionEngine("never_ask", rules=list(rules or [])),
-        claude_settings=claude_settings,
     )
 
 
@@ -313,7 +311,6 @@ def test_native_loop_reads_no_settings_itself(tmp_path, monkeypatch) -> None:
         },
     )
     loop = _loop(proj)
-    assert loop.claude_settings == {}
     assert "settings_env" not in loop.ctx.extra
     assert loop.permissions.rules == []
 

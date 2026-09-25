@@ -299,8 +299,8 @@ async def _answer(
             registry, ctx, name, req.get("arguments") or {},
             permissions=permissions, hooks=hooks, on_stop=on_stop,
         )
-        # MRTR: the tool paused to ask the user something (AskUser).
-        # This bridge is a request/response socket with no event
+        # MRTR: the tool paused on input_required (an MCP server or a
+        # builtin/in-proc tool). This bridge is a request/response socket with no event
         # bus and no user on the far end — the delegated CLI owns the loop — so
         # the round-trip cannot happen here. Its first leg is an EMPTY result
         # carrying the marker; forwarding that text would tell the CLI's model

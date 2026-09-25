@@ -284,7 +284,8 @@ class SessionSlice:
 _TOOL_LINE_CAP = 200
 
 
-def _compact(text: str, cap: int) -> str:
+def clip_text(text: str, cap: int) -> str:
+    """Collapse whitespace and clip to ``cap`` characters with an ellipsis."""
     flat = " ".join(text.split())
     return flat if len(flat) <= cap else flat[: cap - 1] + "…"
 
@@ -313,7 +314,7 @@ def recall_message(message: dict[str, Any], ts: float = 0.0) -> RecallMessage:
                 arg = json.dumps(block.get("input") or {}, ensure_ascii=False)
             except (TypeError, ValueError):
                 arg = "…"
-            tools.append(_compact(f"{block.get('name', '?')}({arg})", _TOOL_LINE_CAP))
+            tools.append(clip_text(f"{block.get('name', '?')}({arg})", _TOOL_LINE_CAP))
         elif kind == "toolresultblock":
             inner = " ".join(
                 str(c.get("text", ""))
@@ -321,7 +322,7 @@ def recall_message(message: dict[str, Any], ts: float = 0.0) -> RecallMessage:
                 if isinstance(c, dict) and c.get("kind") == "text" and c.get("text")
             )
             marker = "ERROR" if block.get("is_error") else "->"
-            tools.append(_compact(f"{marker} {inner or '(no text)'}", _TOOL_LINE_CAP))
+            tools.append(clip_text(f"{marker} {inner or '(no text)'}", _TOOL_LINE_CAP))
     return RecallMessage(
         role=str(message.get("role", "?")), text="\n".join(texts), tools=tools, ts=ts
     )

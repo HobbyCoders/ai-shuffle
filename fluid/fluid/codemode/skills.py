@@ -19,18 +19,15 @@ Alongside the skills the store keeps:
 - ``memories.json`` — the learner's declarative half: short remembered facts
   (stated preferences, environment conventions, corrections) rendered into
   every session's prompt as a frozen snapshot (``render_memory_section``).
-  Only the synthesizer writes the file itself; the model *proposes* through
-  the ``Remember`` builtin, which journals a high-salience entry the
-  synthesizer consolidates on its next pass (propose-then-curate: the model
-  flags what seemed durable while context was hot, the learner with global
-  view decides what lands). The store caps the count, archiving the least
-  recalled instead of growing without bound; the ``Recall`` builtin searches
-  live and archived entries and feeds the usage counters that drive that
-  eviction.
+  Written through :class:`fluid.codemode.facts.FactStore` by the synthesizer,
+  by the ``Remember`` builtin (``save_memory`` directly, protected) and by
+  runtime-fact provisioning. The store caps the count, moving the least
+  recalled into the file's ``archived`` list instead of growing without
+  bound; the ``Recall`` builtin searches live and archived entries and feeds
+  the usage counters that drive that eviction.
 
 Every one of those files is BOUNDED and the harness owns the cleanup. The
-model has no reaping control at all — its only write path stays the
-propose-only ``Remember`` flow. Reaping is deterministic, best-effort (a
+model has no reaping control at all. Reaping is deterministic, best-effort (a
 failure never breaks journaling or synthesis) and rides machinery that
 already exists: :meth:`SkillStore.reap`, called from the interval-gated
 lifecycle pass (:meth:`SkillStore.curate`) and from the synthesizer's
@@ -176,16 +173,14 @@ JOURNAL_REAP_FRACTION = 0.5
 # dropped down to the reap target (explicit kinds excepted). Inference is
 # allowed to be lossy; a store that refuses every new line because synthesis
 # keeps failing is not. A failed pass never advances the cursor, so after a
-# run of failures nothing is consumed, nothing is reapable, and every new
-# event is refused: the Unraid journal sat at its 1 MiB cap from 2026-09-14
-# on while every pass failed.
+# run of failures nothing is consumed and nothing is reapable.
 JOURNAL_OVERFLOW_FRACTION = 0.9
 # Journal kinds a person (or the model on their behalf) wrote on purpose. An
 # append that cannot land one of these raises instead of logging, so the
 # caller can surface the loss instead of reporting "recorded".
 JOURNAL_EXPLICIT_KINDS = frozenset({"remember"})
-# memories-archive.jsonl: overflow past MAX_MEMORIES lands here and Recall
-# searches it, so it is real storage, not a graveyard — but it is capped.
+# The ``archived`` list inside memories.json: overflow past MAX_MEMORIES lands
+# there and Recall searches it, so it is real storage — but it is capped.
 MAX_ARCHIVED_MEMORIES = 200
 # .archive/*.py: skills curation archives rather than deletes; the oldest
 # archived modules are dropped for good past this count.
@@ -324,8 +319,7 @@ def load_json_document(path: Path, default: dict) -> dict:
 
     An absent file is the normal empty case. A file that exists but does not
     parse, or parses to something other than an object, is set aside with a
-    warning rather than silently treated as empty — a truncated
-    ``memories.json`` used to make every memory vanish and the next save
+    warning rather than silently treated as empty, so the next save cannot
     overwrite the evidence.
     """
     try:
@@ -1113,10 +1107,10 @@ class SkillStore:
             pass
         return out, reached
 
-    # ─── memories (the declarative half — synthesizer-written only) ──────
+    # ─── memories (the declarative half; see FactStore) ─────────────────────
     @property
     def archive_dir(self) -> Path:
-        """Where evicted memories and archived skill modules live."""
+        """Where archived skill modules live."""
         return self.root / ".archive"
 
     @property
@@ -1174,8 +1168,7 @@ class SkillStore:
         """Delete one fact. ``explicit`` means the user asked (the Forget
         tool); only that purges the journal evidence written before it. A
         learner or consolidation delete retires the fact and leaves the
-        journal and the synthesis cursor alone: it used to wipe every
-        unsynthesized entry on the store and leave the cursor past the end.
+        journal and the synthesis cursor alone.
         """
         deleted = self._facts.forget(memory_id, explicit=explicit, expected_revision=expected_revision)
         if deleted and explicit:
@@ -1222,9 +1215,8 @@ class SkillStore:
         """The compiled prompt's ``# Memory`` section (frozen snapshot).
 
         An empty store renders a short placeholder (:data:`EMPTY_MEMORY_SECTION`)
-        rather than nothing: a fresh install used to never mention memory at
-        all, so the model never learned that Remember/Recall existed until a
-        fact happened to exist. With a ``project`` key, only global entries
+        rather than nothing, so the model learns Remember/Recall exist before
+        any fact does. With a ``project`` key, only global entries
         and that project's entries render — other projects' facts stay out of
         this session's prompt (a count line says they exist). Unprotected
         facts get a reserved share of the budget (``RESERVED_INFERRED_CHARS``)
@@ -1481,9 +1473,8 @@ class SkillStore:
     #
     # Shared through meta.json so every session's synthesizer over this store
     # honors it; a per-instance guard would reset with each new session.
-    # Without any guard a provider that rejects every request spends the
-    # whole day's budget at once: the Codex backend answered HTTP 400 to 48
-    # learner calls in five minutes on 2026-09-13.
+    # Without it a provider that rejects every request spends the whole
+    # day's budget at once.
     # Keyed by model so one broken provider does not stop another from
     # learning.
     MAX_BACKOFF_MODELS = 16
@@ -1579,9 +1570,7 @@ class SkillStore:
 
 
 # A learner that has run passes for this long without writing anything is
-# reported (Synthesizer._track_yield, and the app's journal diagnostics). Both
-# replicas' learners were silent for 13 days in September 2026 and nothing
-# said so.
+# reported (Synthesizer._track_yield, and the app's journal diagnostics).
 LEARNER_SILENCE_ALARM_SECONDS = 3 * 86400.0
 
 

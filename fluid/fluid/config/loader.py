@@ -112,6 +112,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "headroom_tokens": 16_000,
         "target_ratio": 0.7,
         "keep_recent_turns": 3,
+        "image_trigger_ratio": 1.0,
         "max_resident_span_digests": 20,
         "epoch_fold_spans": 10,
         "intake_stub_chars": 25_000,
@@ -162,9 +163,6 @@ def system_config_path(
         base = env.get("ProgramData") or env.get("PROGRAMDATA") or r"C:\ProgramData"
         return Path(base) / "fluid" / "config.toml"
     return Path("/etc/fluid/config.toml")
-
-
-SYSTEM_CONFIG = system_config_path()
 
 
 def _user_config_path() -> Path:
@@ -710,9 +708,8 @@ def _wire_continual(
 ) -> tuple[Any, Any | None]:
     """The skill store and, when ``client`` is given, its synthesizer.
 
-    Wires the Recall builtin (``recall_store``) and, under ``continual``, the
-    Remember builtin (``continual_journal``) onto ``ctx`` so both legs of the
-    engine serve them. ``client`` is the ProviderClient synthesis passes run
+    Wires the Recall and Remember builtins (``recall_store``/``memory_store``)
+    onto ``ctx`` so both legs of the engine serve them. ``client`` is the ProviderClient synthesis passes run
     on; None keeps the journal without a synthesizer, which is what the
     delegated leg gets when no ``continual_provider`` is configured. A
     ``synthesizer`` handed in (a subagent host passing its parent's) is used
@@ -759,7 +756,7 @@ def _wire_continual(
 
             on_change = _announce
 
-        # Phase 2.3: the synthesizer sees the SESSION model id (so a
+        # The synthesizer sees the SESSION model id (so a
         # guidance-proposal stem can be validated against it) and the raw
         # guidance file(s) currently matching it (so proposals amend the
         # file instead of overwriting blind). Gated on the "user" setting
@@ -785,19 +782,6 @@ def _wire_continual(
         )
         if bus is not None:
             learner.append(synthesizer)
-
-    def _remember(text: str, scope: str | None = None) -> None:
-        # The Remember builtin's write path: journal a high-salience entry
-        # and, when a synthesizer is running, pull its next pass forward.
-        entry: dict[str, Any] = {"kind": "remember", "text": text}
-        if scope:
-            entry["scope"] = scope
-        skills.journal_append(entry)
-        if synthesizer is not None:
-            synthesizer.mark_urgent()
-            synthesizer.kick()
-
-    ctx.extra.setdefault("continual_journal", _remember)
     return skills, synthesizer
 
 

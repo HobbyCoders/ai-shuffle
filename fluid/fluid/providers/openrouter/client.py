@@ -67,12 +67,6 @@ class OpenRouterClient:
         # embedder prefers OpenRouter's silent failover to visible failures.
         self._allow_fallbacks = allow_fallbacks
 
-    def estimate_input_cost(self, model: str, input_tokens: int) -> float | None:
-        row = self._pricing.get(model)
-        if not row or "prompt" not in row:
-            return None
-        return max(input_tokens, 0) * row["prompt"]
-
     def classify_error(self, error: dict) -> ErrorClass:
         """Retry class of an error; an empty completion drops ``session_id``.
 

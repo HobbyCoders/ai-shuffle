@@ -9,14 +9,13 @@ Turn lifecycle:
   model call → else TurnComplete.
 
 Tools/permissions/hooks are all optional: with no registry the loop behaves as
-the M0 text/thinking streamer (a tool_use stop is terminal).
+a plain text/thinking streamer (a tool_use stop is terminal).
 
 Empty completions are retried rather than accepted. Some providers answer a
 request with HTTP 200 and nothing in it — either a terminal usage chunk
 reporting zero tokens and no content, or a stream that closes before any
 terminal chunk arrives (which the chat-completions client reports as an error).
-Both used to end the turn, the first by persisting an empty assistant node and
-stopping the agent mid-work. The loop now re-sends the same history up to
+The loop re-sends the same history up to
 ``EMPTY_COMPLETION_MAX_RETRIES`` times, emitting a ProviderRetry event before
 each attempt and backing off (interruptibly) in between; only after the cap is
 reached does the turn end with the usual terminal ErrorEvent. No empty
@@ -41,7 +40,6 @@ import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from fnmatch import fnmatchcase
 from typing import Any
 
 from fluid.codemode.session import (
@@ -77,7 +75,7 @@ from fluid.context.trim import (
 )
 from fluid.context.usage import MemoryFileUsage, build_context_usage, memory_file_usage
 from fluid.engine.background import BackgroundLifecycleMixin
-from fluid.engine.base import EngineCaps
+from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.events.bus import EventBus
 from fluid.events.model import (
     BlockStart,
@@ -341,10 +339,8 @@ class ToolArgStreamGuard:
 
     A model can degenerate mid-``arguments`` and stream padding forever: the
     JSON never becomes callable, the per-read HTTP timeout never fires because
-    data keeps arriving, and the only thing that ends the call is the user
-    pressing Stop. Three sessions in one audited day burned 224 s, 495 s and
-    839 s that way, the last of them on 423 KB of whitespace across 27,845
-    delta events.
+    data keeps arriving, and without this guard only the user pressing Stop
+    ends the call.
 
     Any limit set to ``None`` is off; all three off means no guard at all.
     """
@@ -471,22 +467,12 @@ def _describe_engine_failure(exc: BaseException, *, transient: bool) -> str:
     )
 
 
-# How long a turn parks on a QuestionRequest before giving up on an answer.
-# A host that renders no questions and never interrupts used to hold the
-# turn open for good. An engine instance may set ``question_timeout`` to
+# How long a turn parks on a QuestionRequest before giving up on an answer,
+# so a host that renders no questions cannot hold the turn open for good. An
+# engine instance may set ``question_timeout`` to
 # another number of seconds, or None to wait without limit.
 QUESTION_TIMEOUT_S = 30 * 60.0
 
-
-def _matches_tool_pattern(name: str, patterns: Sequence[str]) -> bool:
-    """Exact name match, or a case-sensitive fnmatch pattern (ruling CE12).
-
-    ``mcp__chrome-devtools__*`` is the motivating shape; plain names carry no
-    wildcards and fall out of ``fnmatchcase`` as exact comparisons anyway, but
-    the equality check is kept so a name containing ``[`` (legal in MCP tool
-    names, a character class to fnmatch) still matches itself.
-    """
-    return any(name == p or fnmatchcase(name, p) for p in patterns)
 
 
 def _is_context_overflow(message: str, status: int | None = None) -> bool:
@@ -806,7 +792,7 @@ def _held_peer_id(seq: int) -> str:
 
 class NativeLoop(BackgroundLifecycleMixin):
     caps = EngineCaps(
-        inproc_tools=True,
+        code_mode=True, inproc_tools=True, subagents=True,
         fork=True, rewind=True, cache_metrics=True, context_usage=True,
     )
 
@@ -852,9 +838,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         disallowed_tools: Sequence[str] | None = None,
         native_agents: bool = True,
         setting_sources: Sequence[str] | None = None,
-        claude_settings: bool = False,
-        claude_plugins: bool = False,
-        claude_agents: bool = False,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -940,7 +923,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             # a filtered tool is never described and never callable from code.
             register_code_mode_tools(
                 registry, codemode,
-                tool_filter=self._tool_available,
+                tool_filter=self._tool_wired,
             )
         # ``None`` means unlimited: the provider stays the source of truth for
         # when a turn has to stop. Every comparison below guards that case.
@@ -959,8 +942,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_model_calls = 0
         # The live turn-totals dict the agent loop folds each call's usage
         # into, by reference, for the same reason: a turn that dies outside the
-        # loop still bills what it spent. Four crashed turns in one audited day
-        # carried ``cost_usd: null`` and lost real spend.
+        # loop still bills what it spent.
         self._turn_usage: dict[str, Any] = {}
         self._tool_deliveries = []  # Includes nested code-mode tool completions.
         # Streaming deltas the store refused (see _emit / _note_dropped_event).
@@ -989,10 +971,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._reflection_nudged = False
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
-        # Turn watchdog (round 9): a turn whose active tool call never
-        # returned and whose stream made no progress sat until the host tore
-        # the engine down, with no terminal event and its cost unrecorded.
-        # ``_turn_progress_at`` moves on every emitted event; the watchdog
+        # Turn watchdog: bounds a turn whose tool call never returns and whose
+        # stream makes no progress. ``_turn_progress_at moves on every emitted event; the watchdog
         # task cancels the turn after ``turn_watchdog_seconds`` of silence
         # that is not a human wait (a pending permission or question).
         self.turn_watchdog_seconds = turn_watchdog_seconds
@@ -1154,17 +1134,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
         # The Skill builtin's miss list walks the same scopes the index did.
         self.ctx.extra.setdefault("setting_sources", self._setting_sources)
-        # Deprecated Claude ecosystem keywords and observability attributes are
-        # inert compatibility seams. Provider homes are never read by NativeLoop.
-        self.claude_settings: dict[str, Any] = {}
-        self.claude_plugins: list[Any] = []
         self.native_agents: list[Any] = []
         if native_agents:
             self._apply_native_agents()
-        self.claude_agents = self.native_agents
         self._init_background_lifecycle()
 
-    # Discovery scope → the ``source`` label carried on a usage agent row.
     def _apply_native_agents(self) -> None:
         """Discover native agent definitions and publish them to the session.
 
@@ -1423,24 +1397,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_end_hook_fired = False
         return reason
 
-    async def _seed_bus_seq(self, sid: str) -> None:
-        """Continue event numbering after the rows already persisted.
-
-        A fresh bus counts from 1, so a resumed session would re-issue seqs
-        the events file already holds and ``events_since`` would skip the
-        resumed run's first events. A store may offer ``last_event_seq``;
-        otherwise the maximum is taken from a full ``events_since`` read.
-        """
-        last_event_seq = getattr(self.store, "last_event_seq", None)
-        # Failure must abort resume: starting at zero would silently collide
-        # with durable events in stores that deduplicate by (session_id, seq).
-        if callable(last_event_seq):
-            last = int(await last_event_seq(sid))
-        else:
-            events = await self.store.events_since(sid, 0)
-            last = max((e.seq for e in events), default=0)
-        self.bus.seed(sid, last)
-
     @property
     def context_window(self) -> int | None:
         """The window the usage breakdown and the eviction ladder size against.
@@ -1640,11 +1596,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         reply visible while it is written, and every one of them is
         reconstructible from the assistant node the turn goes on to store, so
         a store that refuses a single ``ToolArgsDelta`` INSERT costs a gap in
-        the replay log and nothing else. It used to cost the turn: the failure
-        raised through the agent loop into the catch-all in
-        :meth:`_start_and_loop`, which ended the turn on a non-retriable
-        ErrorEvent. One transient database blip killed two turns and three
-        workers that way. Load-bearing events (ToolUse, ToolResult, Usage, and
+        the replay log and nothing else, never the turn. Load-bearing events (ToolUse, ToolResult, Usage, and
         every lifecycle event) still surface their failures — losing one of
         those really does corrupt the record.
         """
@@ -2345,16 +2297,15 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         The compiled system prompt carries the FIXED environment facts (cwd,
         platform, shell, project manifests); the date and the git state change
-        under a session and used to be compiled in with them, so every new day
-        and every commit rewrote the prompt prefix and cost the cache. Only a
+        under a session, so they ride here to keep the prompt prefix cacheable.
+        Only a
         prompt compiled with an environment section gets the full note — a
         host that injects its own environment keeps its date and git lines.
         The RUNTIME facts (which Python has pytest, which packages lack
         node_modules) are independent of that section: for any compiled
         prompt they ride their own small block on the first turn and
-        whenever they change, because a host that suppressed the environment
-        section used to lose them too and its sessions re-discovered the same
-        facts by hand. A bare system string (no sections) still gets nothing. Gathering runs
+        whenever they change, even when a host suppressed the environment
+        section. A bare system string (no sections) still gets nothing. Gathering runs
         git and stats the tree, so it runs off the loop. Either way the facts
         are also harvested into the memory store (see
         :func:`fluid.context.runtime_facts.harvest_environment_facts`).
@@ -2868,9 +2819,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     arg_stream_retries < _ARG_STREAM_MAX_RETRIES
                     and not self._interrupted.is_set()
                 ):
-                    # A degenerate generation is usually a one-off: the audited
-                    # sessions all re-issued the identical cell successfully on
-                    # the next attempt. Re-send the same history — nothing is
+                    # A degenerate generation is usually a one-off. Re-send the
+                    # same history — nothing is
                     # appended, so the prompt and its cache prefix are
                     # unchanged — and bill what the abandoned call produced.
                     arg_stream_retries += 1
@@ -3102,7 +3052,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 return
 
             # Only run the tool loop when tools are actually configured; without
-            # a registry a tool_use stop is terminal (M0 behavior). With one,
+            # a registry a tool_use stop is terminal. With one,
             # every emitted tool call is dispatched whatever the stop reason
             # says: llama.cpp, vLLM and Ollama builds report ``stop`` next to
             # tool_calls (mapped to ``end_turn``), and a stream that ran out of
@@ -3383,24 +3333,21 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # harness surface: an allowlist of work tools must not
                 # silently amputate the learning loop either. Deny still
                 # beats everything.
-                return not _matches_tool_pattern(name, self.disallowed_tools)
-        if self.allowed_tools is not None and not _matches_tool_pattern(
+                return not matches_tool_pattern(name, self.disallowed_tools)
+        if self.allowed_tools is not None and not matches_tool_pattern(
             name, self.allowed_tools
         ):
             return False
-        return not _matches_tool_pattern(name, self.disallowed_tools)
+        return not matches_tool_pattern(name, self.disallowed_tools)
 
     def _tool_wired(self, name: str) -> bool:
         """Permitted (:meth:`_tool_permitted`) AND backed by a wired capability.
 
         The predicate every catalog is read through — the deferred schemas,
-        the deferred-catalog reminder, ToolSearch, the usage accounting — so a
-        ``requires_extra`` tool whose host injection is missing is invisible
-        there too, exactly as :meth:`_tools_api` withholds it from the request.
-        Filtered on permission alone, an audited host that never wired agent
-        messaging still listed SendMessage and ListAgents in ToolSearch and
-        billed them in the context breakdown; models loaded them and every
-        call failed.
+        the deferred-catalog reminder, ToolSearch, the usage accounting, and
+        the code-mode projection — so a ``requires_extra`` tool whose host
+        injection is missing is invisible on every surface, exactly as
+        :meth:`_tools_api` withholds it from the request.
         """
         if not self._tool_permitted(name):
             return False
@@ -3417,25 +3364,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             s.name for s in self.registry.list_tools(loaded_only=False)
             if self._tool_wired(s.name)
         )
-
-    def _tool_available(self, name: str) -> bool:
-        """Permitted and backed by a wired host capability.
-
-        The JSON surface drops a ``requires_extra`` tool whose injection is
-        missing (:meth:`_capability_present`), but code mode projected it
-        anyway — so a kernel cell could import ``SessionSearch`` and get
-        "unavailable: no session store directory injected" back as a tool
-        error. Absent capability must be invisible on both surfaces.
-
-        """
-        if not self._tool_permitted(name):
-            return False
-        if self.registry is None:
-            return True
-        spec = self.registry.get(name)
-        if spec is None:
-            return True
-        return self._capability_present(spec)
 
     def _tools_api(self) -> list[dict[str, Any]]:
         """The tool schemas the next request would carry (code-mode surface or
@@ -3520,8 +3448,7 @@ class NativeLoop(BackgroundLifecycleMixin):
     def _learner_routing(self) -> tuple[dict[str, Any], WireState | None]:
         """Request extra and wire state for the memory learner's calls.
 
-        The key is ``"learner:<affinity key>"`` (design 2.4: one cache key
-        per role), and the wire state is this loop's ``learner`` state.
+        The key is ``"learner:<affinity key>"`` (one cache key per role), and the wire state is this loop's ``learner`` state.
         Empty before a session exists or once the sticky key was dropped.
         """
         key = self._affinity_key()
@@ -3757,8 +3684,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         One unexplained miss is noise (a TTL expiry looks identical). Two in a
         row inside one turn is a pattern the host should be able to see and act
-        on - audited sessions repeatedly paid full price with nothing
-        in the transcript saying so. Emitted once when the streak reaches the
+        on. Emitted once when the streak reaches the
         threshold, not on every later call in the same run.
         """
         threshold = self._cache_probe.alert_after_misses
@@ -4144,9 +4070,8 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         A call that ends mid-stream — the user pressed Stop, or the argument
         guard fired — normally never reaches the provider's terminal usage
-        chunk, so its usage dict is empty and every downstream number reads
-        zero: an interrupted turn used to record ``cost_usd: 0.0`` for a
-        prompt and an output the provider certainly charged for. The tokens
+        chunk, so its usage dict is empty, yet the provider still charged for
+        the prompt and output. The tokens
         that were generated are sitting in the accumulated blocks, and the
         prompt is the request that was just sent, so both are estimated here
         and flagged as estimates.
@@ -4172,10 +4097,9 @@ class NativeLoop(BackgroundLifecycleMixin):
     ) -> None:
         """Open a block a delta refers to when no ``block_start`` announced it.
 
-        A provider that skips the start frame (a proxy that drops it, a
-        stream joined late) used to raise ``KeyError`` out of the consumer
-        and lose the turn; the delta's own index and kind say enough to open
-        the block.
+        A provider may skip the start frame (a proxy that drops it, a stream
+        joined late); the delta's own index and kind say enough to open the
+        block.
         """
         if index in blocks:
             return
@@ -4237,11 +4161,8 @@ class NativeLoop(BackgroundLifecycleMixin):
     ) -> ToolResultBlock:
         """Dispatch one tool call, racing it against the interrupt flag.
 
-        Interrupt used to be invisible here: the flag was polled only between
-        provider stream chunks and after a full dispatch round, so a
-        long-running tool (a sync Task worker, a slow shell command) pinned the
-        turn arbitrarily long after the user pressed stop. An interrupt now
-        cancels the in-flight dispatch. The cancelled call still surfaces as an
+        An interrupt cancels the in-flight dispatch, so a long-running tool (a
+        sync Task worker, a slow shell command) cannot pin the turn. The cancelled call still surfaces as an
         is_error ToolResult — every tool_use must get a result or the
         transcript is malformed for the next model call — and the agent loop's
         existing post-dispatch interrupt check then ends the turn.
@@ -4395,11 +4316,8 @@ class NativeLoop(BackgroundLifecycleMixin):
     def _reflection_nudge(self) -> str | None:
         """One appended system-reminder asking the model to record a lesson.
 
-        Small models never call Remember on their own after an expensive
-        harness mistake — audited sessions show the model naming the problem
-        in its own thinking, redoing a subagent's work by hand, and leaving
-        nothing durable behind. The journal now records the mistake
-        mechanically (``FrictionDetector``); this is the other half: a prompt
+        Models rarely call Remember on their own after an expensive harness
+        mistake. The journal records the mistake mechanically (``FrictionDetector``); this is the other half: a prompt
         to turn the mistake into a memory while the context is still hot.
 
         Three properties it must keep:
@@ -4424,7 +4342,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         if self.registry is not None and (
             self.registry.get("Remember") is None
-            or not self._tool_available("Remember")
+            or not self._tool_wired("Remember")
         ):
             return None
         try:
@@ -4594,8 +4512,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         # run_python is engine-driven: it opens the kernel; the kernel's in-sandbox
         # tool calls are gated by HostBridge (see CodeModeSession.run_python),
         # which runs its own MRTR round-trip through this loop's
-        # ``_collect_input_responses`` — so an in-kernel AskUser reaches the user
-        # exactly as a JSON-path one does.
+        # ``_collect_input_responses`` — so an in-kernel input_required pause
+        # reaches the user exactly as a JSON-path one does.
         if self._codemode is not None and name == "run_python":
             outcome = await self._codemode.run_python(
                 sid=sid, turn_id=turn_id, input=input, loop=self
@@ -4704,7 +4622,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         allowed = resp.decision in ("allow", "allow_always")
         if resp.decision == "allow_always" and self.permissions is not None:
             # Sticky for the rest of the session: future calls to this tool
-            # skip the prompt (fix: allow_always used to be a one-shot allow).
+            # skip the prompt.
             spec = self.registry.get(name) if self.registry is not None else None
             scope = spec.scope_of(input) if spec is not None else None
             if spec is not None and spec.session_scope is not None and scope is None:

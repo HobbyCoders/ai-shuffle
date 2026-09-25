@@ -509,8 +509,7 @@ class CliHost:
         agent_name = str(input.get("agent") or "").strip()
         definition = self._find_agent(agent_name, ctx)
         label = input.get("label") or agent_name or "subagent"
-        # The Task tool derives an addressable name from the description
-        # (round 9: every worker used to be named after its agent type).
+        # The Task tool derives an addressable name from the description.
         name = str(input.get("name") or label)
         from fluid.swarm import current_launch
         launch = current_launch.get()
@@ -865,11 +864,11 @@ class CliHost:
             list(parent_allowed) if parent_allowed is not None else None
         )
         if definition is not None and definition.tools:
-            from fluid.engine.native import _matches_tool_pattern
+            from fluid.engine.base import matches_tool_pattern
 
             wanted = list(definition.tools)
             if allowed is not None:
-                kept = [t for t in wanted if _matches_tool_pattern(t, allowed)]
+                kept = [t for t in wanted if matches_tool_pattern(t, allowed)]
                 if len(kept) < len(wanted):
                     log.info(
                         "subagent %s: %s outside the parent's tool allowlist, dropped",

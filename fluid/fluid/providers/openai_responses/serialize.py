@@ -64,10 +64,6 @@ _RESEND_STRIP_KEYS = ("id", "status")
 _EFFORT_LOW_CEIL = 4096
 _EFFORT_MEDIUM_CEIL = 16384
 
-_SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
-    ("image/png", "image/jpeg", "image/gif", "image/webp")
-)
-
 
 # ─── request: Message[] → Responses input items ──────────────────────────────
 

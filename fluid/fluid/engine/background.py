@@ -49,6 +49,24 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
     host worker itself.
     """
 
+    async def _seed_bus_seq(self, sid: str) -> None:
+        """Continue event numbering after the rows already persisted.
+
+        A fresh bus counts from 1, so a resumed session would re-issue seqs
+        the events file already holds and ``events_since`` would skip the
+        resumed run's first events. A store may offer ``last_event_seq``;
+        otherwise the maximum is taken from a full ``events_since`` read.
+        """
+        last_event_seq = getattr(self.store, "last_event_seq", None)
+        # Failure must abort resume: starting at zero would silently collide
+        # with durable events in stores that deduplicate by (session_id, seq).
+        if callable(last_event_seq):
+            last = int(await last_event_seq(sid))
+        else:
+            events = await self.store.events_since(sid, 0)
+            last = max((e.seq for e in events), default=0)
+        self.bus.seed(sid, last)
+
     def _init_background_lifecycle(self) -> None:
         self._init_questions()
         self._background_pending: dict[str, BackgroundTaskReceipt] = {}
@@ -393,12 +411,8 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
     ) -> str:
         """The synthetic user turn a completed background worker wakes into.
 
-        A *synchronous* Task hands the model the worker's report directly. A
-        background one used to hand it whatever summary the host chose to
-        include, with no way back to the rest — so a report that arrived elided
-        cost two HistoryExpand round-trips to recover text that had never been
-        in history. When the host names a report file, this carries the same
-        contract the sync path does: a head of the report plus the handle that
+        When the host names a report file, this carries the same contract the
+        synchronous Task path does: a head of the report plus the handle that
         opens the whole of it.
         """
         sections = [

@@ -67,13 +67,11 @@ def _tool_call(tuid: str, name: str, args_json: str) -> list[StreamChunk]:
 
 
 def _loop(provider: ScriptedProvider | None = None, **kw: Any) -> NativeLoop:
-    """A NativeLoop with the filesystem-discovery toggles off — these tests are
-    about the restriction predicate, not about whatever ~/.claude holds."""
+    """A bare NativeLoop for exercising the tool-restriction predicate."""
     return NativeLoop(
         provider=provider or ScriptedProvider([_text("ok")]),
         store=kw.pop("store", None) or MemoryStore(),
         model="m",
-        claude_settings=False, claude_plugins=False, claude_agents=False,
         **kw,
     )
 

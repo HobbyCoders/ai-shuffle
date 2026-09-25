@@ -1,9 +1,7 @@
 """McpManager — owns MCP client connections and maps results to ToolOutcomes.
 
 The registry talks to the manager; the manager owns one ``McpClient`` per
-server. Kept in its own module (rather than folded into the client) so the
-delegated engine's bundled server and future multi-server routing share the
-same connection pool.
+server.
 """
 
 from __future__ import annotations
@@ -61,11 +59,8 @@ class McpManager:
                 request_state=raw.get("request_state"),
                 requests=raw.get("requests", {}),
             )
-            # TODO(MRTR): the engine turns this marker into a question/permission
-            # round-trip and retries ``dispatch(..., input_responses=...,
-            # request_state=marker.request_state)``. The retry seam is wired
-            # (kwargs plumb through to ``call_tool``); the engine-side collection
-            # of ``inputResponses`` lands with AskUserQuestion in a later slice.
+            # Callers resolve the marker via fluid.tools.mrtr.resolve_input_required
+            # and re-dispatch with input_responses/request_state.
             return ToolOutcome(
                 text=f"[input_required] server {server} needs input before completing {tool}",
                 input_required=marker,

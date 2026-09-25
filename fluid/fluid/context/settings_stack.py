@@ -77,9 +77,7 @@ _DECISION_ORDER = ("allow", "ask", "deny")
 # than approximated — see :func:`default_permission_mode`.
 _PERMISSION_MODES = ("default", "acceptEdits", "bypassPermissions")
 
-# defaultMode → fluid approval policy. ``plan`` has no policy of its own (plan
-# mode is a session flag), so it takes the policy that asks before everything;
-# ``acceptEdits`` is on_write plus allow rules for the file-editing builtins
+# defaultMode → fluid approval policy. ``acceptEdits`` is on_write plus allow rules for the file-editing builtins
 # (:data:`_ACCEPT_EDITS_TOOLS`), which is what the mode means in Claude Code.
 _MODE_POLICY = {
     "default": "on_write",
@@ -219,8 +217,8 @@ def default_permission_mode(settings: dict[str, Any]) -> str | None:
     """``permissions.defaultMode`` as a fluid ``SetPermissionMode`` value.
 
     Claude Code and fluid already share this vocabulary — ``NativeLoop``'s
-    ``SetPermissionMode`` handler accepts ``default`` / ``plan`` /
-    ``acceptEdits`` / ``bypassPermissions`` verbatim — so a recognized value
+    ``SetPermissionMode`` handler accepts ``default`` / ``acceptEdits`` /
+    ``bypassPermissions`` verbatim — so a recognized value
     passes straight through.
 
     Anything else (``dontAsk``, a future mode, a typo) returns ``None`` with a

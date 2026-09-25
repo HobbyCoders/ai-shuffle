@@ -10,15 +10,14 @@ Two callbacks, both optional, both about asking the human something:
 
 - ``on_permission`` — the engine says "ask"; in production ``CodeModeSession``
   backs it with a ``PermissionRequest``/``RespondPermission`` pair.
-- ``on_input_required`` — the *tool* asks (MRTR: ``AskUser``);
+- ``on_input_required`` — the *tool* asks (MRTR ``input_required``);
   production backs it with ``QuestionRequest``/``RespondQuestion``.
 
 Unwired, each one fails loudly rather than quietly: a missing permission
 handler denies, and a missing input-required handler returns an error telling
 the model the user was never asked and to use the JSON tool path. Neither ever
-returns an empty result — an in-kernel ``AskUser`` that answered ``''`` for a
-release read to the model as "the tool ran and said nothing", and it invented
-the user's answers from there.
+returns an empty result, which would read to the model as "the tool ran and
+said nothing".
 
 Hard refusals, all before dispatch: a tool outside the session's tool surface
 (``tool_filter``, ruling T9), a tool with ``code_mode_allowed=False`` (the
@@ -96,11 +95,9 @@ def _soft_external_error(spec: Any, outcome: Any) -> bool:
     """Whether an MCP/inproc error result should come back as the call's
     result text instead of aborting the cell.
 
-    Round 9: 99 "never attempted — the cell stopped at the error" aborts, a
-    third of them browser errors (a stale ref, a stale screenshot) that the
-    next call in the cell would have recovered from. Those are ordinary
-    results now; a timeout or an unreachable server still aborts, because
-    every later call in the cell would pay the same wait for nothing.
+    Ordinary tool errors (a stale ref, a stale screenshot) come back as
+    results the cell can recover from; a timeout or an unreachable server
+    still aborts, because every later call would pay the same wait.
     """
     from fluid.tools.registry import FATAL_EXTERNAL_ERROR_CODES
 
@@ -264,10 +261,9 @@ class HostBridge:
             tool_name, tool_input, self._ctx, raw_shell_output=True,
         )
 
-        # MRTR: the tool paused to ask the user something (AskUser,
-        # an elicitating MCP server). Its first leg is an EMPTY
-        # result carrying a marker — returning that as ``result`` is how a
-        # release told models their questions had been answered with silence.
+        # MRTR: the tool paused on input_required (an elicitating MCP server
+        # or a builtin/in-proc tool). Its first leg is an EMPTY result
+        # carrying a marker, which must never be returned as ``result``.
         if outcome.input_required is not None:
             if self._on_input_required is None:
                 return HostReply(error=unresolved_notice(tool_name))

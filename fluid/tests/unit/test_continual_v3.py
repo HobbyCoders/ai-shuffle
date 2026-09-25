@@ -347,7 +347,6 @@ def test_build_engine_wires_continual_channels(tmp_path) -> None:
         tmp_path, continual=True, skills_dir=str(tmp_path / "skills")
     )
     engine = build_engine(config, MemoryStore(), provider=FakeProvider())
-    assert callable(engine.ctx.extra.get("continual_journal"))
     assert isinstance(engine.ctx.extra.get("recall_store"), SkillStore)
     # The Remember/Recall schemas survive requires_extra gating.
     names = {t["name"] for t in engine._tools_api()}

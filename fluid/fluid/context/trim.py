@@ -179,9 +179,8 @@ def _full_text(block: Any) -> str:
 def describe_trimmed_call(call: Any, full_text: str) -> str:
     """What a trimmed result WAS, in terms the model can act on.
 
-    Round 9: after a compaction the model re-ran Reads whose payloads were
-    still in the kernel as ``_refs``, and re-loaded the same four browser
-    tools eleven times because the placeholder said only "trimmed". So:
+    A bare "trimmed" placeholder makes the model redo work it can recover
+    cheaply, so:
 
     * a code-mode cell whose output named ``_refs[N]`` handles says those
       handles still hold the results (the kernel keeps them across cells);
@@ -286,12 +285,9 @@ def _image_placeholder(
 ) -> Text:
     """What replaces an image once the model has already seen it.
 
-    The generic placeholder pointed at HistoryExpand, which recovers TEXT — it
-    cannot put an image back in context. In the audited transcript the model
-    read that, concluded recall was impossible, and designed a UI from memory
-    of a screenshot it had seen once. So this says what actually happened, says
-    plainly that HistoryExpand is not the recovery route, and names the one
-    that is: re-Read the file.
+    HistoryExpand recovers TEXT and cannot put an image back in context, so
+    this says what happened, says plainly that HistoryExpand is not the
+    recovery route, and names the one that is: re-Read the file.
 
     ``text_retained`` is the in-place form: only the image block was swapped
     and every sibling Text in the result is still verbatim in context, so the
@@ -610,16 +606,6 @@ class ToolResultTrimmer:
         """Re-apply persisted image-consumption decisions (resume)."""
         self._image_consumed.update(tuple(p) for p in pairs)
 
-    def image_candidates(self, nodes: list[SessionNode]) -> int:
-        """How many delivered image results are still carrying their bytes."""
-        if not self.config.enabled:
-            return 0
-        return len(
-            self._consumed_image_results(nodes)
-            - self._image_consumed
-            - self._trimmed
-        )
-
     def force_trim(self, nodes: list[SessionNode]) -> bool:
         """Trim every eligible result NOW, ignoring the trigger (context-
         overflow recovery). Returns True when at least one new block was
@@ -636,10 +622,7 @@ class ToolResultTrimmer:
         """
         if not self.config.enabled:
             return [n.message for n in nodes]
-        # Decisions only. Image consumption used to be recomputed here so the
-        # snapshot could predict it, which also meant an image left context
-        # the moment a later assistant node existed — regardless of pressure,
-        # and mid-turn. Now the next request carries exactly what has been
+        # Decisions only: the next request carries exactly what has been
         # decided, so reporting the decided view IS reporting the request.
         return self._render(nodes)
 
@@ -664,8 +647,8 @@ class ToolResultTrimmer:
     ) -> list[Message]:
         """Render history with sticky trims; arm a new batch when over trigger.
 
-        Image consumption obeys the same two gates as every other rung, which
-        it used to skip: it needs real pressure (over the trigger) and a turn
+        Image consumption obeys the same two gates as every other rung: it
+        needs real pressure (over the trigger) and a turn
         boundary. A bare trimmer has no notion of a turn, so ``turn_boundary``
         defaults to True and the engine passes the real answer.
         """

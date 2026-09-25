@@ -57,7 +57,6 @@ class _IdleProvider:
 def _loop(**kw: Any) -> NativeLoop:
     return NativeLoop(
         provider=_IdleProvider(), store=MemoryStore(), model="m",
-        claude_settings=False, claude_plugins=False, claude_agents=False,
         **kw,
     )
 

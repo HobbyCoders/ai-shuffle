@@ -55,7 +55,6 @@ REFRESH_LOCK_WAIT = 30.0
 ISSUER = "https://auth.openai.com"
 AUTHORIZE_URL = f"{ISSUER}/oauth/authorize"
 TOKEN_URL = f"{ISSUER}/oauth/token"
-REVOKE_URL = f"{ISSUER}/oauth/revoke"
 DEVICE_USERCODE_URL = f"{ISSUER}/api/accounts/deviceauth/usercode"
 DEVICE_TOKEN_URL = f"{ISSUER}/api/accounts/deviceauth/token"
 DEVICE_VERIFICATION_URL = f"{ISSUER}/codex/device"
@@ -401,16 +400,6 @@ async def refresh_tokens(
         code, message = _error_code(_safe_json(resp))
         raise CodexAuthError(code or f"http_{resp.status_code}", message)
     return _bundle_from_token_response(_safe_json(resp), prior_refresh_token=refresh_token)
-
-
-async def revoke_token(token: str, *, client: httpx.AsyncClient | None = None) -> bool:
-    """Best-effort token revoke. Never raises."""
-    try:
-        resp = await _post(client, REVOKE_URL, data={"client_id": client_id(), "token": token})
-        return 200 <= resp.status_code < 300
-    except Exception:
-        logger.debug("codex_oauth: revoke failed", exc_info=True)
-        return False
 
 
 # ─── file-backed token store + auth hook ─────────────────────────────────────

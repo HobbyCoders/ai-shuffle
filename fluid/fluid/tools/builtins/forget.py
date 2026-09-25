@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+from fluid.tools.registry import ToolOutcome, ToolSpec
 
 SPEC = ToolSpec(
     name="Forget", risk="write", requires_extra=("memory_store",),

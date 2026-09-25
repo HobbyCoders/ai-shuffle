@@ -22,7 +22,7 @@ try:  # pragma: no cover - trivial import guard
 except ImportError:  # pragma: no cover
     _HAVE_TEXTUAL = False
 
-# Slash commands the TUI answers in place (read-only views; no turn submitted).
+# Slash commands the TUI handles in place without submitting a turn.
 _INFO_COMMANDS = frozenset({"/help", "/context", "/usage", "/tools", "/skills", "/model", "/questions", "/answer"})
 
 _INSTALL_HINT = (
@@ -30,10 +30,6 @@ _INSTALL_HINT = (
     "Install it with:  pip install 'fluid[tui]'\n"
     "Falling back to the plain REPL is available with 'fluid chat' (no --tui)."
 )
-
-
-def textual_available() -> bool:
-    return _HAVE_TEXTUAL
 
 
 async def run_tui(engine, session_id: str) -> int:

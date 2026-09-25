@@ -63,6 +63,7 @@ from fluid.store.base import (
     SessionSearchHit,
     SessionSlice,
     SessionSummary,
+    clip_text,
     message_texts,
     new_id,
     project_root_for,
@@ -86,11 +87,6 @@ _MAX_CACHED_SESSIONS = 8
 _TITLE_FILL = 20
 _TITLE_CAP = 80
 _PREVIEW_CAP = 120
-
-
-def _clip(text: str, cap: int) -> str:
-    flat = " ".join(text.split())
-    return flat if len(flat) <= cap else flat[: cap - 1] + "…"
 
 
 # ─── Append-only writes ──────────────────────────────────────────────────────
@@ -656,7 +652,7 @@ class JsonlStore:
             preview = ""
             for node in reversed(path):
                 if node.message.role == "assistant" and node.message.text().strip():
-                    preview = _clip(node.message.text(), _PREVIEW_CAP)
+                    preview = clip_text(node.message.text(), _PREVIEW_CAP)
                     break
             out.append(SessionSummary(
                 session_id=session_id,
@@ -706,7 +702,7 @@ class JsonlStore:
             return None
         for node in path:
             if node.message.role == "user" and node.message.text().strip():
-                return _clip(node.message.text(), _TITLE_CAP)
+                return clip_text(node.message.text(), _TITLE_CAP)
         return None
 
     def _scan_log(self, path: Path, session_id: str, terms: list[str]) -> SessionSearchHit:

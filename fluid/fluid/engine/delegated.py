@@ -67,11 +67,10 @@ import signal
 import socket
 import tempfile
 from collections.abc import AsyncIterator, Callable
-from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
 from fluid.engine.background import BackgroundLifecycleMixin
-from fluid.engine.base import EngineCaps
+from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.delegated_proto import (
     ControlReply,
     HookCallbackRequest,
@@ -162,10 +161,6 @@ def _spawn_failure_message(exc: BaseException) -> str:
         return str(exc)
     return f"spawn failed: {exc!r}"
 
-
-def _matches_tool_pattern(name: str, patterns: list[str]) -> bool:
-    """Exact name or case-sensitive fnmatch pattern (same rule as NativeLoop)."""
-    return any(name == p or fnmatchcase(name, p) for p in patterns)
 
 # How long a control_request may wait for its control_response before the
 # caller gives up and reports "unavailable". Short on purpose: these are
@@ -392,20 +387,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     self._session_id, cwd=self.cwd
                 )
         return self._session
-
-    async def _seed_bus_seq(self, sid: str) -> None:
-        """Continue event numbering after the rows already persisted, the
-        same way NativeLoop does, so a resumed delegated session does not
-        re-issue seqs the events file already holds."""
-        last_event_seq = getattr(self.store, "last_event_seq", None)
-        # Failure must abort resume: starting at zero would silently collide
-        # with durable events in stores that deduplicate by (session_id, seq).
-        if callable(last_event_seq):
-            last = int(await last_event_seq(sid))
-        else:
-            events = await self.store.events_since(sid, 0)
-            last = max((e.seq for e in events), default=0)
-        self.bus.seed(sid, last)
 
     @property
     def session_id(self) -> str:
@@ -635,12 +616,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         spellings = (name, _BUNDLED_PREFIX + name)
         if self.disallowed_tools and any(
-            _matches_tool_pattern(s, self.disallowed_tools) for s in spellings
+            matches_tool_pattern(s, self.disallowed_tools) for s in spellings
         ):
             return False
         if self.allowed_tools is None:
             return True
-        return any(_matches_tool_pattern(s, self.allowed_tools) for s in spellings)
+        return any(matches_tool_pattern(s, self.allowed_tools) for s in spellings)
 
     async def _start_bundled_server(self) -> None:
         """Expose the registry's inproc/builtin tools over a local socket and
