@@ -248,7 +248,7 @@ export const plugins = {
 				...state,
 				installed: upsertInstalled(state.installed, [plugin]),
 				available: state.available.map((p) =>
-					p.id === pluginId ? { ...p, installed: true, installed_version: plugin.version } : p
+					p.id === pluginId ? { ...p, installed: true, enabled: plugin.enabled } : p
 				),
 				installing: { ...state.installing, [pluginId]: false }
 			}));
@@ -280,16 +280,15 @@ export const plugins = {
 
 		try {
 			const plugins = await pluginsApi.installPluginsBatch(pluginIds, scope);
-			const installedIds = new Set(plugins.map((p) => p.id));
+			const installedById = new Map(plugins.map((p) => [p.id, p]));
 
 			_update((state) => ({
 				...state,
 				installed: upsertInstalled(state.installed, plugins),
-				available: state.available.map((p) =>
-					installedIds.has(p.id)
-						? { ...p, installed: true, installed_version: plugins.find((ip) => ip.id === p.id)?.version || null }
-						: p
-				),
+				available: state.available.map((p) => {
+					const installed = installedById.get(p.id);
+					return installed ? { ...p, installed: true, enabled: installed.enabled } : p;
+				}),
 				installing: {
 					...state.installing,
 					...pluginIds.reduce((acc, id) => ({ ...acc, [id]: false }), {})
@@ -326,7 +325,7 @@ export const plugins = {
 				...state,
 				installed: state.installed.filter((p) => p.id !== pluginId),
 				available: state.available.map((p) =>
-					p.id === pluginId ? { ...p, installed: false, installed_version: null } : p
+					p.id === pluginId ? { ...p, installed: false, enabled: false } : p
 				),
 				installing: { ...state.installing, [pluginId]: false }
 			}));

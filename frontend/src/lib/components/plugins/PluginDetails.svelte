@@ -6,7 +6,7 @@
 	 * - Plugin metadata (name, description, version, marketplace)
 	 * - Feature badges (commands, agents, skills, hooks)
 	 * - README content
-	 * - Lists of commands, agents, skills, and hooks
+	 * - Lists of commands, agents and skills (the API reports hooks only as has_hooks)
 	 */
 	import type { PluginDetails as PluginDetailsType } from '$lib/api/plugins';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
@@ -24,14 +24,15 @@
 	const isAvailable = $derived(plugin.scope === 'marketplace');
 
 	// Tabs for different content sections
-	type DetailTab = 'overview' | 'commands' | 'agents' | 'skills' | 'hooks';
+	type DetailTab = 'overview' | 'commands' | 'agents' | 'skills';
 	let activeTab = $state<DetailTab>('overview');
 
 	// Count non-empty arrays
 	const hasCommands = $derived(plugin.commands && plugin.commands.length > 0);
 	const hasAgents = $derived(plugin.agents && plugin.agents.length > 0);
 	const hasSkills = $derived(plugin.skills && plugin.skills.length > 0);
-	const hasHooks = $derived(plugin.hooks && plugin.hooks.length > 0);
+	// The details response carries no hook list, only whether the plugin ships hooks.
+	const hasHooks = $derived(plugin.has_hooks);
 
 	// Format install date
 	function formatDate(dateStr: string): string {
@@ -221,12 +222,14 @@
 				</div>
 			{:else}
 				<div class="plugin-detail-info-row">
-					<span class="plugin-detail-info-item">
-						<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-						</svg>
-						Installed {formatDate(plugin.installed_at)}
-					</span>
+					{#if plugin.installed_at}
+						<span class="plugin-detail-info-item">
+							<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+							</svg>
+							Installed {formatDate(plugin.installed_at)}
+						</span>
+					{/if}
 					<span class="plugin-detail-info-item">
 						<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
@@ -271,7 +274,7 @@
 					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
 					</svg>
-					{plugin.hooks.length} Hooks
+					Hooks
 				</span>
 			{/if}
 		</div>
@@ -307,14 +310,6 @@
 				class="plugin-detail-tab {activeTab === 'skills' ? 'plugin-detail-tab--active' : ''}"
 			>
 				Skills
-			</button>
-		{/if}
-		{#if hasHooks}
-			<button
-				onclick={() => activeTab = 'hooks'}
-				class="plugin-detail-tab {activeTab === 'hooks' ? 'plugin-detail-tab--active' : ''}"
-			>
-				Hooks
 			</button>
 		{/if}
 	</div>
@@ -370,17 +365,6 @@
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
 						</svg>
 						<span class="plugin-detail-item-name">{skill}</span>
-					</div>
-				{/each}
-			</div>
-		{:else if activeTab === 'hooks'}
-			<div class="plugin-detail-items">
-				{#each plugin.hooks as hook}
-					<div class="plugin-detail-item">
-						<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" class="plugin-detail-item-icon plugin-detail-item-icon--hooks">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-						</svg>
-						<span class="plugin-detail-item-name">{hook}</span>
 					</div>
 				{/each}
 			</div>
@@ -748,7 +732,7 @@
 		font-family: var(--card-font-mono, 'JetBrains Mono', monospace);
 	}
 
-	/* Item lists (commands, agents, skills, hooks) */
+	/* Item lists (commands, agents, skills) */
 	.plugin-detail-items {
 		display: flex;
 		flex-direction: column;
@@ -781,10 +765,6 @@
 
 	.plugin-detail-item-icon--skills {
 		color: var(--feature-skills, oklch(0.65 0.18 145));
-	}
-
-	.plugin-detail-item-icon--hooks {
-		color: var(--feature-hooks, oklch(0.70 0.16 50));
 	}
 
 	.plugin-detail-item-name {

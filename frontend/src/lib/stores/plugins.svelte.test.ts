@@ -7,7 +7,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { PluginInfo, AvailablePlugin } from '$lib/api/plugins';
+import type { PluginInfo, AvailablePlugin, PluginDetails, FileBasedAgent, PluginUpdateInfo } from '$lib/api/plugins';
+// Real backend payloads (see tests/api/test_plugins_frontend_contract.py).
+import responses from '$lib/api/__fixtures__/plugin-responses.json';
 
 const api = vi.hoisted(() => ({
 	getMarketplaces: vi.fn(),
@@ -16,6 +18,7 @@ const api = vi.hoisted(() => ({
 	getFileBasedAgents: vi.fn(),
 	checkForUpdates: vi.fn(),
 	getAutoUpdateSettings: vi.fn(),
+	getPluginDetails: vi.fn(),
 	installPlugin: vi.fn(),
 	installPluginsBatch: vi.fn(),
 	uninstallPlugin: vi.fn(),
@@ -28,29 +31,25 @@ vi.mock('$lib/api/plugins', () => api);
 
 import { plugins, pluginStats } from './plugins.svelte';
 
+// Fixture builders start from a real backend payload so every field the API
+// sends is present and nothing it does not send is invented.
+const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
+
 function installed(id: string, extra: Partial<PluginInfo> = {}): PluginInfo {
 	const [name, marketplace] = id.split('@');
-	return {
-		id,
-		name,
-		marketplace,
-		description: '',
-		version: '1.0.0',
-		scope: 'user',
-		install_path: `/cache/${marketplace}/${name}`,
-		installed_at: null,
-		enabled: true,
-		has_commands: false,
-		has_agents: false,
-		has_skills: true,
-		has_hooks: false,
-		...extra
-	} as PluginInfo;
+	const base: PluginInfo = clone(responses.installed[0]);
+	return { ...base, id, name, marketplace, version: '1.0.0', install_path: `/cache/${marketplace}/${name}`, ...extra };
 }
 
 function available(id: string, isInstalled = false): AvailablePlugin {
 	const [name, marketplace] = id.split('@');
-	return { id, name, marketplace, description: '', installed: isInstalled, installed_version: null } as AvailablePlugin;
+	const base: AvailablePlugin = clone(responses.available[1]);
+	return { ...base, id, name, marketplace, installed: isInstalled, enabled: isInstalled };
+}
+
+function update(plugin_id: string, available_version: string): PluginUpdateInfo {
+	const [name, marketplace] = plugin_id.split('@');
+	return { plugin_id, name, marketplace, installed_version: '1.0.0', available_version, is_local: true };
 }
 
 async function seed(inst: PluginInfo[], avail: AvailablePlugin[]) {
@@ -112,7 +111,7 @@ describe('plugins store — install', () => {
 		unsub();
 
 		expect(plugins.current.installed.map((p) => p.id)).toEqual(['b@mp']);
-		expect(plugins.current.available[0]).toMatchObject({ id: 'a@mp', installed: false, installed_version: null });
+		expect(plugins.current.available[0]).toEqual({ ...available('a@mp'), installed: false, enabled: false });
 		expect(stats).toMatchObject({ totalInstalled: 1, totalAvailable: 1 });
 	});
 });
@@ -138,14 +137,11 @@ describe('plugins store — marketplace and update failures', () => {
 	it('update applies the new version, then re-reads updates; a failed update-all resets its flags', async () => {
 		api.checkForUpdates.mockResolvedValue([]);
 		await seed([installed('a@mp'), installed('b@mp')], []);
-		api.checkForUpdates.mockResolvedValue([
-			{ plugin_id: 'a@mp', current_version: '1.0.0', latest_version: '1.2.0' },
-			{ plugin_id: 'b@mp', current_version: '1.0.0', latest_version: '1.1.0' }
-		]);
+		api.checkForUpdates.mockResolvedValue([update('a@mp', '1.2.0'), update('b@mp', '1.1.0')]);
 		await plugins.checkForUpdates();
 
 		api.updatePlugin.mockResolvedValue(installed('a@mp', { version: '1.2.0' }));
-		api.checkForUpdates.mockResolvedValue([{ plugin_id: 'b@mp', current_version: '1.0.0', latest_version: '1.1.0' }]);
+		api.checkForUpdates.mockResolvedValue([update('b@mp', '1.1.0')]);
 		await plugins.updatePlugin('a@mp');
 		expect(plugins.current.installed.find((p) => p.id === 'a@mp')?.version).toBe('1.2.0');
 		expect(plugins.current.updatesAvailable.map((u) => u.plugin_id)).toEqual(['b@mp']);
@@ -156,5 +152,77 @@ describe('plugins store — marketplace and update failures', () => {
 		expect(plugins.current.updating['b@mp']).toBe(false);
 		expect(plugins.current.error).toBe('b@mp: clone failed');
 		expect(plugins.current.installed.map((p) => p.id)).toEqual(['a@mp', 'b@mp']);
+	});
+});
+
+describe('plugins store — real backend payloads', () => {
+	const agents: FileBasedAgent[] = responses.file_based_agents;
+	const catalog: AvailablePlugin[] = responses.available;
+	const installedList: PluginInfo[] = responses.installed;
+
+	async function seedReal() {
+		api.getMarketplaces.mockResolvedValue([
+			{ id: 'mp', source: 'git', url: 'https://example.invalid/mp.git', install_location: '/mp', last_updated: null }
+		]);
+		api.getAvailablePlugins.mockResolvedValue(clone(catalog));
+		api.getInstalledPlugins.mockResolvedValue(clone(installedList));
+		api.getFileBasedAgents.mockResolvedValue(clone(agents));
+		api.checkForUpdates.mockResolvedValue([]);
+		api.getAutoUpdateSettings.mockResolvedValue(null);
+		await plugins.loadAll();
+	}
+
+	it('loadAll keeps file-based agents as sent (source_plugin, prompt) and counts them', async () => {
+		await seedReal();
+		let stats: { totalFileBasedAgents: number; totalAvailable: number; totalEnabled: number } | undefined;
+		const unsub = pluginStats.subscribe((s) => (stats = s));
+		unsub();
+
+		expect(plugins.current.fileBasedAgents).toEqual(agents);
+		expect(plugins.current.fileBasedAgents[0]).toMatchObject({ source_plugin: 'toolkit@mp', prompt: 'You review diffs.' });
+		// toolkit@mp is installed per the backend's own `installed` flag, so only extra@mp counts as available.
+		expect(stats).toMatchObject({ totalFileBasedAgents: 1, totalAvailable: 1, totalEnabled: 1 });
+	});
+
+	it('sync resolves on the backend { status, marketplace_id } body and reloads the catalog', async () => {
+		await seedReal();
+		api.syncMarketplace.mockResolvedValue(clone(responses.marketplace_sync));
+		const refreshed = clone(catalog).map((p) => ({ ...p, description: `${p.description} (synced)` }));
+		api.getAvailablePlugins.mockResolvedValue(refreshed);
+
+		await plugins.syncMarketplace('mp');
+
+		expect(api.syncMarketplace).toHaveBeenCalledWith('mp');
+		expect(plugins.current.available).toEqual(refreshed);
+		expect(plugins.current.syncing.mp).toBe(false);
+		expect(plugins.current.error).toBeNull();
+	});
+
+	it('install / uninstall update the available entry with backend fields only', async () => {
+		await seedReal();
+		const toolkit = installedList[0];
+		api.installPlugin.mockResolvedValue({ ...clone(toolkit), id: 'extra@mp', name: 'extra', enabled: true });
+
+		await plugins.installPlugin('extra@mp');
+		const extra = plugins.current.available.find((p) => p.id === 'extra@mp');
+		expect(extra).toEqual({ ...catalog[1], installed: true, enabled: true });
+		expect(Object.keys(extra!).sort()).toEqual(Object.keys(catalog[1]).sort());
+
+		api.uninstallPlugin.mockResolvedValue(undefined);
+		await plugins.uninstallPlugin('extra@mp');
+		expect(plugins.current.available.find((p) => p.id === 'extra@mp')).toEqual(catalog[1]);
+
+		// The batch path mirrors the enabled state the backend reports for each install.
+		api.installPluginsBatch.mockResolvedValue([{ ...clone(toolkit), id: 'extra@mp', name: 'extra', enabled: false }]);
+		await plugins.installPluginsBatch(['extra@mp']);
+		expect(plugins.current.available.find((p) => p.id === 'extra@mp')).toEqual({ ...catalog[1], installed: true, enabled: false });
+	});
+
+	it('selectPlugin stores the details payload unchanged', async () => {
+		const details: PluginDetails = clone(responses.details_installed);
+		api.getPluginDetails.mockResolvedValue(details);
+		await plugins.selectPlugin('toolkit@mp');
+		expect(api.getPluginDetails).toHaveBeenCalledWith('toolkit@mp');
+		expect(plugins.current.selectedPlugin).toEqual(responses.details_installed);
 	});
 });

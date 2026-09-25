@@ -1,0 +1,122 @@
+{
+	"available": [
+		{
+			"connector_type": null,
+			"description": "Review helpers",
+			"enabled": true,
+			"has_agents": true,
+			"has_commands": true,
+			"has_hooks": true,
+			"has_mcp": false,
+			"has_skills": true,
+			"id": "toolkit@mp",
+			"installed": true,
+			"marketplace": "mp",
+			"marketplace_path": "/home/user/fluid/plugins/marketplaces/mp/plugins/toolkit",
+			"name": "toolkit"
+		},
+		{
+			"connector_type": null,
+			"description": "Not installed yet",
+			"enabled": false,
+			"has_agents": false,
+			"has_commands": true,
+			"has_hooks": false,
+			"has_mcp": false,
+			"has_skills": false,
+			"id": "extra@mp",
+			"installed": false,
+			"marketplace": "mp",
+			"marketplace_path": "/home/user/fluid/plugins/marketplaces/mp/plugins/extra",
+			"name": "extra"
+		}
+	],
+	"details_available": {
+		"agents": [],
+		"commands": [
+			"hello"
+		],
+		"connector_type": null,
+		"description": "Not installed yet",
+		"enabled": false,
+		"has_agents": false,
+		"has_commands": true,
+		"has_hooks": false,
+		"has_mcp": false,
+		"has_skills": false,
+		"id": "extra@mp",
+		"install_path": "/home/user/fluid/plugins/marketplaces/mp/plugins/extra",
+		"installed_at": null,
+		"marketplace": "mp",
+		"name": "extra",
+		"readme": null,
+		"scope": "marketplace",
+		"skills": [],
+		"version": "available"
+	},
+	"details_installed": {
+		"agents": [
+			"reviewer"
+		],
+		"commands": [
+			"review"
+		],
+		"connector_type": null,
+		"description": "Review helpers",
+		"enabled": true,
+		"has_agents": true,
+		"has_commands": true,
+		"has_hooks": true,
+		"has_mcp": false,
+		"has_skills": true,
+		"id": "toolkit@mp",
+		"install_path": "/home/user/fluid/plugins/cache/mp/toolkit/1.2.0",
+		"installed_at": "2026-01-02T03:04:05",
+		"marketplace": "mp",
+		"name": "toolkit",
+		"readme": "# Toolkit\n\nReview helpers for pull requests.\n",
+		"scope": "user",
+		"skills": [
+			"lint"
+		],
+		"version": "1.2.0"
+	},
+	"file_based_agents": [
+		{
+			"description": "Reviews diffs",
+			"file_path": "/home/user/fluid/plugins/cache/mp/toolkit/1.2.0/agents/reviewer.md",
+			"id": "toolkit@mp:reviewer",
+			"model": "sonnet",
+			"name": "reviewer",
+			"prompt": "You review diffs.",
+			"source_plugin": "toolkit@mp",
+			"tools": [
+				"Read",
+				"Grep"
+			]
+		}
+	],
+	"installed": [
+		{
+			"connector_type": null,
+			"description": "Review helpers",
+			"enabled": true,
+			"has_agents": true,
+			"has_commands": true,
+			"has_hooks": true,
+			"has_mcp": false,
+			"has_skills": true,
+			"id": "toolkit@mp",
+			"install_path": "/home/user/fluid/plugins/cache/mp/toolkit/1.2.0",
+			"installed_at": "2026-01-02T03:04:05",
+			"marketplace": "mp",
+			"name": "toolkit",
+			"scope": "user",
+			"version": "1.2.0"
+		}
+	],
+	"marketplace_sync": {
+		"marketplace_id": "mp",
+		"status": "synced"
+	}
+}
