@@ -424,6 +424,46 @@ def invalidate(python: str, bwrap: str | None = None) -> None:
         _cache.pop((bwrap, os.path.realpath(python)), None)
 
 
+def is_active(mode: str, python: str, *, allow_fs: bool = False) -> bool:
+    """Whether a kernel spawned now would run under the sandbox, from cache only.
+
+    True when ``mode`` is ``auto``/``required``, the host is Linux, ``auto``
+    was not handed ``allow_fs`` (which runs the plain child), and a passing
+    self-test for this bwrap/python pair is cached. Never runs the self-test
+    (see :func:`prewarm`), so it is cheap enough for a per-call permission
+    check; an unknown or failed self-test reads as inactive.
+    """
+    mode = normalize_mode(mode)
+    if mode == "off" or sys.platform != "linux":
+        return False
+    if mode == "auto" and allow_fs:
+        return False
+    bwrap = find_bwrap()
+    if not bwrap:
+        return False
+    with _cache_lock:
+        cached = _cache.get((bwrap, os.path.realpath(python)))
+    return cached is not None and cached[0].ok
+
+
+def prewarm(mode: str, python: str) -> threading.Thread | None:
+    """Run the self-test in a daemon thread so :func:`is_active` has an answer
+    before the first kernel spawn. None when there is nothing to probe."""
+    mode = normalize_mode(mode)
+    if mode == "off" or sys.platform != "linux" or not find_bwrap():
+        return None
+
+    def _run() -> None:
+        try:
+            self_test(python)
+        except Exception:  # best effort; the first spawn probes again
+            _log.debug("code-mode OS sandbox prewarm failed", exc_info=True)
+
+    thread = threading.Thread(target=_run, name="os-sandbox-prewarm", daemon=True)
+    thread.start()
+    return thread
+
+
 def reset_cache() -> None:
     """Forget the self-test results (tests)."""
     with _cache_lock:

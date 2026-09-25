@@ -419,6 +419,12 @@ class Settings(BaseSettings):
     # never uses it. See fluid/fluid/codemode/os_sandbox.py. Env:
     # CODE_MODE_OS_SANDBOX (fluid's KernelConfig reads the same variable).
     code_mode_os_sandbox: str = "auto"
+    # On Linux the app marks itself non-dumpable at startup
+    # (prctl(PR_SET_DUMPABLE, 0)), so the model-run children that share its
+    # uid (kernel, hooks, CLI, MCP servers) cannot read /proc/<app>/environ,
+    # maps or mem. True skips that, keeping core dumps and same-uid debugging.
+    # Env: ALLOW_PROCESS_INTROSPECTION.
+    allow_process_introspection: bool = False
     # Bounds passed to fluid when the vendored build has the seams
     # (see harness_adapter._registry_bound_kwargs / _loop_bound_kwargs).
     #   - fluid_external_call_timeout_seconds: cap on ONE MCP/inproc tool call.

@@ -140,6 +140,18 @@ def _restart_notice(detail: str) -> str:
     )
 
 
+def os_sandbox_active(config: KernelConfig | None = None) -> bool:
+    """Whether a kernel with ``config`` would run under the OS sandbox now.
+
+    Reads only the cached self-test (:func:`os_sandbox.is_active`), so it
+    never spawns anything; False until a self-test has passed in this process.
+    """
+    config = config or KernelConfig()
+    return os_sandbox.is_active(
+        config.os_sandbox, config.python, allow_fs=config.allow_fs
+    )
+
+
 class SubprocessKernel:
     def __init__(self, config: KernelConfig | None = None) -> None:
         self.config = config or KernelConfig()

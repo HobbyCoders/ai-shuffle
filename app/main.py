@@ -144,7 +144,8 @@ async def lifespan(app: FastAPI):
     from app.core.startup import (
         init_core, init_encryption_and_sessions, init_workspace,
         check_prerequisites, start_services, start_background_tasks,
-        shutdown_services,
+        shutdown_services, harden_process_introspection,
+        prewarm_code_mode_sandbox,
     )
     from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
     from app.core.loop_watchdog import start_loop_watchdog, stop_loop_watchdog
@@ -170,6 +171,11 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info(f"Starting AI Shuffle v{settings.version}")
     logger.info("=" * 60)
+
+    # Before any child is spawned: same-uid children must not be able to read
+    # this process's /proc environ (its start-up secrets).
+    harden_process_introspection()
+    prewarm_code_mode_sandbox()
 
     # Startup phases
     init_core()

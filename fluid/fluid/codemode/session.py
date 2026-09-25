@@ -45,7 +45,11 @@ from fluid.codemode.journal import FrictionDetector, append_friction, strip_remi
 from fluid.codemode.kernel import HostReply
 from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
-from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
+from fluid.codemode.subprocess_kernel import (
+    KernelConfig,
+    SubprocessKernel,
+    os_sandbox_active,
+)
 from fluid.codemode.verify import verify_sources, verify_store
 from fluid.events.model import HookEvent, ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
@@ -291,6 +295,26 @@ class CodeModeSession:
     def friction_count(self) -> int:
         """Friction entries recorded this turn (the engine's nudge trigger)."""
         return self._friction.count if self._skills is not None else 0
+
+    def os_sandbox_active(self) -> bool:
+        """Whether this session's cells run under the OS sandbox (bwrap).
+
+        The process-wide cached self-test must hold for this kernel config,
+        and a live kernel must itself have been spawned sandboxed (``auto``
+        starts it plain after a bwrap refusal). Drives ``run_python``'s risk.
+        """
+        if not os_sandbox_active(self._config):
+            return False
+        return self._kernel is None or bool(self._kernel.sandboxed)
+
+    def run_python_risk(self, _input: dict | None = None) -> str:
+        """``safe`` behind the OS sandbox, else ``write`` so Ask mode prompts.
+
+        Without bwrap the kernel's only boundary is the in-process audit guard,
+        which is defence in depth, not a trust boundary: a cell that escapes it
+        runs host commands as the app user.
+        """
+        return "safe" if self.os_sandbox_active() else "write"
 
     def begin_turn(self) -> None:
         """Turn boundary: reset friction budget and cross-call state."""
@@ -795,6 +819,11 @@ def register_code_mode_tools(
                 "required": ["code"],
             },
             source=CODE_MODE_SOURCE,
+            # ``write`` is the ceiling; the classifier lowers it to ``safe``
+            # only while the OS sandbox holds (see run_python_risk), so Ask
+            # mode prompts for cells whenever the kernel runs unsandboxed.
+            risk="write",
+            classify_risk=getattr(session, "run_python_risk", None),
         ),
         _run_guard,
     )

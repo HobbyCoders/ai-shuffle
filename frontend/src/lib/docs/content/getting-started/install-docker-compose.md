@@ -320,6 +320,8 @@ These lines turn off Docker's default seccomp and AppArmor filters for the whole
 - `required`: never run code without the sandbox. When it is unavailable, every Python cell fails with the reason.
 - `off`: never use it.
 
+While the kernel runs without the sandbox, Ask mode asks before each Python cell runs; with the sandbox active, cells run without a prompt.
+
 The kernel's own checks inside the process stay on in every mode, as a second layer; the sandbox is the boundary that holds.
 
 ## Behind a reverse proxy (optional)

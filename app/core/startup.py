@@ -22,6 +22,58 @@ from app.core import encryption
 logger = logging.getLogger(__name__)
 
 
+PR_SET_DUMPABLE = 4
+
+
+def harden_process_introspection() -> bool:
+    """Make this process non-dumpable on Linux; True when it now is.
+
+    Every model-run child (code-mode kernel, hooks, the CLI, MCP servers) runs
+    as the app's uid, and a same-uid process may read ``/proc/<pid>/environ``,
+    ``maps`` and ``mem`` of a dumpable one, so scrubbing secrets out of the
+    children's own environment would not keep the app's start-up secrets from
+    them. ``prctl(PR_SET_DUMPABLE, 0)`` restricts those files to root. Children
+    are unaffected: ``execve`` makes them dumpable again. Best effort: a
+    failure is logged once and startup continues. ``ALLOW_PROCESS_INTROSPECTION
+    =true`` skips it, keeping core dumps and same-uid debugging.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    if settings.allow_process_introspection:
+        logger.info("ALLOW_PROCESS_INTROSPECTION is set: this process stays dumpable")
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or None, use_errno=True)
+        if libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE, 0) failed")
+    except Exception as exc:
+        logger.warning(
+            "Could not mark the app process non-dumpable (%s); same-uid child "
+            "processes can read its /proc environ", exc,
+        )
+        return False
+    return True
+
+
+def prewarm_code_mode_sandbox() -> None:
+    """Run the code-mode OS sandbox self-test in the background.
+
+    ``run_python`` is rated ``safe`` only once a self-test has passed in this
+    process, so warming it here keeps Ask mode from prompting for the first
+    cell on a host where the sandbox works. Best effort.
+    """
+    if not settings.fluid_code_mode:
+        return
+    try:
+        from fluid.codemode import os_sandbox
+        os_sandbox.prewarm(settings.code_mode_os_sandbox, sys.executable)
+    except Exception:
+        logger.debug("Code-mode OS sandbox prewarm skipped", exc_info=True)
+
+
 def _reject_legacy_sqlite() -> None:
     """Never import, rename, or ignore an old database during managed startup."""
     sqlite_path = settings.db_path
