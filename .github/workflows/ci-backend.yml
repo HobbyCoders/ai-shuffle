@@ -137,9 +137,6 @@ jobs:
         # tests/mcp, services, unit, scripts and top-level tests/test_*.py are hermetic too (~45s at -n 4).
         run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance tests/mcp tests/services tests/unit tests/scripts tests/test_*.py -o addopts="" -q -p no:cacheprovider --timeout=120 -n "$PYTEST_WORKERS"
 
-      - name: Packaging and backup regression checks
-        run: python -m pytest tests/test_packaging_audit.py tests/test_run_local_supervisor.py tests/test_chrome_supervisor.py tests/test_connector_catalog.py tests/test_connector_packages.py tests/test_buyer_docs.py tests/scripts/test_release_preflight.py -o addopts="" -q --timeout=120
-
       - name: Start the runner's PostgreSQL
         # The Ubuntu runner image ships PostgreSQL preinstalled and stopped;
         # starting it costs seconds, where a service container costs a pull
@@ -213,7 +210,9 @@ jobs:
             --confcutdir=tests/integration -o addopts="" -p no:cacheprovider \
             --timeout=120 -v
           python -m pytest tests/db/test_usage_budget_postgres.py tests/db/test_openrouter_usage_postgres.py \
-            tests/db/test_dedupe_cancelled_usage_postgres.py \
+            tests/db/test_dedupe_cancelled_usage_postgres.py tests/db/test_turn_usage_settlement_postgres.py \
+            tests/db/test_fluid_delegated_batching_postgres.py tests/db/test_universal_search_pg.py \
+            tests/core/test_pg_session_store.py tests/core/test_pg_session_store_rewind.py \
             -o addopts="" -p no:cacheprovider --timeout=120 -v
 
       - name: Audit public Python dependencies
