@@ -186,9 +186,9 @@ async def _persist_and_broadcast_first_message(
 def _broadcast_session_created(session_id: str) -> None:
     """Fire-and-forget sidebar refresh for a freshly created session."""
     try:
+        from app.core.detached_tasks import spawn_detached
         from app.core.sync_engine import sync_engine
-        import asyncio as _asyncio
-        _asyncio.ensure_future(sync_engine.broadcast_user_session_created(
+        spawn_detached(sync_engine.broadcast_user_session_created(
             user_id="admin",
             session_id=session_id,
             source_device_id=None,

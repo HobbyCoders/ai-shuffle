@@ -84,13 +84,14 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any, only
         value_json = json.dumps(value)
         revision = str(uuid4())
 
+        insert_if_missing = (
+            f"""INSERT INTO user_preferences (user_type, user_id, key, value, updated_at, revision)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON CONFLICT(user_type, user_id, key) DO NOTHING RETURNING {_PREFERENCE_COLUMNS}""",
+            (user_type, user_id, key, value_json, now, revision),
+        )
         if only_if_missing or expected_version is None:
-            cursor.execute(
-                f"""INSERT INTO user_preferences (user_type, user_id, key, value, updated_at, revision)
-                   VALUES (%s, %s, %s, %s, %s, %s)
-                   ON CONFLICT(user_type, user_id, key) DO NOTHING RETURNING {_PREFERENCE_COLUMNS}""",
-                (user_type, user_id, key, value_json, now, revision),
-            )
+            cursor.execute(*insert_if_missing)
         elif expected_version is not _UNCONDITIONAL:
             cursor.execute(
                 f"""UPDATE user_preferences SET value = %s, updated_at = %s, revision = %s
@@ -116,6 +117,14 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any, only
                 (user_type, user_id, key),
             )
             result = row_to_dict(cursor.fetchone())
+            if result is None:
+                # The conflicting row was deleted before the read, so the key
+                # is missing again: insert-if-missing applies. Retry once.
+                cursor.execute(*insert_if_missing)
+                result = row_to_dict(cursor.fetchone())
+                inserted = result is not None
+                if result is None:
+                    raise PreferenceConflict('Preference changed elsewhere; refresh before editing')
         if isinstance(result["value"], str):
             try:
                 result["value"] = json.loads(result["value"])

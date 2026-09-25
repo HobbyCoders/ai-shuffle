@@ -15,6 +15,7 @@ from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
+from app.core.detached_tasks import spawn_detached
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
@@ -1081,7 +1082,7 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
 
     # Broadcast rewind event to all connected devices for this session
     if chat_rewound and messages_removed > 0:
-        asyncio.create_task(
+        spawn_detached(
             sync_engine.broadcast_session_rewound(
                 session_id=session_id,
                 target_uuid=request.target_uuid,

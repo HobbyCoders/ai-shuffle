@@ -22,5 +22,11 @@ def workers(tmp_path):
     engine.reset_for_tests()
     tokens.reset_for_tests()
     transport.reset_for_tests()
-    # Every pairing in a test counts against the per-process exchange limiter.
+
+
+@pytest.fixture(autouse=True)
+def _reset_pairing_limiter():
+    """Every pairing in a test counts against the per-process exchange limiter."""
+    pairing._exchange_limiter.reset()
+    yield
     pairing._exchange_limiter.reset()

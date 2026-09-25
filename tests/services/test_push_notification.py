@@ -399,6 +399,31 @@ class TestFireAndForgetNotify:
         # Executed in a plain sync test → no running event loop.
         fire_and_forget_notify("Title", "Body")
 
+    async def test_task_is_retained_until_done(self):
+        """The scheduled task is strongly held until it finishes, so GC cannot
+        collect it mid-run, and it is released afterwards."""
+        from app.core import detached_tasks
+
+        gate = asyncio.Event()
+
+        async def _slow(*_a, **_kw):
+            await gate.wait()
+            return []
+
+        before = set(detached_tasks._DETACHED_TASKS)
+        with patch.object(push_notification_service, "send_to_all_devices", new=_slow):
+            fire_and_forget_notify("Title", "Body")
+            new = detached_tasks._DETACHED_TASKS - before
+            assert len(new) == 1
+            (task,) = new
+            await asyncio.sleep(0)
+            assert task in detached_tasks._DETACHED_TASKS
+            assert not task.done()
+            gate.set()
+            await task
+        await asyncio.sleep(0)
+        assert task not in detached_tasks._DETACHED_TASKS
+
 
 
 class TestUnifiedPushEndpointPolicy:

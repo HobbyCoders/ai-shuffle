@@ -335,7 +335,7 @@ def leave_network() -> dict:
     left = {"network_id": ctx.network_id, "name": ctx.name, "member_count": len(ctx.active_members())}
     with get_db() as conn:
         cursor = conn.cursor()
-        store.lock_state(cursor)  # Same lock order as in-flight hub receipt transactions.
+        store.lock_state(cursor)  # State lock first, like the other network-state writers.
         for table in ("sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
                       "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
                       "network_joins", "network_member_names", "network_members"):
@@ -1232,22 +1232,15 @@ def _ensure_safe_write_key(ctx: NetworkContext) -> NetworkContext:
     return current
 
 
-def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext | None = None,
-                hub_scope: str | None = None) -> ApplyResult:
+def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
+                ctx: NetworkContext | None = None) -> ApplyResult:
     """Apply a batch in one transaction per envelope so one bad op cannot poison the rest."""
     ctx = ctx or require_context()
     result = ApplyResult()
     for data in envelopes:
         try:
             with get_db() as conn:
-                cursor = conn.cursor()
-                if hub_scope is not None:
-                    state = store.lock_state(cursor)
-                    if ((state or {}).get("hub") or {}).get("binding_scope") != hub_scope:
-                        raise RuntimeError("Account network changed during feed application")
-                outcome = apply_envelope(cursor, data, ctx=ctx, result=result)
-                if hub_scope is not None:
-                    store.record_hub_receipt(cursor, hub_scope, data)
+                outcome = apply_envelope(conn.cursor(), data, ctx=ctx, result=result)
         except TransientApplyError as exc:
             result.retry += 1
             result.reasons.append(str(exc))
@@ -1257,11 +1250,6 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext |
             result.reasons.append(str(exc))
             continue
         except Exception as exc:  # noqa: BLE001 - keep the loop alive; log once per op
-            if hub_scope is not None:
-                # A storage failure is not an invalid remote operation. Do not
-                # let the hub reader advance its cursor past an uncommitted op.
-                load_context()
-                raise
             logger.warning("Applying an operation failed: %s", exc, exc_info=True)
             result.retry += 1
             result.reasons.append("apply failed")

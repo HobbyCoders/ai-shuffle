@@ -450,15 +450,10 @@ def fire_and_forget_notify(
     no cross-install HTTP fan-out is needed (that legacy relay was removed with
     the V2 placement cutover).
     """
-    import asyncio
+    from app.core.detached_tasks import spawn_detached
 
     async def _run() -> None:
         await deliver_local_notification(title, body, data)
 
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
+    if spawn_detached(_run()) is None:
         logger.debug("fire_and_forget_notify called with no running loop; skipped")
-        return
-
-    loop.create_task(_run())
