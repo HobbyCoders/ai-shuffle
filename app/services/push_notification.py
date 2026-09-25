@@ -36,6 +36,45 @@ class NotificationResult:
     message_id: Optional[str] = None
     error: Optional[str] = None
     device_id: Optional[str] = None
+    # Mock mode (no Firebase credentials) reports success without anything
+    # leaving this server. Callers that tell a person "you were notified" must
+    # not count a simulated send.
+    simulated: bool = False
+
+
+#: Why a broadcast reached nobody when no registration can show a notification.
+NO_PUSH_RECEIVER_REASON = "no device can receive push notifications"
+
+#: The channel that does reach the user today.
+IN_APP_CHANNEL_NOTE = (
+    "The in-app notification center (live notification frames to the open "
+    "web, desktop and mobile app) is the working channel; phone push is not."
+)
+
+
+def device_receives_push(device: Dict[str, Any]) -> bool:
+    """Whether ``device``'s registration came from a client that raises push.
+
+    A client declares ``capabilities.supports_push`` when it pairs. Every
+    current client declares ``false``: the Android app dropped its UnifiedPush
+    receiver, and ``ApiClient.registerDevice``, hub enroll and managed repair
+    all send ``supports_push: false``. A UnifiedPush endpoint or FCM token on
+    such a row points at a distributor with no app to hand the message to, so
+    a 2xx from it is not a delivery, and posting the title and body there only
+    copies them to a third party.
+    """
+    capabilities = device.get("capabilities") or {}
+    if not isinstance(capabilities, dict) or capabilities.get("supports_push") is not True:
+        return False
+    return bool(device.get("unifiedpush_endpoint") or device.get("fcm_token"))
+
+
+def delivered_count(results: List["NotificationResult"]) -> int:
+    """Sends a receiving endpoint acknowledged (2xx), excluding mock sends."""
+    return sum(
+        1 for r in results
+        if getattr(r, "success", False) and not getattr(r, "simulated", False)
+    )
 
 
 def _resolve_public(host: str) -> Tuple[Optional[str], Optional[str]]:
@@ -188,6 +227,7 @@ class PushNotificationService:
             success=True,
             message_id=mock_message_id,
             device_id=notification_data["device_id"],
+            simulated=True,
         )
 
     async def _send_fcm_notification(
@@ -331,11 +371,14 @@ class PushNotificationService:
             data: Optional custom data payload
             device_tokens: Explicit FCM tokens. If provided, those are used
                 directly (legacy/back-compat). If None, every registered device
-                is enumerated and dispatched on whichever transport it
-                registered — a UnifiedPush endpoint (preferred) or an FCM token.
+                whose registration can receive push (``device_receives_push``)
+                is dispatched on whichever transport it registered — a
+                UnifiedPush endpoint (preferred) or an FCM token. Other
+                registrations are skipped, not posted to.
 
         Returns:
-            List of NotificationResult for each device
+            List of NotificationResult for each device dispatched to; empty
+            when no registration can receive push.
         """
         # Legacy/explicit path: caller passed FCM tokens directly.
         if device_tokens is not None:
@@ -365,6 +408,8 @@ class PushNotificationService:
 
         results = []
         for d in devices:
+            if not device_receives_push(d):
+                continue
             endpoint = d.get("unifiedpush_endpoint")
             token = d.get("fcm_token")
             if endpoint:

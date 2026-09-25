@@ -300,3 +300,14 @@ def test_claude_event_without_utilization_or_type_is_ignored():
     assert monitor.apply_live_event(None, 0.5, 1) is None
     assert monitor.apply_live_event("five_hour", float("nan"), 1) is None
     assert monitor._windows == []
+
+
+@pytest.mark.parametrize("used", [None, 0.3, 1.0])
+def test_claude_rejected_event_reads_exhausted(used):
+    """The CLI cut the window off: 100% used / 0% left even with no utilization."""
+    monitor = UsageLimitsMonitor()
+    snapshot = monitor.apply_live_event("five_hour", used, 1_790_000_000, status="rejected")
+    window = snapshot["windows"][0]
+    assert window["utilization"] == 0.0
+    assert window["resets_at"] == 1_790_000_000
+    assert isinstance(window["observed_at"], int)

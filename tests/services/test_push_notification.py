@@ -314,9 +314,12 @@ class TestSendToAllDevices:
         """Each device uses its own transport; tokenless devices are skipped."""
         service = PushNotificationService()
         devices = [
-            {"device_id": "d1", "unifiedpush_endpoint": "https://ntfy.sh/a", "fcm_token": None},
-            {"device_id": "d2", "unifiedpush_endpoint": None, "fcm_token": "fcm-tok"},
-            {"device_id": "d3", "unifiedpush_endpoint": None, "fcm_token": None},
+            {"device_id": "d1", "unifiedpush_endpoint": "https://ntfy.sh/a", "fcm_token": None,
+             "capabilities": {"supports_push": True}},
+            {"device_id": "d2", "unifiedpush_endpoint": None, "fcm_token": "fcm-tok",
+             "capabilities": {"supports_push": True}},
+            {"device_id": "d3", "unifiedpush_endpoint": None, "fcm_token": None,
+             "capabilities": {"supports_push": True}},
         ]
         service.send_notification = AsyncMock(return_value=NotificationResult(success=True))
 
@@ -342,6 +345,27 @@ class TestSendToAllDevices:
         assert len(results) == 2
         for call in service.send_notification.await_args_list:
             assert call.kwargs.get("unifiedpush_endpoint") is None
+
+    async def test_registrations_without_push_are_not_posted_to(self):
+        """NC-2: current clients declare supports_push false. A legacy
+        UnifiedPush endpoint or FCM token on their row is skipped, so the
+        title and body never reach a distributor with no app behind it."""
+        service = PushNotificationService()
+        devices = [
+            {"device_id": "old", "unifiedpush_endpoint": "https://ntfy.sh/a", "fcm_token": None,
+             "capabilities": {"supports_push": False}},
+            {"device_id": "tok", "unifiedpush_endpoint": None, "fcm_token": "fcm-tok",
+             "capabilities": {}},
+            {"device_id": "raw", "unifiedpush_endpoint": "https://ntfy.sh/b", "fcm_token": None,
+             "capabilities": "not-a-dict"},
+        ]
+        service.send_notification = AsyncMock(return_value=NotificationResult(success=True))
+
+        with patch("app.db.mobile.get_all_mobile_devices", return_value=devices):
+            results = await service.send_to_all_devices(title="T", body="B")
+
+        assert results == []
+        service.send_notification.assert_not_awaited()
 
     async def test_no_devices_returns_empty(self):
         """No registered devices yields an empty result list, no error."""
@@ -458,3 +482,43 @@ class TestUnifiedPushEndpointPolicy:
             )
         assert result.success is False
         client.post.assert_not_awaited()
+
+
+# =============================================================================
+# Delivery honesty (NC-2)
+# =============================================================================
+
+class TestDeliveryHonesty:
+    """What counts as "the user was notified"."""
+
+    def test_device_receives_push_needs_the_declared_capability_and_a_transport(self):
+        from app.services.push_notification import device_receives_push
+
+        endpoint = {"unifiedpush_endpoint": "https://ntfy.sh/a"}
+        assert device_receives_push({**endpoint, "capabilities": {"supports_push": True}})
+        assert device_receives_push({"fcm_token": "t", "capabilities": {"supports_push": True}})
+        assert not device_receives_push({**endpoint, "capabilities": {"supports_push": False}})
+        assert not device_receives_push({**endpoint, "capabilities": {}})
+        assert not device_receives_push({**endpoint})
+        assert not device_receives_push({**endpoint, "capabilities": {"supports_push": "yes"}})
+        assert not device_receives_push({"capabilities": {"supports_push": True}})
+
+    async def test_mock_send_is_marked_simulated(self):
+        service = PushNotificationService()
+        service._initialized = True
+        service._mock_mode = True
+
+        result = await service.send_notification(device_id="tok", title="T", body="B")
+
+        assert result.success is True
+        assert result.simulated is True
+
+    def test_delivered_count_skips_failures_and_simulated_sends(self):
+        from app.services.push_notification import delivered_count
+
+        assert delivered_count([]) == 0
+        assert delivered_count([
+            NotificationResult(success=True),
+            NotificationResult(success=False),
+            NotificationResult(success=True, simulated=True),
+        ]) == 1

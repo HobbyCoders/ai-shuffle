@@ -10,7 +10,7 @@ on page load, before any live ``usage_snapshot`` WS event arrives.
 import logging
 import math
 import time
-from typing import List, Literal, Optional
+from typing import Any, Callable, List, Literal, Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, field_validator
@@ -363,6 +363,11 @@ async def get_usage_limits(
         provider_usage_monitor,
     )
 
+    # Every row here is the owner's account data: an API key reads none of
+    # it, and never starts the owner's provider polling (see
+    # API_KEY_USAGE_REASON).
+    if _.startswith("api_key:"):
+        return UsageSnapshot(providers=[])
     # A forced refresh inside the cooldown serves the cached rows (with
     # ``cooldown_until``); the request budget still limits each credential.
     provider_usage_monitor.request_refresh(force=refresh, cooldown=FORCED_REFRESH_COOLDOWN_SECONDS)
@@ -397,3 +402,88 @@ async def get_cached_usage_snapshot() -> UsageSnapshot:
 async def get_cached_usage_payload() -> dict:
     """JSON-safe cache-only usage payload for native/tool host callbacks."""
     return (await get_cached_usage_snapshot()).model_dump(mode="json")
+
+
+# Why an API key's session gets no usage. Every snapshot row is the owner's
+# account data: the Claude subscription windows, and the billing of the model
+# providers only the owner can list or configure (require_admin). Nothing is
+# collected per key, so there is no subset a key owns; like the install-wide
+# logs (GetAppErrors/GetAppLogs), GetUsage is refused for non-owner sessions.
+API_KEY_USAGE_REASON = (
+    "usage belongs to the owner's subscription and provider accounts; "
+    "an API key's session cannot read it"
+)
+
+
+def key_denied_usage_result() -> dict:
+    """GetUsage's formatted result for an API key's session."""
+    return {
+        "available": False,
+        "claude_available": False,
+        "source": "host_snapshot",
+        "freshness": "unavailable",
+        "windows": [],
+        "accounts": [],
+        "providers": [],
+        "session_usage": {"available": False, "reason": API_KEY_USAGE_REASON},
+        "denied": True,
+        "reason": API_KEY_USAGE_REASON,
+    }
+
+
+def _key_denied_raw_payload() -> dict:
+    """An empty host snapshot for Fluid's GetUsage formatter.
+
+    ``providers`` is ``[]``, not ``None``: ``None`` makes the formatter replay
+    the last provider rows this process read, which may be the owner's.
+    """
+    return {
+        "available": False,
+        "windows": [],
+        "snapshots": [],
+        "providers": [],
+        "provider_refreshing": False,
+        "session_usage": {"available": False, "reason": API_KEY_USAGE_REASON},
+        "denied": True,
+        "reason": API_KEY_USAGE_REASON,
+    }
+
+
+def _owner_session(session_id: Optional[str]) -> bool:
+    """True only for a known session no API key owns. Fails closed."""
+    if not session_id:
+        return False
+    try:
+        from app.db import database
+
+        row = database.get_session(session_id)
+    except Exception:  # noqa: BLE001 - unknown ownership reads as "not the owner"
+        logger.debug("GetUsage could not read session %s", session_id, exc_info=True)
+        return False
+    return bool(row) and not row.get("api_user_id")
+
+
+async def get_session_usage_payload(session_id: Optional[str]) -> dict:
+    """GetUsage's host snapshot for one app session.
+
+    The owner's session gets :func:`get_cached_usage_payload`; an API key's
+    session (or one whose owner cannot be read) gets an empty snapshot.
+    """
+    from app.db.async_database import run_sync
+
+    if not await run_sync(_owner_session, session_id):
+        return _key_denied_raw_payload()
+    return await get_cached_usage_payload()
+
+
+def session_usage_callback(resolve_session_id: Callable[[], Optional[str]]) -> Callable[[], Any]:
+    """A GetUsage host callback bound to a session resolved at call time."""
+
+    async def _callback() -> dict:
+        try:
+            session_id = resolve_session_id()
+        except Exception:  # noqa: BLE001 - unresolvable reads as "not the owner"
+            session_id = None
+        return await get_session_usage_payload(session_id)
+
+    return _callback

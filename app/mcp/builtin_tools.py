@@ -1480,15 +1480,16 @@ def create_builtin_tools_server(
     # ------------------------------------------------------------------
     @tool(
         "NotifyDevices",
-        "Send a push notification to all registered mobile devices. "
-        "Use for alerting the user to long-running task completion or important "
-        "events.\n"
+        "Send a push notification to registered mobile devices that can "
+        "receive push. Use for alerting the user to long-running task "
+        "completion or important events.\n"
         "\n"
-        "This install may have NO registered devices, in which case nothing is "
-        "delivered and the result says so explicitly (sent: 0, delivered: "
-        "false). Treat that as 'the user has not been told' — say it in chat "
-        "instead. A non-zero `sent` with `successful: 0` means every device "
-        "rejected the push; that is also undelivered.",
+        "Current app versions do not receive push, so usually no device can: "
+        "the result then says delivered: false with reason 'no device can "
+        "receive push notifications'. `delivered` is true only when a device "
+        "that receives push acknowledged the message. Whenever delivered is "
+        "false the user has not been told — say it in chat instead; the "
+        "in-app notification center is the channel that reaches them.",
         {
             "type": "object",
             "properties": {
@@ -1505,11 +1506,18 @@ def create_builtin_tools_server(
         if not title or not body:
             return _err("title and body are required.")
         try:
-            from app.services.push_notification import push_notification_service
+            from app.services.push_notification import (
+                IN_APP_CHANNEL_NOTE,
+                NO_PUSH_RECEIVER_REASON,
+                delivered_count,
+                push_notification_service,
+            )
             results = await push_notification_service.send_to_all_devices(
                 title=title, body=body, data=args.get("data"),
             )
-            successful = sum(1 for r in results if getattr(r, "success", False))
+            # ``successful`` counts only acknowledgements from a device that
+            # receives push: a mock-mode send left nothing on this server.
+            successful = delivered_count(results)
             payload: Dict[str, Any] = {
                 "sent": len(results),
                 "successful": successful,
@@ -1520,14 +1528,19 @@ def create_builtin_tools_server(
             # told. Not an exception — there is nothing to retry — but not a
             # green light either.
             if not results:
-                payload["note"] = (
-                    "no registered devices — nothing was delivered; tell the "
-                    "user in chat instead."
-                )
+                payload["reason"] = NO_PUSH_RECEIVER_REASON
             elif not successful:
+                simulated = sum(1 for r in results if getattr(r, "simulated", False))
+                payload["reason"] = (
+                    "push is in mock mode (no Firebase credentials); nothing "
+                    "left this server"
+                    if simulated == len(results)
+                    else f"all {len(results)} device(s) rejected the push"
+                )
+            if not successful:
                 payload["note"] = (
-                    f"all {len(results)} device(s) rejected the push — nothing "
-                    "was delivered; tell the user in chat instead."
+                    f"{payload['reason']} — nothing was delivered; tell the "
+                    f"user in chat instead. {IN_APP_CHANNEL_NOTE}"
                 )
             return _ok(payload)
         except Exception as e:
@@ -2513,6 +2526,11 @@ def create_builtin_tools_server(
         {"type": "object", "properties": {}, "additionalProperties": False},
     )
     async def get_usage(args: dict) -> dict:
+        if not is_admin:
+            # Owner account data with no per-key subset (see app.api.usage).
+            from app.api.usage import key_denied_usage_result
+
+            return _ok(key_denied_usage_result())
         try:
             from app.api.usage import get_cached_usage_payload
             from fluid.tools.builtins.usage import _payload as format_usage_payload

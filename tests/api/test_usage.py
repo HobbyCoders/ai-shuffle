@@ -742,3 +742,59 @@ class TestCachedUsageToolSnapshot:
         assert payload["available"] is True
         assert payload["windows"][0]["utilization"] == 25
         monitor.get_cluster_snapshot.assert_not_awaited()
+
+
+class TestApiKeyUsage:
+    """Usage rows are the owner's account data: an API key reads none of them."""
+
+    _OWNER = {"available": True, "windows": [{"type": "five_hour", "utilization": 40}],
+              "snapshots": [], "providers": [{"provider_id": "owner-or", "credits": {"balance": 9}}]}
+
+    def test_rest_key_gets_an_empty_snapshot_and_starts_no_refresh(self, cached_provider_poll):
+        from app.api import usage
+
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[require_auth] = lambda: "api_key:u-key"
+        with patch.object(usage, "usage_limits_monitor") as mon, patch.object(
+            usage, "_load_provider_usage", new=AsyncMock(return_value=[])
+        ) as load:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(self._OWNER))
+            body = TestClient(app).get("/api/v1/usage/limits?refresh=true").json()
+        assert body["available"] is False and body["windows"] == [] and body["providers"] == []
+        cached_provider_poll.request_refresh.assert_not_called()
+        mon.get_cluster_snapshot.assert_not_called()
+        load.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("row", "owner"), [
+        ({"id": "s", "api_user_id": None}, True),
+        ({"id": "s", "api_user_id": "u-key"}, False),
+        (None, False),  # unknown session: fail closed
+    ])
+    async def test_get_usage_host_snapshot_follows_session_ownership(self, row, owner):
+        from app.api import usage
+
+        with patch("app.db.database.get_session", return_value=row), patch.object(
+            usage, "get_cached_usage_payload", new=AsyncMock(return_value=dict(self._OWNER))
+        ) as cached:
+            payload = await usage.get_session_usage_payload("s")
+        if owner:
+            assert payload == self._OWNER
+        else:
+            cached.assert_not_awaited()
+            # [] (not None): None makes Fluid replay the last rows it read.
+            assert payload["providers"] == [] and payload["windows"] == [] and payload["snapshots"] == []
+            assert payload["reason"] == usage.API_KEY_USAGE_REASON
+
+    @pytest.mark.asyncio
+    async def test_unresolved_session_is_refused(self):
+        from app.api import usage
+
+        def boom():
+            raise RuntimeError("no id")
+
+        with patch.object(usage, "get_cached_usage_payload", new=AsyncMock()) as cached:
+            assert (await usage.session_usage_callback(lambda: None)())["denied"] is True
+            assert (await usage.session_usage_callback(boom)())["denied"] is True
+        cached.assert_not_awaited()

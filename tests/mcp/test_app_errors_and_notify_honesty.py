@@ -194,8 +194,9 @@ def test_small_result_is_untouched(mock_db):
 
 
 class _Result:
-    def __init__(self, success: bool) -> None:
+    def __init__(self, success: bool, simulated: bool = False) -> None:
         self.success = success
+        self.simulated = simulated
 
 
 def _notify(results):
@@ -213,15 +214,15 @@ def _notify(results):
         )
 
 
-def test_no_registered_devices_is_not_a_green_light(mock_db):
+def test_no_push_receiver_is_not_a_green_light(mock_db):
     body = _notify([])
 
     assert body["sent"] == 0
     assert body["delivered"] is False
-    assert body["note"] == (
-        "no registered devices — nothing was delivered; tell the user in chat "
-        "instead."
-    )
+    assert body["reason"] == "no device can receive push notifications"
+    assert "nothing was delivered" in body["note"]
+    assert "tell the user in chat" in body["note"]
+    assert "in-app notification center" in body["note"]
     # Still not an exception: there is nothing to retry.
     assert body["success"] is True
 
@@ -232,7 +233,19 @@ def test_every_device_rejecting_is_also_undelivered(mock_db):
     assert body["sent"] == 2
     assert body["successful"] == 0
     assert body["delivered"] is False
+    assert body["reason"] == "all 2 device(s) rejected the push"
     assert "nothing was delivered" in body["note"]
+
+
+def test_a_mock_mode_send_is_not_a_delivery(mock_db):
+    """No Firebase credentials: the FCM path "succeeds" without sending."""
+    body = _notify([_Result(True, simulated=True)])
+
+    assert body["sent"] == 1
+    assert body["successful"] == 0
+    assert body["delivered"] is False
+    assert "mock mode" in body["reason"]
+    assert "in-app notification center" in body["note"]
 
 
 def test_a_real_delivery_carries_no_note(mock_db):
@@ -242,12 +255,42 @@ def test_a_real_delivery_carries_no_note(mock_db):
     assert body["successful"] == 1
     assert body["delivered"] is True
     assert "note" not in body
+    assert "reason" not in body
 
 
-def test_description_warns_about_the_empty_device_list(mock_db):
+def test_legacy_endpoint_from_a_client_without_push_is_not_delivered(mock_db):
+    """NC-2: an endpoint saved by an old app on a row whose client declares
+    no push is never posted to, so a distributor's 2xx cannot read as
+    delivered."""
+    from app.services.push_notification import push_notification_service
+
+    devices = [{
+        "device_id": "phone",
+        "unifiedpush_endpoint": "https://ntfy.example/up_old",
+        "fcm_token": None,
+        "capabilities": {"supports_push": False},
+    }]
+    posted = AsyncMock()
+    with patch("app.db.mobile.get_all_mobile_devices", return_value=devices), \
+            patch.object(push_notification_service, "send_notification", posted):
+        body = tool_result_json(
+            asyncio.run(
+                _builtin_handlers()["NotifyDevices"].handler(
+                    {"title": "Release", "body": "v1.2.3 is live"}
+                )
+            )
+        )
+
+    posted.assert_not_awaited()
+    assert body["delivered"] is False
+    assert body["reason"] == "no device can receive push notifications"
+
+
+def test_description_says_push_usually_reaches_nobody(mock_db):
     description = _builtin_handlers()["NotifyDevices"].description
-    assert "no registered devices" in description.lower()
+    assert "no device can receive push notifications" in description.lower()
     assert "chat" in description.lower()
+    assert "in-app notification center" in description.lower()
 
 def test_stored_error_trace_preserves_final_exception_and_bounded_detail(mock_db):
     from app.db import error_logs
