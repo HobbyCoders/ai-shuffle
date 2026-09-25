@@ -636,3 +636,106 @@ def test_tts_stream_maps_openai_errors(c, openai_row, monkeypatch, status, expec
 
 def test_tts_stream_requires_authentication(client):
     assert client.post(f"{BASE}/tts/stream", json={"text": "hi"}).status_code in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# Per-user fal.ai credential policy (API users)
+# ---------------------------------------------------------------------------
+#
+# An API user spends the fal.ai key its credential policy allows, exactly as
+# its agent sessions do (app.core.environment.resolve_api_credential_with_policy):
+# user_provided (the default) only its own key, optional its own key else the
+# owner's, admin_provided the owner's. Regression: both routes used the
+# owner's key for every authenticated caller.
+
+USER_FAL_KEY = "fal-user-own-key-0123456789abcdefghijkl"
+
+
+def _user_fal(policy=None, key=None):
+    if policy:
+        database.set_user_credential_policy("audio-user", "fal_api_key", policy)
+    if key:
+        database.set_user_credential("audio-user", "fal_api_key", encryption.encrypt_value(key))
+
+
+def _owner_fal():
+    set_encrypted_api_key("fal_api_key", FAL_KEY)
+
+
+@pytest.mark.parametrize("policy", [None, "user_provided"])
+def test_api_user_without_own_key_cannot_spend_the_owners_fal_key_on_tts(client, api_user, monkeypatch, policy):
+    _owner_fal()
+    _user_fal(policy)
+    upstream = install(monkeypatch, _fal_tts_routes("fal-ai/kokoro/american-english"))
+    r = client.post(f"{BASE}/tts/stream", json={"text": "hi"}, headers=api_user)
+    assert r.status_code == 403
+    assert r.json()["detail"] == settings_audio.FAL_KEY_USER_PROVIDED
+    assert upstream.calls == []
+
+
+@pytest.mark.parametrize("policy", [None, "user_provided"])
+def test_api_user_without_own_key_cannot_spend_the_owners_fal_key_on_transcribe(client, api_user, monkeypatch, policy):
+    _owner_fal()
+    _user_fal(policy)
+    upstream = install(monkeypatch, {
+        **fal_upload_routes(),
+        ("POST", "https://fal.run/fal-ai/whisper"): httpx.Response(200, json={"text": "hello"}),
+    })
+    r = client.post(f"{BASE}/transcribe", files={"file": ("clip.webm", b"RIFF", "audio/webm")}, headers=api_user)
+    assert r.status_code == 403
+    assert r.json()["detail"] == settings_audio.FAL_KEY_USER_PROVIDED
+    assert upstream.calls == []
+
+
+@pytest.mark.parametrize("policy,own_key,expected", [
+    ("user_provided", True, USER_FAL_KEY),
+    ("optional", True, USER_FAL_KEY),
+    ("optional", False, FAL_KEY),
+    ("admin_provided", True, FAL_KEY),
+])
+def test_api_user_tts_spends_the_key_its_policy_resolves(client, api_user, monkeypatch, policy, own_key, expected):
+    _owner_fal()
+    _user_fal(policy, USER_FAL_KEY if own_key else None)
+    upstream = install(monkeypatch, _fal_tts_routes("fal-ai/kokoro/american-english"))
+    r = client.post(f"{BASE}/tts/stream", json={"text": "hi"}, headers=api_user)
+    assert r.status_code == 200, r.text
+    assert upstream.request_to("https://fal.run/").headers["Authorization"] == f"Key {expected}"
+    assert FAL_KEY not in r.text and USER_FAL_KEY not in r.text
+
+
+@pytest.mark.parametrize("policy,own_key,expected", [
+    ("user_provided", True, USER_FAL_KEY),
+    ("optional", False, FAL_KEY),
+    ("admin_provided", True, FAL_KEY),
+])
+def test_api_user_transcribe_spends_the_key_its_policy_resolves(client, api_user, monkeypatch, policy, own_key, expected):
+    _owner_fal()
+    _user_fal(policy, USER_FAL_KEY if own_key else None)
+    upstream = install(monkeypatch, {
+        **fal_upload_routes(),
+        ("POST", "https://fal.run/fal-ai/whisper"): httpx.Response(200, json={"text": "hello"}),
+    })
+    r = client.post(f"{BASE}/transcribe", files={"file": ("clip.webm", b"RIFF", "audio/webm")}, headers=api_user)
+    assert r.status_code == 200, r.text
+    assert upstream.request_to("https://rest.alpha.fal.ai/").headers["Authorization"] == f"Key {expected}"
+    assert upstream.request_to("https://fal.run/").headers["Authorization"] == f"Key {expected}"
+
+
+def test_api_user_optional_policy_with_no_key_anywhere_is_400(client, api_user, monkeypatch):
+    _user_fal("optional")
+    upstream = install(monkeypatch, _fal_tts_routes("fal-ai/kokoro/american-english"))
+    r = client.post(f"{BASE}/tts/stream", json={"text": "hi"}, headers=api_user)
+    assert r.status_code == 400
+    assert r.json()["detail"] == settings_audio.FAL_KEY_MISSING
+    assert upstream.calls == []
+
+
+def test_api_user_audio_models_report_the_fal_key_its_policy_allows(client, api_user):
+    _owner_fal()
+    body = client.get(f"{BASE}/integrations/audio/models", headers=api_user).json()
+    assert body["fal_configured"] is False
+    assert not any(m["available"] for m in body["tts_models"] if m["provider"] == "fal-ai")
+    _user_fal("optional")
+    body = client.get(f"{BASE}/integrations/audio/models", headers=api_user).json()
+    assert body["fal_configured"] is True
+    assert FAL_KEY not in client.get(f"{BASE}/integrations/audio/models", headers=api_user).text

@@ -166,6 +166,19 @@ def _resolve_api_credential(
     Returns:
         The resolved API key, or None if not available
     """
+    return resolve_api_credential_with_policy(credential_type, api_user_id)[0]
+
+
+def resolve_api_credential_with_policy(
+    credential_type: str,
+    api_user_id: Optional[str] = None
+) -> tuple[Optional[str], str]:
+    """``_resolve_api_credential`` plus the policy that decided it.
+
+    Returns ``(key or None, policy)``. Routes that spend a key for an API user
+    use the policy to explain a missing key (``user_provided`` means the user
+    must store their own). Synchronous: call via ``run_sync`` from async code.
+    """
     # Map credential types to admin settings
     admin_setting_map = {
         "fal_api_key": "fal_api_key",
@@ -174,7 +187,7 @@ def _resolve_api_credential(
 
     if credential_type not in admin_setting_map:
         logger.warning(f"Unknown credential type: {credential_type}")
-        return None
+        return None, "user_provided"
 
     # Get per-user policy for this credential
     # Policies are always per-user, no global fallback
@@ -219,7 +232,7 @@ def _resolve_api_credential(
     else:
         logger.debug(f"Credential {credential_type} not configured (policy={policy})")
 
-    return resolved_key
+    return resolved_key, policy
 
 
 def _get_hook_tool_names(hooks: Optional[Dict[str, list]]) -> list:

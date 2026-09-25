@@ -16,6 +16,7 @@ one hop per query.
 
 import asyncio
 import threading
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -257,7 +258,9 @@ async def test_get_audio_models_reads_key_and_models_in_one_hop(mock_db, loop_th
 
     with patch.object(audio_api.database, "get_system_setting", setting), \
          patch.object(audio_api, "get_decrypted_api_key", key):
-        payload = await audio_api.get_audio_models(token="t")
+        # The owner: no API user on the request state.
+        owner_request = SimpleNamespace(state=SimpleNamespace())
+        payload = await audio_api.get_audio_models(owner_request, token="t")
 
     assert payload["current_tts"] == "fal-ai/kokoro/american-english"
     assert payload["current_stt"] == "fal-ai/whisper"

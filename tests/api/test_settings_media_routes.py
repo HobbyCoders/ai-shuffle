@@ -257,9 +257,37 @@ def test_catalog_upstream_failure_keeps_serving_the_cache(c, catalog, monkeypatc
     catalog.service._last_refresh = 0
     body = c.get("/api/v1/catalog/models").json()
     assert body["total"] == 3
+    # Regression: a failed refresh answered success with the cached count as
+    # "models_fetched"; it is a 502 that names the error and the cache kept.
     r = c.post("/api/v1/catalog/refresh")
-    assert r.status_code == 200
-    assert r.json()["models_fetched"] == 3
+    assert r.status_code == 502
+    body = r.json()
+    assert body["success"] is False
+    assert body["error"] == "fal.ai answered HTTP 503"
+    assert body["cached_models"] == 3
+    assert "models_fetched" not in body
+    assert "3 cached models" in body["detail"]
+    assert {row["category"] for row in body["categories"]} == {"text-to-image", "text-to-video", "text-to-audio"}
+    assert c.get("/api/v1/catalog/models").json()["total"] == 3
+
+
+@pytest.mark.parametrize("handler,error", [
+    (lambda r: httpx.Response(200, json={"models": [], "has_more": False}), "fal.ai returned no models"),
+    (lambda r: (_ for _ in ()).throw(httpx.ConnectError("offline")), "could not reach fal.ai (ConnectError)"),
+    (lambda r: (_ for _ in ()).throw(httpx.ReadTimeout("slow")), "fal.ai did not answer in time"),
+])
+def test_catalog_refresh_failure_on_an_empty_cache_is_502(c, monkeypatch, handler, error):
+    service = fal_catalog.FalCatalogService()
+    monkeypatch.setattr(catalog_api, "catalog_service", service)
+    monkeypatch.setattr(fal_catalog, "httpx", SimpleNamespace(
+        AsyncClient=lambda *a, **kw: mock_transport_client(handler)))
+    set_encrypted_api_key("fal_api_key", FAL_KEY)
+    r = c.post("/api/v1/catalog/refresh")
+    assert r.status_code == 502
+    assert r.json()["success"] is False
+    assert r.json()["error"] == error
+    assert r.json()["cached_models"] == 0
+    assert FAL_KEY not in r.text
 
 
 def test_catalog_refresh_and_categories(c, catalog):

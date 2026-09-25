@@ -9,6 +9,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
 
 from app.api.auth import require_auth
 from app.services.fal_catalog import catalog_service
@@ -89,9 +90,22 @@ async def list_categories(
 async def refresh_catalog(
     _: str = Depends(require_auth),
 ):
-    """Force refresh the model catalog from fal.ai."""
+    """Force refresh the model catalog from fal.ai.
+
+    When fal.ai cannot be read the cached catalog is kept and the answer is a
+    502 with ``success: false``, the ``error`` and the ``cached_models`` count,
+    rather than a success that reports the stale cache as fetched.
+    """
     api_key = get_decrypted_api_key("fal_api_key")
-    count = await catalog_service.refresh(api_key)
+    count, error = await catalog_service.refresh_with_status(api_key)
+    if error:
+        return JSONResponse(status_code=502, content={
+            "detail": f"Could not refresh the model catalog: {error}. Still using the {count} cached models.",
+            "success": False,
+            "error": error,
+            "cached_models": count,
+            "categories": catalog_service.get_categories(),
+        })
     return {
         "success": True,
         "models_fetched": count,

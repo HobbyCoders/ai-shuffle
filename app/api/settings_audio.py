@@ -6,16 +6,17 @@ import logging
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.voice_input_settings import get_voice_input_model
-from app.api.auth import require_admin, require_auth
+from app.api.auth import get_api_user_from_request, require_admin, require_auth
 from app.api.settings_crypto import get_decrypted_api_key
 from app.api.settings_media import get_model_params
+from app.core.environment import resolve_api_credential_with_policy
 from app.services.fal_schema import schema_service, ModelSchema
 
 logger = logging.getLogger(__name__)
@@ -305,6 +306,37 @@ def _openai_voice(voice: Optional[str], model_info: Optional[dict]) -> str:
     if voice and voice in voices:
         return voice
     return voices[0] if voices else "alloy"
+
+
+FAL_KEY_MISSING = "fal.ai API key not configured. Go to Settings > Integrations to add your key."
+FAL_KEY_USER_PROVIDED = (
+    "Your credential policy requires your own fal.ai API key, and none is stored "
+    "for this API key. Ask the owner to store your key or change your fal.ai policy."
+)
+
+
+def _resolve_fal_key(api_user: Optional[dict]) -> tuple[Optional[str], Optional[str]]:
+    """The fal.ai key a caller may spend, and the policy that chose it.
+
+    The owner (and the owner's paired devices, which carry no API user) spend
+    the owner's key. An API user gets the same resolution agent sessions apply
+    (``resolve_api_credential_with_policy``): ``user_provided`` only their own
+    stored key, ``optional`` their key else the owner's, ``admin_provided`` the
+    owner's. Returns ``(key or None, policy or None for the owner)``.
+    Synchronous: call via ``run_sync``.
+    """
+    if api_user is None:
+        return get_decrypted_api_key("fal_api_key"), None
+    return resolve_api_credential_with_policy("fal_api_key", api_user["id"])
+
+
+def _require_fal_key(fal_key: Optional[str], policy: Optional[str]) -> str:
+    """The resolved fal key, or the error that explains why there is none."""
+    if fal_key:
+        return fal_key
+    if policy == "user_provided":
+        raise HTTPException(status_code=403, detail=FAL_KEY_USER_PROVIDED)
+    raise HTTPException(status_code=400, detail=FAL_KEY_MISSING)
 
 
 def _resolve_openai_api_key() -> Optional[str]:
@@ -654,13 +686,18 @@ async def _upload_to_fal_storage(
 
 
 @audio_router.get("/integrations/audio/models")
-async def get_audio_models(token: str = Depends(require_auth)):
+async def get_audio_models(http_request: Request, token: str = Depends(require_auth)):
     """
     Get available TTS and STT models.
+
+    ``available`` and ``fal_configured`` describe the fal.ai key the caller may
+    spend: an API user's own credential policy decides it, as for synthesis.
     """
+    api_user = get_api_user_from_request(http_request)
+
     def _load() -> tuple[str | None, str | None, str, str]:
         """Both key reads (+ decrypt) and both model settings in ONE hop."""
-        fal_key = get_decrypted_api_key("fal_api_key")
+        fal_key, _policy = _resolve_fal_key(api_user)
         openai_key = _resolve_openai_api_key()
         current_tts = database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
         current_stt = database.get_system_setting("stt_model") or "fal-ai/whisper"
@@ -797,6 +834,7 @@ async def update_stt_model(
 
 @audio_router.post("/transcribe", response_model=TranscriptionResponse)
 async def transcribe_audio(
+    http_request: Request,
     file: UploadFile = File(...),
     token: str = Depends(require_auth)
 ):
@@ -847,13 +885,15 @@ async def transcribe_audio(
     # Resolve the model + both keys in ONE hop. A SECOND hop overall: the request
     # body read (``await file.read()``) and the size/format validation that can
     # reject it sit before this, so it cannot share a closure with anything above.
-    def _load_stt() -> tuple[str, str | None, str | None]:
-        stt_model = get_voice_input_model()
-        fal_key = get_decrypted_api_key("fal_api_key")
-        openai_key = _resolve_openai_api_key()
-        return stt_model, fal_key, openai_key
+    api_user = get_api_user_from_request(http_request)
 
-    stt_model, fal_key, openai_key = await run_sync(_load_stt)
+    def _load_stt() -> tuple[str, str | None, str | None, str | None]:
+        stt_model = get_voice_input_model()
+        fal_key, fal_policy = _resolve_fal_key(api_user)
+        openai_key = _resolve_openai_api_key()
+        return stt_model, fal_key, fal_policy, openai_key
+
+    stt_model, fal_key, fal_policy, openai_key = await run_sync(_load_stt)
     if STT_MODELS.get(stt_model, {}).get("realtime_only"):
         raise HTTPException(
             status_code=400,
@@ -867,11 +907,8 @@ async def transcribe_audio(
                 status_code=400,
                 detail="No OpenAI provider with a stored API key is configured. Add one in Settings > Providers."
             )
-    elif not fal_key:
-        raise HTTPException(
-            status_code=400,
-            detail="fal.ai API key not configured. Go to Settings > Integrations to add your key."
-        )
+    else:
+        fal_key = _require_fal_key(fal_key, fal_policy)
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -969,14 +1006,20 @@ async def transcribe_audio(
 @audio_router.post("/tts/stream")
 async def stream_tts(
     request: TTSGenerateRequest,
+    http_request: Request,
     token: str = Depends(require_auth)
 ):
     """
     Stream TTS audio directly from fal.ai without saving to disk.
+
+    An API user spends the fal.ai key its credential policy allows (see
+    ``_resolve_fal_key``), never the owner's key by default.
     """
-    def _load_config() -> tuple[str | None, str | None, str, str, float]:
+    api_user = get_api_user_from_request(http_request)
+
+    def _load_config() -> tuple[str | None, str | None, str | None, str, str, float]:
         """Both key reads (+ decrypt) and the three TTS settings in ONE hop."""
-        fal_key = get_decrypted_api_key("fal_api_key")
+        fal_key, fal_policy = _resolve_fal_key(api_user)
         openai_key = _resolve_openai_api_key()
 
         tts_model = request.model or database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
@@ -986,9 +1029,9 @@ async def stream_tts(
         if speed is None:
             speed_str = database.get_system_setting("tts_speed")
             speed = float(speed_str) if speed_str else 1.0
-        return fal_key, openai_key, tts_model, voice, speed
+        return fal_key, fal_policy, openai_key, tts_model, voice, speed
 
-    fal_key, openai_key, tts_model, voice, speed = await run_sync(_load_config)
+    fal_key, fal_policy, openai_key, tts_model, voice, speed = await run_sync(_load_config)
     model_info = TTS_MODELS.get(tts_model)
     provider = _model_provider(tts_model, model_info)
 
@@ -998,11 +1041,8 @@ async def stream_tts(
                 status_code=400,
                 detail="No OpenAI provider with a stored API key is configured. Add one in Settings > Providers."
             )
-    elif not fal_key:
-        raise HTTPException(
-            status_code=400,
-            detail="fal.ai API key not configured. Go to Settings > Integrations to add your key."
-        )
+    else:
+        fal_key = _require_fal_key(fal_key, fal_policy)
 
     text = request.text.strip()
     if not text:

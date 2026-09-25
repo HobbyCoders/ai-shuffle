@@ -16,6 +16,7 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_admin, require_auth
 from app.api.settings_updates import updates_router
+from app.core import encryption
 from app.core.query_engine import DEFAULT_SECURITY_INSTRUCTIONS
 
 # Import from sub-modules
@@ -102,9 +103,78 @@ class FalAIKeyRequest(BaseModel):
 
 
 class FalAIKeyResponse(BaseModel):
-    """Response after setting fal.ai API key"""
+    """Response after setting fal.ai API key.
+
+    ``valid`` is ``True`` when fal.ai accepted the key and ``None`` when it
+    could not be checked (network error, timeout, rate limit or a fal.ai
+    fault); the key is saved either way. A key fal.ai rejects is not saved
+    (400). ``reason`` explains an unverified key.
+    """
     success: bool
     masked_key: str
+    valid: Optional[bool] = None
+    reason: Optional[str] = None
+
+
+# fal.ai's queue gateway checks the key before anything else, and a GET on a
+# model's queue URL submits nothing, so it costs nothing to ask.
+FAL_KEY_CHECK_URL = "https://queue.fal.run/fal-ai/fast-sdxl"
+# Answers that mean the gateway accepted the key: the probe itself asks for
+# nothing, so "not found" or "method not allowed" still prove authentication.
+_FAL_KEY_ACCEPTED = {200, 201, 202, 204, 404, 405, 422}
+
+
+def _require_credential_storage() -> None:
+    """409 with the recovery guidance when credential storage is locked.
+
+    Keys are only ever stored encrypted; a locked store used to surface as an
+    unhandled 500 from ``encrypt_value``.
+    """
+    if not encryption.is_encryption_ready():
+        raise HTTPException(status_code=409, detail=encryption.credential_storage_error())
+
+
+def _store_api_key(setting_name: str, api_key: str) -> None:
+    """Encrypt and store a key, or 409 when storage is (or becomes) locked.
+
+    Synchronous: call via ``run_sync``.
+    """
+    _require_credential_storage()
+    try:
+        set_encrypted_api_key(setting_name, api_key)
+    except RuntimeError:
+        # Locked between the check and the write.
+        if encryption.is_encryption_ready():
+            raise
+        raise HTTPException(status_code=409, detail=encryption.credential_storage_error()) from None
+
+
+async def _check_fal_key(api_key: str) -> tuple[Optional[bool], Optional[str]]:
+    """Ask fal.ai whether it accepts ``api_key``: ``(valid, reason)``.
+
+    ``False`` only for an explicit rejection (401/403); anything that does not
+    answer the question is ``None`` with a reason.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                FAL_KEY_CHECK_URL,
+                headers={"Authorization": f"Key {api_key}"}
+            )
+    except httpx.TimeoutException:
+        logger.warning("fal.ai API validation timed out, saving key anyway")
+        return None, "fal.ai did not answer in time; the key was saved without verification."
+    except Exception as e:
+        logger.warning(f"Error validating fal.ai key: {type(e).__name__}")
+        return None, "fal.ai could not be reached; the key was saved without verification."
+
+    if response.status_code in (401, 403):
+        return False, "fal.ai rejected the key."
+    if response.status_code in _FAL_KEY_ACCEPTED:
+        return True, None
+    if response.status_code == 429:
+        return None, "fal.ai rate-limited the check; the key was saved without verification."
+    return None, f"fal.ai answered the check with HTTP {response.status_code}; the key was saved without verification."
 
 
 @router.post("/integrations/fal-billing")
@@ -112,7 +182,7 @@ async def set_fal_billing_key(request: FalAIKeyRequest, token: str = Depends(req
     key = request.api_key.strip()
     if not key or len(key) > 4096 or any(c.isspace() for c in key):
         raise HTTPException(400, "Enter an Admin API key without whitespace")
-    await run_sync(set_encrypted_api_key, "fal_billing_api_key", key)
+    await run_sync(_store_api_key, "fal_billing_api_key", key)
     from app.core.provider_usage import FAL_BILLING_URL
     from app.core.usage_polling import UsageDeferred
     from app.network.usage_budget import resume_authentication
@@ -232,33 +302,22 @@ async def set_fal_api_key(
 
     if not api_key:
         raise HTTPException(status_code=400, detail="API key cannot be empty")
+    # Before the network check: a locked store cannot save the key anyway.
+    _require_credential_storage()
 
-    # Validate the key by making a lightweight API call to fal.ai
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                "https://queue.fal.run/fal-ai/fast-sdxl",
-                headers={"Authorization": f"Key {api_key}"}
-            )
-            if response.status_code == 401:
-                raise HTTPException(status_code=400, detail="Invalid API key. Authentication failed.")
-    except httpx.TimeoutException:
-        # Don't fail on timeout - key might still be valid
-        logger.warning("fal.ai API validation timed out, saving key anyway")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.warning(f"Error validating fal.ai key: {e}")
-        # Don't fail on network errors - save the key
+    valid, reason = await _check_fal_key(api_key)
+    if valid is False:
+        raise HTTPException(status_code=400, detail="Invalid API key. Authentication failed.")
 
-    # Save to database (encrypted if encryption is ready). One hop: the fal.ai
-    # validation above is a real network await, so this cannot share a closure
-    # with anything before it.
-    await run_sync(set_encrypted_api_key, "fal_api_key", api_key)
+    # Save to database, always encrypted. One hop: the fal.ai validation above
+    # is a real network await, so this cannot share a closure with it.
+    await run_sync(_store_api_key, "fal_api_key", api_key)
 
     return FalAIKeyResponse(
         success=True,
-        masked_key=mask_api_key(api_key)
+        masked_key=mask_api_key(api_key),
+        valid=valid,
+        reason=reason,
     )
 
 
@@ -298,6 +357,8 @@ async def set_anthropic_api_key(
     api_key = request.api_key.strip()
     if not api_key:
         raise HTTPException(status_code=400, detail="API key cannot be empty")
+    # Before the paid validation call: a locked store cannot save the key.
+    _require_credential_storage()
 
     # Validate the key by making a 1-token messages.create call. Cheapest
     # possible request to confirm auth works before committing the key to
@@ -321,9 +382,9 @@ async def set_anthropic_api_key(
         # Malformed / unexpected response — surface so the user can investigate
         raise HTTPException(status_code=400, detail=f"Anthropic API error: {e}")
 
-    # Save to database (encrypted if encryption is ready). One hop: the
-    # Anthropic validation above is a real network await.
-    await run_sync(set_encrypted_api_key, "anthropic_api_key", api_key)
+    # Save to database, always encrypted. One hop: the Anthropic validation
+    # above is a real network await.
+    await run_sync(_store_api_key, "anthropic_api_key", api_key)
     if request.use_for_claude_code:
         from app.core import claude_auth_mode
         await run_sync(claude_auth_mode.set_mode, claude_auth_mode.MODE_API_KEY)

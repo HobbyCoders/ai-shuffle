@@ -114,7 +114,8 @@ def test_fal_key_is_validated_saved_encrypted_and_masked(c, monkeypatch):
     calls = _fal_validation(monkeypatch, 200)
     r = c.post(f"{BASE}/integrations/fal-ai", json={"api_key": f"  {FAL_KEY}  "})
     assert r.status_code == 200
-    assert r.json() == {"success": True, "masked_key": f"{FAL_KEY[:7]}...{FAL_KEY[-4:]}"}
+    assert r.json() == {
+        "success": True, "masked_key": f"{FAL_KEY[:7]}...{FAL_KEY[-4:]}", "valid": True, "reason": None}
     assert calls[0].headers["Authorization"] == f"Key {FAL_KEY}"
     assert database.get_system_setting("fal_api_key").startswith("enc:")
     assert get_decrypted_api_key("fal_api_key") == FAL_KEY
@@ -128,11 +129,35 @@ def test_fal_key_rejected_by_fal_is_not_saved(c, monkeypatch):
     assert database.get_system_setting("fal_api_key") is None
 
 
-@pytest.mark.parametrize("outcome", [httpx.ReadTimeout("slow"), httpx.ConnectError("offline"), 500])
+@pytest.mark.parametrize("outcome", [httpx.ReadTimeout("slow"), httpx.ConnectError("offline"), 500, 429])
 def test_fal_key_is_saved_when_validation_cannot_answer(c, monkeypatch, outcome):
+    """Regression: the response carried no ``valid`` field, so the settings
+    panel always said "Saved (could not verify)"; an unanswered check is
+    ``valid: null`` with a reason, and the key is still saved."""
     _fal_validation(monkeypatch, outcome)
-    assert c.post(f"{BASE}/integrations/fal-ai", json={"api_key": FAL_KEY}).status_code == 200
+    r = c.post(f"{BASE}/integrations/fal-ai", json={"api_key": FAL_KEY})
+    assert r.status_code == 200
+    assert r.json()["valid"] is None
+    assert "saved without verification" in r.json()["reason"]
+    assert FAL_KEY not in r.text
     assert get_decrypted_api_key("fal_api_key") == FAL_KEY
+
+
+@pytest.mark.parametrize("status", [200, 404, 405, 422])
+def test_fal_key_accepted_by_the_gateway_is_reported_valid(c, monkeypatch, status):
+    """The probe submits nothing, so a not-found / not-allowed answer still
+    proves fal.ai authenticated the key."""
+    _fal_validation(monkeypatch, status)
+    r = c.post(f"{BASE}/integrations/fal-ai", json={"api_key": FAL_KEY})
+    assert r.status_code == 200
+    assert r.json()["valid"] is True and r.json()["reason"] is None
+
+
+def test_fal_key_forbidden_by_fal_is_not_saved(c, monkeypatch):
+    _fal_validation(monkeypatch, 403)
+    r = c.post(f"{BASE}/integrations/fal-ai", json={"api_key": FAL_KEY})
+    assert r.status_code == 400
+    assert database.get_system_setting("fal_api_key") is None
 
 
 def test_fal_key_blank_is_400_and_delete_removes_it(c, monkeypatch):
@@ -155,6 +180,65 @@ def test_locked_storage_never_saves_a_plaintext_key(authenticated_client, monkey
     assert r.status_code >= 400
     assert FAL_KEY not in r.text
     assert database.get_system_setting("fal_api_key") is None
+
+
+@pytest.mark.parametrize("path,setting,body", [
+    ("/integrations/fal-ai", "fal_api_key", {"api_key": FAL_KEY}),
+    ("/integrations/fal-billing", "fal_billing_api_key", {"api_key": "billing-key-0123456789"}),
+    ("/integrations/anthropic", "anthropic_api_key", {"api_key": ANTHROPIC_KEY}),
+])
+def test_saving_a_key_while_storage_is_locked_is_409(authenticated_client, monkeypatch, path, setting, body):
+    """Regression: a locked credential store surfaced as an unhandled 500."""
+    from app.main import app
+
+    calls = _fal_validation(monkeypatch, 200)
+
+    async def _no_anthropic_call(key):
+        raise AssertionError("the key cannot be saved, so it must not be validated")
+
+    monkeypatch.setattr(anthropic_generation, "validate_api_key", _no_anthropic_call)
+    monkeypatch.setattr(encryption, "_encryption_key", None)
+    raw = TestClient(app, raise_server_exceptions=False)
+    r = raw.post(BASE + path, json=body)
+    assert r.status_code == 409
+    assert r.json()["detail"] == encryption.credential_storage_error()
+    assert body["api_key"] not in r.text
+    assert database.get_system_setting(setting) is None
+    assert calls == []
+
+
+def test_key_locked_between_check_and_write_is_409(c, monkeypatch):
+    _fal_validation(monkeypatch, 200)
+
+    def _locks_then_encrypts(value):
+        monkeypatch.setattr(encryption, "_encryption_key", None)
+        raise RuntimeError(encryption.credential_storage_error())
+
+    monkeypatch.setattr(encryption, "encrypt_value", _locks_then_encrypts)
+    r = c.post(f"{BASE}/integrations/fal-ai", json={"api_key": FAL_KEY})
+    assert r.status_code == 409
+    assert database.get_system_setting("fal_api_key") is None
+
+
+def test_documented_masked_key_examples_match_the_real_mask():
+    """The docs showed a 4 + 4 mask; the real one is the first 7 and last 4
+    characters, and both copies of the page must say so."""
+    import re
+    from pathlib import Path
+
+    from app.api.settings_crypto import mask_api_key
+
+    root = Path(__file__).resolve().parents[2]
+    for copy in ("docs/content", "frontend/src/lib/docs/content"):
+        text = (root / copy / "api-reference/model-providers.md").read_text(encoding="utf-8")
+        examples = re.findall(r'"auth_token_masked": "([^"]*)"', text)
+        assert examples, copy
+        for masked in examples:
+            head, _, tail = masked.partition("...")
+            assert len(head) == 7 and len(tail) == 4, (copy, masked)
+            assert mask_api_key(head + "x" * 20 + tail) == masked
+        misc = (root / copy / "api-reference/miscellaneous.md").read_text(encoding="utf-8")
+        assert f'"masked_key": "{mask_api_key(FAL_KEY)}"' in misc, copy
 
 
 @pytest.mark.parametrize("method,path,body", [
