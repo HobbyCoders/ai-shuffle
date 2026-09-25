@@ -1381,13 +1381,34 @@ class HarnessAdapter(ProviderAdapter):
         source, self._next_turn_source = self._next_turn_source, "user"
         return source
 
+    @staticmethod
+    def _session_runs_as_owner(session_id: str) -> bool:
+        """Whether ``session_id`` runs as the owner, not an API key.
+
+        A preview grant signs in as the owner, so an API key's session (or a
+        worker under one) must never see a token in its prompt. Blocking DB
+        read: called from :meth:`_build_workspace_card`, which runs off the
+        loop. Fails closed.
+        """
+        try:
+            from app.core.api_user_scope import session_api_user_id
+            from app.db import database
+
+            row = database.get_session(session_id)
+            return row is not None and session_api_user_id(row) is None
+        except Exception:  # noqa: BLE001 — no token is the safe answer
+            logger.debug("[HarnessAdapter] preview owner check failed", exc_info=True)
+            return False
+
     def _build_workspace_card(self, options: SessionOptions) -> Optional[str]:
         """The "# Workspace facts" card for this native session, or None.
 
         Native legs only. Runs the cheap probes in
         :func:`app.core.environment.workspace_facts_card` and mints the
         session-scoped preview-access URL (:mod:`app.core.preview_access`)
-        that lets the agent browser open this worker's own UI. Never raises.
+        that lets the agent browser open this worker's own UI. An API key's
+        session gets no URL: the grant would sign it in as the owner. Never
+        raises.
         """
         if self._is_delegated:
             return None
@@ -1400,7 +1421,7 @@ class HarnessAdapter(ProviderAdapter):
             browser_host = _browser_loopback_host(os.environ.get("BROWSER_LOOPBACK_HOST"))
             preview_url = None
             session_id = self._resolve_app_session_id()
-            if session_id and browser_host:
+            if session_id and browser_host and self._session_runs_as_owner(session_id):
                 try:
                     preview_url = preview_access.preview_url(
                         session_id, browser_host, int(settings.port)
