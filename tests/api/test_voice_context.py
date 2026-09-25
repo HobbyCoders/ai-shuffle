@@ -200,3 +200,46 @@ def test_api_user_session_access_is_enforced(context_client, monkeypatch):
     response = context_client.patch(PATH.format(session_id), json={"fast": True})
     assert response.status_code == 403
     assert bool(db.get_session(session_id)["fast"]) is False
+
+
+def _api_key_client(mock_db, api_user):
+    """A context client whose caller authenticated with an API key."""
+    from fastapi import Request
+
+    def _as_api_user(request: Request):
+        request.state.api_user = api_user
+        request.state.is_admin = False
+        return f"api_key:{api_user['id']}"
+
+    app = FastAPI()
+    app.include_router(voice_context.router)
+    app.dependency_overrides[require_auth] = _as_api_user
+    return TestClient(app)
+
+
+def _api_users(*user_ids):
+    for user_id in user_ids:
+        db.create_api_user(user_id, user_id, f"hash-{user_id}")
+
+
+def test_api_key_must_own_the_voice_session(mock_db):
+    _api_users("api-owner", "api-other")
+    _session("voice-owned", api_user_id="api-owner")
+    _session("voice-admin", api_user_id=None)
+
+    with _api_key_client(mock_db, {"id": "api-other"}) as other:
+        assert other.patch(PATH.format("voice-owned"), json={"effort": "high"}).status_code == 403
+        assert other.patch(PATH.format("voice-admin"), json={"effort": "high"}).status_code == 403
+    assert db.get_session("voice-owned")["effort"] == "medium"
+
+    with _api_key_client(mock_db, {"id": "api-owner"}) as owner:
+        response = owner.patch(PATH.format("voice-owned"), json={"effort": "high"})
+    assert response.status_code == 200, response.text
+    assert db.get_session("voice-owned")["effort"] == "high"
+
+
+def test_chat_session_is_404_before_ownership(mock_db):
+    _api_users("api-owner", "api-other")
+    _session("chat-owned", mode="code", api_user_id="api-owner")
+    with _api_key_client(mock_db, {"id": "api-other"}) as other:
+        assert other.patch(PATH.format("chat-owned"), json={}).status_code == 404

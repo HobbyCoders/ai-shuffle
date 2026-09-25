@@ -1330,3 +1330,167 @@ class TestStreamingVoiceModels:
         response = authenticated_client.put(VOICE_SETTINGS, json={"voice_provider_id": FAL_PROVIDER_ID, "voice_model": "gpt-live-1"})
         assert response.status_code == 400
         assert authenticated_client.get(VOICE_SETTINGS).json() == before
+
+
+# ============================================================================
+# Access — an API key may only operate the voice sessions it owns
+# ============================================================================
+
+OWNER_KEY = "aih_voice_owner_key"
+OTHER_KEY = "aih_voice_other_key"
+
+# Every session-scoped voice route, with the body that would be a valid call.
+# ``call`` carries a call_id so a 403 there provably happens BEFORE validation
+# and before any sideband is opened.
+CALL_SURFACE = [
+    ("post", "secret", {}),
+    ("post", "call", {"call_id": "rtc_x"}),
+    ("post", "hangup", {}),
+    ("get", "state", None),
+    ("get", "config", None),
+    ("patch", "context", {"effort": "high"}),
+]
+
+
+def _api_user(user_id, raw_key, **kwargs):
+    """Create an API user and return the headers that authenticate as it."""
+    from app.api.auth import hash_api_key
+
+    db.create_api_user(user_id, user_id, hash_api_key(raw_key), **kwargs)
+    return {"Authorization": f"Bearer {raw_key}"}
+
+
+def _mk_owned_voice_session(session_id, api_user_id, *, mode="voice", project_id=None):
+    db.create_session(
+        session_id=session_id, profile_id="default", title="Voice session",
+        provider_id="prov-openai", mode=mode, api_user_id=api_user_id,
+        project_id=project_id,
+        voice_config={"model": "gpt-realtime-2.1", "voice": "marin", "provider_id": "prov-openai"},
+    )
+    return session_id
+
+
+def _hit(client, method, session_id, leaf, body, headers=None):
+    kwargs = {"headers": headers} if headers else {}
+    if body is not None:
+        kwargs["json"] = body
+    return getattr(client, method)(f"{VOICE_ROOT}/sessions/{session_id}/{leaf}", **kwargs)
+
+
+class TestVoiceSessionAccess:
+    @pytest.fixture(autouse=True)
+    def _voice_ready(self, mock_db, monkeypatch, sidebands):
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+        self.sidebands = sidebands
+
+    # -- creation stamps the owner -------------------------------------------
+
+    @pytest.mark.parametrize("execution_mode", ["local", None])
+    def test_api_key_creation_records_the_creator_as_owner(self, client, execution_mode):
+        owner = _api_user("api-owner", OWNER_KEY)
+        body = {"model": "sonnet"}
+        if execution_mode:
+            body["execution_mode"] = execution_mode
+        resp = client.post(f"{VOICE_ROOT}/sessions", json=body, headers=owner)
+        assert resp.status_code == 200, resp.text
+        assert db.get_session(resp.json()["session_id"])["api_user_id"] == "api-owner"
+
+    def test_owner_creation_leaves_the_row_admin_owned(self, authenticated_client):
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})
+        assert resp.status_code == 200, resp.text
+        assert db.get_session(resp.json()["session_id"])["api_user_id"] is None
+
+    def test_creator_can_use_the_session_it_just_created(self, client):
+        owner = _api_user("api-owner", OWNER_KEY)
+        created = client.post(
+            f"{VOICE_ROOT}/sessions", json={"model": "sonnet"}, headers=owner,
+        )
+        assert created.status_code == 200, created.text
+        session_id = created.json()["session_id"]
+        # Transport-agnostic routes (a fresh session is GPT Live, so no sideband).
+        for method, leaf, body in [
+            ("post", "secret", {}), ("get", "state", None), ("get", "config", None),
+            ("patch", "context", {"effort": "high"}), ("post", "hangup", {}),
+        ]:
+            resp = _hit(client, method, session_id, leaf, body, owner)
+            assert resp.status_code == 200, (leaf, resp.text)
+
+    # -- the owner keeps working ----------------------------------------------
+
+    @pytest.mark.parametrize("method,leaf,body", CALL_SURFACE)
+    def test_owning_api_key_operates_its_session(self, client, method, leaf, body):
+        owner = _api_user("api-owner", OWNER_KEY)
+        _mk_owned_voice_session("voice-owned", "api-owner")
+        resp = _hit(client, method, "voice-owned", leaf, body, owner)
+        assert resp.status_code == 200, (leaf, resp.text)
+        if leaf == "call":
+            assert len(self.sidebands) == 1
+            _hit(client, "post", "voice-owned", "hangup", {}, owner)
+
+    @pytest.mark.parametrize("method,leaf,body", CALL_SURFACE)
+    def test_admin_operates_an_api_users_session(
+        self, authenticated_client, method, leaf, body
+    ):
+        _api_user("api-owner", OWNER_KEY)
+        _mk_owned_voice_session("voice-owned", "api-owner")
+        resp = _hit(authenticated_client, method, "voice-owned", leaf, body)
+        assert resp.status_code == 200, (leaf, resp.text)
+        if leaf == "call":
+            _hit(authenticated_client, "post", "voice-owned", "hangup", {})
+
+    # -- everyone else is refused ---------------------------------------------
+
+    @pytest.mark.parametrize("method,leaf,body", CALL_SURFACE)
+    @pytest.mark.parametrize(
+        "owner_id", ["api-owner", None], ids=["api-user-owned", "admin-owned"],
+    )
+    def test_other_api_key_is_denied(self, client, method, leaf, body, owner_id):
+        if owner_id:
+            _api_user(owner_id, OWNER_KEY)
+        other = _api_user("api-other", OTHER_KEY)
+        _mk_owned_voice_session("voice-owned", owner_id)
+
+        resp = _hit(client, method, "voice-owned", leaf, body, other)
+
+        assert resp.status_code == 403, (leaf, resp.text)
+        assert self.sidebands == []
+        # Nothing was touched: the row is untouched and no secret was minted.
+        row = db.get_session("voice-owned")
+        assert row["effort"] is None
+        assert row["is_active"] in (False, 0)
+        from app.api import voice as voice_api
+        assert "voice-owned" not in voice_api._SESSION_CLIENT_SECRETS
+
+    def test_denied_hangup_leaves_the_owners_call_running(self, client):
+        owner = _api_user("api-owner", OWNER_KEY)
+        other = _api_user("api-other", OTHER_KEY)
+        _mk_owned_voice_session("voice-owned", "api-owner")
+        assert _hit(client, "post", "voice-owned", "call", {"call_id": "rtc_1"}, owner).status_code == 200
+
+        assert _hit(client, "post", "voice-owned", "hangup", {}, other).status_code == 403
+        assert _hit(client, "post", "voice-owned", "call", {"call_id": "rtc_2"}, other).status_code == 403
+
+        state = _hit(client, "get", "voice-owned", "state", None, owner).json()
+        assert state["active"] is True and state["connected"] is True
+        assert len(self.sidebands) == 1 and not self.sidebands[0].closed
+        _hit(client, "post", "voice-owned", "hangup", {}, owner)
+
+    def test_project_restricted_key_needs_project_access_too(self, client, tmp_path):
+        db.create_project("proj-a", "A", None, str(tmp_path / "a"))
+        db.create_project("proj-b", "B", None, str(tmp_path / "b"))
+        # Owns the session, but its key was since restricted to another project.
+        restricted = _api_user("api-owner", OWNER_KEY, project_id="proj-b")
+        _mk_owned_voice_session("voice-owned", "api-owner", project_id="proj-a")
+        assert _hit(client, "get", "voice-owned", "state", None, restricted).status_code == 403
+
+    # -- the 404 contract is unchanged, and precedes the access check ---------
+
+    @pytest.mark.parametrize("method,leaf,body", CALL_SURFACE)
+    def test_chat_or_missing_session_is_404_for_any_api_key(self, client, method, leaf, body):
+        _api_user("api-owner", OWNER_KEY)
+        other = _api_user("api-other", OTHER_KEY)
+        _mk_owned_voice_session("chat-owned", "api-owner", mode="chat")
+        assert _hit(client, method, "chat-owned", leaf, body, other).status_code == 404
+        assert _hit(client, method, "nope", leaf, body, other).status_code == 404

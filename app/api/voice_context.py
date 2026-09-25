@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_auth
-from app.api.sessions_helpers import require_session
+from app.api.sessions_helpers import check_session_owner, require_session
 from app.core.generation_options import VALID_EFFORTS
 from app.core.query_options import decode_provider_model
 from app.db import database
@@ -132,6 +132,9 @@ async def update_voice_session_context(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Voice session not found.",
         )
+    # Same rule as the call surface in app.api.voice: an API key may only edit
+    # the worker context (model, permission mode, ...) of a session it owns.
+    check_session_owner(request, session)
 
     _validate_patch(body)
     updated = await run_sync(_persist_patch, session_id, body)

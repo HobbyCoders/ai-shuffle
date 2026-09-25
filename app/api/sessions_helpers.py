@@ -395,6 +395,30 @@ def check_session_access(request: Request, session: dict) -> None:
     check_session_access_for_api_user(get_api_user_from_request(request), session)
 
 
+def check_session_owner_for_api_user(api_user: Optional[dict], session: dict) -> None:
+    """Enforce that an API user OWNS a session, not merely has access to it.
+
+    Pure helper (no Request), the ownership twin of
+    :func:`check_session_access_for_api_user`. ``api_user`` is None for the
+    install owner/admin and for paired devices, which keep full access. An API
+    key on a session it did not create — including an admin-owned row, whose
+    ``api_user_id`` is NULL — is denied with a 403.
+    """
+    if not api_user:
+        return  # Admin / paired device has full access
+
+    if str(session.get("api_user_id")) != str(api_user.get("id")):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this session"
+        )
+
+
+def check_session_owner(request: Request, session: dict) -> None:
+    """Request-bound form of :func:`check_session_owner_for_api_user`."""
+    check_session_owner_for_api_user(get_api_user_from_request(request), session)
+
+
 async def require_session(request: Request, session_id: str) -> dict:
     """Fetch a session, verify it exists, and check access in one call.
 
