@@ -108,7 +108,7 @@ def add_marketplace(svc, url: str, name: Optional[str] = None) -> MarketplaceInf
             raise RuntimeError("Marketplace clone timed out")
 
     # Update known_marketplaces.json
-    data = svc._read_json_file(svc.MARKETPLACES_FILE, {})
+    data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
     data[name] = {
         "source": {
             "source": "git",
@@ -142,7 +142,7 @@ def remove_marketplace(svc, marketplace_id: str) -> bool:
     # Refuse (409) before removing anything if any file this writes cannot be
     # read back; the entry, clone and cache stay for a retry.
     svc._check_files_replaceable(svc.MARKETPLACES_FILE, svc.INSTALLED_FILE, svc.SETTINGS_FILE)
-    data = svc._read_json_file(svc.MARKETPLACES_FILE, {})
+    data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
 
     if marketplace_id not in data:
         raise ValueError(f"Marketplace not found: {marketplace_id}")
@@ -158,7 +158,7 @@ def remove_marketplace(svc, marketplace_id: str) -> bool:
         shutil.rmtree(install_location, ignore_errors=True)
 
     # Remove installed plugins from this marketplace
-    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}})
+    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}}, for_update=True)
     plugins_to_remove = [
         pid for pid in installed.get("plugins", {})
         if pid.endswith(f"@{marketplace_id}")
@@ -177,7 +177,7 @@ def remove_marketplace(svc, marketplace_id: str) -> bool:
         shutil.rmtree(cache_dir, ignore_errors=True)
 
     # Remove from enabled plugins in settings
-    settings = svc._read_json_file(svc.SETTINGS_FILE, {})
+    settings = svc._read_json_file(svc.SETTINGS_FILE, {}, for_update=True)
     enabled = settings.get("enabledPlugins", {})
     for pid in plugins_to_remove:
         enabled.pop(pid, None)
@@ -200,7 +200,7 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
     """
     # Refuse (409) before re-cloning or pulling if the registry cannot be read back.
     svc._check_files_replaceable(svc.MARKETPLACES_FILE)
-    data = svc._read_json_file(svc.MARKETPLACES_FILE, {})
+    data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
 
     if marketplace_id not in data:
         raise ValueError(f"Marketplace not found: {marketplace_id}")

@@ -456,7 +456,7 @@ def _install_implicit_plugin(
         current_mode = script.stat().st_mode
         script.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}})
+    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}}, for_update=True)
     if "plugins" not in installed:
         installed["plugins"] = {}
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -619,7 +619,7 @@ def install_plugin(svc, plugin_id: str, scope: str = "user") -> PluginInfo:
         script.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     # Update installed_plugins.json
-    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}})
+    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}}, for_update=True)
     if "plugins" not in installed:
         installed["plugins"] = {}
 
@@ -664,7 +664,7 @@ def uninstall_plugin(svc, plugin_id: str) -> bool:
     # Refuse (409) before deleting anything, so a retry after fixing the
     # file finds the plugin still installed.
     svc._check_files_replaceable(svc.INSTALLED_FILE, svc.SETTINGS_FILE)
-    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}})
+    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}}, for_update=True)
     file_version = installed.get("version", 1)
 
     if plugin_id not in installed.get("plugins", {}):
@@ -696,7 +696,7 @@ def uninstall_plugin(svc, plugin_id: str) -> bool:
     svc._write_json_file(svc.INSTALLED_FILE, installed)
 
     # Remove from enabled plugins
-    settings = svc._read_json_file(svc.SETTINGS_FILE, {})
+    settings = svc._read_json_file(svc.SETTINGS_FILE, {}, for_update=True)
     enabled = settings.get("enabledPlugins", {})
     enabled.pop(plugin_id, None)
     settings["enabledPlugins"] = enabled
@@ -862,7 +862,7 @@ def uninstall_project_plugin(svc, plugin_id: str) -> bool:
     shutil.rmtree(plugin_path)
 
     # Remove from enabled plugins in the matching Fluid settings file
-    settings = svc._read_project_settings(scope)
+    settings = svc._read_project_settings(scope, for_update=True)
     enabled = settings.get("enabledPlugins", {})
     enabled.pop(plugin_id, None)
     settings["enabledPlugins"] = enabled

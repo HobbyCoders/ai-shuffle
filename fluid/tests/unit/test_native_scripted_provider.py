@@ -1609,9 +1609,9 @@ async def test_a_heartbeat_only_responses_stream_ends_as_truncated():
     assert len(srv.requests) == 1
 
 
-async def test_heartbeats_between_data_events_restart_the_silence_bound():
-    """The bound is on the time since the last DATA event, not the whole call:
-    long reasoning with heartbeats between real events still completes."""
+async def test_heartbeats_between_data_events_do_not_end_the_stream():
+    """The bound covers only the wait for the first DATA event, not the whole
+    call: long reasoning with heartbeats between real events still completes."""
     frames = [Responses.created(), *_heartbeats(0.3)]
     for piece in Responses.message("msg_1", "all done"):
         frames += [piece, *_heartbeats(0.3)]
@@ -1628,6 +1628,46 @@ async def test_heartbeats_between_data_events_restart_the_silence_bound():
     assert not [c for c in chunks if c.kind == "error"]
     assert any(c.kind == "message_stop" for c in chunks)
     assert "".join(c.payload.get("text", "") for c in chunks if c.kind == "text_delta") == "all done"
+
+
+async def test_heartbeats_after_data_outlast_the_read_timeout_bound():
+    """R16-1: with encrypted-only reasoning, response.created (data) arrives
+    and then only heartbeats until the reasoning item is done. That wait may
+    exceed the read-timeout-length bound; only the stream deadline caps it."""
+    frames = [Responses.created(), *_heartbeats(1.0)]
+    frames += [*Responses.message("msg_1", "thought long"), Responses.completed()]
+    with fps.FakeProviderServer(frames) as srv:
+        client = _client("responses", srv.url, event_silence_timeout=0.3)
+        request = ProviderRequest(
+            model=MODELS["responses"], messages=[Message(role="user", content=[Text("hi")])]
+        )
+        started = time.monotonic()
+        chunks = [chunk async for chunk in client.stream(request)]
+
+    assert time.monotonic() - started >= 1.0  # well past the 0.3 s bound
+    assert not [c for c in chunks if c.kind == "error"]
+    assert any(c.kind == "message_stop" for c in chunks)
+    assert "".join(c.payload.get("text", "") for c in chunks if c.kind == "text_delta") == "thought long"
+    assert len(srv.requests) == 1
+
+
+async def test_no_stream_deadline_leaves_heartbeats_after_data_unbounded():
+    """R16-1: PROVIDER_STREAM_DEADLINE=0 turns the whole-call limit off. The
+    default heartbeat bound (the read timeout, here 0.3 s) must not bring a
+    cap back once data has arrived."""
+    frames = [Responses.created(), *_heartbeats(1.0)]
+    frames += [*Responses.message("msg_1", "no cap"), Responses.completed()]
+    with fps.FakeProviderServer(frames) as srv:
+        client = _client("responses", srv.url, timeout=0.3, stream_deadline=0)
+        assert client._event_silence_timeout == 0.3
+        request = ProviderRequest(
+            model=MODELS["responses"], messages=[Message(role="user", content=[Text("hi")])]
+        )
+        chunks = [chunk async for chunk in client.stream(request)]
+
+    assert not [c for c in chunks if c.kind == "error"]
+    assert any(c.kind == "message_stop" for c in chunks)
+    assert "".join(c.payload.get("text", "") for c in chunks if c.kind == "text_delta") == "no cap"
 
 
 def test_the_event_silence_bound_defaults_to_the_read_timeout():

@@ -414,3 +414,90 @@ def test_at_most_five_backups_are_kept_per_file(svc):
         svc._write_json_file(svc.INSTALLED_FILE, {})
     assert len(_baks(svc.INSTALLED_FILE)) == 1
     assert len(_baks(svc.SETTINGS_FILE)) == 5
+
+
+# ─── R16-2: a file caught mid-write after the up-front check ────────────────
+
+
+def _catch_mid_write(monkeypatch, path):
+    """The first text read of ``path`` sees a truncated file (another program
+    was mid-write); the bytes on disk stay whole, as when that writer finishes
+    before ours. The up-front check reads bytes, so it is not affected."""
+    import builtins
+    import io
+
+    real_open = builtins.open
+    state = {"reads": 0}
+
+    def flaky_open(file, mode="r", *args, **kwargs):
+        if str(file) == str(path) and "r" in mode and "b" not in mode:
+            state["reads"] += 1
+            if state["reads"] == 1:
+                return io.StringIO('{"enabledPlugins": {"keep@o')
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr("app.core.plugin_service.open", flaky_open, raising=False)
+    return state
+
+
+def _project_demo(svc):
+    plugin_dir = svc.get_plugins_dir_for_scope(PluginScope.LOCAL) / "demo"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "x").write_text("x")
+    return plugin_dir
+
+
+_MID_WRITE_CASES = [
+    ("remove_marketplace", "settings"),
+    ("remove_marketplace", "installed"),
+    ("uninstall", "settings"),
+    ("uninstall", "installed"),
+    ("install", "installed"),
+    ("update", "settings"),
+    ("project_uninstall", "project"),
+]
+
+
+@pytest.mark.parametrize(
+    "operation,target", _MID_WRITE_CASES, ids=[f"{o}-{t}" for o, t in _MID_WRITE_CASES]
+)
+def test_a_file_caught_mid_write_after_the_check_is_not_rewritten(
+    svc, tmp_path, monkeypatch, operation, target
+):
+    """R16-2: the delegates re-read each file after the up-front check. A
+    tolerant re-read that caught the file mid-write got ``{}`` and wrote what
+    it built from that back, dropping every other key and record. Every read
+    that precedes a write now refuses instead."""
+    _local_marketplace(svc)
+    _installed_demo(svc)
+    svc.SETTINGS_FILE.write_text(json.dumps(
+        {"enabledPlugins": {"demo@market": True, "keep@other": True},
+         "theme": "dark", "env": {"X": "1"}}
+    ))
+    installed = json.loads(svc.INSTALLED_FILE.read_text())
+    installed["plugins"]["keep@other"] = [{"scope": "user", "installPath": "/nowhere"}]
+    svc.INSTALLED_FILE.write_text(json.dumps(installed))
+    project_settings = svc._get_project_settings_file(PluginScope.LOCAL)
+    project_settings.parent.mkdir(parents=True, exist_ok=True)
+    project_settings.write_text(json.dumps(
+        {"enabledPlugins": {"demo@project-local": True, "keep@project-local": True},
+         "theme": "dark"}
+    ))
+    if operation == "project_uninstall":
+        _project_demo(svc)
+
+    path = {"settings": svc.SETTINGS_FILE, "installed": svc.INSTALLED_FILE,
+            "project": project_settings}[target]
+    good = path.read_bytes()
+    state = _catch_mid_write(monkeypatch, path)
+    run = {
+        "remove_marketplace": lambda: svc.remove_marketplace("market"),
+        "uninstall": lambda: svc.uninstall_plugin("demo@market"),
+        "install": lambda: svc.install_plugin("demo@market"),
+        "update": lambda: svc.update_plugin("demo@market"),
+        "project_uninstall": lambda: svc.uninstall_project_plugin("demo@project-local"),
+    }[operation]
+    with pytest.raises(PluginConfigUnreadable):
+        run()
+    assert state["reads"] >= 1  # the mid-write read was reached
+    assert path.read_bytes() == good

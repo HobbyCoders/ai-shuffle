@@ -255,9 +255,11 @@ class PluginService:
     def _check_replaceable(self, path: Path) -> None:
         """Refuse to replace a file that exists but is not a readable JSON object.
 
-        The delegate modules read with the tolerant reader and write the
-        result back, so this is where a read-modify-write of a corrupt file
-        is stopped. A missing file is fine: the write creates it.
+        Every read that precedes a write uses ``for_update=True``, so a file
+        caught mid-write after the up-front check (see
+        :meth:`_check_files_replaceable`) is refused rather than read as
+        ``{}`` and written back; this check on the write itself is the last
+        guard. A missing file is fine: the write creates it.
 
         The auto-update settings file is the exception: it is always written
         as a whole record (never merged into), so one that fails to parse is

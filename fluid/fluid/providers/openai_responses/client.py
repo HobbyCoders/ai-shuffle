@@ -155,12 +155,15 @@ class OpenAIResponsesClient:
         # truncated stream. None or 0 disables it. See
         # fluid.providers._transport.FirstByteTimeout.
         self._first_byte_timeout = first_byte_timeout
-        # Wall clock since the last real (data) event. A heartbeat keeps the
-        # read timeout and the first-byte timer satisfied, so a server that
-        # sends only heartbeats would otherwise be bounded by the stream
-        # deadline alone (or nothing when that is off). Once heartbeats have
-        # been the only frames for this long, the stream ends as truncated.
-        # None means the per-read ``timeout``; 0 disables it.
+        # Wall clock from the headers to the first real (data) event. A
+        # heartbeat keeps the read timeout and the first-byte timer satisfied,
+        # so a server that answers 200 and then sends only heartbeats would
+        # otherwise be bounded by the stream deadline alone (or nothing when
+        # that is off). Once heartbeats have been the only frames for this
+        # long, the stream ends as truncated. After the first data event the
+        # bound no longer applies: with encrypted-only reasoning, heartbeats
+        # can be the only frames for minutes, and only the stream deadline
+        # caps that. None means the per-read ``timeout``; 0 disables it.
         self._event_silence_timeout = (
             timeout if event_silence_timeout is None else event_silence_timeout
         )
@@ -387,8 +390,11 @@ class OpenAIResponsesClient:
                             normalizer = ResponsesStreamNormalizer()
                             # Heartbeats become provider_alive chunks: with
                             # encrypted-only reasoning they can be the only
-                            # frames for minutes. The stream deadline still
-                            # caps the whole call.
+                            # frames for minutes once response.created has
+                            # arrived. Before the first data event they count
+                            # for at most the heartbeat-only bound below;
+                            # after it, the stream deadline alone caps the
+                            # call.
                             # The headers took part of the first-byte budget;
                             # the first frame gets the rest (never less than a
                             # sliver, so a slow header does not fail the read).
@@ -415,15 +421,20 @@ class OpenAIResponsesClient:
                             # body that ends before either was cut off.
                             terminal = False
                             retry_class: ErrorClass | None = None
+                            # Heartbeat-only bound: applies only until the
+                            # first data event (proof of life for the first
+                            # frame, not a limit on later reasoning).
                             silence_limit = self._event_silence_timeout
-                            last_event_at = time.monotonic()
+                            headers_at = time.monotonic()
+                            data_seen = False
                             heartbeats_only = False
                             async for event_name, data in events:
-                                now = time.monotonic()
                                 if event_name != KEEPALIVE_EVENT:
-                                    last_event_at = now
-                                elif silence_limit and silence_limit > 0 and (
-                                    now - last_event_at > silence_limit
+                                    data_seen = True
+                                elif (
+                                    not data_seen
+                                    and silence_limit and silence_limit > 0
+                                    and time.monotonic() - headers_at > silence_limit
                                 ):
                                     heartbeats_only = True
                                     break

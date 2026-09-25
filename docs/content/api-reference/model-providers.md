@@ -150,7 +150,7 @@ Sessions on these providers call the provider directly. These settings bound tho
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
-| `PROVIDER_READ_TIMEOUT` | `600` | Longest silence, in seconds, between two reads of a model response |
+| `PROVIDER_READ_TIMEOUT` | `600` | Longest silence, in seconds, between two reads of a model response. For OpenAI (Responses), also the longest the provider may send only keep-alive heartbeats after answering and before its first event; the turn then ends as a reply cut off mid-stream. Once the first event has arrived, heartbeats keep the call open (a long reasoning step can send nothing else for minutes) and only `PROVIDER_STREAM_DEADLINE` limits it, so with that set to `0` nothing does. `0` keeps the default |
 | `PROVIDER_STREAM_DEADLINE` | `900` | Wall-clock limit, in seconds, for one whole model call; `0` disables it |
 | `PROVIDER_FIRST_BYTE_TIMEOUT` | `60` | Seconds to wait for a call's first byte (the response headers and the first event), on every provider these sessions call: Anthropic, OpenRouter, OpenAI (Responses) and `custom` rows in either `api_dialect`. The call is retried only when not even the response headers arrived; once the provider has answered, the turn ends as a reply cut off mid-stream instead of sending the request again. `0` disables it |
 | `PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL` | `0` | The same wait for a provider whose `base_url` is a server on this computer or the local network (a loopback, private or link-local address, `localhost`, a `.local` name or `host.docker.internal`), such as Ollama or vLLM. A local server can hold its headers while it loads a model, so `0` (the default) disables it; set it to bound local servers too |
