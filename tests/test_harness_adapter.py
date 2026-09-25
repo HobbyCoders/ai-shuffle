@@ -7499,3 +7499,113 @@ def test_code_mode_examples_never_slice_an_unchecked_read():
         # Every bound Read result is tested for truth before it is used.
         for name in re.findall(r"(\w+) = Read\(", block):
             assert re.search(rf"if (not )?{name}\b", block), block
+
+
+# ── PROVIDER_* timeouts reach every native client the app builds ─────────────
+
+
+def _patch_provider_timeouts(monkeypatch, read, deadline, first_byte):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "provider_read_timeout", read)
+    monkeypatch.setattr(settings, "provider_stream_deadline", deadline)
+    monkeypatch.setattr(settings, "provider_first_byte_timeout", first_byte)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["anthropic", "openrouter", "openai_responses"])
+async def test_build_provider_client_env_fallback_carries_configured_timeouts(monkeypatch, kind):
+    import app.core.provider.harness_adapter as ha
+
+    for var in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.setenv(var, "test")
+    _patch_provider_timeouts(monkeypatch, 123.0, 456.0, 7.5)
+
+    client, http_client = await ha._build_provider_client(kind, SessionOptions(model="m"))
+
+    assert http_client is None
+    assert client._timeout == 123.0
+    assert client._stream_deadline == 456.0
+    if kind == "anthropic":
+        assert client._first_byte_timeout == 7.5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,base_url",
+    [
+        ("anthropic", None),
+        ("anthropic", "https://gateway.example"),
+        ("openrouter", None),
+        ("openrouter", "https://api.x.ai"),
+        ("openai_responses", None),
+    ],
+)
+async def test_build_provider_client_bound_row_carries_configured_timeouts(
+    monkeypatch, kind, base_url
+):
+    import app.core.provider.harness_adapter as ha
+    from app.core.provider.fluid_credentials import ProviderCredentials
+
+    async def fake_resolve(_kind, _provider_id):
+        return ProviderCredentials(api_key="sk-test", base_url=base_url)
+
+    monkeypatch.setattr(ha, "resolve_provider_credentials", fake_resolve)
+    _patch_provider_timeouts(monkeypatch, 90.0, 300.0, 15.0)
+
+    client, http_client = await ha._build_provider_client(
+        kind, SessionOptions(model="m", extra={"provider_id": "prov-1"})
+    )
+    try:
+        assert client._timeout == 90.0
+        assert client._stream_deadline == 300.0
+        if kind == "anthropic":
+            assert client._first_byte_timeout == 15.0
+        if http_client is not None:
+            # An injected transport replaces the client's own, so it carries
+            # the configured read timeout too.
+            assert http_client.timeout.read == 90.0
+    finally:
+        if http_client is not None:
+            await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_provider_client_zero_disables_deadline_and_first_byte(monkeypatch):
+    """0 disables the whole-call deadline and the first-byte bound (fluid's
+    None); a 0 read timeout keeps fluid's 600 s, since fluid cannot disable it."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    _patch_provider_timeouts(monkeypatch, 0.0, 0.0, 0.0)
+
+    client, _ = await ha._build_provider_client("anthropic", SessionOptions(model="m"))
+
+    assert client._timeout == 600.0
+    assert client._stream_deadline is None
+    assert client._first_byte_timeout is None
+
+
+@pytest.mark.asyncio
+async def test_build_provider_client_default_timeouts_match_fluid(monkeypatch):
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import Settings
+    from fluid.providers._transport import (
+        DEFAULT_FIRST_BYTE_TIMEOUT_S,
+        DEFAULT_STREAM_DEADLINE_S,
+    )
+
+    defaults = Settings.model_fields
+    _patch_provider_timeouts(
+        monkeypatch,
+        defaults["provider_read_timeout"].default,
+        defaults["provider_stream_deadline"].default,
+        defaults["provider_first_byte_timeout"].default,
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+
+    client, _ = await ha._build_provider_client("anthropic", SessionOptions(model="m"))
+
+    assert client._timeout == 600.0
+    assert client._stream_deadline == DEFAULT_STREAM_DEADLINE_S
+    assert client._first_byte_timeout == DEFAULT_FIRST_BYTE_TIMEOUT_S

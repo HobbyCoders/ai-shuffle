@@ -5342,6 +5342,42 @@ def _require_env_credential(env_var: str, kind: str) -> None:
     )
 
 
+def _provider_read_timeout() -> float:
+    """Per-read HTTP timeout for native provider clients (``PROVIDER_READ_TIMEOUT``).
+
+    fluid's clients take a plain float here, so a zero or negative value keeps
+    fluid's own 600 s instead of disabling the bound.
+    """
+    from app.core.config import settings
+
+    seconds = float(getattr(settings, "provider_read_timeout", 600.0) or 0)
+    return seconds if seconds > 0 else 600.0
+
+
+def _provider_timeout_kwargs(kind: str) -> Dict[str, Any]:
+    """Timeout keyword arguments for the fluid client of ``kind``.
+
+    ``timeout`` (per read) and ``stream_deadline`` (whole call) go to every
+    client; ``first_byte_timeout`` only to the Anthropic client, the one fluid
+    client that takes it. A deadline or first-byte value of 0 (or below)
+    becomes ``None``, which fluid reads as "disabled". Env:
+    PROVIDER_READ_TIMEOUT, PROVIDER_STREAM_DEADLINE, PROVIDER_FIRST_BYTE_TIMEOUT.
+    """
+    from app.core.config import settings
+
+    def _optional(name: str, default: float) -> Optional[float]:
+        seconds = float(getattr(settings, name, default) or 0)
+        return seconds if seconds > 0 else None
+
+    kwargs: Dict[str, Any] = {
+        "timeout": _provider_read_timeout(),
+        "stream_deadline": _optional("provider_stream_deadline", 900.0),
+    }
+    if kind == "anthropic":
+        kwargs["first_byte_timeout"] = _optional("provider_first_byte_timeout", 60.0)
+    return kwargs
+
+
 def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> httpx.AsyncClient:
     """An ``httpx.AsyncClient`` that passively captures usage/quota headers and
     records upstream rate limits.
@@ -5355,9 +5391,9 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
 
     Deliberately no status-code guard on the capture: ``capture_*`` already
     no-ops when no allowlisted header is present, and error responses (notably
-    429) carry the freshest quota headers of all. ``timeout=600.0`` matches the
-    vendored fluid client's own default, which it bypasses whenever a client is
-    injected.
+    429) carry the freshest quota headers of all. Its timeout is the configured
+    per-read one (``_provider_read_timeout``), since the fluid client only
+    applies its own ``timeout`` to a client it creates.
 
     Rate-limit breaker: an HTTP 429 trips :mod:`app.core.rate_limit_breaker`
     for ``provider_id`` (install-wide, honouring ``Retry-After``). Only 429
@@ -5390,7 +5426,9 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
             except Exception:  # noqa: BLE001 — bookkeeping must never break a turn
                 pass
 
-    return httpx.AsyncClient(timeout=600.0, event_hooks={"response": [_on_response]})
+    return httpx.AsyncClient(
+        timeout=_provider_read_timeout(), event_hooks={"response": [_on_response]}
+    )
 
 
 async def _build_provider_client(
@@ -5420,6 +5458,9 @@ async def _build_provider_client(
     creds = None
     if provider_id:
         creds = await resolve_provider_credentials(kind, str(provider_id))
+    # Read timeout, whole-call deadline and (Anthropic) first-byte bound from
+    # PROVIDER_* settings; provider rows carry no timeout override.
+    timeouts = _provider_timeout_kwargs(kind)
 
     if kind == "openai_responses":
         if creds is not None:
@@ -5437,10 +5478,11 @@ async def _build_provider_client(
                 auth=creds.auth,
                 base_url=base_url,
                 http_client=http_client,
+                **timeouts,
             )
             return client, http_client
         _require_env_credential("OPENAI_API_KEY", kind)
-        return OpenAIResponsesClient(), None
+        return OpenAIResponsesClient(**timeouts), None
     if kind == "openrouter":
         # fluid's OpenRouterClient is the generic OpenAI chat/completions
         # client — a row-level base_url redirects it (custom rows with
@@ -5462,17 +5504,19 @@ async def _build_provider_client(
                         base_url=_chat_completions_url(creds.base_url),
                         pricing=pricing,
                         retry=RetryPolicy(),
+                        **timeouts,
                     ),
                     None,
                 )
             return (
                 OpenRouterClient(
-                    api_key=creds.api_key, pricing=pricing, retry=RetryPolicy()
+                    api_key=creds.api_key, pricing=pricing, retry=RetryPolicy(),
+                    **timeouts,
                 ),
                 None,
             )
         _require_env_credential("OPENROUTER_API_KEY", kind)
-        return OpenRouterClient(pricing=pricing, retry=RetryPolicy()), None
+        return OpenRouterClient(pricing=pricing, retry=RetryPolicy(), **timeouts), None
     # anthropic — API-key rows only. A Claude Pro/Max SUBSCRIPTION OAuth token is
     # never routed here (that path stays delegated-CLI only); resolve_provider_
     # credentials refuses such a row outright. A row-level ``base_url`` (every
@@ -5487,7 +5531,7 @@ async def _build_provider_client(
             # the Bearer header too so either scheme works. Returned as the
             # second element — the adapter owns closing an injected client.
             bearer_http = httpx.AsyncClient(
-                timeout=600.0,
+                timeout=timeouts["timeout"],
                 headers={"Authorization": f"Bearer {creds.api_key}"},
             )
             return (
@@ -5495,12 +5539,13 @@ async def _build_provider_client(
                     api_key=creds.api_key,
                     base_url=creds.base_url.rstrip("/") + "/v1/messages",
                     http_client=bearer_http,
+                    **timeouts,
                 ),
                 bearer_http,
             )
-        return AnthropicClient(api_key=creds.api_key), None
+        return AnthropicClient(api_key=creds.api_key, **timeouts), None
     _require_env_credential("ANTHROPIC_API_KEY", kind)
-    return AnthropicClient(), None
+    return AnthropicClient(**timeouts), None
 
 
 def _catalog_pricing_resolver(options: SessionOptions) -> Optional[Any]:

@@ -764,3 +764,39 @@ class TestBlankEnvironmentValues:
         monkeypatch.setenv(name, raw)
         with pytest.raises(ValidationError):
             self._settings()
+
+
+class TestProviderTimeoutSettings:
+    """PROVIDER_READ_TIMEOUT / PROVIDER_STREAM_DEADLINE / PROVIDER_FIRST_BYTE_TIMEOUT."""
+
+    _NAMES = ("PROVIDER_READ_TIMEOUT", "PROVIDER_STREAM_DEADLINE", "PROVIDER_FIRST_BYTE_TIMEOUT")
+
+    def _settings(self):
+        from app.core.config import Settings
+        return Settings(_env_file=None)
+
+    def test_defaults_match_fluid(self, monkeypatch):
+        from fluid.providers._transport import DEFAULT_FIRST_BYTE_TIMEOUT_S, DEFAULT_STREAM_DEADLINE_S
+        for name in self._NAMES:
+            monkeypatch.delenv(name, raising=False)
+        settings = self._settings()
+        assert settings.provider_read_timeout == 600.0
+        assert settings.provider_stream_deadline == DEFAULT_STREAM_DEADLINE_S
+        assert settings.provider_first_byte_timeout == DEFAULT_FIRST_BYTE_TIMEOUT_S
+
+    def test_blank_means_default(self, monkeypatch):
+        for name in self._NAMES:
+            monkeypatch.setenv(name, "")
+        settings = self._settings()
+        assert settings.provider_read_timeout == 600.0
+        assert settings.provider_stream_deadline == 900.0
+        assert settings.provider_first_byte_timeout == 60.0
+
+    def test_values_parse_and_zero_is_kept(self, monkeypatch):
+        monkeypatch.setenv("PROVIDER_READ_TIMEOUT", "120")
+        monkeypatch.setenv("PROVIDER_STREAM_DEADLINE", "0")
+        monkeypatch.setenv("PROVIDER_FIRST_BYTE_TIMEOUT", "12.5")
+        settings = self._settings()
+        assert settings.provider_read_timeout == 120.0
+        assert settings.provider_stream_deadline == 0.0
+        assert settings.provider_first_byte_timeout == 12.5

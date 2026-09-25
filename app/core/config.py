@@ -429,6 +429,14 @@ class Settings(BaseSettings):
     #     FLUID_TURN_WATCHDOG_SECONDS.
     fluid_external_call_timeout_seconds: int = 330
     fluid_turn_watchdog_seconds: int = 900
+    # HTTP bounds on every native provider client the app builds (seconds;
+    # see harness_adapter._provider_timeout_kwargs; defaults match fluid's).
+    # Longest silence between two reads of a model response.
+    provider_read_timeout: float = 600.0
+    # Wall clock for one whole model call; 0 disables it.
+    provider_stream_deadline: float = 900.0
+    # Wait for a call's first byte before retrying it (Anthropic API only); 0 disables it.
+    provider_first_byte_timeout: float = 60.0
 
     # Size limits
     max_tool_output_chars: int = 500_000  # ~500KB, well under 1MB WS buffer
