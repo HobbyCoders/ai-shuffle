@@ -3,6 +3,7 @@
  */
 
 import { api } from './client';
+import { apiOrigin } from './runtime';
 
 // ============================================================================
 // Types
@@ -29,8 +30,6 @@ export interface TriggerConfig {
 	trigger_id?: string;
 	/** webhook (generated server-side when absent) */
 	secret?: string;
-	/** Read by the edit form, but the backend never sets it. */
-	webhook_url?: string;
 	[key: string]: unknown;
 }
 
@@ -129,6 +128,33 @@ export interface Automation {
 	updated_at: string;
 	/** Advice from create/update, e.g. use an API key for scheduled runs. */
 	notices?: string[];
+}
+
+/**
+ * Where a webhook trigger is called: `POST /api/v1/automations/{id}/trigger`
+ * (app/api/automations.py), signed with `X-Webhook-Signature`. The backend
+ * has no reliable public base URL, so the address is built from the origin
+ * this UI talks to (the paired worker on mobile, the page origin otherwise).
+ */
+export function automationWebhookUrl(automationId: string): string {
+	const origin = apiOrigin() || (typeof window !== 'undefined' ? window.location.origin : '');
+	return `${origin}/api/v1/automations/${encodeURIComponent(automationId)}/trigger`;
+}
+
+/** Labels for `trigger_data.trigger`, as written by app/core/automation_manager.py. */
+const RUN_TRIGGER_LABELS: Record<string, string> = {
+	schedule: 'Schedule',
+	connector_event: 'Event',
+	connector_trigger: 'Connector',
+	webhook: 'Webhook',
+	manual: 'Manual'
+};
+
+/** What started a run. Older rows may carry `source` instead of `trigger`. */
+export function runTriggerLabel(triggerData: Record<string, unknown> | null | undefined): string {
+	const raw = triggerData?.trigger ?? triggerData?.source;
+	if (typeof raw !== 'string' || !raw) return RUN_TRIGGER_LABELS.manual;
+	return RUN_TRIGGER_LABELS[raw] ?? raw;
 }
 
 export interface AutomationRun {

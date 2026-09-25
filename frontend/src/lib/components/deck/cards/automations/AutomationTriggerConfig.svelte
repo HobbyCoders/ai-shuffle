@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { TriggerType, TriggerItem } from '$lib/api/automations';
+	import { automationWebhookUrl, type TriggerType, type TriggerItem } from '$lib/api/automations';
 	import type { Connector, ConnectorTypeInfo } from '$lib/api/connectors';
 	import { slide } from 'svelte/transition';
 	import {
@@ -457,7 +457,7 @@
 								<div class="af-mini-field">
 									<label class="af-mini-label" for="auto-webhook-url-{trigIdx}">Webhook URL</label>
 									<input type="text" class="mono-input" id="auto-webhook-url-{trigIdx}"
-										value={trigger.config.webhook_url || 'Generated after creation'} readonly />
+										value={automationWebhookUrl(selectedAutomationId)} readonly />
 								</div>
 								{#if trigger.config.secret}
 									<div class="af-mini-field">
