@@ -17,6 +17,7 @@
 	 * On desktop the sidebar itself replaces this bar's old tab row, and the main
 	 * panel's StudioTopBar carries the breadcrumbs and actions.
 	 */
+	import { tick } from 'svelte';
 	import { Menu, X } from 'lucide-svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
@@ -82,10 +83,36 @@
 
 	// Navigation drawer state
 	let drawerOpen = $state(false);
+	let hamburgerRef = $state<HTMLButtonElement | null>(null);
+	let drawerRef = $state<HTMLElement | null>(null);
+
+	// Opening moves focus into the drawer (it covers the whole screen), and a
+	// dismissal hands it back to the ☰ instead of dropping it on <body>.
+	async function openDrawer() {
+		drawerOpen = true;
+		await tick();
+		drawerRef?.querySelector<HTMLElement>('.drawer-close')?.focus({ preventScroll: true });
+	}
+
+	function dismissDrawer() {
+		if (!drawerOpen) return;
+		const focusWasInside = !!drawerRef?.contains(document.activeElement);
+		drawerOpen = false;
+		if (focusWasInside) hamburgerRef?.focus({ preventScroll: true });
+	}
 
 	function handleWindowKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape') drawerOpen = false;
+		if (e.key === 'Escape') dismissDrawer();
 	}
+
+	// Navigation that does not go through the Sidebar's callbacks — a tapped
+	// notification in the drawer's bell, a system notification — arrives as the
+	// shared `open-session` event. The full-screen drawer must not stay over it.
+	$effect(() => {
+		const close = () => { drawerOpen = false; };
+		window.addEventListener('open-session', close);
+		return () => window.removeEventListener('open-session', close);
+	});
 
 	// Run a drawer action and dismiss the drawer in one step.
 	function drawerGo<T extends unknown[]>(action: (...args: T) => void) {
@@ -100,8 +127,10 @@
 
 <header class="topbar topbar-mobile">
 	<button
+		bind:this={hamburgerRef}
 		class="tb-hamburger"
-		onclick={() => (drawerOpen = true)}
+		onclick={openDrawer}
+		aria-controls="mobile-nav-drawer"
 		aria-label={$unreadCount > 0 ? `Open menu (${$unreadCount} unread notifications)` : 'Open menu'}
 		aria-expanded={drawerOpen}
 	>
@@ -130,10 +159,10 @@
 		role="button"
 		tabindex="-1"
 		aria-label="Close menu"
-		onclick={() => (drawerOpen = false)}
-		onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') drawerOpen = false; }}
+		onclick={dismissDrawer}
+		onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') dismissDrawer(); }}
 	></div>
-	<aside class="drawer" aria-label="Navigation">
+	<aside id="mobile-nav-drawer" class="drawer" aria-label="Navigation" bind:this={drawerRef}>
 		<Sidebar
 			{isAdmin}
 			onNewSession={drawerGo(onNewSession)}
@@ -143,7 +172,7 @@
 			onOpenSpotlight={onOpenSpotlight ? drawerGo(onOpenSpotlight) : undefined}
 		>
 			{#snippet headerAction()}
-				<button class="drawer-close" onclick={() => (drawerOpen = false)} aria-label="Close menu">
+				<button class="drawer-close" onclick={dismissDrawer} aria-label="Close menu">
 					<X size={18} strokeWidth={1.8} />
 				</button>
 			{/snippet}
