@@ -8,6 +8,7 @@ domain-specific modules in ``app.db.*`` so that existing callers like
 Only schema initialisation and maintenance helpers live here directly.
 """
 
+import hashlib
 import json
 import logging
 import sys
@@ -2354,17 +2355,40 @@ def _get_marker(cursor, key: str) -> Optional[str]:
 
 
 def _set_marker(cursor, key: str, value: str) -> None:
-    """Upsert a system_settings marker (no-op when the table does not exist)."""
+    """Upsert a system_settings marker (no-op when the table does not exist).
+
+    Every settings row carries an opaque ``revision`` (see
+    ``_migrate_provider_revisions``). A marker gets one when it is written and
+    keeps it while its value is unchanged, so re-running the migration pass
+    leaves the row as it was instead of a NULL the next pass backfills.
+    """
+    from uuid import uuid4
+
     if not table_exists(cursor, "system_settings"):
         return
     now = datetime.now(timezone.utc).isoformat()
+    if not column_exists(cursor, "system_settings", "revision"):
+        # Older database: _migrate_provider_revisions adds and backfills the
+        # column later in this same pass.
+        cursor.execute(
+            """INSERT INTO system_settings (key, value, updated_at)
+               VALUES (%s, %s, %s)
+               ON CONFLICT(key) DO UPDATE SET
+                   value = excluded.value,
+                   updated_at = excluded.updated_at""",
+            (key, value, now),
+        )
+        return
     cursor.execute(
-        """INSERT INTO system_settings (key, value, updated_at)
-           VALUES (%s, %s, %s)
+        """INSERT INTO system_settings (key, value, updated_at, revision)
+           VALUES (%s, %s, %s, %s)
            ON CONFLICT(key) DO UPDATE SET
                value = excluded.value,
-               updated_at = excluded.updated_at""",
-        (key, value, now),
+               updated_at = excluded.updated_at,
+               revision = CASE WHEN system_settings.value = excluded.value
+                               THEN COALESCE(system_settings.revision, excluded.revision)
+                               ELSE excluded.revision END""",
+        (key, value, now, str(uuid4())),
     )
 
 
@@ -2624,6 +2648,13 @@ def migrations_fingerprint() -> str:
     return h.hexdigest()
 
 
+#: ``pg_advisory_xact_lock`` key for :func:`init_database` (a fixed, namespaced
+#: signed bigint: the leading 8 bytes of sha256("shuffle-schema-init")).
+SCHEMA_INIT_LOCK_KEY = int.from_bytes(
+    hashlib.sha256(b"shuffle-schema-init").digest()[:8], "big", signed=True
+)
+
+
 def init_database():
     """Initialize the PostgreSQL database with schema.
 
@@ -2655,6 +2686,15 @@ def init_database():
 
     with get_db() as conn:
         cursor = conn.cursor()
+
+        # Serialize schema initialisation across processes. Workers sharing
+        # one database can boot (or roll out an upgrade) at the same moment;
+        # without this both see the same missing table/column, both issue the
+        # DDL, and the loser's whole init fails on a duplicate relation or
+        # column once the winner commits. Transaction-scoped, so it is released
+        # by the commit/rollback that ends this block, and everything below
+        # (version, fingerprint) is read only after the other boot finished.
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_INIT_LOCK_KEY,))
 
         # Create schema version table
         cursor.execute("""
