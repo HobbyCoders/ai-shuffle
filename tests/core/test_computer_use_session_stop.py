@@ -39,6 +39,7 @@ def _runtime(sid="s1", tid="t1") -> SessionRuntime:
     rt._pump_task = None
     rt.source = "user"
     rt.turn = {"command_id": None}
+    rt.api_user_id = None
     return rt
 
 

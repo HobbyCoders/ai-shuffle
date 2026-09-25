@@ -619,10 +619,6 @@ async def test_a_connector_message_is_answered_through_the_connector(
     assert "fakechat" in json.dumps(provider.requests[0].body.get("system"))
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "ConnectorManager.handle_incoming_message submits the turn without "
-    "payload={'api_user_id': ...}, so SessionRuntime runs it as the owner"
-))
 async def test_a_connector_turn_runs_as_the_connectors_key(
     provider, project, connectors, pump_calls
 ):

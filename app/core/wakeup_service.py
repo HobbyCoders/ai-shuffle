@@ -169,6 +169,16 @@ async def _resolve_profile_id(row: Dict[str, Any]) -> Optional[str]:
     return (session or {}).get("profile_id") or None
 
 
+def _session_api_user_id(session_id: Optional[str]) -> Optional[str]:
+    """The API key ``session_id`` runs as (``None`` = the owner). Sync (DB)."""
+    if not session_id:
+        return None
+    from app.core import api_user_scope
+    from app.db import database
+
+    return api_user_scope.session_api_user_id(database.get_session(session_id))
+
+
 async def _announce_dropped_wake(row: Dict[str, Any], reason: str) -> None:
     """Tell the SESSION that a wake it was promised will never run.
 
@@ -367,6 +377,10 @@ async def _fire(row: Dict[str, Any]) -> None:
                 session_id, row.get("prompt") or "",
             )
         else:
+            # A wake runs as the key that owns the session, never as the owner:
+            # any key's agent can arm one (ScheduleWakeup) and the idle
+            # watchdog arms them on key sessions unasked.
+            api_user_id = await asyncio.to_thread(_session_api_user_id, session_id)
             turn_id = await turn_manager.submit_async(
                 session_id,
                 "wakeup",
@@ -374,6 +388,7 @@ async def _fire(row: Dict[str, Any]) -> None:
                 profile_id=profile_id,
                 project_id=row.get("project_id"),
                 overrides=overrides,
+                payload={"api_user_id": api_user_id} if api_user_id else None,
             )
     except asyncio.CancelledError:
         raise

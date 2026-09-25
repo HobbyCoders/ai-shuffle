@@ -845,6 +845,9 @@ class ConnectorManager:
                     profile_id=profile_id,
                     project_id=project_id,
                     overrides=overrides or None,
+                    # The connector's API user is the turn's principal: its
+                    # tool surface and credentials, never the owner's.
+                    payload={"api_user_id": api_user_id},
                 )
                 idle = await turn_manager.wait_session_idle(
                     ai_session_id, timeout=3600

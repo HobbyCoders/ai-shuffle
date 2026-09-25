@@ -100,7 +100,7 @@ def commentary_chunks(text: str):
 
 
 async def delegate_to_selected_model(session_id: str, transcript: str, on_submitted=None) -> str:
-    from app.core import turn_manager
+    from app.core import api_user_scope, turn_manager
     from app.core.provider_agent import validate_provider_model
     from app.core.query_options import decode_provider_model
 
@@ -123,13 +123,19 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     overrides = {key: row.get(key) for key in ("effort", "permission_mode", "context_window", "fast")}
     overrides.update(model=selected, provider=provider_id,
                      system_prompt_append=options["delegation_instructions"] or DELEGATION_INSTRUCTIONS)
+    # VoiceStream flushes the spoken exchange before handing off. Keep the
+    # context for the engine without adding a second giant user bubble.
+    payload: dict = {"user_message_already_recorded": True}
+    # The delegated turn runs as the key that owns the session, never as the
+    # owner (a key may open the audio socket on its own session).
+    api_user_id = await run_sync(api_user_scope.session_api_user_id, row)
+    if api_user_id:
+        payload["api_user_id"] = api_user_id
     turn_id = await turn_manager.submit_async(
         session_id, "user", prompt=transcript, profile_id=row["profile_id"],
         project_id=row.get("project_id"), worktree_id=row.get("worktree_id"),
         overrides=overrides,
-        # VoiceStream flushes the spoken exchange before handing off. Keep the
-        # context for the engine without adding a second giant user bubble.
-        payload={"user_message_already_recorded": True},
+        payload=payload,
     )
     if on_submitted is not None:
         # The call-wide event subscriber follows progress, parking and later

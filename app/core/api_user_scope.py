@@ -30,6 +30,51 @@ def session_api_user_id(row: Optional[Mapping[str, Any]]) -> Optional[str]:
     return None
 
 
+# The owner's own chat socket (web app, desktop, a paired phone) stamps its turns
+# with the socket's ``user_id``: ``"admin"`` for the owner, ``"paired:<id>"`` for
+# a device paired to the owner (app/api/websocket.py). A key's socket stamps the
+# key instead, and every other submit path (wakes, voice, connectors, workers,
+# scheduler successors) stamps neither or copies them onto its own source.
+_OWNER_SOCKET_SOURCES = frozenset({"user", "queue"})
+
+
+def _owner_socket_turn(payload: Mapping[str, Any], source: Optional[str]) -> bool:
+    user_id = payload.get("user_id")
+    return (
+        (source or "user") in _OWNER_SOCKET_SOURCES
+        and isinstance(user_id, str)
+        and (user_id == "admin" or user_id.startswith("paired:"))
+    )
+
+
+def turn_api_user_id(
+    payload: Optional[Mapping[str, Any]],
+    source: Optional[str],
+    session_row: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    """The API user a turn on ``session_row`` runs as; ``None`` means the owner.
+
+    An explicit ``payload.api_user_id`` wins. Otherwise the turn runs as the key
+    that owns the session (walking worker parents): a turn submitted without a
+    principal on a key's session must never get the owner's admin tools and
+    credentials. The one way to run as the owner on a key's session is the
+    owner path, a message the owner typed or queued on their own chat socket
+    (``user``/``queue`` source stamped with the owner's socket ``user_id``). An
+    owner stamp on any other source (a wake or continuation that copied it from
+    an earlier turn) is refused and the turn runs as the key.
+    """
+    payload = payload or {}
+    explicit = payload.get("api_user_id")
+    if explicit:
+        return explicit
+    owner_key = session_api_user_id(session_row)
+    if not owner_key:
+        return None
+    if _owner_socket_turn(payload, source):
+        return None
+    return owner_key
+
+
 def viewer_api_user_id(session_id: Optional[str]) -> Optional[str]:
     """The API user behind an app session id or its store (``sdk``) id.
 

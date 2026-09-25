@@ -644,7 +644,9 @@ class SessionRuntime:
         self.origin_send = origin_send
         self.origin_device_id = origin_device_id
         # api_user_id / user_id are transport context; the turn row may carry
-        # them in payload (server-originated turns) — fall back to that.
+        # them in payload (server-originated turns) — fall back to that. A turn
+        # with no principal at all is resolved against the session row in
+        # ``execute`` (``_resolve_principal``) before anything runs.
         payload = turn_row.get("payload") or {}
         self.api_user_id = api_user_id if api_user_id is not None else payload.get("api_user_id")
         self.user_id = user_id if user_id is not None else payload.get("user_id")
@@ -734,6 +736,33 @@ class SessionRuntime:
         self._progress_watchdog: Optional[asyncio.Task] = None
         self._stop_generation: Optional[int] = None
 
+    def _resolve_principal(self, session_row: Optional[Dict[str, Any]]) -> None:
+        """Settle who this turn runs as. Synchronous (DB reads): run off-loop.
+
+        The single fallback point for every submit path: a turn that arrives
+        without ``api_user_id`` on an API key's session runs as that key (its
+        tool surface and credentials), not as the owner, unless it is the
+        owner's own chat-socket message (``api_user_scope.turn_api_user_id``).
+        """
+        if self.api_user_id:
+            return
+        from app.core import api_user_scope
+
+        if session_row is None:
+            from app.db import database as database_mod
+
+            session_row = database_mod.get_session(self.session_id)
+        resolved = api_user_scope.turn_api_user_id(
+            self.turn.get("payload") or {}, self.source, session_row,
+        )
+        if resolved:
+            logger.info(
+                "SessionRuntime: %s turn %s (source=%s) carried no API user; "
+                "running as the session's key %s",
+                self.session_id, self.turn_id, self.source, resolved,
+            )
+        self.api_user_id = resolved
+
     # ------------------------------------------------------------------
     # execute
     # ------------------------------------------------------------------
@@ -784,6 +813,17 @@ class SessionRuntime:
             logger.info(
                 "SessionRuntime: no capable runner for session %s (%s) — turn %s "
                 "stays queued", sid, decision.reason, tid,
+            )
+            return None
+
+        # 0a. Principal. Fail-closed: a turn whose principal cannot be settled
+        #     stays queued rather than running as the owner.
+        try:
+            await asyncio.to_thread(self._resolve_principal, session_row)
+        except Exception:
+            logger.warning(
+                "SessionRuntime: could not resolve the principal for %s turn %s — "
+                "it stays queued", sid, tid, exc_info=True,
             )
             return None
 

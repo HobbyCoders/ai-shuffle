@@ -1746,10 +1746,15 @@ class VoiceBridge:
             }
 
         def _latest_binding():
-            live = turns_db.get_live_turn(task_id)
-            return live or turns_db.get_latest_turn(task_id)
+            from app.core import api_user_scope
 
-        latest = await run_sync(_latest_binding)
+            live = turns_db.get_live_turn(task_id)
+            # The follow-up runs as the key the worker belongs to (its own row,
+            # else the session that spawned it), never as the owner.
+            principal = api_user_scope.session_api_user_id(database.get_session(task_id))
+            return live or turns_db.get_latest_turn(task_id), principal
+
+        latest, api_user_id = await run_sync(_latest_binding)
         if not latest:
             return {
                 "ok": False,
@@ -1767,6 +1772,7 @@ class VoiceBridge:
                 project_id=latest.get("project_id"),
                 worktree_id=latest.get("worktree_id"),
                 overrides=dict(latest.get("overrides") or {}),
+                payload={"api_user_id": api_user_id} if api_user_id else None,
             )
         except Exception as exc:  # noqa: BLE001 — surfaced to the model
             logger.warning(
