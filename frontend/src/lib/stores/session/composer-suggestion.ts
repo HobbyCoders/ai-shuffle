@@ -24,80 +24,89 @@ export interface SuggestionContext {
 	turnId: string | null;
 	streaming: boolean;
 	blocked: boolean;
+	connected?: boolean;
 }
 
-/** One mounted composer, one observed turn. Nothing is persisted or restored. */
-export function createComposerSuggestion() {
+export interface ComposerSuggestion {
+	session_id: string;
+	turn_id: string;
+	suggestion: string;
+}
+
+/** The server retains hints; the mounted composer only owns their presentation. */
+export function createComposerSuggestion(
+	load: (sessionId: string) => Promise<ComposerSuggestion | null> = async () => null
+) {
 	const value = writable('');
 	let context: SuggestionContext | null = null;
-	let turn: string | null = null;
-	let invalid = true;
-	let received = false;
-	let pending = '';
-	const clear = () => {
-		pending = '';
+	let current: ComposerSuggestion | null = null;
+	let revision = 0;
+	// Keep acceptance/dismissal across composer remounts and session switches.
+	const dismissed = new Map<string, string>();
+	const eligible = (c: SuggestionContext | null) =>
+		!!c?.sessionId && c.enabled && c.mode === 'code' && !c.streaming && !c.blocked;
+	function hide() {
+		revision++;
+		current = null;
 		value.set('');
-	};
+	}
+	async function refresh() {
+		if (!eligible(context)) return;
+		const sessionId = context!.sessionId!;
+		const request = ++revision;
+		try {
+			const hint = await load(sessionId);
+			if (request !== revision || context?.sessionId !== sessionId || !eligible(context)) return;
+			current = hint && hint.session_id === sessionId && typeof hint.turn_id === 'string' &&
+				typeof hint.suggestion === 'string' && hint.suggestion.trim() ? hint : null;
+			value.set(current && dismissed.get(sessionId) !== current.turn_id ? current.suggestion : '');
+		} catch {
+			// Optional UI assistance; a reconnect/switch retries this read, never generation.
+		}
+	}
 	function invalidate() {
-		invalid = true;
-		clear();
+		const turnId = current?.turn_id ?? context?.turnId;
+		if (context?.sessionId && turnId) {
+			dismissed.delete(context.sessionId);
+			dismissed.set(context.sessionId, turnId);
+			if (dismissed.size > 256) dismissed.delete(dismissed.keys().next().value!);
+		}
+		hide();
 	}
 	return {
 		subscribe: value.subscribe,
 		observe(next: SuggestionContext) {
-			const switched =
-				!context || next.sessionId !== context.sessionId || next.mode !== context.mode;
-			const disabled = !next.enabled || next.mode !== 'code' || !next.sessionId;
-			if (switched) {
-				turn = null;
-				invalidate();
-			}
-			// A local/remote optimistic start can precede the next turn ID. Do not
-			// let the previous reply reappear if that attempt ends without a turn.
-			if (next.streaming && !context?.streaming && !next.turnId) invalidate();
-			// Only an observed live turn arms this composer. Enabling/revisiting an idle
-			// session must not resurrect a suggestion from history.
-			if (next.turnId && next.turnId !== turn) {
-				turn = next.turnId;
-				received = false;
-				invalid = switched || disabled || next.blocked;
-				clear();
-			}
-			if (disabled || next.blocked || (context && !context.enabled)) invalidate();
+			const changed = next.sessionId !== context?.sessionId || next.mode !== context?.mode ||
+				next.enabled !== context?.enabled || next.streaming !== context?.streaming || next.turnId !== context?.turnId ||
+				next.blocked !== context?.blocked || next.connected !== context?.connected;
 			context = next;
-			value.set(!invalid && !next.streaming ? pending : '');
+			if (changed) {
+				hide();
+				void refresh();
+			}
 		},
-		receive(frame: { session_id?: unknown; turn_id?: unknown; suggestion?: unknown }) {
-			if (
-				!context ||
-				invalid ||
-				received ||
-				frame.session_id !== context.sessionId ||
-				frame.turn_id !== turn ||
-				typeof frame.suggestion !== 'string' ||
-				!frame.suggestion.trim()
-			)
-				return;
-			received = true;
-			pending = frame.suggestion;
-			if (!context.streaming) value.set(pending);
+		receive(frame: { session_id?: unknown }) {
+			// A WS notification is only a wake for an authoritative read. Do not
+			// depend on observing turn.started (SSE folds may coalesce it away).
+			if (frame.session_id === context?.sessionId) void refresh();
 		},
+		refresh,
 		invalidate,
-		reset() {
-			context = null;
-			turn = null;
-			received = false;
-			invalidate();
-		},
+		detach() { context = null; hide(); },
+		reset() { context = null; dismissed.clear(); hide(); },
 		accept() {
-			const text = !invalid && context && !context.streaming ? pending : '';
+			const text = eligible(context) && current && dismissed.get(current.session_id) !== current.turn_id
+				? current.suggestion : '';
 			invalidate();
 			return text;
 		}
 	};
 }
 
-export const composerSuggestion = createComposerSuggestion();
+export const composerSuggestion = createComposerSuggestion(async sessionId => {
+	const { api } = await import('$lib/api/client');
+	return api.get<ComposerSuggestion | null>(`/sessions/${encodeURIComponent(sessionId)}/composer-suggestion`);
+});
 
 export function suggestionKey(
 	event: Pick<

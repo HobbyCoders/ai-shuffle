@@ -770,6 +770,21 @@ def _set_message_pagination_headers(response: Response, pagination: dict) -> Non
         response.headers["X-Message-Next-Before-Seq"] = str(pagination["next_before_seq"])
 
 
+@router.get("/{session_id}/composer-suggestion")
+async def get_composer_suggestion(
+    request: Request, session_id: str, token: str = Depends(require_auth),
+):
+    """Read the latest eligible hint. Never triggers generation or changes a draft."""
+    await require_session(request, session_id)
+    from app.core.composer_suggestions import _eligible
+    from app.db import composer_suggestions
+
+    hint = await run_sync(composer_suggestions.get, session_id)
+    if hint and await _eligible(session_id, hint["turn_id"]):
+        return hint
+    return None
+
+
 @router.get("/{session_id}", response_model=SessionWithMessages)
 async def get_session(
     request: Request,

@@ -1,135 +1,79 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { get } from 'svelte/store';
-import {
-	createComposerSuggestion,
-	suggestionKey,
-	hasComposerDraft,
-	type SuggestionContext
-} from './composer-suggestion';
-const idle: SuggestionContext = {
-	sessionId: 's',
-	mode: 'code',
-	enabled: true,
-	turnId: null,
-	streaming: false,
-	blocked: false
-};
+import { createComposerSuggestion, suggestionKey, hasComposerDraft, type SuggestionContext } from './composer-suggestion';
+const idle: SuggestionContext = { sessionId: 's', mode: 'code', enabled: true, turnId: null, streaming: false, blocked: false };
 const frame = { session_id: 's', turn_id: 't', suggestion: '<img src=x> **literal**' };
-function setup() {
-	const store = createComposerSuggestion();
-	store.observe(idle);
-	store.observe({ ...idle, turnId: 't', streaming: true });
-	return store;
-}
-describe('ephemeral composer suggestions', () => {
-	it('recognizes empty saved editor documents but blocks text and chips', () => {
+const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
+
+describe('session-retained composer suggestions', () => {
+	it('recognizes empty saved documents but blocks text and chips', () => {
 		expect(hasComposerDraft('')).toBe(false);
 		expect(hasComposerDraft('{"type":"doc","content":[{"type":"paragraph"}]}')).toBe(false);
 		expect(hasComposerDraft('draft')).toBe(true);
-		expect(
-			hasComposerDraft(
-				'{"type":"doc","content":[{"type":"paragraph","content":[{"type":"fileChip"}]}]}'
-			)
-		).toBe(true);
+		expect(hasComposerDraft('{"type":"doc","content":[{"type":"fileChip"}]}')).toBe(true);
 	});
-	it.each([true, false])('keeps legitimate completion ordering (suggestion first: %s)', before => {
-		const s = setup();
-		if (before) {
-			s.receive(frame);
-			expect(get(s)).toBe('');
+	it('loads a completed background turn without observing its live turn', async () => {
+		const load = vi.fn().mockResolvedValue(frame);
+		const s = createComposerSuggestion(load);
+		s.observe(idle); await flush();
+		expect(get(s)).toBe(frame.suggestion);
+		expect(load).toHaveBeenCalledOnce();
+		s.observe({ ...idle }); await flush();
+		expect(load).toHaveBeenCalledOnce();
+	});
+	it('restores per-session hints across switches and composer remounts', async () => {
+		const s = createComposerSuggestion(async id => ({ ...frame, session_id: id, suggestion: id }));
+		s.observe(idle); await flush(); expect(get(s)).toBe('s');
+		s.observe({ ...idle, sessionId: 'other' }); expect(get(s)).toBe('');
+		await flush(); expect(get(s)).toBe('other');
+		s.detach(); s.observe(idle); await flush(); expect(get(s)).toBe('s');
+	});
+	it('fetches on live notification, idle completion and reconnect', async () => {
+		const load = vi.fn().mockResolvedValue(null);
+		const s = createComposerSuggestion(load);
+		s.observe({ ...idle, streaming: true, turnId: 't' });
+		s.receive(frame); await flush(); expect(load).not.toHaveBeenCalled();
+		s.observe(idle); await flush(); expect(get(s)).toBe('');
+		load.mockResolvedValue(frame); s.receive(frame); await flush();
+		expect(get(s)).toBe(frame.suggestion);
+		s.observe({ ...idle, connected: true }); await flush(); expect(load).toHaveBeenCalledTimes(3);
+	});
+	it('does not accept stale reads after switch, disable, draft, new turn or detach', async () => {
+		for (const change of [ { ...idle, sessionId: 'other' }, { ...idle, enabled: false },
+			{ ...idle, blocked: true }, { ...idle, streaming: true, turnId: 'new' }, null ]) {
+			let resolve!: (hint: typeof frame) => void;
+			const s = createComposerSuggestion(() => new Promise(r => { resolve = r; }));
+			s.observe(idle); const first = resolve;
+			if (change) s.observe(change); else s.detach();
+			first(frame); await flush(); expect(get(s)).toBe(''); expect(s.accept()).toBe('');
 		}
-		s.observe(idle);
-		if (!before) s.receive(frame);
-		expect(get(s)).toBe(frame.suggestion);
-		expect(s.accept()).toBe(frame.suggestion);
-		expect(get(s)).toBe('');
-		s.receive(frame);
-		expect(get(s)).toBe('');
 	});
-	it('rejects wrong-session, wrong-turn, invalid and duplicate frames', () => {
-		const s = setup();
-		s.observe(idle);
-		for (const f of [
-			{ ...frame, session_id: 'other' },
-			{ ...frame, turn_id: 'old' },
-			{ ...frame, suggestion: 42 },
-			{ ...frame, suggestion: '  ' }
-		])
-			s.receive(f);
-		expect(get(s)).toBe('');
-		s.receive(frame);
-		s.receive({ ...frame, suggestion: 'overwrite' });
+	it.each(['accept', 'invalidate'] as const)('retains %s dismissal across switches but permits a newer turn', async action => {
+		let hint = frame;
+		const s = createComposerSuggestion(async () => hint);
+		s.observe(idle); await flush(); s[action](); expect(get(s)).toBe('');
+		s.detach(); s.observe(idle); await flush(); expect(get(s)).toBe('');
+		hint = { ...frame, turn_id: 'new' }; s.receive(hint); await flush();
 		expect(get(s)).toBe(frame.suggestion);
 	});
-	it('typing then erasing invalidates a pending generation', () => {
-		const s = setup();
-		s.invalidate();
-		s.observe({ ...idle, blocked: true });
-		s.observe(idle);
-		s.receive(frame);
-		expect(get(s)).toBe('');
+	it('hides behind drafts and when disabled; restores without generation', async () => {
+		const load = vi.fn().mockResolvedValue(frame);
+		const s = createComposerSuggestion(load);
+		s.observe({ ...idle, blocked: true }); await flush(); expect(load).not.toHaveBeenCalled();
+		s.observe(idle); await flush(); expect(get(s)).toBe(frame.suggestion);
+		s.observe({ ...idle, enabled: false }); expect(get(s)).toBe('');
+		s.observe(idle); await flush(); expect(get(s)).toBe(frame.suggestion);
 	});
-	it.each(['switch', 'mode', 'disable', 'attachment', 'stop', 'reset'])(
-		'invalidates on %s',
-		reason => {
-			const s = setup();
-			s.receive(frame);
-			if (reason === 'switch') {
-				s.observe({ ...idle, sessionId: 'other' });
-				s.observe(idle);
-			}
-			if (reason === 'mode') {
-				s.observe({ ...idle, mode: 'chat' });
-				s.observe(idle);
-			}
-			if (reason === 'disable') {
-				s.observe({ ...idle, enabled: false });
-				s.observe(idle);
-			}
-			if (reason === 'attachment') {
-				s.observe({ ...idle, blocked: true });
-				s.observe(idle);
-			}
-			if (reason === 'stop') {
-				s.invalidate();
-				s.observe(idle);
-			}
-			if (reason === 'reset') {
-				s.reset();
-				s.observe(idle);
-			}
-			s.receive(frame);
-			expect(get(s)).toBe('');
-		}
-	);
-	it('an optimistic new turn cannot restore the previous suggestion', () => {
-		const s = setup();
-		s.observe(idle);
-		s.receive(frame);
-		s.observe({ ...idle, streaming: true });
-		s.observe(idle);
-		s.receive(frame);
-		expect(get(s)).toBe('');
-	});
-	it('new turn rejects the previous reply and can receive its own', () => {
-		const s = setup();
-		s.observe(idle);
-		s.receive(frame);
-		s.observe({ ...idle, turnId: 'new', streaming: true });
-		expect(get(s)).toBe('');
-		s.receive(frame);
-		s.observe(idle);
-		expect(get(s)).toBe('');
-		s.receive({ ...frame, turn_id: 'new' });
-		expect(get(s)).toBe(frame.suggestion);
-	});
-	it('does not restore on mount or enabling an idle session', () => {
-		const s = createComposerSuggestion();
-		s.observe({ ...idle, turnId: 't' });
-		s.receive(frame);
-		expect(get(s)).toBe('');
+	it('ignores other-session notifications and invalid snapshots, and handles read failure', async () => {
+		const load = vi.fn().mockResolvedValue({ ...frame, session_id: 'other' });
+		const s = createComposerSuggestion(load);
+		s.observe(idle); await flush(); expect(get(s)).toBe('');
+		s.receive({ session_id: 'other' }); expect(load).toHaveBeenCalledOnce();
+		load.mockRejectedValue(new Error('offline')); await s.refresh(); expect(get(s)).toBe('');
+		load.mockResolvedValue(frame); await s.refresh(); expect(get(s)).toBe(frame.suggestion);
 	});
 });
+
 describe('suggestion keyboard decisions', () => {
 	const key = (key: string, extra = {}) => ({
 		key,

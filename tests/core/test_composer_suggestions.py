@@ -254,13 +254,17 @@ def test_trailing_nonfinal_blocks(mock_db, trailing):
 
 
 @pytest.mark.asyncio
-async def test_publish_frame():
+async def test_publish_frame(mock_db):
+    from app.db import sessions, composer_suggestions
+    sessions.create_session("s", "default")
+    turn = _settled_turn("s")
     with patch("app.core.sync_engine.sync_engine.broadcast_event", AsyncMock()) as broadcast:
-        await cs._publish("s", "t", "What next?")
+        await cs._publish("s", turn["id"], "What next?")
         frame = broadcast.call_args.args[0]
         assert frame.session_id == "s"
         assert frame.event_type == "stream_frame"
-        assert frame.data == {"type": "composer_suggestion", "session_id": "s", "turn_id": "t", "suggestion": "What next?"}
+        assert frame.data == {"type": "composer_suggestion", "session_id": "s", "turn_id": turn["id"], "suggestion": "What next?"}
+        assert composer_suggestions.get("s") == {k: v for k, v in frame.data.items() if k != "type"}
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("admin,attribution,expected", [
@@ -741,3 +745,59 @@ async def test_cancellation_propagates_without_warning(stage, caplog):
         with pytest.raises(asyncio.CancelledError):
             await cs._run("s", "t")
     assert not caplog.records
+
+@pytest.mark.asyncio
+async def test_background_generation_survives_absent_watcher_and_reads_without_regeneration(mock_db):
+    from app.db import sessions, settings, composer_suggestions, turns
+    from app.api.sessions import get_composer_suggestion
+    from starlette.requests import Request
+    sessions.create_session("s", "default", api_user_id="owner")
+    settings.set_user_preference("api_user", "owner", "chat_behavior", {"suggestNextResponse": True})
+    turn = _settled_turn("s", terminal_event=False)
+    append(turn, "assistant.text_delta", {"text": "The fix is ready for review."})
+    append(turn, "turn.completed", {"stop_reason": "end_turn"})
+    request = Request({"type": "http", "state": {"api_user": {"id": "owner"}}})
+    with patch("app.api.generation.generate_with_claude", AsyncMock(return_value="Explain the tests.")) as generate:
+        # Real producer and real broadcast, with no registered browser at all.
+        await cs._run("s", turn["id"])
+        assert composer_suggestions.get("s")["suggestion"] == "Explain the tests."
+        for _ in range(3):
+            assert (await get_composer_suggestion(request, "s"))["suggestion"] == "Explain the tests."
+        generate.assert_awaited_once()
+        settings.set_user_preference("api_user", "owner", "chat_behavior", {"suggestNextResponse": False})
+        assert await get_composer_suggestion(request, "s") is None
+        settings.set_user_preference("api_user", "owner", "chat_behavior", {"suggestNextResponse": True})
+        assert await get_composer_suggestion(request, "s") is not None
+        turns.enqueue_turn("s", "user", prompt="Next")
+        assert await get_composer_suggestion(request, "s") is None
+
+
+@pytest.mark.asyncio
+async def test_saved_hint_authorization_and_rewind(mock_db):
+    from app.db import sessions, settings, composer_suggestions
+    from app.api.sessions import get_composer_suggestion
+    from starlette.requests import Request
+    from fastapi import HTTPException
+    sessions.create_session("s", "default", api_user_id="owner")
+    settings.set_user_preference("api_user", "owner", "chat_behavior", {"suggestNextResponse": True})
+    turn = _settled_turn("s")
+    await cs._publish("s", turn["id"], "What next?")
+    with pytest.raises(HTTPException) as denied:
+        await get_composer_suggestion(Request({"type": "http", "state": {"api_user": {"id": "other", "profile_id": "restricted"}}}), "s")
+    assert denied.value.status_code == 403
+    mock_db.execute("DELETE FROM session_events WHERE session_id = ?", ("s",))
+    assert composer_suggestions.get("s") is None
+
+
+@pytest.mark.asyncio
+async def test_late_generation_cannot_overwrite_newer_saved_hint(mock_db):
+    from app.db import sessions, composer_suggestions
+    sessions.create_session("s", "default")
+    old = _settled_turn("s")
+    mock_db.execute("UPDATE turns SET created_at='2000-01-01' WHERE id=?", (old["id"],))
+    new = _settled_turn("s")
+    await cs._publish("s", new["id"], "New reply")
+    await cs._publish("s", old["id"], "Stale reply")
+    assert composer_suggestions.get("s")["suggestion"] == "New reply"
+    mock_db.execute("DELETE FROM sessions WHERE id=?", ("s",))
+    assert composer_suggestions.get("s") is None

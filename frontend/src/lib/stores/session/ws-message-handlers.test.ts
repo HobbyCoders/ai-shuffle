@@ -170,26 +170,20 @@ describe('ws-message-handlers', () => {
 	});
 
 	describe('composer suggestions', () => {
-		const idle = { sessionId: 'session-1', mode: 'code', enabled: true, turnId: null, streaming: false, blocked: false };
-		const frame = { type: 'composer_suggestion', session_id: 'session-1', turn_id: 'reply-turn', suggestion: 'Explain the tests.' };
-		beforeEach(() => {
-			composerSuggestion.reset(); composerSuggestion.observe(idle);
-			composerSuggestion.observe({ ...idle, turnId: 'reply-turn', streaming: true });
-		});
-		it.each([true, false])('routes direct/enveloped broadcasts without ordering loss (envelope: %s)', envelope => {
+		it.each([true, false])('routes a hint notification to the authoritative reader (envelope: %s)', envelope => {
+			const receive = vi.spyOn(composerSuggestion, 'receive').mockImplementation(() => {});
+			const frame = { type: 'composer_suggestion', session_id: 'session-1', turn_id: 't', suggestion: 'Next?' };
 			handlers.handleMessage(envelope ? { event_type: 'stream_frame', data: frame } : frame);
-			expect(get(composerSuggestion)).toBe('');
-			handlers.handleMessage({type:'done',session_id:'session-1'});
-			composerSuggestion.observe(idle);
-			expect(get(composerSuggestion)).toBe(frame.suggestion);
+			expect(receive).toHaveBeenCalledWith(frame);
+			receive.mockRestore();
 		});
-		it.each(['stopped','interrupted','error'])('invalidates current-session %s, not background events', type => {
-			composerSuggestion.observe(idle); handlers.handleMessage(frame);
-			handlers.handleMessage({type,session_id:'other',message:'test'});
-			expect(get(composerSuggestion)).toBe(frame.suggestion);
-			handlers.handleMessage({type,session_id:'session-1',message:'test'});
-			expect(get(composerSuggestion)).toBe('');
-			handlers.handleMessage(frame); expect(get(composerSuggestion)).toBe('');
+		it.each(['stopped', 'interrupted', 'error'])('invalidates current-session %s, not background events', type => {
+			const invalidate = vi.spyOn(composerSuggestion, 'invalidate');
+			handlers.handleMessage({ type, session_id: 'other', message: 'test' });
+			expect(invalidate).not.toHaveBeenCalled();
+			handlers.handleMessage({ type, session_id: 'session-1', message: 'test' });
+			expect(invalidate).toHaveBeenCalledOnce();
+			invalidate.mockRestore();
 		});
 	});
 

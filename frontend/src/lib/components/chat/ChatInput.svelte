@@ -206,11 +206,12 @@
 		const observe = () => composerSuggestion.observe({
 			sessionId: session.sessionId, mode: session.mode, enabled,
 			turnId: session.liveTurnId, streaming: session.isStreaming,
-			blocked: hasComposerDraft(session.draft) || !!session.error
+			blocked: hasComposerDraft(session.draft) || !!session.error,
+			connected: session.wsConnected
 		});
 		const stopSession = activeSession.subscribe(value => { session = value; observe(); });
 		const stopPrefs = chatPreferences.subscribe(value => { enabled = value.suggestNextResponse; observe(); });
-		return () => { stopSession(); stopPrefs(); composerSuggestion.reset(); };
+		return () => { stopSession(); stopPrefs(); composerSuggestion.detach(); };
 	});
 	$effect(() => {
 		if (hasComposerDraft(inputValue) || uploadedFiles.length || isUploading) composerSuggestion.invalidate();
@@ -1057,7 +1058,6 @@
 							initialContent={initialComposerDraft}
 							disabled={!$anyCredential}
 							onTextChange={(text) => {
-								composerSuggestion.invalidate();
 								inputValue = text;
 								// Also update plain text for autocomplete (without chip @path serialization)
 								plainTextValue = editorRef?.getText() ?? '';
