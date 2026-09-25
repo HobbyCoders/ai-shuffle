@@ -400,7 +400,7 @@ async def test_rate_limit_event_reaches_the_client_and_the_shared_snapshot(tmp_p
     assert frame["utilization"] == 0.91
     assert frame["session_id"] == SID
     assert frame["instance_id"] == settings.effective_instance_id
-    live.assert_awaited_once_with("five_hour", 0.91, 1700000000)
+    live.assert_awaited_once_with("five_hour", 0.91, 1700000000, status="allowed_warning")
     assert frames_of(events, "done")
 
 

@@ -52,6 +52,7 @@ import { feedController } from './v2/feed-controller';
 import { pendingQueue } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
 import { get } from 'svelte/store';
+import { rateLimit } from '../rate-limit';
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -183,6 +184,32 @@ describe('ws-message-handlers', () => {
 			handlers.handleMessage({ type, session_id: 'session-1', message: 'test' });
 			expect(invalidate).toHaveBeenCalledOnce();
 			invalidate.mockRestore();
+		});
+	});
+
+	describe('rate_limit frames', () => {
+		it('drops a frame without a window type, logging once, and forwards typed ones', () => {
+			const apply = vi.spyOn(rateLimit, 'applyLiveEvent').mockImplementation(() => {});
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			try {
+				handlers.handleMessage({ type: 'rate_limit', status: 'rejected', utilization: 0.9 });
+				handlers.handleMessage({ type: 'rate_limit', rate_limit_type: '', utilization: 0.9 });
+				handlers.handleMessage({ type: 'rate_limit', rate_limit_type: null, status: 'allowed' });
+				expect(apply).not.toHaveBeenCalled();
+				expect(warn.mock.calls.filter((c) => String(c[0]).includes('rate_limit'))).toHaveLength(1);
+
+				handlers.handleMessage({
+					type: 'rate_limit', rate_limit_type: 'five_hour', status: 'rejected',
+					utilization: null, resets_at: '1900000000', instance_id: 'inst-a',
+				});
+				expect(apply).toHaveBeenCalledOnce();
+				expect(apply.mock.calls[0][0]).toMatchObject({
+					rate_limit_type: 'five_hour', status: 'rejected', instance_id: 'inst-a',
+				});
+			} finally {
+				apply.mockRestore();
+				warn.mockRestore();
+			}
 		});
 	});
 

@@ -42,8 +42,12 @@ export const systemEgressResolver: EgressResolver = async (host) =>
 
 export type EgressDecision =
   | { allowed: true; addresses: string[] }
-  /** `unresolved`: the name has no usable address (not a policy block). */
-  | { allowed: false; reason: string; unresolved?: boolean };
+  /**
+   * `unresolved`: the name has no usable address (not a policy block).
+   * `internal`: the proxy itself failed deciding (a guard error); the
+   * connection is refused, but it is not a policy block either.
+   */
+  | { allowed: false; reason: string; unresolved?: boolean; internal?: boolean };
 
 const CONNECT_TIMEOUT_MS = 10_000;
 
@@ -301,7 +305,11 @@ export async function startEgressProxy(opts: EgressProxyOptions): Promise<Egress
     try {
       decision = await decideEgress(host, port, policy, resolver);
     } catch (err) {
-      decision = { allowed: false, reason: `guard error (${err instanceof Error ? err.message : "unknown"})` };
+      decision = {
+        allowed: false,
+        reason: `guard error (${err instanceof Error ? err.message : "unknown"})`,
+        internal: true,
+      };
     }
     if (!decision.allowed) log(logSafe(`refused ${what} ${host}:${port}: ${decision.reason}`));
     return decision;
@@ -317,8 +325,10 @@ export async function startEgressProxy(opts: EgressProxyOptions): Promise<Egress
     const decision = await decide(target.host, target.port, "CONNECT");
     // As for plain HTTP below: a name that does not resolve or a port nobody
     // answers closes the tunnel unanswered (a network error the navigate tool
-    // retries); only a policy refusal answers, with the marked 403.
-    if (!decision.allowed && decision.unresolved) {
+    // retries); only a policy refusal answers, with the marked 403. A guard
+    // error closes unanswered too: Chromium hides a CONNECT reply, so any
+    // answer would read as ERR_TUNNEL_CONNECTION_FAILED, i.e. a policy block.
+    if (!decision.allowed && (decision.unresolved || decision.internal)) {
       client.destroy();
       return;
     }
@@ -361,6 +371,11 @@ export async function startEgressProxy(opts: EgressProxyOptions): Promise<Egress
     // page: navigate retries loopback URLs on network errors only.
     if (!decision.allowed && decision.unresolved) {
       req.socket.destroy();
+      return;
+    }
+    // Fail closed on a guard error, but unmarked: it is not the policy.
+    if (!decision.allowed && decision.internal) {
+      plain(res, 502, "The browser egress proxy failed to check this destination.\n");
       return;
     }
     if (!decision.allowed) {

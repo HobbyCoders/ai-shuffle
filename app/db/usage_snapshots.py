@@ -69,6 +69,48 @@ def upsert_usage_snapshot(
         )
 
 
+def touch_usage_snapshot_observed(
+    instance_id: str,
+    window_type: str,
+    observed_at: int,
+) -> bool:
+    """Advance one window's ``observed_at`` (and the row's ``fetched_at``) only.
+
+    For a repeat reading whose values did not change: the utilization, reset,
+    availability and generation stay as they are, so peers learn the window was
+    seen again without a new generation or a rewrite of the other windows.
+    Never moves a time backwards. Returns whether the row changed.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT windows, fetched_at FROM usage_snapshots WHERE instance_id = %s FOR UPDATE",
+            (instance_id,),
+        )
+        rows = rows_to_list(cursor.fetchall())
+        if not rows:
+            return False
+        windows = _parse_windows(rows[0].get("windows"))
+        changed = False
+        for w in windows:
+            if not isinstance(w, dict) or w.get("type") != window_type:
+                continue
+            prev = w.get("observed_at")
+            if not isinstance(prev, (int, float)) or prev < observed_at:
+                w["observed_at"] = observed_at
+                changed = True
+        if not changed:
+            return False
+        prev_fetched = rows[0].get("fetched_at")
+        fetched = max(int(prev_fetched), observed_at) if isinstance(prev_fetched, (int, float)) else observed_at
+        cursor.execute(
+            "UPDATE usage_snapshots SET windows = %s, fetched_at = %s, updated_at = %s "
+            "WHERE instance_id = %s",
+            (json.dumps(windows), fetched, datetime.now(timezone.utc).isoformat(), instance_id),
+        )
+        return True
+
+
 def get_all_usage_snapshots() -> List[Dict[str, Any]]:
     """List all persisted usage snapshots, ``windows`` parsed to a list."""
     with get_db() as conn:

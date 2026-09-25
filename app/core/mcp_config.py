@@ -153,6 +153,30 @@ def _host_cidr(address: str) -> str:
     return f"{address}/128" if ":" in address else f"{address}/32"
 
 
+def _browser_behind_egress_proxy() -> bool:
+    """Whether the browser the spawned server drives was started by egress-launch.
+
+    Only then may browser-mcp read an https ``ERR_TUNNEL_CONNECTION_FAILED`` as
+    a refusal by the egress policy (``BROWSER_EGRESS_PROXY``, see
+    browser-mcp/src/loopback.ts); any other proxy's failure must not be
+    reported as one. In the Docker image the supervised Chromium is always
+    launched through the proxy (start-chrome.sh refuses otherwise) unless
+    ``START_CHROME`` turned it off. On a native install it is so only while
+    the native supervisor runs; an external browser on the CDP port is not.
+    Unknown is "no": a missed flag only makes the message less specific.
+    """
+    try:
+        from app.core import native_chrome
+
+        if native_chrome._in_container():
+            return os.environ.get("START_CHROME", "1") == "1"
+        task = native_chrome._supervisor_task
+        return task is not None and not task.done()
+    except Exception:  # pragma: no cover - defensive: never break the env build
+        logger.debug("Could not tell whether the browser runs behind its egress proxy", exc_info=True)
+        return False
+
+
 def _worker_deny_ports(extra: Optional[str]) -> str:
     """The worker's local and protected listener ports, plus any extras."""
     ports = {str(settings.port)}
@@ -222,6 +246,9 @@ def _build_browser_server_env(
     # internal address, whatever the allow-list says: a request from inside
     # the container to them is treated as the owner.
     env["BROWSER_SSRF_DENY_PORTS"] = _worker_deny_ports(os.environ.get("BROWSER_SSRF_DENY_PORTS"))
+
+    if _browser_behind_egress_proxy():
+        env["BROWSER_EGRESS_PROXY"] = "1"
 
     if session_id:
         from app.core import browser_panel_registry

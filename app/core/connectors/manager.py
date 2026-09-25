@@ -271,6 +271,20 @@ class ConnectorManager:
             # would otherwise stay live, unreferenced, and double-handle input.
             if displaced is not None and displaced is not instance:
                 await self._disconnect_quietly(connector_id, displaced)
+            # connect() can outlast the fence sweep in network startup: re-apply
+            # the start rule now that the client is registered, so a fence (or
+            # an ownership move, or a delete) that landed meanwhile stops it
+            # here. Checked after registering, a fence landing later still
+            # finds it in the registry.
+            if not await run_sync(self._still_eligible, connector_id):
+                logger.info(f"Connector {connector_id} lost eligibility while connecting; stopping it")
+                async with self._lock:
+                    if self._connectors.get(connector_id) is instance:
+                        del self._connectors[connector_id]
+                        self._registered_at.pop(connector_id, None)
+                await self._disconnect_quietly(connector_id, instance)
+                await run_sync(database.update_connector_status, connector_id, "disconnected")
+                return False
             # Keep status as "connecting" — the connector's on_ready callback
             # will update to "connected" once the gateway handshake completes.
             # If login fails, _run_client will update to "error".
@@ -281,6 +295,25 @@ class ConnectorManager:
                 database.update_connector_status,
                 connector_id, "error", error="connect() returned False",
             )
+            return False
+
+    @staticmethod
+    def _still_eligible(connector_id: str) -> bool:
+        """The pre-connect start rule, re-read: row present and not fenced/owned elsewhere.
+
+        ``decide_connector`` is the rule network startup and ``start_all`` use
+        (None off-network, ``start`` for this device's own connector). Fails
+        closed, like the check before connect().
+        """
+        from app.network import ownership
+
+        try:
+            row = database.get_connector(connector_id)
+            if not row:
+                return False
+            return ownership.decide_connector(row) in (None, "start")
+        except Exception:
+            logger.exception("Network ownership unavailable; stopping connector %s", connector_id)
             return False
 
     def _is_live(self, connector_id: str, instance: BaseConnector) -> bool:

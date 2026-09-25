@@ -150,3 +150,27 @@ describe('providers null vs empty', () => {
 		expect(rateLimit.current.providerBuckets.a.windows.five_hour.received_at).toBe(T0 - 60_000);
 	});
 });
+
+describe('rejected live events', () => {
+	const bucket = () => rateLimit.current.buckets['__self__'];
+
+	it('marks the window exhausted without a utilization, dated now', () => {
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', status: 'rejected', resets_at: '1900000000' });
+		const w = bucket().windows.five_hour;
+		expect(w.utilization).toBe(0);
+		expect(w.received_at).toBe(T0);
+		expect(w.resets_at).toBe('1900000000');
+		expect(reportedRemainingPct(w, T0)).toBe(0);
+	});
+
+	it('overrides a utilization that still shows headroom', () => {
+		rateLimit.applyLiveEvent({ rate_limit_type: 'seven_day', status: 'rejected', utilization: 0.3 });
+		expect(bucket().windows.seven_day.utilization).toBe(0);
+	});
+
+	it('other verdicts without a utilization leave the windows alone', () => {
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', status: 'allowed', utilization: 0.25 });
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', status: 'allowed_warning', utilization: null });
+		expect(bucket().windows.five_hour.utilization).toBe(75);
+	});
+});

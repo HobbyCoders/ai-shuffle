@@ -8,6 +8,8 @@ Provides REST endpoints for managing MCP (Model Context Protocol) servers:
 """
 
 import logging
+import math
+import re
 from typing import List, Optional, Dict, Literal
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
@@ -145,13 +147,128 @@ def _is_owner(request: Request) -> bool:
     return getattr(request.state, "is_admin", True) is not False
 
 
+# Name parts that make a flag, a NAME=value pair or a header carry a secret
+# (split on - _ . so ``--author`` or ``--keyboard`` do not match).
+_SECRET_NAME_PARTS = frozenset({
+    "token", "tokens", "secret", "secrets", "password", "passwd", "pwd", "passphrase",
+    "apikey", "auth", "authorization", "credential", "credentials", "bearer", "cookie",
+    "pat", "jwt", "session", "sessionid", "signature",
+})
+# Two-part names whose halves are harmless alone (``--key-file`` stays).
+_SECRET_NAME_PAIRS = frozenset({
+    ("api", "key"), ("access", "key"), ("secret", "key"), ("private", "key"),
+    ("client", "secret"), ("auth", "key"), ("account", "key"), ("master", "key"),
+})
+# Well-known credential prefixes (GitHub, OpenAI/Anthropic, Slack, GitLab, AWS,
+# Stripe, Hugging Face, npm, Google).
+_TOKEN_PREFIX_RE = re.compile(
+    r"^(gh[pousr]_|github_pat_|sk-|sk_live_|sk_test_|rk_live_|xox[abprs]-|glpat-|AKIA|ASIA|hf_|npm_|AIza)",
+)
+_FLAG_RE = re.compile(r"^(--?)([A-Za-z0-9][\w.-]*)(=(.*))?$", re.DOTALL)
+_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*)=(.+)$", re.DOTALL)
+_HEADER_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.+)$", re.DOTALL)
+_BEARER_RE = re.compile(r"(?i)\b(bearer|basic|token)\s+[^\s\"']+")
+_QUERY_SECRET_RE = re.compile(r"(?i)([?&][\w.-]*(?:token|key|secret|password|auth|sig)[\w.-]*=)[^&#\s]+")
+
+
+def _secret_name(name: str) -> bool:
+    parts = [p for p in re.split(r"[-_.]+", name.lower()) if p]
+    if any(p in _SECRET_NAME_PARTS for p in parts) or parts == ["key"]:
+        return True
+    return any(pair in _SECRET_NAME_PAIRS for pair in zip(parts, parts[1:]))
+
+
+def _looks_like_token(value: str) -> bool:
+    """A standalone credential: a known token prefix, or a long high-entropy word.
+
+    Paths, URLs, package names (``@scope/pkg``) and plain words stay readable.
+    """
+    value = value.strip().strip("'\"")
+    if len(value) < 16 or any(c.isspace() for c in value):
+        return False
+    if _TOKEN_PREFIX_RE.match(value) and len(value) >= 20:
+        return True
+    if len(value) < 24 or value.startswith(("/", ".", "~", "@", "-")) or "://" in value:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_\-+/=.]+", value):
+        return False
+    if re.search(r"\.[A-Za-z][A-Za-z0-9]{0,9}$", value):
+        return False  # a file name
+    if "/" in value and all(len(part) < 20 for part in value.split("/")):
+        return False  # a relative path
+    words = [part for part in re.split(r"[-_.]+", value) if part]
+    if len(words) >= 2 and all(part.isalpha() or part.isdigit() for part in words):
+        return False  # an identifier such as a model id or a dated name
+    classes = sum(bool(re.search(p, value)) for p in (r"[a-z]", r"[A-Z]", r"[0-9]"))
+    if classes < 2:
+        return False
+    counts: Dict[str, int] = {}
+    for ch in value:
+        counts[ch] = counts.get(ch, 0) + 1
+    entropy = -sum(n / len(value) * math.log2(n / len(value)) for n in counts.values())
+    return entropy >= 3.5
+
+
+def _mask_arg_text(arg: str) -> str:
+    """One argument with any secret-looking value replaced by the mask."""
+    from app.core.scrub import redact_url_credentials
+
+    flag = _FLAG_RE.match(arg)
+    if flag and flag.group(3) is not None:
+        # ``--name=value``: a secret name masks it all; otherwise the value is
+        # checked on its own (``--header=Authorization: x``, ``--env=K=v``).
+        if _secret_name(flag.group(2)):
+            return f"{flag.group(1)}{flag.group(2)}={_SECRET_MASK}"
+        return f"{flag.group(1)}{flag.group(2)}={_mask_arg_text(flag.group(4))}"
+    assign = _ASSIGN_RE.match(arg)
+    if assign and not flag and _secret_name(assign.group(1)):
+        return f"{assign.group(1)}={_SECRET_MASK}"
+    header = _HEADER_RE.match(arg)
+    if header and "://" not in arg and _secret_name(header.group(1)):
+        return f"{header.group(1)}: {_SECRET_MASK}"
+    if _looks_like_token(arg):
+        return _SECRET_MASK
+    masked = redact_url_credentials(arg)
+    masked = _QUERY_SECRET_RE.sub(lambda m: m.group(1) + _SECRET_MASK, masked)
+    return _BEARER_RE.sub(lambda m: f"{m.group(1)} {_SECRET_MASK}", masked)
+
+
+def _mask_args(args: Optional[List[str]]) -> Optional[List[str]]:
+    """Command args as a non-owner may see them (see ``_redacted``).
+
+    Masks ``--token=v`` / ``--api-key v`` values, ``NAME=v`` pairs and
+    ``Header: v`` values whose name reads as a secret, the argument after a
+    bare ``Authorization``, bearer tokens, URL userinfo and secret query
+    parameters, and any standalone value that looks like a credential.
+    """
+    if not args:
+        return args
+    out: List[str] = []
+    mask_next = False
+    for arg in args:
+        text = arg if isinstance(arg, str) else str(arg)
+        if mask_next and not text.startswith("--"):
+            out.append(_SECRET_MASK)
+            mask_next = False
+            continue
+        mask_next = False
+        flag = _FLAG_RE.match(text)
+        if flag and flag.group(3) is None and _secret_name(flag.group(2)):
+            mask_next = True  # ``--token VALUE``
+        elif text.strip().rstrip(":").lower() in ("authorization", "proxy-authorization", "cookie"):
+            mask_next = True  # ``-H Authorization "Bearer x"`` split in two
+        out.append(_mask_arg_text(text))
+    return out
+
+
 def _redacted(response: McpServerResponse) -> McpServerResponse:
     """A server as a non-owner may see it: env and header VALUES masked (the
-    names stay, so the UI can still say what a server needs) and URL-embedded
-    credentials scrubbed."""
+    names stay, so the UI can still say what a server needs), secret-looking
+    args masked the same way, and URL-embedded credentials scrubbed."""
     from app.core.scrub import scrub_url_credentials
 
     return response.model_copy(update={
+        "args": _mask_args(response.args),
         "env": {k: _SECRET_MASK for k in response.env} if response.env else response.env,
         "headers": (
             {k: _SECRET_MASK for k in response.headers}

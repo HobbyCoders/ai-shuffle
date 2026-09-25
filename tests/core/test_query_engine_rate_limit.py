@@ -65,7 +65,16 @@ class TestApplyRateLimitLiveEvent:
         with patch("app.core.usage_limits.usage_limits_monitor", mon):
             await _apply_rate_limit_live_event(_rli(utilization=0.5))
         mon.apply_live_event_and_broadcast.assert_awaited_once_with(
-            "five_hour", 0.5, "2026-07-09T05:00:00+00:00",
+            "five_hour", 0.5, "2026-07-09T05:00:00+00:00", status="allowed",
+        )
+
+    @pytest.mark.asyncio
+    async def test_forwards_rejected_verdict_without_utilization(self):
+        mon = SimpleNamespace(apply_live_event_and_broadcast=AsyncMock())
+        with patch("app.core.usage_limits.usage_limits_monitor", mon):
+            await _apply_rate_limit_live_event(_rli(status="rejected", utilization=None))
+        mon.apply_live_event_and_broadcast.assert_awaited_once_with(
+            "five_hour", None, "2026-07-09T05:00:00+00:00", status="rejected",
         )
 
     @pytest.mark.asyncio

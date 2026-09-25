@@ -256,8 +256,9 @@ _register(Collection(
 
 _register(Collection(
     name="notes", table="notes", keys=("id",),
-    fields=("id", "title", "content", "tags", "is_pinned", "created_at", "updated_at"),
-    json_fields=("tags",), local_fields=("file_path",), resource="notes", priority=70))
+    fields=("id", "title", "content", "tags", "is_pinned", "api_user_id", "created_at", "updated_at"),
+    json_fields=("tags",), local_fields=("file_path",), resource="notes", priority=70,
+    notes="api_user_id travels (like sessions/connectors): a key's note stays that key's on every device."))
 
 _register(Collection(
     name="note_attachments", table="note_attachments", keys=("id",),

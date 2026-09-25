@@ -248,6 +248,47 @@ class TestStartConnector:
         assert db.update_connector_status.call_args.kwargs == {"error": "connect() returned False"}
         assert mgr.get_running_instance("c1") is None
 
+    @pytest.mark.parametrize("change", ["fenced", "owned_elsewhere", "deleted", "ownership_down"])
+    async def test_start_rule_is_rechecked_after_connect(self, mgr, db, fake_registry, monkeypatch, change):
+        """A fence (or an ownership move / delete) that lands while connect() is
+        in flight stops the client once it connects, instead of leaving it to
+        the startup sweep, which gives up after FENCE_SETTLE_SECONDS."""
+        db.get_connector.return_value = connector_row()
+        state = {"rule": "start"}
+
+        def decide(row):
+            if state["rule"] == "boom":
+                raise RuntimeError("network db down")
+            return state["rule"]
+
+        monkeypatch.setattr(ownership, "decide_connector", decide)
+
+        async def connect(self):
+            # The fence lands mid-connect.
+            if change == "fenced" or change == "owned_elsewhere":
+                state["rule"] = "skip"
+            elif change == "deleted":
+                db.get_connector.return_value = None
+            else:
+                state["rule"] = "boom"
+            self._status = ConnectorStatus.CONNECTED
+            return True
+
+        monkeypatch.setattr(FakeConnector, "connect", connect)
+
+        assert await mgr.start_connector("c1") is False
+        assert mgr.get_running_instance("c1") is None
+        [inst] = FakeConnector.instances
+        inst.disconnect.assert_awaited_once()
+        assert statuses(db) == ["connecting", "disconnected"]
+
+    async def test_owned_start_survives_the_recheck(self, mgr, db, fake_registry, monkeypatch):
+        db.get_connector.return_value = connector_row()
+        monkeypatch.setattr(ownership, "decide_connector", lambda row: "start")
+        assert await mgr.start_connector("c1") is True
+        assert mgr.get_running_instance("c1") is FakeConnector.instances[0]
+        FakeConnector.instances[0].disconnect.assert_not_awaited()
+
     async def test_secrets_are_decrypted_before_instantiation(self, mgr, db, not_enrolled, fake_registry, monkeypatch):
         db.get_connector.return_value = connector_row(config={"token": "enc:abc"})
         monkeypatch.setattr(ConnectorManager, "_decrypt_config",

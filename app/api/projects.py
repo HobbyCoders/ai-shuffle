@@ -521,14 +521,15 @@ def _refuse_git_metadata(*paths: str) -> None:
 
     Every component is checked, in every spelling git itself refuses (case,
     trailing dots and spaces, ``.git::$INDEX_ALLOCATION``, the 8.3 name
-    ``GIT~1``): ``.git`` controls what the app's own git runs execute (hooks,
-    config), so file routes must never write into it or move it.
+    ``GIT~1``, HFS+ ignorable code points such as ``.g\\u200cit``): ``.git``
+    controls what the app's own git runs execute (hooks, config), so file
+    routes must never write into it or move it.
     """
-    from app.core.git_commit_ops import _is_ntfs_dotgit
+    from app.core.git_commit_ops import _is_dotgit_alias
 
     for path in paths:
         for name in str(path).replace("\\", "/").split("/"):
-            if name and _is_ntfs_dotgit(name):
+            if name and _is_dotgit_alias(name):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Path is inside the repository metadata directory (.git)",

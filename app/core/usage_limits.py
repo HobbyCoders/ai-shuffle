@@ -32,6 +32,15 @@ logger = logging.getLogger(__name__)
 # surfaces at once. Bounds the per-event and per-GET DB cost.
 _CLUSTER_CACHE_TTL_SECONDS = 4.0
 
+# An unchanged repeat reading still advances the window's ``observed_at`` in
+# memory, but writes it to the shared row (and fans it out) at most this often
+# per window: a tool-use loop reports every window on every API round-trip.
+_OBSERVED_PERSIST_INTERVAL_SECONDS = 60.0
+
+# The CLI's verdict on a window it has cut off. Such an event may carry no
+# utilization; the window is exhausted either way.
+_REJECTED = "rejected"
+
 
 class UsageLimitsMonitor:
     """In-memory holder for the latest Claude usage windows the CLI reported."""
@@ -58,6 +67,12 @@ class UsageLimitsMonitor:
         self._refresh_task: asyncio.Task | None = None
         # Monotonic start of the last refresh, for the forced-refresh cooldown.
         self._refresh_started: float | None = None
+        # Per window type: monotonic time its ``observed_at`` last went to the
+        # shared row (full persist or an observed-only touch), for coalescing.
+        self._observed_persisted: Dict[str, float] = {}
+        # Window type whose unchanged repeat is due an observed-only write, set
+        # by ``apply_live_event`` for the async wrapper to carry out.
+        self._observed_due: Optional[str] = None
 
     def current_generation(self) -> int:
         return self._generation
@@ -125,8 +140,31 @@ class UsageLimitsMonitor:
             # Our own row changed — drop the cluster cache so the next assembly
             # re-reads and reflects it immediately.
             self._cluster_cache = None
+            now = time.monotonic()
+            for w in self._windows:
+                if w.get("type"):
+                    self._observed_persisted[w["type"]] = now
         except Exception as e:  # noqa: BLE001 — persistence must never break the poll
             logger.debug("Usage-snapshot persist skipped: %s", e)
+
+    def _persist_observed(self, window_type: str, observed_at: int) -> bool:
+        """Write only one window's newer ``observed_at`` to this install's row.
+
+        Best-effort; returns whether the row changed. Synchronous — async
+        callers run it through ``run_sync``.
+        """
+        try:
+            from app.core.config import settings
+            from app.db import database as db
+            touched = db.touch_usage_snapshot_observed(
+                settings.effective_instance_id, window_type, observed_at,
+            )
+        except Exception as e:  # noqa: BLE001 — persistence must never break the stream
+            logger.debug("Usage-snapshot observed_at write skipped: %s", e)
+            return False
+        if touched:
+            self._cluster_cache = None
+        return bool(touched)
 
     def _seed(self, rows: List[Dict[str, Any]], self_id: str) -> None:
         """Adopt this install's persisted reading once after startup.
@@ -282,27 +320,38 @@ class UsageLimitsMonitor:
         rate_limit_type: Optional[str],
         utilization: Optional[float],
         resets_at: Optional[str],
+        status: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Refine a single window from a live CLI ``rate_limit`` event (in-memory).
 
         Returns the updated snapshot when the reading MATERIALLY changed (i.e.
         needs persist + broadcast), else None — an identical repeat (same type,
-        utilization and resets_at) is a no-op so a tool-use loop's per-round-trip
-        events don't each cost a DB upsert + cluster fanout. Does NOT persist or
-        broadcast — async callers do that via ``run_sync`` (see
-        ``apply_live_event_and_broadcast`` / ``refresh_and_broadcast``).
+        utilization and resets_at) only advances the window's ``observed_at``
+        in memory, so a tool-use loop's per-round-trip events don't each cost a
+        DB upsert + cluster fanout; at most once a minute per window such a
+        repeat is flagged for an observed-only write (``_observed_due``). A
+        ``rejected`` status marks the window exhausted (0% remaining) even
+        without a utilization. Does NOT persist or broadcast — async callers do
+        that via ``run_sync`` (see ``apply_live_event_and_broadcast`` /
+        ``refresh_and_broadcast``).
         """
-        if not rate_limit_type or utilization is None:
+        self._observed_due = None
+        if not rate_limit_type:
             return None
-        try:
-            util = float(utilization)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(util):
-            return None
-        # CLI rate_limit events report utilization as a 0.0-1.0 USED fraction
-        # (above 1 when over the limit); the snapshot carries 0-100 REMAINING.
-        util = 100.0 - min(100.0, max(0.0, util * 100))
+        if status == _REJECTED:
+            util = 0.0
+        else:
+            if utilization is None:
+                return None
+            try:
+                util = float(utilization)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(util):
+                return None
+            # CLI rate_limit events report utilization as a 0.0-1.0 USED fraction
+            # (above 1 when over the limit); the snapshot carries 0-100 REMAINING.
+            util = 100.0 - min(100.0, max(0.0, util * 100))
 
         now = time.time()
         # Each event observes one window; ``observed_at`` (epoch ms) lets
@@ -324,6 +373,13 @@ class UsageLimitsMonitor:
         self._available = True
         self._fetched_at = now
         if not changed:
+            mono = time.monotonic()
+            last = self._observed_persisted.get(rate_limit_type)
+            if last is None or mono - last >= _OBSERVED_PERSIST_INTERVAL_SECONDS:
+                # Claimed now, before the write, so concurrent repeats within
+                # the interval do not each write.
+                self._observed_persisted[rate_limit_type] = mono
+                self._observed_due = rate_limit_type
             return None
         self._generation = max(self._generation + 1, int(now))
         return self._snapshot()
@@ -352,6 +408,7 @@ class UsageLimitsMonitor:
         rate_limit_type: Optional[str],
         utilization: Optional[float],
         resets_at: Optional[str],
+        status: Optional[str] = None,
     ) -> None:
         """Apply a live event and, if it changed anything, broadcast the update.
 
@@ -359,13 +416,27 @@ class UsageLimitsMonitor:
         offloaded WS) to persist the live refinement into the shared
         ``usage_snapshots`` row — the only cross-install propagation channel, as
         the yielded WS ``rate_limit`` event reaches only clients connected
-        directly to this install.
+        directly to this install. An unchanged repeat writes only the window's
+        ``observed_at`` (coalesced to once a minute per window) and broadcasts
+        under the same generation, so every device shows the latest
+        observation time.
         """
-        snapshot = self.apply_live_event(rate_limit_type, utilization, resets_at)
+        snapshot = self.apply_live_event(rate_limit_type, utilization, resets_at, status=status)
         if snapshot is not None:
             # Persist (so peers see the live change) then broadcast the enriched
             # cluster shape. Both touch the DB — offload off the event loop.
             await run_sync(self._persist_snapshot)
+            await self._broadcast(await run_sync(self._cluster_snapshot))
+            return
+        due, self._observed_due = self._observed_due, None
+        if due is None:
+            return
+        observed_at = next(
+            (w.get("observed_at") for w in self._windows if w.get("type") == due), None,
+        )
+        if not isinstance(observed_at, int):
+            return
+        if await run_sync(self._persist_observed, due, observed_at):
             await self._broadcast(await run_sync(self._cluster_snapshot))
 
 

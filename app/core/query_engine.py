@@ -105,6 +105,30 @@ _STREAM_DEBUG = bool(
     os.environ.get("STREAM_DEBUG") or os.environ.get("AIHUB_DEBUG_STREAM")
 )
 
+_LEGACY_NOTE_REF = re.compile(r"@Notes/(note-[a-f0-9]+)")
+
+
+def _resolve_note_references_for(prompt: str, api_user_id: Optional[str]) -> str:
+    """Expand legacy ``@Notes/note-<id>`` references the caller may read.
+
+    Same rule as the notes API (``app.api.notes._owned_note``): the owner (no
+    key) reaches every note; an API key only the notes it wrote
+    (``notes.api_user_id``). A reference to any other note is left as typed,
+    like one to a note that does not exist, so a key cannot pull the owner's
+    note into its session by id.
+    """
+    if not api_user_id:
+        return resolve_note_references(prompt)
+
+    def expand(match: "re.Match[str]") -> str:
+        note = database.get_note(match.group(1))
+        if not note or note.get("api_user_id") != api_user_id:
+            return match.group(0)
+        return resolve_note_references(match.group(0))
+
+    return _LEGACY_NOTE_REF.sub(expand, prompt)
+
+
 def _rate_limit_event_dict(rli: Any, session_id: str) -> Dict[str, Any]:
     """Build the ``rate_limit`` WS frame from an SDK ``RateLimitInfo``.
 
@@ -143,6 +167,7 @@ async def _apply_rate_limit_live_event(rli: Any) -> None:
         from app.core.usage_limits import usage_limits_monitor
         await usage_limits_monitor.apply_live_event_and_broadcast(
             rli.rate_limit_type, rli.utilization, rli.resets_at,
+            status=getattr(rli, "status", None),
         )
     except Exception as _usage_err:  # noqa: BLE001 — never break the turn
         logger.debug(f"usage monitor live-event update skipped: {_usage_err}")
@@ -608,7 +633,7 @@ async def execute_query(
         raise credential_gate.AgentSetupRequired(_refusal)
 
     # Resolve virtual @Notes/note-id references to actual content
-    prompt = resolve_note_references(prompt)
+    prompt = _resolve_note_references_for(prompt, api_user_id)
 
     # Execute query and collect response
     response_text = []
@@ -2484,7 +2509,7 @@ async def _stream_to_websocket_impl(
         # turn has no prompt to resolve — the head node already carries whatever
         # the failed call was sent.
         if not resume:
-            prompt = resolve_note_references(prompt)
+            prompt = _resolve_note_references_for(prompt, api_user_id)
 
         _query_send_start = time.monotonic()
         prepare_completions = getattr(

@@ -183,6 +183,9 @@ const LIST_SHAPE_FIELDS: ReadonlySet<string> = new Set(['hidden', 'tags', 'proje
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
+/** A rate_limit frame without a window type is logged once per page load. */
+let warnedUntypedRateLimit = false;
+
 export function createMessageHandlers(deps: MessageHandlerDeps): {
 	handleMessage: (data: Record<string, unknown>) => void;
 } {
@@ -975,9 +978,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// from (relayed remote-session events carry the worker's id); the
 				// store routes by it so an offloaded session's usage lands in the
 				// right bucket. ContextUsageBar reads the store reactively.
+				// The backend keys every window on the CLI's `rate_limit_type`; a
+				// frame without one names no window, so it is dropped (never filed
+				// under a made-up "unknown" row).
+				const rateLimitType = data.rate_limit_type;
+				if (typeof rateLimitType !== 'string' || !rateLimitType) {
+					if (!warnedUntypedRateLimit) {
+						warnedUntypedRateLimit = true;
+						console.warn('[ws] dropping rate_limit frame without a window type', data);
+					}
+					break;
+				}
 				rateLimit.applyLiveEvent({
-					status: (data.status as string) ?? 'unknown',
-					rate_limit_type: (data.rate_limit_type as string) ?? 'unknown',
+					status: typeof data.status === 'string' ? data.status : undefined,
+					rate_limit_type: rateLimitType,
 					resets_at: data.resets_at as string | undefined,
 					utilization: data.utilization as number | undefined,
 					session_id: data.session_id as string | undefined,

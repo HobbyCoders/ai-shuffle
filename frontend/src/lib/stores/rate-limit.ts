@@ -154,6 +154,7 @@ export const SELF_BUCKET_KEY = '__self__';
 
 /** Live SDK `rate_limit` event payload (utilization is a 0–1 fraction). */
 export interface LiveRateLimitEvent {
+	/** The CLI's verdict: `allowed`, `allowed_warning` or `rejected` (exhausted). */
 	status?: string;
 	rate_limit_type: string;
 	resets_at?: string | null;
@@ -621,16 +622,20 @@ export const rateLimit = {
 	 *  self install when the event carries none (legacy backend). */
 	applyLiveEvent(event: LiveRateLimitEvent): void {
 		const { rate_limit_type, utilization } = event;
+		if (!rate_limit_type) return;
+		// `rejected` means the CLI cut this window off: exhausted, whether or not
+		// the event carries a utilization.
+		const rejected = event.status === 'rejected';
 		// A data-less event (utilization null) must NOT create/wipe a window —
 		// the CLI emits these before any usage is recorded.
-		if (!rate_limit_type || utilization == null || typeof utilization !== 'number') return;
+		if (!rejected && (utilization == null || typeof utilization !== 'number')) return;
 		const now = Date.now();
 		const win: UsageWindow = {
 			type: rate_limit_type,
 			// SDK events report the USED fraction; the polled Claude feed — and every
 			// consumer, e.g. `reportedRemainingPct` — treats a window's utilization as
 			// quota REMAINING, so convert at ingest.
-			utilization: 100 - _fractionToPct(utilization),
+			utilization: rejected ? 0 : 100 - _fractionToPct(utilization as number),
 			resets_at: event.resets_at ?? null,
 			received_at: now,
 			source: 'live',

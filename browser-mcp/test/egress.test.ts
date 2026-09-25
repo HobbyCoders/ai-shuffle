@@ -371,6 +371,29 @@ describe("egress proxy", () => {
     expect(internal.connections).toBe(0);
   });
 
+  it("fails closed on a guard error without the policy marker", async () => {
+    const t = await target("127.0.0.1");
+    // A malformed policy makes the decision itself throw: an internal failure.
+    const broken = { ...ONLY_ONE, defaultBlock: null } as unknown as typeof ONLY_ONE;
+    const lines: string[] = [];
+    const proxy = await proxyWith(broken, noDns, (l) => lines.push(l));
+
+    // CONNECT: closed unanswered, never a (marked or unmarked) refusal that
+    // Chromium would surface as ERR_TUNNEL_CONNECTION_FAILED.
+    const r = await tunnel(proxy.port, `127.0.0.1:${t.port}`);
+    expect(r.status).toBe(0);
+    expect(r.head).not.toMatch(/X-Browser-Egress/i);
+    r.socket.destroy();
+
+    // Plain HTTP: an explanatory 502 page, unmarked.
+    const page = await viaProxy(proxy.port, `http://127.0.0.1:${t.port}/`);
+    expect(page.status).toBe(502);
+    expect(page.headers["x-browser-egress"]).toBeUndefined();
+
+    expect(t.connections).toBe(0);
+    expect(lines.some((l) => l.includes("guard error"))).toBe(true);
+  });
+
   it("turns an unresolvable name or a closed port into a network error, not a page", async () => {
     const closed = await target("127.0.0.1");
     const closedPort = closed.port;

@@ -3,7 +3,8 @@
 ``.git`` controls what the app's own git runs execute (hooks, config), so an
 API key limited to a project must not be able to write into it through the
 file routes, in any spelling git itself treats as ``.git`` (case, trailing
-dots or spaces, an NTFS stream suffix, the 8.3 name ``GIT~1``).
+dots or spaces, an NTFS stream suffix, the 8.3 name ``GIT~1``, HFS+
+ignorable code points).
 """
 
 from io import BytesIO
@@ -16,7 +17,11 @@ from fastapi.testclient import TestClient
 from app.api.auth import require_admin, require_auth
 from app.api.projects import router
 
-DOTGIT_SPELLINGS = [".git", ".GIT", ".git.", ".git ", ".git::$INDEX_ALLOCATION", "GIT~1", "git~1"]
+DOTGIT_SPELLINGS = [
+    ".git", ".GIT", ".git.", ".git ", ".git::$INDEX_ALLOCATION", "GIT~1", "git~1",
+    # HFS+ drops these code points when it compares names (git's is_hfs_dotgit).
+    ".g\u200cit", ".GI\u200dT", "\ufeff.git", ".git\u206a",
+]
 DETAIL = "Path is inside the repository metadata directory (.git)"
 
 

@@ -274,3 +274,53 @@ def test_operator_deny_ports_add_to_the_worker_ports(monkeypatch):
     monkeypatch.setenv("BROWSER_SSRF_DENY_PORTS", "9000")
     env = mcp_config._build_browser_server_env({}, session_id=None)
     assert env["BROWSER_SSRF_DENY_PORTS"] == "8000,8001,9000"
+
+
+class _Task:
+    def __init__(self, done: bool):
+        self._done = done
+
+    def done(self) -> bool:
+        return self._done
+
+
+@pytest.mark.parametrize(
+    ("in_container", "start_chrome", "task", "expected"),
+    [
+        (True, None, None, True),  # Docker: start-chrome.sh launches it behind the proxy
+        (True, "0", None, False),  # Docker with START_CHROME=0: someone else's browser
+        (False, None, _Task(done=False), True),  # native supervisor running
+        (False, None, _Task(done=True), False),  # native supervisor gone
+        (False, None, None, False),  # external browser on the CDP port / not started
+    ],
+)
+def test_egress_proxy_flag_follows_the_launcher(monkeypatch, in_container, start_chrome, task, expected):
+    """browser-mcp reads BROWSER_EGRESS_PROXY=1 as "an https tunnel refusal is the
+    egress policy"; it must be set exactly when the browser runs behind egress-launch."""
+    from app.core import native_chrome
+
+    monkeypatch.setattr(native_chrome, "_in_container", lambda: in_container)
+    monkeypatch.setattr(native_chrome, "_supervisor_task", task)
+    if start_chrome is None:
+        monkeypatch.delenv("START_CHROME", raising=False)
+    else:
+        monkeypatch.setenv("START_CHROME", start_chrome)
+
+    env = mcp_config._build_browser_server_env({})
+
+    if expected:
+        assert env["BROWSER_EGRESS_PROXY"] == "1"
+    else:
+        assert "BROWSER_EGRESS_PROXY" not in env
+
+
+def test_egress_proxy_flag_is_not_taken_from_the_profile_env(monkeypatch):
+    from app.core import native_chrome
+
+    monkeypatch.setattr(native_chrome, "_in_container", lambda: False)
+    monkeypatch.setattr(native_chrome, "_supervisor_task", None)
+    monkeypatch.setenv("BROWSER_EGRESS_PROXY", "1")
+
+    env = mcp_config._build_browser_server_env({"BROWSER_EGRESS_PROXY": "1"})
+
+    assert "BROWSER_EGRESS_PROXY" not in env
