@@ -32,16 +32,27 @@ export function isUnderDir(candidate: string, dir: string): boolean {
   return target.startsWith(prefix);
 }
 
+/** setInputFiles timeout: base + per-MiB allowance, capped. No size cap exists (see validatePaths). */
+export const UPLOAD_TIMEOUT_BASE_MS = 30_000;
+export const UPLOAD_TIMEOUT_PER_MIB_MS = 2_000;
+export const UPLOAD_TIMEOUT_MAX_MS = 300_000;
+
+/** Time allowed to attach `totalBytes` over CDP: 30 s + 2 s/MiB, at most 5 min. */
+export function uploadTimeoutMs(totalBytes: number): number {
+  const mib = Math.max(0, totalBytes) / (1024 * 1024);
+  return Math.min(UPLOAD_TIMEOUT_MAX_MS, Math.ceil(UPLOAD_TIMEOUT_BASE_MS + mib * UPLOAD_TIMEOUT_PER_MIB_MS));
+}
+
 /**
  * Validate every path against the allowlist and require regular files. Returns the resolved
- * absolute paths, or an error string. Pure except for fs stat (injected in tests).
+ * absolute paths and their total size, or an error string. Pure except for fs stat (injected in tests).
  */
 export function validatePaths(
   paths: string[],
   uploadDir: string | undefined,
   stat: (p: string) => { isFile: () => boolean; size: number } = statSync,
   realpath: (p: string) => string = realpathSync,
-): { paths: string[] } | { error: string } {
+): { paths: string[]; totalBytes: number } | { error: string } {
   if (!uploadDir) {
     return { error: "uploads are disabled: BROWSER_UPLOAD_DIR is not set" };
   }
@@ -56,6 +67,7 @@ export function validatePaths(
     return { error: `BROWSER_UPLOAD_DIR does not exist: ${uploadDir}` };
   }
   const resolved: string[] = [];
+  let totalBytes = 0;
   for (const p of paths) {
     if (typeof p !== "string" || p === "") {
       return { error: "each path must be a non-empty string" };
@@ -81,8 +93,9 @@ export function validatePaths(
       return { error: `not a regular file: ${p}` };
     }
     resolved.push(realPath);
+    totalBytes += info.size;
   }
-  return { paths: resolved };
+  return { paths: resolved, totalBytes };
 }
 
 export async function runUpload(session: Session, input: UploadInput): Promise<McpToolResult> {
@@ -109,12 +122,14 @@ export async function runUpload(session: Session, input: UploadInput): Promise<M
     return errorResult(`ref ${input.ref} is not a file input`);
   }
 
+  // Larger files take longer to attach over CDP (especially on Windows or a loaded host).
+  const timeout = uploadTimeoutMs(validated.totalBytes);
   try {
-    // Larger files can take longer to attach over CDP, especially on Windows.
-    await locator.setInputFiles(validated.paths, { timeout: 30000 });
+    await locator.setInputFiles(validated.paths, { timeout });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return errorResult(`upload failed: ${msg}`);
+    const mib = (validated.totalBytes / (1024 * 1024)).toFixed(1);
+    return errorResult(`upload failed (${mib} MiB, timeout ${timeout / 1000}s): ${msg}`);
   }
 
   return jsonResult({ ok: true, ref: input.ref, count: validated.paths.length });

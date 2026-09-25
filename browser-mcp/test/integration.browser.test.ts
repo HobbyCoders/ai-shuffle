@@ -773,7 +773,8 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       else process.env.BROWSER_UPLOAD_DIR = previousDir;
       rmSync(path, { force: true });
     }
-  }, 45000);
+    // Outlive the scaled setInputFiles timeout (84 s for 27 MiB) so a slow host fails with its message.
+  }, 120000);
 
   it("batch runs sequentially and stops on the first error", async () => {
     await runNavigate(session, { url: fixtureUrl });

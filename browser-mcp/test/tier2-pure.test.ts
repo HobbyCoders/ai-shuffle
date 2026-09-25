@@ -11,7 +11,13 @@ import {
 import { compileMatcher, PATTERN_MAX_LEN } from "../src/match.js";
 import { parseBatchAction, runBatch, BATCH_MAX_ACTIONS } from "../src/tools/batch.js";
 import { resolveDims, RESIZE_PRESET_DIMS } from "../src/tools/resize.js";
-import { validatePaths, isUnderDir } from "../src/tools/upload.js";
+import {
+  validatePaths,
+  isUnderDir,
+  uploadTimeoutMs,
+  UPLOAD_TIMEOUT_BASE_MS,
+  UPLOAD_TIMEOUT_MAX_MS,
+} from "../src/tools/upload.js";
 import { runNetwork, NETWORK_BODY_MAX_BYTES } from "../src/tools/network.js";
 import { raceWithTimeout } from "../src/session.js";
 import type { Session } from "../src/session.js";
@@ -343,9 +349,27 @@ describe("upload path allowlist", () => {
     (size) => {
       expect(validatePaths(["/srv/uploads/big.bin"], dir, stat(size), idRealpath)).toEqual({
         paths: ["/srv/uploads/big.bin"],
+        totalBytes: size,
       });
     },
   );
+
+  it("sums sizes across files into totalBytes", () => {
+    const r = validatePaths(["/srv/uploads/a", "/srv/uploads/b"], dir, stat(1024), idRealpath);
+    expect(r).toEqual({ paths: ["/srv/uploads/a", "/srv/uploads/b"], totalBytes: 2048 });
+  });
+
+  it("scales the setInputFiles timeout with total size, capped at 5 minutes", () => {
+    const MiB = 1024 * 1024;
+    expect(uploadTimeoutMs(0)).toBe(UPLOAD_TIMEOUT_BASE_MS);
+    expect(uploadTimeoutMs(-1)).toBe(UPLOAD_TIMEOUT_BASE_MS);
+    expect(uploadTimeoutMs(1 * MiB)).toBe(32_000);
+    expect(uploadTimeoutMs(27 * MiB)).toBe(84_000);
+    expect(uploadTimeoutMs(MiB / 2)).toBe(31_000);
+    expect(uploadTimeoutMs(135 * MiB)).toBe(UPLOAD_TIMEOUT_MAX_MS);
+    expect(uploadTimeoutMs(5 * 1024 * MiB)).toBe(UPLOAD_TIMEOUT_MAX_MS);
+    expect(UPLOAD_TIMEOUT_MAX_MS).toBe(300_000);
+  });
 
   it("rejects out-of-dir paths regardless of size", () => {
     const result = validatePaths(["/etc/passwd"], dir, stat(100 * 1024 * 1024), idRealpath);

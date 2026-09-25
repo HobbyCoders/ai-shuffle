@@ -1,7 +1,7 @@
 import type { Page, ElementHandle } from 'playwright-core';
 import { randomUUID } from 'node:crypto';
 import type { BrowserEditor } from './workspace-protocol.js';
-import { validatePaths } from './tools/upload.js';
+import { validatePaths, uploadTimeoutMs } from './tools/upload.js';
 
 export async function rememberFileChooser(page: Page, input: ElementHandle<Node>): Promise<void> {
   await page.evaluate(node => {
@@ -27,7 +27,7 @@ export async function uploadField(page: Page, args: Record<string, unknown>): Pr
   try {
     const el = handle.asElement();
     if (!el) throw new Error('File field unavailable');
-    await el.setInputFiles(validated.paths, { timeout: 10000 });
+    await el.setInputFiles(validated.paths, { timeout: uploadTimeoutMs(validated.totalBytes) });
     await page.evaluate(input => {
       const host = window as typeof window & { __aisEditors?: { pending?: Element } };
       if (host.__aisEditors?.pending === input) delete host.__aisEditors.pending;
