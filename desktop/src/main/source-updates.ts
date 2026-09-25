@@ -11,6 +11,8 @@ const REVISION = /^[a-f0-9]{40}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 const MAX_SIZE = 512 * 1024 ** 2;
 const MAX_NOTES = 4000;
+/** An update.lock without a valid pid this old is left over from a crash, not held by a running updater. */
+export const STALE_LOCK_MS = 10 * 60_000;
 // "0.9.0" on a release, "0.9.0-dev.12+gabc1234" on an edge build (docker/application_updates.py).
 const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:[.+-][A-Za-z0-9.+-]{1,60})?$/;
 /**
@@ -255,8 +257,17 @@ export class SourceUpdates {
     try { const handle = await fs.open(file, 'wx'); await handle.writeFile(String(process.pid)); await handle.close(); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const pid = Number(await fs.readFile(file, 'utf8'));
-      if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('An update lock needs attention; no files were changed');
+      const text = await fs.readFile(file, 'utf8');
+      const pid = /^\s*\d+\s*$/.test(text) ? Number(text) : NaN;
+      if (!Number.isSafeInteger(pid) || pid <= 0) {
+        // A crash between creating the lock and writing its pid leaves it empty.
+        // A fresh one may belong to an updater that is still writing it; once
+        // it is old enough no live updater can own it, so it is taken over.
+        const age = Date.now() - (await fs.stat(file)).mtimeMs;
+        if (age < STALE_LOCK_MS) throw new Error('An update lock needs attention; no files were changed');
+        console.warn(`Taking over an update lock without a process id, last changed ${Math.round(age / 60_000)} min ago: ${file}`);
+        await fs.unlink(file); return this.lock();
+      }
       try { process.kill(pid, 0); throw new Error('An application update is already running'); }
       catch (failure) { if ((failure as NodeJS.ErrnoException).code !== 'ESRCH') throw failure; }
       await fs.unlink(file); return this.lock();

@@ -25,6 +25,15 @@ _desktop_request = None
 # dropped while the updater still counts as present.
 DESKTOP_PRESENCE_SECONDS = 75
 DESKTOP_REQUEST_SECONDS = 90
+# The container supervisor, unlike the desktop shell, polls request.json about
+# once a second (watch() in docker/container_runtime.py starts a service pass
+# each second while the app is ready and no pass is running), so 10 s covers
+# idle polling several times over. It is deliberately not widened to the
+# desktop's 90 s: a request that lands while a check or download is running,
+# or while the readiness probe is failing, should expire rather than replay
+# minutes later (docker/application_updates.py service() never replays old
+# requests); the UI then shows the finished pass and the owner can retry.
+CONTAINER_REQUEST_SECONDS = 10
 
 
 def _desktop_present():
@@ -117,8 +126,7 @@ def enqueue(action):
         raise ValueError("Application updates are disabled in Account settings")
     root = control_root()
     if root:
-        # The container supervisor polls its request file every few seconds.
-        atomic_json(root / "request.json", {"action": action, "expires_at": time.time() + 10})
+        atomic_json(root / "request.json", {"action": action, "expires_at": time.time() + CONTAINER_REQUEST_SECONDS})
         return
     request = {"action": action, "expires_at": time.time() + DESKTOP_REQUEST_SECONDS}
     with _bridge_lock:

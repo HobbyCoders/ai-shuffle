@@ -104,3 +104,16 @@ def test_container_request_keeps_its_short_expiry(bridge, monkeypatch, tmp_path)
     updates.enqueue("check")
     request = json.loads((tmp_path / "request.json").read_text())
     assert request["action"] == "check" and request["expires_at"] <= before + 11
+
+
+def test_container_request_expiry_spans_several_supervisor_polls():
+    # The container keeps 10 s (not the desktop's 90 s) only because its
+    # supervisor polls request.json about once a second; keep the two in step.
+    from pathlib import Path
+    import re
+
+    source = (Path(__file__).resolve().parents[2] / "docker/container_runtime.py").read_text()
+    watch = source[source.index("def watch("):source.index("def shutdown(")]
+    poll = float(re.search(r"next_update = time\.monotonic\(\) \+ ([\d.]+)", watch)[1])
+    assert updates.CONTAINER_REQUEST_SECONDS == 10
+    assert updates.CONTAINER_REQUEST_SECONDS >= 5 * poll

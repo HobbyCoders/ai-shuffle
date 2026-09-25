@@ -378,7 +378,7 @@ test('checks and downloads report the signed release name and notes; a staged up
  await f.release(C,undefined,{notes:undefined,version:undefined});
  const w=f.create();await w.load();assert.deepEqual(await w.check(),{kind:'available',version:C.slice(0,12)});
 });
-test('the update lock: a live holder refuses, a dead holder is reclaimed, garbage asks for attention, and every outcome releases it',async t=>{
+test('the update lock: a live holder refuses, a dead holder is reclaimed, fresh garbage asks for attention, stale garbage is taken over, and every outcome releases it',async t=>{
  const f=await fixture(t);const release=await f.release(A);const u=f.create();await u.load();
  const lock=path.join(f.root,'update.lock');
  // Another updater process is running (this test process stands in for it).
@@ -393,6 +393,17 @@ test('the update lock: a live holder refuses, a dead holder is reclaimed, garbag
  await assert.rejects(fs.stat(lock),/ENOENT/,'released after a check');
  // A lock without a pid is not guessed at.
  await fs.writeFile(lock,'not a pid');
+ await assert.rejects(u.check(),/needs attention/);
+ // Old enough, an empty or unparsable lock is a crash leftover: taken over once, with a warning, and released.
+ for(const content of ['','not a pid']){
+  await fs.writeFile(lock,content);const old=new Date(Date.now()-11*60_000);await fs.utimes(lock,old,old);
+  const warnings=[];const warn=console.warn;console.warn=(...args)=>warnings.push(args.join(' '));
+  try{assert.equal((await u.check()).kind,'available');}finally{console.warn=warn;}
+  assert.equal(warnings.length,1);assert.match(warnings[0],/Taking over an update lock without a process id/);
+  await assert.rejects(fs.stat(lock),/ENOENT/);
+ }
+ // A fresh empty lock may be an updater still writing its pid: left alone.
+ await fs.writeFile(lock,'');
  await assert.rejects(u.check(),/needs attention/);
  await fs.rm(lock);
  // A corrupt manifest fails the check, before any archive request, and still releases the lock.

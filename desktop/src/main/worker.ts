@@ -25,7 +25,7 @@
 import { EventEmitter } from 'node:events';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { createWriteStream, existsSync, type WriteStream } from 'node:fs';
+import { createWriteStream, existsSync, renameSync, type WriteStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
@@ -264,36 +264,59 @@ export interface HealthReply {
 	/** SHA-256 hex of the attach token the worker was started with, when it was started by a desktop app. */
 	attach?: string;
 	status?: number;
+	/** Why a probe that got no usable reply failed, when the probe itself gave up. */
+	reason?: string;
 }
 
-export function fetchHealth(port: number, pathname = '/health', timeoutMs = 2500): Promise<HealthReply> {
+/** Longest a whole health probe may take; the http `timeout` only bounds idle time. */
+export const HEALTH_TOTAL_TIMEOUT_MS = 5000;
+/** Largest health reply read; the real /health and /health/ready bodies are a few hundred bytes. */
+export const HEALTH_MAX_BYTES = 65_536;
+
+export function fetchHealth(port: number, pathname = '/health', timeoutMs = 2500, totalMs = HEALTH_TOTAL_TIMEOUT_MS): Promise<HealthReply> {
 	return new Promise((resolve) => {
+		let timer: NodeJS.Timeout | null = null;
+		const settle = (reply: HealthReply) => {
+			if (timer) clearTimeout(timer);
+			timer = null;
+			resolve(reply);
+		};
 		const req = http.get({ host: '127.0.0.1', port, path: pathname, timeout: timeoutMs, headers: { accept: 'application/json' } }, (res) => {
 			let body = '';
 			res.setEncoding('utf8');
 			// A reply cut off mid-body (the worker crashed while answering) never
 			// ends; without this the probe, and the start or stop awaiting it, hangs.
-			res.on('error', () => resolve({ ok: false, status: res.statusCode }));
+			res.on('error', () => settle({ ok: false, status: res.statusCode }));
 			res.on('data', (chunk) => {
 				body += chunk;
 				// Whatever answers on the port may stream forever; a health reply is small.
-				if (body.length > 65_536) req.destroy(new Error('Health response too large'));
+				if (body.length > HEALTH_MAX_BYTES) {
+					settle({ ok: false, status: res.statusCode, reason: 'The health reply was too large' });
+					req.destroy(new Error('Health response too large'));
+				}
 			});
 			res.on('end', () => {
-				if (res.statusCode !== 200) return resolve({ ok: false, status: res.statusCode });
+				if (res.statusCode !== 200) return settle({ ok: false, status: res.statusCode });
 				try {
 					const json = JSON.parse(body) as { service?: string; version?: string; attach?: string };
-					resolve({ ok: true, service: json.service, version: json.version, attach: typeof json.attach === 'string' ? json.attach : undefined, status: 200 });
+					settle({ ok: true, service: json.service, version: json.version, attach: typeof json.attach === 'string' ? json.attach : undefined, status: 200 });
 				} catch {
-					resolve({ ok: false, status: res.statusCode });
+					settle({ ok: false, status: res.statusCode });
 				}
 			});
 		});
+		// A responder that drips bytes never goes idle and stays under the size
+		// bound; the overall deadline ends the probe regardless.
+		timer = setTimeout(() => {
+			timer = null;
+			settle({ ok: false, reason: `The health check did not finish within ${Math.round(totalMs / 1000)} s` });
+			req.destroy(new Error('Health check timed out'));
+		}, totalMs);
 		req.on('timeout', () => {
+			settle({ ok: false });
 			req.destroy();
-			resolve({ ok: false });
 		});
-		req.on('error', () => resolve({ ok: false }));
+		req.on('error', () => settle({ ok: false }));
 	});
 }
 
@@ -471,14 +494,22 @@ export interface SupervisorOptions {
 	baseEnv?: NodeJS.ProcessEnv;
 	postgres: () => PostgresConfig | null;
 	readyTimeoutMs?: number;
+	/** Overall limit of one health probe; defaults to HEALTH_TOTAL_TIMEOUT_MS. */
+	healthTotalMs?: number;
+	/** worker.log size at which it rotates to worker.prev.log during a run; defaults to WORKER_LOG_MAX_BYTES. */
+	logMaxBytes?: number;
 }
 
 export const ATTACH_ANY_ENV = 'SHUFFLE_DESKTOP_ATTACH_ANY';
+/** worker.log rotates to worker.prev.log at each start and whenever it grows past this during a run. */
+export const WORKER_LOG_MAX_BYTES = 20 * 1024 ** 2;
 
 export class WorkerSupervisor extends EventEmitter {
 	private child: ChildProcess | null = null;
 	private starting: Promise<WorkerState> | null = null;
 	private logStream: WriteStream | null = null;
+	/** Bytes in the current worker.log, as far as this run has written them. */
+	private logBytes = 0;
 	private _state: WorkerState;
 	private stopping = false;
 	private readonly lifecycleToken = randomBytes(32).toString('hex');
@@ -552,7 +583,7 @@ export class WorkerSupervisor extends EventEmitter {
 		const orphanAlive = !!previous?.pid && isProcessAlive(previous.pid);
 		// Preview NEVER attaches to an existing worker, even on its own port, and
 		// does not probe an unrelated one; it only looks for its own orphan.
-		const health: HealthReply = this.opts.allowAttach !== false || orphanAlive ? await fetchHealth(port) : { ok: false };
+		const health: HealthReply = this.opts.allowAttach !== false || orphanAlive ? await fetchHealth(port, '/health', 2500, this.opts.healthTotalMs) : { ok: false };
 		if (this.stopping) return this.state;
 		if (health.ok && health.service === 'ai-shuffle') {
 			const ours = !!previous && health.attach === attachTokenHash(previous.token);
@@ -578,7 +609,8 @@ export class WorkerSupervisor extends EventEmitter {
 		}
 		for (const candidate of [port, protectedPort]) {
 			if (!(await isPortFree(candidate))) {
-				this.set({ phase: 'failed', error: `Port ${candidate} is in use by another program. Free it and restart the worker.` });
+				const why = candidate === port && health.reason ? ` ${health.reason}.` : '';
+				this.set({ phase: 'failed', error: `Port ${candidate} is in use by another program.${why} Free it and restart the worker.` });
 				return this.state;
 			}
 		}
@@ -657,7 +689,7 @@ export class WorkerSupervisor extends EventEmitter {
 		const deadline = Date.now() + (this.opts.readyTimeoutMs ?? 180_000);
 		while (Date.now() < deadline) {
 			if (this.child !== child || this.state.phase !== 'starting') return this.state;
-			const ready = await fetchHealth(port, '/health/ready', 2000);
+			const ready = await fetchHealth(port, '/health/ready', 2000, this.opts.healthTotalMs);
 			if (ready.ok) {
 				await this.finishStartup(port);
 				return this.state;
@@ -842,10 +874,37 @@ export class WorkerSupervisor extends EventEmitter {
 		} catch {
 			/* first run */
 		}
-		const stream = createWriteStream(current, { flags: 'a' });
+		try { this.logBytes = (await fs.stat(current)).size; } catch { this.logBytes = 0; }
+		this.openLog(current);
+	}
+
+	private openLog(file: string): void {
+		const stream = createWriteStream(file, { flags: 'a' });
 		// A log file that cannot be opened must not take the app down; the status page keeps the tail.
 		stream.on('error', () => { if (this.logStream === stream) this.logStream = null; });
 		this.logStream = stream;
+	}
+
+	/**
+	 * A long run rotates on size too. The old stream is renamed while still
+	 * open, so writes it has queued land in worker.prev.log, then ended; new
+	 * output goes to a fresh worker.log. A rename that fails (the file is held
+	 * open elsewhere) keeps the current file and tries again after another cap.
+	 */
+	private rotateDuringRun(): void {
+		const old = this.logStream;
+		// Not open yet: renaming now would let it create a second worker.log.
+		if (!old || old.pending) return;
+		const current = this._state.logPath;
+		this.logBytes = 0;
+		try {
+			renameSync(current, path.join(this.opts.logDir, 'worker.prev.log'));
+		} catch {
+			return;
+		}
+		old.end();
+		this.openLog(current);
+		this.log(`--- worker.log passed ${this.opts.logMaxBytes ?? WORKER_LOG_MAX_BYTES} bytes; earlier output of this run is in worker.prev.log ---`);
 	}
 
 	private log(text: string): void {
@@ -856,7 +915,11 @@ export class WorkerSupervisor extends EventEmitter {
 			this.emit('log', line);
 		}
 		if (this.recentLog.length > 600) this.recentLog.splice(0, this.recentLog.length - 600);
-		this.logStream?.write(text.endsWith('\n') ? text : `${text}\n`);
+		if (!this.logStream) return;
+		const out = text.endsWith('\n') ? text : `${text}\n`;
+		this.logStream.write(out);
+		this.logBytes += Buffer.byteLength(out);
+		if (this.logBytes > (this.opts.logMaxBytes ?? WORKER_LOG_MAX_BYTES)) this.rotateDuringRun();
 	}
 
 	private closeLog(finalLine: string): void {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import net from 'node:net';
@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const { resolveRuntime, buildWorkerEnv, isPortFree, fetchHealth, attachTokenHash, readWorkerProcessRecord, requestBrowserHandoff, WorkerSupervisor, ATTACH_ANY_ENV, DEFAULT_PORT, PROTECTED_PORT } = require('../dist/main/worker.js');
+const { resolveRuntime, buildWorkerEnv, isPortFree, fetchHealth, HEALTH_TOTAL_TIMEOUT_MS, attachTokenHash, readWorkerProcessRecord, requestBrowserHandoff, WorkerSupervisor, ATTACH_ANY_ENV, DEFAULT_PORT, PROTECTED_PORT } = require('../dist/main/worker.js');
 const { writePrivateFile } = require('../dist/main/private-file.js');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -483,6 +483,36 @@ test('a health reply that never stops streaming is cut off at a bound', async (t
 	assert.equal(reply.ok, false);
 });
 
+/** A responder that drips a byte at a time: never idle long enough for the http timeout, never over the size cap. */
+function dripServer(t, port) {
+	return rawServer(t, port, (_req, res) => {
+		res.writeHead(200, { 'content-type': 'application/json' });
+		res.write('{"service":"ai-shuffle"');
+		const timer = setInterval(() => res.write(' '), 50);
+		res.on('close', () => clearInterval(timer));
+	});
+}
+
+test('a health reply that drips bytes forever is ended by the overall deadline, with a reason', async (t) => {
+	const port = await freePort();
+	await dripServer(t, port);
+	assert.equal(HEALTH_TOTAL_TIMEOUT_MS, 5000);
+	const started = Date.now();
+	const reply = await within(fetchHealth(port, '/health', 2500, 400), 3000, 'fetchHealth');
+	assert.equal(reply.ok, false);
+	assert.match(reply.reason, /did not finish within/);
+	assert.ok(Date.now() - started < 2000, 'ended at the overall deadline, not by the idle timeout');
+});
+
+test('a worker port held by a dripping responder fails the start and says the health check timed out', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t, {}, { healthTotalMs: 400 });
+	await dripServer(t, f.port);
+	const state = await within(f.supervisor.start(), 3000, 'start');
+	assert.equal(state.phase, 'failed');
+	assert.match(state.error, new RegExp(`Port ${f.port} is in use by another program\\. The health check did not finish within`));
+	assert.deepEqual(await f.spawns(), []);
+});
+
 test('a worker port answering with a truncated health reply fails the start instead of leaving it starting', { skip: !posix }, async (t) => {
 	const f = await fakeSupervisor(t);
 	await rawServer(t, f.port, (req, res) => {
@@ -570,6 +600,26 @@ test('each start rotates the previous run\'s log to worker.prev.log', { skip: !p
 	assert.match(current, /--- worker stopped by the app/);
 	assert.notEqual(previous, current);
 	assert.ok(firstPid);
+});
+
+test('worker.log rotates to worker.prev.log when it passes the size cap during a run', { skip: !posix }, async (t) => {
+	const f = await fakeSupervisor(t, {}, { logMaxBytes: 4096 });
+	const logs = path.join(f.dir, 'logs');
+	assert.equal((await f.supervisor.start()).phase, 'ready');
+	for (let i = 0; i < 5 && f.supervisor.logStream?.pending; i++) await sleep(50);
+	// Stand in for a chatty worker: its output goes through the same path.
+	for (let i = 0; i < 20; i++) f.supervisor.log(`line ${i} ${'x'.repeat(300)}`);
+	f.supervisor.log('after the cap');
+	await f.supervisor.stop();
+	const previous = await readFile(path.join(logs, 'worker.prev.log'), 'utf8');
+	const current = await readFile(path.join(logs, 'worker.log'), 'utf8');
+	assert.match(previous, /--- worker start/, 'this run\'s early output moved to worker.prev.log');
+	assert.match(current, /passed 4096 bytes; earlier output of this run is in worker.prev.log/);
+	assert.match(current, /after the cap/);
+	assert.match(current, /--- worker stopped by the app/, 'the stream stays usable after rotating');
+	assert.ok((await stat(path.join(logs, 'worker.log'))).size < 4096 + 1024);
+	// Nothing is lost across the rotation.
+	for (let i = 0; i < 20; i++) assert.ok(previous.includes(`line ${i} `) || current.includes(`line ${i} `), `line ${i} kept`);
 });
 
 test('a child that exits after a newer one was spawned leaves the newer worker\'s state alone', { skip: !posix }, async (t) => {
