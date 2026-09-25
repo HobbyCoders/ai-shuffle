@@ -95,12 +95,31 @@ def _is_eligible_voice_provider(row: Dict[str, Any]) -> bool:
     return bool(row.get("auth_token"))
 
 
-def list_eligible_voice_providers() -> List[Dict[str, str]]:
+def _fal_key_for(api_user: Optional[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+    """The fal.ai key ``api_user`` may spend, and the policy that chose it.
+
+    Same resolution as ``/transcribe`` and ``/tts/stream``
+    (:func:`app.api.settings_audio._resolve_fal_key`): the owner and the
+    owner's paired devices (``api_user is None``) spend the owner's key; an API
+    user gets only what its fal.ai credential policy allows. Synchronous.
+    """
+    from app.api.settings_audio import _resolve_fal_key
+
+    return _resolve_fal_key(api_user)
+
+
+def list_eligible_voice_providers(
+    api_user: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, str]]:
     """``[{id, name}]`` for every provider row eligible to fund voice calls.
 
     Synchronous (call via ``run_sync`` from async code). Deliberately returns
     only id + name: the rows are read with ``include_token=True`` so eligibility
     can test for a stored key, and that blob must never travel outward.
+
+    The OpenAI rows are the owner's providers for every caller (as for the
+    OpenAI audio models in :mod:`app.api.settings_audio`; there is no per-user
+    OpenAI policy). fal.ai is listed when the caller's fal key resolves.
     """
     rows = database.get_enabled_model_providers(include_token=True)
     providers = [
@@ -108,15 +127,27 @@ def list_eligible_voice_providers() -> List[Dict[str, str]]:
         for row in rows
         if _is_eligible_voice_provider(row)
     ]
-    if database.get_system_setting("fal_api_key"):
+    if api_user is None:
+        fal_available = bool(database.get_system_setting("fal_api_key"))
+    else:
+        fal_available = bool(_fal_key_for(api_user)[0])
+    if fal_available:
         providers.append({"id": FAL_PROVIDER_ID, "name": "fal.ai"})
     return providers
 
 
-def _eligible_provider_row(provider_id: str) -> Optional[Dict[str, Any]]:
-    """The full (token-carrying) provider row for ``provider_id``, if eligible."""
+def _eligible_provider_row(
+    provider_id: str, api_user: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """The full (token-carrying) provider row for ``provider_id``, if eligible.
+
+    The fal.ai row carries no key. For an API user it is always returned, so
+    :func:`_provider_api_key` explains a missing key in the caller's policy
+    terms (403 "store your own key" / 400 "not configured") instead of a
+    generic "cannot fund voice calls".
+    """
     if provider_id == FAL_PROVIDER_ID:
-        if database.get_system_setting("fal_api_key"):
+        if api_user is not None or database.get_system_setting("fal_api_key"):
             return {"id": FAL_PROVIDER_ID, "name": "fal.ai", "provider_type": "fal"}
         return None
     row = database.get_model_provider(provider_id, include_token=True)
@@ -246,9 +277,11 @@ class VoiceStateResponse(BaseModel):
 # ============================================================================
 
 @router.get("/providers", response_model=List[VoiceProvider])
-async def get_voice_providers(token: str = Depends(require_auth)):
+async def get_voice_providers(http_request: Request, token: str = Depends(require_auth)):
     """List configured OpenAI and fal.ai voice providers, without credentials."""
-    return await run_sync(list_eligible_voice_providers)
+    return await run_sync(
+        list_eligible_voice_providers, get_api_user_from_request(http_request)
+    )
 
 
 def list_voice_agents() -> List[Dict[str, Any]]:
@@ -307,8 +340,11 @@ async def preview_voice(
     if voice not in LIVE_VOICES:
         raise HTTPException(400, f"voice must be one of {list(LIVE_VOICES)}")
     voice_settings = await run_sync(get_voice_settings)
-    provider_row = await run_sync(_resolve_provider_row, None, voice_settings["voice_provider_id"])
-    api_key = await _provider_api_key(provider_row)
+    api_user = get_api_user_from_request(http_request)
+    provider_row = await run_sync(
+        _resolve_provider_row, None, voice_settings["voice_provider_id"], api_user
+    )
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
 
     finished = asyncio.Event()
 
@@ -344,16 +380,19 @@ async def preview_voice(
 
 
 def _resolve_provider_row(
-    requested_id: Optional[str], settings_provider_id: Optional[str]
+    requested_id: Optional[str],
+    settings_provider_id: Optional[str],
+    api_user: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Pick the provider row that funds this call, or raise a helpful 400.
 
     Precedence: explicit request value > the pinned ``voice_provider_id``
-    setting > the single eligible row when exactly one exists.
+    setting > the single eligible row when exactly one exists. ``api_user`` is
+    the caller (``None`` for the owner); it only affects the fal.ai row.
     """
     requested = (requested_id or "").strip()
     if requested:
-        row = _eligible_provider_row(requested)
+        row = _eligible_provider_row(requested, api_user)
         if row is None:
             raise HTTPException(
                 status_code=400,
@@ -535,16 +574,30 @@ def _forget_client_secret(session_id: str) -> None:
     _SESSION_CLIENT_SECRETS.pop(session_id, None)
 
 
-async def _provider_api_key(provider_row: Dict[str, Any]) -> str:
+async def _provider_api_key(
+    provider_row: Dict[str, Any], *, api_user: Optional[Dict[str, Any]]
+) -> str:
     """Decrypt the row's stored API key, or raise a 400 explaining the fix.
 
     Reuses the fluid credential layer's decryption so crypto lives in exactly one
     place; an eligible row always HAS a token, but a locked encryption service
     can still yield nothing.
+
+    ``api_user`` is the caller (``None`` for the owner and paired devices), a
+    required keyword so no route can forget it. The fal.ai key follows the
+    caller's credential policy exactly as ``/transcribe`` and ``/tts/stream``
+    do: an API user never spends the owner's fal key unless its policy allows
+    it, and gets the same 403/400 refusal those routes give. OpenAI rows are
+    the owner's providers for every caller (no per-user OpenAI policy exists).
     """
     from app.core.provider.fluid_credentials import _decrypt_auth_token
 
     if provider_row["id"] == FAL_PROVIDER_ID:
+        if api_user is not None:
+            from app.api.settings_audio import _require_fal_key
+
+            fal_key, policy = await run_sync(_fal_key_for, api_user)
+            return _require_fal_key(fal_key, policy)
         from app.api.settings import get_decrypted_api_key
         api_key = await run_sync(get_decrypted_api_key, "fal_api_key")
     else:
@@ -695,10 +748,11 @@ async def create_voice_session(
         )
 
     provider_row = await run_sync(
-        _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"]
+        _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"],
+        api_user,
     )
 
-    api_key = await _provider_api_key(provider_row)
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
 
     model = voice_settings["voice_model"]
     if (model == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
@@ -868,14 +922,13 @@ async def mint_voice_session_secret(
     resolution, so a call keeps being funded by the row it started on.
     """
     voice_settings = await _require_voice_enabled()
-    session_row = await _require_voice_session(
-        session_id, api_user=get_api_user_from_request(http_request)
-    )
+    api_user = get_api_user_from_request(http_request)
+    session_row = await _require_voice_session(session_id, api_user=api_user)
     _reject_when_capped(session_id)
 
     config = session_config(session_row, voice_settings)
-    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None)
-    api_key = await _provider_api_key(provider_row)
+    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user)
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
 
     model = config["model"]
     client_secret, expires_at = "", None
@@ -1056,8 +1109,8 @@ async def attach_voice_call(
     config = session_config(session_row, voice_settings)
     if transport_for(config["model"]) != "webrtc":
         raise HTTPException(400, "This voice model uses the audio stream, not the Realtime sideband.")
-    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None)
-    api_key = await _provider_api_key(provider_row)
+    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user)
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
 
     try:
         await voice_bridge.registry.attach(
@@ -1210,8 +1263,8 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
         config = session_config(row, settings)
         if transport_for(config["model"]) != "stream":
             raise HTTPException(400, "This voice model uses WebRTC.")
-        provider = await run_sync(_resolve_provider_row, config["provider_id"], None)
-        key = await _provider_api_key(provider)
+        provider = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user)
+        key = await _provider_api_key(provider, api_user=api_user)
         if session_id in voice_stream.calls:
             raise HTTPException(409, "This voice session already has an audio connection.")
         if len(voice_stream.calls) >= voice_stream.MAX_CONNECTIONS:

@@ -1571,3 +1571,127 @@ class TestVoiceKeyToolSurface:
                 pass
         assert refused.value.code == 4403
         assert refused.value.reason == "Access denied to this session"
+
+
+# ============================================================================
+# fal.ai key policy — a key spends only the fal key its credential policy allows
+# ============================================================================
+#
+# Same resolution as /transcribe and /tts/stream (app.api.settings_audio):
+# the owner and paired devices spend the owner's fal key; an API user gets its
+# own stored key under ``user_provided`` (the default), and is refused with the
+# same 403 when it has none. Regression: the fal voice path (PersonaPlex audio
+# stream) handed the owner's fal key to any caller.
+
+OWNER_FAL_KEY = "fal-owner-key-0123456789abcdefghijklmn"
+USER_FAL_KEY = "fal-user-own-key-0123456789abcdefghijkl"
+FAL_SESSION = "voice-fal-key-a"
+
+
+@pytest.fixture
+def fal_streams(monkeypatch):
+    """Capture the key each PersonaPlex audio stream is built with; no network."""
+    from app.core import voice_stream
+
+    seen = []
+
+    class _FakeStream:
+        def __init__(self, websocket, row, config, key, max_minutes):
+            seen.append(key)
+
+        async def run(self):
+            return None
+
+    monkeypatch.setattr(voice_stream, "VoiceStream", _FakeStream)
+    return seen
+
+
+def _fal_voice_setup(mock_db, *, policy=None, user_key=None, api_user_id="key-a"):
+    from app.core.voice_models import FAL_PROVIDER_ID, PERSONAPLEX_MODEL
+
+    unlock_encryption(mock_db)
+    _enable_voice()
+    _make_keys()
+    db.set_system_setting("fal_api_key", encryption.encrypt_value(OWNER_FAL_KEY))
+    if policy:
+        db.set_user_credential_policy("key-a", "fal_api_key", policy)
+    if user_key:
+        db.set_user_credential("key-a", "fal_api_key", encryption.encrypt_value(user_key))
+    db.create_session(
+        session_id=FAL_SESSION, profile_id="default", title="Voice session",
+        provider_id=FAL_PROVIDER_ID, mode="voice", api_user_id=api_user_id,
+        voice_config={"model": PERSONAPLEX_MODEL, "voice": "NATF2",
+                      "provider_id": FAL_PROVIDER_ID, "options": {}},
+    )
+
+
+class TestVoiceFalKeyPolicy:
+    @pytest.mark.parametrize("policy", [None, "user_provided"])
+    def test_key_without_its_own_fal_key_is_refused(
+        self, client, mock_db, fal_streams, policy
+    ):
+        from starlette.websockets import WebSocketDisconnect
+        from app.api.settings_audio import FAL_KEY_USER_PROVIDED
+
+        _fal_voice_setup(mock_db, policy=policy)
+
+        with pytest.raises(WebSocketDisconnect) as refused:
+            with client.websocket_connect(
+                f"{VOICE_ROOT}/sessions/{FAL_SESSION}/audio?token=aih_voice_key_a"
+            ):
+                pass
+        assert refused.value.code == 4403
+        assert refused.value.reason == FAL_KEY_USER_PROVIDED[:120]
+        assert fal_streams == []  # the owner's key never reached a stream
+
+        resp = client.post(f"{VOICE_ROOT}/sessions/{FAL_SESSION}/secret", headers=KEY_A)
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == FAL_KEY_USER_PROVIDED
+        assert OWNER_FAL_KEY not in resp.text
+
+        providers = client.get(f"{VOICE_ROOT}/providers", headers=KEY_A).json()
+        assert "__fal_voice__" not in [p["id"] for p in providers]
+
+    def test_key_with_its_own_fal_key_spends_that_key_never_the_owners(
+        self, client, mock_db, fal_streams
+    ):
+        _fal_voice_setup(mock_db, policy="user_provided", user_key=USER_FAL_KEY)
+
+        with client.websocket_connect(
+            f"{VOICE_ROOT}/sessions/{FAL_SESSION}/audio?token=aih_voice_key_a"
+        ):
+            pass
+        assert fal_streams == [USER_FAL_KEY]
+
+        resp = client.post(f"{VOICE_ROOT}/sessions/{FAL_SESSION}/secret", headers=KEY_A)
+        assert resp.status_code == 200, resp.text
+        assert OWNER_FAL_KEY not in resp.text and USER_FAL_KEY not in resp.text
+        providers = client.get(f"{VOICE_ROOT}/providers", headers=KEY_A).json()
+        assert "__fal_voice__" in [p["id"] for p in providers]
+
+    def test_key_with_its_own_fal_key_works_when_the_owner_has_none(
+        self, client, mock_db, fal_streams
+    ):
+        _fal_voice_setup(mock_db, policy="user_provided", user_key=USER_FAL_KEY)
+        db.delete_system_setting("fal_api_key")
+
+        with client.websocket_connect(
+            f"{VOICE_ROOT}/sessions/{FAL_SESSION}/audio?token=aih_voice_key_a"
+        ):
+            pass
+        assert fal_streams == [USER_FAL_KEY]
+
+    def test_owner_still_spends_the_owner_fal_key(
+        self, client, mock_db, fal_streams, monkeypatch
+    ):
+        from unittest.mock import AsyncMock
+        from app.api import ws_auth
+
+        _fal_voice_setup(mock_db, api_user_id=None)
+        # The owner / paired-device contract of authenticate_websocket.
+        monkeypatch.setattr(
+            ws_auth, "authenticate_websocket", AsyncMock(return_value=(True, None))
+        )
+        with client.websocket_connect(f"{VOICE_ROOT}/sessions/{FAL_SESSION}/audio"):
+            pass
+        assert fal_streams == [OWNER_FAL_KEY]
