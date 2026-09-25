@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import PermissionRequest, { type PermissionRequestData } from './PermissionRequest.svelte';
 	import { focusTrap } from './ui/focus-trap';
 
@@ -18,18 +19,50 @@
 	let showPendingList = $state(false);
 	let queueEl: HTMLElement | undefined = $state();
 
-	// When the queue advances, the answered prompt (and whatever in it had
-	// focus) is replaced; move focus onto the new prompt so its shortcuts and
-	// screen readers reach it, as focusTrap does for the first one.
+	/** The chat composer, where focus goes when the last request is answered
+	 *  and nothing else (the element focused before the queue opened) took it. */
+	const COMPOSER_SELECTOR = '[data-composer-editor], .ProseMirror';
+
+	function nothingFocused(): boolean {
+		const active = document.activeElement;
+		return !active || active === document.body || !active.isConnected;
+	}
+
+	// Focus follows the answer. When the queue advances, the answered prompt
+	// (and whatever in it had focus) is replaced: focus moves onto the new
+	// prompt so its shortcuts and screen readers reach it, as focusTrap does
+	// for the first one. When the last request is answered, focusTrap returns
+	// focus to where the user was; if that is gone, it goes to the composer.
 	let shownRequestId: string | null = null;
 	$effect(() => {
 		const id = requests[0]?.request_id ?? null;
 		const previous = shownRequestId;
 		shownRequestId = id;
-		if (!id || !previous || id === previous || !queueEl) return;
-		if (queueEl.contains(document.activeElement)) return;
-		queueEl.querySelector<HTMLElement>('.permission-panel')?.focus({ preventScroll: true });
+		if (!previous || id === previous) return;
+		if (!id) {
+			if (nothingFocused()) {
+				document.querySelector<HTMLElement>(COMPOSER_SELECTOR)?.focus({ preventScroll: true });
+			}
+			return;
+		}
+		if (!queueEl) return;
+		if (queueEl.contains(document.activeElement) && !nothingFocused()) return;
+		focusPanel();
 	});
+
+	function focusPanel() {
+		queueEl?.querySelector<HTMLElement>('.permission-panel')?.focus({ preventScroll: true });
+	}
+
+	/** An answer disables (or removes) the button that had focus, and a
+	 *  browser then drops focus to <body>, outside the focus trap, where Tab
+	 *  escapes into the page behind the modal and a screen reader loses its
+	 *  place. Park focus on the prompt itself first; if the answer is lost and
+	 *  the buttons come back, focus is still inside the trap. */
+	function parkFocusBeforeAnswer() {
+		if (!queueEl) return;
+		if (nothingFocused() || queueEl.contains(document.activeElement)) focusPanel();
+	}
 
 	function handleRespond(detail: {
 		request_id: string;
@@ -37,29 +70,98 @@
 		remember?: 'none' | 'session' | 'profile';
 		pattern?: string;
 	}) {
+		parkFocusBeforeAnswer();
 		onRespond?.(detail);
 	}
 
-	function handleDenyAll() {
-		for (const req of requests) {
-			onRespond?.({
-				request_id: req.request_id,
-				decision: 'deny',
-				remember: 'none'
-			});
-		}
-		onDismissAll?.();
+	// Bulk-action arming, the same rules the prompt's own buttons follow
+	// (PermissionRequest): Allow All / Deny All answer every queued request,
+	// including one that appeared an instant ago under the pointer or the
+	// keyboard, so they count only once the newest request has been visible
+	// for BULK_ARM_DELAY_MS, and re-arm whenever another request arrives.
+	// - A click counts only once armed.
+	// - Enter / Space on a focused bulk button counts only once armed and only
+	//   for a fresh press (not an auto-repeat, not a key already down when the
+	//   newest request arrived); an unarmed press is held back, and so is the
+	//   click it would generate (Space's comes on keyup).
+	// - After a bulk answer the buttons stay disarmed until another request
+	//   arrives or, if the queue is still shown after BULK_RETRY_MS (the
+	//   answers were lost), until they re-arm so the action can be retried.
+	const BULK_ARM_DELAY_MS = 500;
+	const BULK_RETRY_MS = 5000;
+	let bulkArmed = false;
+	/** When the newest request arrived, on the clock events' `timeStamp` uses. */
+	let bulkShownAt = 0;
+	let bulkKeyClickBlocked = false;
+	let bulkTimer: ReturnType<typeof setTimeout> | undefined;
+	let seenRequestIds = new Set<string>();
+
+	function armBulkAfter(delayMs: number) {
+		bulkArmed = false;
+		clearTimeout(bulkTimer);
+		bulkTimer = setTimeout(() => (bulkArmed = true), delayMs);
 	}
 
-	function handleAllowAll() {
-		// Allow all pending permission requests
+	$effect(() => {
+		const ids = requests.map((r) => r.request_id);
+		untrack(() => {
+			const arrived = ids.some((id) => !seenRequestIds.has(id));
+			seenRequestIds = new Set(ids);
+			if (!arrived) return;
+			bulkKeyClickBlocked = false;
+			// A synthetic event's timeStamp reads the same clock as input events.
+			bulkShownAt = new Event('permission-bulk-shown').timeStamp;
+			armBulkAfter(BULK_ARM_DELAY_MS);
+		});
+	});
+	$effect(() => () => clearTimeout(bulkTimer));
+
+	function isBulkKey(e: KeyboardEvent): boolean {
+		return e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar';
+	}
+
+	function handleBulkKeydown(e: KeyboardEvent) {
+		if (!isBulkKey(e)) return;
+		const fresh = !e.repeat && !(e.timeStamp > 0 && e.timeStamp < bulkShownAt);
+		if (fresh && bulkArmed) return;
+		e.preventDefault();
+		bulkKeyClickBlocked = true;
+	}
+
+	function handleBulkKeyup(e: KeyboardEvent) {
+		if (!bulkKeyClickBlocked) return;
+		if (e.key === ' ' || e.key === 'Spacebar') e.preventDefault();
+		setTimeout(() => (bulkKeyClickBlocked = false), 0);
+	}
+
+	function bulkActionAllowed(e: MouseEvent): boolean {
+		if (!bulkArmed) return false;
+		// A click with no pointer behind it (detail 0) that an unarmed Enter or
+		// Space on the button generated.
+		if (e.detail === 0 && bulkKeyClickBlocked) return false;
+		return true;
+	}
+
+	function answerAll(decision: 'allow' | 'deny', e: MouseEvent): boolean {
+		if (!bulkActionAllowed(e)) return false;
+		armBulkAfter(BULK_RETRY_MS);
+		parkFocusBeforeAnswer();
 		for (const req of requests) {
 			onRespond?.({
 				request_id: req.request_id,
-				decision: 'allow',
+				decision,
 				remember: 'none'
 			});
 		}
+		return true;
+	}
+
+	function handleDenyAll(e: MouseEvent) {
+		if (answerAll('deny', e)) onDismissAll?.();
+	}
+
+	function handleAllowAll(e: MouseEvent) {
+		answerAll('allow', e);
 	}
 
 	// Get a short summary for queued items
@@ -154,6 +256,8 @@
 						<button
 							type="button"
 							onclick={handleAllowAll}
+							onkeydown={handleBulkKeydown}
+							onkeyup={handleBulkKeyup}
 							class="px-3 py-1.5 text-xs font-medium rounded-lg border transition-all
 								bg-success/10 text-success border-success/25
 								hover:bg-success/20 hover:border-success/35"
@@ -163,6 +267,8 @@
 						<button
 							type="button"
 							onclick={handleDenyAll}
+							onkeydown={handleBulkKeydown}
+							onkeyup={handleBulkKeyup}
 							class="px-3 py-1.5 text-xs font-medium rounded-lg border transition-all
 								bg-destructive/10 text-destructive border-destructive/25
 								hover:bg-destructive/20 hover:border-destructive/35"

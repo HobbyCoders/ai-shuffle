@@ -310,12 +310,10 @@ class TestUnifiedPushTransport:
 class TestSendToAllDevices:
     """Test per-transport dispatch when broadcasting to all devices."""
 
-    async def test_dispatches_per_transport(self):
-        """Each device uses its own transport; tokenless devices are skipped."""
+    async def test_dispatches_to_fcm_tokens_only(self):
+        """An FCM registration is sent to; tokenless devices are skipped."""
         service = PushNotificationService()
         devices = [
-            {"device_id": "d1", "unifiedpush_endpoint": "https://ntfy.sh/a", "fcm_token": None,
-             "capabilities": {"supports_push": True}},
             {"device_id": "d2", "unifiedpush_endpoint": None, "fcm_token": "fcm-tok",
              "capabilities": {"supports_push": True}},
             {"device_id": "d3", "unifiedpush_endpoint": None, "fcm_token": None,
@@ -326,12 +324,31 @@ class TestSendToAllDevices:
         with patch("app.db.mobile.get_all_mobile_devices", return_value=devices):
             results = await service.send_to_all_devices(title="T", body="B")
 
-        # d3 has no transport, so only two sends happen.
-        assert len(results) == 2
+        # d3 has no transport, so only one send happens.
+        assert len(results) == 1
         calls = service.send_notification.await_args_list
-        assert calls[0].kwargs["unifiedpush_endpoint"] == "https://ntfy.sh/a"
-        assert calls[1].kwargs.get("unifiedpush_endpoint") is None
-        assert calls[1].kwargs["device_id"] == "fcm-tok"
+        assert calls[0].kwargs.get("unifiedpush_endpoint") is None
+        assert calls[0].kwargs["device_id"] == "fcm-tok"
+
+    async def test_real_legacy_unifiedpush_row_is_not_posted_to(self):
+        """R10-13: Android builds from 2026-06-24 to 2026-09-06 registered
+        ``supports_push: true`` with a UnifiedPush endpoint, and an upgraded
+        phone never rewrites that row. The current app has no receiver, so
+        the distributor must not get the title and body."""
+        service = PushNotificationService()
+        devices = [
+            {"device_id": "legacy", "unifiedpush_endpoint": "https://ntfy.sh/up_old",
+             "fcm_token": None, "capabilities": {"supports_push": True,
+                                                  "supports_biometric": True}},
+        ]
+        service.send_notification = AsyncMock(return_value=NotificationResult(success=True))
+        service._send_via_unifiedpush = AsyncMock(return_value=NotificationResult(success=True))
+
+        with patch("app.db.mobile.get_all_mobile_devices", return_value=devices):
+            results = await service.send_to_all_devices(title="T", body="B")
+
+        assert results == []
+        service.send_notification.assert_not_awaited()
 
     async def test_explicit_tokens_use_fcm_path(self):
         """Passing device_tokens keeps the legacy explicit-FCM behaviour."""
@@ -495,7 +512,10 @@ class TestDeliveryHonesty:
         from app.services.push_notification import device_receives_push
 
         endpoint = {"unifiedpush_endpoint": "https://ntfy.sh/a"}
-        assert device_receives_push({**endpoint, "capabilities": {"supports_push": True}})
+        # R10-13: a UnifiedPush endpoint is legacy even when push is declared.
+        assert not device_receives_push({**endpoint, "capabilities": {"supports_push": True}})
+        assert not device_receives_push(
+            {**endpoint, "fcm_token": "t", "capabilities": {"supports_push": True}})
         assert device_receives_push({"fcm_token": "t", "capabilities": {"supports_push": True}})
         assert not device_receives_push({**endpoint, "capabilities": {"supports_push": False}})
         assert not device_receives_push({**endpoint, "capabilities": {}})

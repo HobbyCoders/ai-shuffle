@@ -286,6 +286,34 @@ def test_legacy_endpoint_from_a_client_without_push_is_not_delivered(mock_db):
     assert body["reason"] == "no device can receive push notifications"
 
 
+def test_real_legacy_row_declaring_push_is_not_delivered(mock_db):
+    """R10-13: the rows old Android builds really wrote declare
+    ``supports_push: true`` with a UnifiedPush endpoint. The current app
+    has no receiver, so NotifyDevices must not post there or count it."""
+    from app.services.push_notification import push_notification_service
+
+    devices = [{
+        "device_id": "phone",
+        "unifiedpush_endpoint": "https://ntfy.example/up_old",
+        "fcm_token": None,
+        "capabilities": {"supports_push": True, "supports_biometric": True},
+    }]
+    posted = AsyncMock()
+    with patch("app.db.mobile.get_all_mobile_devices", return_value=devices), \
+            patch.object(push_notification_service, "send_notification", posted):
+        body = tool_result_json(
+            asyncio.run(
+                _builtin_handlers()["NotifyDevices"].handler(
+                    {"title": "Release", "body": "v1.2.3 is live"}
+                )
+            )
+        )
+
+    posted.assert_not_awaited()
+    assert body["delivered"] is False
+    assert body["reason"] == "no device can receive push notifications"
+
+
 def test_description_says_push_usually_reaches_nobody(mock_db):
     description = _builtin_handlers()["NotifyDevices"].description
     assert "no device can receive push notifications" in description.lower()

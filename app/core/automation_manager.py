@@ -128,6 +128,19 @@ class AutomationManager:
         task.add_done_callback(self._on_task_done)
         return task
 
+    def _shutdown_begun(self) -> bool:
+        """Whether shutdown has begun, app-wide or for this manager.
+
+        The app flags ``startup.is_shutting_down`` first, then stops running
+        sessions, and reaches ``shutdown()`` (which sets ``_shutting_down``)
+        last. A run started in between would mint a session and a queued turn
+        the scheduler no longer starts, so every point where a run can move to
+        ``running`` checks both.
+        """
+        from app.core import startup
+
+        return self._shutting_down or bool(getattr(startup, "is_shutting_down", False))
+
     @staticmethod
     def _on_task_done(task: asyncio.Task) -> None:
         if task.cancelled():
@@ -398,6 +411,12 @@ class AutomationManager:
         can insert the (automation_id, fire_bucket) row, and only that winner
         executes the tick.
         """
+        if self._shutdown_begun():
+            # Before the cross-install fire claim, so a live install can still
+            # take this tick.
+            logger.info(f"Automation {automation_id}: shutting down — scheduled fire skipped")
+            return
+
         def _gate_blocking() -> Tuple[Optional[Dict[str, Any]], bool, str]:
             """Row read + runner election in ONE hop. ``should_run_scheduled_here``
             is itself a chain of blocking reads (install registry, project,
@@ -610,9 +629,7 @@ class AutomationManager:
             # mid-wait, leaving its row ``running``) while its queued turn ran
             # unwatched on the next boot. A webhook or connector event that
             # lands in that window starts nothing.
-            from app.core import startup
-
-            if self._shutting_down or getattr(startup, "is_shutting_down", False):
+            if self._shutdown_begun():
                 logger.info(f"Automation {automation_id}: shutting down — run not started")
                 return
             if automation_id in self._running:
@@ -838,6 +855,14 @@ class AutomationManager:
         automation_id = automation["id"]
         action_steps = automation.get("action_steps") or []
         start_time = time.time()
+
+        if claim_from is not None and self._shutdown_begun():
+            # Leave the row ``claim_from`` (``approved``): the next boot's
+            # re-queue starts it, instead of a turn nobody would run.
+            logger.info(
+                f"Automation {automation_id}: shutting down — {claim_from} run {run_id} left for the next start"
+            )
+            return
 
         # If there's no prompt AND no action_steps, skip execution
         has_prompt = bool(rendered_prompt and rendered_prompt.strip())
@@ -1384,6 +1409,9 @@ class AutomationManager:
                 return None, None
             return run, automation
 
+        if self._shutdown_begun():
+            logger.info(f"Approval {approval_id}: shutting down — run left approved for the next start")
+            return None
         run, automation = await run_sync(_load_approved)
         if run is None or automation is None:
             return None
@@ -1397,7 +1425,7 @@ class AutomationManager:
             # pop) that run's latch entry.
             while True:
                 async with self._lock:
-                    if self._shutting_down:
+                    if self._shutdown_begun():
                         self._waiting_approved.discard(me)
                         return
                     holder = self._running.get(auto_id)
@@ -1486,13 +1514,15 @@ class AutomationManager:
                 selected.append(row["approval_id"])
             return selected
 
+        if self._shutdown_begun():
+            return
         try:
             approval_ids = await run_sync(_select_approved_blocking)
         except Exception as e:  # noqa: BLE001 — a DB blip must not break start()
             logger.warning(f"Could not re-queue approved automation runs: {e}")
             return
         for approval_id in approval_ids:
-            if self._shutting_down:
+            if self._shutdown_begun():
                 return
             run = await self.execute_approved_run(approval_id)
             if run is not None:

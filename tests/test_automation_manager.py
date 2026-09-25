@@ -1862,6 +1862,25 @@ class TestScheduledFireClaims:
         await _drain(tasks)
         assert [e[0] for e in executed] == ["auto-prune"]
 
+    async def test_tick_after_the_app_began_shutting_down_is_not_claimed(
+        self, manager, fire_env, monkeypatch
+    ):
+        """R10-14: the app flags shutdown long before it reaches the manager's
+        own ``shutdown()``; a tick in between neither runs nor spends the
+        cross-install fire claim a live install could still take."""
+        from app.core import startup
+
+        executed, tasks = fire_env
+        _make_automation("auto-sd-tick", triggers=[{"type": "cron", "config": {"expression": "* * * * *"}}])
+        claims = []
+        monkeypatch.setattr(am.database, "claim_automation_fire",
+                            lambda *a, **k: claims.append(a) or True)
+        monkeypatch.setattr(startup, "is_shutting_down", True)
+
+        await manager._on_schedule_trigger("auto-sd-tick", "cron", {})
+        await _drain(tasks)
+        assert executed == [] and claims == []
+
     def test_fire_bucket_identity(self):
         t = datetime(2026, 9, 26, 9, 0, 20, tzinfo=timezone.utc)
         # cron: rounds to the nearest minute (late or early callbacks agree).
@@ -2651,6 +2670,114 @@ class TestRunConcurrency:
         old = database.get_automation_run("run-old")
         assert old["status"] == "cancelled"
         assert "expired" in (old.get("error") or "")
+
+    async def test_approval_after_the_app_began_shutting_down_starts_nothing(
+        self, manager, mock_db, runner, monkeypatch
+    ):
+        """R10-14: the approve route's background start checked only the
+        manager's own flag, set last in shutdown; an approval in the window
+        after ``startup.is_shutting_down`` minted a session and a queued turn
+        nobody would run. The row stays ``approved`` for the next boot."""
+        from app.core import startup
+        from app.db import database
+
+        _make_automation("auto-ap", triggers=_WEBHOOK_NO_SECRET)
+        database.create_automation_run(run_id="run-ap", automation_id="auto-ap",
+                                       status="approved", prompt_rendered="approved prompt")
+        database.create_automation_approval(approval_id="appr-ap", run_id="run-ap", automation_id="auto-ap")
+        database.update_automation_approval("appr-ap", status="approved")
+        tasks = _capture_tasks(manager)
+        monkeypatch.setattr(startup, "is_shutting_down", True)
+
+        await manager.execute_approved_run("appr-ap")
+        await _drain(tasks)
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        assert runner.calls == []
+        assert database.get_automation_run("run-ap")["status"] == "approved"
+        assert manager._running == {}
+
+    async def test_approved_run_queued_behind_the_latch_stays_put_once_the_app_shuts_down(
+        self, manager, mock_db, runner, monkeypatch
+    ):
+        """R10-14: the queued approved run woke to a free latch after the app
+        flagged shutdown (the manager's own flag not yet set) and started."""
+        from app.core import startup
+        from app.db import database
+
+        g_first = asyncio.Event()
+        runner.gates = [g_first]
+        _make_automation("auto-aq", triggers=_WEBHOOK_NO_SECRET)
+        database.create_automation_run(run_id="run-aq", automation_id="auto-aq",
+                                       status="approved", prompt_rendered="approved prompt")
+        database.create_automation_approval(approval_id="appr-aq", run_id="run-aq", automation_id="auto-aq")
+        database.update_automation_approval("appr-aq", status="approved")
+        tasks = _capture_tasks(manager)
+
+        first = asyncio.create_task(manager._execute("auto-aq", {"trigger": "manual"}))
+        await _until(lambda: len(runner.calls) == 1)
+        assert (await manager.execute_approved_run("appr-aq"))["id"] == "run-aq"
+        for _ in range(20):
+            await asyncio.sleep(0)
+        monkeypatch.setattr(startup, "is_shutting_down", True)
+        g_first.set()
+        await first
+        await _drain(tasks)
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        assert len(runner.calls) == 1, "the approved run must not start during shutdown"
+        assert database.get_automation_run("run-aq")["status"] == "approved"
+        assert manager._running == {}
+
+    async def test_execute_run_claiming_an_approved_row_refuses_during_shutdown(
+        self, manager, mock_db, runner, monkeypatch
+    ):
+        """R10-14: ``_execute_run(claim_from="approved")`` is the last gate
+        before the run moves to ``running``; it refuses once shutdown began."""
+        from app.core import startup
+        from app.db import database
+
+        _make_automation("auto-ex", triggers=_WEBHOOK_NO_SECRET)
+        database.create_automation_run(run_id="run-ex", automation_id="auto-ex",
+                                       status="approved", prompt_rendered="approved prompt")
+        monkeypatch.setattr(startup, "is_shutting_down", True)
+
+        await manager._execute_run(database.get_automation("auto-ex"), "run-ex",
+                                   "approved prompt", {}, claim_from="approved")
+
+        assert runner.calls == []
+        assert database.get_automation_run("run-ex")["status"] == "approved"
+
+    async def test_requeue_starts_nothing_once_the_app_began_shutting_down(
+        self, mock_db, paused_scheduler_class, monkeypatch
+    ):
+        """R10-14: the start-up re-queue checked only the manager's flag."""
+        from app.core import startup
+        from app.db import database
+
+        monkeypatch.setattr(
+            "app.core.automation_service.should_run_scheduled_here", lambda a: (True, "elected"),
+        )
+        _make_automation("auto-rs", triggers=_WEBHOOK_NO_SECRET)
+        database.create_automation_run(run_id="run-rs", automation_id="auto-rs",
+                                       status="approved", prompt_rendered="p")
+        database.create_automation_approval(approval_id="appr-rs", run_id="run-rs", automation_id="auto-rs")
+        database.update_automation_approval("appr-rs", status="approved")
+        monkeypatch.setattr(startup, "is_shutting_down", True)
+
+        restarted = AutomationManager()
+        fake = _FakeRunner()
+        restarted._run_prompt_as_session = fake
+        tasks = _capture_tasks(restarted)
+        await restarted._requeue_approved_runs()
+        await _drain(tasks)
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        assert fake.calls == []
+        assert database.get_automation_run("run-rs")["status"] == "approved"
 
     async def test_update_automation_run_compare_and_set(self, mock_db):
         from app.db import database

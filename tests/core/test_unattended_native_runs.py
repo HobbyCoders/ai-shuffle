@@ -487,6 +487,35 @@ async def test_no_run_starts_while_the_app_is_shutting_down(provider, project, m
     assert _runs() == [] and provider.requests == []
 
 
+async def test_an_approval_while_the_app_is_shutting_down_starts_nothing(
+    provider, project, test_db, monkeypatch
+):
+    """R10-14: an approval POSTed after the app flagged shutdown (the manager's
+    own flag is set last) minted a session and a queued turn; the run then
+    timed out as ``failed`` with its approval spent and the turn ran unwatched
+    on the next boot. It must stay ``approved`` for the next start instead."""
+    from app.core import startup
+
+    agent = _agent(project)
+    _automation(agent, requires_approval=True, timeout_seconds=2)
+    autos = Automations()
+    await autos.manager.trigger_webhook("auto-1", {"topic": "x"})
+    await autos.settle()
+    [approval] = database.get_pending_automation_approvals()
+    database.update_automation_approval(approval["id"], status="approved", decided_by="admin")
+    database.update_automation_run(approval["run_id"], status="approved")
+    provider.script(Messages.text("ran"))
+    monkeypatch.setattr(startup, "is_shutting_down", True)
+
+    await autos.manager.execute_approved_run(approval["id"])
+    await autos.settle()
+
+    [row] = _runs()
+    assert row["status"] == "approved", row
+    assert test_db.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 0
+    assert provider.requests == []
+
+
 async def test_max_cost_per_run_only_logs(provider, project, caplog):
     agent = _agent(project)
     _automation(agent, max_cost_per_run=0.0000001)

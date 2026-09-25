@@ -62,11 +62,21 @@ def device_receives_push(device: Dict[str, Any]) -> bool:
     such a row points at a distributor with no app to hand the message to, so
     a 2xx from it is not a delivery, and posting the title and body there only
     copies them to a third party.
+
+    A UnifiedPush endpoint is never receivable, whatever the row declares.
+    Android builds from abe482c3 (2026-06-24) up to e6c025e1 (2026-09-06)
+    registered ``supports_push: true`` together with an endpoint; e6c025e1
+    removed the receiver (03cc6ec1 the leftovers). A phone upgraded since then
+    never re-registers its capabilities, and the registration stores no
+    client version or build date to tell those rows apart, so the endpoint's
+    presence is the only reliable marker of that legacy registration.
     """
     capabilities = device.get("capabilities") or {}
     if not isinstance(capabilities, dict) or capabilities.get("supports_push") is not True:
         return False
-    return bool(device.get("unifiedpush_endpoint") or device.get("fcm_token"))
+    if device.get("unifiedpush_endpoint"):
+        return False
+    return bool(device.get("fcm_token"))
 
 
 def delivered_count(results: List["NotificationResult"]) -> int:
@@ -372,9 +382,8 @@ class PushNotificationService:
             device_tokens: Explicit FCM tokens. If provided, those are used
                 directly (legacy/back-compat). If None, every registered device
                 whose registration can receive push (``device_receives_push``)
-                is dispatched on whichever transport it registered — a
-                UnifiedPush endpoint (preferred) or an FCM token. Other
-                registrations are skipped, not posted to.
+                is sent to its FCM token. Other registrations, including
+                every legacy UnifiedPush endpoint, are skipped, not posted to.
 
         Returns:
             List of NotificationResult for each device dispatched to; empty
@@ -408,26 +417,14 @@ class PushNotificationService:
 
         results = []
         for d in devices:
+            # Only an FCM token can pass: UnifiedPush rows are legacy.
             if not device_receives_push(d):
                 continue
-            endpoint = d.get("unifiedpush_endpoint")
-            token = d.get("fcm_token")
-            if endpoint:
-                results.append(
-                    await self.send_notification(
-                        device_id=d.get("device_id", ""),
-                        title=title,
-                        body=body,
-                        data=data,
-                        unifiedpush_endpoint=endpoint,
-                    )
+            results.append(
+                await self.send_notification(
+                    device_id=d["fcm_token"], title=title, body=body, data=data
                 )
-            elif token:
-                results.append(
-                    await self.send_notification(
-                        device_id=token, title=title, body=body, data=data
-                    )
-                )
+            )
 
         if not results:
             logger.debug("No devices to broadcast to")

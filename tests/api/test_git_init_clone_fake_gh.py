@@ -380,6 +380,21 @@ def test_api_key_cannot_clone_another_projects_repository(env, as_api_key, form)
     assert not _is_repo(target) and not (target / "hello.txt").exists()
 
 
+@pytest.mark.parametrize("url", [
+    "C:\\Users\\me\\other\\repo", "C:/Users/me/other/repo", "d:\\", "\\\\server\\share\\repo",
+])
+def test_api_key_cannot_clone_a_windows_path(env, as_api_key, url):
+    # R10-9: on a Windows install git reads a drive-letter path as a local
+    # path, not as scp-like ssh to host "C", so a key must not get it through.
+    target = _project(env, "p-clone", "thief-win")
+
+    response = env.client.post("/api/v1/projects/p-clone/git/clone", json={"clone_url": url})
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "API keys can clone only HTTPS or SSH remotes"
+    assert not _is_repo(target)
+
+
 def test_api_key_can_clone_an_https_remote(env, as_api_key, monkeypatch):
     bare = _source_repo(env)
     target = _project(env, "p-clone", "keyed")

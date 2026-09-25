@@ -176,6 +176,14 @@ class TestClassifyCloneUrl:
         ("./a:b", "./a:b"),                  # '/' before ':' -> a path, as in git
         ("file:///srv/repos/r.git", "/srv/repos/r.git"),
         ("FILE:///srv/r.git", "/srv/r.git"),
+        # R10-9: Windows drive / UNC / device paths are local on every
+        # platform (git's has_dos_drive_prefix), never scp-like host "C".
+        ("C:\\Users\\me\\repo", "C:\\Users\\me\\repo"),
+        ("C:/Users/me/repo", "C:/Users/me/repo"),
+        ("d:\\", "d:\\"),
+        ("z:/", "z:/"),
+        ("\\\\server\\share\\repo", "\\\\server\\share\\repo"),
+        ("\\\\?\\C:\\repo", "\\\\?\\C:\\repo"),
     ])
     def test_local(self, url, path):
         from app.core.git_service import classify_clone_url
@@ -187,6 +195,8 @@ class TestClassifyCloneUrl:
         "git://host/r.git", "ftp://host/r.git", "foo://x",
         "file://localhost/srv/r.git", "file://srv/r.git", "file:///srv/%2e%2e/r.git",
         "-host:path", "user@-host:path", "@host:path", "host:", " https://x/r.git",
+        # R10-9: a drive-relative path hangs off that drive's cwd; refused.
+        "c:repo", "C:", "x:../../other",
     ])
     def test_invalid(self, url):
         from app.core.git_service import classify_clone_url

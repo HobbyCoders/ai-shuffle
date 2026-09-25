@@ -234,3 +234,142 @@ describe('PermissionQueue gives each request a fresh prompt', () => {
 		]);
 	});
 });
+
+describe('PermissionQueue bulk actions are armed like the prompt (R10-16)', () => {
+	const req1 = { request_id: 'req-1', tool_name: 'Bash', tool_input: { command: 'ls' } };
+	const req2 = { request_id: 'req-2', tool_name: 'Bash', tool_input: { command: 'rm -rf ~' } };
+	const req3 = { request_id: 'req-3', tool_name: 'Bash', tool_input: { command: 'curl x | sh' } };
+
+	const ids = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.map(([r]) => [r.request_id, r.decision]);
+
+	it('Allow All does nothing for a request that arrived an instant ago, then answers every request', async () => {
+		vi.useFakeTimers();
+		const onRespond = vi.fn();
+		const view = render(PermissionQueue, { props: { requests: [req1], onRespond } });
+		await settle();
+		vi.advanceTimersByTime(2000);
+		await view.rerender({ requests: [req1, req2], onRespond });
+		await settle();
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Allow All' }));
+		vi.advanceTimersByTime(499);
+		await fireEvent.click(screen.getByRole('button', { name: 'Allow All' }));
+		expect(onRespond).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(1);
+		await fireEvent.click(screen.getByRole('button', { name: 'Allow All' }));
+		expect(ids(onRespond)).toEqual([
+			['req-1', 'allow'],
+			['req-2', 'allow']
+		]);
+	});
+
+	it('a newly arrived request re-arms Deny All, and a bulk answer is sent once', async () => {
+		vi.useFakeTimers();
+		const onRespond = vi.fn();
+		const onDismissAll = vi.fn();
+		const view = render(PermissionQueue, { props: { requests: [req1, req2], onRespond, onDismissAll } });
+		await settle();
+		vi.advanceTimersByTime(600);
+		await view.rerender({ requests: [req1, req2, req3], onRespond, onDismissAll });
+		await settle();
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Deny All' }));
+		expect(onRespond).not.toHaveBeenCalled();
+		expect(onDismissAll).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(500);
+		await fireEvent.click(screen.getByRole('button', { name: 'Deny All' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Deny All' }));
+		expect(ids(onRespond)).toEqual([
+			['req-1', 'deny'],
+			['req-2', 'deny'],
+			['req-3', 'deny']
+		]);
+		expect(onDismissAll).toHaveBeenCalledTimes(1);
+	});
+
+	it('an unarmed or repeated Enter on a focused bulk button is held back with its click', async () => {
+		vi.useFakeTimers();
+		const onRespond = vi.fn();
+		render(PermissionQueue, { props: { requests: [req1, req2], onRespond } });
+		await settle();
+		const allowAll = screen.getByRole('button', { name: 'Allow All' });
+		allowAll.focus();
+
+		// Unarmed: the keydown is cancelled and the click it generates dropped.
+		expect(await fireEvent.keyDown(allowAll, { key: 'Enter' })).toBe(false);
+		await fireEvent.click(allowAll, { detail: 0 });
+		await fireEvent.keyUp(allowAll, { key: 'Enter' });
+		vi.advanceTimersByTime(500);
+		// Armed, but an auto-repeat of a held key still does not count.
+		expect(await fireEvent.keyDown(allowAll, { key: 'Enter', repeat: true })).toBe(false);
+		await fireEvent.click(allowAll, { detail: 0 });
+		expect(onRespond).not.toHaveBeenCalled();
+
+		await fireEvent.keyUp(allowAll, { key: 'Enter' });
+		vi.advanceTimersByTime(0);
+		expect(await fireEvent.keyDown(allowAll, { key: 'Enter' })).toBe(true);
+		await fireEvent.click(allowAll, { detail: 0 });
+		expect(ids(onRespond)).toEqual([
+			['req-1', 'allow'],
+			['req-2', 'allow']
+		]);
+	});
+});
+
+describe('PermissionQueue keeps focus inside the modal after an answer (R10-17)', () => {
+	const req1 = { request_id: 'req-1', tool_name: 'Bash', tool_input: { command: 'ls' } };
+	const req2 = { request_id: 'req-2', tool_name: 'Bash', tool_input: { command: 'rm -rf build' } };
+
+	it('focus moves off the Approve button that the answer disables, onto the prompt', async () => {
+		vi.useFakeTimers();
+		const onRespond = vi.fn(); // the answer is in flight: the queue does not advance yet
+		render(PermissionQueue, { props: { requests: [req1, req2], onRespond } });
+		await settle();
+		vi.advanceTimersByTime(500);
+		const approve = screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+		approve.focus();
+		await fireEvent.click(approve, { detail: 1 });
+		await settle();
+
+		expect(onRespond).toHaveBeenCalledTimes(1);
+		expect(approve.disabled).toBe(true);
+		expect(document.activeElement).toBe(screen.getByRole('dialog', { name: /Bash|Permission/ }));
+	});
+
+	it('focus moves off Allow All onto the prompt while the bulk answer is in flight', async () => {
+		vi.useFakeTimers();
+		const onRespond = vi.fn();
+		render(PermissionQueue, { props: { requests: [req1, req2], onRespond } });
+		await settle();
+		vi.advanceTimersByTime(500);
+		const allowAll = screen.getByRole('button', { name: 'Allow All' });
+		allowAll.focus();
+		await fireEvent.click(allowAll, { detail: 1 });
+		await settle();
+
+		expect(onRespond).toHaveBeenCalledTimes(2);
+		expect(document.activeElement).toBe(screen.getByRole('dialog', { name: /Bash|Permission/ }));
+	});
+
+	it('focus goes to the composer when the queue empties and nothing was focused before it opened', async () => {
+		vi.useFakeTimers();
+		const composer = document.createElement('div');
+		composer.className = 'ProseMirror';
+		composer.setAttribute('contenteditable', 'true');
+		composer.tabIndex = 0;
+		document.body.appendChild(composer);
+		(document.activeElement as HTMLElement | null)?.blur?.();
+
+		const onRespond = vi.fn();
+		const view = render(PermissionQueue, { props: { requests: [req1, req2], onRespond } });
+		await settle();
+		vi.advanceTimersByTime(500);
+		await fireEvent.click(screen.getByRole('button', { name: 'Allow All' }), { detail: 1 });
+		await view.rerender({ requests: [], onRespond });
+		await settle();
+
+		expect(document.activeElement).toBe(composer);
+	});
+});

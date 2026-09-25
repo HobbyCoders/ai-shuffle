@@ -53,6 +53,10 @@ _SCP_LIKE_RE = re.compile(
 )
 
 
+# ``C:`` drive prefix (git's has_dos_drive_prefix).
+_DOS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+
 def classify_clone_url(clone_url: str) -> Tuple[str, Optional[str]]:
     """How git will read *clone_url* as a clone source.
 
@@ -80,6 +84,19 @@ def classify_clone_url(clone_url: str) -> Tuple[str, Optional[str]]:
                 return "invalid", "A file:// clone URL must name an absolute local path"
             return "local", path
         return "invalid", "Unsupported clone URL: use an HTTPS or SSH URL"
+    # Windows paths, read before the scp-like test the way git for Windows
+    # does (connect.c url_is_local_not_ssh + has_dos_drive_prefix): a
+    # one-letter "host" followed by ':' is a drive letter, never ssh. Applied
+    # on every platform, since a POSIX server never has a one-letter ssh host
+    # worth the ambiguity. ``C:\\repo`` / ``C:/repo`` are absolute local
+    # paths; a drive-relative ``C:repo`` depends on that drive's cwd, so it is
+    # refused rather than guessed. UNC and ``\\?\`` device paths are local.
+    if _DOS_DRIVE_RE.match(url):
+        if len(url) > 2 and url[2] in "\\/":
+            return "local", url
+        return "invalid", "A Windows clone path must be absolute (C:\\path\\to\\repo)"
+    if url.startswith("\\\\"):
+        return "local", url
     colon, slash = url.find(":"), url.find("/")
     if colon != -1 and (slash == -1 or colon < slash):
         # No ``/`` before the first ``:`` -> git reads it as scp-like ssh.
