@@ -114,7 +114,12 @@ class DocsIndex:
 
             title = meta.get("title", slug.replace("-", " ").title())
             description = meta.get("description", "")
-            order = int(meta.get("order", 99))
+            # A malformed ``order`` sorts last instead of failing the whole
+            # index (every documentation request would 500 until a restart).
+            try:
+                order = int(meta.get("order", 99))
+            except ValueError:
+                order = 99
 
             entry = DocEntry(
                 slug=slug,

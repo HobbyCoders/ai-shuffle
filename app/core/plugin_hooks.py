@@ -49,7 +49,8 @@ def get_file_based_agents(svc) -> List[Dict[str, Any]]:
                 agent_data["file_path"] = str(agent_file)
 
                 agents.append(agent_data)
-            except IOError as e:
+            except (OSError, UnicodeDecodeError) as e:
+                # One unreadable or non-UTF-8 file must not hide every agent.
                 logger.error(f"Failed to read agent file {agent_file}: {e}")
 
     return agents
@@ -166,38 +167,9 @@ def get_hooks_from_plugins(plugins: List) -> List[Dict[str, Any]]:
                 # 3. List of hook objects: [{"event": "PreToolUse", "type": "prompt"}]
                 # 4. Object with "hooks" key: {"hooks": [...]}
 
-                hooks_list = []
-                if isinstance(hooks_data, list):
-                    hooks_list = hooks_data
-                elif isinstance(hooks_data, dict):
-                    if "hooks" in hooks_data:
-                        hooks_list = hooks_data["hooks"]
-                    else:
-                        # Dict mapping event names to something (file paths, configs, etc)
-                        hooks_list = list(hooks_data.keys())
-
-                logger.debug(f"[get_hooks_from_plugins] Plugin {plugin.id}: found {len(hooks_list)} hooks in hooks.json")
-                for hook in hooks_list:
-                    if isinstance(hook, str):
-                        # Simple event name string
-                        result.append({
-                            "plugin_id": plugin.id,
-                            "plugin_name": plugin.name,
-                            "event": hook,
-                            "hook_type": "prompt",
-                            "description": None,
-                            "tool_matcher": None,
-                        })
-                    elif isinstance(hook, dict):
-                        # Full hook object
-                        result.append({
-                            "plugin_id": plugin.id,
-                            "plugin_name": plugin.name,
-                            "event": hook.get("event", "Unknown"),
-                            "hook_type": hook.get("type", "prompt"),
-                            "description": hook.get("description"),
-                            "tool_matcher": hook.get("toolMatcher"),
-                        })
+                if isinstance(hooks_data, dict) and "hooks" in hooks_data:
+                    hooks_data = hooks_data["hooks"]
+                result.extend(_hook_rows(plugin, hooks_data))
             except Exception as e:
                 logger.error(f"[get_hooks_from_plugins] Error parsing hooks.json for {plugin.id}: {e}")
 
@@ -211,20 +183,55 @@ def get_hooks_from_plugins(plugins: List) -> List[Dict[str, Any]]:
                 with open(plugin_json) as f:
                     data = json.load(f)
 
-                hooks = data.get("hooks", [])
-                for hook in hooks:
-                    result.append({
-                        "plugin_id": plugin.id,
-                        "plugin_name": plugin.name,
-                        "event": hook.get("event", "Unknown"),
-                        "hook_type": hook.get("type", "prompt"),
-                        "description": hook.get("description"),
-                        "tool_matcher": hook.get("toolMatcher"),
-                    })
+                # Same shapes as hooks.json. A string ``hooks`` is a path to a
+                # hooks file, not a list of events; the standard object form
+                # ({"PreToolUse": [...]}) used to raise on the first key and
+                # silently drop every hook the plugin declared.
+                if isinstance(data, dict):
+                    result.extend(_hook_rows(plugin, data.get("hooks")))
             except Exception:
                 pass
 
     return result
+
+
+def _hook_rows(plugin, hooks_data: Any) -> List[Dict[str, Any]]:
+    """Hook info rows for one plugin's hook declaration.
+
+    Accepts a list of event names or hook objects, or a dict mapping event
+    names to their definitions (the Claude Code format). Anything else,
+    including a string path to a separate hooks file, contributes nothing.
+    """
+    if isinstance(hooks_data, dict):
+        hooks_list: List[Any] = list(hooks_data.keys())
+    elif isinstance(hooks_data, list):
+        hooks_list = hooks_data
+    else:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for hook in hooks_list:
+        if isinstance(hook, str):
+            # Simple event name string
+            rows.append({
+                "plugin_id": plugin.id,
+                "plugin_name": plugin.name,
+                "event": hook,
+                "hook_type": "prompt",
+                "description": None,
+                "tool_matcher": None,
+            })
+        elif isinstance(hook, dict):
+            # Full hook object
+            rows.append({
+                "plugin_id": plugin.id,
+                "plugin_name": plugin.name,
+                "event": hook.get("event", "Unknown"),
+                "hook_type": hook.get("type", "prompt"),
+                "description": hook.get("description"),
+                "tool_matcher": hook.get("toolMatcher"),
+            })
+    return rows
 
 
 def _parse_plugin_hook_file(hook_file: Path, plugin) -> Optional[Dict[str, Any]]:

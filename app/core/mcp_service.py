@@ -258,14 +258,22 @@ class McpService:
 
     def _read_json_file(self, path: Path, default: Any = None) -> Any:
         """Safely read a JSON file"""
+        fallback = default if default is not None else {}
         try:
             if path.exists():
-                with open(path, 'r') as f:
-                    return json.load(f)
-            return default if default is not None else {}
-        except (json.JSONDecodeError, IOError) as e:
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                # Every caller indexes the result as an object; a file holding
+                # ``null`` or a list would otherwise raise AttributeError.
+                if not isinstance(data, dict):
+                    logger.error(f"Ignoring {path}: top-level JSON is not an object")
+                    return fallback
+                return data
+            return fallback
+        except (ValueError, OSError) as e:
+            # ValueError covers JSONDecodeError and a non-UTF-8 file.
             logger.error(f"Error reading {path}: {e}")
-            return default if default is not None else {}
+            return fallback
 
     def _write_json_file(self, path: Path, data: Any) -> bool:
         """Safely write a JSON file with atomic operation"""
@@ -470,7 +478,7 @@ class McpService:
         data = self._read_json_file(self.USER_MCP_FILE, {})
         project_key, project_data = self._find_project_entry(data)
         if project_key is None or project_data is None:
-            raise ValueError(f"Project not found in ~/.claude.json")
+            raise ValueError("Project not found in ~/.claude.json")
 
         mcp_servers = project_data.get("mcpServers", {})
         if name not in mcp_servers:
@@ -766,7 +774,12 @@ class McpService:
 
         if not config.name:
             errors.append("Server name is required")
-        elif not config.name.replace("-", "").replace("_", "").isalnum():
+        elif not (
+            config.name.isascii()
+            and config.name.replace("-", "").replace("_", "").isalnum()
+        ):
+            # ASCII only: str.isalnum() accepts letters and digits from any
+            # script, which tool names (mcp__<server>__<tool>) cannot carry.
             errors.append("Server name must be alphanumeric with hyphens/underscores only")
 
         if config.type in [McpServerType.STDIO, "stdio"]:

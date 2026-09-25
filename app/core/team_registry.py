@@ -260,7 +260,8 @@ class TeamRegistry:
                     existing.teammate_session_id = sid
 
                 pid = rec.get("pid")
-                if isinstance(pid, int) and pid > 0:
+                # bool is an int: a JSON ``true`` must not become pid 1.
+                if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
                     existing.pid = pid
 
                 status = rec.get("status")
@@ -480,6 +481,17 @@ def _parse_output_for_teammates(output: Any) -> List[Dict[str, Any]]:
 
 def _scan_team_dir_for_teammates(team_name: str) -> List[Dict[str, Any]]:
     """Fallback: read ~/.claude/teams/{team_name}/ for teammate JSON files."""
+    # The team name comes from model-authored tool input: never let it name a
+    # directory outside ~/.claude/teams (an absolute path or ``..`` segment
+    # would, and a pid read from there is later signalled by kill_teammate).
+    if (
+        not team_name
+        or team_name in (".", "..")
+        or "/" in team_name
+        or "\\" in team_name
+        or "\0" in team_name
+    ):
+        return []
     base = Path.home() / ".claude" / "teams" / team_name
     if not base.exists() or not base.is_dir():
         return []
