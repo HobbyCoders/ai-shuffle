@@ -661,3 +661,57 @@ class TestWebhookSecretExposure:
             resp = client.get(url, headers=headers)
             assert resp.status_code == 403
             assert SECRET not in resp.text and CIPHERTEXT not in resp.text
+
+
+# =============================================================================
+# Lifecycle against a real (paused) scheduler
+# =============================================================================
+
+
+@pytest.fixture
+def live_singleton_scheduler():
+    """Attach a real, paused APScheduler to the manager singleton."""
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.core.automation_manager import automation_manager
+
+    sched = BackgroundScheduler(timezone="UTC")
+    sched.start(paused=True)
+    saved = (automation_manager._scheduler, dict(automation_manager._scheduled_versions))
+    automation_manager._scheduler = sched
+    automation_manager._scheduled_versions.clear()
+    yield sched
+    sched.shutdown(wait=False)
+    automation_manager._scheduler = saved[0]
+    automation_manager._scheduled_versions.clear()
+    automation_manager._scheduled_versions.update(saved[1])
+
+
+class TestLifecycleWithScheduler:
+    def test_enable_update_disable_keep_exactly_the_right_jobs(
+        self, authenticated_client, live_singleton_scheduler
+    ):
+        sched = live_singleton_scheduler
+        profile_id = _create_profile(authenticated_client)
+        aid = authenticated_client.post("/api/v1/automations", json={
+            "name": "Weekdays",
+            "triggers": [
+                {"type": "cron", "config": {"expression": "0 9 * * 1-5"}},
+                {"type": "interval", "config": {"seconds": 600}},
+            ],
+            "prompt": "standup",
+            "profile_id": profile_id,
+        }).json()["id"]
+        assert sched.get_jobs() == []  # created disabled
+
+        assert authenticated_client.post(f"/api/v1/automations/{aid}/enable").status_code == 200
+        assert sorted(j.id for j in sched.get_jobs()) == [f"{aid}__trigger_0", f"{aid}__trigger_1"]
+
+        resp = authenticated_client.patch(f"/api/v1/automations/{aid}", json={
+            "triggers": [{"type": "cron", "config": {"expression": "30 8 * * sun-thu"}}],
+        })
+        assert resp.status_code == 200
+        assert [j.id for j in sched.get_jobs()] == [f"{aid}__trigger_0"]
+        assert sched.get_job(f"{aid}__trigger_0").args[2] == {"expression": "30 8 * * sun-thu"}
+
+        assert authenticated_client.post(f"/api/v1/automations/{aid}/disable").status_code == 200
+        assert sched.get_jobs() == []

@@ -955,7 +955,12 @@ class AutomationManager:
             # Awaiting inside the handler keeps the active exception bound to
             # this frame, so the bare ``raise`` below still re-raises it.
             await run_sync(_settle_failure)
-            raise
+            if actual is e:
+                raise
+            # Propagate the unwrapped error: _execute records the failure a
+            # second time from what it catches, and the group's text
+            # ("unhandled errors in a TaskGroup") would overwrite this one.
+            raise actual from e
 
     # ------------------------------------------------------------------
     # Prompt execution — automation runs ARE normal streaming sessions
@@ -1315,8 +1320,18 @@ class AutomationManager:
 
         # Execute in background
         async def _run():
-            async with self._lock:
-                self._running[automation["id"]] = asyncio.current_task()
+            auto_id = automation["id"]
+            me = asyncio.current_task()
+            # Same one-run-per-automation latch as _execute: queue behind an
+            # in-flight run rather than run beside it and overwrite (and later
+            # pop) that run's latch entry.
+            while True:
+                async with self._lock:
+                    holder = self._running.get(auto_id)
+                    if holder is None or holder.done():
+                        self._running[auto_id] = me
+                        break
+                await asyncio.wait({holder})
             try:
                 await self._execute_run(
                     automation,
@@ -1326,7 +1341,8 @@ class AutomationManager:
                 )
             finally:
                 async with self._lock:
-                    self._running.pop(automation["id"], None)
+                    if self._running.get(auto_id) is me:
+                        self._running.pop(auto_id, None)
 
         self._create_tracked_task(_run(), name=f"auto-approved-{run['id']}")
         return run
@@ -1371,19 +1387,21 @@ class AutomationManager:
             if dedup_window and isinstance(dedup_window, (int, float)) and dedup_window > 0 and response:
                 recent = database.get_automation_runs(automation["id"], limit=5)
                 now = datetime.now(timezone.utc)
+                # Run rows store only the response tail, so compare tails.
+                stored_response = self._response_tail(response)
                 for prev in recent:
                     if prev["id"] == run_id:
                         continue
                     if (
-                        prev.get("response") == response
+                        prev.get("response") == stored_response
                         and prev.get("output_status") == "delivered"
                     ):
                         completed = prev.get("completed_at")
                         if completed:
                             try:
-                                completed_dt = datetime.fromisoformat(
-                                    str(completed).replace("Z", "+00:00").replace("+00:00", "")
-                                )
+                                completed_dt = datetime.fromisoformat(str(completed).replace("Z", "+00:00"))
+                                if completed_dt.tzinfo is None:
+                                    completed_dt = completed_dt.replace(tzinfo=timezone.utc)
                                 age = (now - completed_dt).total_seconds()
                                 if 0 < age < dedup_window:
                                     logger.info(
