@@ -70,21 +70,39 @@ def test_register_url_os_override(monkeypatch):
 #
 # Matrix (most specific first): an explicit BROWSER_SSRF_ALLOW always wins; then
 # BROWSER_SSRF_ALLOW_LOOPBACK true/false; then the default, which ALLOWS
-# loopback. AI Shuffle exposes no tenancy setting, so "self-hosted single user"
-# is what an install is — Docker included. The deployment-mode probe is no
-# longer consulted at all.
+# loopback in every runtime (Docker, native and desktop). AI Shuffle exposes no
+# tenancy setting, so the deployment-mode probe does not gate it (e55cfa74).
+# That is the documented policy in docs/internal/DEVELOPMENT.md and .env.example.
+
+_REAL_IS_LOCAL_MODE = type(settings).is_local_mode
 
 
-def test_default_allows_loopback(monkeypatch):
-    """Unset knob, non-local (Docker) deployment: loopback is allowed."""
+def test_docker_default_allows_loopback(monkeypatch):
+    """Unset knob in Docker: loopback is allowed."""
     _set_local_mode(monkeypatch, False)
 
     env = mcp_config._build_browser_server_env({}, session_id=None)
     assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
 
 
-def test_local_mode_allows_loopback_by_default(monkeypatch):
+def test_native_default_allows_loopback(monkeypatch):
     _set_local_mode(monkeypatch, True)
+
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
+
+
+@pytest.mark.parametrize("local_mode_env", [
+    # The desktop shell starts the worker with LOCAL_MODE=true (desktop/src/main/worker.ts).
+    "true",
+    # An explicit LOCAL_MODE=false is a Docker deployment.
+    "false",
+])
+def test_runtime_default_is_the_same_under_real_deployment_detection(monkeypatch, local_mode_env):
+    """End to end through settings.is_local_mode() and app.core.platform, not a stub."""
+    monkeypatch.setattr(type(settings), "is_local_mode", _REAL_IS_LOCAL_MODE)
+    monkeypatch.setattr(settings, "local_mode", None, raising=False)
+    monkeypatch.setenv("LOCAL_MODE", local_mode_env)
 
     env = mcp_config._build_browser_server_env({}, session_id=None)
     assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
@@ -101,8 +119,10 @@ def test_deployment_mode_is_not_consulted(monkeypatch):
     assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
 
 
-def test_setting_false_blocks_loopback(monkeypatch):
-    """An install fronted for other people turns it back off explicitly."""
+@pytest.mark.parametrize("local_mode", [False, True], ids=["docker", "native"])
+def test_setting_false_blocks_loopback(monkeypatch, local_mode):
+    """An install fronted for other people turns it off explicitly, in any runtime."""
+    _set_local_mode(monkeypatch, local_mode)
     monkeypatch.setattr(settings, "browser_ssrf_allow_loopback", False)
 
     env = mcp_config._build_browser_server_env({}, session_id=None)
@@ -200,6 +220,7 @@ def test_own_address_is_routable_or_absent(monkeypatch, host, expected):
 def test_loopback_stand_in_is_allowed_with_automatic_loopback(monkeypatch):
     """browser-mcp now refuses private addresses by default, so the loopback
     stand-in (this host's own address) rides on the automatic loopback allow."""
+    _set_local_mode(monkeypatch, True)
     monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
     env = mcp_config._build_browser_server_env({}, session_id=None)
     assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK + ",172.17.0.5/32"
@@ -214,10 +235,30 @@ def test_explicit_allow_is_not_widened_by_the_loopback_stand_in(monkeypatch):
 
 
 def test_stand_in_is_not_allowed_when_loopback_is_off(monkeypatch):
+    _set_local_mode(monkeypatch, True)
     monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
     monkeypatch.setattr(settings, "browser_ssrf_allow_loopback", False, raising=False)
     env = mcp_config._build_browser_server_env({}, session_id=None)
     assert "BROWSER_SSRF_ALLOW" not in env
+
+
+def test_docker_default_allows_loopback_and_the_stand_in(monkeypatch):
+    _set_local_mode(monkeypatch, False)
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK + ",172.17.0.5/32"
+    assert env["BROWSER_LOOPBACK_HOST"] == "172.17.0.5"
+
+
+def test_docker_opt_out_refuses_loopback_and_the_stand_in(monkeypatch):
+    """The container's own address is private; with loopback off it stays
+    refused too, but the stand-in is still named for error messages."""
+    _set_local_mode(monkeypatch, False)
+    monkeypatch.setattr(settings, "browser_ssrf_allow_loopback", False, raising=False)
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert "BROWSER_SSRF_ALLOW" not in env
+    assert env["BROWSER_LOOPBACK_HOST"] == "172.17.0.5"
 
 
 def test_worker_ports_are_always_denied(monkeypatch):

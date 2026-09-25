@@ -833,22 +833,18 @@ class Settings(BaseSettings):
     error_log_max_warning_rows: int = 1000
 
     # Whether the browser MCP server may reach loopback (127.0.0.0/8, ::1,
-    # "localhost"). browser-mcp blocks loopback by default: on a shared/multi-user
-    # deployment a hostile page could steer the agent's browser into the app's own
-    # API or a neighbouring service on 127.0.0.1. On a local/self-hosted install
-    # there is nothing on loopback the agent cannot already reach through its
-    # shell, and blocking it means an agent cannot view the dev server it just
-    # started.
+    # "localhost"). browser-mcp blocks loopback by default, so a hostile page
+    # cannot steer the agent's browser into a service on 127.0.0.1.
     #
-    # None (default) = auto. AI Shuffle exposes no tenancy model: there is one
-    # admin password, one operator, and every session's agent already has an
-    # unrestricted shell on the box, so "self-hosted single user" is what an
-    # install IS — a Docker/Unraid deployment is not a shared one. Auto
-    # therefore ALLOWS loopback, in Docker as well as in local mode; the
-    # deployment-mode probe is not a tenancy signal and does not gate it.
+    # None (default) = auto, which ALLOWS loopback in every runtime (Docker,
+    # native and desktop): AI Shuffle has one owner and the agent already has a
+    # shell on the box, and blocking loopback means an agent cannot view the dev
+    # server it just started. The deployment-mode probe is not a tenancy signal
+    # and does not gate this. The worker's own ports and the DevTools port stay
+    # denied either way.
     #
-    # BROWSER_SSRF_ALLOW_LOOPBACK=false turns it back off for an install that
-    # is fronted for other people. Setting BROWSER_SSRF_ALLOW explicitly is
+    # BROWSER_SSRF_ALLOW_LOOPBACK=false turns it off for an install that is
+    # fronted for other people. Setting BROWSER_SSRF_ALLOW explicitly is
     # stronger still: that value is passed through verbatim and nothing is
     # appended to it — see app.core.mcp_config._browser_ssrf_allow.
     browser_ssrf_allow_loopback: Optional[bool] = Field(

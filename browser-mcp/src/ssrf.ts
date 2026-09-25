@@ -22,9 +22,10 @@
  *   - Loopback (127.0.0.0/8, ::1, "localhost") and other bogon ranges are blocked
  *     by DEFAULT but MAY be re-enabled with an explicit BROWSER_SSRF_ALLOW entry
  *     (an operator opt-in; also how the test harness reaches its own loopback
- *     fixture server). Local/self-hosted installs of the app inject that entry
- *     automatically so an agent can view a dev server it just started — see
- *     ``app/core/mcp_config.py`` and the BROWSER_SSRF_ALLOW_LOOPBACK setting.
+ *     fixture server). The app injects that entry by default in every runtime
+ *     (Docker, native and desktop) so an agent can view a dev server it just
+ *     started, unless BROWSER_SSRF_ALLOW_LOOPBACK=false — see
+ *     ``app/core/mcp_config.py``.
  *
  * Every block reason names its own remedy: a blocked address is a configuration
  * decision, not a network failure, and the agent that hits it should be able to

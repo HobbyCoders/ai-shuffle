@@ -75,16 +75,22 @@ def _browser_ssrf_allow(explicit: Optional[str]) -> Optional[str]:
        env) is passed through untouched — the operator has stated the policy
        and we do not append to it.
     2. ``BROWSER_SSRF_ALLOW_LOOPBACK`` true/false, when set, decides.
-    3. Unset: loopback is ALLOWED. AI Shuffle has no multi-tenant or cloud mode
-       to detect — one admin password, one operator, and the agent already has
-       a shell on the same host — so a self-hosted install is single-user by
-       construction whether it runs in Docker or natively. ``is_local_mode()``
-       is a Docker-vs-native probe, not a tenancy signal, so it does not decide
-       this. An install fronted for other people sets
+    3. Unset: loopback is ALLOWED in every runtime (Docker, native and
+       desktop). AI Shuffle has no multi-tenant mode — one owner, and the agent
+       already has a shell on the same host — so a self-hosted install is
+       single-user whether it runs in Docker or natively. ``is_local_mode()``
+       is a Docker-vs-native probe, not a tenancy signal, and gating on it
+       refused a single-user Unraid agent checking a UI on 127.0.0.1 (commit
+       e55cfa74). An install fronted for other people sets
        ``BROWSER_SSRF_ALLOW_LOOPBACK=false``.
 
+    The tradeoff: with loopback allowed, a page the agent visits can reach
+    anything listening on the worker's loopback that is not on the deny list.
+    The worker's own ports and the DevTools port are always denied (see
+    ``_worker_deny_ports`` and browser-mcp ``compilePolicy``).
+
     Returns None only when loopback is explicitly disabled, leaving browser-mcp
-    on its own default-block policy.
+    on its own default-block policy (loopback, private LAN and metadata refused).
     """
     if explicit:
         return explicit

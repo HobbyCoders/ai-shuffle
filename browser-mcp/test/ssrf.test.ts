@@ -301,3 +301,65 @@ describe("describePolicy", () => {
     expect(s).toContain("10.0.0.0/8");
   });
 });
+
+describe("documented runtime defaults (docs/internal/DEVELOPMENT.md, .env.example)", () => {
+  // What app/core/mcp_config.py hands this server with nothing configured by the
+  // operator. Every runtime (Docker, native, desktop) gets loopback plus this
+  // host's own address (the loopback stand-in); BROWSER_SSRF_ALLOW_LOOPBACK=false
+  // injects no BROWSER_SSRF_ALLOW at all.
+  const DOCKER = compilePolicy({
+    BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,172.17.0.5/32",
+    BROWSER_SSRF_DENY_PORTS: "8000,8001",
+  } as NodeJS.ProcessEnv);
+  const NATIVE = compilePolicy({
+    BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,192.168.1.20/32",
+    BROWSER_SSRF_DENY_PORTS: "8000,8001",
+  } as NodeJS.ProcessEnv);
+  const LOOPBACK_OFF = compilePolicy({ BROWSER_SSRF_DENY_PORTS: "8000,8001" } as NodeJS.ProcessEnv);
+
+  it("Docker and native allow loopback dev servers and the stand-in", () => {
+    for (const p of [DOCKER, NATIVE]) {
+      expect(classifyIp("127.0.0.1", p, 5173).blocked).toBe(false);
+      expect(classifyIp("::1", p, 5173).blocked).toBe(false);
+      expect(classifyIp("::ffff:127.0.0.1", p, 5173).blocked).toBe(false);
+    }
+    expect(classifyIp("172.17.0.5", DOCKER, 5173).blocked).toBe(false);
+    expect(classifyIp("192.168.1.20", NATIVE, 5173).blocked).toBe(false);
+  });
+
+  it("the rest of the LAN stays refused in every runtime", () => {
+    for (const p of [DOCKER, NATIVE, LOOPBACK_OFF]) {
+      for (const ip of ["172.17.0.1", "192.168.1.21", "10.0.0.1", "100.64.0.1", "fd12::1"]) {
+        expect(classifyIp(ip, p, 80).blocked, ip).toBe(true);
+      }
+    }
+  });
+
+  it("BROWSER_SSRF_ALLOW_LOOPBACK=false refuses loopback and names the setting", () => {
+    for (const ip of ["127.0.0.1", "::1", "::ffff:127.0.0.1", "::", "172.17.0.5"]) {
+      expect(classifyIp(ip, LOOPBACK_OFF, 5173).blocked, ip).toBe(true);
+    }
+    expect(classifyIp("127.0.0.1", LOOPBACK_OFF, 5173).reason).toContain("BROWSER_SSRF_ALLOW_LOOPBACK");
+  });
+
+  it("every runtime refuses metadata and the worker and DevTools ports, and allows public hosts", () => {
+    for (const p of [DOCKER, NATIVE, LOOPBACK_OFF]) {
+      expect(classifyIp("169.254.169.254", p, 80).blocked).toBe(true);
+      expect(classifyIp("fd00:ec2::254", p, 80).blocked).toBe(true);
+      expect(classifyIp("127.0.0.1", p, 8000).blocked).toBe(true);
+      expect(classifyIp("127.0.0.1", p, 8001).blocked).toBe(true);
+      expect(classifyIp("127.0.0.1", p, 9221).blocked).toBe(true);
+      expect(classifyIp("8.8.8.8", p, 443).blocked).toBe(false);
+    }
+  });
+
+  it("BROWSER_SSRF_BLOCK removes loopback (or a public range) and wins over an allow", () => {
+    const p = compilePolicy({
+      BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,203.0.113.0/24",
+      BROWSER_SSRF_BLOCK: "203.0.113.0/24,127.0.0.1/32",
+    } as NodeJS.ProcessEnv);
+    expect(classifyIp("203.0.113.7", p).blocked).toBe(true);
+    expect(classifyIp("127.0.0.1", p).blocked).toBe(true);
+    expect(classifyIp("127.0.0.2", p).blocked).toBe(false);
+  });
+});
