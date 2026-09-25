@@ -15,14 +15,16 @@ export interface UpdateState {
 /**
  * How often the shell trades update state with its worker (the web UI's
  * update button reads that state and queues check/download/install requests
- * there). Each exchange is a local request and a settings read in the
- * worker, so this is not the 2 s it used to be. It cannot go past about 8 s
- * without a worker change: the worker treats the desktop updater as gone
- * after 10 s of silence and drops a queued request after 10 s
- * (app/core/application_updates.py). Phase changes are pushed at once, so
- * the button still follows a check or download without waiting for a tick.
+ * there). Each exchange is a local request; the worker answers one with
+ * nothing queued without a settings read. The worker treats the desktop
+ * updater as present for 45 s after a report and keeps a queued request for
+ * 60 s (DESKTOP_PRESENCE_SECONDS and DESKTOP_REQUEST_SECONDS in
+ * app/core/application_updates.py), so this must stay under 45 s. Phase
+ * changes are pushed at once, so the button still follows a check or
+ * download without waiting for a tick; a request queued from the web UI waits
+ * up to one interval.
  */
-export const BRIDGE_INTERVAL_MS = 8_000;
+export const BRIDGE_INTERVAL_MS = 30_000;
 
 export class Updater {
   private state: UpdateState = { phase: 'unsupported', version: null, percent: null, error: null, checkedAt: null };

@@ -18,6 +18,15 @@ _bridge_lock = threading.Lock()
 _desktop_state = {}
 _desktop_seen = 0.0
 _desktop_request = None
+# The desktop shell reports every 30 s (BRIDGE_INTERVAL_MS in
+# desktop/src/main/updater.ts) and at once on a phase change. Presence spans
+# one missed report; a queued request outlives the wait for the next report.
+DESKTOP_PRESENCE_SECONDS = 45
+DESKTOP_REQUEST_SECONDS = 60
+
+
+def _desktop_present():
+    return bool(_desktop_seen) and time.monotonic() - _desktop_seen < DESKTOP_PRESENCE_SECONDS
 
 
 def all_workers():
@@ -31,7 +40,8 @@ def desktop_exchange(state):
         _desktop_state = dict(state)
         _desktop_seen = time.monotonic()
         request, _desktop_request = _desktop_request, None
-    if not allowed() or not request or request["expires_at"] < time.time():
+    # Most reports carry nothing back: answer those without the settings read.
+    if not request or request["expires_at"] < time.time() or not allowed():
         return {}
     return request
 
@@ -90,7 +100,7 @@ def status():
             result.update(phase="error", error="Cannot read application updater status. Check the container logs.")
     else:
         with _bridge_lock:
-            if _desktop_seen and time.monotonic() - _desktop_seen < 10:
+            if _desktop_present():
                 result.update(_desktop_state)
                 result["supported"] = _desktop_state.get("phase") != "unsupported"
                 result["kind"] = "desktop"
@@ -104,12 +114,13 @@ def enqueue(action):
     if not allowed():
         raise ValueError("Application updates are disabled in Account settings")
     root = control_root()
-    request = {"action": action, "expires_at": time.time() + 10}
     if root:
-        atomic_json(root / "request.json", request)
+        # The container supervisor polls its request file every few seconds.
+        atomic_json(root / "request.json", {"action": action, "expires_at": time.time() + 10})
         return
+    request = {"action": action, "expires_at": time.time() + DESKTOP_REQUEST_SECONDS}
     with _bridge_lock:
-        if not _desktop_seen or time.monotonic() - _desktop_seen >= 10 or _desktop_state.get("phase") == "unsupported":
+        if not _desktop_present() or _desktop_state.get("phase") == "unsupported":
             raise ValueError("This worker's application updater is unavailable")
         if _desktop_request and _desktop_request["expires_at"] >= time.time():
             raise ValueError("An update request is already queued")

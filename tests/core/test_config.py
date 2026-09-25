@@ -705,3 +705,62 @@ class TestSettingsConfigClass:
 
         assert Settings.model_config.get('env_file') == '.env'
         assert Settings.model_config.get('env_file_encoding') == 'utf-8'
+
+
+class TestBlankEnvironmentValues:
+    """Unraid passes blank template fields to the container as empty variables."""
+
+    def _settings(self):
+        from app.core.config import Settings
+        return Settings(_env_file=None)
+
+    def test_blank_bool_int_and_path_settings_keep_their_defaults(self, monkeypatch):
+        for name in ("BROWSER_SSRF_ALLOW_LOOPBACK", "COOKIE_SECURE", "AI_SHUFFLE_DURABLE_TASKS"):
+            monkeypatch.setenv(name, "")
+        monkeypatch.setenv("PORT", "")
+        monkeypatch.setenv("SESSION_EXPIRE_DAYS", "  ")
+        monkeypatch.setenv("WS_RATE_LIMIT_WINDOW_SECONDS", "")
+        monkeypatch.setenv("TOOLS_DIR", "")
+        settings = self._settings()
+        assert settings.browser_ssrf_allow_loopback is None
+        assert settings.cookie_secure is True and settings.durable_task_state is True
+        assert settings.port == 8000 and settings.session_expire_days == 30
+        assert settings.ws_rate_limit_window_seconds == 10.0
+        assert settings.tools_dir is None
+
+    def test_blank_comma_separated_list_setting_is_kept_as_given(self, monkeypatch):
+        # List-like settings are comma-separated text; a blank text value is a value.
+        monkeypatch.setenv("TRUSTED_PROXIES", "")
+        monkeypatch.setenv("CORS_ORIGINS", "")
+        settings = self._settings()
+        assert settings.trusted_proxies == "" and settings.cors_origins == ""
+
+    def test_no_setting_is_json_decoded_from_the_environment(self):
+        # pydantic-settings JSON-decodes list/dict/set/tuple fields before any
+        # validator runs, so a blank value for one would still fail start-up.
+        from typing import get_args, get_origin
+        from app.core.config import Settings
+        complex_types = (list, dict, set, tuple, frozenset)
+        for name, field in Settings.model_fields.items():
+            kinds = [field.annotation, get_origin(field.annotation), *get_args(field.annotation),
+                     *(get_origin(arg) for arg in get_args(field.annotation))]
+            assert not any(kind in complex_types for kind in kinds), name
+
+    @pytest.mark.parametrize("raw,expected", [("true", True), ("0", False), ("false", False), ("1", True)])
+    def test_non_blank_bool_still_parses(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("BROWSER_SSRF_ALLOW_LOOPBACK", raw)
+        monkeypatch.setenv("COOKIE_SECURE", raw)
+        settings = self._settings()
+        assert settings.browser_ssrf_allow_loopback is expected and settings.cookie_secure is expected
+
+    def test_non_blank_int_still_parses(self, monkeypatch):
+        monkeypatch.setenv("PORT", "9001")
+        assert self._settings().port == 9001
+
+    @pytest.mark.parametrize("name,raw", [("BROWSER_SSRF_ALLOW_LOOPBACK", "maybe"), ("PORT", "eighty"),
+                                          ("COOKIE_SECURE", "yes please")])
+    def test_garbage_still_fails(self, monkeypatch, name, raw):
+        from pydantic import ValidationError
+        monkeypatch.setenv(name, raw)
+        with pytest.raises(ValidationError):
+            self._settings()

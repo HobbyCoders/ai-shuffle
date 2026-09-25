@@ -12,9 +12,10 @@ import logging
 import os
 import tempfile
 import threading
+import types
 from contextlib import contextmanager
 from pathlib import Path
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union, get_args, get_origin
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings
 
@@ -177,6 +178,13 @@ def _get_or_create_persisted_instance_id(data_dir: Path, service_name: str) -> s
 
         _cached_persisted_instance_id = new_id
         return new_id
+
+
+def _is_text(annotation) -> bool:
+    """True for ``str`` and ``Optional[str]``: settings where an empty value is a value."""
+    if get_origin(annotation) in (Union, types.UnionType):
+        return all(arg is str for arg in get_args(annotation) if arg is not type(None))
+    return annotation is str
 
 
 class Settings(BaseSettings):
@@ -886,6 +894,20 @@ class Settings(BaseSettings):
     # a ``project_v2_id``; sessions without one (created by an un-upgraded
     # install sharing the DB) take the legacy resolver ladder. There is no
     # setting for it.
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value, info):
+        """A blank value for a non-text setting means "use the default".
+
+        Unraid passes every template field to the container, filled in or not,
+        so ``BROWSER_SSRF_ALLOW_LOOPBACK=`` must not stop start-up. Text
+        settings keep a blank value as given; anything non-blank still parses
+        strictly."""
+        field = cls.model_fields[info.field_name]
+        if isinstance(value, str) and not value.strip() and not _is_text(field.annotation):
+            return field.get_default(call_default_factory=True)
+        return value
 
     @field_validator("version", mode="before")
     @classmethod

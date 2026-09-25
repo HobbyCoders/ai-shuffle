@@ -280,7 +280,7 @@ test('installer checks never replace Windows source updates and respect the no-u
  off.updater.start(); assert.equal(off.timers.length, 0);
 });
 
-test('NC-6: the worker bridge ticks every 8 s, not 2 s, and pushes a new phase at once', async () => {
+test('NC-6: the worker bridge ticks every 30 s, not 2 s, and pushes a new phase at once', async () => {
  const delays = []; const ticks = [];
  const module = { exports: {} };
  vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
@@ -288,15 +288,19 @@ test('NC-6: the worker bridge ticks every 8 s, not 2 s, and pushes a new phase a
   setTimeout: () => 0, clearTimeout() {}, setInterval: (fn, ms) => { delays.push(ms); ticks.push(fn); return ticks.length; }, clearInterval() {}, Date
  });
  const { Updater, BRIDGE_INTERVAL_MS } = module.exports;
- assert.equal(BRIDGE_INTERVAL_MS, 8000);
- // The worker treats the desktop updater as gone after 10 s of silence and drops a request after 10 s.
- assert(BRIDGE_INTERVAL_MS < 10_000);
+ assert.equal(BRIDGE_INTERVAL_MS, 30_000);
+ // The worker's windows: the desktop updater is gone after DESKTOP_PRESENCE_SECONDS of silence
+ // and a queued request lapses after DESKTOP_REQUEST_SECONDS. One tick must fit inside both.
+ const worker = readFileSync(new URL('../../app/core/application_updates.py', import.meta.url), 'utf8');
+ const seconds = name => Number(worker.match(new RegExp(`^${name} = (\\d+)$`, 'm'))[1]);
+ assert(BRIDGE_INTERVAL_MS < seconds('DESKTOP_PRESENCE_SECONDS') * 1000);
+ assert(BRIDGE_INTERVAL_MS < seconds('DESKTOP_REQUEST_SECONDS') * 1000);
  const updater = new Updater(); const seen = [];
  let release; const gate = () => new Promise(resolve => { release = resolve; });
  updater.useApplications(source({ check: async () => { await gate(); return { kind: 'available', version: 'bbbbbbbbbbbb' }; } }));
  updater.setBridge(async state => { seen.push(state.phase); return {}; }, async () => false);
  updater.start();
- assert.deepEqual(delays.filter(ms => ms < 60_000), [8000], 'one bridge interval, no 2 s heartbeat');
+ assert.deepEqual(delays.filter(ms => ms < 60_000), [30_000], 'one bridge interval, no 2 s heartbeat');
  await new Promise(setImmediate);
  assert.deepEqual(seen, ['idle'], 'one exchange at start');
  // An explicit check: "checking" and then "available" reach the worker without waiting for the tick.
