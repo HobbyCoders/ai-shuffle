@@ -594,14 +594,16 @@ def get_hooks_jsonl_path(sdk_session_id: str, working_dir: str) -> Path:
         working_dir: The working directory for the project
 
     Returns:
-        Path to the hooks JSONL file (may not exist yet)
+        Path to the hooks JSONL file (may not exist)
+
+    Pure path computation. It used to ``mkdir`` the project directory, and its
+    only caller is the READ path (every history parse) — so reading a session
+    whose transcript was found in a different project dir created an empty
+    "ghost" project dir for the computed name (see get_agent_jsonl_paths).
     """
     claude_projects_dir = settings.get_claude_projects_dir
     project_dir_name = get_project_dir_name(working_dir)
     project_dir = claude_projects_dir / project_dir_name
-
-    # Ensure directory exists
-    project_dir.mkdir(parents=True, exist_ok=True)
 
     return project_dir / f"{sdk_session_id}.hooks.jsonl"
 
@@ -643,8 +645,16 @@ def write_system_message(
         entry["data"] = data
 
     try:
+        # A transcript whose last line was torn (writer died mid-line, no
+        # trailing newline) would otherwise swallow this entry into that
+        # invalid line, and both would be skipped on every read.
+        needs_newline = False
+        with open(jsonl_path, 'rb') as rf:
+            if rf.seek(0, 2) > 0:
+                rf.seek(-1, 2)
+                needs_newline = rf.read(1) != b'\n'
         with open(jsonl_path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(entry) + '\n')
+            f.write(('\n' if needs_newline else '') + json.dumps(entry) + '\n')
         logger.debug(f"Wrote system message ({subtype}) to {jsonl_path}")
     except Exception as e:
         logger.error(f"Failed to write system message to {jsonl_path}: {e}")
@@ -820,19 +830,33 @@ def parse_jsonl_file(jsonl_path: Path) -> Generator[Dict[str, Any], None, None]:
     """
     Parse a JSONL file line by line.
 
-    Yields each parsed JSON object.
+    Yields each parsed JSON object. A line that is not valid JSON, or is valid
+    JSON but not an object (``null``, a bare number, an array — what a torn or
+    interleaved write leaves behind), is skipped with a warning; parsing
+    continues with the next line.
+
+    Bytes that are not valid UTF-8 are decoded as U+FFFD instead of raising:
+    with a strict decoder ONE bad byte raised out of the read loop and dropped
+    every line from that point — for a small transcript the whole history.
     """
     try:
-        with open(jsonl_path, 'r', encoding='utf-8') as f:
+        with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    yield json.loads(line)
+                    entry = json.loads(line)
                 except json.JSONDecodeError as e:
                     logger.warning(f"Failed to parse line {line_num} in {jsonl_path}: {e}")
                     continue
+                if not isinstance(entry, dict):
+                    logger.warning(
+                        f"Skipping non-object line {line_num} in {jsonl_path} "
+                        f"({type(entry).__name__})"
+                    )
+                    continue
+                yield entry
     except Exception as e:
         logger.error(f"Failed to read JSONL file {jsonl_path}: {e}")
 
@@ -1505,6 +1529,8 @@ def _transform_entries(
     total_output_tokens = 0
     usage_model = None
     last_usage = {}
+    # API message id -> the usage last counted for it (see _count_usage_once).
+    usage_by_message_id: Dict[str, Dict[str, Any]] = {}
 
     for entry in entries:
         entry_type = entry.get("type")
@@ -1515,12 +1541,15 @@ def _transform_entries(
 
         # Accumulate usage data from all assistant entries
         if entry_type == "assistant":
-            message_data_for_usage = entry.get("message", {})
-            usage = message_data_for_usage.get("usage", {})
+            message_data_for_usage = entry.get("message") or {}
+            usage = message_data_for_usage.get("usage") or {}
             if not usage_model:
                 usage_model = message_data_for_usage.get("model")
-            total_input_tokens += usage.get("input_tokens", 0)
-            total_output_tokens += usage.get("output_tokens", 0)
+            d_in, d_out = _count_usage_once(
+                message_data_for_usage.get("id"), usage, usage_by_message_id
+            )
+            total_input_tokens += d_in
+            total_output_tokens += d_out
             # Only track last_usage from main conversation turns (not subagents/sidechain).
             # last_usage represents the current context window size, so it must come from
             # the main conversation — subagent usage reflects a different context window.
@@ -1539,7 +1568,9 @@ def _transform_entries(
         role = message_data.get("role")
         content = message_data.get("content")
         timestamp = entry.get("timestamp")
-        uuid = entry.get("uuid", f"msg-{msg_counter}")
+        # ``or`` rather than a .get default: an explicit ``"uuid": null`` must
+        # fall back too, or every such entry gets the SAME id (None).
+        uuid = entry.get("uuid") or f"msg-{msg_counter}"
 
         # Handle system messages (e.g., compact_boundary, worktree_context, plugin_warning)
         if entry_type == "system":
@@ -2123,6 +2154,31 @@ def _transform_entries(
     return messages, usage_data
 
 
+def _count_usage_once(
+    message_id: Any,
+    usage: Dict[str, Any],
+    seen: Dict[str, Dict[str, Any]],
+) -> Tuple[int, int]:
+    """``(input, output)`` token deltas to add for one assistant entry.
+
+    The CLI writes ONE line per content block of an API response (thinking,
+    text, each tool_use), and every one of those lines repeats the response's
+    full ``usage`` under the same ``message.id``. Summing per line counted a
+    response once per block. Count each ``message.id`` once: a repeat replaces
+    the previously counted usage (so a later, larger streaming snapshot wins)
+    instead of adding to it. Entries with no id are counted as they come.
+    """
+    d_in = usage.get("input_tokens", 0) or 0
+    d_out = usage.get("output_tokens", 0) or 0
+    if isinstance(message_id, str) and message_id and usage:
+        prev = seen.get(message_id)
+        if prev is not None:
+            d_in -= prev.get("input_tokens", 0) or 0
+            d_out -= prev.get("output_tokens", 0) or 0
+        seen[message_id] = usage
+    return d_in, d_out
+
+
 def _merge_hook_messages(
     messages: List[Dict[str, Any]],
     sdk_session_id: str,
@@ -2443,6 +2499,11 @@ def _window_pagination(
     }
 
 
+#: Entry types whose output messages carry the entry's uuid (or, without one,
+#: the counter fallback) as their identity. See :func:`_entries_are_window_safe`.
+_WINDOW_ID_ENTRY_TYPES = frozenset({"user", "assistant", "system", "hook_event"})
+
+
 def _entries_are_window_safe(entries) -> bool:
     """True when a windowed parse of ``entries`` yields trustworthy identities.
 
@@ -2456,7 +2517,14 @@ def _entries_are_window_safe(entries) -> bool:
     transcript path.
     """
     for entry in entries:
-        if not isinstance(entry, dict) or not entry.get("uuid"):
+        if not isinstance(entry, dict):
+            return False
+        # Only entries that can PRODUCE a message take an identity from the
+        # counter. Bookkeeping lines the CLI writes without a uuid
+        # (queue-operation, last-prompt, custom-title, file-history-*) render
+        # nothing, so they cannot mislabel anything — refusing on them sent
+        # nearly every real transcript down the whole-transcript path.
+        if entry.get("type") in _WINDOW_ID_ENTRY_TYPES and not entry.get("uuid"):
             return False
     return True
 
@@ -2714,19 +2782,24 @@ def get_session_cost_from_jsonl(
 
     # Track the last usage data - for cache tokens we want the final state
     last_usage = {}
+    usage_by_message_id: Dict[str, Dict[str, Any]] = {}
 
     for entry in parse_jsonl_file(jsonl_path):
         if entry.get("type") == "assistant":
-            message_data = entry.get("message", {})
-            usage = message_data.get("usage", {})
+            message_data = entry.get("message") or {}
+            usage = message_data.get("usage") or {}
 
             # Get model
             if not model:
                 model = message_data.get("model")
 
-            # Sum up input/output tokens (these are incremental per turn)
-            total_input_tokens += usage.get("input_tokens", 0)
-            total_output_tokens += usage.get("output_tokens", 0)
+            # Sum up input/output tokens (these are incremental per turn),
+            # counting each API response once across its per-block lines.
+            d_in, d_out = _count_usage_once(
+                message_data.get("id"), usage, usage_by_message_id
+            )
+            total_input_tokens += d_in
+            total_output_tokens += d_out
 
             # Keep track of latest usage for cache tokens
             if usage:
@@ -2841,8 +2914,9 @@ def list_chat_history_sessions(
 
     for jsonl_file in project_dir.glob("*.jsonl"):
         try:
-            # Skip agent files (subagent logs)
-            if jsonl_file.name.startswith("agent-"):
+            # Skip agent files (subagent logs) and ``<sid>.hooks.jsonl``
+            # sidecars (plugin warnings, not a session of their own).
+            if jsonl_file.name.startswith("agent-") or jsonl_file.name.endswith(".hooks.jsonl"):
                 continue
 
             stat = jsonl_file.stat()

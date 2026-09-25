@@ -324,16 +324,31 @@ class JSONLRewindService:
         Parse all entries from a JSONL file.
 
         Returns list of parsed JSON objects, preserving order.
+
+        Undecodable (non-UTF-8) bytes are read with ``surrogateescape`` so
+        ``_raw_line`` round-trips them byte-for-byte on a truncation rewrite,
+        while the parsed entry sees them as U+FFFD. A strict decoder raised out
+        of the loop on the first bad byte, which returned only the lines before
+        it — a rewind then saw a truncated transcript ("empty", "target not
+        found" or "already at the target"). A line that is valid JSON but not
+        an object is kept verbatim as an unparsed line, like invalid JSON.
         """
         entries = []
         try:
-            with open(jsonl_path, 'r', encoding='utf-8') as f:
+            with open(jsonl_path, 'r', encoding='utf-8', errors='surrogateescape') as f:
                 for line_num, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
                         continue
                     try:
-                        entry = json.loads(line)
+                        decoded = line if line.isascii() else (
+                            line.encode('utf-8', 'surrogateescape').decode('utf-8', 'replace')
+                        )
+                        entry = json.loads(decoded)
+                        if not isinstance(entry, dict):
+                            raise json.JSONDecodeError(
+                                f"expected an object, got {type(entry).__name__}", decoded, 0
+                            )
                         entry['_line_num'] = line_num
                         entry['_raw_line'] = line
                         entries.append(entry)
@@ -479,7 +494,9 @@ class JSONLRewindService:
             )
 
             try:
-                with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                # surrogateescape: write undecodable bytes of kept lines back
+                # exactly as they were read (see _parse_jsonl_entries).
+                with os.fdopen(temp_fd, 'w', encoding='utf-8', errors='surrogateescape') as f:
                     for entry in keep_entries:
                         # Use raw line if available (preserves exact formatting)
                         raw_line = entry.get('_raw_line')

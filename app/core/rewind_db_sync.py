@@ -274,12 +274,33 @@ def _fallback_anchor_by_content(
             return anchor_row["id"]
 
         if role == "assistant":
-            # Prefer exact/loose match; assistant rows store their final text.
+            # Assistant rows store their final text (and never carry a
+            # jsonl_uuid, so every assistant-target rewind lands here). Match
+            # by content, disambiguating repeated text ("Done.") by occurrence
+            # counted FROM THE END: if the transcript has N matching assistant
+            # entries after the target, the anchor is the (N+1)-th matching row
+            # from the end. Taking simply the last match anchored a rewind to
+            # an earlier "Done." on the latest one, so the rows in between
+            # survived the rewind. Counting from the end keeps older DB rows
+            # the transcript no longer has from shifting the pick.
+            later_matches = sum(
+                1
+                for e in entries[target_idx + 1:]
+                if e.get("type") == "assistant"
+                and (e.get("message") or {}).get("role") == "assistant"
+                and not e.get("isMeta")
+                and not e.get("isSidechain")
+                and _texts_match(
+                    jsonl_rewind_service._extract_message_text(e), target_text
+                )
+            )
             for r in reversed(db_rows):
                 if r.get("role") != "assistant":
                     continue
                 if _texts_match(r.get("content") or "", target_text):
-                    return r["id"]
+                    if later_matches == 0:
+                        return r["id"]
+                    later_matches -= 1
             return None
 
         return None
@@ -302,11 +323,18 @@ def _delete_rows_after(
       DB must therefore delete rows with ``id >= anchor_id`` — the anchor
       row is the target and goes too.
 
-    - ``include_response=True`` (typical for assistant-target rewinds or
-      "keep response" user rewinds): JSONL keeps the target and its
-      trailing assistant reply. DB widens the anchor to the first
-      following assistant row and deletes rows strictly after that,
-      preserving both the target and its response.
+    - ``include_response=True`` (what the UI sends for EVERY assistant-target
+      rewind, and for "keep response" user rewinds): JSONL keeps the target
+      and everything up to the next real user prompt
+      (``compute_rewind_keep_count``). DB deletes from the next prompt row
+      (``user``/``command``) after the anchor onward; with no later prompt
+      nothing is deleted.
+
+      This used to widen the anchor to the first ``assistant`` row after it
+      and delete strictly after that. For an ASSISTANT anchor that row is the
+      NEXT turn's reply, so the next turn's prompt and reply survived the
+      rewind; for a user anchor it cut the turn's own later rows (tool rows,
+      a second assistant text) that JSONL keeps.
     """
     from app.db.base import get_db, get_cursor
     from app.db.compat import ph
@@ -316,19 +344,20 @@ def _delete_rows_after(
         cursor = get_cursor(conn)
 
         if include_response:
-            effective_anchor = anchor_id
             cursor.execute(
                 f"SELECT id FROM session_messages "
-                f"WHERE session_id = {_ph} AND id > {_ph} AND role = 'assistant' "
+                f"WHERE session_id = {_ph} AND id > {_ph} "
+                f"AND role IN ('user', 'command') "
                 f"ORDER BY id ASC LIMIT 1",
                 (session_id, anchor_id),
             )
             row = cursor.fetchone()
-            if row is not None:
-                effective_anchor = row["id"] if isinstance(row, dict) else row[0]
+            if row is None:
+                return 0  # target is the tail turn — nothing after it
+            next_prompt_id = row["id"] if isinstance(row, dict) else row[0]
             cursor.execute(
-                f"DELETE FROM session_messages WHERE session_id = {_ph} AND id > {_ph}",
-                (session_id, effective_anchor),
+                f"DELETE FROM session_messages WHERE session_id = {_ph} AND id >= {_ph}",
+                (session_id, next_prompt_id),
             )
         else:
             # Drop anchor row and everything after it (matches JSONL's
