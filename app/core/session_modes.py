@@ -165,6 +165,43 @@ def permission_mode_for_session_mode(permission_mode: Any, mode: Any) -> Any:
     return "default"
 
 
+# The one tool every mode short of Bypass puts to a person: the computer-use
+# access request (see ``app.mcp.computer_use.access``).
+COMPUTER_USE_REQUEST_ACCESS = "mcp__computer-use__request_access"
+
+
+def effective_permission_mode(permission_mode: Any, *, delegated: bool) -> Any:
+    """The permission mode a session actually runs in on its leg.
+
+    Only the delegated Claude CLI implements the classifier-backed ``auto``
+    mode, so a legacy ``auto`` selection runs as Ask (``default``) on every
+    other provider. The engine (``HarnessAdapter.connect`` /
+    ``set_permission_mode``) and the app's approver (``query_engine``'s
+    ``can_use_tool``) both read the mode through this, so the prompt a person
+    sees follows the policy the engine applies. Anything else is returned as-is.
+    """
+    if permission_mode == "auto" and not delegated:
+        return "default"
+    return permission_mode
+
+
+def mode_approves_without_prompt(permission_mode: Any, tool_name: str) -> bool:
+    """Whether a session in ``permission_mode`` approves ``tool_name`` on its own.
+
+    The rule for a call the runtime asked about: Ask (``default``, the retired
+    ``plan``, or no mode) puts it to a person; Bypass approves everything; every
+    other mode approves everything except the computer-use access request.
+    Both the interactive approver and the native leg's no-approver path
+    (``HarnessAdapter.receive_events``) decide through this, so a run with
+    nobody watching allows exactly what a watched one would.
+    """
+    if permission_mode == "bypassPermissions":
+        return True
+    if permission_mode in (None, "", "default", "plan"):
+        return False
+    return tool_name != COMPUTER_USE_REQUEST_ACCESS
+
+
 def narrow_tool_access_for_mode(access: ToolAccess, mode: Any) -> ToolAccess:
     """Compose an agent's own ``ToolAccess`` with the ceiling its mode imposes.
 

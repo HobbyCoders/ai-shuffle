@@ -1935,7 +1935,20 @@ async def _stream_to_websocket_impl(
                 refs = callback_refs
                 _disallowed = refs["disallowed_tools"]
                 _allowed = refs["allowed_tools"]
-                _perm_mode = refs["permission_mode"]
+                # Read the mode the way the session's leg runs it: a legacy
+                # ``auto`` is Ask everywhere but the delegated Claude CLI, and
+                # the engine already asks under Ask — approving here would
+                # turn every such prompt into an allow. A caller that does not
+                # say which leg it is on gets the mode unchanged.
+                from app.core.session_modes import (
+                    effective_permission_mode,
+                    mode_approves_without_prompt,
+                )
+
+                _perm_mode = effective_permission_mode(
+                    refs["permission_mode"],
+                    delegated=getattr(context, "delegated", True),
+                )
                 _broadcast = refs["broadcast_func"]
                 _profile_id = refs["profile_id"]
                 _config = refs["config"]
@@ -2194,8 +2207,10 @@ async def _stream_to_websocket_impl(
                     # All other computer-use actions: access is gated by request_access.
                     return PermissionResultAllow()
 
-                # For other tools in default mode, route through permission handler
-                if _perm_mode == "default":
+                # Every other tool: Ask routes it through the permission
+                # handler; the modes that approve on their own allow it (the
+                # same rule a native run with no approver applies).
+                if not mode_approves_without_prompt(_perm_mode, tool_name):
                     request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
                     logger.debug(f"[WS] Permission request for {tool_name}: {request_id}")
 

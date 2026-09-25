@@ -84,6 +84,7 @@ from app.core.provider.fluid_credentials import (
     resolve_provider_credentials,
 )
 from app.core.provider.protocol import ProviderAdapter
+from app.core.session_modes import effective_permission_mode, mode_approves_without_prompt
 # Registers the app-owned SafetyWarning shape with fluid's event codec. The
 # translation branch below matches on the class NAME, so it needs no symbol
 # from here — but a session replayed through this adapter must be decodable,
@@ -254,8 +255,10 @@ class HarnessAdapter(ProviderAdapter):
         # App-side permission callback (AgentOptions.can_use_tool). When
         # present, fluid PermissionRequests are bridged to it out-of-band (SDK
         # parity — the loops never see a permission event); when absent they
-        # surface in-stream as PermissionRequestEvent, except on the delegated
-        # leg, which answers them from the permission mode.
+        # are answered from the permission mode: the delegated leg decides
+        # every one; the native leg approves what the mode approves on its
+        # own and lets the rest surface in-stream as PermissionRequestEvent
+        # (fluid denies those after ``permission_timeout``).
         self._can_use_tool: Optional[Any] = None
         self._perm_bridge_tasks: set = set()
         # httpx client injected into the native provider client purely to
@@ -369,10 +372,11 @@ class HarnessAdapter(ProviderAdapter):
         kind = await asyncio.to_thread(_decide_provider_kind, options)
         self._is_delegated = kind == "delegated"
         self._provider_kind = kind
-        if not self._is_delegated and options.permission_mode == 'auto':
-            # Legacy Auto selections on native routes use Ask. Only the
-            # delegated Claude CLI implements the classifier-backed mode.
-            options.permission_mode = 'default'
+        # Legacy Auto selections on native routes use Ask. Only the
+        # delegated Claude CLI implements the classifier-backed mode.
+        options.permission_mode = effective_permission_mode(
+            options.permission_mode, delegated=self._is_delegated
+        )
         options.effort = await asyncio.to_thread(_effective_effort, options, options.effort, kind)
 
         self._registry = await self._build_registry(options, native=not self._is_delegated)
@@ -1644,6 +1648,20 @@ class HarnessAdapter(ProviderAdapter):
                     # every prompt until it is answered.
                     await self._answer_without_approver(translated)
                     continue
+                if (
+                    isinstance(translated, PermissionRequestEvent)
+                    and getattr(translated, "risk", None) != "question"
+                    and mode_approves_without_prompt(
+                        self.permission_mode,
+                        self._permission_tool_name(translated.name),
+                    )
+                ):
+                    # Native leg, no approver: the modes that approve on their
+                    # own allow here too, as they do in a watched session.
+                    # Only a call Ask would put to a person still surfaces,
+                    # and fluid denies it after ``permission_timeout``.
+                    await self._allow_without_approver(translated)
+                    continue
                 if isinstance(translated, ResultMessage) and not self._is_live(event):
                     # A terminal from before this turn was submitted: history
                     # being replayed, not this turn ending. Dropping it (rather
@@ -1831,6 +1849,16 @@ class HarnessAdapter(ProviderAdapter):
                 ev.tool_use_id, exc_info=True,
             )
 
+    async def _allow_without_approver(self, ev: PermissionRequestEvent) -> None:
+        """Approve a native prompt the session's mode approves on its own."""
+        try:
+            await self.respond_to_permission(ev.tool_use_id, True)
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] failed to submit permission decision for %s",
+                ev.tool_use_id, exc_info=True,
+            )
+
     async def _on_tool_allowed(self, payload: Dict[str, Any]) -> None:
         """Record the one-shot approval computer-use request_access spends.
 
@@ -1880,7 +1908,12 @@ class HarnessAdapter(ProviderAdapter):
             result = await can_use_tool(
                 self._permission_tool_name(ev.name),
                 ev.input,
-                SimpleNamespace(tool_use_id=ev.tool_use_id, agent_id=None),
+                # ``delegated`` lets the approver read the session's mode
+                # the way this leg runs it (``effective_permission_mode``).
+                SimpleNamespace(
+                    tool_use_id=ev.tool_use_id, agent_id=None,
+                    delegated=self._is_delegated,
+                ),
             )
             allow = type(result).__name__ == "PermissionResultAllow"
             if allow:
@@ -2039,8 +2072,7 @@ class HarnessAdapter(ProviderAdapter):
             self._engine.model = model
 
     async def set_permission_mode(self, mode: str) -> None:
-        if not self._is_delegated and mode == 'auto':
-            mode = 'default'
+        mode = effective_permission_mode(mode, delegated=self._is_delegated)
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
         try:
