@@ -58,7 +58,7 @@ from fluid.context.settings_stack import (
     load_settings_stack,
     mcp_toggles,
 )
-from fluid.context.instructions import Command, Skill, parse_frontmatter
+from fluid.context.instructions import Command, Skill, _read, parse_frontmatter
 
 log = logging.getLogger(__name__)
 
@@ -293,13 +293,6 @@ def _md_files(root: Path, manifest: dict[str, Any], key: str, *, recursive: bool
                 seen.add(resolved)
                 found.append(path)
     return found
-
-
-def _read(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return ""
 
 
 def _skills_for(plugin_name: str, root: Path, manifest: dict[str, Any]) -> list[Skill]:

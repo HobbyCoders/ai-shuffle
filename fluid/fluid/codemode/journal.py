@@ -254,7 +254,6 @@ class FrictionDetector:
 
 def append_friction(
     skills: SkillStore | None,
-    synthesizer: Any | None,
     entries: list[dict[str, Any]],
 ) -> None:
     """Write friction entries to the journal. Never raises.
@@ -274,7 +273,6 @@ def append_friction(
 
 def record_friction(
     skills: SkillStore | None,
-    synthesizer: Any | None,
     detector: FrictionDetector,
     name: str,
     input: Any,
@@ -283,7 +281,7 @@ def record_friction(
 ) -> list[dict[str, Any]]:
     """Observe one tool call and journal whatever friction it earned."""
     entries = detector.observe(name, input, output, is_error)
-    append_friction(skills, synthesizer, entries)
+    append_friction(skills, entries)
     return entries
 
 
@@ -348,8 +346,7 @@ class ToolJournal:
         except Exception:
             pass
         record_friction(
-            self._skills, self._synthesizer, self._friction,
-            name, input, output, is_error,
+            self._skills, self._friction, name, input, output, is_error,
         )
 
     async def aclose(self) -> None:

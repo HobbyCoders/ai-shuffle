@@ -47,7 +47,7 @@ from fluid.providers._transport import (
     is_closed_client_error,
     is_usable_client,
 )
-from fluid.providers.base import StreamChunk
+from fluid.providers.base import StreamChunk, flatten_system
 
 log = logging.getLogger(__name__)
 
@@ -56,16 +56,9 @@ log = logging.getLogger(__name__)
 
 def system_message(system: Any) -> dict[str, Any] | None:
     """Flatten fluid's ``system`` (str or block list) into one system message."""
-    if system is None:
+    text = flatten_system(system)
+    if text is None:
         return None
-    if isinstance(system, str):
-        text = system
-    elif isinstance(system, list):
-        text = "".join(
-            str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in system
-        )
-    else:
-        text = str(system)
     return {"role": "system", "content": text}
 
 

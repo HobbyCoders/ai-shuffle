@@ -114,23 +114,10 @@ def mounted_builtin_tools(
     ``extra`` is the tool context's extras — the mapping a host injects its
     capabilities into (``ctx.extra``), or just the keys. Every builtin whose
     :data:`TOOL_CAPABILITIES` entry names a key that is not there is dropped,
-    exactly as the request schemas drop it.
-
-    One derivation, two consumers, because they disagreed: a host that never
-    injected ``agent_message`` still had SendMessage and ListAgents in the
-    prompt and in the context breakdown while the engine withheld them from
-    every surface the model could call. Models imported them, the imports
-    failed, and two workers briefed to coordinate through them could not. Pass
-    the result as ``mounted_tools`` to
-    :func:`fluid.context.usage.build_context_usage`, and give the same extras
-    to prompt composition as ``wired`` (``frozenset(ctx.extra)``), so the
-    prose, the schemas and the accounting name one surface.
+    exactly as the request schemas drop it: this is
+    :func:`wired_builtin_tools` over a ``ctx.extra`` mapping.
     """
-    present = frozenset(extra or ())
-    return frozenset(
-        name for name in tools
-        if all(key in present for key in TOOL_CAPABILITIES.get(name, ()))
-    )
+    return wired_builtin_tools(frozenset(tools), frozenset(extra or ()))
 
 # Code-mode tool names prose may reference (the addendum's surface).
 CODE_MODE_TOOL_NAMES: tuple[str, ...] = (

@@ -130,6 +130,7 @@ from fluid.hooks.bus import (
     TURN_START,
     HookDecision,
     HookBus,
+    hook_reminder,
 )
 from fluid.messages import (
     Image,
@@ -278,13 +279,6 @@ _CONTINUE_NUDGE = (
 # How many times the TurnEnd (Stop) hooks may send the model back to work in
 # one turn. Past this a block is reported and the turn ends anyway.
 MAX_STOP_HOOK_CONTINUATIONS = 3
-
-
-def _hook_reminder(label: str, text: str) -> str:
-    """Hook-supplied text as a system-reminder block on a user message."""
-    from fluid.hooks.bus import hook_reminder
-
-    return hook_reminder(label, text)
 
 
 def _steer_parts(
@@ -472,6 +466,15 @@ def _describe_engine_failure(exc: BaseException, *, transient: bool) -> str:
 # engine instance may set ``question_timeout`` to
 # another number of seconds, or None to wait without limit.
 QUESTION_TIMEOUT_S = 30 * 60.0
+
+# How long a turn parks on a PermissionRequest before denying the call, so a
+# host with nobody to approve (REST, background or failover runs with no
+# approver wired) cannot hold the turn open for good. Longer than any host's
+# own approval deadline (the app's is 300 s) so a late answer still wins, and
+# the same bound the delegated leg uses. An engine instance may set
+# ``permission_timeout`` to another number of seconds, or None to wait
+# without limit.
+PERMISSION_TIMEOUT_S = 900.0
 
 
 
@@ -946,11 +949,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_usage: dict[str, Any] = {}
         self._tool_deliveries = []  # Includes nested code-mode tool completions.
         # Streaming deltas the store refused (see _emit / _note_dropped_event).
-        # Cumulative for the engine; the per-turn count drives the log's
-        # once-per-turn rate limit and hosts can read the total as a metric.
+        # Cumulative for the engine, which hosts can read as a metric;
+        # ``_dropped_events_turn`` rate-limits the log to once per turn.
         self.dropped_delta_events = 0
         self._dropped_events_turn: str | None = None
-        self._dropped_events_in_turn = 0
         # Hook bookkeeping. ``_session_hook_started`` gates the one SessionStart
         # per engine and ``_session_start_context`` holds what those hooks
         # asked to add to the first user message. ``_turn_end_hook_fired``
@@ -971,6 +973,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._reflection_nudged = False
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
+        self.permission_timeout: float | None = PERMISSION_TIMEOUT_S
         # Turn watchdog: bounds a turn whose tool call never returns and whose
         # stream makes no progress. ``_turn_progress_at`` moves on every emitted event; the watchdog
         # task cancels the turn after ``turn_watchdog_seconds`` of silence
@@ -1309,7 +1312,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._hook_stop_reason = None
         parts: list[str] = []
         if with_context and self._session_start_context:
-            parts.append(_hook_reminder("SessionStart hook context", self._session_start_context))
+            parts.append(hook_reminder("SessionStart hook context", self._session_start_context))
             self._session_start_context = None
         if self.hooks is None:
             return False, "\n".join(parts) or None
@@ -1333,7 +1336,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return True, None
         if with_context and decision.additional_context:
             parts.append(
-                _hook_reminder("UserPromptSubmit hook context", decision.additional_context)
+                hook_reminder("UserPromptSubmit hook context", decision.additional_context)
             )
         return False, "\n".join(parts) or None
 
@@ -1615,20 +1618,18 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         Rate-limited on purpose: the failure mode is a store that is down for
         seconds, and a degenerate stream emits thousands of deltas a second.
-        One warning names the cause; the rest are counted and reported at the
-        end of the turn.
+        One warning names the cause; the rest are only counted in
+        ``dropped_delta_events``.
         """
         turn = self._active_turn_id
         if turn != self._dropped_events_turn:
             self._dropped_events_turn = turn
-            self._dropped_events_in_turn = 0
             log.warning(
                 "store refused a %s event (%s: %s); the turn continues — "
                 "streaming deltas are reconstructible from the stored "
                 "assistant message",
                 type(event).__name__, type(exc).__name__, exc,
             )
-        self._dropped_events_in_turn += 1
         self.dropped_delta_events += 1
 
     def events(self, *, since_seq: int = 0) -> AsyncIterator[Event]:
@@ -3110,7 +3111,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     nudge = SessionNode(
                         node_id=new_id("node"), parent_id=parent.node_id,
                         message=Message(role="user", content=[Text(
-                            _hook_reminder("A Stop hook asked you to continue", reason)
+                            hook_reminder("A Stop hook asked you to continue", reason)
                         )]),
                     )
                     await self.store.append(sid, nudge)
@@ -3907,8 +3908,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if payload.get("provider_requests"):
                     usage_totals["provider_requests"] = payload["provider_requests"]
                 # No ErrorEvent here — _agent_loop decides whether this error
-                # is terminal or recoverable (context overflow → forced trim
-                # + one retry) before surfacing it.
+                # is terminal or recoverable (context overflow → compaction
+                # escalation and up to 3 retries) before surfacing it.
                 status = payload.get("status")
                 transport_failure = payload.get("transport_failure")
                 error_message = str(payload.get("message", payload))
@@ -4592,6 +4593,9 @@ class NativeLoop(BackgroundLifecycleMixin):
     ) -> tuple[str, str | None, dict[str, Any] | None]:
         """Publish a PermissionRequest and park the turn until RespondPermission.
 
+        The wait also ends on an Interrupt, and after ``permission_timeout``
+        seconds with no decision the call is denied rather than parked.
+
         Returns ``(verdict, deny_message, updated_input)``: the responder's
         reason (surfaced as the denied tool's output) and any rewritten tool
         input it handed back on an allow.
@@ -4608,13 +4612,25 @@ class NativeLoop(BackgroundLifecycleMixin):
             sid, turn_id, "permission_prompt", f"{name} needs your permission to run",
             name=name, tool_use_id=tool_use_id,
         )
+        timeout = self.permission_timeout
         interrupt_wait = asyncio.create_task(self._interrupted.wait())
         try:
             done, _ = await asyncio.wait(
-                {fut, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+                {fut, interrupt_wait}, timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            if fut not in done:  # Interrupt arrived while parked on the prompt
-                return ("deny", "interrupted while awaiting permission", None)
+            if fut not in done:
+                if interrupt_wait in done:
+                    return ("deny", "interrupted while awaiting permission", None)
+                log.warning(
+                    "no permission decision for %s within %.0fs; denying", name, timeout,
+                )
+                return (
+                    "deny",
+                    f"permission request timed out after {timeout:.0f}s with no "
+                    "decision; the call was denied",
+                    None,
+                )
             resp: RespondPermission = fut.result()
         finally:
             interrupt_wait.cancel()
@@ -4702,10 +4718,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                     message=f"PostToolUse hook on {name}: {reason}",
                     hook_event=POST_TOOL_USE, tool_name=name,
                 ))
-                additions.append(_hook_reminder("PostToolUse hook feedback", reason))
+                additions.append(hook_reminder("PostToolUse hook feedback", reason))
             if decision.additional_context:
                 additions.append(
-                    _hook_reminder("PostToolUse hook context", decision.additional_context)
+                    hook_reminder("PostToolUse hook context", decision.additional_context)
                 )
             if additions:
                 # New text the tool never produced: drop the content id so

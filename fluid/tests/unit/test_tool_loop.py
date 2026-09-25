@@ -589,6 +589,47 @@ async def test_permission_ask_allow_and_deny() -> None:
         assert expect_text in result.output
 
 
+async def test_unanswered_permission_prompt_is_denied_after_the_timeout() -> None:
+    """A host with no approver cannot park a native turn forever: the prompt
+    is still published, and the call is denied once the wait runs out."""
+    ran: list[bool] = []
+
+    @tool("touch", "Touch a marker", {"type": "object", "properties": {}}, risk="write")
+    async def touch(args: dict) -> dict:
+        ran.append(True)
+        return {"content": [{"type": "text", "text": "touched"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("m", [touch]))
+    provider = ScriptedProvider([_tool("t1", "mcp__m__touch", "{}"), _text("done")])
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=provider, store=store, model="claude-sonnet-5", session_id=sid,
+        registry=registry, permissions=PermissionEngine("on_write"),
+    )
+    loop.permission_timeout = 0.2
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+
+    events = loop.bus.log(sid)
+    assert any(isinstance(e, PermissionRequest) for e in events)
+    result = next(e for e in events if isinstance(e, ToolResult))
+    assert result.is_error
+    assert "timed out" in result.output
+    assert not ran
+    assert not loop._pending_permissions
+    assert isinstance(events[-1], TurnComplete)
+
+
+def test_permission_wait_is_bounded_by_default() -> None:
+    from fluid.engine import native
+
+    loop = NativeLoop(provider=ScriptedProvider([_text("x")]), store=MemoryStore(), model="m")
+    assert loop.permission_timeout == native.PERMISSION_TIMEOUT_S
+    assert native.PERMISSION_TIMEOUT_S is not None
+
+
 async def test_deny_rule_blocks_bash(tmp_path) -> None:
     from fluid.tools.builtins import register_builtins
 

@@ -980,7 +980,7 @@ class CliHost:
         if isinstance(host, CliHost):
             await host.wait_idle()
             await child.wait_turn()
-        text = await _final_assistant_text(child, session_id)
+        text = await final_assistant_text(child.store, session_id)
         if error and not text:
             text = f"subagent error: {error}"
         return status, text or "(the subagent returned no text)"
@@ -1087,9 +1087,10 @@ def _monitor_summary(worker: Worker, code: int | None, *, cancelled: bool = Fals
     return f"`{worker.description}` — {head}\n{out}" if out else f"`{worker.description}` — {head}"
 
 
-async def _final_assistant_text(child: Any, session_id: str) -> str:
+async def final_assistant_text(store: Any, session_id: str) -> str:
+    """The last non-empty assistant text on the session's path, or ""."""
     try:
-        nodes = await child.store.load_path(session_id)
+        nodes = await store.load_path(session_id)
     except Exception:  # noqa: BLE001
         return ""
     for node in reversed(nodes):

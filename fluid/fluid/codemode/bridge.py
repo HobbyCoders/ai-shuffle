@@ -42,7 +42,12 @@ from fluid.permissions.engine import (
     non_interactive_denial,
 )
 from fluid.tools.mrtr import resolve_input_required, unresolved_notice
-from fluid.tools.registry import InputRequired, ToolCtx, ToolRegistry
+from fluid.tools.registry import (
+    FATAL_EXTERNAL_ERROR_CODES,
+    InputRequired,
+    ToolCtx,
+    ToolRegistry,
+)
 
 
 def _approved_input_error(spec: Any, input: dict[str, Any]) -> str | None:
@@ -99,8 +104,6 @@ def _soft_external_error(spec: Any, outcome: Any) -> bool:
     results the cell can recover from; a timeout or an unreachable server
     still aborts, because every later call would pay the same wait.
     """
-    from fluid.tools.registry import FATAL_EXTERNAL_ERROR_CODES
-
     if getattr(spec, "source", None) not in ("mcp", "inproc"):
         return False
     return getattr(outcome, "error_code", None) not in FATAL_EXTERNAL_ERROR_CODES

@@ -156,10 +156,6 @@ class Hit:
     matches: int
 
 
-def _node_text(node: SessionNode) -> str:
-    return _render_node(node)
-
-
 def search_path(
     nodes: list[SessionNode],
     query: str,
@@ -177,7 +173,7 @@ def search_path(
         return []
     scored: list[tuple[int, int, int, Hit]] = []
     for pos, node in enumerate(nodes):
-        text = _node_text(node)
+        text = _render_node(node)
         lowered = text.lower()
         matched = [t for t in terms if t in lowered]
         if not matched:

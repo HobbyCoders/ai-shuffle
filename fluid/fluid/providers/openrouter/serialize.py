@@ -13,8 +13,8 @@ flavor on top of it:
   block), gated to models that honor the markers (``anthropic/`` prefix) —
   other models ignore or reject the field, so the breakpoint budget is dropped
   for them.
-* ``reasoning: {effort}`` from the harness effort knob, clamped to
-  OpenRouter's low/medium/high vocabulary.
+* ``reasoning: {effort}`` from the harness effort knob, passed through when
+  it is one of none/minimal/low/medium/high/xhigh/max and dropped otherwise.
 """
 
 from __future__ import annotations

@@ -311,50 +311,47 @@ def _load_hooks_json(path: Path) -> dict[str, Any]:
     with a logged warning naming them. A malformed file is logged and
     ignored rather than fatal.
     """
-    import logging
-
     from fluid.config.model import resolve_hook_event
 
-    log = logging.getLogger(__name__)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        log.warning("%s: hooks file ignored: %s", path, exc)
+        logger.warning("%s: hooks file ignored: %s", path, exc)
         return {}
     if not isinstance(raw, dict):
-        log.warning("%s: hooks file ignored: expected a JSON object", path)
+        logger.warning("%s: hooks file ignored: expected a JSON object", path)
         return {}
     groups = raw.get("hooks", raw)
     if not isinstance(groups, dict):
-        log.warning("%s: hooks file ignored: 'hooks' is not an object", path)
+        logger.warning("%s: hooks file ignored: 'hooks' is not an object", path)
         return {}
     entries: list[dict[str, Any]] = []
     for event_name, matchers in groups.items():
         event = resolve_hook_event(event_name)
         if event is None:
-            log.warning("%s: hooks for %r dropped: fluid has no such event", path, event_name)
+            logger.warning("%s: hooks for %r dropped: fluid has no such event", path, event_name)
             continue
         if not isinstance(matchers, list):
-            log.warning("%s: hooks for %r dropped: expected a list", path, event_name)
+            logger.warning("%s: hooks for %r dropped: expected a list", path, event_name)
             continue
         for group in matchers:
             if not isinstance(group, dict):
-                log.warning("%s: %s hook group dropped: not an object", path, event_name)
+                logger.warning("%s: %s hook group dropped: not an object", path, event_name)
                 continue
             matcher = group.get("matcher")
             for hook in group.get("hooks") or ():
                 if not isinstance(hook, dict):
-                    log.warning("%s: %s hook dropped: not an object", path, event_name)
+                    logger.warning("%s: %s hook dropped: not an object", path, event_name)
                     continue
                 if hook.get("type", "command") != "command":
-                    log.warning(
+                    logger.warning(
                         "%s: %s hook of type %r dropped: only command hooks run",
                         path, event_name, hook.get("type"),
                     )
                     continue
                 command = hook.get("command")
                 if not isinstance(command, str) or not command.strip():
-                    log.warning("%s: %s hook dropped: empty command", path, event_name)
+                    logger.warning("%s: %s hook dropped: empty command", path, event_name)
                     continue
                 entry: dict[str, Any] = {"event": event, "command": command}
                 if isinstance(matcher, str) and matcher:

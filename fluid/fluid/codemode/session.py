@@ -145,8 +145,6 @@ class _HumanWait:
 
     @staticmethod
     def _now() -> float:
-        import asyncio
-
         try:
             return asyncio.get_running_loop().time()
         except RuntimeError:  # pragma: no cover - always called inside a loop
@@ -668,7 +666,7 @@ class CodeModeSession:
         except Exception:
             pass
         pending, self._friction_pending = self._friction_pending, []
-        append_friction(self._skills, self._synthesizer, pending)
+        append_friction(self._skills, pending)
         if self._synthesizer is not None:
             try:
                 self._synthesizer.kick()

@@ -360,8 +360,6 @@ def draft_guidance_proposal(
             "a synthesizer proposal must carry a motivation case "
             "(prompt + checks reproducing the failure)"
         )
-    from fluid.codemode.anchors import validate_anchor
-
     error = validate_anchor(
         motivation.get("prompt", ""),
         motivation.get("checks", []),
@@ -399,11 +397,11 @@ def queue_pending(root: str | Path, proposal: Proposal) -> None:
     _rewrite_pending(root, records)
 
 
-def pending_queue(root: str | Path) -> list[dict]:
-    """Parsed pending-proposal records, oldest first."""
+def _read_records(path: Path) -> list[dict]:
+    """Parsed JSONL dict records, oldest first (malformed lines skipped)."""
     out: list[dict] = []
     try:
-        with (Path(root) / PENDING_FILE).open("r", encoding="utf-8") as fh:
+        with path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 try:
                     record = json.loads(line)
@@ -414,6 +412,11 @@ def pending_queue(root: str | Path) -> list[dict]:
     except OSError:
         pass
     return out
+
+
+def pending_queue(root: str | Path) -> list[dict]:
+    """Parsed pending-proposal records, oldest first."""
+    return _read_records(Path(root) / PENDING_FILE)
 
 
 def remove_pending(root: str | Path, *, kind: str, target: str) -> None:
@@ -440,33 +443,9 @@ def _rewrite_pending(root: Path, records: list[dict]) -> None:
 
 def parked_proposals(root: str | Path) -> list[dict]:
     """Parsed ``parked.jsonl`` records, oldest first (malformed lines skipped)."""
-    out: list[dict] = []
-    try:
-        with (Path(root) / PARKED_FILE).open("r", encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(record, dict):
-                    out.append(record)
-    except OSError:
-        pass
-    return out
+    return _read_records(Path(root) / PARKED_FILE)
 
 
 def evolution_log(root: str | Path) -> list[dict]:
     """Parsed ``.evolution-log.jsonl`` records, oldest first."""
-    out: list[dict] = []
-    try:
-        with (Path(root) / LOG_FILE).open("r", encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(record, dict):
-                    out.append(record)
-    except OSError:
-        pass
-    return out
+    return _read_records(Path(root) / LOG_FILE)

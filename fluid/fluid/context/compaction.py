@@ -337,10 +337,6 @@ def _arg_hint(input_: dict[str, Any], cap: int) -> str:
     return rendered[:cap] + ("…" if len(rendered) > cap else "")
 
 
-def _result_size(block: ToolResultBlock) -> int:
-    return block_chars(block)
-
-
 def render_span_digest(
     span: list[SessionNode], config: CompactionConfig
 ) -> Message:
@@ -367,7 +363,7 @@ def render_span_digest(
             ]
             for block in results:
                 lines.extend(s.render() for s in block.delivered_steers)
-                size = _result_size(block)
+                size = block_chars(block)
                 if block.is_error:
                     error_text = " ".join(
                         inner.text

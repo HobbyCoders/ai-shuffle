@@ -150,7 +150,7 @@ class EventBus:
         Empty only when nothing after ``cursor`` is reachable anywhere.
         """
         ring = self._logs.get(session_id)
-        floor = ring[0].seq if ring else self.last_seq(session_id) + 1
+        floor = self.floor_seq(session_id)
         if cursor >= floor - 1:
             if not ring:
                 return []

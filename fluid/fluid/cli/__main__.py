@@ -1,15 +1,17 @@
-"""``fluid`` console entry — chat, run, sessions, config, and migration.
+"""``fluid`` console entry — chat, run, sessions, config, anchors, evolve, and migration.
 
   fluid chat [--tui]        interactive REPL (or Textual TUI)
   fluid run "<prompt>"      one-shot: stream the reply, then exit
   fluid sessions [--limit]  list persisted sessions from the JSONL store
+  fluid config              print the resolved layered config
+  fluid anchors ...         manage the replay-anchor retention set
+  fluid evolve ...          guarded harness evolution: propose, run, review
+  fluid import-settings     preview an explicit provider-to-Fluid migration
 
 ``chat`` and ``run`` accept ``--resume <session-id>`` to pick up an existing
 session, or ``--continue`` for the most recently active one. Both build the
 engine against the stored session, so the engine's own resume path (deferred
 catalog, compaction, background tasks) rehydrates on the first turn.
-  fluid config              print the resolved layered config
-  fluid import-settings     preview an explicit provider-to-Fluid migration
 
 The heavy lifting lives in ``fluid.cli.config`` (engine construction with the
 instruction stack injected) and ``fluid.cli.repl`` (rendering/permissions). The
@@ -39,11 +41,14 @@ from fluid.cli.repl import (
     SIGINT_EXIT_CODE,
     Repl,
     abandon_stdin_read,
+    auto_answer,
     auto_deny,
+    render_continual_update,
     request_interrupt,
     sigint_scope,
     stream_turn,
     tty_permission_responder,
+    tty_question_responder,
 )
 from fluid.config.loader import load_config
 from fluid.config.model import HarnessConfig
@@ -118,8 +123,6 @@ async def run_once(
         # Background work (Task/Monitor) parks the session instead of ending
         # it; the one-shot run keeps streaming through park and wake until
         # nothing is in flight, so it never exits with workers running.
-        from fluid.cli.repl import auto_answer, tty_question_responder
-
         with sigint_scope(on_sigint):
             stop = await stream_turn(
                 engine, meta.session_id, prompt, out=out, on_permission=on_permission,
@@ -144,7 +147,6 @@ async def _close_and_flush_learning(engine, session_id: str, out) -> None:
     well not have happened; print those late events here. Everything
     published before close was already rendered by the stream loop.
     """
-    from fluid.cli.repl import render_continual_update
     from fluid.events.model import ContinualUpdate
 
     before = engine.bus.last_seq(session_id)

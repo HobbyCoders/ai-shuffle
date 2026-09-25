@@ -1,7 +1,7 @@
 """Opt-in request tracing for every native provider.
 
 Set ``FLUID_TRACE_REQUESTS=<dir>`` and each outbound model request body is
-written to ``<dir>/<utc-timestamp>-<n>.json`` before it is sent. The files are
+written to ``<dir>/<utc-timestamp>-<n>-<provider>.json`` before it is sent. The files are
 the exact JSON the provider receives, so prefix drift between two consecutive
 requests (the usual cause of a missed prompt cache) can be diagnosed with a
 plain diff. Nothing is written when the variable is unset.

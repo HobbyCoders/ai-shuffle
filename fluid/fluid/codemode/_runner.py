@@ -895,7 +895,6 @@ class _BoundedSink:
 def _checkpoint() -> dict:
     import base64
     import pickle
-    import types
 
     vars_map: dict = {}
     dropped: list = []

@@ -222,7 +222,7 @@ when the turn ends. Console output is forced to UTF-8 on Windows.
 ## Environment variables the CLI reads directly
 
 Config-level `FLUID_*` variables are listed in
-[configuration.md](configuration.md). Two more are read outside the config
+[configuration.md](configuration.md). These are read outside the config
 loader:
 
 - `FLUID_SHELL` — path to the shell the `Bash` and `Monitor` tools run through
@@ -236,3 +236,19 @@ loader:
   consecutive files shows exactly where a prompt prefix changed, which is the
   usual cause of a missed cache.
 - `XDG_DATA_HOME` — base for the default session store.
+- `FLUID_STORE_FSYNC=1` — the JSONL session store fsyncs after every record
+  instead of relying on the OS to flush.
+- `FLUID_CHILD_ENV_PASSTHROUGH` — comma-separated variable names that still
+  reach `Bash` commands and the delegated `claude` child even though they look
+  like host secrets (`*_TOKEN`, `*_SECRET`, database settings and similar are
+  dropped from what children inherit by default).
+- `FLUID_CHILD_ENV_UNSET` — set in an environment a caller hands to a child
+  (never the host's own): comma-separated names to drop from what that child
+  inherits. The marker itself never reaches the child.
+- `FLUID_RESPONSES_ROUTING_ARM` — experimental routing identity for the
+  OpenAI Responses client on the Codex backend. `A` (default) sends only the
+  body's `prompt_cache_key`; `B` adds the Codex identity headers; `C` is `B`
+  plus the `x-codex-turn-state` replay; `D` is `B` plus a turn-start prewarm
+  hook, which only logs over HTTP. Unknown values fall back to `A`.
+- `CODEX_APP_SERVER_LOGIN_CLIENT_ID` — overrides the OAuth client id used by
+  `fluid.providers.openai_responses.codex_oauth`.

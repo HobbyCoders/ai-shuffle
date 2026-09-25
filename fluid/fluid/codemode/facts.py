@@ -387,7 +387,7 @@ class FactStore:
                     old["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
                     old["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
                     old["alternatives"] = sorted(set(old.get("alternatives", []) + [old["text"], entry["text"]]))[:2]
-            for key, t in tombstones.items():
+            for key in tombstones:
                 # Delete wins over every replay. Restoring creates a new ID;
                 # a stale worker cannot resurrect the forgotten record.
                 entries.pop(key, None)

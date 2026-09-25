@@ -1431,7 +1431,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """The CLI hook events this loop registers; empty registers none."""
         if self.hooks is not None:
             return tuple(_CLI_HOOK_EVENTS)
-        if self.tool_policy is not None or self._has_deny_rules():
+        if self._needs_policy_hook():
             return _POLICY_HOOK_EVENTS
         return ()
 

@@ -141,6 +141,19 @@ class ProviderRequest:
     wire_state: WireState | None = field(default=None, compare=False, repr=False)
 
 
+def flatten_system(system: str | list[Any] | None) -> str | None:
+    """``ProviderRequest.system`` (str or text-block list) as one string."""
+    if system is None:
+        return None
+    if isinstance(system, str):
+        return system
+    if isinstance(system, list):
+        return "".join(
+            str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in system
+        )
+    return str(system)
+
+
 class ProviderClient(Protocol):
     # Optional cost hook (NOT part of the protocol — implementing it is opt-in):
     # a provider MAY expose ``estimate_cost(model, usage) -> float | None``. The

@@ -251,7 +251,6 @@ class PermissionBridge:
     tool_name: str
     tool_use_id: str
     input: dict[str, Any]
-    risk: str = "safe"
     # The CLI's own ``permission_suggestions``: the rules it would add for an
     # "always allow" answer, echoed back as ``updatedPermissions``.
     suggestions: tuple[dict[str, Any], ...] = ()
@@ -709,7 +708,7 @@ class StreamJsonMapper:
         ) if isinstance(raw_suggestions, list) else ()
         bridge = PermissionBridge(
             cli_request_id=frame.get("request_id", ""), fluid_request_id=fluid_rid,
-            tool_name=tool_name, tool_use_id=tid, input=inp, risk=risk,
+            tool_name=tool_name, tool_use_id=tid, input=inp,
             suggestions=suggestions,
         )
         event = PermissionRequest(

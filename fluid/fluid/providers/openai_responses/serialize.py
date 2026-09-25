@@ -55,6 +55,7 @@ from fluid.providers.base import (
     ErrorClass,
     ProviderRequest,
     StreamChunk,
+    flatten_system,
 )
 
 # Fields echoed on output items that MUST be removed before a stateless
@@ -71,19 +72,6 @@ _EFFORT_MEDIUM_CEIL = 16384
 def _strip_for_resend(item: dict[str, Any]) -> dict[str, Any]:
     """Copy an echoed output item minus the fields a stateless resend forbids."""
     return {k: v for k, v in item.items() if k not in _RESEND_STRIP_KEYS}
-
-
-def _instructions_from_system(system: Any) -> str | None:
-    if system is None:
-        return None
-    if isinstance(system, str):
-        return system
-    if isinstance(system, list):
-        parts = [
-            str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in system
-        ]
-        return "".join(parts)
-    return str(system)
 
 
 def _image_part(block: Image) -> dict[str, Any]:
@@ -255,7 +243,7 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
         "include": ["reasoning.encrypted_content"],
     }
 
-    instructions = _instructions_from_system(request.system)
+    instructions = flatten_system(request.system)
     if instructions is not None:
         body["instructions"] = instructions
 

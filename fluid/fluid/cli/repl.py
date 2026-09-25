@@ -275,7 +275,6 @@ def _switch_mode(out: TextIO, mode: str) -> None:
         out.write("\n  [thinking] " + ("\x1b[2m" if dim else ""))
     else:
         out.write(("\x1b[0m" if dim else "") + "\n\n")
-    _mode[key] = mode
 
 
 def _end_stream(out: TextIO) -> None:
@@ -591,7 +590,6 @@ class Repl:
     ) -> None:
         self.engine = engine
         self.session_id = session_id
-        self.input_fn = input_fn or input
         self._reader = stdin_reader() if input_fn is None else LineReader(input_fn)
         self.out = out or sys.stdout
         self.prompt = prompt
