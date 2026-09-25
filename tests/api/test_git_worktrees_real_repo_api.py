@@ -83,6 +83,30 @@ def test_get_worktree_and_foreign_ids_are_404(wt_api, mock_db):
     assert response.json()["detail"] == "Worktree not found in this project: wt-1"
 
 
+def test_git_routes_refuse_another_projects_worktree_id(wt_api, monkeypatch):
+    """A key limited to p2 cannot reach p1's worktree by passing its id on p2's routes."""
+    from app.api import common
+
+    client, _, path, tmp_path = wt_api
+    other = init_repo(tmp_path / "other")
+    database.create_project("p2", "Other", None, str(other))
+    worktree_manager._ensure_repository_record("p2", str(other))
+    monkeypatch.setattr(common, "get_api_user_from_request", lambda request: {"project_id": "p2"})
+
+    status_resp = client.get("/api/v1/projects/p2/git/status", params={"worktree_id": "wt-1"})
+    assert status_resp.status_code == 404
+    assert status_resp.json()["detail"] == "Worktree not found in this project: wt-1"
+
+    stage = client.post(
+        "/api/v1/projects/p2/git/stage", params={"worktree_id": "wt-1"}, json={"files": ["wip.txt"]},
+    )
+    assert stage.status_code == 404
+    assert git(path, "status", "--porcelain").strip() == "?? wip.txt"
+
+    # The project the key is limited to still works.
+    assert client.get("/api/v1/projects/p2/git/status").status_code == 200
+
+
 def test_worktree_file_browsing_is_confined(wt_api):
     client, _, path, tmp_path = wt_api
     (tmp_path / "outside").mkdir()

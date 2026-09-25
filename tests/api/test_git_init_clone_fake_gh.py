@@ -263,6 +263,35 @@ def test_clone_bad_url_is_500(env, url):
     assert not _is_repo(target)
 
 
+def test_clone_response_never_echoes_url_credentials(env, monkeypatch):
+    bare = _source_repo(env)
+    target = _project(env, "p-clone", "with-creds")
+    url = "https://alice:s3cr3t@example.invalid/r.git"
+    # Resolve the credentialed URL to the local bare repo: a real clone, no network.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{bare}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", url)
+
+    response = env.client.post("/api/v1/projects/p-clone/git/clone", json={"clone_url": url})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["message"] == "Repository cloned from https://***@example.invalid/r.git"
+    assert (target / "hello.txt").read_text() == "hi\n"
+
+
+def test_clone_error_never_echoes_url_credentials(env):
+    target = _project(env, "p-clone", "creds-fail")
+
+    response = env.client.post(
+        "/api/v1/projects/p-clone/git/clone", json={"clone_url": "http://alice:s3cr3t@127.0.0.1:9/r.git"},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"].startswith("Failed to clone repository:")
+    assert "s3cr3t" not in response.text
+    assert not _is_repo(target)
+
+
 @pytest.mark.parametrize("body", [{}, {"clone_url": ""}, {"clone_url": "x" * 501}])
 def test_clone_url_validation_is_422(env, body):
     _project(env, "p-clone", "v")

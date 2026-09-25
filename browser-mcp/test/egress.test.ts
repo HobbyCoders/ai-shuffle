@@ -123,6 +123,12 @@ describe("parseAuthority and launch switches", () => {
       stripProxyArgs(["--headless=new", "--proxy-server=socks5://x:1", "--no-proxy-server", "--proxy-bypass-list=*", "--proxy-pac-url=http://x/p", "--proxy-auto-detect", "about:blank"]),
     ).toEqual(["--headless=new", "about:blank"]);
   });
+
+  it("drops single-dash and mixed-case proxy switches and a bare `--`", () => {
+    expect(
+      stripProxyArgs(["-no-proxy-server", "-proxy-server=direct://", "-Proxy-Bypass-List=*", "--NO-PROXY-SERVER", "--", "--headless=new"]),
+    ).toEqual(["--headless=new"]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -408,15 +414,15 @@ describe.skipIf(process.platform === "win32")("launchBehindProxy", () => {
     writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$@" > "${out}"\nexit 7\n`);
     chmodSync(fake, 0o755);
 
-    const launched = await launchBehindProxy([fake, "--no-proxy-server", "--proxy-server=http://evil:1", "about:blank"], {
-      policy: ONLY_ONE,
-      stdio: "ignore",
-      log: () => {},
-    });
+    const launched = await launchBehindProxy(
+      [fake, "--no-proxy-server", "-no-proxy-server", "--proxy-server=http://evil:1", "about:blank"],
+      { policy: ONLY_ONE, stdio: "ignore", log: () => {} },
+    );
     expect(await launched.exited).toBe(7);
+    // The launcher's switches come last so they win over any unrecognised copy.
     expect(readFileSync(out, "utf8").trim().split("\n")).toEqual([
-      ...chromiumProxyArgs(launched.proxy.port),
       "about:blank",
+      ...chromiumProxyArgs(launched.proxy.port),
     ]);
     await expect(
       new Promise((resolve, reject) => {

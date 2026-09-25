@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 
 from app.core.git_service import git_service
+from app.core.scrub import redact_url_credentials
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.git_owner import session_git_action
@@ -350,7 +351,7 @@ async def clone_repository(
     if not success:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to clone repository: {error}"
+            detail=f"Failed to clone repository: {redact_url_credentials(error or '')}"
         )
 
     # Create database record
@@ -369,7 +370,7 @@ async def clone_repository(
 
     return CloneRepoResponse(
         success=True,
-        message=f"Repository cloned from {body.clone_url}",
+        message=f"Repository cloned from {redact_url_credentials(body.clone_url)}",
         repository_id=repo["id"] if repo else None,
     )
 

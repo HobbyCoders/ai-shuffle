@@ -516,6 +516,25 @@ def _resolve_leaf_in_project(project: dict, rel: str) -> tuple[Path, Path]:
     return parent / lexical.name, base_path
 
 
+def _refuse_git_metadata(*paths: str) -> None:
+    """400 when any path names the repository metadata directory.
+
+    Every component is checked, in every spelling git itself refuses (case,
+    trailing dots and spaces, ``.git::$INDEX_ALLOCATION``, the 8.3 name
+    ``GIT~1``): ``.git`` controls what the app's own git runs execute (hooks,
+    config), so file routes must never write into it or move it.
+    """
+    from app.core.git_commit_ops import _is_ntfs_dotgit
+
+    for path in paths:
+        for name in str(path).replace("\\", "/").split("/"):
+            if name and _is_ntfs_dotgit(name):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Path is inside the repository metadata directory (.git)",
+                )
+
+
 @router.get("/{project_id}/files")
 async def list_project_files(
     request: Request,
@@ -699,6 +718,9 @@ def _perform_project_upload(
         if worktree_full.exists():
             base_project_path = worktree["worktree_path"]
 
+    # Uploads are confined without following links, so the spelling is the target.
+    _refuse_git_metadata(path, filename)
+
     # Build target directory path using Path joining (avoid mixed slashes on Windows)
     base = Path(base_project_path)
     if path:
@@ -759,6 +781,7 @@ async def upload_file(
 
     check_project_access(request, project_id)
     api_user = get_api_user_from_request(request)
+    _refuse_git_metadata(path, file.filename or "")
 
     def _load_project():
         project = database.get_project(project_id)
@@ -917,6 +940,7 @@ async def rename_file_or_folder(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid name"
         )
+    _refuse_git_metadata(path, new_name)
 
     def _resolve():
         project = database.get_project(project_id)
@@ -945,6 +969,11 @@ async def rename_file_or_folder(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid name"
             )
+        # The resolved identities too: a link to .git is followed in the parent.
+        _refuse_git_metadata(
+            current_path.relative_to(base_path).as_posix(),
+            new_path.relative_to(base_path).as_posix(),
+        )
         if new_path.exists():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

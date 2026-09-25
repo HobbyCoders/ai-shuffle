@@ -129,6 +129,23 @@ describe("classifyIp — default policy", () => {
     expect(classifyIp("::ffff:127.0.0.1", DEFAULT).blocked).toBe(true);
   });
 
+  it("classifies IPv4-compatible, IPv4-translated and NAT64 local-use forms by their IPv4 address", () => {
+    const denyPort = compilePolicy({ BROWSER_SSRF_DENY_PORTS: "8000" } as NodeJS.ProcessEnv);
+    for (const ip of ["::7f00:1", "::127.0.0.1", "::ffff:0:7f00:1", "::ffff:0:127.0.0.1", "64:ff9b:1::7f00:1", "64:ff9b:1::a9fe:a9fe", "::a9fe:a9fe", "::ffff:0:a00:1"]) {
+      expect(classifyIp(ip, DEFAULT).blocked, ip).toBe(true);
+      expect(classifyIp(ip, denyPort, 8000).blocked, ip).toBe(true);
+    }
+    expect(classifyIp("::a9fe:a9fe", DEFAULT).reason).toMatch(/metadata/i);
+    // Other layouts inside the local-use /48 are default-blocked.
+    expect(classifyIp("64:ff9b:1:7f00:0:100::", DEFAULT).blocked).toBe(true);
+    // Public IPv4 behind these forms stays public; :: and ::1 keep their IPv6 meaning.
+    expect(classifyIp("::ffff:0:5db8:d822", DEFAULT).blocked).toBe(false);
+    expect(normalizeIp("::7f00:1")).toBe("127.0.0.1");
+    const v6Loopback = compilePolicy({ BROWSER_SSRF_ALLOW: "::1/128" } as NodeJS.ProcessEnv);
+    expect(classifyIp("::1", v6Loopback).blocked).toBe(false);
+    expect(classifyIp("::", DEFAULT).reason).toMatch(/IPv6 unspecified/);
+  });
+
   it("BLOCKS 0.0.0.0/8 and IPv6 link-local by default", () => {
     expect(classifyIp("0.0.0.0", DEFAULT).blocked).toBe(true);
     expect(classifyIp("fe80::1", DEFAULT).blocked).toBe(true);

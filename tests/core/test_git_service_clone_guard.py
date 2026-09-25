@@ -94,3 +94,54 @@ class TestCloneRepoTerminalPrompt:
         env = mock_run.call_args.kwargs["env"]
         assert env["AI_SHUFFLE_CLONE_ENV_PROBE"] == "keep-me"
         assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+
+class TestCloneCredentialRedaction:
+    """A clone URL with userinfo never reaches logs or the client error text."""
+
+    URL = "https://alice:s3cr3t@git.example.com/o/r.git"
+    TOKEN_URL = "https://ghp_tok3n@github.com/o/r.git"
+
+    def test_failed_clone_error_and_logs_are_redacted(self, git, caplog):
+        fake_result = MagicMock(returncode=128, stderr=(
+            f"Cloning into '.'...\nfatal: unable to access '{self.URL}': 403\n"
+            f"fatal: repository '{self.TOKEN_URL}' not found\n"
+        ))
+        with caplog.at_level("DEBUG", logger="app.core.git_service"), \
+             patch.object(git, "_run_git", return_value=fake_result):
+            success, error = git.clone_repo("/tmp/work", self.URL)
+
+        assert success is False
+        assert "s3cr3t" not in error and "ghp_tok3n" not in error
+        assert "https://***@git.example.com/o/r.git" in error
+        assert "s3cr3t" not in caplog.text and "ghp_tok3n" not in caplog.text
+
+    def test_successful_clone_debug_log_is_redacted(self, git, caplog):
+        with caplog.at_level("DEBUG", logger="app.core.git_service"), \
+             patch.object(git, "_run_git", return_value=MagicMock(returncode=0)):
+            assert git.clone_repo("/tmp/work", self.URL) == (True, None)
+        assert "Cloned repository from https://***@git.example.com/o/r.git" in caplog.text
+        assert "s3cr3t" not in caplog.text
+
+    def test_run_git_failure_log_is_redacted(self, git, caplog, tmp_path):
+        import subprocess
+
+        err = subprocess.CalledProcessError(128, ["git"], stderr=f"fatal: '{self.URL}' denied")
+        with caplog.at_level("WARNING", logger="app.core.git_service"), \
+             patch("app.core.git_service.subprocess.run", side_effect=err), \
+             pytest.raises(subprocess.CalledProcessError):
+            git._run_git(str(tmp_path), ["clone", "--", self.URL, "."], check=True)
+        assert "s3cr3t" not in caplog.text
+        assert "https://***@git.example.com" in caplog.text
+
+
+def test_redact_url_credentials_shapes():
+    from app.core.scrub import redact_url_credentials
+
+    assert redact_url_credentials("https://u:p@h/r.git") == "https://***@h/r.git"
+    assert redact_url_credentials("x https://tok@h:8443/r and ssh://git:pw@h/r") == (
+        "x https://***@h:8443/r and ssh://***@h/r"
+    )
+    # Nothing to redact: ssh-style remotes, host:port, plain text.
+    for text in ("git@github.com:o/r.git", "http://localhost:8080/api", "no url here", ""):
+        assert redact_url_credentials(text) == text

@@ -184,6 +184,7 @@ class TestGenerateCommitMessage:
         """worktree_id resolves the working dir via the worktree record."""
         mock_database.get_project.return_value = sample_project
         mock_database.get_worktree.return_value = sample_worktree
+        mock_database.get_git_repository_by_project.return_value = {"id": "repo-abc"}
         with ExitStack() as stack:
             _patch_stack(
                 stack, mock_git_service, mock_database, mock_settings,

@@ -200,6 +200,15 @@ def _resolve_working_dir(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Worktree not found: {worktree_id}"
             )
+        # The access check covers project_id only; a worktree of another
+        # project must not be reachable through it. Same check and error as
+        # the worktree routes (git_worktrees._require_worktree_for_project).
+        repo = database.get_git_repository_by_project(project_id)
+        if not repo or worktree.get("repository_id") != repo["id"]:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Worktree not found in this project: {worktree_id}",
+            )
         return get_worktree_working_dir(worktree), True
 
     if session_id:

@@ -42,8 +42,11 @@ def _clear_cache():
 def db():
     """Patch the database module git_helpers resolves through."""
     with patch.object(helpers, "database") as mock_db:
-        mock_db.get_worktree.return_value = {"id": "wt-1", "path": "/checkouts/wt-1"}
+        mock_db.get_worktree.return_value = {"id": "wt-1", "repository_id": "repo-1", "path": "/checkouts/wt-1"}
         mock_db.get_session.return_value = {"id": "ses-1"}
+        mock_db.get_git_repository_by_project.side_effect = (
+            lambda project_id: {"id": "repo-1"} if project_id == "p1" else {"id": "repo-2"}
+        )
         yield mock_db
 
 
@@ -66,6 +69,16 @@ class TestResolution:
     def test_falls_back_to_project_path(self, db, resolvers):
         assert _resolve("p1") == "/projects/p1"
 
+    def test_worktree_of_another_project_404s(self, db, resolvers):
+        """A worktree id is honoured only for the project that owns it."""
+        db.get_worktree.return_value = {"id": "wt-9", "repository_id": "repo-2", "path": "/checkouts/wt-9"}
+        with pytest.raises(HTTPException) as exc:
+            _resolve("p1", "wt-9")
+        assert exc.value.status_code == 404
+        assert exc.value.detail == "Worktree not found in this project: wt-9"
+        assert len(helpers._working_dir_cache) == 0
+        assert _resolve("p2", "wt-9") == "/checkouts/wt-9"
+
     def test_unknown_worktree_404s_and_is_not_cached(self, db, resolvers):
         db.get_worktree.return_value = None
         with pytest.raises(HTTPException) as exc:
@@ -73,7 +86,7 @@ class TestResolution:
         assert exc.value.status_code == 404
 
         # A raised resolution leaves nothing behind to serve later.
-        db.get_worktree.return_value = {"id": "missing", "path": "/checkouts/late"}
+        db.get_worktree.return_value = {"id": "missing", "repository_id": "repo-1", "path": "/checkouts/late"}
         assert _resolve("p1", "missing") == "/checkouts/late"
 
 
@@ -146,7 +159,7 @@ class TestCaching:
         helpers._working_dir_cache.peek(("p1", "wt-1", None)).expires_at = (
             _time.monotonic() - 1
         )
-        db.get_worktree.return_value = {"id": "wt-1", "path": "/checkouts/moved"}
+        db.get_worktree.return_value = {"id": "wt-1", "repository_id": "repo-1", "path": "/checkouts/moved"}
         assert _resolve("p1", "wt-1", None) == "/checkouts/moved"
 
 
@@ -168,7 +181,7 @@ class TestInvalidation:
 
     def test_invalidation_makes_a_moved_checkout_visible_immediately(self, db, resolvers):
         assert _resolve("p1", "wt-1", None) == "/checkouts/wt-1"
-        db.get_worktree.return_value = {"id": "wt-1", "path": "/checkouts/elsewhere"}
+        db.get_worktree.return_value = {"id": "wt-1", "repository_id": "repo-1", "path": "/checkouts/elsewhere"}
         helpers.invalidate_working_dir_cache(project_id="p1", worktree_id="wt-1")
         assert _resolve("p1", "wt-1", None) == "/checkouts/elsewhere"
 

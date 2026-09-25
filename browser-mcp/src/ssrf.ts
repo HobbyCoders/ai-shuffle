@@ -162,21 +162,34 @@ export function parseIp(s: string): ParsedIp | null {
 /** NAT64 well-known prefix 64:ff9b::/96 (RFC 6052). */
 const NAT64_PREFIX = [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0];
 
+/** NAT64 local-use prefix 64:ff9b:1::/48 (RFC 8215), in its /96 layout. */
+const NAT64_LOCAL_PREFIX = [0x00, 0x64, 0xff, 0x9b, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+
+/** IPv4-translated ::ffff:0:0/96 (RFC 2765 / SIIT). */
+const TRANSLATED_PREFIX = [0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0];
+
 /**
- * If `p` is an IPv6 address that carries an IPv4 destination — IPv4-mapped
- * (::ffff:a.b.c.d) or NAT64 well-known (64:ff9b::a.b.c.d, which a NAT64
- * gateway translates to that IPv4 host) — return the equivalent IPv4 ParsedIp
- * so it classifies against the v4 ranges; otherwise return `p`.
+ * If `p` is an IPv6 address that carries an IPv4 destination, return the
+ * equivalent IPv4 ParsedIp so it classifies against the v4 ranges; otherwise
+ * return `p`. Covered: IPv4-mapped (::ffff:a.b.c.d), IPv4-translated
+ * (::ffff:0:a.b.c.d), IPv4-compatible (::a.b.c.d, except :: and ::1, which are
+ * the IPv6 unspecified and loopback addresses), NAT64 well-known
+ * (64:ff9b::a.b.c.d) and NAT64 local-use in its /96 layout
+ * (64:ff9b:1::a.b.c.d). A gateway or SIT route translates each to that host.
+ * Other layouts inside 64:ff9b:1::/48 stay IPv6 and are default-blocked.
  */
 function unmap(p: ParsedIp): ParsedIp {
   if (p.version !== 6) return p;
   const b = p.bytes;
+  const v4 = (): ParsedIp => ({ version: 4, bytes: b.slice(12, 16) });
   const firstTenZero = b.slice(0, 10).every((x) => x === 0);
-  if (firstTenZero && b[10] === 0xff && b[11] === 0xff) {
-    return { version: 4, bytes: b.slice(12, 16) };
-  }
-  if (NAT64_PREFIX.every((x, i) => b[i] === x)) {
-    return { version: 4, bytes: b.slice(12, 16) };
+  if (firstTenZero && b[10] === 0xff && b[11] === 0xff) return v4();
+  if (NAT64_PREFIX.every((x, i) => b[i] === x)) return v4();
+  if (NAT64_LOCAL_PREFIX.every((x, i) => b[i] === x)) return v4();
+  if (TRANSLATED_PREFIX.every((x, i) => b[i] === x)) return v4();
+  if (b.slice(0, 12).every((x) => x === 0)) {
+    const isUnspecifiedOrLoopback = b.slice(12, 15).every((x) => x === 0) && b[15] <= 1;
+    if (!isUnspecifiedOrLoopback) return v4();
   }
   return p;
 }
@@ -318,6 +331,9 @@ const DEFAULT_BLOCK: LabeledCidr[] = [
   // A connect() to [::] reaches the local host on Linux, exactly like 0.0.0.0.
   labeled("::/128", "IPv6 unspecified (reaches loopback)"),
   labeled("fe80::/10", "IPv6 link-local"),
+  // NAT64 local-use (RFC 8215): a site-local translator; the embedded IPv4
+  // address can sit anywhere, so layouts other than /96 are not classified.
+  labeled("64:ff9b:1::/48", "NAT64 local-use"),
 ];
 
 /** Private network ranges; blocked by default, allowed per entry by the operator. */

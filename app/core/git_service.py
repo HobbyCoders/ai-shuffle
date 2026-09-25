@@ -20,6 +20,8 @@ import os
 import subprocess
 from typing import List, Dict, Any, Optional, Tuple
 
+from app.core.scrub import redact_url_credentials
+
 # Cache primitives used below
 from app.core.git_cache import (
     _git_cache,
@@ -95,10 +97,16 @@ class GitService(
                 env=run_env,
             )
         except subprocess.TimeoutExpired:
-            logger.warning(f"Git command timed out: git {' '.join(args)}")
+            logger.warning(
+                "Git command timed out: git %s", redact_url_credentials(" ".join(args))
+            )
             raise
         except subprocess.CalledProcessError as e:
-            logger.warning(f"Git command failed: git {' '.join(args)}: {e.stderr}")
+            logger.warning(
+                "Git command failed: git %s: %s",
+                redact_url_credentials(" ".join(args)),
+                redact_url_credentials(e.stderr or ""),
+            )
             raise
 
     # =========================================================================
@@ -181,12 +189,13 @@ class GitService(
         # arbitrary local commands. Fail closed with the tuple contract rather than
         # raising, so callers surface a clean error instead of a 500.
         stripped = clone_url.strip()
+        safe_url = redact_url_credentials(clone_url)
         if stripped.startswith("-"):
-            logger.warning("Refusing clone URL that looks like an option: %s", clone_url[:50])
+            logger.warning("Refusing clone URL that looks like an option: %s", safe_url[:50])
             return False, "Invalid clone URL (looks like a command-line option)"
         lowered = stripped.lower()
         if lowered.startswith("ext::") or lowered.startswith("file::"):
-            logger.warning("Refusing unsafe clone URL scheme: %s", clone_url[:50])
+            logger.warning("Refusing unsafe clone URL scheme: %s", safe_url[:50])
             return False, "Refusing unsafe clone URL scheme (ext:: / file::)"
 
         # Force-disable git's interactive credential prompt so a clone of a
@@ -205,18 +214,20 @@ class GitService(
                 env=clone_env,
             )
             if result.returncode == 0:
-                logger.debug(f"Cloned repository from {clone_url} into {working_dir}")
+                logger.debug("Cloned repository from %s into %s", safe_url, working_dir)
                 if _native_reader is not None:
                     _native_reader.invalidate_repo(working_dir)
                 return True, None
-            error = result.stderr.strip() or "Unknown error"
-            logger.warning(f"Failed to clone repo: {error}")
+            # git's stderr can echo the URL (and so its credentials) back.
+            error = redact_url_credentials(result.stderr.strip()) or "Unknown error"
+            logger.warning("Failed to clone repo: %s", error)
             return False, error
         except subprocess.TimeoutExpired:
             return False, f"Clone timed out after {timeout}s — the repository may be too large"
         except Exception as e:
-            logger.error(f"Error cloning repository: {e}")
-            return False, str(e)
+            error = redact_url_credentials(str(e))
+            logger.error("Error cloning repository: %s", error)
+            return False, error
 
     def get_remote_url(self, working_dir: str) -> Optional[str]:
         """Get the remote URL for origin."""

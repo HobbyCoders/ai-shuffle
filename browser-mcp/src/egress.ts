@@ -62,8 +62,15 @@ const HOP_BY_HOP = new Set([
   "upgrade",
 ]);
 
-/** Proxy switches the launcher owns; any caller-supplied copy is dropped. */
-const PROXY_SWITCH = /^--(proxy-server|proxy-bypass-list|proxy-pac-url|no-proxy-server|proxy-auto-detect|winhttp-proxy-resolver)(=|$)/;
+/**
+ * Proxy switches the launcher owns; any caller-supplied copy is dropped.
+ * Chromium also accepts a single-dash prefix (and `/` on Windows, where switch
+ * names are case-insensitive), so every spelling is matched.
+ */
+const PROXY_SWITCH = new RegExp(
+  `^(?:--?${process.platform === "win32" ? "|/" : ""})(?:proxy-server|proxy-bypass-list|proxy-pac-url|no-proxy-server|proxy-auto-detect|winhttp-proxy-resolver)(?:=|$)`,
+  "i",
+);
 
 /** A CONNECT authority: `host:port` or `[v6]:port`. No userinfo, path or spaces. */
 const AUTHORITY = /^(\[[0-9A-Fa-f:.]+\]|[^\s:/?#@[\]]+):([0-9]{1,5})$/;
@@ -80,9 +87,13 @@ export function chromiumProxyArgs(port: number): string[] {
   ];
 }
 
-/** `args` without any switch that would change or disable the proxy. */
+/**
+ * `args` without any switch that would change or disable the proxy, and
+ * without a bare `--` (which would turn the launcher's switches, placed after
+ * these, into plain arguments).
+ */
 export function stripProxyArgs(args: string[]): string[] {
-  return args.filter((arg) => !PROXY_SWITCH.test(arg));
+  return args.filter((arg) => arg !== "--" && !PROXY_SWITCH.test(arg));
 }
 
 /** Parse a CONNECT target. Undefined when it is not a plain host:port. */
@@ -449,7 +460,9 @@ export async function launchBehindProxy(command: string[], opts: LaunchOptions):
   const [exe, ...args] = command;
   if (!exe) throw new Error("no browser command");
   const proxy = await startEgressProxy(opts);
-  const child = spawn(exe, [...chromiumProxyArgs(proxy.port), ...stripProxyArgs(args)], {
+  // The launcher's switches go last: Chromium keeps the last copy of a switch,
+  // so they win over any spelling the filter did not recognise.
+  const child = spawn(exe, [...stripProxyArgs(args), ...chromiumProxyArgs(proxy.port)], {
     stdio: opts.stdio ?? ["ignore", "inherit", "inherit"],
     env: opts.env ?? process.env,
   });

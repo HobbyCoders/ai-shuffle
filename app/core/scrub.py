@@ -95,3 +95,24 @@ def scrub_url_credentials(value: Any) -> Any:
     if isinstance(value, list):
         return [scrub_url_credentials(v) for v in value]
     return value
+
+
+# The whole userinfo of a URL, user included. Unlike ``_URL_CREDENTIALS_RE``
+# this also matches a user with no password: a clone URL routinely carries a
+# token in that position (``https://ghp_xxx@github.com/o/r.git``). Scoped to
+# git remotes and their error text, where no ``scheme://name@`` is benign
+# enough to keep. ssh-style ``git@host:path`` has no ``://`` and is untouched.
+_URL_USERINFO_RE = re.compile(
+    r"([A-Za-z][A-Za-z0-9+.\-]*://)[^\s/?#@\"'<>\[\]{}\\^|]+(?=@)"
+)
+
+
+def redact_url_credentials(text: str) -> str:
+    """Replace the userinfo of every URL in *text* (a git remote, argv or stderr).
+
+    ``https://user:pw@host/r.git`` and ``https://token@host/r.git`` both become
+    ``https://***@host/r.git``; the host and path stay readable.
+    """
+    if not isinstance(text, str) or _URL_USERINFO_RE.search(text) is None:
+        return text
+    return _URL_USERINFO_RE.sub(r"\g<1>" + REDACTED, text)

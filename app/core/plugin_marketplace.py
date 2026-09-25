@@ -13,8 +13,17 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict
 
 from app.core.plugin_models import MarketplaceInfo
+from app.core.scrub import redact_url_credentials
 
 logger = logging.getLogger(__name__)
+
+
+def _git_error(e: subprocess.CalledProcessError) -> str:
+    """git's stderr for a client-facing error, with URL credentials removed."""
+    stderr = e.stderr or b""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    return redact_url_credentials(stderr)
 
 
 def get_marketplaces(svc) -> List[MarketplaceInfo]:
@@ -66,7 +75,7 @@ def add_marketplace(svc, url: str, name: Optional[str] = None) -> MarketplaceInf
 
     if not re.match(r'^https?://[\w\-.]+(:\d+)?(/[\w\-./%+@]*)*$', url) and \
        not re.match(r'^git@[\w\-.]+:[\w\-./]+$', url):
-        raise ValueError(f"Invalid git URL: {url[:100]}")
+        raise ValueError(f"Invalid git URL: {redact_url_credentials(url)[:100]}")
 
     # Derive name from URL if not provided
     if not name:
@@ -83,14 +92,15 @@ def add_marketplace(svc, url: str, name: Optional[str] = None) -> MarketplaceInf
     # Clone the repository
     if not Path(install_location).exists():
         try:
+            # "--" so a URL can never be read as a git option (e.g. --upload-pack=...).
             subprocess.run(
-                ["git", "clone", "--depth", "1", url, install_location],
+                ["git", "clone", "--depth", "1", "--", url, install_location],
                 check=True,
                 capture_output=True,
                 timeout=120
             )
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to clone marketplace: {e.stderr.decode()}")
+            raise RuntimeError(f"Failed to clone marketplace: {_git_error(e)}")
         except subprocess.TimeoutExpired:
             raise RuntimeError("Marketplace clone timed out")
 
@@ -227,13 +237,13 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
         shutil.rmtree(install_path, ignore_errors=True)
         try:
             subprocess.run(
-                ["git", "clone", "--depth", "1", source_url, install_location],
+                ["git", "clone", "--depth", "1", "--", source_url, install_location],
                 check=True,
                 capture_output=True,
                 timeout=120
             )
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to re-clone marketplace: {e.stderr.decode()}")
+            raise RuntimeError(f"Failed to re-clone marketplace: {_git_error(e)}")
         except subprocess.TimeoutExpired:
             raise RuntimeError("Marketplace re-clone timed out")
     else:
@@ -246,7 +256,7 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
                 timeout=120
             )
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to sync marketplace: {e.stderr.decode()}")
+            raise RuntimeError(f"Failed to sync marketplace: {_git_error(e)}")
         except subprocess.TimeoutExpired:
             raise RuntimeError("Marketplace sync timed out")
 
