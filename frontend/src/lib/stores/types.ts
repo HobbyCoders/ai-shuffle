@@ -101,7 +101,6 @@ export interface ChatMessage {
 	partialToolInput?: string; // Accumulator for streaming tool input JSON
 	systemSubtype?: string; // For system messages (e.g., 'context' for /context command)
 	systemData?: Record<string, unknown>; // Raw data from system message
-	thinkingTokens?: number; // Live estimated thinking-token count shown on the thinking block (from CLI thinking_tokens events)
 	thinkingSubtype?: string; // 'reasoning_summary' when the block is the provider's own summary of its reasoning, not the reasoning text (fluid BlockStart.subtype)
 	profileId?: string; // Profile ID that was active when this message was created (for per-query tracking)
 	// Subagent-specific fields

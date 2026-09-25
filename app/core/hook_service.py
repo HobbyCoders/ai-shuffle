@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Awaitable
 
@@ -309,6 +310,9 @@ async def get_database_hooks_for_event(
 # Unified Stop Hook Handler
 # =============================================================================
 
+_STOP_TEXT_LIMIT = 16_000
+
+
 def create_stop_hook_handler(
     working_dir: str,
     project_id: Optional[str] = None,
@@ -381,15 +385,26 @@ def create_stop_hook_handler(
 
         # 2. Check for database Stop hooks
         db_hooks = await get_database_hooks_for_event(project_id, "Stop")
+        if db_hooks:
+            # Same wrapper as the other events: bash hooks read HOOK_TIMESTAMP,
+            # HOOK_DATA and HOOK_<KEY> from "timestamp" and "data".
+            stop_data = json.loads(json.dumps({**script_input, "project_id": project_id}, default=str))
+            if isinstance(stop_data.get("text"), str):
+                # The turn's final text; bounded so the environment stays under
+                # the per-variable limit.
+                stop_data["text"] = stop_data["text"][:_STOP_TEXT_LIMIT]
+            stop_event = {
+                "event": "Stop",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "working_dir": working_dir,
+                "project_id": project_id,
+                "data": stop_data,
+            }
         for hook in db_hooks:
             logger.debug(f"Executing database Stop hook: {hook.get('name')}")
 
             # Execute the hook and check if it wants to block
-            result = await execute_hook(hook, {
-                "event": "Stop",
-                "working_dir": working_dir,
-                "project_id": project_id
-            })
+            result = await execute_hook(hook, stop_event)
 
             # If hook output contains a block decision, honor it
             if result.get("success") and result.get("output"):

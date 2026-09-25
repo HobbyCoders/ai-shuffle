@@ -1958,7 +1958,6 @@
 		<ThinkingBlock
 			content={message.content}
 			streaming={message.streaming}
-			thinkingTokens={message.thinkingTokens}
 			profileName={getProfileName(message)}
 			subtype={message.thinkingSubtype}
 		/>

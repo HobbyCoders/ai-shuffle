@@ -180,7 +180,7 @@ async def register_device(request: MobileDeviceRegisterRequest):
     if not request.pairing_code:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="A one-time pairing code is required. Create one from Settings → Devices.",
+            detail="A one-time pairing code is required. Create one from Settings → Providers → Devices.",
         )
 
     # Check if device already exists
@@ -238,7 +238,7 @@ async def register_device(request: MobileDeviceRegisterRequest):
     if result and result.get("duplicate"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Device already registered. Revoke it from Settings → Devices before pairing again.",
+            detail="Device already registered. Revoke it from Settings → Providers → Devices before pairing again.",
         )
     if not result:
         raise HTTPException(

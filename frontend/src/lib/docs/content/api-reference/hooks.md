@@ -202,7 +202,7 @@ Bash hooks on the seven background events get no stdin. They receive environment
 | `HOOK_DATA` | The event data as JSON |
 | `HOOK_<KEY>` | One per top-level key of the event data (e.g. `HOOK_TOOL_NAME`). Plain text, not JSON |
 
-A `Stop` bash hook gets only `HOOK_EVENT=Stop`; its `HOOK_DATA` is `{}`.
+A `Stop` bash hook gets the same variables, also with no stdin. `HOOK_DATA` holds the stop payload, such as `session_id`, `cwd`, `stop_hook_active`, `stop_reason`, the turn's final `text` (first 16,000 characters) and `project_id`.
 
 ## Blocking a tool call
 
@@ -242,8 +242,15 @@ X-Hook-Signature: sha256=<hmac_hex_digest>  (if secret configured)
 ```json
 {
   "event": "Stop",
+  "timestamp": "2025-01-15T10:30:00Z",
   "working_dir": "/workspace/my-project",
-  "project_id": "proj_abc123"
+  "project_id": "proj_abc123",
+  "data": {
+    "hook_event_name": "Stop",
+    "session_id": "sess_def456",
+    "stop_reason": "end_turn",
+    "project_id": "proj_abc123"
+  }
 }
 ```
 

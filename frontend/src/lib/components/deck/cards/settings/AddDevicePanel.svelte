@@ -115,7 +115,7 @@
 				<h4>{grant.grant.purpose === 'network:join' ? 'Worker invite' : grant.grant.purpose === 'runner' ? 'Worker enrollment code' : 'Phone or browser code'}</h4>
 				<p class="hint">
 					{#if grant.grant.purpose === 'network:join'}
-						On the other worker choose <strong>Join with an invite</strong> during setup or in Settings → Devices, then scan this code or paste the link. It joins immediately.
+						On the other worker choose <strong>Join with an invite</strong> during setup or in Settings → Providers → Devices, then scan this code or paste the link. It joins immediately.
 					{:else if grant.grant.purpose === 'runner'}
 						On the worker configured for this database, run the command below.
 					{:else if link}

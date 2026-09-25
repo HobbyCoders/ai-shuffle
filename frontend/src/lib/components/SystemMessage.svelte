@@ -528,9 +528,9 @@
 			}
 
 			case 'thinking_tokens': {
-				// Live thinking-token estimates - routed to the thinking-block
-				// counter during streaming (never a card). Defensive guard so
-				// any persisted rows that slip through reload stay hidden.
+				// Live thinking-token estimates: the backend drops them and
+				// they are never a card. Defensive guard so any persisted rows
+				// that slip through reload stay hidden.
 				return {
 					title: 'Thinking Tokens',
 					content: `${(data.estimated_tokens as number) ?? ''}`,

@@ -1166,11 +1166,32 @@ class SessionSyncResponse(BaseModel):
     sessions: List[dict]
 
 
+def _resolve_sync_profile_id(requested: Optional[str], project: dict) -> str:
+    """The agent imported sessions are filed under.
+
+    The app seeds no agents, so there is no "default" to fall back on.
+    """
+    if requested:
+        if not database.get_profile(requested):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent not found: {requested}")
+        return requested
+    default_id = (project.get("settings") or {}).get("default_profile_id")
+    if default_id and database.get_profile(default_id):
+        return default_id
+    profiles = database.get_all_profiles()
+    if not profiles:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No agents are configured; create an agent before importing sessions.",
+        )
+    return profiles[0]["id"]
+
+
 @router.post("/{project_id}/sync-sessions", response_model=SessionSyncResponse)
 async def sync_project_sessions(
     request: Request,
     project_id: str,
-    profile_id: str = Query("default", description="Profile to use for imported sessions"),
+    profile_id: Optional[str] = Query(None, description="Agent for imported sessions; defaults to the project's default agent, else the first agent"),
     token: str = Depends(require_auth)
 ):
     """
@@ -1190,7 +1211,8 @@ async def sync_project_sessions(
 
     Args:
         project_id: The project to sync sessions for
-        profile_id: The profile to associate with imported sessions (default: 'default')
+        profile_id: The agent for imported sessions. Defaults to the project's
+            default agent, else the first agent; 409 when there are no agents.
 
     Returns:
         imported_count: Number of sessions successfully imported
@@ -1218,7 +1240,7 @@ async def sync_project_sessions(
         # Run session sync
         return session_sync_service.sync_project_sessions(
             project_id=project_id,
-            profile_id=profile_id
+            profile_id=_resolve_sync_profile_id(profile_id, project),
         )
 
     result = await run_sync(_sync)

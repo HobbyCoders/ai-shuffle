@@ -236,6 +236,29 @@ def test_bearer_session_works_for_http_and_websocket(app):
     assert remote.post('/api/v1/owner/login', json={'password': PASSWORD}).status_code == 403
 
 
+
+def test_logout_revokes_the_owner_token_server_side(app):
+    owner_auth.set_password(PASSWORD, source='test')
+    # A Bearer session: a script signs out without an Origin, and the token is dead.
+    token = client(app).post('/api/v1/owner/login', json={'password': PASSWORD, 'bearer': True}).json()['token']
+    script = client(app, origin=False, headers={'Authorization': 'Bearer ' + token})
+    assert script.get('/owner').status_code == 200
+    assert script.post('/api/v1/auth/logout').status_code == 200
+    assert script.get('/owner').status_code == 403
+    assert script.get('/user').status_code == 401
+    assert owner_auth.local_session(token) is None
+    # A cookie session: the same token replayed as a Bearer after sign-out is refused.
+    lan = client(app)
+    assert lan.post('/api/v1/owner/login', json={'password': PASSWORD}).status_code == 200
+    cookie = lan.cookies.get('session')
+    assert cookie and cookie.startswith(owner_auth.SESSION_PREFIX)
+    assert lan.post('/api/v1/auth/logout').status_code == 200
+    replay = client(app, origin=False, headers={'Authorization': 'Bearer ' + cookie})
+    assert replay.get('/owner').status_code == 403
+    assert owner_auth.local_session(cookie) is None
+    # The cookie path still needs a same-origin page.
+    assert client(app, origin=False).post('/api/v1/auth/logout', cookies={'session': 'x'}).status_code == 403
+
 def test_login_before_any_password_is_a_conflict(app):
     assert client(app).post('/api/v1/owner/login', json={'password': PASSWORD}).status_code == 409
 

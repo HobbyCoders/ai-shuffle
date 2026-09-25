@@ -147,6 +147,40 @@ export async function getConnectors(): Promise<Connector[]> {
 	return api.get<Connector[]>('/connectors');
 }
 
+/** Chat connectors: every incoming message runs an agent turn. */
+const CHAT_CONNECTOR_TYPES = new Set(['telegram', 'discord', 'whatsapp', 'slack', 'line', 'signal', 'imessage', 'msteams', 'bluebubbles']);
+
+/**
+ * Whether a new connection of this type runs an agent on incoming messages or
+ * requests. The backend refuses those until the connection's API user has an
+ * agent, so the create form asks for one. Webhooks default to outbound.
+ */
+export function connectorNeedsAgent(type: string, config: ConnectorConfig): boolean {
+	if (type === 'webhook') {
+		const mode = String(config.mode ?? '').trim().toLowerCase() || 'outbound';
+		return mode !== 'outbound';
+	}
+	return CHAT_CONNECTOR_TYPES.has(type);
+}
+
+/**
+ * Build the create payload. An existing API user keeps its own agents; a new
+ * API user is created with the chosen agent.
+ */
+export function buildConnectorCreate(input: {
+	name: string;
+	type: ConnectorCreate['type'];
+	config: ConnectorConfig;
+	events: string[];
+	apiUserId?: string;
+	profileId?: string;
+}): ConnectorCreate {
+	const data: ConnectorCreate = { name: input.name, type: input.type, config: input.config, events: input.events };
+	if (input.apiUserId) data.api_user_id = input.apiUserId;
+	else if (input.profileId) data.profile_ids = [input.profileId];
+	return data;
+}
+
 /**
  * Create a new connector
  */

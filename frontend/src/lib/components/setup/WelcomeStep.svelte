@@ -55,7 +55,7 @@
 			<p>
 				AI Shuffle checks for updates when it starts and once a day, without asking, like other desktop apps.
 				The check sends no prompts, files or usage data. Once licensing is live it also renews this worker's license.
-				You can turn updates off in Settings > General > Allow updates.
+				You can turn updates off in Settings → Account → Application updates → Allow updates.
 				<a href={PRIVACY_UPDATES_URL} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-primary underline">
 					What is sent <ExternalLink size={12} />
 				</a>

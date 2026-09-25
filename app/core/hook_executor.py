@@ -184,11 +184,7 @@ async def execute_bash_hook(
 
     try:
         # Prepare environment with event data
-        env = {
-            "HOOK_EVENT": event_data.get("event", ""),
-            "HOOK_TIMESTAMP": event_data.get("timestamp", ""),
-            "HOOK_DATA": json.dumps(event_data.get("data", {})),
-        }
+        env = {}
 
         # Add specific fields from event data
         if "data" in event_data:
@@ -196,6 +192,13 @@ async def execute_bash_hook(
             for key, value in data.items():
                 env_key = f"HOOK_{key.upper()}"
                 env[env_key] = str(value) if value is not None else ""
+
+        # Set last so a data key such as "event" cannot overwrite them.
+        env.update({
+            "HOOK_EVENT": event_data.get("event", ""),
+            "HOOK_TIMESTAMP": event_data.get("timestamp", ""),
+            "HOOK_DATA": json.dumps(event_data.get("data", {})),
+        })
 
         # Execute the command
         process = await spawn_hook_shell(

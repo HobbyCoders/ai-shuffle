@@ -24,7 +24,7 @@ it('defaults to a worker invite on an enrolled worker and embeds the reachable a
 	await fireEvent.click(screen.getByRole('button', { name: 'Create worker invite' }));
 	expect(api.post).toHaveBeenCalledWith('/pairing/grants', { purpose: 'network:join', endpoint_url: endpoint.url, device_label: null });
 	expect(await screen.findByText('Worker invite')).toBeTruthy();
-	expect(screen.getByText(/It joins immediately/)).toBeTruthy();
+	expect(screen.getByText(/It joins immediately/).textContent).toContain('Settings → Providers → Devices');
 	expect(screen.getByRole('button', { name: 'Copy invite link' })).toBeTruthy();
 	expect(screen.getByLabelText('Worker invite QR code')).toBeTruthy();
 	expect(screen.queryByText(/fingerprint/i)).toBeNull();

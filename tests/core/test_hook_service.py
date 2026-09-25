@@ -224,6 +224,38 @@ class TestStopHookHandler:
         assert captured.get("session_id") == "sess-abc"
 
 
+    @pytest.mark.asyncio
+    async def test_database_bash_stop_hook_gets_timestamp_and_data(self, tmp_path):
+        """A saved Stop bash hook reads the stop payload like the other events."""
+        import json
+        out = tmp_path / "env.txt"
+        hook = {
+            "hook_type": "bash", "timeout": 10000, "name": "stop-env",
+            "command": f'printf "%s\\n%s\\n%s\\n%s" "$HOOK_EVENT" "$HOOK_TIMESTAMP" '
+                       f'"$HOOK_SESSION_ID" "$HOOK_DATA" > "{out}"; echo \'{{"decision": "block", "reason": "again"}}\'',
+        }
+        with patch('app.core.hook_service.get_database_hooks_for_event', new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_stop_hook_handler(str(tmp_path), project_id="proj-1", plugin_stop_hooks=[])
+            result = await handler(
+                {"hook_event_name": "Stop", "event": "TurnEnd", "session_id": "sess-abc",
+                 "stop_hook_active": False, "stop_reason": "end_turn", "text": "done"},
+                None,
+                {"signal": None},
+            )
+
+        event, timestamp, session_id, data = out.read_text().split("\n", 3)
+        assert event == "Stop"
+        assert timestamp.startswith("20") and "T" in timestamp
+        assert session_id == "sess-abc"
+        data = json.loads(data)
+        assert data["session_id"] == "sess-abc"
+        assert data["stop_reason"] == "end_turn"
+        assert data["project_id"] == "proj-1"
+        assert data["cwd"] == str(tmp_path)
+        assert result.get("decision") == "block" and result.get("reason") == "again"
+
+
 class TestExecutePluginHook:
     """Tests for plugin hook execution."""
 

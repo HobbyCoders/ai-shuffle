@@ -448,9 +448,12 @@ async def preview_access_redirect(request: Request):
 @router.post("/logout")
 async def logout(request: Request, response: Response):
     """Logout and invalidate session"""
-    owner_auth.same_origin(request)
-    token = get_session_token(request)
-    if token:
+    cookie_token = get_session_token(request)
+    bearer_token = get_api_key(request)
+    # A cookie is ambient, so it needs a same-origin page; a Bearer is not.
+    if cookie_token or not bearer_token:
+        owner_auth.same_origin(request)
+    for token in dict.fromkeys(t for t in (cookie_token, bearer_token) if t):
         paired_client = await run_sync(get_paired_client_from_token, token, touch=False)
         if paired_client:
             from app.core.pairing import hash_controller_session

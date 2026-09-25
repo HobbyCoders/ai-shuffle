@@ -1789,3 +1789,50 @@ class TestFileInfoDetails:
         assert dir_idx_z < file_idx_a  # dirs before files
         assert dir_idx_a < dir_idx_z  # adir before zdir
         assert file_idx_a < file_idx_z  # afile before zfile
+
+
+# =============================================================================
+# Test Session Sync Agent
+# =============================================================================
+
+class TestSyncSessionsAgent:
+    """sync-sessions files imports under a real agent; there is no "default"."""
+
+    @pytest.fixture
+    def sync(self):
+        with patch("app.core.session_sync.session_sync_service") as svc:
+            svc.sync_project_sessions.return_value = {"imported_count": 0, "skipped_count": 0, "errors": [], "sessions": []}
+            yield svc.sync_project_sessions
+
+    def test_defaults_to_first_agent(self, client, mock_database, sample_project, sync):
+        mock_database.get_project.return_value = sample_project
+        mock_database.get_all_profiles.return_value = [{"id": "agent-a"}, {"id": "agent-b"}]
+
+        assert client.post("/api/v1/projects/test-project/sync-sessions").status_code == 200
+        assert sync.call_args.kwargs["profile_id"] == "agent-a"
+
+    def test_prefers_project_default_agent(self, client, mock_database, sample_project, sync):
+        mock_database.get_project.return_value = {**sample_project, "settings": {"default_profile_id": "agent-b"}}
+        mock_database.get_profile.return_value = {"id": "agent-b"}
+
+        assert client.post("/api/v1/projects/test-project/sync-sessions").status_code == 200
+        assert sync.call_args.kwargs["profile_id"] == "agent-b"
+
+    def test_no_agents_is_a_clear_conflict(self, client, mock_database, sample_project, sync):
+        mock_database.get_project.return_value = sample_project
+        mock_database.get_all_profiles.return_value = []
+
+        response = client.post("/api/v1/projects/test-project/sync-sessions")
+
+        assert response.status_code == 409
+        assert "create an agent" in response.json()["detail"]
+        sync.assert_not_called()
+
+    def test_unknown_agent_is_rejected(self, client, mock_database, sample_project, sync):
+        mock_database.get_project.return_value = sample_project
+        mock_database.get_profile.return_value = None
+
+        response = client.post("/api/v1/projects/test-project/sync-sessions?profile_id=missing")
+
+        assert response.status_code == 404
+        sync.assert_not_called()
