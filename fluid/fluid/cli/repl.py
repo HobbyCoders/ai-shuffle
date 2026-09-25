@@ -758,8 +758,15 @@ class Repl:
                 self.out.write(f"no running task {arg}\n")
         elif cmd == "/model":
             if arg:
-                await set_model(self.engine, arg)
-                self.out.write(f"model → {arg}\n")
+                try:
+                    await set_model(self.engine, arg)
+                except RuntimeError as exc:
+                    # The delegated leg records a switch only once the CLI
+                    # acknowledges it; a refused or unanswered one keeps the
+                    # old model.
+                    self.out.write(f"model not changed: {exc}\n")
+                else:
+                    self.out.write(f"model → {arg}\n")
             else:
                 self.out.write(f"model = {self.engine.model}\n")
         elif cmd == "/fork":

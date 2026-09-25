@@ -211,6 +211,10 @@ _STALE_QUIET = 0.05
 _WAKE_SETTLE = 0.2
 _WAKE_DRAIN_TIMEOUT = 30.0
 _WAKE_FRAME_TYPES = frozenset({"assistant", "user", "stream_event"})
+# A Stop that cuts a model / mode switch short also stops the turn that switch
+# was preparing (a host switches right before it submits the turn): a UserTurn
+# submitted within this many seconds ends Interrupted without reaching the CLI.
+_STOP_CARRYOVER = 15.0
 _STALE_PERMISSION_DENIAL = (
     "denied: the claude CLI asked for this permission between turns, when "
     "no one could approve it"
@@ -421,6 +425,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._proc_results = 0
         # Loop time the last turn's result was read (see _discard_stale_stdout).
         self._last_result_at: float | None = None
+        # The CLI started a turn of its own (a wake) whose result has not been
+        # read yet. Kept across drains: a Stop ends the drain, not the wake,
+        # and the next drain must still wait for that result.
+        self._wake_in_flight = False
         # A hook on a bridge-served call answered ``continue: false``: the
         # reason, reported as the turn's ErrorEvent once the CLI's result
         # lands (the native loop ends its turn the same way).
@@ -461,6 +469,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # Loop-issued control_requests awaiting their control_response, by
         # request_id (the outbound mirror of _pending_permissions).
         self._pending_controls: dict[str, asyncio.Future] = {}
+        # set_model / set_permission_mode switches whose outcome is unknown: the
+        # frame reached the CLI, but a Stop or the deadline ended the wait, so
+        # the CLI may be on the new value while ``model`` / ``permission_mode``
+        # keep the old one. The next turn re-sends the recorded value first.
+        self._unconfirmed_settings: set[str] = set()
+        # Loop time until which a Stop that cut a switch short still stops the
+        # next UserTurn (see ``_STOP_CARRYOVER``).
+        self._stop_carryover_until: float | None = None
         # Context-usage snapshots asked for mid-turn, one per model call the
         # CLI reports: request_id -> the node that call produced. Answered
         # through the turn's own frame reader (see _read_until_result);
@@ -581,6 +597,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if self._turn_task and not self._turn_task.done():
                 raise RuntimeError("a turn is already running; Interrupt it first")
             self._interrupted.clear()
+            if self._stop_carryover_until is not None:
+                # The Stop that cut this turn's switch short is this turn's.
+                if asyncio.get_running_loop().time() <= self._stop_carryover_until:
+                    self._interrupted.set()
+                self._stop_carryover_until = None
             self._turn_task = asyncio.create_task(self._run_turn(op))
         elif isinstance(op, Resume):
             # The CLI owns its own transcript; fluid cannot hand it a head node
@@ -891,6 +912,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         )
         self._stdout_backlog.clear()
         self.cli_hooks_registered = False
+        # A new CLI: no wake of the old one to wait for, and the model and
+        # mode it runs are the recorded ones (they are its argv).
+        self._wake_in_flight = False
+        self._unconfirmed_settings.clear()
         # Once per CLI process: the installed CLI is unpinned, and its version
         # is what ties a production report to the CLI behaviour behind it.
         logger.info(
@@ -957,6 +982,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # dead pipe found mid-turn, rather than write into this one.
                 if not self._proc_usable() and not await spawned():
                     return
+                if self._unconfirmed_settings and not self._interrupted.is_set():
+                    # The drain re-sent the recorded model / mode and the CLI
+                    # did not acknowledge it: its setting is still unknown. A
+                    # fresh CLI takes both from its argv.
+                    logger.warning(
+                        "claude CLI did not confirm %s; restarting it on the "
+                        "recorded values", ", ".join(sorted(self._unconfirmed_settings)),
+                    )
+                    await self._stop_process()
+                    if not await spawned():
+                        return
             op, question_ids = await self._question_turn_content(op)
             content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
             user_node = SessionNode(
@@ -1247,72 +1283,135 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         CLI blocks on each one, and an unanswered one wedges the next turn.
 
         A Stop ends the drain at once, whatever it was waiting for: the turn
-        then ends as Interrupted without its message being sent, and whatever
-        the CLI still writes is the next turn's drain to read.
+        then ends as Interrupted without its message being sent. A wake the
+        drain saw start stays owed its result (``_wake_in_flight``), so the
+        next turn's drain still waits for it rather than writing into it.
+
+        A model or mode switch whose outcome is unknown (``_unconfirmed_
+        settings``) is re-sent here with the recorded value, and the drain
+        holds (bounded) until the CLI acknowledges it.
         """
         assert self._proc is not None and self._proc.stdout is not None
+        if self._interrupted.is_set():
+            return
         loop = asyncio.get_running_loop()
         settle_until = (self._last_result_at or 0.0) + _WAKE_SETTLE
-        wake_deadline: float | None = None
-        for _ in range(1000):  # backstop against a continuously-spewing child
-            if self._interrupted.is_set():
-                return
-            now = loop.time()
-            if wake_deadline is not None:
-                timeout = wake_deadline - now
-            else:
-                timeout = max(_STALE_QUIET, settle_until - now)
-            try:
-                # Lines a parked permission wait read ahead come first.
-                line = self._stdout_backlog.pop(0) if self._stdout_backlog else (
-                    await self._readline_unless_stopped(max(timeout, 0.0))
-                )
-            except TimeoutError:
-                if wake_deadline is not None:
-                    logger.warning(
-                        "claude CLI wake turn did not finish within %.0fs; "
-                        "starting the turn anyway", _WAKE_DRAIN_TIMEOUT,
+        wake_deadline: float | None = (
+            loop.time() + _WAKE_DRAIN_TIMEOUT if self._wake_in_flight else None
+        )
+        resync = await self._send_setting_resync()
+        resync_deadline = loop.time() + CONTROL_TIMEOUT
+        try:
+            for _ in range(1000):  # backstop against a continuously-spewing child
+                if self._interrupted.is_set():
+                    return
+                now = loop.time()
+                holds = [] if wake_deadline is None else [wake_deadline]
+                if any(not fut.done() for _subtype, fut in resync.values()):
+                    holds.append(resync_deadline)
+                if holds:
+                    timeout = max(holds) - now
+                else:
+                    timeout = max(_STALE_QUIET, settle_until - now)
+                try:
+                    # Lines a parked permission wait read ahead come first.
+                    line = self._stdout_backlog.pop(0) if self._stdout_backlog else (
+                        await self._readline_unless_stopped(max(timeout, 0.0))
                     )
-                return
-            if line is None:  # stopped: the turn is not going to the CLI
-                return
-            if not line:  # EOF — let the turn's reader surface the closed stream
-                return
-            text = line.decode(errors="replace").strip()
-            if not text:
-                continue
-            if self._route_control_response(text):
-                # A control reply is never stale: some caller is awaiting that
-                # exact request_id (a context-usage snapshot taken as this turn
-                # was starting). Route it instead of dropping it on the floor.
-                continue
-            if await self._answer_hook_line(text):
-                # A hook the CLI is blocked on: never stale either.
-                continue
+                except TimeoutError:
+                    if wake_deadline is not None:
+                        logger.warning(
+                            "claude CLI wake turn did not finish within %.0fs; "
+                            "starting the turn anyway", _WAKE_DRAIN_TIMEOUT,
+                        )
+                        self._wake_in_flight = False
+                    return
+                if line is None:  # stopped: the turn is not going to the CLI
+                    return
+                if not line:  # EOF — let the turn's reader surface the closed stream
+                    return
+                text = line.decode(errors="replace").strip()
+                if not text:
+                    continue
+                if self._route_control_response(text):
+                    # A control reply is never stale: some caller is awaiting
+                    # that exact request_id (a context-usage snapshot taken as
+                    # this turn was starting, a re-sent setting). Route it
+                    # instead of dropping it on the floor.
+                    continue
+                if await self._answer_hook_line(text):
+                    # A hook the CLI is blocked on: never stale either.
+                    continue
+                try:
+                    frame = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(frame, dict):
+                    continue
+                kind = frame.get("type")
+                if kind == "control_request":
+                    if not await self._answer_stale_control_request(frame):
+                        continue
+                elif kind == "result":
+                    logger.warning("discarding stale between-turn CLI result: %.300s", text)
+                    wake_deadline = None
+                    self._wake_in_flight = False
+                    settle_until = 0.0
+                    continue
+                else:
+                    logger.warning("discarding stale between-turn CLI frame: %.300s", text)
+                    # A lone system frame (a task_notification, say) is no proof
+                    # a wake turn is running; only a turn's own frames arm the wait.
+                    if kind not in _WAKE_FRAME_TYPES:
+                        continue
+                if wake_deadline is None:
+                    wake_deadline = loop.time() + _WAKE_DRAIN_TIMEOUT
+                    self._wake_in_flight = True
+            logger.warning("stale-frame drain hit its line cap; continuing turn anyway")
+        finally:
+            self._settle_setting_resync(resync)
+
+    def _setting_request(self, subtype: str) -> dict[str, Any]:
+        """The control_request that puts the CLI on the recorded value."""
+        if subtype == "set_model":
+            return {"subtype": "set_model", "model": self.model}
+        return {
+            "subtype": "set_permission_mode",
+            "mode": _cli_permission_mode(self.permission_mode, self.cli_version),
+        }
+
+    async def _send_setting_resync(self) -> dict[str, tuple[str, asyncio.Future]]:
+        """Re-send each unconfirmed setting's recorded value: request_id ->
+        (subtype, reply future). Idempotent: a CLI already on the value just
+        acknowledges it. The drain routes the replies."""
+        sent: dict[str, tuple[str, asyncio.Future]] = {}
+        loop = asyncio.get_running_loop()
+        for subtype in sorted(self._unconfirmed_settings):
+            request_id = self._next_req_id()
+            fut: asyncio.Future = loop.create_future()
+            self._pending_controls[request_id] = fut
+            sent[request_id] = (subtype, fut)
             try:
-                frame = json.loads(text)
-            except json.JSONDecodeError:
+                await self._write_frame({
+                    "type": "control_request", "request_id": request_id,
+                    "request": self._setting_request(subtype),
+                })
+            except (OSError, RuntimeError) as exc:
+                fut.set_result(ControlReply(request_id=request_id, ok=False, error=repr(exc)))
+        return sent
+
+    def _settle_setting_resync(self, sent: dict[str, tuple[str, asyncio.Future]]) -> None:
+        """Record which re-sent settings the CLI acknowledged; the rest stay
+        unconfirmed (the turn then restarts the CLI, or the next one retries)."""
+        for request_id, (subtype, fut) in sent.items():
+            self._pending_controls.pop(request_id, None)
+            if not fut.done():
                 continue
-            if not isinstance(frame, dict):
-                continue
-            kind = frame.get("type")
-            if kind == "control_request":
-                if not await self._answer_stale_control_request(frame):
-                    continue
-            elif kind == "result":
-                logger.warning("discarding stale between-turn CLI result: %.300s", text)
-                wake_deadline = None
-                settle_until = 0.0
-                continue
+            reply = fut.result()
+            if reply.ok:
+                self._unconfirmed_settings.discard(subtype)
             else:
-                logger.warning("discarding stale between-turn CLI frame: %.300s", text)
-                # A lone system frame (a task_notification, say) is no proof a
-                # wake turn is running; only a turn's own frames arm the wait.
-                if kind not in _WAKE_FRAME_TYPES:
-                    continue
-            if wake_deadline is None:
-                wake_deadline = loop.time() + _WAKE_DRAIN_TIMEOUT
-        logger.warning("stale-frame drain hit its line cap; continuing turn anyway")
+                logger.warning("claude CLI refused the re-sent %s: %s", subtype, reply.error)
 
     async def _readline_unless_stopped(self, timeout: float) -> bytes | None:
         """One stdout line, or None once a Stop is requested; TimeoutError
@@ -2278,15 +2377,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 roundtrip.cancel()
             await asyncio.gather(roundtrip, stop, return_exceptions=True)
         if roundtrip.cancelled():
+            # The frame already reached the CLI, which may apply it: the value
+            # is unknown until the next turn re-sends the recorded one. The
+            # Stop is also meant for the turn this switch was preparing.
+            self._unconfirmed_settings.add(str(subtype))
+            self._stop_carryover_until = asyncio.get_running_loop().time() + _STOP_CARRYOVER
             raise RuntimeError(f"stopped before the Claude CLI acknowledged {subtype}")
         try:
             reply = roundtrip.result()
         except TimeoutError:
+            self._unconfirmed_settings.add(str(subtype))
             raise RuntimeError(
                 f"the Claude CLI did not acknowledge {subtype} within {CONTROL_TIMEOUT:.0f} s"
             ) from None
         if not reply.ok:
             raise RuntimeError(f"the Claude CLI refused {subtype}: {reply.error or 'no reason given'}")
+        self._unconfirmed_settings.discard(str(subtype))
 
     async def _control_roundtrip(self, request: dict[str, Any], timeout: float) -> ControlReply:
         """Write a control_request and wait for its reply (TimeoutError when
@@ -2420,6 +2526,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 continue
             if self._route_control_response(text) or await self._answer_hook_line(text):
                 continue
+            if _frame_type(text) == "result":
+                self._wake_in_flight = False  # the wake a stopped drain saw start
             logger.warning("discarding between-turn CLI frame: %.300s", text)
         return _PumpOutcome.REPLY
 
@@ -2520,6 +2628,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         assert self._proc is not None and self._proc.stdin is not None
         self._proc.stdin.write((json.dumps(frame) + "\n").encode())
         await self._proc.stdin.drain()
+
+
+def _frame_type(text: str) -> Any:
+    """A stdout line's frame ``type``, or None when it is not a JSON frame."""
+    try:
+        frame = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return frame.get("type") if isinstance(frame, dict) else None
 
 
 def _hook_text(value: Any) -> str:

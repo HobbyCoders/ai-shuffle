@@ -10,8 +10,10 @@ Selection (environment of the spawned child):
   FAKE_CLAUDE_SCRIPT   path to the script JSON (required)
   FAKE_CLAUDE_RECORD   path of a JSONL file the fake appends to: one ``start``
                        record (argv, env, cwd), every stdin frame it reads
-                       (``stdin``), and each permission answer it acted on
-                       (``decision``). Tests assert on what the CLI saw.
+                       (``stdin``), each permission answer it acted on
+                       (``decision``) and each set_model / set_permission_mode
+                       it applied (``applied``). Tests assert on what the CLI
+                       saw.
 
 Script shape::
 
@@ -20,9 +22,14 @@ Script shape::
     "spawn_exit": {"code": 1, "stderr": "."}, # exit before any frame
     "init": {"tools": [...], "model": "...", "session_id": "..."},
     "context_usage": "answer" | "error" | "mute",   # get_context_usage replies
-    "controls": {"<subtype>": "error" | "mute"},    # how other control
-                                              # requests (set_model, …) are
-                                              # answered; default success
+    "controls": {"<subtype>": "error" | "mute" | {"late": s}},
+                                              # how other control requests
+                                              # (set_model, …) are answered;
+                                              # default success. ``late``:
+                                              # the first one is applied and
+                                              # answered only after ``s``
+                                              # seconds (the fake reads
+                                              # nothing meanwhile)
     "turns": [[step, ...], ...],              # one list per user frame; after
                                               # the last, a plain text turn
     "resume_turns": [[step, ...], ...]        # used instead when spawned
@@ -102,6 +109,7 @@ class Fake:
         self.interrupted = False
         self.served: dict[str, int] = {}
         self.mode = _flag("--permission-mode") or "default"
+        self.model = _flag("--model")
         allowed = _flag("--allowed-tools") or ""
         self.allowed = [p for p in allowed.split(",") if p]
         self.sid = _flag("--resume") or (script.get("init") or {}).get("session_id", "cli-sess-1")
@@ -179,9 +187,20 @@ class Fake:
             payload = {"commands": [], "output_style": "default"}
         elif subtype == "interrupt":
             self.interrupted = True
-        elif subtype == "set_permission_mode":
-            if (self.script.get("controls") or {}).get(subtype) is None:
-                self.mode = req.get("mode") or self.mode
+        elif subtype in ("set_permission_mode", "set_model"):
+            how = (self.script.get("controls") or {}).get(subtype)
+            if isinstance(how, dict):
+                if self.served[subtype] == 1:
+                    time.sleep(float(how.get("late", 0)))
+            elif how is not None:
+                how = "refused"
+            if how != "refused":
+                if subtype == "set_model":
+                    self.model = req.get("model") or self.model
+                    self.record("applied", subtype=subtype, value=self.model)
+                else:
+                    self.mode = req.get("mode") or self.mode
+                    self.record("applied", subtype=subtype, value=self.mode)
         elif subtype == "get_context_usage":
             how = self.script.get("context_usage", "answer")
             if how == "mute":
@@ -193,6 +212,8 @@ class Fake:
                 return
             payload = CONTEXT_USAGE
         how = (self.script.get("controls") or {}).get(subtype)
+        if isinstance(how, dict):
+            how = None
         if how == "mute":
             return
         if how == "error":

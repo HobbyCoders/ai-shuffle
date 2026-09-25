@@ -664,8 +664,9 @@ async def test_stop_during_the_between_turn_drain_ends_the_turn_at_once(tmp_path
         assert isinstance(events[-1], Interrupted), events[-1]
         assert elapsed < 1.0, elapsed
         assert not _of(events, TextDelta)
-        # Let the wake finish; the next turn drains it and runs normally.
-        await asyncio.sleep(wake_s)
+        # R11-3: the Stop ended the drain, not the wake. The next turn, sent
+        # while the wake is still running, waits for the wake's result instead
+        # of writing into it and taking "WAKE text" as its answer.
         events = await run.turn("three")
         assert isinstance(events[-1], TurnComplete), events[-1]
         assert "".join(e.text for e in _of(events, TextDelta)) == "second answer"
@@ -674,10 +675,17 @@ async def test_stop_during_the_between_turn_drain_ends_the_turn_at_once(tmp_path
         await run.aclose()
 
 
-async def test_stop_during_a_setting_acknowledgement_wait_keeps_the_old_value(tmp_path) -> None:
+async def test_stop_during_a_setting_acknowledgement_wait_keeps_the_old_value(
+    tmp_path, monkeypatch,
+) -> None:
     """A switch the CLI has not acknowledged yet waits up to CONTROL_TIMEOUT
     (5 s); a Stop ends that wait at once and the switch is not recorded. A
-    Stop left over from before does not cut the next switch short."""
+    Stop left over from before does not cut the next switch short.
+
+    R11-4: the Stop still ends the turn the switch was preparing, and since
+    the frame reached the CLI its model is unknown: the next turn re-sends the
+    recorded one, and a CLI that never answers is restarted on it."""
+    monkeypatch.setattr(delegated_mod, "CONTROL_TIMEOUT", 0.5)
     run = Scripted(tmp_path, {"controls": {"set_model": "mute"}})
     try:
         await run.turn("hi")
@@ -691,12 +699,76 @@ async def test_stop_during_a_setting_acknowledgement_wait_keeps_the_old_value(tm
         assert elapsed < 1.0, elapsed
         assert run.loop.model == "claude-fake"
         assert not run.loop._pending_controls
-        # The earlier Stop is spent: an acknowledged switch still records.
+        # The earlier Stop is spent for switches: an acknowledged one records.
         await run.loop.submit(SetPermissionMode(mode="acceptEdits"))
         assert run.loop.permission_mode == "acceptEdits"
-        # And the session still takes turns.
-        events = await run.turn("again")
+        # The turn the stopped switch was preparing ends Interrupted, unsent.
+        events = await run.turn("two")
+        assert isinstance(events[-1], Interrupted), events[-1]
+        assert not _of(events, TextDelta)
+        # The next turn re-sends the model; unanswered, the CLI is restarted
+        # on the recorded values and the session still takes turns.
+        events = await run.turn("three")
         assert isinstance(events[-1], TurnComplete), events[-1]
+        sent = [f["request"]["model"] for f in run.stdin_frames("control_request", "set_model")]
+        assert sent == ["claude-other", "claude-fake"]
+        starts = run.records("start")
+        assert len(starts) == 2, starts
+        argv = starts[1]["argv"]
+        assert argv[argv.index("--model") + 1] == "claude-fake"
+        assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+        assert _user_texts(run) == ["hi", "three"]
+    finally:
+        await run.aclose()
+
+
+def _record_order(run: Scripted) -> list[tuple[str, Any]]:
+    """The fake's applied switches and received user texts, in order."""
+    rows = [json.loads(line) for line in run.record_path.read_text().splitlines() if line]
+    order: list[tuple[str, Any]] = []
+    for row in rows:
+        if row["kind"] == "applied" and row["subtype"] == "set_model":
+            order.append(("model", row["value"]))
+        elif row["kind"] == "stdin" and row["frame"].get("type") == "user":
+            order.append(("user", row["frame"]["message"]["content"][0]["text"]))
+    return order
+
+
+@pytest.mark.parametrize("how", ["stop", "timeout"])
+async def test_a_switch_the_cli_applies_after_the_wait_ended_is_undone_before_the_next_turn(
+    tmp_path, monkeypatch, how,
+) -> None:
+    """R11-4: the CLI applies a set_model whose wait a Stop or the deadline
+    already ended, and its late reply is dropped. The loop keeps the old model,
+    so the next turn re-sends it before the user frame: the CLI and the
+    recorded model agree again. A Stop also ends the turn it was preparing."""
+    monkeypatch.setattr(delegated_mod, "CONTROL_TIMEOUT", 0.3)
+    run = Scripted(tmp_path, {"controls": {"set_model": {"late": 0.6}}})
+    try:
+        await run.turn("one")
+        stopper = asyncio.create_task(_stop_after(run, 0.1)) if how == "stop" else None
+        with pytest.raises(RuntimeError, match="set_model"):
+            await run.loop.submit(SetModel(model="claude-other"))
+        if stopper is not None:
+            await stopper
+        assert run.loop.model == "claude-fake"
+        if how == "stop":
+            events = await run.turn("two")
+            assert isinstance(events[-1], Interrupted), events[-1]
+        # The CLI applies the switch after all (its reply finds no one waiting).
+        for _ in range(500):
+            if run.records("applied"):
+                break
+            await asyncio.sleep(0.01)
+        assert run.records("applied")[0]["value"] == "claude-other"
+        events = await run.turn("three" if how == "stop" else "two")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        last = "three" if how == "stop" else "two"
+        assert _record_order(run) == [
+            ("user", "one"), ("model", "claude-other"), ("model", "claude-fake"), ("user", last),
+        ]
+        assert len(run.records("start")) == 1  # re-sent, not restarted
+        assert not run.loop._unconfirmed_settings
     finally:
         await run.aclose()
 

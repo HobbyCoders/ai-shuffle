@@ -11,6 +11,7 @@ value skipped it. Driven against the scripted fake CLI.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import sys
 from pathlib import Path
@@ -110,3 +111,20 @@ async def test_with_no_cli_running_the_switch_applies_to_the_next_spawn(tmp_path
     argv = loop._build_argv()
     assert argv[argv.index("--model") + 1] == "claude-other"
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+
+
+async def test_the_repl_model_command_reports_a_refused_switch(tmp_path) -> None:
+    """R11-5: ``/model`` printed the refusal instead of crashing the REPL."""
+    from fluid.cli.repl import Repl
+
+    loop, _record = _loop(tmp_path, {"set_model": "error"})
+    try:
+        await _turn(loop)
+        out = io.StringIO()
+        repl = Repl(loop, loop.session_id, input_fn=lambda prompt: "", out=out)
+        assert await repl.dispatch_slash("/model claude-other") is True
+        assert "model not changed" in out.getvalue()
+        assert "refused set_model" in out.getvalue()
+        assert loop.model == "claude-fake"
+    finally:
+        await loop.aclose()
