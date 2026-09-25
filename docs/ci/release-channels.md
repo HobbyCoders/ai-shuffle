@@ -14,8 +14,9 @@ that same tag** (never `main`):
    `main` must be protected, and the merged PR for that commit must have a
    successful **Merge gate** on its head SHA. It also checks version surfaces
    and all connector source bytes locally, at the pinned Git commit and on
-   GitHub. **create-release** then waits for the owner's `release-signing`
-   environment approval, makes the GitHub release and decides whether this tag
+   GitHub. **create-release** then requires the immutable owner's trigger and
+   the tags-only `release-signing` environment, makes the GitHub release and
+   decides whether this tag
    is the newest final release (`promote_latest`). Legacy milestone tags such
    as `v6-phase2` and prereleases do not participate in that comparison.
 2. **docker** (`docker-publish.yml`) builds the image from the tag, runs the
@@ -52,7 +53,7 @@ installer dispatch must select that existing tag as its workflow ref and
 supply the same version; a dispatch from `main` fails preflight, because a
 checkout does not change GitHub's tags-only environment authorization.
 
-Every push to `main` still publishes an **edge** source update
+An explicit owner dispatch on `main` publishes an **edge** source update
 (`desktop-source.yml` → `publish-source.mjs` with the default
 `SOURCE_CHANNEL=edge`) at `/v1/desktop/manifest/edge`, signed with
 `channel: "edge"`. Customer containers only accept `stable`; set
@@ -101,11 +102,24 @@ spec under the same release ID. The digest test and preflight enforce it.
 
 ### Owner prerequisites (not satisfied by the checks above)
 
-Preparation-time read-only GitHub checks reported `main.protected=false` and
-only `account-hub-production` / `google-play-internal` in the environment
-list: `release-signing` was absent. This is a blocker, not a successful
-release-gate check. Re-read those settings after the owner configures them;
-no secret values were inspected or configured during source preparation.
+On 2026-09-25, owner-approved main/tag rules and deployment-ref restrictions
+were configured and read back. `main.protected=true`; `release-signing` accepts
+only `v*` tags. This private repository is on GitHub Team, which does not support
+native required-reviewer environments. The owner chose explicit owner-triggered
+production workflows instead of upgrading billing. This is **not** a native
+reviewer gate: anyone trusted to change protected workflow code must be trusted
+with this policy. Secrets were not read, moved or changed.
+
+Production jobs require repository `HobbyCoders/ai-shuffle`, immutable actor ID
+`76577322` (Quickkill0), and the same triggering actor on reruns. The hub, license,
+registry, website and edge-source deploys accept only manual dispatch from
+`main`; a merge no longer deploys the website or publishes a source update.
+Stable release jobs accept only the owner-created `v*` tag push or an explicit
+owner dispatch from that tag. Reusable signing/publishing workflows also enforce
+the owner identity and protected ref; another maintainer cannot rerun an owner's
+old deployment to obtain its authority. Existing worker-readiness and publish
+opt-ins remain required. CI/unsigned builds stay automatic. Changes take effect
+when the reviewed workflow revision reaches `main`; run nothing before then.
 
 - Merge the reviewed candidate through protected `main`, with the applicable
   suites and **Merge gate** green on the PR head. Confirm required review,
@@ -113,7 +127,7 @@ no secret values were inspected or configured during source preparation.
   `v*` tag rules in GitHub settings. Preflight checks protection is enabled
   and the merged PR's gate; it does not audit every ruleset setting.
 - Configure the `release-signing` environment below. Both release creation
-  and stable signing require its approval from a tag ref. Before any
+  and stable signing require an owner trigger and its tag-ref restriction. Before any
   publication, the creation job checks the presence of its Cloudflare values,
   D1 ID and signing key and tests the private key against
   `desktop/build/application-update-key.pem`. Presence is not proof of token
@@ -131,12 +145,11 @@ no secret values were inspected or configured during source preparation.
   license enforcement rollout with the owner; do not fill them with guessed
   values. Finish the real-box matrix in
   `docs/internal/acceptance-clean-box.md` before calling the candidate sale-ready.
-- Connector package installs still fall back to `gh api` with the user's
-  GitHub sign-in for the private source repository
-  (`app/core/connector_packages.py`). An AI Shuffle license does not grant
-  repository read access. The pin fix does **not** solve ordinary buyers'
-  connector distribution; resolve that separate distribution blocker before
-  advertising those plugin installs to buyers.
+- Official connector source snapshots ship with the app and update archive;
+  buyers no longer need a GitHub account or private repository access. Source
+  digests and bounds are still enforced, and dependency installation still
+  needs PyPI. Repeat clean-buyer install/update acceptance on the final artifact;
+  do not confuse the owner's remote catalog check with that buyer path.
 
 Only after those prerequisites may the owner create/push the annotated
 `v0.8.19` tag at the merged PR commit. On that tagged checkout, the equivalent
@@ -217,8 +230,10 @@ desktop workers once `DesktopUpdateState` in `app/api/internal.py` accepts
    release.
 3. **Create the `release-signing` environment.** Settings → Environments →
    New environment `release-signing`:
-   - Required reviewers: yourself. Every stable signing then waits for your
-     click.
+   - On this private Team repository, required reviewers are unavailable.
+     The owner explicitly chose immutable-actor/rerun checks in the protected
+     workflows. Do not claim the environment itself requires approval. If
+     Enterprise is adopted later, add native reviewers as an additional gate.
    - Deployment branches and tags: **Selected branches and tags**, add the tag
      pattern `v*` only.
    - Secrets: `DESKTOP_APPLICATION_SIGNING_KEY`, `CLOUDFLARE_API_TOKEN`,

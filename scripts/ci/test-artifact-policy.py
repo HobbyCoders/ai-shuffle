@@ -110,11 +110,23 @@ class ArtifactPolicyTests(unittest.TestCase):
         preview = next(s for j in desktop["jobs"].values() for s in uploads(j) if s["with"]["name"] == "windows-preview-installer")
         self.assertEqual(desktop["on"]["workflow_dispatch"]["inputs"]["upload_preview"]["default"], "false")
         cases = []
-        for event, ref, enabled, tag in itertools.product(["pull_request", "workflow_dispatch", "push"], ["refs/heads/main", "refs/heads/feature"], [False, True], ["", "v1.2.3"]):
+        for event, ref, enabled, tag, owner, same_rerun_actor in itertools.product(
+            ["pull_request", "workflow_dispatch", "push"],
+            ["refs/heads/main", "refs/heads/feature", "refs/tags/v1.2.3"],
+            [False, True], ["", "v1.2.3"], [False, True], [False, True],
+        ):
             inputs = {"publish_download": enabled, "upload_preview": enabled, "release_tag": tag}
-            github = {"event_name": event, "ref": ref}
-            cases.append({"inputs": inputs, "github": github, "android": enabled and event != "pull_request" and (bool(tag) or ref == "refs/heads/main"), "desktop": event == "workflow_dispatch" and enabled})
-        runner = "const {android,desktop,cases}=JSON.parse(require('fs').readFileSync(0,'utf8')); for(const c of cases) for(const [key,expr] of Object.entries({android,desktop})) require('assert').strictEqual(new Function('inputs','github','return '+expr)(c.inputs,c.github), c[key]);"
+            github = {"event_name": event, "ref": ref, "repository": "HobbyCoders/ai-shuffle",
+                      "actor_id": "76577322" if owner else "7", "actor": "Quickkill0",
+                      "triggering_actor": "Quickkill0" if same_rerun_actor else "another-maintainer"}
+            permitted_ref = ref == "refs/heads/main" or ref.startswith("refs/tags/v")
+            permitted_event = ((event == "workflow_dispatch" and permitted_ref)
+                               or (event == "push" and ref.startswith("refs/tags/v")))
+            android_allowed = (enabled and owner and same_rerun_actor and permitted_event
+                               and (bool(tag) or ref == "refs/heads/main"))
+            cases.append({"inputs": inputs, "github": github, "android": android_allowed,
+                          "desktop": event == "workflow_dispatch" and enabled})
+        runner = "const {android,desktop,cases}=JSON.parse(require('fs').readFileSync(0,'utf8')); for(const c of cases) for(const [key,expr] of Object.entries({android,desktop})) require('assert').strictEqual(new Function('inputs','github','startsWith','return '+expr)(c.inputs,c.github,(s,p)=>s.startsWith(p)), c[key]);"
         subprocess.run(["node", "-e", runner], input=json.dumps({"android": android, "desktop": preview["if"], "cases": cases}), text=True, check=True)
         self.assertEqual(preview["with"]["retention-days"], "1")
         steps = next(j["steps"] for j in desktop["jobs"].values() if preview in j.get("steps", []))

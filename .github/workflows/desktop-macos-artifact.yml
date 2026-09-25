@@ -23,7 +23,9 @@ permissions:
 
 jobs:
   macos:
-    if: inputs.build_macos == true
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) &&
+      (inputs.build_macos == true)
     name: macOS arm64 artifact with source provenance
     runs-on: blacksmith-6vcpu-macos-latest
     # Notarization of a large app can queue at Apple for a while.

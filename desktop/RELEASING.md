@@ -14,6 +14,14 @@ instead of shipping unsigned by accident. Once signing works, set the
 repository **variable** `DESKTOP_REQUIRE_SIGNING=true` so an unsigned Windows
 or macOS release can never be built again.
 
+Production/signing jobs require the repository owner’s immutable GitHub actor
+ID and a matching rerun actor on a permitted main/release-tag ref. A collaborator
+cannot reuse an owner-triggered run to publish. Unsigned PR verification remains
+automatic; a merge alone does not deploy or publish an edge update. These
+workflow gates plus environment ref restrictions are the owner-approved GitHub
+Team design, not Enterprise required-reviewer protection. See
+`docs/ci/release-channels.md` for the exact trigger/ref and secret-custody limits.
+
 ## Which workflow builds what
 
 | Workflow | Trigger | Output | Signed |
@@ -22,7 +30,7 @@ or macOS release can never be built again.
 | `desktop-installer.yml` | `release.yml` with `build_desktop`, or manual with a `vX.Y.Z` tag | the stable Windows x64 NSIS installer, attached to the GitHub release and served by the hub at `/desktop` | Authenticode when the Windows secrets are set |
 | `desktop-macos-artifact.yml` | manual, `build_macos` ticked | Apple Silicon DMG and ZIP, `SHA256SUMS`, provenance, as a one-day Actions artifact | Developer ID and notarized when the macOS secrets are set |
 | `desktop-linux-artifact.yml` | manual | x64 AppImage and deb, `SHA256SUMS`, provenance, as a one-day Actions artifact | no, by design |
-| `desktop-source.yml` | every push to `main` | the Ed25519-signed source manifest that installed Windows apps update from | always, with `DESKTOP_APPLICATION_SIGNING_KEY` |
+| `desktop-source.yml` | owner dispatch from `main` | the Ed25519-signed source manifest that installed Windows apps update from | always, with `DESKTOP_APPLICATION_SIGNING_KEY` |
 
 The macOS and Linux artifacts are downloaded from the run and attached to the
 release by hand for now; the hub only serves the Windows installer.

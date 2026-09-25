@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/**'
       - 'scripts/ci/*.py'
+      - 'tests/scripts/test_owner_publication_policy.py'
   workflow_dispatch:
 
 permissions:
@@ -22,7 +23,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: python -m pip install PyYAML==6.0.3
+      - run: python -m pip install PyYAML==6.0.3 pytest==9.1.1
       - run: python scripts/ci/test-artifact-policy.py
       - run: python scripts/ci/test-cost-policy.py
       - run: python scripts/ci/test-merge-gate.py
+      - run: python -m pytest -q -o addopts="" --confcutdir=tests/scripts tests/scripts/test_owner_publication_policy.py

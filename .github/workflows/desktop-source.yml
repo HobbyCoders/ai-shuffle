@@ -1,8 +1,6 @@
 name: Publish desktop source update
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -14,6 +12,8 @@ concurrency:
 
 jobs:
   publish:
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     # Store and sign GitHub's source ZIP in a private release. No application builds.
     runs-on: ubuntu-latest
     environment: account-hub-production

@@ -267,7 +267,8 @@ def test_stable_update_is_signed_only_after_verification_in_a_protected_environm
     job = release["jobs"]["source-stable"]
     assert set(job["needs"]) == {"create-release", "docker", "buyer-install"}
     assert job["environment"] == "release-signing"
-    assert job["if"] == "needs.create-release.outputs.promote_latest == 'true'"
+    assert "needs.create-release.outputs.promote_latest == 'true'" in job["if"]
+    assert "github.actor_id == '76577322'" in job["if"]
     checkout = job["steps"][0]
     assert checkout["with"]["ref"] == "refs/tags/${{ needs.create-release.outputs.release_tag }}"
     assert checkout["with"]["fetch-depth"] == 0
@@ -276,6 +277,6 @@ def test_stable_update_is_signed_only_after_verification_in_a_protected_environm
     assert publish["env"]["SOURCE_CHANNEL"] == "stable"
     assert publish["env"]["RELEASE_TAG"] == "${{ needs.create-release.outputs.release_tag }}"
     assert job["concurrency"]["group"] == "desktop-source-publish"
-    # The per-push publisher stays on the edge channel.
+    # The owner-dispatched source publisher stays on the edge channel.
     edge = yaml.safe_load((ROOT / ".github/workflows/desktop-source.yml").read_text())
     assert "SOURCE_CHANNEL" not in str(edge)
