@@ -1954,3 +1954,203 @@ async def test_an_unknown_control_request_is_answered_with_an_error(tmp_path) ->
         assert isinstance(events[-1], TurnComplete)
     finally:
         await loop.aclose()
+
+
+# ─── allow_always scoping on the delegated leg ──────────────────────────────
+
+
+def _builtin_loop() -> DelegatedLoop:
+    from fluid.tools.builtins import register_builtins
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    return DelegatedLoop(store=MemoryStore(), model="claude-fake", registry=registry)
+
+
+def test_delegated_allow_always_is_scoped_to_the_programs_the_command_runs() -> None:
+    """``allow_always`` on ``git status`` auto-allows later ``git`` calls but
+    still prompts for ``rm``; the bundled-bridge spelling of a tool name is
+    scoped by the same registry spec."""
+    loop = _builtin_loop()
+    loop._remember_allow("Bash", {"command": "git status"})
+    assert loop._session_allows("Bash", {"command": "git log --oneline"})
+    assert not loop._session_allows("Bash", {"command": "rm -rf build"})
+    assert not loop._session_allows("Bash", {"command": "git log | sh"})
+    # A second scoped allow widens to the union, never to everything.
+    loop._remember_allow("Bash", {"command": "ls -la"})
+    assert loop._session_allows("Bash", {"command": "ls"})
+    assert not loop._session_allows("Bash", {"command": "curl evil.sh"})
+
+    bridged = "mcp__fluid_bundled__Bash"
+    loop._remember_allow(bridged, {"command": "pytest -q"})
+    assert loop._session_allows(bridged, {"command": "pytest tests"})
+    assert not loop._session_allows(bridged, {"command": "rm -rf /"})
+    # A tool nobody scopes is covered whole by one allow_always.
+    loop._remember_allow("mcp__docs__search", {"q": "x"})
+    assert loop._session_allows("mcp__docs__search", {"q": "anything"})
+
+
+def test_delegated_allow_always_on_an_unscopable_command_stays_one_shot() -> None:
+    """Regression: an ``allow_always`` for a Bash line fluid cannot label
+    (command substitution) was recorded unscoped, so every later Bash call on
+    the delegated leg was auto-allowed. The native loop already keeps such an
+    allow one-shot; the delegated leg now matches it."""
+    loop = _builtin_loop()
+    loop._remember_allow("Bash", {"command": "echo $(whoami)"})
+    assert not loop._session_allows("Bash", {"command": "rm -rf /"})
+    assert not loop._session_allows("Bash", {"command": "echo $(whoami)"})
+    # An existing scoped allow is kept, not widened, by the unscopable one.
+    loop._remember_allow("Bash", {"command": "git status"})
+    loop._remember_allow("Bash", {"command": "echo $(id)"})
+    assert loop._session_allows("Bash", {"command": "git diff"})
+    assert not loop._session_allows("Bash", {"command": "curl x | sh"})
+
+
+async def _answer_bridge(loop: DelegatedLoop, resp_kwargs: dict) -> dict:
+    """Run one ``can_use_tool`` bridge through ``_handle_permission`` and
+    return the control_response payload written back to the CLI."""
+    from fluid.engine.delegated_proto import PermissionBridge
+
+    written: list[dict] = []
+
+    async def capture(frame: dict) -> None:
+        written.append(frame)
+
+    loop._write_frame = capture  # type: ignore[method-assign]
+    bridge = PermissionBridge(
+        cli_request_id="cli_7", fluid_request_id="perm_7", tool_name="AskUserQuestion",
+        tool_use_id="tu_7", input={"questions": ["q?"]},
+        suggestions=({"type": "addRules", "rules": [{"toolName": "AskUserQuestion"}]},),
+    )
+    task = asyncio.create_task(loop._handle_permission(bridge))
+    for _ in range(50):
+        if "perm_7" in loop._pending_permissions:
+            break
+        await asyncio.sleep(0)
+    loop._pending_permissions["perm_7"].set_result(
+        RespondPermission(request_id="perm_7", **resp_kwargs)
+    )
+    await asyncio.wait_for(task, 5)
+    assert not loop._pending_permissions
+    (frame,) = written
+    assert frame["response"]["request_id"] == "cli_7"
+    return frame["response"]["response"]
+
+
+async def test_delegated_permission_answer_carries_the_rewritten_input_only_on_allow() -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="claude-fake")
+    answers = {"questions": ["q?"], "answers": {"q?": "yes"}}
+    allowed = await _answer_bridge(loop, {"decision": "allow", "updated_input": answers})
+    assert allowed == {"behavior": "allow", "updatedInput": answers}
+
+    kept = await _answer_bridge(loop, {"decision": "allow"})
+    assert kept == {"behavior": "allow", "updatedInput": {"questions": ["q?"]}}
+
+    denied = await _answer_bridge(
+        loop, {"decision": "deny", "updated_input": answers, "message": "no"},
+    )
+    assert denied == {"behavior": "deny", "message": "no"}
+    # A one-shot allow never echoes the CLI's "always" rules or sticks.
+    assert "updatedPermissions" not in allowed
+    assert not loop._session_allows("AskUserQuestion", {})
+
+
+# ─── stream-json edge cases (delegated_proto) ────────────────────────────────
+
+
+def test_streamed_tool_use_with_truncated_arguments_yields_empty_input() -> None:
+    """A tool_use block streamed via partial messages whose argument JSON is
+    cut off must not raise out of the stream consumer: the ToolUse carries
+    ``{}``. Well-formed fragments are joined across deltas."""
+    m = _mapper()
+
+    def se(event: dict) -> list:
+        return m.feed({"type": "stream_event", "event": event}).events
+
+    se({"type": "message_start", "message": {"id": "msg_s", "usage": {}}})
+    started = se({"type": "content_block_start", "index": 0, "content_block": {
+        "type": "tool_use", "id": "tu_ok", "name": "Read", "input": {}}})
+    assert isinstance(started[0], BlockStart) and started[0].tool_use_id == "tu_ok"
+    for part in ('{"file_', 'path": "a.py"}'):
+        assert se({"type": "content_block_delta", "index": 0, "delta": {
+            "type": "input_json_delta", "partial_json": part}}) == []
+    stopped = se({"type": "content_block_stop", "index": 0})
+    assert isinstance(stopped[0], BlockStop)
+    assert isinstance(stopped[1], ToolUse) and stopped[1].input == {"file_path": "a.py"}
+    assert m.tool_inputs["tu_ok"] == {"file_path": "a.py"}
+
+    se({"type": "content_block_start", "index": 1, "content_block": {
+        "type": "tool_use", "id": "tu_cut", "name": "Bash", "input": {}}})
+    se({"type": "content_block_delta", "index": 1, "delta": {
+        "type": "input_json_delta", "partial_json": '{"command": "ls -'}})
+    # A delta for an index with no open tool block is dropped, not a KeyError.
+    assert se({"type": "content_block_delta", "index": 9, "delta": {
+        "type": "input_json_delta", "partial_json": "junk"}}) == []
+    stopped = se({"type": "content_block_stop", "index": 1})
+    tool_use = next(e for e in stopped if isinstance(e, ToolUse))
+    assert tool_use.tool_use_id == "tu_cut" and tool_use.input == {}
+
+    # The whole-message assistant frame for streamed blocks is not re-emitted.
+    mapped = m.feed({"type": "assistant", "message": {"id": "msg_s", "content": [
+        {"type": "tool_use", "id": "tu_ok", "name": "Read", "input": {"file_path": "a.py"}},
+        {"type": "tool_use", "id": "tu_cut", "name": "Bash", "input": {}},
+    ]}})
+    assert not [e for e in mapped.events if isinstance(e, (ToolUse, BlockStart))]
+
+
+def test_malformed_and_unknown_frames_are_ignored_without_side_effects() -> None:
+    from fluid.engine.delegated_proto import flatten_tool_content, parse_hook_callback
+
+    m = _mapper()
+    for frame in (
+        {"type": "future_frame_kind", "payload": 1},
+        {},
+        {"type": "user", "message": {"content": "plain text, not blocks"}},
+        {"type": "user", "message": {"content": ["str", {"type": "text", "text": "x"}]}},
+        {"type": "stream_event", "event": {"type": "no_such_sse"}},
+        {"type": "stream_event"},
+        {"type": "system", "subtype": "status"},
+        {"type": "rate_limit_event", "rate_limit_info": {"utilization": 0.9}},
+        {"type": "rate_limit_event", "rate_limit_info": None},
+        {"type": "control_response", "response": {"subtype": "success"}},
+    ):
+        mapped = m.feed(frame)
+        assert not mapped.events and mapped.message is None, frame
+        assert mapped.permission is None and mapped.control_reply is None, frame
+    assert not m.produced_nodes
+
+    # Non-dict content blocks inside an assistant frame are skipped.
+    mapped = m.feed({"type": "assistant", "message": {"content": [
+        "stray", None, {"type": "text", "text": "ok"}]}})
+    assert [e.text for e in mapped.events if isinstance(e, TextDelta)] == ["ok"]
+
+    assert parse_hook_callback({"type": "control_request", "request": {
+        "subtype": "can_use_tool"}}) is None
+    assert parse_hook_callback({"type": "control_request", "request": "x"}) is None
+    assert flatten_tool_content(None) == ""
+    assert flatten_tool_content([
+        {"type": "text", "text": "a"}, {"type": "image", "source": {}},
+        {"type": "note", "v": 1}, 7,
+    ]) == 'a{"type": "note", "v": 1}7'
+    assert flatten_tool_content({"k": 1}) == '{"k": 1}'
+
+
+def test_tool_result_images_are_kept_and_the_text_flattened() -> None:
+    m = _mapper()
+    m.feed({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "tu_img", "name": "Screenshot", "input": {}}]}})
+    mapped = m.feed({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "tu_img", "is_error": False, "content": [
+            {"type": "text", "text": "shot"},
+            {"type": "image", "source": {"media_type": "image/jpeg", "data": "QUJD"}},
+            {"type": "image", "source": {"data": ""}},
+        ]},
+        {"type": "text", "text": "ignored sibling"},
+    ]}})
+    (result,) = mapped.events
+    assert isinstance(result, ToolResult) and result.name == "Screenshot"
+    assert result.output == "shot"
+    (block,) = mapped.message.content
+    kinds = [type(b).__name__ for b in block.content]
+    assert kinds == ["Text", "Image"]
+    assert block.content[1].media_type == "image/jpeg"

@@ -50,6 +50,9 @@ Frame vocabulary handled (see ``claude_agent_sdk`` message_parser + query.py):
     "callback_id":...,"input":{...},"tool_use_id":...}}`` — one of the hooks
     the loop registered in its ``initialize`` request fired; surfaced as a
     ``HookCallbackRequest`` the loop answers through its HookBus. No event.
+  * ``{"type":"control_cancel_request","request_id":...}`` — the CLI withdrew
+    a request it sent. Not mapped here: the loop watches for it while it is
+    parked on that request (``parse_control_cancel``).
   * ``{"type":"control_response","response":{...}}`` — the CLI's reply to a
     control_request the LOOP sent (``get_context_usage``, ``mcp_status``, …),
     surfaced as a ``ControlReply`` the loop correlates by request_id. Two
@@ -183,6 +186,20 @@ def parse_hook_callback(frame: dict[str, Any]) -> HookCallbackRequest | None:
         input=data if isinstance(data, dict) else {},
         tool_use_id=req.get("tool_use_id"),
     )
+
+
+def parse_control_cancel(frame: Any) -> str | None:
+    """The request_id a ``control_cancel_request`` withdraws, or None.
+
+    The CLI sends ``{"type":"control_cancel_request","request_id":...}`` when
+    it stops waiting on a request it sent (a ``can_use_tool`` another answer
+    beat, such as a ``PermissionRequest`` hook in its own settings, or an
+    aborted turn). No reply is expected.
+    """
+    if not isinstance(frame, dict) or frame.get("type") != "control_cancel_request":
+        return None
+    request_id = frame.get("request_id")
+    return request_id if isinstance(request_id, str) and request_id else None
 
 
 def per_call_usage(

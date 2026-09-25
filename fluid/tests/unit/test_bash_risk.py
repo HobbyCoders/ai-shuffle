@@ -449,6 +449,20 @@ def test_allow_always_on_bash_covers_same_programs_only() -> None:
     assert engine.decide(bash_spec, {"command": "rm -rf build"}).source == "session"
 
 
+def test_a_later_scoped_allow_never_narrows_an_unscoped_one() -> None:
+    """Once a session allow covers every Bash call, a later scoped
+    ``allow_always`` must leave it covering every call (not crash on the
+    ``None`` marker, not shrink it to the new programs)."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as bash_spec
+
+    engine = PermissionEngine("on_write")
+    engine.allow_always(bash_spec.name, None)
+    engine.allow_always(bash_spec.name, bash_spec.scope_of({"command": "git status"}))
+    assert engine.decide(bash_spec, {"command": "rm -rf build"}).source == "session"
+    assert engine.decide(bash_spec, {"command": "git push"}).source == "session"
+
+
 def test_allow_always_without_scope_hook_covers_every_call() -> None:
     from fluid.permissions.engine import PermissionEngine
     from fluid.tools.registry import ToolSpec

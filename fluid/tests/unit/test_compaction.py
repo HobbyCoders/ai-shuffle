@@ -1146,3 +1146,32 @@ def test_context_compaction_event_carries_token_basis() -> None:
     legacy.pop("measured_prompt_tokens")
     revived = event_from_dict(legacy)
     assert revived.token_basis == "" and revived.measured_prompt_tokens == 0
+
+
+def test_segments_refuse_reused_call_ids_and_orphan_results() -> None:
+    """A tool_use id seen twice, or a result for a call the batch never made,
+    means the pairing cannot be trusted: the batch is not digested."""
+    from fluid.context.compaction import completed_segments
+
+    def turn(steps: list[tuple[str, str]]) -> list[SessionNode]:
+        nodes = [_node("start", "user", [Text("Keep the API stable.")])]
+        for n, (kind, ident) in enumerate(steps):
+            if kind == "call":
+                nodes.append(_node(f"a{n}", "assistant", [
+                    ToolUseBlock(id=ident, name="Edit", input={"text": "a"})]))
+            else:
+                nodes.append(_node(f"r{n}", "user", [ToolResultBlock(
+                    tool_use_id=ident, content=[Text("ok")], delivery_metadata_version=1,
+                )]))
+        return nodes
+
+    paired = [(k, f"c{i}") for i in range(8) for k in ("call", "result")]
+    assert len(completed_segments(turn(paired))) == 1
+
+    # Calls 0 and 1 share an id; the one result settles "both" of them.
+    reused = [("call", "c0"), ("call", "c0"), ("result", "c0"), *paired[4:]]
+    assert not completed_segments(turn(reused))
+
+    # A result whose call is absent, with every real call still paired.
+    orphan = [*paired[:2], ("result", "ghost"), *paired[2:]]
+    assert not completed_segments(turn(orphan))

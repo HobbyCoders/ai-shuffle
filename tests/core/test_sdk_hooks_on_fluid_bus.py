@@ -298,3 +298,68 @@ async def test_a_failing_observed_hook_never_blocks_the_turn(monkeypatch, tmp_pa
         **_pre_tool_payload("Bash"), "output": {"stdout": "ok"},
     })
     assert decision.action != "deny"
+
+
+# ─── a PreToolUse callback that cannot answer fails closed ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_raising_or_hung_pretooluse_callback_denies(tmp_path):
+    """The engines read a missing PreToolUse answer as "no opinion" and run
+    the call, which would skip a guard's deny. Other events keep carrying on."""
+    import asyncio
+
+    async def crash(hook_input, tool_use_id, context):
+        raise RuntimeError("guard crashed")
+
+    async def hang(hook_input, tool_use_id, context):
+        await asyncio.sleep(5)
+
+    crashed = await sdk_hooks_bus(
+        {"PreToolUse": [HookMatcher(hooks=[crash])]}, str(tmp_path),
+    ).emit("PreToolUse", _pre_tool_payload("Bash"))
+    hung = await sdk_hooks_bus(
+        {"PreToolUse": [HookMatcher(hooks=[hang], timeout=0.05)]}, str(tmp_path),
+    ).emit("PreToolUse", _pre_tool_payload("Bash"))
+    observed = await sdk_hooks_bus(
+        {"PostToolUse": [HookMatcher(hooks=[crash])]}, str(tmp_path),
+    ).emit("PostToolUse", {**_pre_tool_payload("Bash"), "output": "ok"})
+
+    assert crashed.action == "deny" and "guard crashed" in crashed.note
+    assert hung.action == "deny" and "timed out after 0.05s" in hung.note
+    assert observed.action == "allow"
+    assert any("guard crashed" in w for w in observed.warnings)
+
+
+@pytest.mark.asyncio
+async def test_a_crashing_app_guard_denies_the_delegated_cli_call(tmp_path):
+    """End to end on the delegated leg: the fake claude CLI asks the
+    PreToolUse callback before running Bash, the app's guard raises, and the
+    deny (not the CLI's fail-open "no opinion") reaches the CLI."""
+    import sys
+    from pathlib import Path
+
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.events.model import ToolResult
+    from fluid.events.ops import UserTurn
+    from fluid.store.base import MemoryStore
+
+    fake = Path(__file__).resolve().parents[2] / "fluid" / "tests" / "fixtures" / "fake_claude.py"
+
+    async def crash(hook_input, tool_use_id, context):
+        raise RuntimeError("guard crashed")
+
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=[sys.executable, str(fake)],
+        env={"FAKE_CLAUDE_SCENARIO": "u"}, cwd=str(tmp_path),
+        hooks=sdk_hooks_bus({"PreToolUse": [HookMatcher(hooks=[crash])]}, str(tmp_path)),
+    )
+    try:
+        await loop.submit(UserTurn(content="run it"))
+        await loop.wait_turn()
+        events = loop.bus.log(loop.session_id)
+    finally:
+        await loop.aclose()
+
+    (result,) = [e for e in events if isinstance(e, ToolResult)]
+    assert result.is_error and "guard crashed" in result.output

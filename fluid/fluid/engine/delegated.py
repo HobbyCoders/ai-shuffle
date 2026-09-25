@@ -46,8 +46,12 @@ TurnStart for UserPromptSubmit, TurnEnd for Stop, SessionStart, PreCompact,
 SubagentStop), so a host observing the native loop observes this one the same
 way. PreToolUse also applies the deny policy (``tool_policy``, else the
 permission engine's deny rules), and a deny from either the hooks or the policy
-wins over any allow. A SessionStart with source ``compact`` re-injects the
-session ledger, the way the native loop recites it on every user turn.
+wins over any allow, and a PreToolUse answer that fails or overruns its
+budget is a deny (fail closed: the CLI would otherwise carry on without it). A
+SessionStart with source ``compact`` re-injects the session ledger, the way the
+native loop recites it on every user turn. Notification (on parking for a
+permission prompt) and SessionEnd (on ``aclose``) are raised by the loop
+itself, as the native loop raises them, not by the CLI.
 
 Continual learning rides along when the loader wires a ``journal``: every
 tool result the CLI reports is journaled with the input that produced it, the
@@ -77,6 +81,7 @@ from fluid.engine.delegated_proto import (
     PermissionBridge,
     StreamJsonMapper,
     flatten_tool_content,
+    parse_control_cancel,
     parse_control_response,
     parse_hook_callback,
 )
@@ -106,9 +111,11 @@ from fluid.events.ops import (
     UserTurn,
 )
 from fluid.hooks.bus import (
+    NOTIFICATION,
     POST_TOOL_USE,
     PRE_COMPACT,
     PRE_TOOL_USE,
+    SESSION_END,
     SESSION_START,
     SUBAGENT_STOP,
     TURN_END,
@@ -211,6 +218,14 @@ _STALE_PERMISSION_DENIAL = (
 # Longer than any host's own approval deadline (the app's is 300 s), so a
 # host that answers late still wins; past it the call is denied, not parked.
 PERMISSION_TIMEOUT = 900.0
+
+# The PreToolUse callback's deadline, sent to the CLI at ``initialize`` (in
+# seconds, the unit of the CLI's matcher ``timeout``) instead of relying on its
+# unpinned default. A callback the CLI gives up on counts as "no opinion", so a
+# deny would be skipped: the loop answers within ``PRE_TOOL_USE_HOOK_BUDGET``,
+# with a deny if the hooks have not decided by then.
+PRE_TOOL_USE_CLI_TIMEOUT = 600
+PRE_TOOL_USE_HOOK_BUDGET = 570.0
 
 # Poll interval while another reader (a live turn) owns stdout and is expected
 # to deliver our reply. Also caps a single pump read, so the pump notices a turn
@@ -392,6 +407,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._stdout_lock = asyncio.Lock()
         # Fire-and-forget writes of cli_session_id back to the store.
         self._cli_id_writes: set[asyncio.Task] = set()
+        # SessionEnd hooks run once, on the first aclose.
+        self._session_ended = False
 
         # Bundled inproc/builtin tool server (lazy — only if a registry is set).
         self._mcp_config_path: str | None = None
@@ -539,6 +556,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 await self._turn_task
             except asyncio.CancelledError:
                 pass
+        await self._emit_session_end()
         await self._stop_process()
         if self._journal is not None:
             try:
@@ -779,6 +797,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         )
         self._stdout_backlog.clear()
         self.cli_hooks_registered = False
+        # Once per CLI process: the installed CLI is unpinned, and its version
+        # is what ties a production report to the CLI behaviour behind it.
+        logger.info(
+            "claude CLI started: version=%s leg=delegated session=%s model=%s "
+            "permission_mode=%s resume=%s pid=%s",
+            self.cli_version or "unknown",
+            self._session.session_id if self._session else None,
+            self.model, self.permission_mode, bool(self._spawn_resume), self._proc.pid,
+        )
         if self._cli_hook_events():
             async with self._stdout_lock:
                 outcome = await self._initialize_cli_hooks()
@@ -1116,8 +1143,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             else:
                 timeout = max(_STALE_QUIET, settle_until - now)
             try:
-                line = await asyncio.wait_for(
-                    self._proc.stdout.readline(), timeout=max(timeout, 0.0),
+                # Lines a parked permission wait read ahead come first.
+                line = self._stdout_backlog.pop(0) if self._stdout_backlog else (
+                    await asyncio.wait_for(
+                        self._proc.stdout.readline(), timeout=max(timeout, 0.0),
+                    )
                 )
             except TimeoutError:
                 if wake_deadline is not None:
@@ -1332,16 +1362,35 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         the reader would sit on the future, each waiting for the other. It
         also ends after ``PERMISSION_TIMEOUT``, denying the call, so a host
         with nobody to answer cannot park the turn forever.
+
+        The CLI keeps streaming while it waits, so stdout is read on the side
+        (``_watch_parked_stdout``). Its frames are queued for the turn's
+        reader, in order. A ``control_cancel_request`` for this request (a
+        ``PermissionRequest`` hook in the CLI's own settings answered first,
+        say) ends the wait with no reply: the CLI has moved on. The host's
+        prompt is not withdrawn (fluid has no event for that); its late answer
+        finds no pending request and is dropped. EOF ends the wait the same
+        way, and the turn's reader reports the closed stream.
         """
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._pending_permissions[bridge.fluid_request_id] = fut
         interrupt_wait = asyncio.create_task(self._interrupted.wait())
+        watch = asyncio.create_task(self._watch_parked_stdout(bridge.cli_request_id))
         try:
+            await self._notify_permission_prompt(bridge)
             done, _ = await asyncio.wait(
-                {fut, interrupt_wait}, timeout=PERMISSION_TIMEOUT,
+                {fut, interrupt_wait, watch}, timeout=PERMISSION_TIMEOUT,
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            if fut not in done and watch in done:
+                if watch.result() == "cancelled":  # re-raises a failed read
+                    logger.info(
+                        "claude CLI withdrew its permission request for %s (%s); "
+                        "the host's decision is no longer needed",
+                        bridge.tool_name, bridge.cli_request_id,
+                    )
+                return
             if fut not in done:
                 if interrupt_wait in done:
                     message = "interrupted while awaiting permission"
@@ -1361,6 +1410,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             resp: RespondPermission = fut.result()
         finally:
             interrupt_wait.cancel()
+            watch.cancel()
+            # The turn's reader resumes on the same stream: the side reader
+            # must be gone first (a cancelled readline consumes nothing).
+            await asyncio.gather(watch, return_exceptions=True)
             self._pending_permissions.pop(bridge.fluid_request_id, None)
         allow = resp.decision in ("allow", "allow_always")
         # An allow may carry a rewritten input (the SDK's ``updatedInput``) —
@@ -1379,6 +1432,79 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             permissions=suggestions,
         )
 
+    async def _watch_parked_stdout(self, cli_request_id: str) -> str:
+        """Read stdout while the turn's reader is parked on a permission.
+
+        Every line goes to ``_stdout_backlog`` for the turn's reader, except a
+        ``control_cancel_request`` for ``cli_request_id`` (returns
+        ``"cancelled"``) and a reply to a control call someone is awaiting,
+        which is routed now rather than after the click (usage snapshots stay
+        queued: the turn's reader emits those). Returns ``"eof"`` when stdout
+        closes, with the EOF queued too. With no process there is nothing to
+        read, and it waits to be cancelled.
+        """
+        stdout = self._proc.stdout if self._proc is not None else None
+        if stdout is None:
+            await asyncio.get_running_loop().create_future()
+            return "eof"  # never reached: the future is only ever cancelled
+
+        def parse(line: bytes) -> Any:
+            try:
+                return json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                return None
+
+        for i, line in enumerate(self._stdout_backlog):
+            if parse_control_cancel(parse(line)) == cli_request_id:
+                del self._stdout_backlog[i]
+                return "cancelled"
+        while True:
+            line = await stdout.readline()
+            if not line:
+                self._stdout_backlog.append(line)
+                return "eof"
+            frame = parse(line)
+            if parse_control_cancel(frame) == cli_request_id:
+                return "cancelled"
+            if isinstance(frame, dict) and frame.get("type") == "control_response":
+                reply = parse_control_response(frame)
+                if reply is not None and reply.request_id not in self._pending_usage_snapshots:
+                    self._resolve_control(reply)
+                    continue
+            self._stdout_backlog.append(line)
+
+    async def _notify_permission_prompt(self, bridge: PermissionBridge) -> None:
+        """Notification hooks, raised when the loop parks on a prompt as the
+        native loop raises them; they never affect the prompt itself."""
+        if self.hooks is None:
+            return
+        try:
+            decision = await self.hooks.emit(NOTIFICATION, self._cli_hook_payload(
+                {}, turn_id=self._active_turn_id, notification_type="permission_prompt",
+                message=f"{bridge.tool_name} needs your permission to run",
+                name=bridge.tool_name, tool_use_id=bridge.tool_use_id,
+            ))
+            await self._report_hook_warnings(NOTIFICATION, decision, bridge.tool_name)
+        except Exception:  # noqa: BLE001 — a notification never blocks the prompt
+            logger.warning("Notification hooks failed", exc_info=True)
+
+    async def _emit_session_end(self) -> None:
+        """SessionEnd hooks, once, on close: best effort, logged only (the
+        event bus is on its way out), as on the native loop."""
+        if self.hooks is None or self._session is None or self._session_ended:
+            return
+        self._session_ended = True
+        try:
+            decision = await self.hooks.emit(
+                SESSION_END, self._cli_hook_payload({}, reason="other"),
+            )
+        except Exception:  # noqa: BLE001 — nothing may keep the loop from closing
+            logger.warning("SessionEnd hooks failed", exc_info=True)
+            return
+        for message in [*decision.warnings, decision.system_message or ""]:
+            if message:
+                logger.warning("SessionEnd hook: %s", message)
+
     def _registry_spec(self, tool_name: str) -> Any | None:
         """The registry spec behind a CLI tool name, bridged prefix or not."""
         if self.registry is None:
@@ -1392,6 +1518,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         spec = self._registry_spec(tool_name)
         scope = spec.scope_of(input) if spec is not None else None
         if scope is None:
+            if spec is not None and spec.session_scope is not None:
+                # The tool scopes its allows but could not label this call (a
+                # Bash line with command substitution): recording it unscoped
+                # would auto-allow every later call, so it stays one-shot, as
+                # on the native leg.
+                logger.info(
+                    "allow_always for %s applied to this call only: the "
+                    "command could not be scoped", tool_name,
+                )
+                return
             self._always_allowed[tool_name] = None
             return
         current = self._always_allowed.get(tool_name, set())
@@ -1475,6 +1611,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         event: [{
                             "matcher": None,
                             "hookCallbackIds": [_HOOK_CALLBACK_PREFIX + event],
+                            **({"timeout": PRE_TOOL_USE_CLI_TIMEOUT}
+                               if event == "PreToolUse" else {}),
                         }]
                         for event in events
                     },
@@ -1559,7 +1697,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         try:
             if event not in _CLI_HOOK_EVENTS:
                 raise ValueError(f"unknown hook callback: {request.callback_id!r}")
-            output = await self._run_cli_hook(event, request.input, request.tool_use_id)
+            if event == "PreToolUse":
+                output = await self._guarded_pre_tool_use(request)
+            else:
+                output = await self._run_cli_hook(event, request.input, request.tool_use_id)
             response = {
                 "subtype": "success",
                 "request_id": request.cli_request_id,
@@ -1576,6 +1717,36 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             await self._write_frame({"type": "control_response", "response": response})
         except (OSError, RuntimeError):
             logger.debug("could not answer the CLI's hook callback", exc_info=True)
+
+    async def _guarded_pre_tool_use(self, request: HookCallbackRequest) -> dict[str, Any]:
+        """PreToolUse, failing closed. The CLI treats a failed or late
+        callback as "no opinion" and runs the call, so a hook or policy that
+        raises, or has not decided within ``PRE_TOOL_USE_HOOK_BUDGET``, is
+        answered with a deny carrying the reason."""
+        name = str(request.input.get("tool_name") or "")
+        try:
+            return await asyncio.wait_for(
+                self._cli_pre_tool_use(request.input, request.tool_use_id),
+                PRE_TOOL_USE_HOOK_BUDGET,
+            )
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError as exc:
+            error: BaseException = exc
+            reason = f"PreToolUse hooks did not decide within {PRE_TOOL_USE_HOOK_BUDGET:.0f}s"
+        except Exception as exc:  # noqa: BLE001 — answered as a deny below
+            error = exc
+            reason = f"PreToolUse hooks failed ({type(exc).__name__}: {exc})"
+        logger.warning("denying %s: %s", name or "a tool call", reason, exc_info=error)
+        try:
+            await self._hook_event("deny", reason, PRE_TOOL_USE, name or None)
+        except Exception:  # noqa: BLE001 — the deny still goes out
+            logger.debug("reporting the PreToolUse failure failed", exc_info=True)
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": f"blocked: {reason}; the call was denied",
+        }}
 
     async def _run_cli_hook(
         self, event: str, data: dict[str, Any], tool_use_id: str | None,

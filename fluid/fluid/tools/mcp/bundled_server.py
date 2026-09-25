@@ -327,11 +327,17 @@ def bundled_server_config(socket_path: str, token: str | None = None) -> dict[st
     ``socket_path`` must be the *resolved* address — for the TCP form that means
     the real bound port, not ``tcp:127.0.0.1:0``. ``token`` rides in the
     entry's ``env`` (not ``args``: a process list is world-readable).
+
+    ``alwaysLoad`` keeps the bridge's tools in every request. Without it a
+    claude CLI that has ToolSearch defers every MCP tool behind it (the
+    default since 2.1.x, not threshold based), so the model would have to
+    search before calling the tools its prompt names. Older CLIs drop the key.
     """
     config: dict[str, Any] = {
         "type": "stdio",
         "command": sys.executable,
         "args": ["-m", "fluid.tools.mcp.bundled_server", "--socket", socket_path],
+        "alwaysLoad": True,
     }
     if token is not None:
         config["env"] = {TOKEN_ENV: token}

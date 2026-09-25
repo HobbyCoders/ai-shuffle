@@ -622,6 +622,43 @@ async def test_unanswered_permission_prompt_is_denied_after_the_timeout() -> Non
     assert isinstance(events[-1], TurnComplete)
 
 
+async def test_interrupt_ends_a_pending_permission_wait_with_a_denial() -> None:
+    """An Interrupt must release a turn parked on a permission prompt: the
+    call is denied (never run) instead of waiting out the full timeout, and
+    the parked request is dropped so a late answer resolves nothing."""
+    ran: list[bool] = []
+
+    @tool("touch", "Touch a marker", {"type": "object", "properties": {}}, risk="write")
+    async def touch(args: dict) -> dict:
+        ran.append(True)
+        return {"content": [{"type": "text", "text": "touched"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("m", [touch]))
+    provider = ScriptedProvider([_tool("t1", "mcp__m__touch", "{}"), _text("done")])
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=provider, store=store, model="claude-sonnet-5", session_id=sid,
+        registry=registry, permissions=PermissionEngine("on_write"),
+    )
+    assert loop.permission_timeout is not None and loop.permission_timeout > 60
+    holder, got, watcher = await _first_event(loop, sid, PermissionRequest)
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(got.wait(), timeout=5)
+    await loop.submit(Interrupt())
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    await watcher
+
+    events = loop.bus.log(sid)
+    result = next(e for e in events if isinstance(e, ToolResult))
+    assert result.is_error
+    assert "interrupted" in result.output
+    assert not ran
+    assert not loop._pending_permissions
+    assert not any(isinstance(e, TurnComplete) for e in events)
+
+
 def test_permission_wait_is_bounded_by_default() -> None:
     from fluid.engine import native
 
