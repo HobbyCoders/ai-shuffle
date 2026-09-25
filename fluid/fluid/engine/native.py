@@ -972,7 +972,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
         # Turn watchdog: bounds a turn whose tool call never returns and whose
-        # stream makes no progress. ``_turn_progress_at moves on every emitted event; the watchdog
+        # stream makes no progress. ``_turn_progress_at`` moves on every emitted event; the watchdog
         # task cancels the turn after ``turn_watchdog_seconds`` of silence
         # that is not a human wait (a pending permission or question).
         self.turn_watchdog_seconds = turn_watchdog_seconds
