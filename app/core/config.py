@@ -331,12 +331,6 @@ class Settings(BaseSettings):
     # in particular (it backs the accounting backfill). 0 disables pruning.
     fluid_event_retention_days: int = 7
 
-    # Claude
-    command_timeout: int = 300
-
-    # Security - API Key Session
-    api_key_session_expire_hours: int = 24  # API key web session duration
-
     # Security - Trusted Proxies (for getting real IP behind reverse proxy)
     trusted_proxy_headers: str = "X-Forwarded-For,X-Real-IP"  # Comma-separated
 

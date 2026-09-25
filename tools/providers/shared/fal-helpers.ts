@@ -30,13 +30,6 @@ export function configureFal(): void {
   configured = true;
 }
 
-/**
- * Get the fal.ai API key from environment.
- */
-export function getFalApiKey(): string {
-  return process.env.FAL_KEY || '';
-}
-
 // ============================================================================
 // File Download
 // ============================================================================

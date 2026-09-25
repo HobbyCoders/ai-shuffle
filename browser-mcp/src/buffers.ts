@@ -85,25 +85,6 @@ export interface NetworkEntry {
   response: Response;
 }
 
-/** Terse view of a {@link NetworkEntry} (no live handle) for listing. */
-export interface NetworkListItem {
-  id: string;
-  method: string;
-  url: string;
-  status: number;
-  resourceType: string;
-}
-
-export function toListItem(e: NetworkEntry): NetworkListItem {
-  return {
-    id: e.id,
-    method: e.method,
-    url: e.url,
-    status: e.status,
-    resourceType: e.resourceType,
-  };
-}
-
 /**
  * Ring buffer of network responses that also assigns each a stable, per-page
  * id (`req1`, `req2`, …) used by browser_network's two-phase list/body flow.

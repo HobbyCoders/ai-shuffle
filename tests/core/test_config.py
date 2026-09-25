@@ -62,7 +62,6 @@ class TestSettingsDefaults:
 
                 assert settings.session_secret is None
                 assert settings.session_expire_days == 30
-                assert settings.command_timeout == 300
 
     def test_default_security_settings(self):
         """Default security settings should be set correctly."""
@@ -71,7 +70,6 @@ class TestSettingsDefaults:
                 from app.core.config import Settings
                 settings = Settings()
 
-                assert settings.api_key_session_expire_hours == 24
                 # Note: cookie_secure may be overridden by .env file, so we just check it's a bool
                 assert isinstance(settings.cookie_secure, bool)
                 assert settings.max_request_body_mb == 50
@@ -128,7 +126,6 @@ class TestSettingsFromEnvironment:
             "VERSION": "1.0.0",
             "SESSION_SECRET": "test-secret",
             "SESSION_EXPIRE_DAYS": "7",
-            "COMMAND_TIMEOUT": "600",
             "COOKIE_SECURE": "false",
         }
 
@@ -145,7 +142,6 @@ class TestSettingsFromEnvironment:
                     assert settings.version == "1.0.0"
                     assert settings.session_secret == "test-secret"
                     assert settings.session_expire_days == 7
-                    assert settings.command_timeout == 600
                     assert settings.cookie_secure is False
 
     def test_local_mode_env_var_true(self):
