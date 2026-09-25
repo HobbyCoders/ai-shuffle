@@ -27,6 +27,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import signal
 import struct
 import sys
@@ -153,6 +154,12 @@ class SubprocessKernel:
         # the child) into a bounded tail kept for the death diagnostic.
         self._stderr_task: asyncio.Task | None = None
         self._stderr_tail = bytearray()
+        # Per-process framing nonce (SE-2). Generated fresh on every spawn and
+        # handed to the child in the boot frame; the child stamps it onto every
+        # child→host frame and the host drops any frame that lacks it, so a cell
+        # that reaches the raw pipe cannot mint a frame the host will act on
+        # without also extracting the nonce from the child's closures.
+        self._nonce = ""
 
     # ── lifecycle ──
     async def start(self) -> None:
@@ -182,7 +189,9 @@ class SubprocessKernel:
             self._job_handle = _win_assign_memory_job(
                 self._proc.pid, self.config.mem_limit_bytes
             )
-        await self._send({"kind": "boot", "config": self.config.boot_payload()})
+        self._nonce = secrets.token_hex(16)
+        boot_config = {**self.config.boot_payload(), "nonce": self._nonce}
+        await self._send({"kind": "boot", "config": boot_config})
         await self._read_frame()  # {"kind": "ready"}
         self._ever_started = True
         if self._vfs_sources or self._skill_sources:
@@ -526,7 +535,16 @@ class SubprocessKernel:
         header = await self._proc.stdout.readexactly(4)
         (length,) = struct.unpack(">I", header)
         body = await self._proc.stdout.readexactly(length)
-        return json.loads(body.decode("utf-8"))
+        frame = json.loads(body.decode("utf-8"))
+        # SE-2: every genuine child→host frame carries the boot nonce. A frame
+        # without it is a cell-forged frame (or a desynced pipe from interleaved
+        # forged bytes); refuse to act on it and let the caller restart the
+        # kernel rather than trust fabricated output or a fabricated host_call.
+        if self._nonce and (not isinstance(frame, dict) or frame.get("_n") != self._nonce):
+            raise ConnectionError("kernel frame failed the nonce check (forged or desynced pipe)")
+        if isinstance(frame, dict):
+            frame.pop("_n", None)
+        return frame
 
 
 # ── Windows Job Object memory limit (host-side counterpart of the POSIX rlimit

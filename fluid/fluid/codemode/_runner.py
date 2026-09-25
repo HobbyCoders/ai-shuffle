@@ -43,16 +43,12 @@ import _audit_guard
 import truncate
 import vfs
 
-_IN = sys.stdin.buffer  # binary framing channels, captured before any redirect
-_OUT = sys.stdout.buffer
-# The framing pipe is ours alone. A print that runs outside a cell's capture
-# (a finalizer, a pickling hook during a checkpoint, a thread the cell left
-# running) would otherwise land between frames and desync the host, which then
-# waits out its timeout and kills the kernel. Stray text goes to stderr, which
-# the host drains. ``input()`` gets an empty stdin and fails at once with
-# EOFError instead of blocking on the host's pipe until the cell times out.
-sys.stdout = sys.stderr
-sys.stdin = io.StringIO()
+# The binary framing pipe (child stdin/stdout) is captured and redirected in
+# ``_main`` — see :func:`_framing`. It is deliberately NOT kept in a module
+# global: the pipe file objects, the ``_send``/``_read_frame`` closures and the
+# per-process nonce live only in ``_main``'s locals and the closures it builds,
+# so a cell that reaches this module (or a tool stub's ``__globals__``) finds no
+# ``_OUT``/``_send`` to forge frames onto. See the SE-2 notes below.
 
 # Boot-configured globals (populated by the boot frame).
 _REF_THRESHOLD = truncate.DEFAULT_LIMIT
@@ -95,36 +91,59 @@ _CELL_SPILL_MAX = vfs.REF_REGISTRY_MAX  # unprinted results held per cell
 _CELL_DONE = []
 
 
-# ─── framing ─────────────────────────────────────────────────────────────────
+# ─── framing (SE-2: pipe + nonce held only in closures) ──────────────────────
+#
+# A cell must not be able to write forged frames onto the host RPC pipe. Two
+# things keep it out:
+#   * The pipe file objects and the ``send``/``read_frame`` closures are built
+#     here from ``_main``'s locals and never stored on any module or object a
+#     cell can reach (``sys.modules['__main__']`` is swapped for a clean module
+#     after boot, and gc enumeration is denied by the audit guard).
+#   * Every child→host frame carries the per-process ``nonce`` the host handed
+#     us at boot; the host drops any frame that lacks it. A cell that somehow
+#     reaches the raw pipe still cannot mint a frame the host will act on
+#     without also digging the nonce out of the closure.
+# This is defence in depth, not a boundary: a cell that traverses a tool stub's
+# ``__closure__`` chain can still reach both the pipe and the nonce in-process.
+# The OS sandbox is the real boundary (see ``_audit_guard`` module docstring).
 
 
-def _read_exact(n: int) -> bytes:
-    chunks = []
-    got = 0
-    while got < n:
-        chunk = _IN.read(n - got)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        got += len(chunk)
-    return b"".join(chunks)
+def _framing(pipe_in, pipe_out, nonce_box):
+    """Build the ``(send, read_frame)`` pair over the binary pipe.
 
+    ``nonce_box`` is a one-key dict whose value ``send`` stamps onto every
+    outgoing frame; ``_main`` fills it from the boot config.
+    """
 
-def _read_frame():
-    header = _read_exact(4)
-    if len(header) < 4:
-        return None
-    (length,) = struct.unpack(">I", header)
-    body = _read_exact(length)
-    if len(body) < length:
-        return None
-    return json.loads(body.decode("utf-8"))
+    def read_exact(n: int) -> bytes:
+        chunks = []
+        got = 0
+        while got < n:
+            chunk = pipe_in.read(n - got)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+        return b"".join(chunks)
 
+    def read_frame():
+        header = read_exact(4)
+        if len(header) < 4:
+            return None
+        (length,) = struct.unpack(">I", header)
+        body = read_exact(length)
+        if len(body) < length:
+            return None
+        return json.loads(body.decode("utf-8"))
 
-def _send(obj: dict) -> None:
-    body = json.dumps(obj).encode("utf-8")
-    _OUT.write(struct.pack(">I", len(body)) + body)
-    _OUT.flush()
+    def send(obj: dict) -> None:
+        framed = dict(obj)
+        framed["_n"] = nonce_box.get("n", "")
+        body = json.dumps(framed).encode("utf-8")
+        pipe_out.write(struct.pack(">I", len(body)) + body)
+        pipe_out.flush()
+
+    return send, read_frame
 
 
 # ─── host-call RPC (blocks the cell until the host answers) ──────────────────
@@ -147,12 +166,19 @@ def _mutating(leaf: str) -> bool:
     return any(f"[risk: {r}]" in (_SOURCES.get(leaf) or "") for r in _MUTATING_RISKS)
 
 
-def _host_call(tool_name: str, kwargs: dict):
-    # Deliberately one frame, not a wrapper around an inner function: a tool
-    # error's traceback reaches the model with every frame below the cell in
-    # it, and an extra kernel frame is an extra line of noise on every failure.
-    _send({"kind": "host_call", "name": tool_name, "kwargs": kwargs})
-    reply = _read_frame()
+def _make_host_call(send, read_frame):
+    """The ``__host_call__`` a cell's tool stubs invoke, bound to this process's
+    framing pipe via closure (not a module global — see :func:`_framing`)."""
+
+    def __host_call__(tool_name: str, kwargs: dict):
+        return _do_host_call(send, read_frame, tool_name, kwargs)
+
+    return __host_call__
+
+
+def _do_host_call(send, read_frame, tool_name: str, kwargs: dict):
+    send({"kind": "host_call", "name": tool_name, "kwargs": kwargs})
+    reply = read_frame()
     if reply is None:
         raise vfs.ToolError("host pipe closed during a tool call")
     if reply.get("denied"):
@@ -819,20 +845,28 @@ def _run_cell(code: str):
     _CELL_REFS.clear()
     _CELL_DONE.clear()
     try:
-        tree = ast.parse(code, "<cell>", "exec")
-        if tree.body and isinstance(tree.body[-1], ast.Expr):
-            last = tree.body.pop()
-            if tree.body:
+        # The cell body AND the ``repr`` of its result run under the audit
+        # guard's deny-any-frame region: ``repr(value)`` invokes the value's
+        # own ``__repr__``, which a cell can set to a C callable
+        # (``functools.partial(exec, …)``) that runs with no ``<cell>`` frame on
+        # the stack. Inside the region a denied event is refused regardless of
+        # frame (R8-1). ``__exit__`` releases the region as an exception unwinds,
+        # so the traceback formatting in the ``except`` handlers runs outside it.
+        with _audit_guard.attributed_region():
+            tree = ast.parse(code, "<cell>", "exec")
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                last = tree.body.pop()
+                if tree.body:
+                    exec(compile(tree, "<cell>", "exec"), _NS)
+                value = eval(compile(ast.Expression(last.value), "<cell>", "eval"), _NS)
+                if value is not None:
+                    value_repr = _cap_value_repr(repr(value))
+                    # REPL semantics: the displayed value stays reachable as
+                    # ``_`` in the next cell, so an unbound last expression (a
+                    # tool call written bare) is never lost.
+                    _NS["_"] = value
+            else:
                 exec(compile(tree, "<cell>", "exec"), _NS)
-            value = eval(compile(ast.Expression(last.value), "<cell>", "eval"), _NS)
-            if value is not None:
-                value_repr = _cap_value_repr(repr(value))
-                # REPL semantics: the displayed value stays reachable as ``_``
-                # in the next cell, so an unbound last expression (a tool call
-                # written bare) is never lost.
-                _NS["_"] = value
-        else:
-            exec(compile(tree, "<cell>", "exec"), _NS)
     except Exception as exc:
         err = _format_cell_traceback(exc)
         hint = _error_hint(exc)
@@ -941,7 +975,13 @@ def _checkpoint() -> dict:
             continue
         sink = _BoundedSink(remaining if remaining is not None else 1 << 62)
         try:
-            pickle.dump(value, sink)
+            # Pickling calls the value's own ``__reduce__``/``__getstate__``,
+            # which a cell can set to a C callable that runs ``exec`` with no
+            # ``<cell>`` frame on the stack (R8-1). Run it under the guard's
+            # deny-any-frame region — NOT a trusted region — so such a hook is
+            # refused; a refusal raises and the variable is dropped below.
+            with _audit_guard.attributed_region():
+                pickle.dump(value, sink)
         except _CheckpointTooLarge:
             oversized.append(key)
             continue
@@ -1108,7 +1148,7 @@ def _guard_filesystem() -> None:
     _io.FileIO = _blocked_open  # type: ignore[assignment]
 
 
-def _boot(config: dict) -> None:
+def _boot(config: dict, host_call) -> None:
     global _REF_THRESHOLD, _STDOUT_CAP, _NS, _CKPT_MAX_BYTES
     _REF_THRESHOLD = config.get("ref_threshold", truncate.DEFAULT_LIMIT)
     _STDOUT_CAP = config.get("stdout_cap", truncate.DEFAULT_STDOUT_CAP)
@@ -1119,7 +1159,7 @@ def _boot(config: dict) -> None:
     # writing, which the guard refuses. The kernel never needs bytecode
     # caches, so turn them off rather than widen the import carve-out.
     sys.dont_write_bytecode = True
-    # The hard boundary: an audit hook the interpreter consults at every
+    # The hard in-process layer: an audit hook the interpreter consults at every
     # spawn/socket/open no matter which object the cell reached it through.
     # Installed before the namespace exists, so no cell ever runs without it.
     _audit_guard.install(
@@ -1132,35 +1172,67 @@ def _boot(config: dict) -> None:
         _guard_filesystem()  # must precede make_namespace (it copies builtins)
     allowlist = set(config.get("allowlist") or vfs.DEFAULT_ALLOWLIST)
     _NS = vfs.make_namespace(
-        allowlist=allowlist, host_call=_host_call, refs=_REFS
+        allowlist=allowlist, host_call=host_call, refs=_REFS
     )
     vfs.install_finder(
-        _SOURCES, _host_call,
+        _SOURCES, host_call,
         skills=_SKILLS, guarded_builtins=_NS["__builtins__"],
     )
+    # SE-1/SE-2 hygiene, done once the guard is armed and the namespace built:
+    #   * Drop the guard module from ``sys.modules`` so a cell cannot reach it
+    #     by name (its enforcement state is in the hook's closure regardless).
+    #     The runner keeps its own ``_audit_guard`` global for ``_run_cell`` /
+    #     checkpoint / restore.
+    #   * Swap ``__main__`` for a clean, empty module so a cell that does
+    #     ``sys.modules['__main__']`` finds no ``_send``/``_OUT`` to forge onto.
+    #     The real runner module stays reachable only through its running frame
+    #     and (with gc enumeration denied) a tool stub's ``__closure__`` chain.
+    sys.modules.pop("_audit_guard", None)
+    try:
+        sys.modules["__main__"] = types.ModuleType("__main__")
+    except Exception:  # pragma: no cover - defensive; never fail boot for this
+        pass
 
 
 def _main() -> None:
-    boot = _read_frame()
+    # Capture the binary framing pipe BEFORE redirecting stdout, and keep it —
+    # with ``send``/``read_frame`` and the per-process nonce — only in locals and
+    # the closures below (SE-2). Stray text (a finalizer, a thread the cell left
+    # running) then goes to stderr, which the host drains, instead of desyncing
+    # the frame pipe. ``input()`` gets an empty stdin and fails at once with
+    # EOFError instead of blocking on the host's pipe until the cell times out.
+    pipe_in = sys.stdin.buffer
+    pipe_out = sys.stdout.buffer
+    sys.stdout = sys.stderr
+    sys.stdin = io.StringIO()
+    nonce_box = {"n": ""}
+    send, read_frame = _framing(pipe_in, pipe_out, nonce_box)
+    host_call = _make_host_call(send, read_frame)
+
+    boot = read_frame()
     if boot is None or boot.get("kind") != "boot":
         return
-    _boot(boot.get("config") or {})
-    _send({"kind": "ready"})
+    config = boot.get("config") or {}
+    # The host stamps every child→host frame with this nonce and rejects any
+    # frame that lacks it; a forging cell does not know it.
+    nonce_box["n"] = str(config.get("nonce") or "")
+    _boot(config, host_call)
+    send({"kind": "ready"})
     while True:
-        frame = _read_frame()
+        frame = read_frame()
         if frame is None:
             break
         kind = frame.get("kind")
         if kind == "exec":
             out, value_repr, err = _run_cell(frame.get("code", ""))
-            _send({"kind": "done", "stdout": out, "value_repr": value_repr, "error": err})
+            send({"kind": "done", "stdout": out, "value_repr": value_repr, "error": err})
         elif kind == "set_vfs":
             _set_vfs(frame.get("sources") or {}, frame.get("skills") or {})
-            _send({"kind": "vfs_ok"})
+            send({"kind": "vfs_ok"})
         elif kind == "checkpoint":
-            _send(_checkpoint())
+            send(_checkpoint())
         elif kind == "restore":
-            _send(_restore(
+            send(_restore(
                 frame.get("vars") or {},
                 frame.get("tools") or [],
                 frame.get("skills") or [],
