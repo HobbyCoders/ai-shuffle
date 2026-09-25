@@ -60,6 +60,41 @@ Same as above but returns pagination metadata.
 }
 ```
 
+### GET /api/v1/sessions/cursor
+
+List sessions a page at a time using a cursor instead of an offset. Use this for long lists: each page continues exactly where the last one ended, even while sessions are being updated.
+
+**Auth:** Required
+
+**Query Parameters:** the same filters as `GET /api/v1/sessions`, plus:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `limit` | integer | Page size (default: 50, max: 100) |
+| `cursor` | string | `next_cursor` from the previous page (omit for the first page) |
+| `cursor_id` | string | `next_cursor_id` from the previous page |
+
+```bash
+curl "http://localhost:8000/api/v1/sessions/cursor?limit=50" \
+  -H "Authorization: Bearer aih_your_key"
+
+# Next page
+curl "http://localhost:8000/api/v1/sessions/cursor?limit=50&cursor=2025-01-15T10:35:00Z&cursor_id=sess_abc123" \
+  -H "Authorization: Bearer aih_your_key"
+```
+
+**Response:**
+```json
+{
+  "items": [...],
+  "next_cursor": "2025-01-15T10:35:00Z",
+  "next_cursor_id": "sess_abc123",
+  "has_more": true
+}
+```
+
+Sessions are ordered by most recently updated. Pass both cursor values back unchanged; stop when `has_more` is `false`.
+
 ## Search Sessions
 
 ### GET /api/v1/sessions/search/query
@@ -159,6 +194,27 @@ Get live session state for streaming. Returns current partial messages and strea
 
 Get session state for client reconnection.
 
+### GET /api/v1/sessions/{session_id}/context-usage
+
+Get how much of the model's context window the session is using, broken down by category.
+
+**Auth:** Required, with the same session access checks as session detail.
+
+```bash
+curl http://localhost:8000/api/v1/sessions/sess_abc123/context-usage \
+  -H "Authorization: Bearer aih_your_key"
+```
+
+**Response:** one of three shapes.
+
+```json
+{ "available": true, "source": "live", "usage": { ... } }
+{ "available": true, "source": "persisted", "captured_at": "2025-01-15T10:35:00Z", "usage": { ... } }
+{ "available": false, "reason": "not_connected" }
+```
+
+`source: "live"` comes from the running session. When the session is not running, the breakdown saved at the end of its last turn is returned as `source: "persisted"`. `reason` is `not_connected` (no saved breakdown), `timeout` or `unsupported`.
+
 ## Session Management
 
 ### PATCH /api/v1/sessions/{session_id}
@@ -180,6 +236,43 @@ Delete a session and all its messages.
 curl -X DELETE http://localhost:8000/api/v1/sessions/sess_abc123 \
   -H "Authorization: Bearer aih_your_key"
 ```
+
+### POST /api/v1/sessions/{session_id}/clear
+
+Clear the conversation but keep the session. The id, title, project and worktree stay; the transcript is emptied and the next message starts a fresh conversation. Running background tasks for the session are stopped.
+
+**Auth:** Required
+
+```bash
+curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/clear \
+  -H "Authorization: Bearer aih_your_key"
+```
+
+Returns `{"status": "ok", "session_id": "sess_abc123"}`. Returns `409` while a turn is running; stop it first.
+
+### POST /api/v1/sessions/{session_id}/resume
+
+Run the last turn again from where it stopped, without adding a message. This is the **Retry** action after a provider error.
+
+**Auth:** Required
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `if_busy` | string | `queue` (default) runs the retry after the current turn; `conflict` returns `409` instead |
+
+```bash
+curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/resume \
+  -H "Authorization: Bearer aih_your_key"
+```
+
+**Response:**
+```json
+{ "turn_id": "...", "session_id": "sess_abc123", "queued": false }
+```
+
+`queued` is `true` when the retry waits behind a running turn. If a retry is already queued, that turn is returned with `"duplicate": true`. Claude Code sessions cannot be resumed this way and return `409`.
 
 ### POST /api/v1/sessions/batch-delete
 
@@ -206,6 +299,68 @@ curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/active \
   -H "Content-Type: application/json" \
   -d '{"is_active": false}'
 ```
+
+## Background Tasks
+
+### POST /api/v1/sessions/{session_id}/tasks/{task_id}/stop
+
+Stop one background task (a background agent or a background shell) while the rest of the session keeps running. Task ids are listed in `activeTasks` from `GET /api/v1/sessions/{session_id}/live`.
+
+**Auth:** Required
+
+```bash
+curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/tasks/task_123/stop \
+  -H "Authorization: Bearer aih_your_key"
+```
+
+**Response:**
+```json
+{ "session_id": "sess_abc123", "task_id": "task_123", "ok": true, "kind": "shell" }
+```
+
+A task that could not be stopped (for example, it already finished) returns `200` with `"ok": false` and a `detail` message.
+
+## Moving Sessions Between Devices
+
+When several devices share one account, each session runs on one device at a time. These endpoints change which device runs it.
+
+### POST /api/v1/sessions/{session_id}/adopt
+
+Run the session on this device from now on (**Continue here** in the device menu). The body is optional.
+
+**Auth:** Required
+
+```bash
+curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/adopt \
+  -H "Authorization: Bearer aih_your_key"
+```
+
+**Response:**
+```json
+{ "session_id": "sess_abc123", "instance_id": "...", "adopted": true, "status": "adopted" }
+```
+
+`status` is `adopted`, or `already_local` (nothing changed, `adopted: false`). Send `{"follow": true}` to take the session without pinning it here, so a later message from another device moves it again; `status` is then `unpinned`. The response may include `warning` (for example, a worktree branch that was not pushed) and `local_project_id`. Returns `409` while the session is running on another device.
+
+### POST /api/v1/sessions/{session_id}/move
+
+Send the session to another device. Its next turns run there. `target_instance_id` is a device `id` from `GET /api/v1/cluster/installs`.
+
+**Auth:** Required
+
+```bash
+curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/move \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"target_instance_id": "target-device-id"}'
+```
+
+**Response:**
+```json
+{ "session_id": "sess_abc123", "instance_id": "target-device-id", "moved": true, "status": "moved", "pending_live_run": false }
+```
+
+`status` is `moved`, or `already_there` (`moved: false`) when the device already runs it. Returns `404` for an unknown device and `409` when the device is offline, the session's project is not checked out there, or a turn is running.
 
 ## Session Sync
 

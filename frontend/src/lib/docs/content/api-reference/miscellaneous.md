@@ -129,9 +129,43 @@ curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/branches \
   -d '{"name": "feature-x"}'
 ```
 
+`start_point` (optional) is the branch or commit to start from.
+
+### DELETE /api/v1/projects/{project_id}/git/branches/{branch_name}
+
+Delete a branch. Add `?force=true` to delete a branch that is not fully merged. The checked-out branch cannot be deleted.
+
+### Other git operations
+
+**Auth:** Required. Unless noted, these also accept optional `worktree_id` or `session_id` query parameters to act on a worktree or a session's checkout instead of the project folder. The write operations return `{"success": true, "message": "..."}`. Fetch, pull, push, stage, unstage and discard add `status` (the fresh git status), and pull, stage, unstage and discard add `diff_stats`.
+
+| Method | Path | Body or query | Notes |
+|--------|------|---------------|-------|
+| `POST` | `/git/checkout` | Body: `{"ref": "main", "auto_stash": false}` | Switch branch or commit in the project folder. Returns `409` for uncommitted changes unless `auto_stash` is `true`. Not allowed with `worktree_id` |
+| `POST` | `/git/fetch` | Query: `remote` (default `origin`) | Returns `502` if the remote cannot be reached |
+| `POST` | `/git/pull` | Body: `{"remote": "origin", "strategy": "merge", "auto_stash": false}` | `strategy` is `merge` or `rebase`. On a conflict the pull is aborted and the response has `success: false`, `has_conflicts: true` and `conflicts` |
+| `POST` | `/git/push` | Body: `{"remote": "origin", "branch": null, "set_upstream": false, "force": false}` | `branch` defaults to the current branch |
+| `POST` | `/git/stage` | Body: `{"files": ["src/app.py"]}` | |
+| `POST` | `/git/unstage` | Body: `{"files": ["src/app.py"]}` | Keeps the changes in the working tree |
+| `POST` | `/git/discard` | Body: `{"files": ["src/app.py"]}` | Reverts the files; untracked files are deleted. Optional `file_statuses` maps a file to `modified`, `staged` or `untracked`; otherwise it is read from git status |
+| `GET` | `/git/diff-stats` | Query: `include_unstaged` (default `true`) | Returns `additions`, `deletions`, `files_changed` |
+| `GET` | `/git/changed-files` | | Returns `files` (each with `file`, `status`, `category`, `additions`, `deletions`, `is_binary`), `total_additions`, `total_deletions` |
+| `POST` | `/git/file-diff` | Body: `{"file_path": "src/app.py", "staged": false}` | Returns `file`, `diff` (unified diff), `is_binary`, `truncated` |
+
+Paths in the table are relative to `/api/v1/projects/{project_id}`.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/pull \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"strategy": "rebase"}'
+```
+
 ## GitHub Integration
 
 GitHub endpoints are scoped to a project's connected repository.
+
+**Auth:** Required. Apart from `status`, these also need the server's GitHub CLI to be signed in (see [GitHub Integration](/docs/api-reference/authentication#github-integration)); otherwise they return `401` "GitHub CLI is not authenticated".
 
 ### GET /api/v1/projects/{project_id}/github/status
 
@@ -145,9 +179,38 @@ List pull requests for the project's repository.
 
 Create a pull request.
 
+### GET /api/v1/projects/{project_id}/github/pulls/{number}
+
+Get one pull request. Returns `number`, `title`, `body`, `state`, `head_branch`, `base_branch`, `author`, `url`, `created_at`, `updated_at` and `mergeable`.
+
+### POST /api/v1/projects/{project_id}/github/pulls/{number}/merge
+
+Merge a pull request. The body is optional; `method` is `merge` (default), `squash` or `rebase`.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/github/pulls/42/merge \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"method": "squash"}'
+```
+
+Returns `{"status": "ok", "message": "Pull request #42 merged successfully"}`, or `400` with GitHub's reason.
+
+### DELETE /api/v1/projects/{project_id}/github/pulls/{number}
+
+Close a pull request without merging. Returns `{"status": "ok", "message": "Pull request #42 closed"}`.
+
 ### GET /api/v1/projects/{project_id}/github/actions
 
-List GitHub Actions workflow runs for the project's repository.
+List GitHub Actions workflow runs for the project's repository. `?limit=` sets how many (default 10, max 50).
+
+### GET /api/v1/projects/{project_id}/github/actions/{run_id}
+
+Get one workflow run: `id`, `name`, `status`, `conclusion`, `branch`, `event`, `url`, `created_at`.
+
+### POST /api/v1/projects/{project_id}/github/actions/{run_id}/rerun
+
+Run a workflow again. Returns `{"status": "ok", "message": "Workflow #123 re-run triggered"}`.
 
 ## Settings & Integrations
 

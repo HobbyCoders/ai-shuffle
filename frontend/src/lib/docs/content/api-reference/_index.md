@@ -114,14 +114,14 @@ The `session_id` is sent in the message body (e.g. `{"type": "query", "prompt": 
 | Category | Prefix | Description |
 |----------|--------|-------------|
 | [Authentication](/docs/api-reference/authentication) | `/auth`, `/owner` | Owner password and sign-in, setup, Claude CLI, GitHub |
-| [Sessions](/docs/api-reference/sessions) | `/sessions` | Chat session CRUD, search, export |
+| [Sessions](/docs/api-reference/sessions) | `/sessions` | Chat session CRUD, search, export, clear and retry, moving between devices |
 | [Query & Execution](/docs/api-reference/query-execution) | `/query`, `/conversation` | One-shot queries, conversations, streaming |
-| [WebSocket](/docs/api-reference/websocket) | `/ws` | Real-time chat and CLI bridge |
+| [WebSocket](/docs/api-reference/websocket) | `/ws` | Real-time chat control, permissions, questions, message queue |
 | [Agents](/docs/api-reference/agents) | `/agents` | Agent configuration CRUD and nested-agent management |
-| [Projects](/docs/api-reference/projects) | `/projects` | Project CRUD, files, git |
-| [Connectors](/docs/api-reference/connectors) | `/connectors` | Platform connector management |
+| [Projects](/docs/api-reference/projects) | `/projects` | Project CRUD, files, project agents, memory files, project plugins, links |
+| [Connectors](/docs/api-reference/connectors) | `/connectors` | Platform connector management, Gmail sign-in, Plaid |
 | [Automations](/docs/api-reference/automations) | `/automations` | Scheduled/triggered workflows |
 | [Hooks](/docs/api-reference/hooks) | `/hooks` | Event hook management |
 | [MCP](/docs/api-reference/mcp) | `/mcp` | MCP server configuration |
 | [API Users](/docs/api-reference/api-users) | `/api-users` | API key management |
-| [Miscellaneous](/docs/api-reference/miscellaneous) | Various | Tags, analytics, git, settings, files |
+| [Miscellaneous](/docs/api-reference/miscellaneous) | Various | Tags, analytics, git, GitHub pull requests and actions, settings, files |

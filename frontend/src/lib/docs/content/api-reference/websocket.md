@@ -54,6 +54,15 @@ ws.send(JSON.stringify({
 | `done` | Turn complete | `session_id`, `metadata` (`total_cost_usd`, `tokens_in`, `tokens_out`, `model`, `duration_ms`, ...) |
 | `interrupted` | Turn ended by an interrupt | `session_id`, `message` |
 | `interrupt_confirmed` / `interrupt_failed` | Reply to `interrupt_for_query` | `session_id`, `message` (on failure) |
+| `query_queued` | The `query` was queued behind a running turn (or handed to the device that runs the session) instead of starting now | `session_id` |
+| `session_not_found` | Reply to `load_session` for an unknown session | `session_id` |
+| `session_closed` | Reply to `close_session` | `session_id` |
+| `permission_response_ack` | Reply to `permission_response` | `session_id`, `request_id`, `result` |
+| `user_question_response_ack` | Reply to `user_question_response` | `session_id`, `request_id`, `success`, `reason` (`not_pending` when the question was already answered) |
+| `pending_permissions` | Reply to `get_pending_permissions` | `session_id`, `pending`, `deferred` |
+| `pending_questions` | Reply to `get_pending_questions` | `session_id`, `questions` |
+| `permission_queue_update` | Deferred permission requests were put back in the queue | `session_id`, `requeued_ids`, `remaining_count` |
+| `sync` | Multi-device update. With `event_type: "queue_updated"`, `data.queued_messages` is the session's current queue | `event_type`, `session_id`, `data` |
 | `error` | Error occurred | `message` |
 | `ping` | Keep-alive | — |
 
@@ -65,10 +74,17 @@ Other devices watching the same session receive the same control frames. Content
 |------|-------------|------------|
 | `query` | Start a new query (creates a session if `session_id` is omitted) | `prompt`, `session_id`, `profile`, `project` |
 | `queue_message` | Queue a message to send after the current stream completes | `content`, `session_id`, `profile`, `project` |
+| `remove_queued_message` | Remove one queued message | `message_id`, `session_id` |
+| `clear_queued_messages` | Remove every queued message for the session | `session_id` |
 | `load_session` | Load/switch to a session and receive its history | `session_id` |
+| `watch_session` | Follow a session without loading its history. The server sends its queue, if any, as a `sync` frame | `session_id` |
+| `close_session` | Stop following the current session; replies `session_closed` | — |
 | `stop` | Stop the current turn, its background work and queued messages | `session_id`, `turn_id` (optional) |
-| `permission_response` | Approve/deny a tool use | `request_id`, `session_id`, `decision`, `remember` |
-| `user_question_response` | Answer a `user_question` | `request_id`, `session_id`, `answers` |
+| `permission_response` | Approve, deny or defer a tool use | `request_id`, `session_id`, `decision`, `remember`, `pattern` |
+| `get_pending_permissions` | List open and deferred permission requests for the current session | — |
+| `requeue_deferred_permissions` | Send deferred permission requests again as new `permission_request` frames | `session_id` |
+| `user_question_response` | Answer a `user_question` | `request_id`, `session_id`, `answers`, `dismissed`, `skipped` |
+| `get_pending_questions` | List unanswered questions for the current session | — |
 | `interrupt_for_query` | Interrupt the running turn so a new `query` can follow; replies `interrupt_confirmed` or `interrupt_failed` | `session_id` |
 | `pong` | Keep-alive response to a `ping` | — |
 
@@ -82,6 +98,7 @@ When the agent wants to use a tool that requires approval:
 
 // Client approves or denies via a "decision" of "allow" or "deny".
 // "remember" optionally persists the choice: "none", "session", or "profile" (the agent).
+// "pattern" optionally narrows a remembered rule.
 ws.send(JSON.stringify({
   type: 'permission_response',
   session_id: 'sess_abc123',
@@ -90,6 +107,42 @@ ws.send(JSON.stringify({
   remember: 'none'
 }));
 ```
+
+A `decision` of `"defer"` sets the request aside without answering it; `remember` and `pattern` are ignored. Deferred requests come back in `pending_permissions.deferred`, and `requeue_deferred_permissions` sends them again. The server confirms every answer with `permission_response_ack`.
+
+`get_pending_permissions` and `get_pending_questions` act on the session selected by the last `load_session` or `watch_session` on this socket. Send them after reconnecting to restore prompts that are still open.
+
+### Answering Questions
+
+A `user_question` frame carries `questions`. Reply with `answers`, an object keyed by each question's `question` text. List questions the user skipped (by the same key) in `skipped`, or send `"dismissed": true` to close the prompt without answering.
+
+```javascript
+ws.send(JSON.stringify({
+  type: 'user_question_response',
+  session_id: 'sess_abc123',
+  request_id: 'req_456',
+  answers: { 'Which database?': 'PostgreSQL' }
+}));
+```
+
+### Message Queue
+
+A `query` sent while a turn is running is queued and answered with `query_queued`. `queue_message` adds to the same queue explicitly. After every change the server sends the whole queue:
+
+```json
+{
+  "type": "sync",
+  "event_type": "queue_updated",
+  "session_id": "sess_abc123",
+  "data": {
+    "queued_messages": [
+      { "id": "turn_789", "session_id": "sess_abc123", "content": "Also update the tests", "profile_id": "your-agent-id", "project_id": "my-project", "position": 0, "created_at": "2025-01-15T10:36:00Z" }
+    ]
+  }
+}
+```
+
+Remove an entry with `{"type": "remove_queued_message", "message_id": "turn_789", "session_id": "sess_abc123"}`, or all of them with `clear_queued_messages`. A queued message the running turn has already read cannot be removed; the next `queue_updated` shows what is left.
 
 ### Connection Lifecycle
 

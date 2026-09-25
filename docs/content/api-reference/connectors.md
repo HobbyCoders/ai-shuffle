@@ -1,6 +1,6 @@
 <!--
 title: Connectors
-description: Connector CRUD, lifecycle management, and webhook endpoints
+description: Connector CRUD, lifecycle management, Gmail and Plaid sign-in, and webhook endpoints
 order: 7
 -->
 
@@ -8,7 +8,7 @@ order: 7
 
 Endpoints for managing platform connectors — creating, configuring, testing, and controlling connections to external messaging platforms and services.
 
-Every endpoint on this page except the inbound webhooks needs owner access. API-user keys (`aih_...`) get `403`. The examples send an owner token from `POST /api/v1/owner/login` (see [Owner password](/docs/api-reference/authentication#owner-password)).
+Every endpoint on this page except the inbound webhooks and the Google sign-in callback needs owner access. API-user keys (`aih_...`) get `403`. The examples send an owner token from `POST /api/v1/owner/login` (see [Owner password](/docs/api-reference/authentication#owner-password)).
 
 ## Discovery
 
@@ -300,6 +300,21 @@ curl http://localhost:8000/api/v1/connectors/conn_abc123/logs \
 ]
 ```
 
+### GET /api/v1/connectors/{connector_id}/dependencies
+
+List the automations that use this connector, so you can update them before deleting or changing it.
+
+**Auth:** Owner only
+
+**Response:**
+```json
+[
+  { "id": "auto_abc123", "name": "Morning inbox summary", "is_enabled": true, "uses": ["action", "trigger"] }
+]
+```
+
+`uses` names where the connector appears: `trigger`, `action` (a Connector Action step) or `output`. An automation triggered by events from any connector is listed for every connector.
+
 ### GET /api/v1/connectors/{connector_id}/triggers
 
 List the triggers exposed by the connector's type.
@@ -338,6 +353,140 @@ curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/actions/send_me
   "action_id": "send_message",
   "result": {}
 }
+```
+
+## Gmail Sign-in (Google OAuth)
+
+Gmail connections are created by signing in with Google instead of pasting credentials. You register your own Google OAuth app once, then each sign-in creates (or reconnects) a Gmail connector. See the [Gmail connector guide](/docs/connectors/gmail) for the Google Cloud setup.
+
+The Gmail app must be installed and enabled first (**Build → Plugins → Apps**).
+
+### GET /api/v1/connectors/oauth/google/status
+
+**Auth:** Owner only
+
+**Response:**
+```json
+{
+  "configured": true,
+  "client_id": "1234-abc.apps.googleusercontent.com",
+  "redirect_uri": "https://shuffle.example.com/api/v1/connectors/oauth/google/callback",
+  "suggested_redirect_uri": "https://shuffle.example.com/api/v1/connectors/oauth/google/callback",
+  "environment_managed": false
+}
+```
+
+`environment_managed` is `true` when the app settings come from the `SHUFFLE_GOOGLE_CLIENT_ID`, `SHUFFLE_GOOGLE_CLIENT_SECRET` and `SHUFFLE_GOOGLE_REDIRECT_URI` environment variables; they then cannot be changed through the API.
+
+### PUT /api/v1/connectors/oauth/google/app
+
+Save the Google OAuth app. The secret is stored encrypted.
+
+**Auth:** Owner only
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/connectors/oauth/google/app \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "1234-abc.apps.googleusercontent.com",
+    "client_secret": "GOCSPX-...",
+    "redirect_uri": "http://localhost:8000/api/v1/connectors/oauth/google/callback"
+  }'
+```
+
+`redirect_uri` must be the address you reach AI Shuffle on followed by `/api/v1/connectors/oauth/google/callback`, over HTTPS (plain HTTP only for `localhost`). Returns `{"configured": true}`, `400` for a redirect URI that does not match, or `409` while credential storage is locked.
+
+### POST /api/v1/connectors/oauth/google/start
+
+Start a sign-in. Returns `{"authorization_url": "...", "flow_id": "..."}` and sets a short-lived cookie that ties the sign-in to this browser. Open `authorization_url` in the same browser within 10 minutes.
+
+**Auth:** Owner only
+
+```json
+{
+  "name": "Work mail",
+  "connector_id": null,
+  "options": { "labels": "INBOX", "watch_inbox": false, "poll_interval_seconds": 60, "max_results": 20 }
+}
+```
+
+Every field is optional. `name` defaults to the Google account's address. Set `connector_id` to reconnect an existing Gmail connector; the same Google account must be chosen. `options` also accepts `enabled_action_categories`.
+
+### GET /api/v1/connectors/oauth/google/callback
+
+Google redirects here after sign-in. It creates or updates the connector and shows a page that reports the result to the window that opened it (`{"type": "connector-oauth", "flow_id", "connector_id", "error"}`) and closes itself. Not called directly.
+
+**Auth:** None (public — checked against the pending sign-in and its browser cookie)
+
+## Personal Finance (Plaid)
+
+The Plaid connector gives agents read-only access to bank and credit-card accounts through Plaid Link. Agents cannot make payments or transfers, and bank logins never reach AI Shuffle. You need your own Plaid app with the Transactions product; `sandbox` uses Plaid's test institutions, `production` uses real accounts and may incur Plaid fees.
+
+The Plaid app must be installed and enabled first (**Build → Plugins → Apps**). Connecting a bank needs a browser, because Plaid Link runs in the page at `/plaid-link`.
+
+### GET /api/v1/connectors/oauth/plaid/status
+
+**Auth:** Owner only
+
+Returns `configured`, and once configured `client_id`, `environment`, `country_codes` and `redirect_uri` (never the secret), plus `suggested_redirect_uri`.
+
+### PUT /api/v1/connectors/oauth/plaid/app
+
+Save the Plaid app. The secret is stored encrypted.
+
+**Auth:** Owner only
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/connectors/oauth/plaid/app \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "your-plaid-client-id",
+    "client_secret": "your-plaid-secret",
+    "environment": "sandbox",
+    "country_codes": ["US"],
+    "redirect_uri": "https://shuffle.example.com/plaid-link"
+  }'
+```
+
+`environment` is `sandbox` (default) or `production`. `country_codes` defaults to `["US"]`. `redirect_uri` must be the HTTPS address you reach AI Shuffle on followed by `/plaid-link`; add the same URI to the allowed redirect URIs in the Plaid dashboard. Returns `{"configured": true}`, `400` for a redirect URI that does not match, or `409` while credential storage is locked.
+
+### POST /api/v1/connectors/oauth/plaid/start
+
+Start a bank connection. No body. Returns `{"flow_id": "...", "link_token": "..."}` and sets a cookie that ties the flow to this browser for 30 minutes. Open Plaid Link with `link_token`.
+
+**Auth:** Owner only
+
+### POST /api/v1/connectors/oauth/plaid/exchange
+
+Finish the connection with the `public_token` that Plaid Link returns on success. Must come from the same browser as `start`.
+
+**Auth:** Owner only
+
+```json
+{ "flow_id": "...", "public_token": "public-sandbox-..." }
+```
+
+Returns `{"connector_id": "..."}`. The new connector is named after the first account, for example `Checking (Plaid sandbox)`.
+
+### Plaid actions
+
+Run these through `POST /api/v1/connectors/{connector_id}/actions/{action_id}/execute`, or let an agent use them while the connector is active. Every result also includes `environment`.
+
+| Action | Parameters | Returns |
+|--------|------------|---------|
+| `accounts` | — | `accounts` (name, type, masked number, cached balances) |
+| `balances` | — | `accounts` with balances fetched now from the bank (Plaid may charge for this) |
+| `transactions` | `start_date`, `end_date` (required, `YYYY-MM-DD`), `count` (1–100, default 50), `offset` | `accounts`, `transactions`, `total_transactions`, `offset` |
+
+In `transactions`, positive amounts are money spent and negative amounts are refunds or credits. Pending entries can still change.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/actions/transactions/execute \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"start_date": "2025-01-01", "end_date": "2025-01-31", "count": 50}'
 ```
 
 ## Inbound Webhooks
