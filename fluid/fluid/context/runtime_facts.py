@@ -225,13 +225,19 @@ def harvest_tool_facts(name: str, output: str) -> list[tuple[str, str]]:
     if not match:
         return []
     origin = match.group(1)
-    host = origin.split("://", 1)[-1].split(":", 1)[0]
-    if not host or host in ("localhost", "127.0.0.1", "0.0.0.0"):
+    scheme, _, authority = origin.partition("://")
+    if authority.startswith("["):  # bracketed IPv6 literal, maybe with a port
+        host = authority[: authority.find("]") + 1]
+    else:
+        host = authority.split(":", 1)[0]
+    if not host or host in ("localhost", "127.0.0.1", "0.0.0.0", "[::1]", "[::]"):
         return []
+    # Built from scheme + host, not by cutting the last ":" off the origin —
+    # a portless origin has no port colon, and that cut left "http:".
     return [(
         _KEY_BROWSER_HOST,
         f"The browser tools run on another host: local servers must bind "
-        f"0.0.0.0 and be browsed via {origin.rsplit(':', 1)[0]}:<port> "
+        f"0.0.0.0 and be browsed via {scheme}://{host}:<port> "
         f"(loopback URLs are rewritten to this host).",
     )]
 

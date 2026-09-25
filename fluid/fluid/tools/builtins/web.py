@@ -343,18 +343,40 @@ async def _get(url: str, *, transport: Any = None) -> Any:
     ) as client:
         current = url
         for _ in range(_MAX_SAME_HOST_REDIRECTS):
-            response = await client.get(current)
-            if response.status_code in (301, 302, 303, 307, 308):
-                target = urljoin(current, response.headers.get("location", ""))
-                if urlparse(target).hostname != urlparse(current).hostname:
-                    return ("redirect", target)
-                reason = check_url(target)
-                if reason is not None:
-                    return ("blocked", reason)
-                current = target
-                continue
-            return response
+            # Streamed so the body cap bounds what is READ, not just what is
+            # kept: ``client.get`` would buffer a multi-gigabyte response in
+            # full before any slice applied.
+            async with client.stream("GET", current) as response:
+                if response.status_code in (301, 302, 303, 307, 308):
+                    target = urljoin(current, response.headers.get("location", ""))
+                    if urlparse(target).hostname != urlparse(current).hostname:
+                        return ("redirect", target)
+                    reason = check_url(target)
+                    if reason is not None:
+                        return ("blocked", reason)
+                    current = target
+                    continue
+                body = bytearray()
+                truncated = False
+                async for chunk in response.aiter_bytes():
+                    body += chunk
+                    if len(body) > _MAX_RESPONSE_BYTES:
+                        truncated = True
+                        del body[_MAX_RESPONSE_BYTES:]
+                        break
+                return _Fetched(response, bytes(body), truncated)
         return ("error", "too many redirects")
+
+
+class _Fetched:
+    """A final (non-redirect) response plus its size-capped body."""
+
+    __slots__ = ("response", "body", "truncated")
+
+    def __init__(self, response: Any, body: bytes, truncated: bool) -> None:
+        self.response = response
+        self.body = body
+        self.truncated = truncated
 
 
 # ─── WebFetch ────────────────────────────────────────────────────────────────
@@ -437,13 +459,13 @@ async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         url = "https://" + url[len("http://"):]  # upgrade, like the big harnesses
     transport = (ctx.extra or {}).get("web_transport")  # test seam
     try:
-        response = await _get(url, transport=transport)
+        fetched = await _get(url, transport=transport)
     except BlockedAddress as exc:
         return ToolOutcome(text=f"WebFetch refused: {exc}", is_error=True)
     except Exception as exc:
         return ToolOutcome(text=f"WebFetch failed: {type(exc).__name__}: {exc}", is_error=True)
-    if isinstance(response, tuple):
-        kind, detail = response
+    if isinstance(fetched, tuple):
+        kind, detail = fetched
         if kind == "redirect":
             return ToolOutcome(
                 text=(
@@ -453,15 +475,19 @@ async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 )
             )
         return ToolOutcome(text=f"WebFetch failed: {detail}", is_error=True)
+    response = fetched.response
     if response.status_code >= 400:
         return ToolOutcome(
             text=f"WebFetch failed: HTTP {response.status_code} for {url}",
             is_error=True,
         )
-    body = response.content[:_MAX_RESPONSE_BYTES]
+    body = fetched.body
     content_type = (response.headers.get("content-type") or "").lower()
     charset = response.charset_encoding or "utf-8"
-    text = body.decode(charset, errors="replace")
+    try:
+        text = body.decode(charset, errors="replace")
+    except LookupError:  # a charset label Python does not know
+        text = body.decode("utf-8", errors="replace")
     title = ""
     extractor: _TextExtractor | None = None
     if "html" in content_type or re.search(r"<html[\s>]", text[:2048], re.IGNORECASE):
@@ -474,7 +500,7 @@ async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     text, _ = strip_invisible(text)
 
     offset = max(0, int(input.get("offset") or 0))
-    max_chars = min(MAX_FETCH_CHARS, int(input.get("max_chars") or DEFAULT_FETCH_CHARS))
+    max_chars = max(1, min(MAX_FETCH_CHARS, int(input.get("max_chars") or DEFAULT_FETCH_CHARS)))
     window = text[offset : offset + max_chars]
     header = f"{url}" + (f" — {title}" if title else "")
     footer = ""
@@ -482,6 +508,11 @@ async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         footer = (
             f"\n[{len(text)} chars total; showing {offset}..{offset + len(window)} "
             f"— continue with offset={offset + len(window)}]"
+        )
+    if fetched.truncated:
+        footer += (
+            f"\n[response body exceeded {_MAX_RESPONSE_BYTES // (1024 * 1024)} MiB; "
+            "only its beginning was read]"
         )
     if extractor is not None:
         # Rides after the offset marker, never instead of it: a long index page

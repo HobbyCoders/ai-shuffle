@@ -131,6 +131,25 @@ def split_plugin_ref(ref: str) -> tuple[str, str]:
     return name, marketplace or DEFAULT_MARKETPLACE
 
 
+def _plain_component(value: str) -> bool:
+    """One ordinary path segment: no separators, no ``.``/``..``, no NUL, no ``:``.
+
+    Plugin and marketplace names come from ``enabledPlugins`` keys — a
+    project-scope settings file included — and are joined onto the plugins
+    root; a ``../`` in either would load a "plugin" (and start its MCP
+    servers) from anywhere on disk. On Windows a drive prefix (``D:x``)
+    replaces the root it is joined onto, so ``:`` is refused too.
+    """
+    return (
+        bool(value)
+        and value not in (".", "..")
+        and "/" not in value
+        and "\\" not in value
+        and "\0" not in value
+        and ":" not in value
+    )
+
+
 def _version_key(name: str) -> tuple[int, tuple[int, ...], str]:
     """Sort key for a version directory name.
 
@@ -186,6 +205,9 @@ def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None
     a stale ``enabledPlugins`` entry must not break the session (CE11).
     """
     home = plugins_home() if home is None else home
+    if not (_plain_component(name) and _plain_component(marketplace)):
+        log.warning("refusing plugin ref %r@%r: not a plain name", name, marketplace)
+        return None
 
     cache = home / "cache" / marketplace / name
     if cache.is_dir():

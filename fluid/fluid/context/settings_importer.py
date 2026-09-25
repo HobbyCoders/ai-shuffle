@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qsl, quote_plus, urlsplit, urlunsplit
 
-from fluid.context.plugins import DEFAULT_MARKETPLACE, _version_key
+from fluid.context.plugins import DEFAULT_MARKETPLACE, _plain_component, _version_key
 
 try:  # pragma: no cover - Python 3.11+ in supported deployments
     import tomllib
@@ -516,25 +516,6 @@ def _project_registration(
     return replace(item, id=f"{item.id}-{suffix}")
 
 
-def _plain_component(value: str) -> bool:
-    """One ordinary path segment: no separators, no ``.``/``..``, no NUL, no ``:``.
-
-    Plugin and marketplace names come from ``enabledPlugins`` keys and are
-    joined onto both the source plugins root and ``~/.fluid/plugins``; a
-    ``../`` in either would read and write outside those roots. On Windows a
-    drive prefix (``D:x``) replaces the root it is joined onto, so ``:`` is
-    refused too.
-    """
-    return (
-        bool(value)
-        and value not in (".", "..")
-        and "/" not in value
-        and "\\" not in value
-        and "\0" not in value
-        and ":" not in value
-    )
-
-
 def _claude_plugin_root(plugins: Path, name: str, marketplace: str) -> Path | None:
     """Resolve one enabled plugin's on-disk root inside the SOURCE home.
 
@@ -879,7 +860,12 @@ def _has_secret_key(value: str) -> bool:
 
 
 def _contains_embedded_secret(value: str) -> bool:
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        # "http://[oops" and friends: unparseable, so it cannot be vetted —
+        # treated as secret-bearing (placeholder or rejection), never copied.
+        return True
     if parsed.username is not None or parsed.password is not None:
         return True
     if any(_has_secret_key(key) for key, _ in parse_qsl(parsed.query, keep_blank_values=True)):
@@ -931,7 +917,10 @@ def _redact_map(server: str, raw: Any, placeholders: list[str]) -> dict[str, str
 
 def _redact_url(server: str, url: str, placeholders: list[str]) -> str | None:
     """Secret query values become placeholders; credentials anywhere else reject the URL."""
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+    except ValueError:  # malformed (e.g. an unbalanced IPv6 bracket): reject
+        return None
     if parsed.username is not None or parsed.password is not None:
         return None
     if _contains_embedded_secret(urlunsplit(parsed._replace(query=""))):
@@ -1019,7 +1008,7 @@ def _sanitize_server(name: str, raw: Any) -> tuple[dict[str, Any] | None, str | 
     else:
         redacted = _redact_url(name, url, placeholders)
         if redacted is None:
-            return None, "server URL carries a credential outside its query string"
+            return None, "server URL is malformed or carries a credential outside its query string"
         clean["url"] = redacted
     if args:
         clean["args"] = _redact_args(name, args, placeholders)

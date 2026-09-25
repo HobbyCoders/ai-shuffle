@@ -76,15 +76,33 @@ def input_schema(schema: Any) -> dict[str, Any]:
     def convert(value: Any) -> dict[str, Any]:
         scalar = {str: "string", int: "integer", float: "number", bool: "boolean",
                   type(None): "null", dict: "object", list: "array"}
-        if value in scalar:
-            return {"type": scalar[value]}
+        if isinstance(value, dict):
+            # Already a JSON Schema fragment inside a shorthand map.
+            return value
+        try:
+            if value in scalar:
+                return {"type": scalar[value]}
+        except TypeError:  # unhashable, e.g. a list value — not a type
+            return {}
         origin, args = get_origin(value), get_args(value)
         if origin in (Required, NotRequired):
             return convert(args[0])
         if is_typeddict(value):
-            props = {k: convert(v) for k, v in get_type_hints(value, include_extras=True).items()}
+            hints = get_type_hints(value, include_extras=True)
+            props = {k: convert(v) for k, v in hints.items()}
+
+            # The explicit marker wins over ``__required_keys__``: under
+            # ``from __future__ import annotations`` Python < 3.14 cannot see
+            # NotRequired/Required in the string annotations and files every
+            # key by the class's ``total`` alone.
+            def required(key: str) -> bool:
+                marker = get_origin(hints[key])
+                if marker is NotRequired:
+                    return False
+                return marker is Required or key in value.__required_keys__
+
             return {"type": "object", "properties": props,
-                    "required": [k for k in props if k in value.__required_keys__]}
+                    "required": [k for k in props if required(k)]}
         if origin is list:
             return {"type": "array", "items": convert(args[0]) if args else {}}
         if origin is dict:

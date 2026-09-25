@@ -501,6 +501,17 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     content, newline = read_text_preserving(path)
     old = old.replace("\r\n", "\n")
     new = new.replace("\r\n", "\n")
+    if not old and content:
+        # "" occurs between every pair of characters: with replace_all it
+        # would splice new_string through the whole file. An empty file is
+        # the one place an empty old_string has a meaning (fill it).
+        return ToolOutcome(
+            text=(
+                "old_string is empty — Edit replaces existing text, so quote "
+                "the lines to change (use Write to replace a whole file)."
+            ),
+            is_error=True,
+        )
 
     # 1. Exact match.
     count = content.count(old)
