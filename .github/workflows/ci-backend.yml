@@ -137,6 +137,21 @@ jobs:
         # tests/mcp, services, unit, scripts and top-level tests/test_*.py are hermetic too (~45s at -n 4).
         run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance tests/mcp tests/services tests/unit tests/scripts tests/test_*.py -o addopts="" -q -p no:cacheprovider --timeout=120 -n "$PYTEST_WORKERS"
 
+      - name: Boot smoke test (real server process)
+        # Starts `python -m app.main` as a subprocess against a private
+        # PostgreSQL 16 cluster (initialized on a free port by the container
+        # supervisor's own Database class), then drives health, the owner
+        # bootstrap, a session, the chat socket and a SIGTERM shutdown. It
+        # catches "the app does not start", which the in-process TestClient
+        # suites above cannot. Needs the runner's preinstalled PostgreSQL 16
+        # binaries (not the service, which is still stopped here);
+        # BOOT_SMOKE_REQUIRED makes missing binaries fail instead of skip.
+        # Serial on purpose: the server binds real ports. ~15 s.
+        env:
+          BOOT_SMOKE_REQUIRED: '1'
+          SMOKE_PG_BIN: /usr/lib/postgresql/16/bin
+        run: python -m pytest tests/smoke -m boot_smoke -o addopts="" -q -rs -p no:cacheprovider --timeout=240
+
       - name: Start the runner's PostgreSQL
         # The Ubuntu runner image ships PostgreSQL preinstalled and stopped;
         # starting it costs seconds, where a service container costs a pull

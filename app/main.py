@@ -89,10 +89,17 @@ log_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(messa
 root_logger = logging.getLogger()
 root_logger.setLevel(log_level)
 
-# Only add handlers if not already present (prevents duplicates on re-import)
-if not root_logger.handlers:
-    # Console handler (for docker logs)
+# Console handler (for docker logs), added once. Found by name, not by "root
+# has no handlers": importing app.api.logs above already attached its ring
+# buffer to the root logger, so that check never added this handler and the
+# console carried no application logs at all. Test runs (TESTING=1) keep the
+# console quiet, as they always have since then.
+CONSOLE_HANDLER_NAME = "ai-shuffle-console"
+if os.environ.get("TESTING") != "1" and not any(
+    handler.get_name() == CONSOLE_HANDLER_NAME for handler in root_logger.handlers
+):
     console_handler = logging.StreamHandler()
+    console_handler.set_name(CONSOLE_HANDLER_NAME)
     console_handler.setLevel(log_level)
     console_handler.setFormatter(log_format)
     root_logger.addHandler(console_handler)
