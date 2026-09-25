@@ -26,6 +26,7 @@ from typing import Optional, Tuple, Dict, Any, List
 from app.core.config import settings
 from app.core.git_cache import _git_cache
 from app.core.git_service import git_service
+from app.core.scrub import strip_url_userinfo
 from app.core.project_utils import (
     get_project_working_dir, get_worktree_working_dir,
     get_worktree_working_dir_as_path
@@ -459,7 +460,7 @@ class WorktreeManager:
 
         # Create a new record
         repo_id = f"repo-{uuid.uuid4().hex[:12]}"
-        remote_url = self.git_service.get_remote_url(working_dir)
+        remote_url = strip_url_userinfo(self.git_service.get_remote_url(working_dir))
         default_branch = self.git_service.get_default_branch(working_dir)
 
         # Try to extract GitHub repo name from URL

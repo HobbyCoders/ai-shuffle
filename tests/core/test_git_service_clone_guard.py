@@ -30,6 +30,8 @@ class TestCloneRepoUrlGuard:
         "EXT::sh -c id",          # case-insensitive
         "file::/etc/passwd",
         "FILE::/etc/passwd",      # case-insensitive
+        "fd::3",                  # any remote helper
+        "persistent-https::x",
     ])
     def test_malicious_url_rejected_before_subprocess(self, git, bad_url):
         # A rejected URL returns (False, reason) and never reaches _run_git.
@@ -145,3 +147,92 @@ def test_redact_url_credentials_shapes():
     # Nothing to redact: ssh-style remotes, host:port, plain text.
     for text in ("git@github.com:o/r.git", "http://localhost:8080/api", "no url here", ""):
         assert redact_url_credentials(text) == text
+
+
+class TestClassifyCloneUrl:
+    """How the clone route reads a source: remote, local (with the path git
+    opens) or refused. Mirrors git's own URL / scp-like / path split."""
+
+    @pytest.mark.parametrize("url", [
+        "https://github.com/o/r.git",
+        "http://git.example.com/r.git",
+        "HTTPS://github.com/o/r.git",
+        "https://tok@github.com/o/r.git",
+        "ssh://git@github.com/o/r.git",
+        "git+ssh://git@github.com/o/r.git",
+        "git@github.com:o/r.git",
+        "deploy@git.example.com:/srv/r.git",
+        "github.com:o/r.git",
+        "git@[::1]:r.git",
+    ])
+    def test_remote(self, url):
+        from app.core.git_service import classify_clone_url
+        assert classify_clone_url(url) == ("remote", None)
+
+    @pytest.mark.parametrize("url, path", [
+        ("/srv/repos/r.git", "/srv/repos/r.git"),
+        ("../other/r.git", "../other/r.git"),
+        ("r.git", "r.git"),
+        ("./a:b", "./a:b"),                  # '/' before ':' -> a path, as in git
+        ("file:///srv/repos/r.git", "/srv/repos/r.git"),
+        ("FILE:///srv/r.git", "/srv/r.git"),
+    ])
+    def test_local(self, url, path):
+        from app.core.git_service import classify_clone_url
+        assert classify_clone_url(url) == ("local", path)
+
+    @pytest.mark.parametrize("url", [
+        "", "   ", "-oProxyCommand=x", "  --upload-pack=x",
+        "ext::sh -c id", "file::/etc/passwd", "fd::3", "persistent-https::x",
+        "git://host/r.git", "ftp://host/r.git", "foo://x",
+        "file://localhost/srv/r.git", "file://srv/r.git", "file:///srv/%2e%2e/r.git",
+        "-host:path", "user@-host:path", "@host:path", "host:", " https://x/r.git",
+    ])
+    def test_invalid(self, url):
+        from app.core.git_service import classify_clone_url
+        kind, reason = classify_clone_url(url)
+        assert kind == "invalid" and reason
+
+
+class TestStripUrlUserinfo:
+    @pytest.mark.parametrize("url, expected", [
+        ("https://ghp_tok@github.com/o/r.git", "https://github.com/o/r.git"),
+        ("https://alice:s3cr3t@git.example.com/r.git", "https://git.example.com/r.git"),
+        ("http://x-access-token:t@host:8080/r", "http://host:8080/r"),
+        ("https://github.com/o/r.git", "https://github.com/o/r.git"),
+        ("git@github.com:o/r.git", "git@github.com:o/r.git"),
+        ("ssh://git@github.com/o/r.git", "ssh://git@github.com/o/r.git"),
+        ("git+ssh://git@github.com/o/r.git", "git+ssh://git@github.com/o/r.git"),
+        ("/srv/repos/r.git", "/srv/repos/r.git"),
+        (None, None),
+    ])
+    def test_strip(self, url, expected):
+        from app.core.scrub import strip_url_userinfo
+        assert strip_url_userinfo(url) == expected
+
+
+class TestStatusRemoteUrl:
+    """get_status never carries a clone token, on either reader."""
+
+    def test_native_status_is_stripped_and_not_mutated(self, git):
+        native = MagicMock()
+        raw = {"is_git_repo": True, "remote_url": "https://ghp_tok@github.com/o/r.git"}
+        native.get_status.return_value = raw
+        with patch("app.core.git_service._native_reader", native), \
+             patch("app.core.git_service._git_cache") as cache:
+            cache.get.return_value = None
+            status = git.get_status("/tmp/work-native")
+        assert status["remote_url"] == "https://github.com/o/r.git"
+        assert raw["remote_url"] == "https://ghp_tok@github.com/o/r.git"
+
+    def test_cli_status_is_stripped(self, git, tmp_path):
+        import subprocess
+        repo = tmp_path / "r"
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                        "https://alice:s3cr3t@git.example.com/r.git"], check=True)
+        with patch("app.core.git_service._native_reader", None):
+            git.invalidate_status_cache(str(repo))
+            status = git.get_status(str(repo))
+        assert status["is_git_repo"] is True
+        assert status["remote_url"] == "https://git.example.com/r.git"

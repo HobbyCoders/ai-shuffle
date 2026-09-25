@@ -17,20 +17,20 @@ Sub-modules:
 
 import asyncio
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 
-from app.core.git_service import git_service
-from app.core.scrub import redact_url_credentials
+from app.core.config import settings
+from app.core.git_service import classify_clone_url, git_service
+from app.core.scrub import redact_url_credentials, strip_url_userinfo
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.git_owner import session_git_action
 from app.api.auth import require_auth, get_api_user_from_request
-from app.api.common import check_project_access
+from app.api.common import check_project_access, is_path_served
 
 # Import from sub-modules
 from app.api.git_helpers import (
@@ -55,25 +55,6 @@ from app.api import git_ai as _git_ai_mod
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/git", tags=["Git"])
-
-# ``scheme://<userinfo>@``: the userinfo, with its ``@``, of every URL except
-# ssh ones, whose user (``ssh://git@host``) is a login name, not a secret.
-_URL_USERINFO_AT_RE = re.compile(
-    r"(?<![A-Za-z0-9+.\-])(?!(?:git\+)?ssh(?:\+git)?://)"
-    r"([A-Za-z][A-Za-z0-9+.\-]*://)[^\s/?#@\"'<>\[\]{}\\^|]+@"
-)
-
-
-def _strip_url_userinfo(url: Optional[str]) -> Optional[str]:
-    """``https://tok@host/r.git`` -> ``https://host/r.git``, for storing and display.
-
-    The credentialed URL stays in the clone's own ``.git/config`` (git needs it
-    to fetch and push); the database row, which the UI shows, never holds it.
-    ssh URLs (``git@host:path``, ``ssh://git@host/r``) are kept as they are.
-    """
-    if not isinstance(url, str):
-        return url
-    return _URL_USERINFO_AT_RE.sub(r"\g<1>", url)
 
 # Include sub-routers (no extra prefix — they share the same base path)
 router.include_router(_git_worktrees_mod.router)
@@ -175,7 +156,7 @@ async def get_git_status(
         current_branch=status_data.get("current_branch"),
         is_detached=status_data.get("is_detached", False),
         head_commit=status_data.get("head_commit"),
-        remote_url=status_data.get("remote_url"),
+        remote_url=strip_url_userinfo(status_data.get("remote_url")),
         is_clean=status_data.get("is_clean", True),
         staged=staged_files,
         modified=status_data.get("modified", []),
@@ -317,7 +298,7 @@ async def init_repository(
         await run_sync(
             database.update_git_repository,
             repo["id"],
-            remote_url=remote_url,
+            remote_url=strip_url_userinfo(remote_url),
             github_repo_name=github_full_name,
         )
 
@@ -336,6 +317,41 @@ async def init_repository(
     )
 
 
+def _local_clone_source_served(source: str, working_dir: str) -> bool:
+    """True when a local clone source resolves inside a served project root."""
+    path = Path(source)
+    if not path.is_absolute():
+        # git resolves a relative source against its cwd, the clone target.
+        path = Path(working_dir) / path
+    return is_path_served(path, settings.effective_workspace_dir)
+
+
+async def _authorize_clone_source(request: Request, working_dir: str, clone_url: str) -> None:
+    """Refuse a clone source the caller may not read (400).
+
+    Remote HTTPS/SSH URLs are open to everyone. A local path or ``file://`` URL
+    would copy a repository from this server's disk: API keys never get one
+    (a project-scoped key could otherwise take another project's history), and
+    the owner only from inside the workspace or a registered project folder,
+    the same roots the file routes serve.
+    """
+    kind, detail = classify_clone_url(clone_url)
+    if kind == "remote":
+        return
+    if kind == "invalid":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+    if get_api_user_from_request(request):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="API keys can clone only HTTPS or SSH remotes",
+        )
+    if not await run_sync(_local_clone_source_served, detail, working_dir):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A local clone source must be inside the workspace or a project folder",
+        )
+
+
 @router.post("/clone", response_model=CloneRepoResponse)
 @session_git_action
 async def clone_repository(
@@ -352,6 +368,7 @@ async def clone_repository(
     """
     check_project_access(request, project_id)
     working_dir = await get_working_dir_async(project_id, session_id=session_id)
+    await _authorize_clone_source(request, working_dir, body.clone_url)
 
     # Guard: don't clone into an existing repo
     if await run_git(git_service.is_git_repo, working_dir):
@@ -384,7 +401,7 @@ async def clone_repository(
         await run_sync(
             database.update_git_repository,
             repo["id"],
-            remote_url=_strip_url_userinfo(remote_url),
+            remote_url=strip_url_userinfo(remote_url),
             default_branch=current_branch or "main",
         )
 

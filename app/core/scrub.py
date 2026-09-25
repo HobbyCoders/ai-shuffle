@@ -116,3 +116,25 @@ def redact_url_credentials(text: str) -> str:
     if not isinstance(text, str) or _URL_USERINFO_RE.search(text) is None:
         return text
     return _URL_USERINFO_RE.sub(r"\g<1>" + REDACTED, text)
+
+
+# ``scheme://<userinfo>@``: the userinfo, with its ``@``, of every URL except
+# ssh ones, whose user (``ssh://git@host``) is a login name, not a secret.
+_URL_USERINFO_AT_RE = re.compile(
+    r"(?<![A-Za-z0-9+.\-])(?!(?:git\+)?ssh(?:\+git)?://)"
+    r"([A-Za-z][A-Za-z0-9+.\-]*://)[^\s/?#@\"'<>\[\]{}\\^|]+@"
+)
+
+
+def strip_url_userinfo(url: Any) -> Any:
+    """``https://tok@host/r.git`` -> ``https://host/r.git``, for storing and display.
+
+    For a git remote on its way to the database or a client. The credentialed
+    URL stays in the clone's own ``.git/config`` (git needs it to fetch and
+    push); the database row and every API response carry the stripped form.
+    ssh URLs (``git@host:path``, ``ssh://git@host/r``) are kept as they are;
+    non-strings pass through.
+    """
+    if not isinstance(url, str):
+        return url
+    return _URL_USERINFO_AT_RE.sub(r"\g<1>", url)

@@ -648,6 +648,7 @@ def test_clone_rejects_option_and_helper_urls(api, mock_db, url):
 
     response = client.post("/api/v1/projects/p-clone/git/clone", json={"clone_url": url})
 
-    assert response.status_code == 500
-    assert response.json()["detail"].startswith("Failed to clone repository:")
+    # Refused before git runs (the route classifies the source first).
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith(("Invalid clone URL", "Refusing unsafe clone URL scheme"))
     assert not (target / ".git").exists()

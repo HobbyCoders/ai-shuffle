@@ -17,10 +17,11 @@ Implementation is split across mixin modules for maintainability:
 
 import logging
 import os
+import re
 import subprocess
 from typing import List, Dict, Any, Optional, Tuple
 
-from app.core.scrub import redact_url_credentials
+from app.core.scrub import redact_url_credentials, strip_url_userinfo
 
 # Cache primitives used below
 from app.core.git_cache import (
@@ -37,6 +38,55 @@ from app.core.git_diff_ops import GitDiffMixin
 from app.core.git_commit_ops import GitCommitMixin
 
 logger = logging.getLogger(__name__)
+
+
+# Clone sources, read the way git reads them (connect.c / transport.c).
+_REMOTE_CLONE_SCHEMES = frozenset({"http", "https", "ssh", "git+ssh", "ssh+git"})
+_URL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*)://")
+# ``<transport>::<address>`` runs the remote helper git-remote-<transport>.
+_REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*::")
+# scp-like ssh: ``[user@]host:path``. Neither user nor host may start with a
+# dash (ssh would read it as an option).
+_SCP_LIKE_RE = re.compile(
+    r"^(?:[A-Za-z0-9._~+][A-Za-z0-9._~+\-]*@)?"
+    r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9][A-Za-z0-9.\-]*):\S+$"
+)
+
+
+def classify_clone_url(clone_url: str) -> Tuple[str, Optional[str]]:
+    """How git will read *clone_url* as a clone source.
+
+    Returns ``("remote", None)`` for an http(s) or ssh remote (``ssh://`` or
+    scp-like ``user@host:path``), ``("local", path)`` for a filesystem path or
+    a ``file://`` URL (*path* is the path git will open, possibly relative to
+    the clone's cwd), and ``("invalid", reason)`` for everything else: option
+    look-alikes, remote helpers (``ext::``, ``fd::``...), other URL schemes.
+    """
+    url = clone_url
+    if not url.strip() or url.lstrip().startswith("-"):
+        return "invalid", "Invalid clone URL (looks like a command-line option)"
+    if _REMOTE_HELPER_RE.match(url):
+        return "invalid", "Refusing unsafe clone URL scheme (remote helpers such as ext:: / file::)"
+    match = _URL_SCHEME_RE.match(url)
+    if match:
+        scheme = match.group(1).lower()
+        if scheme in _REMOTE_CLONE_SCHEMES:
+            return "remote", None
+        if scheme == "file":
+            path = url[match.end():]
+            # git percent-decodes file:// URLs; refuse encodings rather than
+            # guess, and refuse a host part (``file://host/path``).
+            if not path.startswith("/") or "%" in path:
+                return "invalid", "A file:// clone URL must name an absolute local path"
+            return "local", path
+        return "invalid", "Unsupported clone URL: use an HTTPS or SSH URL"
+    colon, slash = url.find(":"), url.find("/")
+    if colon != -1 and (slash == -1 or colon < slash):
+        # No ``/`` before the first ``:`` -> git reads it as scp-like ssh.
+        if _SCP_LIKE_RE.match(url):
+            return "remote", None
+        return "invalid", "Unsupported clone URL: use an HTTPS or SSH URL"
+    return "local", url
 
 
 class GitService(
@@ -185,16 +235,19 @@ class GitService(
             runs — matching the return-False guard style in git_branch_ops.py.
         """
         # Reject flag injection: a url beginning with '-' would be parsed by git
-        # as an option. Reject remote-helper schemes (ext::/file::) which can run
-        # arbitrary local commands. Fail closed with the tuple contract rather than
+        # as an option. Reject remote-helper schemes (ext::, file::, fd::...)
+        # which can run arbitrary local commands. Which sources a caller may
+        # clone at all (remote vs. local disk) is the route's decision; see
+        # classify_clone_url. Fail closed with the tuple contract rather than
         # raising, so callers surface a clean error instead of a 500.
         stripped = clone_url.strip()
         safe_url = redact_url_credentials(clone_url)
         if stripped.startswith("-"):
             logger.warning("Refusing clone URL that looks like an option: %s", safe_url[:50])
             return False, "Invalid clone URL (looks like a command-line option)"
-        lowered = stripped.lower()
-        if lowered.startswith("ext::") or lowered.startswith("file::"):
+        # Any ``<transport>::`` remote helper: ext:: runs a command, fd:: blocks
+        # on a file descriptor, file:: reads the local disk.
+        if _REMOTE_HELPER_RE.match(stripped):
             logger.warning("Refusing unsafe clone URL scheme: %s", safe_url[:50])
             return False, "Refusing unsafe clone URL scheme (ext:: / file::)"
 
@@ -422,7 +475,7 @@ class GitService(
             - current_branch: Current branch name
             - is_detached: Whether HEAD is detached
             - head_commit: Current HEAD commit SHA
-            - remote_url: Origin remote URL
+            - remote_url: Origin remote URL, userinfo (a clone token) stripped
             - is_clean: True if no uncommitted changes
             - staged: List of staged files
             - modified: List of modified files
@@ -440,6 +493,9 @@ class GitService(
         if _native_reader is not None:
             try:
                 result = _native_reader.get_status(working_dir)
+                if result.get("remote_url"):
+                    # A clone URL's token stays in .git/config, not in status.
+                    result = {**result, "remote_url": strip_url_userinfo(result["remote_url"])}
                 _git_cache.put(cache_key, result)
                 return result
             except Exception as e:
@@ -498,7 +554,7 @@ class GitService(
             # Get remote URL (single lightweight call)
             result = self._run_git(working_dir, ["remote", "get-url", "origin"], timeout=5)
             if result.returncode == 0:
-                status["remote_url"] = result.stdout.strip()
+                status["remote_url"] = strip_url_userinfo(result.stdout.strip())
 
             # Get ahead/behind relative to the default branch (main/master).
             # This is more useful for the PR workflow than comparing against

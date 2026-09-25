@@ -18,6 +18,7 @@ from fastapi import HTTPException, status
 from app.core.git_service import git_service
 from app.core.github_service import CACHE_MISS, TTLCache
 from app.core.project_utils import get_worktree_working_dir
+from app.core.scrub import strip_url_userinfo
 from app.db import database
 from app.api.common import resolve_project_path
 
@@ -370,7 +371,8 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
 
     # Create a new record
     repo_id = f"repo-{uuid.uuid4().hex[:12]}"
-    remote_url = git_service.get_remote_url(working_dir)
+    # The row (and the 60 s cache the UI reads) never holds a clone token.
+    remote_url = strip_url_userinfo(git_service.get_remote_url(working_dir))
     default_branch = git_service.get_default_branch(working_dir)
 
     # Try to extract GitHub repo name from URL
