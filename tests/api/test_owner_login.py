@@ -259,6 +259,26 @@ def test_logout_revokes_the_owner_token_server_side(app):
     # The cookie path still needs a same-origin page.
     assert client(app, origin=False).post('/api/v1/auth/logout', cookies={'session': 'x'}).status_code == 403
 
+
+def test_trusted_lan_bearer_needs_no_origin_but_cookie_does(app):
+    owner_auth.set_password(PASSWORD, source='test')
+    token = client(app).post('/api/v1/owner/login', json={'password': PASSWORD, 'bearer': True}).json()['token']
+    script = client(app, origin=False, headers={'Authorization': 'Bearer ' + token})
+    assert script.put('/api/v1/owner/trusted-lan', json={'enabled': True}).json() == {'trusted_lan': True}
+    assert owner_auth.trusted_lan()
+    # A cookie is ambient: without a same-origin page it is refused, even
+    # when a Bearer rides along.
+    lan = client(app)
+    assert lan.post('/api/v1/owner/login', json={'password': PASSWORD}).status_code == 200
+    cookie = lan.cookies.get('session')
+    no_origin = client(app, origin=False)
+    assert no_origin.put('/api/v1/owner/trusted-lan', json={'enabled': False},
+                         cookies={'session': cookie}).status_code == 403
+    assert no_origin.put('/api/v1/owner/trusted-lan', json={'enabled': False}, cookies={'session': cookie},
+                         headers={'Authorization': 'Bearer ' + token}).status_code == 403
+    assert owner_auth.trusted_lan()
+    assert lan.put('/api/v1/owner/trusted-lan', json={'enabled': False}).json() == {'trusted_lan': False}
+
 def test_login_before_any_password_is_a_conflict(app):
     assert client(app).post('/api/v1/owner/login', json={'password': PASSWORD}).status_code == 409
 

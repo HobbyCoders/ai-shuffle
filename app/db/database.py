@@ -2923,7 +2923,6 @@ from app.db.auth import (  # noqa: F401
     delete_auth_session,
     clear_all_sessions,
     cleanup_expired_sessions,
-    get_api_key_session,
 )
 
 from app.db.profiles import (  # noqa: F401

@@ -145,9 +145,10 @@ When `project_id` is set, the API user can only:
 
 ### Agent Restriction
 
-When `profile_ids` is set, the API user can only:
-- Use the specified agents for queries
-- Not access or use other agents
+When `profile_ids` is set, the server limits every agent run started with the key (the `/api/v1/query` and `/api/v1/conversation` endpoints, a chat WebSocket `query` or `queue_message`, and `POST /api/v1/voice/sessions`) to those agents:
+- A `profile` outside the list is rejected with `403`
+- An omitted `profile` runs the key's agent when exactly one is assigned; with several assigned, the request is rejected with `400` naming the allowed ids
+- `GET /api/v1/agents` lists only the assigned agents, and `GET /api/v1/agents/{id}` returns `403` for any other
 
 ### Unrestricted
 

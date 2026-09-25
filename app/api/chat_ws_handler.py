@@ -856,6 +856,25 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "error", "message": "Session authorization denied"})
             return False
 
+    async def _restrict_profile(self, requested, default):
+        """Apply an API user's assigned agents to a WS-supplied profile.
+
+        Returns ``(True, profile)``; on refusal sends the error frame and
+        returns ``(False, None)``. The owner and API users with no assigned
+        agents get ``default`` back unchanged.
+        """
+        if not self.api_user_id:
+            return True, default
+        user = await run_sync(database.get_api_user, self.api_user_id)
+        if not (user or {}).get("profile_ids"):
+            return True, default
+        from app.api.sessions_helpers import resolve_api_user_profile
+        try:
+            return True, resolve_api_user_profile(user, requested)
+        except HTTPException as exc:
+            await self.send_json({"type": "error", "message": exc.detail})
+            return False, None
+
     async def handle_query(self, data: dict) -> None:
         """Handle 'query' message type."""
 
@@ -864,7 +883,10 @@ class ChatWebSocketHandler:
         if session_id and not await self._authorize_mobile_session(
                 session_id, claim=data.get("claim_mobile_authority") is True):
             return
-        profile_id = data.get("profile", "claude-code")
+        allowed, profile_id = await self._restrict_profile(
+            data.get("profile"), data.get("profile", "claude-code"))
+        if not allowed:
+            return
         project_id = data.get("project") or None
         if isinstance(project_id, str):
             project_id = project_id.strip() or None
@@ -2021,6 +2043,12 @@ class ChatWebSocketHandler:
 
         if not await self._authorize_mobile_session(session_id):
             return
+        # An omitted profile keeps the session's own agent; a named one must
+        # be among an API user's assigned agents.
+        if profile_id:
+            allowed, profile_id = await self._restrict_profile(profile_id, profile_id)
+            if not allowed:
+                return
 
         # V2 placement: the durable queued turn IS the hand-off (see
         # handle_query) — enqueue locally with no kick and wake the owner's

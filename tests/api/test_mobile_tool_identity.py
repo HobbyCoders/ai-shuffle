@@ -45,7 +45,6 @@ def world(monkeypatch):
     monkeypatch.setattr(identity.mobile, 'get_mobile_device', devices.get)
     monkeypatch.setattr(store, 'admin_active', lambda h: h == identity.digest('shr_admin-token') and 'admin' not in revoked)
     monkeypatch.setattr(database, 'get_auth_session', lambda t: {'token': t} if t == 'shr_admin-token' and 'admin' not in revoked else None)
-    monkeypatch.setattr(database, 'get_api_key_session', lambda t: None)
     monkeypatch.setattr(database, 'get_api_user_by_key_hash', lambda h: None)
     monkeypatch.setattr(database, 'get_paired_client_by_session_hash', client_by_hash)
     monkeypatch.setattr(database, 'touch_paired_client', lambda _: None)

@@ -121,10 +121,8 @@ class TestAuthenticateWebSocket:
 
         # authenticate_websocket lives in app.api.ws_auth and reads `database`
         # from that module's namespace, so patch it there (not app.api.websocket).
-        with patch("app.api.ws_auth.database") as mock_db, \
+        with patch("app.api.ws_auth.database"), \
                 patch("app.core.owner_auth.owner_session", return_value=True):
-            mock_db.get_api_key_session.return_value = None
-
             is_auth, api_user = await authenticate_websocket(mock_websocket, "test-token")
 
             assert is_auth is True
@@ -146,21 +144,6 @@ class TestAuthenticateWebSocket:
         assert mock_websocket.state.mobile_tool_principal["kind"] == "paired"
 
     @pytest.mark.asyncio
-    async def test_authenticate_with_api_key_session(self, mock_websocket):
-        """Should authenticate with API key session token."""
-        from app.api.websocket import authenticate_websocket
-
-        with patch("app.api.ws_auth.database") as mock_db:
-            mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = {"api_user_id": "user-123"}
-            mock_db.get_api_user.return_value = {"id": "user-123", "is_active": True}
-
-            is_auth, api_user = await authenticate_websocket(mock_websocket, "api-session-token")
-
-            assert is_auth is True
-            assert api_user["id"] == "user-123"
-
-    @pytest.mark.asyncio
     async def test_authenticate_with_raw_api_key(self, mock_websocket):
         """Should authenticate with raw API key (hashed)."""
         from app.api.websocket import authenticate_websocket
@@ -170,7 +153,6 @@ class TestAuthenticateWebSocket:
 
         with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = None
             mock_db.get_api_user_by_key_hash.return_value = {"id": "user-456", "is_active": True}
 
             is_auth, api_user = await authenticate_websocket(mock_websocket, raw_key)
@@ -189,7 +171,6 @@ class TestAuthenticateWebSocket:
         with patch("app.api.ws_auth.database") as mock_db:
             # When token=None, only cookie path is checked (no side_effect needed)
             mock_db.get_auth_session.return_value = {"id": "session-1"}
-            mock_db.get_api_key_session.return_value = None
 
             is_auth, api_user = await authenticate_websocket(mock_websocket, None)
 
@@ -202,29 +183,12 @@ class TestAuthenticateWebSocket:
 
         with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = None
             mock_db.get_api_user_by_key_hash.return_value = None
 
             is_auth, api_user = await authenticate_websocket(mock_websocket, "invalid-token")
 
             assert is_auth is False
             assert api_user is None
-
-    @pytest.mark.asyncio
-    async def test_authenticate_fails_with_inactive_api_user(self, mock_websocket):
-        """Should fail authentication if API user is inactive."""
-        from app.api.websocket import authenticate_websocket
-
-        with patch("app.api.ws_auth.database") as mock_db:
-            mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = {"api_user_id": "user-123"}
-            mock_db.get_api_user.return_value = {"id": "user-123", "is_active": False}
-            # Also mock the raw API key check to return None (continue checking)
-            mock_db.get_api_user_by_key_hash.return_value = None
-
-            is_auth, api_user = await authenticate_websocket(mock_websocket, "token")
-
-            assert is_auth is False
 
     @pytest.mark.asyncio
     async def test_authenticate_with_no_credentials(self, mock_websocket):
@@ -235,7 +199,6 @@ class TestAuthenticateWebSocket:
 
         with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = None
 
             is_auth, api_user = await authenticate_websocket(mock_websocket, None)
 
@@ -1419,9 +1382,8 @@ class TestAuthenticateWebSocketEdgeCases:
         # authenticate_websocket reads `database` from app.api.ws_auth's namespace.
         with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = {"api_user_id": "user-123"}
             # API user without is_active field - should default to True
-            mock_db.get_api_user.return_value = {"id": "user-123"}
+            mock_db.get_api_user_by_key_hash.return_value = {"id": "user-123"}
 
             is_auth, api_user = await authenticate_websocket(mock_websocket, "token")
 
@@ -1429,31 +1391,15 @@ class TestAuthenticateWebSocketEdgeCases:
             assert api_user["id"] == "user-123"
 
     @pytest.mark.asyncio
-    async def test_authenticate_api_user_none_from_session(self, mock_websocket):
-        """Should fail when API user from session is None."""
-        from app.api.websocket import authenticate_websocket
-
-        with patch("app.api.ws_auth.database") as mock_db:
-            mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = {"api_user_id": "user-123"}
-            mock_db.get_api_user.return_value = None  # User not found
-            mock_db.get_api_user_by_key_hash.return_value = None
-
-            is_auth, api_user = await authenticate_websocket(mock_websocket, "token")
-
-            assert is_auth is False
-
-    @pytest.mark.asyncio
-    async def test_authenticate_with_cookie_api_key_session(self, mock_websocket):
-        """Should authenticate via cookie with API key session."""
+    async def test_authenticate_with_cookie_api_key(self, mock_websocket):
+        """Should authenticate an API key carried by the session cookie."""
         from app.api.websocket import authenticate_websocket
 
         mock_websocket.cookies = {"session": "cookie-api-session"}
 
         with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None  # Not admin session
-            mock_db.get_api_key_session.return_value = {"api_user_id": "api-user-1"}
-            mock_db.get_api_user.return_value = {"id": "api-user-1", "is_active": True}
+            mock_db.get_api_user_by_key_hash.return_value = {"id": "api-user-1", "is_active": True}
 
             is_auth, api_user = await authenticate_websocket(mock_websocket, None)
 
@@ -1469,7 +1415,6 @@ class TestAuthenticateWebSocketEdgeCases:
 
         with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = None
             mock_db.get_api_user_by_key_hash.return_value = {"id": "user-789", "is_active": False}
 
             is_auth, api_user = await authenticate_websocket(mock_websocket, raw_key)
@@ -1943,7 +1888,6 @@ class TestChatWebSocketEndpoint:
         """Should close connection with code 4001 if auth fails."""
         with nullcontext(MagicMock()) as mock_db:
             mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = None
             mock_db.get_api_user_by_key_hash.return_value = None
 
             try:
@@ -1994,7 +1938,6 @@ class TestSessionSyncWebSocketEndpoint:
         """Should require authentication."""
         with nullcontext(MagicMock()) as mock_db:
             mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = None
 
             try:
                 with client.websocket_connect("/api/v1/ws/sessions/test-session"):
@@ -2041,7 +1984,6 @@ class TestGlobalWebSocketEndpoint:
         """Should require authentication."""
         with nullcontext(MagicMock()) as mock_db:
             mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = None
 
             try:
                 with client.websocket_connect("/api/v1/ws/global"):
@@ -2073,7 +2015,6 @@ class TestCLIWebSocketEndpoint:
         """Should require authentication."""
         with nullcontext(MagicMock()) as mock_db:
             mock_db.get_auth_session.return_value = None
-            mock_db.get_api_key_session.return_value = None
 
             try:
                 with client.websocket_connect("/api/v1/ws/cli/test-session"):

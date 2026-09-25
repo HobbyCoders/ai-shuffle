@@ -32,7 +32,7 @@ curl -X POST http://localhost:8000/api/v1/query \
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `prompt` | string | Yes | The message to send to the agent |
-| `profile` | string | No | Agent id to run (from `GET /api/v1/agents`). If the API user has a configured agent, that agent is always used and this field is ignored. Otherwise it is required (400 if missing). |
+| `profile` | string | No | Agent id to run (from `GET /api/v1/agents`). Required (400 if missing), except that a key assigned exactly one agent runs that agent when this is omitted. A key with assigned agents gets 403 for any other agent. |
 | `project` | string | No | Project context. If the API user has a configured project, that project is always used. |
 | `overrides` | object | No | Optional per-query overrides (see below) |
 
@@ -136,7 +136,7 @@ curl -X POST http://localhost:8000/api/v1/conversation \
 |-------|------|----------|-------------|
 | `prompt` | string | Yes | The message to send to the agent |
 | `session_id` | string | No | If provided, continues that session |
-| `profile` | string | No | Agent id for a new session. If the API user has a configured agent, that agent is always used and this field is ignored. Otherwise it is required (400 if missing). |
+| `profile` | string | No | Agent id for a new session. Required (400 if missing), except that a key assigned exactly one agent runs that agent when this is omitted. A key with assigned agents gets 403 for any other agent. |
 | `project` | string | No | Project context for a new session |
 | `overrides` | object | No | Optional per-query overrides (see One-Shot Query) |
 
@@ -216,9 +216,8 @@ curl http://localhost:8000/api/v1/streaming/active \
 ## Usage Notes
 
 ### Agent Selection
-- If the API user has a configured agent, it is always used and `profile` is ignored
-- Otherwise `profile` is required; a request without one is rejected with a 400
-- API users may be restricted to specific agents
+- `profile` is required; a request without one is rejected with a 400
+- An API user with assigned agents (`profile_ids`) can only run those: any other `profile` is rejected with a 403. Omitting `profile` runs the assigned agent when there is exactly one, and is rejected with a 400 naming the allowed ids when there are several
 
 ### Project Context
 - If `project` is specified, the agent has access to that project's files

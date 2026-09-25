@@ -90,7 +90,7 @@ class TestOneShotQuery:
             mock_api_key.return_value = {
                 "id": "test-api-user-id",
                 "username": "testuser",
-                "profile_id": "test-profile",
+                "profile_ids": ["test-profile"],
                 "project_id": "test-project"
             }
             mock_claude.return_value = None
@@ -132,15 +132,12 @@ class TestOneShotQuery:
 
     @pytest.mark.asyncio
     async def test_one_shot_query_uses_api_user_profile(self, mock_dependencies):
-        """Should use API user's configured profile over request profile."""
+        """An omitted profile runs the API user's only assigned agent."""
         from app.api.query import one_shot_query
         from app.core.models import QueryRequest
 
-        request = QueryRequest(
-            prompt="Hello!",
-            profile="request-profile"  # This should be overridden
-        )
-        api_user = {"id": "user1", "profile_id": "user-configured-profile"}
+        request = QueryRequest(prompt="Hello!")
+        api_user = {"id": "user1", "profile_ids": ["user-configured-profile"]}
 
         await one_shot_query(request, api_user)
 
@@ -157,7 +154,7 @@ class TestOneShotQuery:
             prompt="Hello!",
             profile="request-profile"
         )
-        api_user = {"id": "user1", "profile_id": None}
+        api_user = {"id": "user1", "profile_ids": None}
 
         await one_shot_query(request, api_user)
 
@@ -179,7 +176,7 @@ class TestOneShotQuery:
         )
         # API user has no profile and request profile should be ignored
         # We need to ensure neither api_user nor request has a valid profile
-        api_user = {"id": "user1", "profile_id": None}
+        api_user = {"id": "user1", "profile_ids": None}
 
         # Patch the request's profile attribute to None after creation
         request.profile = None
@@ -200,7 +197,7 @@ class TestOneShotQuery:
         from app.core.models import QueryRequest
 
         request = QueryRequest(prompt="Hello!")
-        api_user = {"id": "user1", "profile_id": None}
+        api_user = {"id": "user1", "profile_ids": None}
 
         with pytest.raises(HTTPException) as exc_info:
             await one_shot_query(request, api_user)
@@ -222,7 +219,7 @@ class TestOneShotQuery:
                 context_window=200_000,
             )
         )
-        api_user = {"id": "user1", "profile_id": "test-profile"}
+        api_user = {"id": "user1", "profile_ids": ["test-profile"]}
 
         await one_shot_query(request, api_user)
 
@@ -241,7 +238,7 @@ class TestOneShotQuery:
         mock_dependencies["execute"].side_effect = ValueError("Profile not found")
 
         request = QueryRequest(prompt="Hello!", profile="test-profile")
-        api_user = {"id": "user1", "profile_id": "test-profile"}
+        api_user = {"id": "user1", "profile_ids": ["test-profile"]}
 
         with pytest.raises(HTTPException) as exc_info:
             await one_shot_query(request, api_user)
@@ -259,7 +256,7 @@ class TestOneShotQuery:
         mock_dependencies["execute"].side_effect = RuntimeError("Unexpected error")
 
         request = QueryRequest(prompt="Hello!", profile="test-profile")
-        api_user = {"id": "user1", "profile_id": "test-profile"}
+        api_user = {"id": "user1", "profile_ids": ["test-profile"]}
 
         with pytest.raises(HTTPException) as exc_info:
             await one_shot_query(request, api_user)
@@ -283,7 +280,7 @@ class TestStreamOneShotQuery:
              patch("app.api.query.stream_query") as mock_stream:
             mock_api_key.return_value = {
                 "id": "test-api-user-id",
-                "profile_id": "test-profile",
+                "profile_ids": ["test-profile"],
                 "project_id": None
             }
             mock_claude.return_value = None
@@ -326,7 +323,7 @@ class TestStreamOneShotQuery:
         from app.core.models import QueryRequest
 
         request = QueryRequest(prompt="Hello!")
-        api_user = {"id": "user1", "profile_id": None}
+        api_user = {"id": "user1", "profile_ids": None}
 
         with pytest.raises(HTTPException) as exc_info:
             await stream_one_shot_query(request, api_user)
@@ -363,7 +360,7 @@ class TestConversation:
                    return_value="Continued response"):
             mock_api_key.return_value = {
                 "id": None,
-                "profile_id": "default"
+                "profile_ids": ["default"]
             }
             mock_claude.return_value = None
             yield {
@@ -438,7 +435,7 @@ class TestConversation:
             prompt="Continue conversation",
             session_id="existing-session-123"
         )
-        api_user = {"id": None, "profile_id": "default"}
+        api_user = {"id": None, "profile_ids": ["default"]}
 
         await conversation(request, api_user)
 
@@ -457,7 +454,7 @@ class TestConversation:
             prompt="Hello!",
             session_id="invalid-session"
         )
-        api_user = {"id": None, "profile_id": "default"}
+        api_user = {"id": None, "profile_ids": ["default"]}
 
         with pytest.raises(HTTPException) as exc_info:
             await conversation(request, api_user)
@@ -475,7 +472,7 @@ class TestConversation:
         from app.core.models import ConversationRequest
 
         request = ConversationRequest(prompt="Hello!")
-        api_user = {"id": "user1", "profile_id": None}
+        api_user = {"id": "user1", "profile_ids": None}
 
         with pytest.raises(HTTPException) as exc_info:
             await conversation(request, api_user)
@@ -493,7 +490,7 @@ class TestConversation:
         mock_conv_dependencies["submit"].side_effect = RuntimeError("Connection failed")
 
         request = ConversationRequest(prompt="Hello!")
-        api_user = {"id": None, "profile_id": "default"}
+        api_user = {"id": None, "profile_ids": ["default"]}
 
         with pytest.raises(HTTPException) as exc_info:
             await conversation(request, api_user)
@@ -517,7 +514,7 @@ class TestStreamConversation:
              patch("app.api.query.stream_query") as mock_stream:
             mock_api_key.return_value = {
                 "id": "test-api-user-id",
-                "profile_id": "test-profile"
+                "profile_ids": ["test-profile"]
             }
             mock_claude.return_value = None
 
@@ -558,7 +555,7 @@ class TestStreamConversation:
         from app.core.models import ConversationRequest
 
         request = ConversationRequest(prompt="Hello!", profile=None)
-        api_user = {"id": "user1", "profile_id": None}
+        api_user = {"id": "user1", "profile_ids": None}
 
         with pytest.raises(HTTPException) as exc_info:
             await stream_conversation(request, api_user)
@@ -581,7 +578,7 @@ class TestStreamConversation:
             prompt="Test",
             device_id="my-device-id"
         )
-        api_user = {"id": "user1", "profile_id": "test-profile"}
+        api_user = {"id": "user1", "profile_ids": ["test-profile"]}
 
         # Execute the endpoint
         result = await stream_conversation(request, api_user)
@@ -607,7 +604,7 @@ class TestStartConversation:
              patch("app.api.query.start_background_query") as mock_start:
             mock_api_key.return_value = {
                 "id": "test-api-user-id",
-                "profile_id": "test-profile"
+                "profile_ids": ["test-profile"]
             }
             mock_claude.return_value = None
             mock_start.return_value = {
@@ -649,7 +646,7 @@ class TestStartConversation:
             prompt="Continue in background",
             session_id="existing-session"
         )
-        api_user = {"id": "user1", "profile_id": "test-profile"}
+        api_user = {"id": "user1", "profile_ids": ["test-profile"]}
 
         await start_conversation(request, api_user)
 
@@ -664,7 +661,7 @@ class TestStartConversation:
         from app.core.models import ConversationRequest
 
         request = ConversationRequest(prompt="Hello!", profile=None)
-        api_user = {"id": "user1", "profile_id": None}
+        api_user = {"id": "user1", "profile_ids": None}
 
         with pytest.raises(HTTPException) as exc_info:
             await start_conversation(request, api_user)
@@ -681,7 +678,7 @@ class TestStartConversation:
         mock_start_dependencies["start"].side_effect = ValueError("Profile not found")
 
         request = ConversationRequest(prompt="Hello!")
-        api_user = {"id": "user1", "profile_id": "test-profile"}
+        api_user = {"id": "user1", "profile_ids": ["test-profile"]}
 
         with pytest.raises(HTTPException) as exc_info:
             await start_conversation(request, api_user)
@@ -698,7 +695,7 @@ class TestStartConversation:
         mock_start_dependencies["start"].side_effect = RuntimeError("Background task failed")
 
         request = ConversationRequest(prompt="Hello!")
-        api_user = {"id": "user1", "profile_id": "test-profile"}
+        api_user = {"id": "user1", "profile_ids": ["test-profile"]}
 
         with pytest.raises(HTTPException) as exc_info:
             await start_conversation(request, api_user)
@@ -867,11 +864,11 @@ class TestStreamingGeneratorErrorHandling:
              patch("app.api.query.require_claude_auth"), \
              patch("app.api.query.stream_query", return_value=error_stream_gen()):
 
-            mock_api.return_value = {"id": "user1", "profile_id": "test-profile"}
+            mock_api.return_value = {"id": "user1", "profile_ids": ["test-profile"]}
             request = QueryRequest(prompt="Hello!")
 
             # Call the endpoint - it returns a StreamingResponse
-            response = await stream_one_shot_query(request, {"id": "user1", "profile_id": "test"})
+            response = await stream_one_shot_query(request, {"id": "user1", "profile_ids": ["test"]})
 
             # Consume the generator to trigger the error handling
             chunks = []
@@ -900,10 +897,10 @@ class TestStreamingGeneratorErrorHandling:
              patch("app.api.query.require_claude_auth"), \
              patch("app.api.query.stream_query", return_value=error_stream_gen()):
 
-            mock_api.return_value = {"id": "user1", "profile_id": "test-profile"}
+            mock_api.return_value = {"id": "user1", "profile_ids": ["test-profile"]}
             request = ConversationRequest(prompt="Continue conversation")
 
-            response = await stream_conversation(request, {"id": "user1", "profile_id": "test"})
+            response = await stream_conversation(request, {"id": "user1", "profile_ids": ["test"]})
 
             # Consume the generator
             chunks = []
@@ -932,10 +929,10 @@ class TestStreamingGeneratorErrorHandling:
              patch("app.api.query.require_claude_auth"), \
              patch("app.api.query.stream_query", return_value=mock_stream_gen()):
 
-            mock_api.return_value = {"id": "user1", "profile_id": "test-profile"}
+            mock_api.return_value = {"id": "user1", "profile_ids": ["test-profile"]}
             request = QueryRequest(prompt="Hello!")
 
-            response = await stream_one_shot_query(request, {"id": "user1", "profile_id": "test"})
+            response = await stream_one_shot_query(request, {"id": "user1", "profile_ids": ["test"]})
 
             chunks = []
             async for chunk in response.body_iterator:
@@ -978,13 +975,13 @@ class TestApiUserConfigurationPrecedence:
 
             request = QueryRequest(
                 prompt="Hello",
-                profile="request-profile",
+                profile="user-profile",
                 project="request-project"
             )
 
             api_user = {
                 "id": "user1",
-                "profile_id": "user-profile",
+                "profile_ids": ["user-profile"],
                 "project_id": "user-project"
             }
 
@@ -1019,7 +1016,7 @@ class TestApiUserConfigurationPrecedence:
 
             api_user = {
                 "id": "user1",
-                "profile_id": None,  # No profile
+                "profile_ids": None,  # No profile
                 "project_id": None   # No project
             }
 
@@ -1029,6 +1026,99 @@ class TestApiUserConfigurationPrecedence:
             # Should fall back to request values
             assert call_kwargs["project_id"] == "request-project"
             assert call_kwargs["profile_id"] == "request-profile"
+
+
+# =============================================================================
+# API-user agent restriction (api_user_profiles)
+# =============================================================================
+
+_ALL_PROFILE_ENDPOINTS = [
+    ("one_shot_query", "QueryRequest"),
+    ("stream_one_shot_query", "QueryRequest"),
+    ("conversation", "ConversationRequest"),
+    ("stream_conversation", "ConversationRequest"),
+    ("start_conversation", "ConversationRequest"),
+]
+
+
+class TestApiUserAgentRestriction:
+    """An API user's assigned agents (``profile_ids``) are enforced server-side
+    on every query path, not just filtered out of GET /agents."""
+
+    @staticmethod
+    def _call(endpoint, model, profile, api_user):
+        from app.api import query
+        from app.core import models
+
+        request = getattr(models, model)(prompt="Hi", profile=profile)
+        return getattr(query, endpoint)(request, api_user)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint,model", _ALL_PROFILE_ENDPOINTS)
+    async def test_disallowed_agent_is_403(self, endpoint, model):
+        from fastapi import HTTPException
+
+        api_user = {"id": "u1", "profile_ids": ["allowed-a"]}
+        with pytest.raises(HTTPException) as exc_info:
+            await self._call(endpoint, model, "other-agent", api_user)
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint,model", _ALL_PROFILE_ENDPOINTS)
+    async def test_omitted_with_several_allowed_is_400_naming_them(self, endpoint, model):
+        from fastapi import HTTPException
+
+        api_user = {"id": "u1", "profile_ids": ["allowed-a", "allowed-b"]}
+        with pytest.raises(HTTPException) as exc_info:
+            await self._call(endpoint, model, None, api_user)
+        assert exc_info.value.status_code == 400
+        assert "allowed-a" in exc_info.value.detail
+        assert "allowed-b" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("profile,allowed,expected", [
+        ("allowed-b", ["allowed-a", "allowed-b"], "allowed-b"),  # allowed agent
+        (None, ["allowed-a"], "allowed-a"),  # omitted → the only agent
+        ("any-agent", None, "any-agent"),  # unrestricted: unchanged
+    ])
+    async def test_resolved_agent_reaches_the_engine(self, profile, allowed, expected):
+        from app.api.query import start_conversation
+        from app.core.models import ConversationRequest
+
+        with patch("app.api.query.start_background_query",
+                   new=AsyncMock(return_value={"session_id": "s", "status": "started"})) as start:
+            await start_conversation(
+                ConversationRequest(prompt="Hi", profile=profile),
+                {"id": "u1", "profile_ids": allowed},
+            )
+        assert start.call_args.kwargs["profile_id"] == expected
+
+    @pytest.mark.asyncio
+    async def test_one_shot_runs_the_allowed_agent(self):
+        from app.api.query import one_shot_query
+        from app.core.models import QueryRequest
+
+        with patch("app.core.query_engine.execute_query",
+                   new=AsyncMock(return_value={"response": "ok", "session_id": "s",
+                                               "metadata": {}})) as execute:
+            await one_shot_query(
+                QueryRequest(prompt="Hi", profile="allowed-a"),
+                {"id": "u1", "profile_ids": ["allowed-a"]},
+            )
+        assert execute.call_args.kwargs["profile_id"] == "allowed-a"
+
+    def test_owner_is_unrestricted(self):
+        from app.api.sessions_helpers import resolve_api_user_profile
+
+        assert resolve_api_user_profile(None, "any-agent") == "any-agent"
+        assert resolve_api_user_profile(None, None) is None
+
+    def test_legacy_profile_id_column_is_not_a_restriction_source(self):
+        """The dead ``api_users.profile_id`` column no longer picks the agent."""
+        from app.api.sessions_helpers import resolve_api_user_profile
+
+        user = {"id": "u1", "profile_id": "legacy", "profile_ids": ["allowed-a"]}
+        assert resolve_api_user_profile(user, None) == "allowed-a"
 
 
 # =============================================================================

@@ -263,7 +263,11 @@ class TrustedLanBody(BaseModel):
 
 @router.put("/trusted-lan")
 async def set_trusted_lan(body: TrustedLanBody, request: Request, _: str = Depends(_require_owner)):
-    owner_auth.same_origin(request)
+    from app.api.auth import get_api_key, get_session_token
+    # A cookie (or passwordless LAN access) is ambient, so it needs a
+    # same-origin page; a Bearer owner token is not (as on logout).
+    if get_session_token(request) or not get_api_key(request):
+        owner_auth.same_origin(request)
     await run_sync(owner_auth.set_trusted_lan, body.enabled)
     await run_sync(_audit, request, audit_service.AuditEventType.SETTINGS_CHANGED,
                    {"setting": "trusted_lan", "enabled": body.enabled})

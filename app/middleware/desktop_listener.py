@@ -67,8 +67,6 @@ def _standalone_credential(conn: HTTPConnection) -> bool:
         user = database.get_api_user_by_key_hash(hashlib.sha256(token.encode()).hexdigest())
         if user and user.get("is_active", True):
             return True
-        if conn.scope.get("type") == "websocket" and database.get_api_key_session(token):
-            return True
     return False
 
 

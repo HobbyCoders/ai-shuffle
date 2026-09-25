@@ -251,6 +251,35 @@ def parse_session_history_via_store(
 # Access control helpers
 # ---------------------------------------------------------------------------
 
+def resolve_api_user_profile(api_user: Optional[dict], requested: Optional[str]) -> Optional[str]:
+    """Return the agent an API user may run, enforcing its assigned agents.
+
+    ``api_user['profile_ids']`` (the ``api_user_profiles`` junction) is the
+    restriction. Unrestricted callers (the owner passes ``None``; an API user
+    with no assigned agents) get ``requested`` back unchanged. A restricted
+    user asking for an agent outside the set gets 403; one that names no agent
+    runs its only agent, or gets 400 listing the allowed ids when it has
+    several.
+    """
+    allowed = (api_user or {}).get("profile_ids") or []
+    if not allowed:
+        return requested
+    if requested:
+        if requested not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"This API key is not allowed to use agent '{requested}'.",
+            )
+        return requested
+    if len(allowed) == 1:
+        return allowed[0]
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Specify 'profile': this API key may use agents "
+               + ", ".join(allowed) + ".",
+    )
+
+
 def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -> None:
     """Enforce an API user's project/profile access to a session.
 

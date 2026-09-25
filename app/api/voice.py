@@ -637,6 +637,12 @@ async def create_voice_session(
     # then verify that it resolves to the supplied V2 project.
     from app.api.auth import get_api_user_from_request
     from app.api.common import require_origin_access
+    from app.api.sessions_helpers import resolve_api_user_profile
+
+    # An API user's assigned agents bound the profile (omitted → its only one).
+    requested_profile_id = resolve_api_user_profile(
+        get_api_user_from_request(http_request), request.profile_id
+    )
 
     execution_mode = (request.execution_mode or "").strip().lower() or None
     if execution_mode not in (None, "local", "worktree"):
@@ -696,7 +702,7 @@ async def create_voice_session(
     # Resolve the profile the same way normal session creation does (explicit →
     # project default → first configured agent). A literal fallback id here hits
     # the sessions.profile_id FK the moment no such agent row exists.
-    profile_id = request.profile_id
+    profile_id = requested_profile_id
     if not profile_id and request.project_id:
         project = await run_sync(database.get_project, request.project_id)
         profile_id = ((project or {}).get("settings") or {}).get("default_profile_id")

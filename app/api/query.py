@@ -20,7 +20,9 @@ from app.core.session_title import derive_session_title
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import get_api_user_from_request, require_api_key, require_auth
-from app.api.sessions_helpers import check_session_access_for_api_user, require_session
+from app.api.sessions_helpers import (
+    check_session_access_for_api_user, require_session, resolve_api_user_profile,
+)
 from app.api.sse_utils import is_client_disconnect
 
 logger = logging.getLogger(__name__)
@@ -127,16 +129,17 @@ async def one_shot_query(
     """
     One-shot query - stateless, creates a new session each time.
     Best for simple queries that don't need conversation history.
-    Requires API key authentication. Uses the API user's configured project and profile.
+    Requires API key authentication. Uses the API user's configured project;
+    the profile must be one of the user's assigned agents, if it has any.
     """
-    # Use API user's configured profile/project, fall back to request values
-    profile_id = api_user.get("profile_id") or request.profile
+    # Assigned agents restrict the profile; the API user's project wins.
+    profile_id = resolve_api_user_profile(api_user, request.profile)
     project_id = api_user.get("project_id") or request.project
 
     if not profile_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No profile configured. Set profile_id on API user or provide 'profile' in request."
+            detail="No profile configured. Provide 'profile' in the request."
         )
 
     try:
@@ -179,16 +182,17 @@ async def stream_one_shot_query(
 ):
     """
     SSE streaming one-shot query.
-    Requires API key authentication. Uses the API user's configured project and profile.
+    Requires API key authentication. Uses the API user's configured project;
+    the profile must be one of the user's assigned agents, if it has any.
     """
-    # Use API user's configured profile/project, fall back to request values
-    profile_id = api_user.get("profile_id") or request.profile
+    # Assigned agents restrict the profile; the API user's project wins.
+    profile_id = resolve_api_user_profile(api_user, request.profile)
     project_id = api_user.get("project_id") or request.project
 
     if not profile_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No profile configured. Set profile_id on API user or provide 'profile' in request."
+            detail="No profile configured. Provide 'profile' in the request."
         )
 
     async def event_generator():
@@ -255,16 +259,17 @@ async def conversation(
     and untracked spend). We then block until the session drains and read the
     outcome and the assistant text back out of the durable event log.
 
-    Requires API key authentication. Uses the API user's configured project and profile.
+    Requires API key authentication. Uses the API user's configured project;
+    the profile must be one of the user's assigned agents, if it has any.
     """
-    # Use API user's configured profile/project, fall back to request values
-    profile_id = api_user.get("profile_id") or request.profile
+    # Assigned agents restrict the profile; the API user's project wins.
+    profile_id = resolve_api_user_profile(api_user, request.profile)
     project_id = api_user.get("project_id") or request.project
 
     if not profile_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No profile configured. Set profile_id on API user or provide 'profile' in request."
+            detail="No profile configured. Provide 'profile' in the request."
         )
 
     try:
@@ -403,17 +408,18 @@ async def stream_conversation(
 ):
     """
     SSE streaming conversation.
-    Requires API key authentication. Uses the API user's configured project and profile.
+    Requires API key authentication. Uses the API user's configured project;
+    the profile must be one of the user's assigned agents, if it has any.
     """
-    # Use API user's configured profile/project, fall back to request values
-    profile_id = api_user.get("profile_id") or request.profile
+    # Assigned agents restrict the profile; the API user's project wins.
+    profile_id = resolve_api_user_profile(api_user, request.profile)
     project_id = api_user.get("project_id") or request.project
     api_user_id = api_user.get("id")
 
     if not profile_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No profile configured. Set profile_id on API user or provide 'profile' in request."
+            detail="No profile configured. Provide 'profile' in the request."
         )
 
     async def event_generator():
@@ -480,21 +486,22 @@ async def start_conversation(
     - Browser tab can be backgrounded
     - Use /session/{session_id}/interrupt to stop
 
-    Requires API key authentication. Uses the API user's configured project and profile.
+    Requires API key authentication. Uses the API user's configured project;
+    the profile must be one of the user's assigned agents, if it has any.
 
     Returns:
         session_id: The ID of the session (new or existing)
         status: "started" if the query was launched successfully
     """
-    # Use API user's configured profile/project, fall back to request values
-    profile_id = api_user.get("profile_id") or request.profile
+    # Assigned agents restrict the profile; the API user's project wins.
+    profile_id = resolve_api_user_profile(api_user, request.profile)
     project_id = api_user.get("project_id") or request.project
     api_user_id = api_user.get("id")
 
     if not profile_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No profile configured. Set profile_id on API user or provide 'profile' in request."
+            detail="No profile configured. Provide 'profile' in the request."
         )
 
     try:

@@ -51,18 +51,6 @@ class AuthSessionRow(TypedDict):
     created_at: str
 
 
-class ApiKeySessionRow(TypedDict):
-    """API key session with joined api_user fields."""
-    token: str
-    api_user_id: str
-    expires_at: str
-    created_at: str
-    user_name: str
-    project_id: Optional[str]
-    is_active: bool
-    profile_ids: Optional[List[str]]
-
-
 # ============================================================================
 # Admin Operations
 # ============================================================================
@@ -289,7 +277,3 @@ def cleanup_expired_sessions() -> dict:
 
     return results
 
-
-def get_api_key_session(token: str) -> Optional[ApiKeySessionRow]:
-    """Human web sessions for integration users are retired; use scoped API keys."""
-    return None

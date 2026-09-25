@@ -67,9 +67,8 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
         if await run_sync(owner_auth.owner_session, websocket, candidate):
             websocket.state.mobile_tool_principal = identity.principal('admin', 'install', candidate)
             return True, None
-        key_session = await run_sync(database.get_api_key_session, candidate)
-        user = (await run_sync(database.get_api_user, key_session['api_user_id']) if key_session
-                else await run_sync(database.get_api_user_by_key_hash, hashlib.sha256(candidate.encode()).hexdigest()))
+        user = await run_sync(
+            database.get_api_user_by_key_hash, hashlib.sha256(candidate.encode()).hexdigest())
         if user and user.get('is_active', True):
             websocket.state.mobile_tool_principal = identity.principal('api_user', user['id'], candidate)
             return True, user

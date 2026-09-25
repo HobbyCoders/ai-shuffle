@@ -612,6 +612,25 @@ class TestCreateVoiceSession:
         assert resp.status_code == 400 and "composer" in resp.json()["detail"]
         assert db.get_sessions(limit=50) == []
 
+    def test_api_user_is_bound_to_its_assigned_agents(self, client, mock_db, monkeypatch):
+        from app.api.auth import hash_api_key
+
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+        db.create_api_user("voice-restricted", "Restricted", hash_api_key("aih_voice_r"),
+                           profile_ids=["default"])
+        headers = {"Authorization": "Bearer aih_voice_r"}
+
+        denied = client.post(f"{VOICE_ROOT}/sessions", headers=headers,
+                             json={"model": "gpt-5.6", "profile_id": "other-agent"})
+        assert denied.status_code == 403, denied.text
+        assert db.get_sessions(limit=50) == []
+
+        resp = client.post(f"{VOICE_ROOT}/sessions", headers=headers, json={"model": "gpt-5.6"})
+        assert resp.status_code == 200, resp.text
+        assert db.get_session(resp.json()["session_id"])["profile_id"] == "default"
+
 # ============================================================================
 # VW3 — call surface (re-mint / attach / hangup / state)
 # ============================================================================
