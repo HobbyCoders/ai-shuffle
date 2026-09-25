@@ -110,6 +110,21 @@ class AuditGuard:
             for p in (sys.path if roots is None else roots) if p
         )
         self._busy = False
+        # Depth of the "treat events as cell-originated" region. Restoring a
+        # checkpoint unpickles model-authored objects, and a crafted payload's
+        # reconstructor (``__reduce__`` returning ``(os.system, …)``) is invoked
+        # by pickle's own internals — no ``<cell>`` frame on the stack — so it
+        # would otherwise slip past ``from_cell``. The runner raises this depth
+        # around ``pickle.loads`` so a malicious checkpoint can do nothing a
+        # live cell could not.
+        self._attributed_depth = 0
+
+    def enter_attributed(self) -> None:
+        self._attributed_depth += 1
+
+    def exit_attributed(self) -> None:
+        if self._attributed_depth > 0:
+            self._attributed_depth -= 1
 
     # ── decision, split out so it is testable without installing anything ──
 
@@ -137,6 +152,8 @@ class AuditGuard:
     def from_cell(self, frame):
         """True when a cell frame is anywhere below ``frame`` on the stack, or
         the current thread is not the runner's main thread."""
+        if self._attributed_depth > 0:
+            return True
         if threading.get_ident() != self._main_thread:
             return True
         while frame is not None:
@@ -189,6 +206,27 @@ class AuditGuard:
 
 
 _INSTALLED = None
+
+
+class attributed_region:
+    """Attribute audit events raised inside the block to cell code.
+
+    Used by the runner around ``pickle.loads`` when restoring a checkpoint:
+    the unpickled objects are model-authored, and their reconstructors run with
+    no cell frame on the stack, so without this a crafted payload would reach
+    ``os.system``/sockets/``open`` that a live cell is denied. A no-op if no
+    guard is installed (the host-side unit tests that never boot a child).
+    """
+
+    def __enter__(self):
+        if _INSTALLED is not None:
+            _INSTALLED.enter_attributed()
+        return self
+
+    def __exit__(self, *exc):
+        if _INSTALLED is not None:
+            _INSTALLED.exit_attributed()
+        return False
 
 
 def install(*, allow_fs=False, allow_network=False):

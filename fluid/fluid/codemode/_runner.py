@@ -45,6 +45,14 @@ import vfs
 
 _IN = sys.stdin.buffer  # binary framing channels, captured before any redirect
 _OUT = sys.stdout.buffer
+# The framing pipe is ours alone. A print that runs outside a cell's capture
+# (a finalizer, a pickling hook during a checkpoint, a thread the cell left
+# running) would otherwise land between frames and desync the host, which then
+# waits out its timeout and kills the kernel. Stray text goes to stderr, which
+# the host drains. ``input()`` gets an empty stdin and fails at once with
+# EOFError instead of blocking on the host's pipe until the cell times out.
+sys.stdout = sys.stderr
+sys.stdin = io.StringIO()
 
 # Boot-configured globals (populated by the boot frame).
 _REF_THRESHOLD = truncate.DEFAULT_LIMIT
@@ -785,6 +793,23 @@ def _unattempted_note(code: str, exc: BaseException) -> str:
         return ""
 
 
+def _cap_value_repr(text: str) -> str:
+    """The displayed value, held to the same budget as the cell's stdout.
+
+    A cell ending in a bare ``data`` used to pour the whole repr into the
+    model's context, which the stdout cap exists to prevent. The full value
+    stays bound to ``_`` for the next cell to slice.
+    """
+    if len(text) <= _STDOUT_CAP:
+        return text
+    dropped = len(text) - _STDOUT_CAP
+    return (
+        text[:_STDOUT_CAP]
+        + f"…[value repr truncated: -{dropped} chars; the full value is "
+        "bound to `_` — slice it instead of re-displaying it]"
+    )
+
+
 def _run_cell(code: str):
     buf = _SegmentedStdout()
     value_repr = ""
@@ -801,7 +826,7 @@ def _run_cell(code: str):
                 exec(compile(tree, "<cell>", "exec"), _NS)
             value = eval(compile(ast.Expression(last.value), "<cell>", "eval"), _NS)
             if value is not None:
-                value_repr = repr(value)
+                value_repr = _cap_value_repr(repr(value))
                 # REPL semantics: the displayed value stays reachable as ``_``
                 # in the next cell, so an unbound last expression (a tool call
                 # written bare) is never lost.
@@ -823,6 +848,11 @@ def _run_cell(code: str):
         err = _format_cell_traceback(exc).rstrip("\n") + (
             "\nThe kernel keeps running; a cell cannot exit the process.\n"
         )
+    except BaseException as exc:
+        # Any other BaseException subclass (a cell's own ``class E(BaseException)``,
+        # GeneratorExit) is still the cell's failure, not the kernel's: left
+        # uncaught it ended the child and cost every function defined so far.
+        err = _format_cell_traceback(exc)
     finally:
         sys.stdout = saved
     # The registry is the runner's, not the cell's: rebinding ``_refs`` in a
@@ -915,7 +945,10 @@ def _checkpoint() -> dict:
         except _CheckpointTooLarge:
             oversized.append(key)
             continue
-        except Exception:
+        except BaseException:
+            # A cell object's own pickling hook may raise anything, SystemExit
+            # included; that makes the variable unrestorable, never the
+            # checkpoint (or the kernel) fail.
             dropped.append(key)
             continue
         blob = b"".join(sink.chunks)
@@ -969,8 +1002,14 @@ def _restore(vars_map: dict, tools=None, skills=None) -> dict:
     reimported = _reimport_stubs(tools, "tools") + _reimport_stubs(skills, "skills")
     for key, encoded in (vars_map or {}).items():
         try:
-            value = pickle.loads(base64.b64decode(encoded))
-        except Exception:
+            # Unpickle under cell attribution: a crafted checkpoint object's
+            # reconstructor runs with no <cell> frame on the stack, so the
+            # audit hook would otherwise let it reach os.system/sockets/open
+            # that a live cell is denied. A blocked payload raises here and the
+            # variable is simply dropped.
+            with _audit_guard.attributed_region():
+                value = pickle.loads(base64.b64decode(encoded))
+        except BaseException:
             dropped.append(key)
             continue
         _NS[key] = value
