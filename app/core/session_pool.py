@@ -1816,8 +1816,9 @@ def reconnect_option_names(state: SessionState, new_options: AgentOptions) -> li
     """Check if option changes between queries require a fresh subprocess.
 
     Some options (model, permission_mode) can be changed at runtime via adapter methods.
-    Others (system_prompt, cwd, mcp_servers, plugins, and the resolved provider
-    binding) are fixed at spawn/connect time and require a new subprocess.
+    Others (system_prompt, cwd, mcp_servers, plugins, the resolved provider
+    binding, effort, fast mode, the context window) are fixed at spawn/connect
+    time and require a new subprocess.
     """
     changed = []
     old = state.connect_options
@@ -1866,6 +1867,16 @@ def reconnect_option_names(state: SessionState, new_options: AgentOptions) -> li
         new_options, "aih_context_window", None
     ):
         changed.append("aih_context_window")
+
+    # Reasoning effort is baked in at connect time too: the delegated leg's
+    # ``--effort`` CLI arg, the native leg's NativeLoop ``effort`` (and the
+    # ``app_caller_effort`` its Task children inherit), both set once in
+    # ``HarnessAdapter.connect``. The reuse call sites only hot-swap model and
+    # permission mode, so without this a reused client ran every later turn at
+    # the connect-time effort. Compared as sent (before the adapter's
+    # per-model normalization) — the same raw value every turn when unchanged.
+    if getattr(old, "effort", None) != getattr(new_options, "effort", None):
+        changed.append("effort")
 
     # Per-session fast mode is baked in at connect time the same way — a
     # ``--settings {"fastMode": true}`` CLI arg on the delegated leg, a
@@ -1926,7 +1937,10 @@ def reconnect_option_names(state: SessionState, new_options: AgentOptions) -> li
     # subprocess, and the delegated CLI handles its own re-auth in place.
 
     # These can be changed at runtime — no reconnect needed
-    # (model via client.set_model(), permission_mode via client.set_permission_mode())
+    # (model via client.set_model(), permission_mode via client.set_permission_mode()).
+    # ``thinking`` is deliberately neither: the delegated leg does not take it,
+    # and the native leg pins it per session from the recorded turns
+    # (NativeLoop._resolve_session_thinking), so a rebuild could not apply it.
     return changed
 
 def requires_reconnect(state: SessionState, new_options: AgentOptions) -> bool:
