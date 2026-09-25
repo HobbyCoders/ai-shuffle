@@ -16,6 +16,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import {
 		deriveTeamFeedSignal,
+		isTeamAccessRefused,
 		resolveTeamPollIntervalMs
 	} from './team-status-poll';
 
@@ -28,6 +29,9 @@
 	let teams = $state<Team[]>([]);
 	let expanded = $state<Record<string, boolean>>({});
 	let killingKey = $state<string | null>(null);
+	/** The session whose teams the server refused (403/404); asked no more. */
+	let refusedFor = $state<string | null>(null);
+	const refused = $derived(refusedFor !== null && refusedFor === sessionId);
 	let documentVisible = $state(
 		typeof document === 'undefined' || document.visibilityState !== 'hidden'
 	);
@@ -47,7 +51,7 @@
 	const hasTeams: boolean = $derived(feedSignal.hasTeams || teams.length > 0);
 
 	const pollIntervalMs = $derived(
-		resolveTeamPollIntervalMs({ visible: documentVisible, hasTeams, hasRunning })
+		resolveTeamPollIntervalMs({ visible: documentVisible, hasTeams, hasRunning, refused })
 	);
 
 	function teammateKey(team: string, member: string): string {
@@ -58,8 +62,13 @@
 		try {
 			const next = await listTeams(id);
 			teams = Array.isArray(next) ? next : [];
-		} catch {
-			// silently swallow polling errors
+		} catch (error) {
+			// Quiet either way. A refusal will not change by asking again, so
+			// this session is not polled again; anything else retries.
+			if (isTeamAccessRefused(error)) {
+				refusedFor = id;
+				teams = [];
+			}
 		}
 	}
 
@@ -85,6 +94,7 @@
 		// Tracked so a feed-side change re-fetches the details immediately.
 		void teamSignature;
 		if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+		if (refusedFor === id) return;
 		void refresh(id);
 	});
 

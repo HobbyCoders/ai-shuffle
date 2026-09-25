@@ -1,0 +1,112 @@
+"""R9-16: the delegated leg records a model / permission-mode switch only once
+the Claude CLI acknowledges it.
+
+The CLI answers every ``control_request`` with a ``control_response``
+(``success``, or ``error`` with a reason). ``SetModel`` / ``SetPermissionMode``
+used to write the frame fire-and-forget and record the new value at once, so a
+refused switch was recorded as applied and the host's next turn with the same
+value skipped it. Driven against the scripted fake CLI.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+import fluid.engine.delegated as delegated_mod
+from fluid.engine.delegated import DelegatedLoop
+from fluid.events import ErrorEvent, TurnComplete, UserTurn
+from fluid.events.model import Interrupted
+from fluid.events.ops import SetModel, SetPermissionMode
+from fluid.store.base import MemoryStore
+
+FAKE = Path(__file__).parent.parent / "fixtures" / "fake_claude_script.py"
+_TERMINALS = (TurnComplete, Interrupted, ErrorEvent)
+
+
+def _loop(tmp_path: Path, controls: dict | None = None) -> tuple[DelegatedLoop, Path]:
+    script = tmp_path / "script.json"
+    script.write_text(json.dumps({"controls": controls or {}}), encoding="utf-8")
+    record = tmp_path / "record.jsonl"
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", permission_mode="default",
+        claude_cmd=[sys.executable, str(FAKE)],
+        env={"FAKE_CLAUDE_SCRIPT": str(script), "FAKE_CLAUDE_RECORD": str(record)},
+    )
+    return loop, record
+
+
+async def _turn(loop: DelegatedLoop) -> None:
+    """One plain turn, so the CLI process is up."""
+    sid = (await loop.store.create_session()).session_id
+    loop._session_id = sid
+    start = loop.bus.last_seq(sid)
+
+    async def watch() -> None:
+        async for event in loop.bus.subscribe(sid, since_seq=start):
+            if isinstance(event, _TERMINALS):
+                return
+
+    watcher = asyncio.create_task(watch())
+    await asyncio.sleep(0)
+    await loop.submit(UserTurn(content="hi"))
+    await asyncio.wait_for(watcher, 20)
+    await asyncio.wait_for(loop.wait_turn(), 20)
+
+
+def _sent(record: Path, subtype: str) -> list[dict]:
+    rows = [json.loads(line) for line in record.read_text().splitlines() if line]
+    return [r["frame"] for r in rows if r["kind"] == "stdin"
+            and r["frame"].get("type") == "control_request"
+            and (r["frame"].get("request") or {}).get("subtype") == subtype]
+
+
+async def test_acknowledged_switches_are_recorded(tmp_path) -> None:
+    loop, record = _loop(tmp_path)
+    try:
+        await _turn(loop)
+        await loop.submit(SetModel(model="claude-other"))
+        await loop.submit(SetPermissionMode(mode="acceptEdits"))
+        assert loop.model == "claude-other"
+        assert loop.permission_mode == "acceptEdits"
+        assert _sent(record, "set_model")[0]["request"]["model"] == "claude-other"
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("how", ["error", "mute"])
+async def test_a_refused_or_unanswered_model_switch_keeps_the_old_model(tmp_path, monkeypatch, how) -> None:
+    monkeypatch.setattr(delegated_mod, "CONTROL_TIMEOUT", 0.5)
+    loop, record = _loop(tmp_path, {"set_model": how})
+    try:
+        await _turn(loop)
+        with pytest.raises(RuntimeError, match="set_model"):
+            await loop.submit(SetModel(model="claude-other"))
+        assert loop.model == "claude-fake"
+        assert len(_sent(record, "set_model")) == 1
+    finally:
+        await loop.aclose()
+
+
+async def test_a_refused_mode_switch_keeps_the_old_mode(tmp_path) -> None:
+    loop, _record = _loop(tmp_path, {"set_permission_mode": "error"})
+    try:
+        await _turn(loop)
+        with pytest.raises(RuntimeError, match="refused set_permission_mode"):
+            await loop.submit(SetPermissionMode(mode="bypassPermissions"))
+        assert loop.permission_mode == "default"
+    finally:
+        await loop.aclose()
+
+
+async def test_with_no_cli_running_the_switch_applies_to_the_next_spawn(tmp_path) -> None:
+    loop, _record = _loop(tmp_path)
+    await loop.submit(SetModel(model="claude-other"))
+    await loop.submit(SetPermissionMode(mode="acceptEdits"))
+    argv = loop._build_argv()
+    assert argv[argv.index("--model") + 1] == "claude-other"
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"

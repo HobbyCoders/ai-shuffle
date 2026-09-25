@@ -84,6 +84,27 @@ def crontab_day_of_week(field: str) -> str:
 # automations created, changed, or deleted on other installs.
 SCHEDULE_RECONCILE_SECONDS = 60
 
+# How long an approval stays good for the restart re-queue. An approved run a
+# shutdown cancelled is started again only when it was approved within this
+# window; an older one is stamped cancelled instead of surprising the owner
+# with a run they approved days ago (the first start after an upgrade would
+# otherwise run every run ever left ``approved``).
+APPROVED_RUN_REQUEUE_MAX_AGE_SECONDS = 24 * 3600
+
+
+def _parse_utc(value: Any) -> Optional[datetime]:
+    """A stored timestamp (datetime on PostgreSQL, ISO text on SQLite) as aware UTC."""
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
 
 class AutomationManager:
     """Central hub for automation scheduling, execution, and output delivery."""
@@ -803,8 +824,17 @@ class AutomationManager:
         run_id: str,
         rendered_prompt: str,
         trigger_data: Dict[str, Any],
+        *,
+        claim_from: Optional[str] = None,
     ) -> None:
-        """Execute a single automation run (after approval if needed)."""
+        """Execute a single automation run (after approval if needed).
+
+        ``claim_from`` makes the ``running`` stamp a compare-and-set from that
+        status: an approved run starts only while its row is still
+        ``approved``, so the row itself is the claim for the whole run and a
+        second install (or a second queued copy on this one) that reaches the
+        same run later finds it taken and does nothing.
+        """
         automation_id = automation["id"]
         action_steps = automation.get("action_steps") or []
         start_time = time.time()
@@ -817,24 +847,35 @@ class AutomationManager:
 
             def _settle_empty_run() -> None:
                 """Terminal stamp + success accounting, contiguous — one hop."""
-                database.update_automation_run(
+                settled = database.update_automation_run(
                     run_id, status="completed",
                     started_at=datetime.now(timezone.utc).isoformat(),
                     completed_at=datetime.now(timezone.utc).isoformat(),
+                    expected_status=claim_from,
                 )
-                database.record_automation_run_success(automation_id)
+                if claim_from is None or settled is not None:
+                    database.record_automation_run_success(automation_id)
 
             await run_sync(_settle_empty_run)
             return
 
-        def _mark_running() -> None:
+        def _mark_running() -> bool:
             """Both "now running" writes in one hop; they were already adjacent."""
-            database.update_automation_run(
-                run_id, status="running", started_at=datetime.now(timezone.utc).isoformat()
+            started = database.update_automation_run(
+                run_id, status="running", started_at=datetime.now(timezone.utc).isoformat(),
+                expected_status=claim_from,
             )
+            if claim_from is not None and started is None:
+                return False
             database.update_automation(automation_id, status="running")
+            return True
 
-        await run_sync(_mark_running)
+        if not await run_sync(_mark_running):
+            logger.info(
+                f"Automation {automation_id}: run {run_id} is no longer {claim_from} "
+                "(started elsewhere) — skipping"
+            )
+            return
 
         try:
             response_text = ""
@@ -1374,6 +1415,7 @@ class AutomationManager:
                     run["id"],
                     run.get("prompt_rendered") or automation.get("prompt") or "",
                     run.get("trigger_data", {}),
+                    claim_from="approved",
                 )
             finally:
                 async with self._lock:
@@ -1390,29 +1432,49 @@ class AutomationManager:
         same automation already in flight; shutdown cancels that wait and the
         row stays ``approved`` (the approval itself is spent, so approving
         again is refused). Every install sharing the database sees the row, so
-        the same runner election as a scheduled fire picks one install, and a
-        shared fire claim per run and ten-minute window keeps two installs that
-        start together from both running it.
+        the same runner election as a scheduled fire picks one install.
+
+        Only runs of an automation that still exists and is enabled, approved
+        within ``APPROVED_RUN_REQUEUE_MAX_AGE_SECONDS`` (24 h), are re-queued;
+        an older approved run is stamped ``cancelled`` (compare-and-set, so a
+        run another install just started is untouched). A disabled
+        automation's run is left ``approved`` for a later start once it is
+        enabled again (inside the same 24 h). Running once is guaranteed by
+        the run row itself: ``_execute_run(claim_from="approved")`` moves it
+        ``approved -> running`` as a compare-and-set, so a second install, a
+        second start, or a copy still queued in memory on a live install that
+        reaches it afterwards skips it.
         """
-        def _claim_approved_blocking() -> List[str]:
+        def _select_approved_blocking() -> List[str]:
             from app.core.automation_service import should_run_scheduled_here
             from app.db.base import get_db, rows_to_list
 
             with get_db() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    """SELECT a.id AS approval_id, r.id AS run_id, r.automation_id
+                    """SELECT a.id AS approval_id, a.decided_at, r.id AS run_id,
+                              r.automation_id
                        FROM automation_approvals a
                        JOIN automation_runs r ON r.id = a.run_id
                        WHERE a.status = 'approved' AND r.status = 'approved'
                        ORDER BY r.created_at"""
                 )
                 rows = rows_to_list(cursor.fetchall())
-            window = int(time.time() // 600)
-            claimed: List[str] = []
+            now = datetime.now(timezone.utc)
+            selected: List[str] = []
             for row in rows:
+                decided = _parse_utc(row.get("decided_at"))
+                if decided is None or (now - decided).total_seconds() > APPROVED_RUN_REQUEUE_MAX_AGE_SECONDS:
+                    expired = database.update_automation_run(
+                        row["run_id"], status="cancelled",
+                        error="Approval expired: approved more than 24 h before a restart could run it",
+                        completed_at=now.isoformat(), expected_status="approved",
+                    )
+                    if expired is not None:
+                        logger.info(f"Approved run {row['run_id']} expired before a restart re-queued it")
+                    continue
                 automation = database.get_automation(row["automation_id"])
-                if not automation:
+                if not automation or not automation.get("is_enabled"):
                     continue
                 try:
                     should_run, reason = should_run_scheduled_here(automation)
@@ -1421,14 +1483,11 @@ class AutomationManager:
                 if not should_run:
                     logger.info(f"Approved run {row['run_id']} left to another install ({reason})")
                     continue
-                if database.claim_automation_fire(
-                    row["automation_id"], f"approved-run:{row['run_id']}:{window}"
-                ):
-                    claimed.append(row["approval_id"])
-            return claimed
+                selected.append(row["approval_id"])
+            return selected
 
         try:
-            approval_ids = await run_sync(_claim_approved_blocking)
+            approval_ids = await run_sync(_select_approved_blocking)
         except Exception as e:  # noqa: BLE001 — a DB blip must not break start()
             logger.warning(f"Could not re-queue approved automation runs: {e}")
             return

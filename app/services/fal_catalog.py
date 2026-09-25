@@ -110,6 +110,12 @@ def resolve_output_type(category: str) -> Optional[str]:
 
 FAL_CATALOG_API = "https://api.fal.ai/v1/models"
 DEFAULT_CACHE_TTL = 3600  # 1 hour
+# httpx's 30 s timeout is per operation, so a slow-dripping upstream could keep
+# a paged fetch going far longer. The whole fetch gets this deadline, and a
+# caller waiting on a refresh (its own or one already running) gives up after
+# the fetch deadline plus a margin for the DB write, answering with the cache.
+REFRESH_FETCH_TIMEOUT_SECONDS = 120.0
+REFRESH_WAIT_TIMEOUT_SECONDS = REFRESH_FETCH_TIMEOUT_SECONDS + 30.0
 
 
 @dataclass
@@ -193,7 +199,7 @@ def _describe_refresh_error(error: Exception) -> str:
     """A short, key-free reason a catalog fetch failed."""
     if isinstance(error, HTTPStatusError):
         return f"fal.ai answered HTTP {error.response.status_code}"
-    if isinstance(error, TimeoutException):
+    if isinstance(error, (TimeoutException, asyncio.TimeoutError)):
         return "fal.ai did not answer in time"
     return f"could not reach fal.ai ({type(error).__name__})"
 
@@ -296,14 +302,26 @@ class FalCatalogService:
             self._refresh_task = task
         else:
             logger.debug("Catalog refresh already in progress, waiting for it")
-        # Shielded: a caller that goes away does not cancel the refresh the
-        # other callers are waiting on.
-        return await asyncio.shield(task)
+        # Shielded: a caller that goes away (or stops waiting) does not cancel
+        # the refresh the other callers are waiting on. Bounded: a refresh
+        # that outlives the deadline leaves the cache as it was for this caller.
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), REFRESH_WAIT_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "fal.ai catalog refresh still running after %.0f s; answering with the cache",
+                REFRESH_WAIT_TIMEOUT_SECONDS,
+            )
+            return len(self._cache), (
+                f"the refresh did not finish within {REFRESH_WAIT_TIMEOUT_SECONDS:.0f} s"
+            )
 
     async def _refresh_once(self, api_key: Optional[str]) -> tuple[int, Optional[str]]:
         self._refreshing = True
         try:
-            models = await self._fetch_all_models(api_key)
+            models = await asyncio.wait_for(
+                self._fetch_all_models(api_key), REFRESH_FETCH_TIMEOUT_SECONDS
+            )
             if not models:
                 logger.warning("fal.ai catalog API returned no models, keeping existing cache")
                 return len(self._cache), "fal.ai returned no models"
@@ -331,6 +349,7 @@ class FalCatalogService:
         """Paginate through the fal.ai catalog API and return all inference models."""
         all_models: list[CatalogModel] = []
         cursor: Optional[str] = None
+        seen_cursors: set[str] = set()
         page = 0
 
         headers = {}
@@ -377,6 +396,10 @@ class FalCatalogService:
 
                 if not has_more or not next_cursor:
                     break
+                if next_cursor in seen_cursors:
+                    logger.warning("Catalog fetch got a repeated page cursor, stopping pagination")
+                    break
+                seen_cursors.add(next_cursor)
 
                 cursor = next_cursor
 

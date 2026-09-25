@@ -621,7 +621,9 @@ export interface Team {
  */
 export async function listTeams(sessionId: string): Promise<Team[]> {
 	const r = await fetch(`${apiBase()}/teams/${sessionId}`, withAuth({ }));
-	if (!r.ok) throw new Error(`listTeams: ${r.status}`);
+	// The status rides on the error so the status bar can tell a refusal
+	// (a key's view of a session it does not own) from a transient failure.
+	if (!r.ok) throw Object.assign(new Error(`listTeams: ${r.status}`), { status: r.status });
 	return r.json();
 }
 
@@ -637,7 +639,7 @@ export async function killTeammate(
 		`${apiBase()}/teams/${sessionId}/${encodeURIComponent(teamName)}/members/${encodeURIComponent(teammateName)}/kill`,
 		withAuth({ method: 'POST' })
 	);
-	if (!r.ok) throw new Error(`killTeammate: ${r.status}`);
+	if (!r.ok) throw Object.assign(new Error(`killTeammate: ${r.status}`), { status: r.status });
 	return r.json();
 }
 

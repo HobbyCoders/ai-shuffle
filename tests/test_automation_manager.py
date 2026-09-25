@@ -2209,9 +2209,11 @@ class TestBudgetAndApproval:
         assert _auto("auto-appr")["status"] == "idle"
         assert manager._running == {}
 
-        # Approve → the parked run executes with the rendered prompt.
+        # Approve (both writes, as the approve route makes them) → the parked
+        # run executes with the rendered prompt.
         tasks = _capture_tasks(manager)
         database.update_automation_approval(approval["id"], status="approved")
+        database.update_automation_run(run["id"], status="approved")
         resumed = await manager.execute_approved_run(approval["id"])
         assert resumed["id"] == run["id"]
         await _drain(tasks)
@@ -2545,11 +2547,9 @@ class TestRunConcurrency:
         assert fake.calls[0]["prompt"] == "approved prompt"
         assert database.get_automation_run("run-pend")["status"] == "pending"
 
-        # Started once: a second install starting in the same window, or this
-        # one restarting, does not run it again.
+        # Started once: this install restarting does not run it again.
         again = AutomationManager()
         again._run_prompt_as_session = fake
-        database.update_automation_run("run-rq", status="approved")
         await again.start()
         try:
             for _ in range(20):
@@ -2559,6 +2559,107 @@ class TestRunConcurrency:
         finally:
             await again.shutdown()
         assert len(fake.calls) == 1
+
+    async def test_requeued_run_is_not_run_again_by_the_install_still_holding_it(
+        self, mock_db, paused_scheduler_class, monkeypatch
+    ):
+        """R9-7: install A still holds an approved run queued in memory behind
+        an in-flight run; install B starts, re-queues and runs it. When A's
+        in-flight run ends, A must not run it a second time — the row moved
+        ``approved -> running`` and that compare-and-set is the claim."""
+        from app.db import database
+
+        monkeypatch.setattr(
+            "app.core.automation_service.should_run_scheduled_here", lambda a: (True, "elected"),
+        )
+        _make_automation("auto-2x", triggers=_WEBHOOK_NO_SECRET)
+        database.create_automation_run(run_id="run-2x", automation_id="auto-2x",
+                                       status="approved", prompt_rendered="approved prompt")
+        database.create_automation_approval(approval_id="appr-2x", run_id="run-2x", automation_id="auto-2x")
+        database.update_automation_approval("appr-2x", status="approved")
+
+        install_a = AutomationManager()
+        runner_a = _FakeRunner()
+        g_first = asyncio.Event()
+        runner_a.gates = [g_first]
+        install_a._run_prompt_as_session = runner_a
+        tasks_a = _capture_tasks(install_a)
+        first = asyncio.create_task(install_a._execute("auto-2x", {"trigger": "manual"}))
+        await _until(lambda: len(runner_a.calls) == 1)
+        assert (await install_a.execute_approved_run("appr-2x"))["id"] == "run-2x"
+
+        install_b = AutomationManager()
+        runner_b = _FakeRunner()
+        install_b._run_prompt_as_session = runner_b
+        tasks_b = _capture_tasks(install_b)
+        await install_b.start()
+        try:
+            await _until(lambda: database.get_automation_run("run-2x")["status"] == "completed")
+            g_first.set()
+            await first
+            await _drain(tasks_a)
+        finally:
+            await install_b.shutdown()
+            await _drain(tasks_b)
+        assert [c["run_id"] for c in runner_b.calls] == ["run-2x"]
+        assert [c["run_id"] for c in runner_a.calls] == [runner_a.calls[0]["run_id"]]
+        assert runner_a.calls[0]["run_id"] != "run-2x", "install A ran the run a second time"
+
+    async def test_requeue_skips_disabled_automations_and_expires_old_approvals(
+        self, mock_db, paused_scheduler_class, monkeypatch
+    ):
+        """R9-7: the re-queue ran every run ever left ``approved``, including
+        ones of disabled automations and approvals days old."""
+        from datetime import datetime, timedelta, timezone
+
+        from app.db import database
+        from app.db.base import get_db
+
+        monkeypatch.setattr(
+            "app.core.automation_service.should_run_scheduled_here", lambda a: (True, "elected"),
+        )
+        _make_automation("auto-off", triggers=_WEBHOOK_NO_SECRET, enabled=False)
+        _make_automation("auto-old", triggers=_WEBHOOK_NO_SECRET)
+        for auto_id, run_id, appr_id in (("auto-off", "run-off", "appr-off"),
+                                         ("auto-old", "run-old", "appr-old")):
+            database.create_automation_run(run_id=run_id, automation_id=auto_id,
+                                           status="approved", prompt_rendered="p")
+            database.create_automation_approval(approval_id=appr_id, run_id=run_id, automation_id=auto_id)
+            database.update_automation_approval(appr_id, status="approved")
+        stale = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        with get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE automation_approvals SET decided_at = %s WHERE id = %s", (stale, "appr-old"),
+            )
+
+        restarted = AutomationManager()
+        fake = _FakeRunner()
+        restarted._run_prompt_as_session = fake
+        tasks = _capture_tasks(restarted)
+        await restarted.start()
+        try:
+            if restarted._requeue_task is not None:
+                await asyncio.gather(restarted._requeue_task, return_exceptions=True)
+            # Any re-queued run finishes before shutdown.
+            await asyncio.gather(*[t for t in tasks if t.get_name().startswith("auto-approved-")],
+                                 return_exceptions=True)
+        finally:
+            await restarted.shutdown()
+            await _drain(tasks)
+        assert fake.calls == []
+        assert database.get_automation_run("run-off")["status"] == "approved"
+        old = database.get_automation_run("run-old")
+        assert old["status"] == "cancelled"
+        assert "expired" in (old.get("error") or "")
+
+    async def test_update_automation_run_compare_and_set(self, mock_db):
+        from app.db import database
+
+        _make_automation("auto-cas", triggers=_WEBHOOK_NO_SECRET)
+        database.create_automation_run(run_id="run-cas", automation_id="auto-cas", status="approved")
+        assert database.update_automation_run("run-cas", status="running", expected_status="approved")
+        assert database.update_automation_run("run-cas", status="running", expected_status="approved") is None
+        assert database.get_automation_run("run-cas")["status"] == "running"
 
 
 # =============================================================================

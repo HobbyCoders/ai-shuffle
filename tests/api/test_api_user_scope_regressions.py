@@ -408,18 +408,54 @@ def test_import_files_the_session_inside_the_key_scope(client, import_world):
 
 
 # ---------------------------------------------------------------------------
-# 7. Teams API is owner-only
+# 7. Teams API: a key reaches only its own sessions' teammates
 # ---------------------------------------------------------------------------
 
 
-def test_teams_routes_are_owner_only(client, mock_db):
+def test_teams_routes_refuse_a_key_on_sessions_it_does_not_own(client, mock_db):
+    database.create_profile("own-profile", "Own", None, {})
+    _scoped_key()
+    database.create_session("owner-sess", "own-profile", title="owner's")
+
+    assert client.get("/api/v1/teams/owner-sess", headers=AUTH).status_code == 403
+    assert client.post(
+        "/api/v1/teams/owner-sess/t/members/m/kill", headers=AUTH).status_code == 403
+    assert client.get("/api/v1/teams/missing-sess", headers=AUTH).status_code == 404
+
+
+def test_teams_routes_serve_a_key_its_own_sessions_teammates(client, mock_db, monkeypatch):
+    """R9-17: owner-only teams routes answered 403 to every poll of a key's
+    web user and left it no way to stop its own session's teammates."""
+    from types import SimpleNamespace
+
+    from app.api import teams as teams_api
+
     database.create_profile("own-profile", "Own", None, {})
     _scoped_key()
     database.create_session("u1-sess", "own-profile", title="mine", api_user_id="u1")
+    killed = []
 
-    assert client.get("/api/v1/teams/u1-sess", headers=AUTH).status_code == 403
-    assert client.post(
-        "/api/v1/teams/u1-sess/t/members/m/kill", headers=AUTH).status_code == 403
+    async def list_teams(session_id):
+        return [{"team_name": "t", "parent_session_id": session_id, "teammates": [
+            {"team_name": "t", "teammate_name": "m", "pid": 42, "status": "running"}]}]
+
+    async def get_teammate(session_id, team, name):
+        return SimpleNamespace(pid=42)
+
+    async def kill_teammate(session_id, team, name):
+        killed.append((session_id, team, name))
+        return True
+
+    monkeypatch.setattr(teams_api.team_registry, "list_teams", list_teams)
+    monkeypatch.setattr(teams_api.team_registry, "get_teammate", get_teammate)
+    monkeypatch.setattr(teams_api.team_registry, "kill_teammate", kill_teammate)
+
+    r = client.get("/api/v1/teams/u1-sess", headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()[0]["teammates"][0]["teammate_name"] == "m"
+    r = client.post("/api/v1/teams/u1-sess/t/members/m/kill", headers=AUTH)
+    assert r.status_code == 200 and r.json() == {"success": True, "pid": 42}
+    assert killed == [("u1-sess", "t", "m")]
 
 
 def test_teams_list_stays_open_to_the_owner(client, mock_db, monkeypatch):

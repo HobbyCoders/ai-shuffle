@@ -182,7 +182,29 @@ class TestCodexCapturePersistence:
         row = next(r for r in db.get_all_provider_usage_snapshots() if r["provider_id"] == "cx")
         assert row["windows"] == [{"type": "five_hour", "utilization": 42.0, "resets_at": "1790000000"}]
         assert row["plan_type"] == "plus"
-        assert row["fetched_at"] > int(time.time() * 1000) - 5_000
+        # R9-14: the carried windows keep the reading's own time, not "now".
+        assert row["fetched_at"] < int(time.time() * 1000) - 50_000
+
+    def test_carried_windows_go_stale_per_the_usual_interval(self):
+        """R9-14: a stream of window-less captures kept stamping the old
+        windows as just fetched, so an hours-old quota read "fresh"."""
+        from app.db import database as db
+
+        db.create_model_provider(provider_id="cx", name="ChatGPT", provider_type="chatgpt",
+                                 base_url="https://chatgpt.com")
+        old_ms = int(time.time() * 1000) - 3_600_000
+        db.upsert_provider_usage_snapshot(
+            "cx", "chatgpt", "plus",
+            [{"type": "five_hour", "utilization": 42.0, "resets_at": "1790000000"}],
+            None, {}, old_ms,
+        )
+        asyncio.run(provider_usage._persist_codex_capture(
+            "cx", {"x-codex-credits-has-credits": "false", "x-codex-credits-balance": "0"},
+        ))
+        entry = _providers(_get())["cx"]
+        assert entry["windows"][0]["utilization"] == 42.0
+        assert entry["fetched_at"] == old_ms
+        assert entry["status"] == "stale"
 
     def test_capture_with_windows_replaces_them(self):
         from app.db import database as db

@@ -594,14 +594,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if fut is not None and not fut.done():
                 fut.set_result(op)
         elif isinstance(op, SetModel):
+            await self._apply_setting({"subtype": "set_model", "model": op.model})
             self.model = op.model
-            await self._send_control({"subtype": "set_model", "model": op.model})
         elif isinstance(op, SetPermissionMode):
-            self.permission_mode = "default" if op.mode == "plan" else op.mode
-            await self._send_control({
+            mode = "default" if op.mode == "plan" else op.mode
+            await self._apply_setting({
                 "subtype": "set_permission_mode",
-                "mode": _cli_permission_mode(self.permission_mode, self.cli_version),
+                "mode": _cli_permission_mode(mode, self.cli_version),
             })
+            self.permission_mode = mode
         else:  # Fork / Rewind: unsupported under delegation (see EngineCaps)
             raise NotImplementedError(f"op not supported by DelegatedLoop: {type(op).__name__}")
 
@@ -2209,18 +2210,34 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if fut is not None and not fut.done():
             fut.set_result(reply)
 
-    async def _request_control(
-        self, request: dict[str, Any], *, timeout: float = CONTROL_TIMEOUT,
-    ) -> dict[str, Any] | None:
-        """Send a control_request and await its control_response.
+    async def _apply_setting(self, request: dict[str, Any]) -> None:
+        """Send a ``set_model`` / ``set_permission_mode`` control_request and
+        wait for the CLI's acknowledgement.
 
-        Returns the reply's payload dict, or None when the CLI is not running,
-        answered with the error subtype, or did not answer within ``timeout``.
-        The pending entry is removed on every path — a late reply then simply
-        finds nothing to resolve.
+        The CLI answers every control_request with a control_response (success,
+        or error with a reason), so the caller records the new value only once
+        it is acknowledged: a refused or unanswered switch raises
+        ``RuntimeError`` and the old value stays, and the host's next turn with
+        the same value tries again instead of skipping a switch that never
+        happened. With no CLI running the value just applies to the next spawn
+        (its ``--model`` / ``--permission-mode`` argv), as before.
         """
         if self._proc is None or self._proc.returncode is not None:
-            return None
+            return
+        subtype = request.get("subtype")
+        try:
+            reply = await self._control_roundtrip(request, CONTROL_TIMEOUT)
+        except TimeoutError:
+            raise RuntimeError(
+                f"the Claude CLI did not acknowledge {subtype} within {CONTROL_TIMEOUT:.0f} s"
+            ) from None
+        if not reply.ok:
+            raise RuntimeError(f"the Claude CLI refused {subtype}: {reply.error or 'no reason given'}")
+
+    async def _control_roundtrip(self, request: dict[str, Any], timeout: float) -> ControlReply:
+        """Write a control_request and wait for its reply (TimeoutError when
+        none arrives). The pending entry is removed on every path, so a late
+        reply simply finds nothing to resolve."""
         request_id = self._next_req_id()
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_controls[request_id] = fut
@@ -2231,7 +2248,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 "request": request,
             })
             await self._await_control_reply(fut, timeout)
-            reply: ControlReply = fut.result()
+            return fut.result()
+        finally:
+            self._pending_controls.pop(request_id, None)
+
+    async def _request_control(
+        self, request: dict[str, Any], *, timeout: float = CONTROL_TIMEOUT,
+    ) -> dict[str, Any] | None:
+        """Send a control_request and await its control_response.
+
+        Returns the reply's payload dict, or None when the CLI is not running,
+        answered with the error subtype, or did not answer within ``timeout``.
+        """
+        if self._proc is None or self._proc.returncode is not None:
+            return None
+        try:
+            reply = await self._control_roundtrip(request, timeout)
         except TimeoutError:
             logger.debug("control_request %r timed out", request.get("subtype"))
             return None
@@ -2240,8 +2272,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         except Exception:
             logger.debug("control_request %r failed", request.get("subtype"), exc_info=True)
             return None
-        finally:
-            self._pending_controls.pop(request_id, None)
         if not reply.ok:
             logger.debug("control_request %r errored: %s", request.get("subtype"), reply.error)
             return None

@@ -179,7 +179,7 @@ Some data belongs to the owner's account, to the whole install or to another key
 - **Notes.** Each key has its own notes and sees only those, including through `@Notes/...` references in a prompt. The owner sees every note (see [Notes](/docs/api-reference/notes)).
 - **MCP server settings.** The server lists show environment and header values, URL credentials and secret-looking arguments as `********` (see [MCP Servers](/docs/api-reference/mcp#get-apiv1mcpservers)).
 - **Session import.** An imported session stays inside the key's agents and project (see [Import](/docs/api-reference/sessions#post-apiv1sessionsimport)).
-- **Agent teams.** The `/api/v1/teams` routes, which list and stop an agent's teammates, are owner-only.
+- **Agent teams.** The `/api/v1/teams` routes, which list and stop an agent's teammates, reach only the teammates of the key's own sessions; another session answers 403.
 
 ## Using API Keys
 

@@ -179,6 +179,38 @@ async def test_an_unchanged_mode_is_not_reapplied():
     assert applied == ["acceptEdits", "default"]
 
 
+async def test_a_switch_the_engine_refuses_is_not_recorded_and_is_retried():
+    """R9-16: the delegated leg raises when the Claude CLI refuses (or does not
+    acknowledge) a mode switch. The adapter must not record the mode as
+    applied, so the next turn with the same mode asks again."""
+
+    class _RefusingEngine(_NativeEngine):
+        def __init__(self):
+            super().__init__()
+            self.refuse = True
+
+        async def submit(self, op):
+            if isinstance(op, SetPermissionMode):
+                if self.refuse:
+                    raise RuntimeError("the Claude CLI refused set_permission_mode: nope")
+                self.ops.append(op)
+                return
+            await super().submit(op)
+
+    engine = _RefusingEngine()
+    adapter, sdk_options = await _connected_adapter(engine, "default")
+    state = _pooled(adapter, sdk_options)
+
+    await _turns(state, ["bypassPermissions"])
+    assert state.connect_options.permission_mode == "default"
+    assert not [op for op in engine.ops if isinstance(op, SetPermissionMode)]
+
+    engine.refuse = False
+    await _turns(state, ["bypassPermissions"])
+    assert [op.mode for op in engine.ops if isinstance(op, SetPermissionMode)] == ["bypassPermissions"]
+    assert state.connect_options.permission_mode == "bypassPermissions"
+
+
 async def test_legacy_auto_is_recorded_as_asked_for():
     """The record holds the mode the caller asked for, so a native session
     that keeps sending the legacy ``auto`` is not re-applied every turn,

@@ -144,7 +144,7 @@ async def test_permission_mode_mapping_reaches_argv_and_control(monkeypatch) -> 
     async def send_control(request: dict) -> None:
         sent.append(request)
 
-    loop._send_control = send_control  # type: ignore[method-assign]
+    loop._apply_setting = send_control  # type: ignore[method-assign]
     for version, wire in (("2.1.280 (Claude Code)", "default"), ("3.0.0 (Claude Code)", "manual")):
         loop.cli_version = version
         argv = loop._build_argv()

@@ -245,6 +245,7 @@ async def _persist_codex_capture(provider_id: str, headers: Dict[str, str]) -> N
         from app.db import database as db
 
         windows, plan_type = u.windows, u.plan_type
+        fetched_at: Optional[int] = int(time.time() * 1000)
         if not windows or plan_type is None:
             # Every response is captured, errors included, and some carry only
             # part of the header set (credits without the quota windows, for
@@ -261,6 +262,12 @@ async def _persist_codex_capture(provider_id: str, headers: Dict[str, str]) -> N
             ) or {}
             if not windows:
                 windows = previous.get("windows") or []
+                # The windows are the last full reading's, so the row keeps
+                # that reading's time: stamping it now would show hours-old
+                # quota as fresh. The route then marks it stale per the usual
+                # interval. (The credits this capture did carry are not shown
+                # for ChatGPT rows; the plan type is not time-sensitive.)
+                fetched_at = previous.get("fetched_at")
             if plan_type is None:
                 plan_type = previous.get("plan_type")
 
@@ -275,7 +282,7 @@ async def _persist_codex_capture(provider_id: str, headers: Dict[str, str]) -> N
             windows,
             u.credits,
             u.raw,
-            int(time.time() * 1000),
+            fetched_at,
         )
     except Exception as e:  # noqa: BLE001 — capture must never break a turn
         # Never log header values — only the exception's own message.

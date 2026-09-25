@@ -20,6 +20,9 @@ Script shape::
     "spawn_exit": {"code": 1, "stderr": "."}, # exit before any frame
     "init": {"tools": [...], "model": "...", "session_id": "..."},
     "context_usage": "answer" | "error" | "mute",   # get_context_usage replies
+    "controls": {"<subtype>": "error" | "mute"},    # how other control
+                                              # requests (set_model, …) are
+                                              # answered; default success
     "turns": [[step, ...], ...],              # one list per user frame; after
                                               # the last, a plain text turn
     "resume_turns": [[step, ...], ...]        # used instead when spawned
@@ -177,7 +180,8 @@ class Fake:
         elif subtype == "interrupt":
             self.interrupted = True
         elif subtype == "set_permission_mode":
-            self.mode = req.get("mode") or self.mode
+            if (self.script.get("controls") or {}).get(subtype) is None:
+                self.mode = req.get("mode") or self.mode
         elif subtype == "get_context_usage":
             how = self.script.get("context_usage", "answer")
             if how == "mute":
@@ -188,6 +192,14 @@ class Fake:
                 }})
                 return
             payload = CONTEXT_USAGE
+        how = (self.script.get("controls") or {}).get(subtype)
+        if how == "mute":
+            return
+        if how == "error":
+            self.emit({"type": "control_response", "response": {
+                "subtype": "error", "request_id": rid, "error": f"{subtype} refused",
+            }})
+            return
         self.emit({"type": "control_response", "response": {
             "subtype": "success", "request_id": rid, "response": payload,
         }})

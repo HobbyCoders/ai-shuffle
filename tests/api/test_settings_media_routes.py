@@ -329,6 +329,73 @@ async def test_catalog_refresh_during_another_refresh_reports_its_outcome(monkey
     assert len(calls) == 2  # one fetch (two pages), shared by both callers
 
 
+async def test_catalog_refresh_waiting_on_a_hung_refresh_gives_up_with_the_cache(monkeypatch):
+    """R9-15: a second ``/catalog/refresh`` waited on the first with no
+    overall deadline (httpx's timeout is per operation)."""
+    import asyncio
+
+    service = fal_catalog.FalCatalogService()
+    service._cache = [object(), object()]  # two cached models
+    monkeypatch.setattr(catalog_api, "catalog_service", service)
+    monkeypatch.setattr(catalog_api, "get_decrypted_api_key", lambda name: FAL_KEY)
+    monkeypatch.setattr(service, "get_categories", lambda: [])
+    monkeypatch.setattr(fal_catalog, "REFRESH_WAIT_TIMEOUT_SECONDS", 0.2, raising=False)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def handler(request):
+        entered.set()
+        await release.wait()
+        return httpx.Response(200, json={"models": [], "has_more": False})
+
+    monkeypatch.setattr(fal_catalog, "httpx", SimpleNamespace(
+        AsyncClient=lambda *a, **kw: mock_transport_client(handler)))
+
+    background = asyncio.create_task(service.refresh(FAL_KEY))
+    await entered.wait()
+    try:
+        response = await asyncio.wait_for(catalog_api.refresh_catalog(_="token"), 5)
+        assert response.status_code == 502
+        body = json.loads(response.body)
+        assert body["success"] is False and body["cached_models"] == 2
+        assert "did not finish within" in body["error"]
+        assert "2 cached models" in body["detail"]
+        # Only the waiting stops: the fetch itself keeps running (shielded).
+        assert not service._refresh_task.done()
+    finally:
+        release.set()
+        await asyncio.wait_for(background, 5)
+        await asyncio.wait_for(asyncio.shield(service._refresh_task), 5)
+
+
+async def test_catalog_fetch_has_an_overall_deadline_and_stops_on_a_repeated_cursor(monkeypatch):
+    """R9-15: the fetch itself is bounded as a whole, and a cursor that comes
+    back again ends the paging instead of walking 20 identical pages."""
+    import asyncio
+
+    service = fal_catalog.FalCatalogService()
+    monkeypatch.setattr(service, "_persist_to_db", lambda models: None)
+    calls = []
+
+    def looping(request):
+        calls.append(request)
+        return httpx.Response(200, json={**CATALOG_PAGES[0], "next_cursor": "same"})
+
+    monkeypatch.setattr(fal_catalog, "httpx", SimpleNamespace(
+        AsyncClient=lambda *a, **kw: mock_transport_client(looping)))
+    count, error = await service.refresh_with_status(FAL_KEY)
+    assert error is None and len(calls) == 2
+
+    async def hanging(request):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(fal_catalog, "REFRESH_FETCH_TIMEOUT_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(fal_catalog, "httpx", SimpleNamespace(
+        AsyncClient=lambda *a, **kw: mock_transport_client(hanging)))
+    count2, error = await asyncio.wait_for(service.refresh_with_status(FAL_KEY), 5)
+    assert error == "fal.ai did not answer in time"
+    assert count2 == count
+
+
 def test_catalog_refresh_and_categories(c, catalog):
     r = c.post("/api/v1/catalog/refresh")
     assert r.status_code == 200

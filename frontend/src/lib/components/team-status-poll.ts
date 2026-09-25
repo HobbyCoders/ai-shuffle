@@ -21,6 +21,8 @@ export interface TeamPollInput {
 	hasTeams: boolean;
 	/** Any teammate is currently running. */
 	hasRunning: boolean;
+	/** The server refused this session's teams (403/404): stop asking. */
+	refused?: boolean;
 }
 
 /** Fast cadence while a teammate is actually running. */
@@ -36,8 +38,20 @@ export const TEAM_POLL_IDLE_MS = 30000;
  */
 export function resolveTeamPollIntervalMs(input: TeamPollInput): number | null {
 	if (!input.visible) return null;
+	if (input.refused) return null;
 	if (!input.hasTeams) return null;
 	return input.hasRunning ? TEAM_POLL_RUNNING_MS : TEAM_POLL_IDLE_MS;
+}
+
+/**
+ * True when a teams request was refused rather than failed: 403 (an API key's
+ * web user looking at a session the key does not own) or 404 (the session is
+ * gone). Neither changes by asking again, so the bar goes quiet for that
+ * session instead of repeating the request every poll.
+ */
+export function isTeamAccessRefused(error: unknown): boolean {
+	const status = (error as { status?: unknown } | null)?.status;
+	return status === 403 || status === 404;
 }
 
 /** The transcript-derived team signal (cheap single pass over the messages). */
