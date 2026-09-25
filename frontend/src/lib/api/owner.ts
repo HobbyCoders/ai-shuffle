@@ -29,11 +29,15 @@ function isOwnerStatus(value: unknown): value is OwnerStatus {
 /**
  * The owner status, or why it is missing: `unsupported` when the worker
  * predates owner passwords (no route, or a reply without the owner fields),
- * `unreachable` for any other failure (offline, 5xx, refused).
+ * `unreachable` when no reply arrived at all (offline, refused, DNS), and
+ * `error` with the HTTP status when the worker answered with any other error
+ * (403, 429, 5xx).
  */
-export type OwnerStatusResult =
-	| { ok: true; status: OwnerStatus }
-	| { ok: false; reason: 'unsupported' | 'unreachable' };
+export type OwnerStatusFailure =
+	| { ok: false; reason: 'unsupported' | 'unreachable' }
+	| { ok: false; reason: 'error'; code: number };
+
+export type OwnerStatusResult = { ok: true; status: OwnerStatus } | OwnerStatusFailure;
 
 export async function fetchOwnerStatus(): Promise<OwnerStatusResult> {
 	let body: unknown;
@@ -41,7 +45,9 @@ export async function fetchOwnerStatus(): Promise<OwnerStatusResult> {
 		body = await api.get<unknown>('/owner/status', { cache: 'no-store' });
 	} catch (e: unknown) {
 		const code = e && typeof e === 'object' && 'status' in e ? (e as { status: unknown }).status : null;
-		return { ok: false, reason: code === 404 || code === 405 ? 'unsupported' : 'unreachable' };
+		if (code === 404 || code === 405) return { ok: false, reason: 'unsupported' };
+		if (typeof code === 'number' && code > 0) return { ok: false, reason: 'error', code };
+		return { ok: false, reason: 'unreachable' };
 	}
 	return isOwnerStatus(body) ? { ok: true, status: body } : { ok: false, reason: 'unsupported' };
 }

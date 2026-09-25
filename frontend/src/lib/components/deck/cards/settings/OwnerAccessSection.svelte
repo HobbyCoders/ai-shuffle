@@ -6,12 +6,12 @@
 	import { onMount } from 'svelte';
 	import { KeyRound } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import { changeOwnerPassword, createOwnerPassword, fetchOwnerStatus, setTrustedLan, type OwnerStatus } from '$lib/api/owner';
+	import { changeOwnerPassword, createOwnerPassword, fetchOwnerStatus, setTrustedLan, type OwnerStatus, type OwnerStatusFailure } from '$lib/api/owner';
 	import { ownerAccess } from '$lib/stores/owner-access.svelte';
 
 	let status = $state<OwnerStatus | null>(null);
 	/** Why the first load failed; a later reload failure keeps the last status. */
-	let loadFailure = $state<'unsupported' | 'unreachable' | null>(null);
+	let loadFailure = $state<OwnerStatusFailure | null>(null);
 	let loading = $state(false);
 	let current = $state('');
 	let next = $state('');
@@ -28,7 +28,7 @@
 				status = result.status;
 				loadFailure = null;
 			} else if (!status) {
-				loadFailure = result.reason;
+				loadFailure = result;
 			}
 		} finally {
 			loading = false;
@@ -80,13 +80,13 @@
 
 <div class="set-group">
 	<div class="set-grouphead"><h3><KeyRound />Owner access</h3></div>
-	{#if !status && loadFailure === 'unsupported'}
+	{#if !status && loadFailure?.reason === 'unsupported'}
 		<div class="set-row stack" role="alert">
 			<p class="hint">This worker does not support owner passwords. Update the worker to manage owner access here.</p>
 		</div>
-	{:else if !status && loadFailure === 'unreachable'}
+	{:else if !status && loadFailure}
 		<div class="set-row stack">
-			<p class="msg err" role="alert">Could not load owner access status. The worker did not answer.</p>
+			<p class="msg err" role="alert">Could not load owner access status. {loadFailure.reason === 'error' ? `The worker answered with an error (status ${loadFailure.code}).` : 'The worker did not answer.'}</p>
 			<div><button type="button" class="ed-btn" disabled={loading} onclick={() => void load()}>{loading ? 'Retrying…' : 'Try again'}</button></div>
 		</div>
 	{:else if !status}

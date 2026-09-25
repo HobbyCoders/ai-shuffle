@@ -412,7 +412,7 @@ async def _openai_tts_bytes(
         error_detail = response.text
         logger.error(f"OpenAI TTS failed: {response.status_code} - {error_detail}")
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail=f"TTS generation failed: {error_detail}",
         )
     return response.content
@@ -447,7 +447,7 @@ async def _openai_transcribe(
         error_detail = response.text
         logger.error(f"OpenAI transcription failed: {response.status_code} - {error_detail}")
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail=f"Transcription failed: {error_detail}",
         )
     result = response.json()
@@ -954,7 +954,7 @@ async def transcribe_audio(
                     error_detail = response.text
                     logger.error(f"fal.ai Whisper failed: {response.status_code} - {error_detail}")
                     raise HTTPException(
-                        status_code=500,
+                        status_code=502,
                         detail=f"Transcription failed: {error_detail}"
                     )
 
@@ -989,6 +989,14 @@ async def transcribe_audio(
         raise HTTPException(
             status_code=504,
             detail="Transcription timed out. Please try with a shorter audio clip."
+        )
+    except httpx.TransportError:
+        # The upstream could not be reached (refused, reset, DNS): a gateway
+        # failure, not a fault in this server.
+        logger.exception("Transcription upstream unreachable")
+        raise HTTPException(
+            status_code=502,
+            detail="Transcription failed"
         )
     except Exception:
         logger.exception("Transcription failed")
@@ -1092,19 +1100,19 @@ async def stream_tts(
                     raise HTTPException(status_code=429, detail="Rate limit exceeded.")
                 elif response.status_code != 200:
                     logger.error(f"fal.ai TTS failed: {response.status_code} - {response.text}")
-                    raise HTTPException(status_code=500, detail=f"TTS generation failed: {response.text}")
+                    raise HTTPException(status_code=502, detail=f"TTS generation failed: {response.text}")
 
                 result = response.json()
                 audio_url_from_fal = _extract_audio_url(result)
 
                 if not audio_url_from_fal:
                     logger.error(f"No audio URL in fal.ai response for {tts_model}: {result}")
-                    raise HTTPException(status_code=500, detail="No audio URL in fal.ai response")
+                    raise HTTPException(status_code=502, detail="No audio URL in fal.ai response")
 
                 # Stream directly from fal.ai CDN to the client (no disk round-trip)
                 audio_response = await client.get(audio_url_from_fal, timeout=60.0)
                 if audio_response.status_code != 200:
-                    raise HTTPException(status_code=500, detail="Failed to download generated audio")
+                    raise HTTPException(status_code=502, detail="Failed to download generated audio")
                 audio_bytes = audio_response.content
 
             return Response(
@@ -1117,6 +1125,10 @@ async def stream_tts(
         raise
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="TTS generation timed out. Try shorter text.")
+    except httpx.TransportError:
+        # The upstream could not be reached: a gateway failure (502).
+        logger.exception("TTS upstream unreachable")
+        raise HTTPException(status_code=502, detail="TTS generation failed")
     except Exception:
         logger.exception("TTS streaming failed")
         raise HTTPException(status_code=500, detail="TTS generation failed")

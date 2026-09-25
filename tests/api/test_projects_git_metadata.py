@@ -1,4 +1,4 @@
-"""Project file upload and rename refuse the repository metadata directory.
+"""Project file upload, rename, folder create and delete refuse ``.git``.
 
 ``.git`` controls what the app's own git runs execute (hooks, config), so an
 API key limited to a project must not be able to write into it through the
@@ -120,3 +120,87 @@ def test_rename_elsewhere_still_works(client, project_dir):
 
     assert response.status_code == 200
     assert (project_dir / "src" / "b.txt").read_text() == "a"
+
+
+def _mkdir(client, path, name):
+    return client.post(
+        "/api/v1/projects/test-project/files/folder", params={"path": path}, json={"name": name}
+    )
+
+
+@pytest.mark.parametrize("dotgit", DOTGIT_SPELLINGS)
+def test_create_folder_refuses_git_metadata_parent(client, project_dir, dotgit):
+    response = _mkdir(client, f"{dotgit}/hooks", "pre-commit")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == DETAIL
+    assert not (project_dir / ".git" / "hooks" / "pre-commit").exists()
+
+
+@pytest.mark.parametrize("dotgit", DOTGIT_SPELLINGS)
+def test_create_folder_refuses_git_metadata_name(client, project_dir, dotgit):
+    response = _mkdir(client, "src", dotgit)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == DETAIL
+    assert not (project_dir / "src" / ".git").exists()
+
+
+def test_create_folder_refuses_git_metadata_reached_through_a_link(client, project_dir):
+    (project_dir / "meta").symlink_to(project_dir / ".git", target_is_directory=True)
+
+    response = _mkdir(client, "meta/hooks", "pre-commit")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == DETAIL
+    assert not (project_dir / ".git" / "hooks" / "pre-commit").exists()
+
+
+def test_create_folder_elsewhere_still_works(client, project_dir):
+    response = _mkdir(client, "src", "hooks")
+
+    assert response.status_code == 200
+    assert (project_dir / "src" / "hooks").is_dir()
+
+
+def _delete(client, path):
+    return client.delete("/api/v1/projects/test-project/files", params={"path": path})
+
+
+@pytest.mark.parametrize("path", [".git", ".git/hooks", ".GIT/config", "src/../.git", "GIT~1/config"])
+def test_delete_refuses_git_metadata(client, project_dir, path):
+    (project_dir / ".git" / "config").write_text("[core]\n")
+
+    response = _delete(client, path)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == DETAIL
+    assert (project_dir / ".git" / "hooks").is_dir()
+    assert (project_dir / ".git" / "config").exists()
+
+
+def test_delete_refuses_git_metadata_reached_through_a_link(client, project_dir):
+    (project_dir / "meta").symlink_to(project_dir / ".git", target_is_directory=True)
+
+    response = _delete(client, "meta/hooks")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == DETAIL
+    assert (project_dir / ".git" / "hooks").is_dir()
+
+
+def test_delete_of_a_link_to_git_metadata_removes_only_the_link(client, project_dir):
+    (project_dir / "meta").symlink_to(project_dir / ".git", target_is_directory=True)
+
+    response = _delete(client, "meta")
+
+    assert response.status_code == 200
+    assert not (project_dir / "meta").is_symlink()
+    assert (project_dir / ".git" / "hooks").is_dir()
+
+
+def test_delete_elsewhere_still_works(client, project_dir):
+    response = _delete(client, "src/a.txt")
+
+    assert response.status_code == 200
+    assert not (project_dir / "src" / "a.txt").exists()

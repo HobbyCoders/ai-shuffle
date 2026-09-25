@@ -69,6 +69,8 @@ describe('AIToolsSettings', () => {
 		await fireEvent.click(await screen.findByRole('button', { name: /Browse All/ }));
 		await fireEvent.click(await screen.findByTitle('fal-ai/new-image'));
 		await waitFor(() => expect(api.patch).toHaveBeenCalledOnce());
+		// The rejection has reached the catch before the card is checked.
+		await waitFor(() => expect(console.error).toHaveBeenCalledWith('Failed to set default from browser:', expect.any(Error)));
 		expect(screen.getByTitle('fal-ai/new-image').textContent).not.toContain('Default');
 	});
 

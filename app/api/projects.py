@@ -885,6 +885,7 @@ async def create_folder(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid folder name"
         )
+    _refuse_git_metadata(path, folder_name)
 
     def _resolve():
         project = database.get_project(project_id)
@@ -897,6 +898,8 @@ async def create_folder(
         folder_path, base_path = _resolve_in_project(
             project, f"{path}/{folder_name}" if path else folder_name
         )
+        # The resolved identity too: a link to .git is followed in the parent.
+        _refuse_git_metadata(folder_path.relative_to(base_path).as_posix())
 
         if folder_path.exists():
             raise HTTPException(
@@ -1010,6 +1013,7 @@ async def delete_file_or_folder(
 ):
     """Delete a file or folder within the project."""
     check_project_access(request, project_id)
+    _refuse_git_metadata(path)
 
     def _resolve():
         project = database.get_project(project_id)
@@ -1032,6 +1036,9 @@ async def delete_file_or_folder(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot delete project root directory"
             )
+        # The resolved identity too: a link to .git is followed in the parent
+        # (a link that IS the leaf is removed itself, which is harmless).
+        _refuse_git_metadata(target_path.relative_to(base_path).as_posix())
 
         return target_path
 

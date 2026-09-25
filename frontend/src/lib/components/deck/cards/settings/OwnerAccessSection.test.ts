@@ -113,7 +113,7 @@ describe('status load failures', () => {
 	it('shows an error with a retry instead of loading forever when the worker does not answer', async () => {
 		owner.fetchOwnerStatus.mockResolvedValueOnce({ ok: false, reason: 'unreachable' });
 		render(OwnerAccessSection);
-		expect((await screen.findByRole('alert')).textContent).toContain('Could not load owner access status');
+		expect((await screen.findByRole('alert')).textContent).toBe('Could not load owner access status. The worker did not answer.');
 		expect(screen.queryByText('Loading…')).toBeNull();
 		expect(screen.queryByRole('form', { name: 'Owner password' })).toBeNull();
 		await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
@@ -133,6 +133,15 @@ describe('status load failures', () => {
 		expect(screen.queryByText('Loading…')).toBeNull();
 	});
 
+	it.each([403, 503])('says the worker answered with an error (HTTP %i) rather than did not answer', async (code) => {
+		owner.fetchOwnerStatus.mockResolvedValueOnce({ ok: false, reason: 'error', code });
+		render(OwnerAccessSection);
+		const alert = (await screen.findByRole('alert')).textContent;
+		expect(alert).toBe(`Could not load owner access status. The worker answered with an error (status ${code}).`);
+		expect(alert).not.toContain('did not answer');
+		expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+	});
+
 	it('explains that an older worker has no owner passwords', async () => {
 		owner.fetchOwnerStatus.mockResolvedValueOnce({ ok: false, reason: 'unsupported' });
 		render(OwnerAccessSection);
@@ -147,6 +156,9 @@ describe('status load failures', () => {
 		await screen.findByText('Change the owner password');
 		await fill({ 'Current password': 'old-secret', 'New password': 'long-enough-pass', 'Repeat the new password': 'long-enough-pass' });
 		await waitFor(() => expect(screen.getByRole('status').textContent).toBe('Password changed. Every other browser was signed out.'));
+		// ownerAccess.refresh() runs after load(): the failed reload has been handled.
+		await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+		expect(owner.fetchOwnerStatus).toHaveBeenCalledTimes(2);
 		expect(screen.getByText('Change the owner password')).toBeTruthy();
 		expect(screen.queryByRole('alert')).toBeNull();
 	});

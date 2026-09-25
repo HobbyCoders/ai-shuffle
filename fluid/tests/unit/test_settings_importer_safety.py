@@ -297,9 +297,11 @@ def _ready_destinations_confined(preview, *roots: Path) -> None:
 
 @pytest.mark.parametrize("ref", [
     "../../../../loot@mp",          # name climbs out of the marketplace dir
-    "loot@../../../../../",         # marketplace climbs out
+    "loot@../../..",                # marketplace climbs out: marketplaces/../../../loot is src/loot
     "sub/dir@mp",
     "..@mp",
+    "D:loot@mp",                    # Windows drive-relative name
+    "loot@D:",                      # Windows drive-relative marketplace
 ])
 def test_plugin_refs_cannot_escape_the_plugin_roots(tmp_path: Path, ref: str) -> None:
     """Regression: an ``enabledPlugins`` key is joined onto both the source
@@ -318,9 +320,20 @@ def test_plugin_refs_cannot_escape_the_plugin_roots(tmp_path: Path, ref: str) ->
     assert not by_kind(preview.items, "plugin_enablement")
     rejected = [item for item in by_kind(preview.items, "plugin") if item.status == "diagnostic"]
     assert rejected
+    assert all("not a plain name@marketplace" in item.message for item in rejected)
     apply_settings_import(preview)
     assert not (destination / "loot").exists()
     assert not list(tmp_path.glob("**/dst/**/data.txt"))
+
+
+@pytest.mark.parametrize("value", ["D:x", "D:", "x:y"])
+def test_plain_component_refuses_a_drive_prefix(value: str) -> None:
+    from pathlib import PureWindowsPath
+
+    # Why: on Windows the drive-relative segment replaces the root it joins.
+    assert PureWindowsPath("C:/plugins") / "D:x" == PureWindowsPath("D:x")
+    assert not si._plain_component(value)
+    assert si._plain_component("good-plugin.v2")
 
 
 def test_plain_plugin_ref_still_imports(tmp_path: Path) -> None:

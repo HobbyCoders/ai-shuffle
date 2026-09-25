@@ -76,6 +76,7 @@ def install(monkeypatch, routes) -> Upstream:
     monkeypatch.setattr(settings_audio, "httpx", SimpleNamespace(
         AsyncClient=lambda *a, **kw: mock_transport_client(upstream),
         TimeoutException=httpx.TimeoutException,
+        TransportError=httpx.TransportError,
     ))
     return upstream
 
@@ -315,8 +316,9 @@ def test_transcribe_silence_is_200_with_empty_text(c, fal_key, monkeypatch):
 @pytest.mark.parametrize("status,expected,detail", [
     (401, 400, "fal.ai API key is invalid. Please update it in Settings > Integrations."),
     (429, 429, "fal.ai rate limit exceeded. Please wait a moment and try again."),
-    (422, 500, "Transcription failed: bad audio"),
-    (503, 500, "Transcription failed: bad audio"),
+    # Any other upstream answer is a gateway failure: 502, not a fault here.
+    (422, 502, "Transcription failed: bad audio"),
+    (503, 502, "Transcription failed: bad audio"),
 ])
 def test_transcribe_maps_fal_errors(c, fal_key, monkeypatch, status, expected, detail):
     install(monkeypatch, {**fal_upload_routes(), ("POST", "https://fal.run/"): httpx.Response(status, text="bad audio")})
@@ -353,8 +355,18 @@ def test_transcribe_timeout_is_504(c, fal_key, monkeypatch):
     assert r.json()["detail"] == "Transcription timed out. Please try with a shorter audio clip."
 
 
-def test_transcribe_unexpected_transport_error_is_generic_500(c, fal_key, monkeypatch):
+def test_transcribe_unreachable_upstream_is_generic_502(c, fal_key, monkeypatch):
     install(monkeypatch, {("POST", "https://rest.alpha.fal.ai/"): httpx.ConnectError("refused")})
+    r = _transcribe(c)
+    assert r.status_code == 502
+    assert r.json()["detail"] == "Transcription failed"
+
+
+def test_transcribe_internal_error_stays_500(c, fal_key, monkeypatch):
+    async def boom(*_a, **_kw):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(settings_audio, "_upload_to_fal_storage", boom)
     r = _transcribe(c)
     assert r.status_code == 500
     assert r.json()["detail"] == "Transcription failed"
@@ -374,7 +386,7 @@ def test_transcribe_openai_model_goes_to_openai_with_provider_key(c, openai_row,
     assert all("fal" not in str(req.url) for req in upstream.calls)
 
 
-@pytest.mark.parametrize("status,expected", [(401, 400), (429, 429), (500, 500)])
+@pytest.mark.parametrize("status,expected", [(401, 400), (429, 429), (500, 502)])
 def test_transcribe_maps_openai_errors(c, openai_row, monkeypatch, status, expected):
     database.set_system_setting("voice_input_model", "openai/whisper-1")
     install(monkeypatch, {("POST", settings_audio.OPENAI_TRANSCRIBE_URL): httpx.Response(status, text="upstream")})
@@ -546,7 +558,8 @@ def test_tts_stream_schema_without_speed_bounds_uses_default_range(c, fal_key, m
 @pytest.mark.parametrize("status,expected,detail", [
     (401, 400, "fal.ai API key is invalid."),
     (429, 429, "Rate limit exceeded."),
-    (500, 500, "TTS generation failed: model crashed"),
+    (500, 502, "TTS generation failed: model crashed"),
+    (422, 502, "TTS generation failed: model crashed"),
 ])
 def test_tts_stream_maps_fal_errors(c, fal_key, monkeypatch, status, expected, detail):
     install(monkeypatch, {("POST", "https://fal.run/"): httpx.Response(status, text="model crashed")})
@@ -555,29 +568,37 @@ def test_tts_stream_maps_fal_errors(c, fal_key, monkeypatch, status, expected, d
     assert r.json()["detail"] == detail
 
 
-def test_tts_stream_without_audio_url_is_500(c, fal_key, monkeypatch):
+def test_tts_stream_without_audio_url_is_502(c, fal_key, monkeypatch):
     install(monkeypatch, {("POST", "https://fal.run/"): httpx.Response(200, json={"audio": {"url": ""}})})
     r = c.post(f"{BASE}/tts/stream", json={"text": "hi"})
-    assert r.status_code == 500
+    assert r.status_code == 502
     assert r.json()["detail"] == "No audio URL in fal.ai response"
 
 
-def test_tts_stream_failed_download_is_500(c, fal_key, monkeypatch):
+def test_tts_stream_failed_download_is_502(c, fal_key, monkeypatch):
     install(monkeypatch, {
         ("POST", "https://fal.run/"): httpx.Response(200, json={"audio": {"url": CDN_URL}}),
         ("GET", CDN_URL): httpx.Response(404),
     })
     r = c.post(f"{BASE}/tts/stream", json={"text": "hi"})
-    assert r.status_code == 500
+    assert r.status_code == 502
     assert r.json()["detail"] == "Failed to download generated audio"
 
 
-def test_tts_stream_timeout_is_504_and_other_errors_500(c, fal_key, monkeypatch):
+def test_tts_stream_timeout_is_504_unreachable_502_and_bugs_500(c, fal_key, monkeypatch):
     install(monkeypatch, {("POST", "https://fal.run/"): httpx.ConnectTimeout("slow")})
     r = c.post(f"{BASE}/tts/stream", json={"text": "hi"})
     assert r.status_code == 504
     assert r.json()["detail"] == "TTS generation timed out. Try shorter text."
     install(monkeypatch, {("POST", "https://fal.run/"): httpx.ConnectError("down")})
+    r = c.post(f"{BASE}/tts/stream", json={"text": "hi"})
+    assert r.status_code == 502
+    assert r.json()["detail"] == "TTS generation failed"
+
+    async def boom(*_a, **_kw):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(settings_audio, "_resolve_tts_payload", boom)
     r = c.post(f"{BASE}/tts/stream", json={"text": "hi"})
     assert r.status_code == 500
     assert r.json()["detail"] == "TTS generation failed"
@@ -626,7 +647,7 @@ def test_tts_stream_openai_model_maps_voice_and_format(c, openai_row, monkeypatc
     assert upstream.request_to(settings_audio.OPENAI_SPEECH_URL).headers["Authorization"] == f"Bearer {OPENAI_KEY}"
 
 
-@pytest.mark.parametrize("status,expected", [(401, 400), (429, 429), (500, 500)])
+@pytest.mark.parametrize("status,expected", [(401, 400), (429, 429), (500, 502)])
 def test_tts_stream_maps_openai_errors(c, openai_row, monkeypatch, status, expected):
     install(monkeypatch, {("POST", settings_audio.OPENAI_SPEECH_URL): httpx.Response(status, text="upstream")})
     r = c.post(f"{BASE}/tts/stream", json={"text": "hi", "model": "openai/gpt-4o-mini-tts", "voice": "nova"})

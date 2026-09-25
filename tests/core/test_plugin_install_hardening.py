@@ -373,6 +373,41 @@ def test_clone_url_guard_bites(svc, fake_git, monkeypatch):
     assert clone[clone.index("--upload-pack=touch /tmp/pwned") - 1] == "--"
 
 
+TOKEN = "ghp_secretToken123"
+TOKEN_URL = f"https://{TOKEN}@example.com/o/x.git"
+
+
+@pytest.mark.parametrize("source", [
+    {"source": "url", "url": TOKEN_URL},
+    {"source": "git-subdir", "url": TOKEN_URL, "path": "plugins/x"},
+])
+def test_clone_error_redacts_url_credentials_and_is_capped(svc, monkeypatch, source):
+    stderr = (f"Cloning into 'x'...\nfatal: unable to access '{TOKEN_URL}/': "
+              "The requested URL returned error: 403\n" + "remote: noise\n" * 400)
+
+    def run(cmd, **_kw):
+        return subprocess.CompletedProcess(cmd, 128, "", stderr)
+
+    monkeypatch.setattr(plugin_install.subprocess, "run", run)
+    _marketplace(svc, plugins=[{"name": "x", "source": source}])
+    with pytest.raises(RuntimeError, match="Failed to clone") as exc:
+        svc.install_plugin("x@mp")
+    message = str(exc.value)
+    assert TOKEN not in message
+    assert "https://***@example.com/o/x.git" in message
+    assert len(message) < 600
+    assert "x@mp" not in _installed(svc)
+
+
+def test_rejected_clone_url_error_redacts_url_credentials(svc, fake_git):
+    _marketplace(svc, plugins=[{"name": "x", "source": {
+        "source": "url", "url": f"file://{TOKEN}@host/repo"}}])
+    with pytest.raises(ValueError, match="Unsupported plugin source URL") as exc:
+        svc.install_plugin("x@mp")
+    assert TOKEN not in str(exc.value)
+    assert fake_git.calls == []
+
+
 def test_clone_passes_ref_and_separates_url(svc, fake_git):
     _marketplace(svc, plugins=[{"name": "x", "source": {"source": "github", "repo": "o/x",
                                                         "ref": "v2"}}])

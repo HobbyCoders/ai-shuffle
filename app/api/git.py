@@ -17,6 +17,7 @@ Sub-modules:
 
 import asyncio
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -54,6 +55,25 @@ from app.api import git_ai as _git_ai_mod
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/git", tags=["Git"])
+
+# ``scheme://<userinfo>@``: the userinfo, with its ``@``, of every URL except
+# ssh ones, whose user (``ssh://git@host``) is a login name, not a secret.
+_URL_USERINFO_AT_RE = re.compile(
+    r"(?<![A-Za-z0-9+.\-])(?!(?:git\+)?ssh(?:\+git)?://)"
+    r"([A-Za-z][A-Za-z0-9+.\-]*://)[^\s/?#@\"'<>\[\]{}\\^|]+@"
+)
+
+
+def _strip_url_userinfo(url: Optional[str]) -> Optional[str]:
+    """``https://tok@host/r.git`` -> ``https://host/r.git``, for storing and display.
+
+    The credentialed URL stays in the clone's own ``.git/config`` (git needs it
+    to fetch and push); the database row, which the UI shows, never holds it.
+    ssh URLs (``git@host:path``, ``ssh://git@host/r``) are kept as they are.
+    """
+    if not isinstance(url, str):
+        return url
+    return _URL_USERINFO_AT_RE.sub(r"\g<1>", url)
 
 # Include sub-routers (no extra prefix — they share the same base path)
 router.include_router(_git_worktrees_mod.router)
@@ -364,7 +384,7 @@ async def clone_repository(
         await run_sync(
             database.update_git_repository,
             repo["id"],
-            remote_url=remote_url,
+            remote_url=_strip_url_userinfo(remote_url),
             default_branch=current_branch or "main",
         )
 

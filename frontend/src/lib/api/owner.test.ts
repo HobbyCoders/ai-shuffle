@@ -1,4 +1,4 @@
-/** fetchOwnerStatus tells an older worker (no owner passwords) from one that did not answer. */
+/** fetchOwnerStatus tells an older worker (no owner passwords), one that did not answer and one that answered with an error apart. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const get = vi.hoisted(() => vi.fn());
@@ -30,13 +30,19 @@ describe('fetchOwnerStatus', () => {
 		expect(await getOwnerStatus()).toBeNull();
 	});
 
-	it.each([
-		['a network failure', new TypeError('Failed to fetch')],
-		['a server error', { detail: 'boom', status: 502 }],
-		['a refusal', { detail: 'Forbidden', status: 403 }]
-	])('treats %s as unreachable', async (_label, error) => {
-		get.mockRejectedValue(error);
+	it('treats a network failure (no reply) as unreachable', async () => {
+		get.mockRejectedValue(new TypeError('Failed to fetch'));
 		expect(await fetchOwnerStatus()).toEqual({ ok: false, reason: 'unreachable' });
+		expect(await getOwnerStatus()).toBeNull();
+	});
+
+	it.each([
+		['a server error', 502],
+		['a refusal', 403],
+		['a rate limit', 429]
+	])('reports %s as an error answer with its status', async (_label, status) => {
+		get.mockRejectedValue({ detail: 'nope', status });
+		expect(await fetchOwnerStatus()).toEqual({ ok: false, reason: 'error', code: status });
 		expect(await getOwnerStatus()).toBeNull();
 	});
 });

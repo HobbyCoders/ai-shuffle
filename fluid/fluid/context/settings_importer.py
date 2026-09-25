@@ -517,11 +517,13 @@ def _project_registration(
 
 
 def _plain_component(value: str) -> bool:
-    """One ordinary path segment: no separators, no ``.``/``..``, no NUL.
+    """One ordinary path segment: no separators, no ``.``/``..``, no NUL, no ``:``.
 
     Plugin and marketplace names come from ``enabledPlugins`` keys and are
     joined onto both the source plugins root and ``~/.fluid/plugins``; a
-    ``../`` in either would read and write outside those roots.
+    ``../`` in either would read and write outside those roots. On Windows a
+    drive prefix (``D:x``) replaces the root it is joined onto, so ``:`` is
+    refused too.
     """
     return (
         bool(value)
@@ -529,6 +531,7 @@ def _plain_component(value: str) -> bool:
         and "/" not in value
         and "\\" not in value
         and "\0" not in value
+        and ":" not in value
     )
 
 

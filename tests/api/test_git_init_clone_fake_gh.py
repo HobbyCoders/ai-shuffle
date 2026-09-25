@@ -331,9 +331,29 @@ def test_push_branch_cannot_inject_receive_pack(env):
 def test_push_branch_guard_bites_when_disabled(env, monkeypatch):
     from app.core import git_commit_ops
 
-    monkeypatch.setattr(git_commit_ops, "_push_branch_arg", lambda branch: branch)
+    monkeypatch.setattr(git_commit_ops, "_is_plain_branch_name", lambda branch: True)
+    monkeypatch.setattr(git_commit_ops, "_push_refspec", lambda branch: branch)
     with pytest.raises(AssertionError):
         _assert_receive_pack_not_run(env)
+
+
+def _push_refspec_branch(env, branch):
+    repo = github_repo(env.tmp, name="refspecrepo")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "push", "-q", "origin", "main:keep-me")
+    database.create_project("p-refspec", "p-refspec", None, str(repo))
+    response = env.client.post("/api/v1/projects/p-refspec/git/push", json={"branch": branch})
+    return response, repo
+
+
+def test_push_branch_refspec_cannot_delete_a_remote_branch(env):
+    """R8-4: ``branch=":keep-me"`` reached ``git push origin :keep-me`` and
+    deleted the remote branch."""
+    response, repo = _push_refspec_branch(env, ":keep-me")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid branch name: ':keep-me'"
+    assert git(bare_of(repo), "branch", "--list", "keep-me") != ""
 
 
 def test_push_option_like_remote_is_400(env):
@@ -345,3 +365,31 @@ def test_push_option_like_remote_is_400(env):
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid remote name: --mirror"
     assert not git(bare_of(repo), "branch", "--list", "feat/x")
+
+
+@pytest.mark.parametrize("pid, url", [
+    # A project id per case: the repo-record cache outlives the test database.
+    ("p-clone-userpw", "https://alice:s3cr3t@example.invalid/r.git"),
+    ("p-clone-token", "https://ghp_s3cr3t@example.invalid/r.git"),
+])
+def test_clone_stores_remote_without_url_credentials(env, monkeypatch, pid, url):
+    bare = _source_repo(env)
+    target = _project(env, pid, "stored-creds")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{bare}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", url)
+    # The remote exactly as the clone's .git/config holds it, whichever reader
+    # (pygit2 or the CLI, which applies insteadOf) serves the route.
+    from app.core.git_service import git_service
+    monkeypatch.setattr(git_service, "get_remote_url",
+                        lambda wd: git(wd, "config", "--get", "remote.origin.url"))
+
+    response = env.client.post(f"/api/v1/projects/{pid}/git/clone", json={"clone_url": url})
+
+    assert response.status_code == 200, response.text
+    record = database.get_git_repository(response.json()["repository_id"])
+    assert record["remote_url"] == "https://example.invalid/r.git"
+    assert "s3cr3t" not in str(record)
+    # git itself keeps the working, credentialed remote.
+    assert git(target, "config", "--get", "remote.origin.url") == url
+    git(target, "fetch", "-q", "origin")

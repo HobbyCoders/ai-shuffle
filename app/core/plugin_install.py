@@ -20,8 +20,24 @@ from app.core.plugin_models import (
     PluginScope,
     _force_rmtree,
 )
+from app.core.scrub import redact_url_credentials
 
 logger = logging.getLogger(__name__)
+
+# How much of git's own error output an install error carries.
+_GIT_ERROR_MAX_CHARS = 500
+
+
+def _git_error_text(stderr: Any) -> str:
+    """git's error output for an install error: URL credentials redacted, capped.
+
+    The clone URL comes from a marketplace entry and may carry a token
+    (``https://ghp_xxx@host/r.git``); git echoes it back in its errors.
+    """
+    text = redact_url_credentials(str(stderr or "").strip())
+    if len(text) > _GIT_ERROR_MAX_CHARS:
+        text = text[:_GIT_ERROR_MAX_CHARS] + "..."
+    return text
 
 
 def _safe_path_component(value: Any, what: str) -> str:
@@ -121,7 +137,7 @@ def _clone_plugin_source(svc, source: Dict[str, Any], dest: Path) -> None:
         timeout=120
     )
     if result.returncode != 0:
-        raise RuntimeError(f"Failed to clone plugin: {result.stderr.strip()}")
+        raise RuntimeError(f"Failed to clone plugin: {_git_error_text(result.stderr)}")
     _checkout_pinned_sha(dest, source.get("sha"))
     _prune_escaping_symlinks(dest)
 
@@ -134,7 +150,7 @@ _ALLOWED_CLONE_URL_PREFIXES = ("https://", "http://", "ssh://", "git@")
 
 def _check_clone_url(url: Any) -> None:
     if not isinstance(url, str) or not url.startswith(_ALLOWED_CLONE_URL_PREFIXES):
-        raise ValueError(f"Unsupported plugin source URL: {str(url)[:100]!r}")
+        raise ValueError(f"Unsupported plugin source URL: {redact_url_credentials(str(url))[:100]!r}")
 
 
 def _checkout_pinned_sha(repo_dir: Path, sha: Any) -> None:
@@ -210,7 +226,7 @@ def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> None:
         )
         if result.returncode != 0:
             raise RuntimeError(
-                f"Failed to clone git-subdir repo: {result.stderr.strip()}"
+                f"Failed to clone git-subdir repo: {_git_error_text(result.stderr)}"
             )
         _checkout_pinned_sha(tmp_dir, source.get("sha"))
 
