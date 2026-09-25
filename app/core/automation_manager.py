@@ -1088,6 +1088,25 @@ class AutomationManager:
     def _response_tail(cls, text: str) -> str:
         return (text or "")[-cls.RESPONSE_TAIL_CHARS:]
 
+    @staticmethod
+    async def _discard_unused_session(automation_id: str, session_id: str) -> None:
+        """Delete a session minted for a turn that will not start, and drop it
+        from connected devices. Best-effort: a failure leaves the empty session
+        behind, as before, and the run is still cancelled."""
+        try:
+            await run_sync(database.delete_session, session_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Automation {automation_id}: could not delete unused session {session_id}: {e}")
+            return
+        try:
+            from app.core import sync_engine as sync_engine_module
+
+            await sync_engine_module.sync_engine.broadcast_user_session_deleted(
+                user_id="admin", session_id=session_id, source_device_id=None
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Automation {automation_id}: session delete broadcast failed: {e}")
+
     async def _run_prompt_as_session(
         self,
         automation: Dict[str, Any],
@@ -1178,8 +1197,11 @@ class AutomationManager:
         #    then kicks the scheduler, which starts the turn in the ONE spawn
         #    path (SessionRuntime). No ``deferred_delivery`` concept survives —
         #    the v2 SSE typed-event feed is always live. Last shutdown gate:
-        #    the session mint and broadcast above both awaited.
+        #    the session mint and broadcast above both awaited. The session was
+        #    minted for this turn alone and is still empty, so it goes too
+        #    (the run's link clears with it: ON DELETE SET NULL).
         if self._shutdown_begun():
+            await self._discard_unused_session(automation_id, session_id)
             raise _ShutdownBeforeTurn()
         await turn_manager.submit_async(
             session_id,

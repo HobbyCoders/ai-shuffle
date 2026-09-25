@@ -220,6 +220,27 @@ class TestImport:
         assert r.status_code == 400
         assert r.json()["detail"] == detail
 
+    @pytest.mark.parametrize("raw", [b"null", b"5", b'"session messages"', b"true"])
+    def test_a_top_level_non_object_is_400(self, client, world, raw):
+        """R12-2: only an object can carry 'session' and 'messages'."""
+        r = _upload(client, raw)
+        assert r.status_code == 400, r.text
+        assert r.json()["detail"] == "Invalid export format. The file must hold a JSON object."
+
+    @pytest.mark.parametrize("field,value", [
+        ("title", 5), ("title", ["a"]), ("profile_id", 7), ("project_id", {"id": "proj-a"}),
+    ])
+    def test_non_string_identity_fields_are_400_before_any_session(
+        self, client, world, field, value,
+    ):
+        """R12-2: a bad title used to fail the response after the session row
+        was saved, leaving an orphan session behind a 500."""
+        r = _upload(client, _export(session={field: value}))
+        assert r.status_code == 400, r.text
+        assert r.json()["detail"] == f"Invalid export format. '{field}' must be a string."
+        assert database.get_sessions() == []
+        assert not world["projects_dir"].exists()
+
     @pytest.mark.parametrize("field", ["total_cost_usd", "total_tokens_in", "turn_count"])
     def test_non_numeric_stats_are_400(self, client, world, field):
         r = _upload(client, _export(session={field: "lots"}))

@@ -96,6 +96,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Passwords that contain `@`, and `ssh://user:password@` addresses, are now fully removed from clone addresses in logs and messages.
 - Forwarded addresses written with a port or in brackets, and IPv4 addresses written as IPv6, are matched against `TRUSTED_PROXIES` and counted per visitor.
 - Plugin names in a repository's own settings can no longer point outside the plugin folders.
+- Unpairing a device or signing it out closes its open connections at once; before, they stayed open until it next used a session. A device whose session token was replaced loses them within about 30 seconds. An outage of the connection service never drops a live connection.
 
 ### API keys
 
@@ -133,7 +134,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Claude subscription sessions: Stop ends the turn as Interrupted and keeps its cost instead of showing an error, works while Claude Code is still starting, and no longer makes a resumed session send the stopped message again.
 - Claude subscription sessions survive a Claude Code crash between turns and unusual output lines instead of failing every later turn.
 - Claude subscription sessions show Claude's real rate-limit status instead of always "allowed", and a rejected status marks the window as used up.
-- A model or permission-mode switch now counts only once Claude Code confirms it; a refused switch keeps the old setting and is tried again next turn. Switching back and forth (for example Ask, then Bypass, then Ask) now lands on the last choice with every provider. A Stop or timeout while a switch waits for confirmation keeps the old value and the next turn sends the switch again; Claude Code is restarted on the recorded values if it still does not confirm.
+- A model or permission-mode switch now counts only once Claude Code confirms it; a refused switch keeps the old setting and is tried again next turn. Switching back and forth (for example Ask, then Bypass, then Ask) now lands on the last choice with every provider. A Stop or timeout while a switch waits for confirmation keeps the old value and the next turn sends the switch again; Claude Code is restarted on the recorded values if it still does not confirm. That Stop also stops the turn the switch was preparing when it is sent within 15 seconds.
 - Claude subscription sessions: Stop in the pause between turns ends the turn at once as Interrupted instead of after up to 30 seconds, and the next turn no longer takes the answer of Claude Code's own background turn as its reply.
 - Changing the effort mid-session now takes effect. Note: it restarts the session's engine; the conversation is kept.
 - Other providers: a reply cut off mid-stream is reported and retried instead of saved as a finished answer, and text already received is kept and marked as interrupted.
@@ -174,13 +175,14 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Note autocomplete and the chat history list load faster in large projects.
 - The notification tool reports a push as delivered only when a device confirmed it, and points to the in-app notification center otherwise.
 - **Allow All** and **Deny All** in the permission queue wait for the same short delay as the single-request buttons, so they no longer answer a request that just appeared, and focus moves to the next prompt or back to the message box.
-- On a phone-sized screen, opening a session from a notification in the menu drawer closes the drawer.
+- On a phone-sized screen, opening a session from a notification in the menu drawer closes the drawer. Closing the drawer from a menu item or a notification returns focus to the menu button unless the opened page takes it.
 
 ### Accessibility
 
 - Dialogs and the command palette keep keyboard focus inside while open, close on Escape and return focus where it was. Enter on a focused Cancel or Close button no longer confirms.
 - The message box, icon-only buttons, menus, fields and each API user's Edit, Rotate and Delete buttons have names screen readers announce, and states shown only by colour now also have text.
 - A streaming reply is announced once instead of per word, and the permission prompt says when its shortcuts are ready.
+- Row buttons in the connector, plugin, file and API-user lists name their item, the project switcher says what it does, branch menus are announced as menus, and the git dialogs announce errors and the selected mode.
 
 ### Connectors
 
@@ -201,6 +203,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - An update that fails partway reports the failure and starts the worker and database again instead of leaving them stopped.
 - A worker that cannot start shows an error instead of staying on "starting", and quitting no longer tries to stop a process that is not the app's database.
 - Only AI Shuffle's own pages get microphone, clipboard and fullscreen access, and sign-in or payment pop-ups get none. The launch token is sent only to the worker.
+- A background script left behind by a sign-in or payment pop-up no longer breaks the app until its profile is cleared. The worker's own background scripts get the launch token, pop-ups that open another site run in a separate session with no token or permissions, and leftover background scripts are cleared at start and when a pop-up closes.
 - **Quit** from the tray stops the worker cleanly and forces it after 60 seconds; closing the window offers **Quit Anyway** if stopping fails again.
 - The unused `aishuffle://` link handler is removed, so web pages can no longer launch the app.
 - The desktop app reports update status to the web interface every 30 seconds, and at once when the phase changes (checking, available, downloading, ready), with less load on the worker. Download percentages in the web interface move in 30-second steps. One missed report no longer makes the update button say the updater is unavailable.
@@ -223,8 +226,9 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Upgrading from a build before 19 September (database schema 88 or older) no longer fails at start.
 - Several workers sharing one PostgreSQL database can start at the same time without failing on setup.
 - The app's own log lines appear in `docker logs` again.
-- An approved automation run waiting at shutdown is re-queued on the next start and runs once. Runs of disabled or deleted automations are skipped, approvals older than 24 hours expire, and events that arrive during shutdown no longer create runs. Once shutdown has begun, no approved or scheduled run starts by any path.
+- An approved automation run waiting at shutdown is re-queued on the next start and runs once. Runs of disabled or deleted automations are skipped, approvals older than 24 hours expire, and events that arrive during shutdown no longer create runs. Once shutdown has begun, no approved or scheduled run starts by any path, and a run cancelled after its session was created removes that empty session again.
 - A catalog refresh started while another one runs waits for it, and a refresh gives up after two minutes instead of hanging.
+- Error reports the app sends to the server are size-capped.
 
 ### Removed
 
@@ -247,4 +251,12 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - WebFetch stops downloading at its 5 MiB limit instead of reading the whole page first, and a page with an unknown character set is read as UTF-8 instead of failing.
 - An Edit with empty old text is refused unless the file is empty; before, it inserted the new text between every character.
 - One malformed MCP server address no longer breaks the whole settings import preview.
+- Session import: a file over 50 MB gets a "too large" error, and a malformed export (not a JSON object, a message that is not an object, a title that is not text, counters that are not numbers) is refused before anything is saved instead of failing with a server error or leaving an empty session behind. An export naming a project this install does not have is imported without a project, and re-importing the app's own export keeps its whole transcript.
+- In Docker, the folder browser, project paths, the default working folder for commands and sessions, the built-in browser, history, plugin paths and settings import all use the workspace chosen during setup. Before, some used the start-up folder, so paths inside the chosen workspace were refused or resolved elsewhere, and settings import skipped projects there as "outside workspace".
+- Clearing the sign-in-again flag of a ChatGPT or Grok provider no longer changes how it signs in; a provider without that sign-in returns 404.
+- MCP servers, plugins and the project MCP tab show a failed load or action instead of failing silently, and a failed plugin details load stays on the list. Changing project closes an MCP editor still open on the previous project's server, and removing a global MCP server from a project asks first.
+- Uninstalling a plugin asks first, and the API user list stays usable while it shows an error.
+- Files: a refused new folder or rename keeps what you typed, and pressing Enter twice no longer creates the folder twice.
+- Clearing an API user's description or project restriction now saves.
+- Documentation: device unpairing, provider timeout settings and errors, Resume after an interrupted reply, and session import errors are described as the app behaves.
 - Documentation: a second pass against the app corrected many pages (permission modes, API users, voice, usage, settings import, hooks, connectors), and new sections cover reverse proxies and the code-mode sandbox.

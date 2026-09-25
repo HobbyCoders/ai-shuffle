@@ -2368,8 +2368,17 @@ class TestRunFailures:
             monkeypatch.setattr(startup, "is_shutting_down", True)
 
         sync.broadcast_user_session_created = _broadcast
+        sync.broadcast_user_session_deleted = AsyncMock()
         monkeypatch.setattr("app.core.sync_engine.sync_engine", sync)
         _make_automation("auto-sd-mint", triggers=_WEBHOOK_NO_SECRET)
+        minted: list[str] = []
+        real_create = am.database.create_session
+
+        def _create(**kwargs):
+            minted.append(kwargs["session_id"])
+            return real_create(**kwargs)
+
+        monkeypatch.setattr(am.database, "create_session", _create)
 
         await manager._execute("auto-sd-mint", {"trigger": "manual"})
 
@@ -2378,6 +2387,16 @@ class TestRunFailures:
         assert run["status"] == "cancelled"
         assert _auto("auto-sd-mint")["status"] == "idle"
         assert not _auto("auto-sd-mint").get("last_error")
+        # R12-3: the session minted (and shown) for the cancelled turn is
+        # removed again, on this install and on every device, not left empty.
+        (sid,) = minted
+        from app.db import database
+
+        assert database.get_session(sid) is None
+        assert not run.get("session_id")
+        sync.broadcast_user_session_deleted.assert_awaited_once_with(
+            user_id="admin", session_id=sid, source_device_id=None,
+        )
 
     async def test_shutdown_before_the_session_mint_mints_nothing(self, manager, mock_db, monkeypatch):
         from app.core import startup

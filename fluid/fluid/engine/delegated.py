@@ -2526,8 +2526,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 continue
             if self._route_control_response(text) or await self._answer_hook_line(text):
                 continue
-            if _frame_type(text) == "result":
+            kind = _frame_type(text)
+            if kind == "result":
                 self._wake_in_flight = False  # the wake a stopped drain saw start
+            elif kind in _WAKE_FRAME_TYPES:
+                # A wake that started while no drain was reading (a switch or a
+                # context-usage capture between turns): the next turn's drain
+                # must wait for its result, as it would had it seen this frame.
+                self._wake_in_flight = True
             logger.warning("discarding between-turn CLI frame: %.300s", text)
         return _PumpOutcome.REPLY
 

@@ -449,6 +449,11 @@ async def import_session(
         )
 
     # Validate import data structure
+    if not isinstance(import_data, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid export format. The file must hold a JSON object."
+        )
     if 'session' not in import_data or 'messages' not in import_data:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -468,6 +473,15 @@ async def import_session(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid export format. Every message must be an object."
         )
+    # These name the session and its agent and project. A non-string would fail
+    # the lookups, or the response after the session row was already created.
+    for field in ('title', 'profile_id', 'project_id'):
+        value = session_data.get(field)
+        if value is not None and not isinstance(value, str):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid export format. '{field}' must be a string."
+            )
     # These feed numeric increments; a string would fail the UPDATE after the
     # session row was already created.
     for field in ('total_cost_usd', 'total_tokens_in', 'total_tokens_out', 'turn_count'):

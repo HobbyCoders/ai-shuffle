@@ -40,7 +40,7 @@ describe('mobile workspace popup', () => {
 		Object.defineProperty(surface, 'getBoundingClientRect', { value: () => ({ top: 0, bottom: 600 } as DOMRect) });
 		const remove = vi.spyOn(surface, 'removeEventListener');
 		const { container, unmount } = render(WorkspaceSelector, { target: surface, props: { selectedProject: null, onSelectProject: vi.fn() } });
-		const trigger = screen.getByRole('button', { name: 'your project' });
+		const trigger = screen.getByRole('button', { name: 'Choose a project' });
 		await fireEvent.click(trigger);
 		const anchor = trigger.closest('.picker-container')!;
 		const rect = vi.fn();
@@ -60,7 +60,7 @@ describe('mobile workspace popup', () => {
 	it('keeps a long catalog selectable and closes after selecting its final project', async () => {
 		const onSelectProject = vi.fn();
 		render(WorkspaceSelector, { selectedProject: null, onSelectProject });
-		const trigger = screen.getByRole('button', { name: 'your project' });
+		const trigger = screen.getByRole('button', { name: 'Choose a project' });
 		await fireEvent.click(trigger);
 		await fireEvent.click(screen.getByRole('button', { name: 'Project 40' }));
 		expect(onSelectProject).toHaveBeenCalledWith('p40', null);
@@ -70,7 +70,7 @@ describe('mobile workspace popup', () => {
 
 	it('fits the popup inside a short viewport and restores desktop positioning when the shell is desktop', async () => {
 		const { container } = render(WorkspaceSelector, { selectedProject: null, onSelectProject: vi.fn() });
-		await fireEvent.click(screen.getByRole('button', { name: 'your project' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Choose a project' }));
 		const popup = container.querySelector('.picker-dropdown') as HTMLElement;
 		const top = parseFloat(popup.style.getPropertyValue('--picker-top'));
 		expect(top).toBeGreaterThanOrEqual(12);
@@ -86,7 +86,7 @@ describe('mobile workspace popup', () => {
 
 	it('dismisses with Escape and restores focus to the project trigger', async () => {
 		render(WorkspaceSelector, { selectedProject: null, onSelectProject: vi.fn() });
-		const trigger = screen.getByRole('button', { name: 'your project' });
+		const trigger = screen.getByRole('button', { name: 'Choose a project' });
 		await fireEvent.click(trigger);
 		screen.getByRole('button', { name: 'Project 1' }).focus();
 		await fireEvent.keyDown(window, { key: 'Escape' });

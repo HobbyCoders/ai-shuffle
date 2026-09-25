@@ -675,6 +675,36 @@ async def test_stop_during_the_between_turn_drain_ends_the_turn_at_once(tmp_path
         await run.aclose()
 
 
+async def test_a_wake_that_starts_during_a_between_turn_switch_is_waited_for(tmp_path) -> None:
+    """R12-1: a wake whose first frames the control pump reads (a model switch
+    or a context-usage capture between turns) is still owed its result. The
+    next turn waits for it instead of writing into it and taking "WAKE text"
+    as its answer."""
+    first = [
+        {"op": "text", "text": "first answer"}, {"op": "result"},
+        {"op": "sleep", "s": 0.05},
+        {"op": "text", "text": "WAKE started"},
+        # The switch is answered mid-wake: the pump reads "WAKE started".
+        {"op": "serve", "subtype": "set_model", "count": 1, "timeout": 3},
+        {"op": "sleep", "s": 1.5},
+        {"op": "text", "text": "WAKE text"}, {"op": "result"},
+    ]
+    second = [{"op": "text", "text": "second answer"}, {"op": "result"}]
+    run = Scripted(tmp_path, {"turns": [first, second]})
+    try:
+        await run.turn("one")
+        await asyncio.sleep(0.3)  # the wake's first frame is out
+        await run.loop.submit(SetModel(model="claude-other"))
+        assert run.loop.model == "claude-other"
+        assert run.loop._wake_in_flight
+        events = await run.turn("two")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert "".join(e.text for e in _of(events, TextDelta)) == "second answer"
+        assert _user_texts(run) == ["one", "two"]
+    finally:
+        await run.aclose()
+
+
 async def test_stop_during_a_setting_acknowledgement_wait_keeps_the_old_value(
     tmp_path, monkeypatch,
 ) -> None:

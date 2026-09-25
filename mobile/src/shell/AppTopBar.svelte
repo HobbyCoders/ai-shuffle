@@ -108,16 +108,18 @@
 	// Navigation that does not go through the Sidebar's callbacks — a tapped
 	// notification in the drawer's bell, a system notification — arrives as the
 	// shared `open-session` event. The full-screen drawer must not stay over it.
+	// Focus goes back to the ☰ like any dismissal; the opened view may take it.
 	$effect(() => {
-		const close = () => { drawerOpen = false; };
+		const close = () => dismissDrawer();
 		window.addEventListener('open-session', close);
 		return () => window.removeEventListener('open-session', close);
 	});
 
-	// Run a drawer action and dismiss the drawer in one step.
+	// Run a drawer action and dismiss the drawer in one step. The dismissal
+	// comes first, so an action that moves focus (into a chat) still wins.
 	function drawerGo<T extends unknown[]>(action: (...args: T) => void) {
 		return (...args: T) => {
-			drawerOpen = false;
+			dismissDrawer();
 			action(...args);
 		};
 	}

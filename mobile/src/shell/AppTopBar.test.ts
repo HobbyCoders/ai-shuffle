@@ -205,6 +205,34 @@ describe('AppTopBar drawer', () => {
 		expect(screen.queryByTestId('sidebar')).toBeNull();
 	});
 
+	it('returns focus to the menu button when a navigation action or a notification closes the drawer', async () => {
+		renderBar();
+		for (const label of ['Stub open settings', 'Stub notification']) {
+			await fireEvent.click(menuButton());
+			await tick();
+			const item = screen.getByRole('button', { name: label });
+			item.focus();
+			await fireEvent.click(item);
+			await tick();
+			expect(screen.queryByTestId('sidebar')).toBeNull();
+			expect(document.activeElement).toBe(menuButton());
+		}
+	});
+
+	it('lets a navigation action move focus where it belongs after the drawer closes', async () => {
+		const target = document.createElement('input');
+		document.body.append(target);
+		renderBar({ onOpenSession: () => target.focus() });
+		await fireEvent.click(menuButton());
+		await tick();
+		const item = screen.getByRole('button', { name: 'Stub open session' });
+		item.focus();
+		await fireEvent.click(item);
+		await tick();
+		expect(document.activeElement).toBe(target);
+		target.remove();
+	});
+
 	it('stops listening for open-session once unmounted', async () => {
 		const remove = vi.spyOn(window, 'removeEventListener');
 		const { unmount } = renderBar();
