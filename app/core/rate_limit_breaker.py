@@ -11,9 +11,11 @@
 * **The breaker refuses; it never reroutes.** No account rotation, no
   failover, no provider switching.
 
-Recording seam: ``harness_adapter._usage_capture_http_client``, which sees every
-native-leg response. The delegated (claude CLI) leg is not covered: its HTTP
-traffic happens inside the CLI child process, where the app has no hook.
+Recording seam: ``harness_adapter._usage_capture_http_client``, which is
+attached only to the openai_responses leg with a bound provider row. The
+anthropic and openrouter native legs are not observed, and neither is the
+delegated (claude CLI) leg: its HTTP traffic happens inside the CLI child
+process, where the app has no hook.
 Consumer today: ``provider_agent._await_worker_idle`` fails a worker fast while
 its provider is tripped. There is no pre-dispatch refusal, so the breaker is a
 record-and-signal surface rather than a request gate.
@@ -256,7 +258,8 @@ class ProviderCircuitBreaker:
 
 # ─── Process-wide singleton + module-level convenience API ───────────────────
 # Every native provider leg runs in this one process, so a single instance is
-# the install-wide breaker. A persisted backing store would slot in behind this
+# the install-wide breaker (today only the bound openai_responses leg records
+# into it; see the module docstring). A persisted backing store would slot in behind this
 # same surface.
 
 _BREAKER = ProviderCircuitBreaker()

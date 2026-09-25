@@ -860,11 +860,13 @@ class Settings(BaseSettings):
 
     # Per-provider rate-limit circuit breaker. The first upstream HTTP 429 for a
     # provider trips the breaker for that provider INSTALL-WIDE for a time-based
-    # cooldown, so retry loops cannot turn one rate limit into a request storm.
-    # 429s are observed by harness_adapter._usage_capture_http_client (native
-    # legs only; the delegated CLI's own HTTP is not observed). The breaker only
-    # ever REFUSES — it never reroutes or fails over. ON by default: this is a
-    # safety feature. Set PROVIDER_CIRCUIT_BREAKER_ENABLED=false to disable it.
+    # cooldown. 429s are recorded only by harness_adapter._usage_capture_http_client,
+    # which is attached only to the openai_responses leg with a bound provider
+    # row (anthropic/openrouter native legs and the delegated CLI are not
+    # observed). The breaker never gates requests: its only reader is
+    # provider_agent._await_worker_idle, which fails a ProviderAgent worker fast
+    # while its provider is tripped. It never reroutes or fails over. ON by
+    # default. Set PROVIDER_CIRCUIT_BREAKER_ENABLED=false to disable it.
     # See app.core.rate_limit_breaker.
     provider_circuit_breaker_enabled: bool = True
     # Cooldown applied when the upstream 429 carries no usable Retry-After.

@@ -40,10 +40,13 @@ Started from ``startup.install_v2_turns_wiring``.
 
 THE UNIFIED BACKGROUND SWEEP
 ----------------------------
-This module also hosts the driver that the cross-install correctness loops
-share. Every cross-install correctness loop registers a :class:`SweepPass`
-here (via :func:`register_pass`) and shares one timer; the driver runs each
-pass when it comes due, batching everything that falls in the same tick.
+This module also hosts a driver that cross-install correctness loops can
+share. A loop registers a :class:`SweepPass` here (via :func:`register_pass`)
+and shares one timer; the driver runs each pass when it comes due, batching
+everything that falls in the same tick. Today the registered passes are
+``turn_claim``, ``git_ops``, ``git_ops_retention`` and ``interaction_expiry``.
+The streaming-status dead-lease reap is not one of them: it runs its own 15 s
+loop (``streaming_status.sweep_loop``, started from ``startup``).
 
 Two things make the idle cost collapse:
 

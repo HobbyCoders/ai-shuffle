@@ -572,7 +572,7 @@ async def _periodic_cleanup() -> dict:
     # subprocesses that already exited and never signals a live session.
     try:
         from app.core.session_pool import reap_terminated_process_trees
-        reaped = reap_terminated_process_trees()
+        reaped = await reap_terminated_process_trees()
         if reaped:
             cleaned["reaped_orphan_processes"] = reaped
     except Exception as e:

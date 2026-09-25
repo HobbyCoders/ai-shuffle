@@ -13,9 +13,10 @@ Where the surface comes from
 ----------------------------
 The CLI announces it in the ``{"type":"system","subtype":"init"}`` frame — but
 only AFTER the first user message of a session, so the list is never knowable at
-spawn time on a cold process. The vendored ``DelegatedMapper`` reads the tool
-list out of that frame and ``DelegatedLoop`` republishes it as a
-``DelegatedSurface`` event, so there IS a live feed; it just arrives too late
+spawn time on a cold process. The vendored ``StreamJsonMapper``
+(fluid/engine/delegated_proto.py) reads the tool list out of that frame and
+emits it as a ``DelegatedSurface`` event that ``DelegatedLoop`` publishes, so
+there IS a live feed; it just arrives too late
 to shape the argv of the connect that produced it.
 
 Reconnecting mid-session to apply a subtraction learned from the init frame is

@@ -217,7 +217,7 @@ class TaskRegistry:
         # NOT in this set is a prior-turn orphan leaking from the pooled
         # adapter's buffer; it must NOT fire a spurious in-stream unpark in this
         # later, unrelated turn. (The slow path — a genuinely in-flight agent that
-        # completes AFTER its spawning turn — is handled by the idle reader,
+        # completes AFTER its spawning turn — is handled by the drain-mode settle path,
         # which is unaffected by this set.)
         self._started_this_turn: Dict[str, set] = {}
         # session_id -> set of PARENT launch tool_use_ids that the parent issued

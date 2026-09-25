@@ -214,8 +214,8 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
       process and marked ``killed`` in the registry immediately.
     - **agent**: a PROVIDER-LANE worker runs as its own session under the
       ProviderAgent supervisor and is torn down there. The harness adapter has
-      no per-task stop for any other agent task, so its registry row is reaped
-      (marked ``killed``) as below.
+      no per-task stop for any other agent task, so its registry row is marked
+      ``killed`` directly, with the stop's attribution while the session is live.
 
     "Ghost" tasks — ones already terminated by outside forces (idle eviction,
     process death, session teardown) but still parked ``running`` in the
@@ -295,9 +295,26 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
         return {"ok": True, "kind": "agent", "task_id": task_id}
 
     # 3) Any other agent task — the adapter has no per-task stop, so settle the
-    # registry row (a ghost the UI would otherwise show forever) and report it.
+    # registry row ourselves and report it. On a live session this is the
+    # explicit stop the caller asked for, so it carries the stop attribution
+    # (the chip reads "Stopped by user" / cancelled, not a red failure). With
+    # the session gone the task was already dead: reap it unattributed (or with
+    # the shutdown attribution) as a ghost the UI would otherwise show forever.
     state = get_session_pool().peek(session_id)
     if existing is not None:
+        if state is not None and state.is_connected:
+            task_registry.complete_task(
+                session_id,
+                task_id,
+                "killed",
+                summary=USER_STOP_SUMMARY if source == USER_STOP_REASON else f"Stopped by host: {source}",
+                reason=source,
+            )
+            return {
+                "ok": True,
+                "kind": existing.get("kind") or "agent",
+                "task_id": task_id,
+            }
         _reap_task_killed(session_id, task_id)
         return {
             "ok": True,

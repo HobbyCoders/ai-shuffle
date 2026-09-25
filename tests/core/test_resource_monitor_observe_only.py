@@ -165,7 +165,7 @@ def _spawn_sleeper() -> subprocess.Popen:
     )
 
 
-def test_reaper_kills_recorded_orphan_descendants():
+async def test_reaper_kills_recorded_orphan_descendants():
     """A recorded terminated-subprocess descendant that is still alive gets reaped."""
     psutil = pytest.importorskip("psutil")
 
@@ -188,7 +188,7 @@ def test_reaper_kills_recorded_orphan_descendants():
         )
         assert dead_parent_pid in sp._terminated_trees
 
-        reaped = sp.reap_terminated_process_trees()
+        reaped = await sp.reap_terminated_process_trees()
 
         assert reaped == 2
         # Registry entry consumed.
@@ -205,7 +205,7 @@ def test_reaper_kills_recorded_orphan_descendants():
                 c.wait(timeout=5)
 
 
-def test_reaper_skips_descendant_of_live_session(monkeypatch):
+async def test_reaper_skips_descendant_of_live_session(monkeypatch):
     """A descendant that belongs to a still-LIVE SDK subprocess must NOT be reaped."""
     pytest.importorskip("psutil")
 
@@ -223,7 +223,7 @@ def test_reaper_skips_descendant_of_live_session(monkeypatch):
         monkeypatch.setattr(sp, "subprocess_pid", lambda st: os.getpid())
 
         sp.record_terminated_subprocess(999_999_998, descendants=[child.pid])
-        reaped = sp.reap_terminated_process_trees()
+        reaped = await sp.reap_terminated_process_trees()
 
         # Protected: not reaped.
         assert reaped == 0
@@ -234,9 +234,9 @@ def test_reaper_skips_descendant_of_live_session(monkeypatch):
             child.wait(timeout=5)
 
 
-def test_reaper_noop_when_registry_empty():
+async def test_reaper_noop_when_registry_empty():
     """Reaper is a safe no-op with nothing recorded."""
-    assert sp.reap_terminated_process_trees() == 0
+    assert await sp.reap_terminated_process_trees() == 0
 
 
 def test_record_terminated_subprocess_is_bounded():

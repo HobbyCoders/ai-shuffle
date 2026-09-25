@@ -31,11 +31,14 @@ already contains it, so normalization is a no-op there.
 Delivery to the parent's UI has two best-effort legs, because the parent may or
 may not have a live socket:
 
-1. the parent's own pooled ``callback_refs["broadcast_func"]`` — the parent is
-   mid-turn (blocked in the Task tool call), so this is the socket that owns
-   the tab the user is looking at;
+1. the parent's own pooled ``callback_refs["broadcast_func"]`` — for a
+   synchronous dispatch the parent is mid-turn (blocked in the Task tool
+   call), so this is the socket that owns the tab the user is looking at;
 2. a user-level fan-out (``sync_engine.broadcast_user_permission``) for every
-   other device, mirroring ``sync_engine.broadcast_user_question``.
+   other device, mirroring ``sync_engine.broadcast_user_question``. Background
+   and Explore-class dispatches return a receipt instead of blocking, so their
+   parent may be parked or idle with no live socket, and this leg is what
+   reaches the user then.
 
 Neither leg is required for correctness: the durable row plus the parent's
 ``interaction.requested`` log event let any device restore the prompt.

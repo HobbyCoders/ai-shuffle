@@ -421,34 +421,34 @@ def record_terminated_subprocess(pid: Optional[int], descendants: Optional[list]
         _terminated_trees.popitem(last=False)
 
 
-def reap_terminated_process_trees() -> int:
-    """Kill orphaned descendants of subprocesses that have already terminated.
+# A descendant counts as the SAME process when its start time is within this
+# many seconds of the snapshot. psutil derives create_time() from the boot time,
+# which the kernel shifts when the wall clock is stepped (NTP, host resync), so
+# exact float equality would silently disable the reaper after a small step.
+# A recycled pid belongs to a process started later than the original, so a
+# 1 s window does not let an unrelated process through.
+_START_TIME_TOLERANCE_SECONDS = 1.0
 
-    Walks each recorded terminated-subprocess descendant snapshot and, for any
-    descendant PID that is still alive, is still the SAME process (its start
-    time matches the snapshot, so a recycled pid is never signalled) AND no
-    longer has a live ancestor inside our own server process, sends SIGTERM
-    (then SIGKILL on stragglers).
 
-    This is process hygiene only — it operates exclusively on the recorded
-    descendants of subprocesses that have already exited, so it can never kill
-    a live session. Returns the number of orphans reaped.
+def _is_same_process(current: float, recorded: float) -> bool:
+    """True when `current` start time matches the `recorded` one.
 
-    Safe no-op if psutil is unavailable or there is nothing to reap.
+    Anything that cannot be compared (NaN, a non-number) counts as a mismatch,
+    so an undeterminable identity skips the kill.
     """
-    if not _terminated_trees:
-        return 0
     try:
-        import psutil
-    except ImportError:
-        _terminated_trees.clear()
-        return 0
+        return abs(float(current) - float(recorded)) < _START_TIME_TOLERANCE_SECONDS
+    except (TypeError, ValueError):
+        return False
 
-    reaped = 0
-    own_pid = os.getpid()
-    # PIDs of all CLI subprocesses we currently know are LIVE — descendants of
-    # these must never be touched (they belong to an active session).
-    live_subprocess_pids: set[int] = set()
+
+def _live_subprocess_pids() -> set[int]:
+    """PIDs of every CLI subprocess currently LIVE in the pool.
+
+    Descendants of these belong to an active session and must never be touched.
+    Runs on the event loop: it reads the pool, which only the loop mutates.
+    """
+    live: set[int] = set()
     try:
         if _session_pool is not None:
             # Snapshot — the pool dict can be mutated (evictions/removals) while
@@ -457,9 +457,28 @@ def reap_terminated_process_trees() -> int:
             for st in list(_session_pool._pool.values()):
                 p = subprocess_pid(st)
                 if p and is_subprocess_alive(st):
-                    live_subprocess_pids.add(p)
+                    live.add(p)
     except Exception:
         pass
+    return live
+
+
+def _reap_trees(
+    trees: list[tuple[int, list[tuple[int, float]]]],
+    live_subprocess_pids: set[int],
+) -> int:
+    """Blocking psutil half of the reaper; runs in a worker thread.
+
+    Walks process ancestry and waits up to 2 s for SIGTERM stragglers, so it
+    must stay off the event loop. Touches no shared app state.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return 0
+
+    reaped = 0
+    own_pid = os.getpid()
 
     def _has_live_protected_ancestor(proc: "psutil.Process") -> bool:
         """True if the process descends from a still-live CLI subprocess.
@@ -483,27 +502,25 @@ def reap_terminated_process_trees() -> int:
         return False
 
     to_kill: list["psutil.Process"] = []
-    for parent_pid, descendant_pids in list(_terminated_trees.items()):
+    for parent_pid, descendant_pids in trees:
         # If the recorded parent is somehow alive again, skip — only reap trees
         # whose parent has genuinely terminated.
         try:
             if psutil.pid_exists(parent_pid) and psutil.Process(parent_pid).is_running():
                 # Parent still around (rare PID reuse) — leave its tree alone.
-                _terminated_trees.pop(parent_pid, None)
                 continue
         except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
             pass
         for dpid, created in descendant_pids:
             try:
                 proc = psutil.Process(dpid)
-                if proc.create_time() != created:
+                if not _is_same_process(proc.create_time(), created):
                     continue  # pid reused by an unrelated process
             except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
-                continue
+                continue  # identity cannot be confirmed: never signal it
             if _has_live_protected_ancestor(proc):
                 continue
             to_kill.append(proc)
-        _terminated_trees.pop(parent_pid, None)
 
     if not to_kill:
         return 0
@@ -522,7 +539,36 @@ def reap_terminated_process_trees() -> int:
             reaped += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
             continue
+    return reaped
 
+
+async def reap_terminated_process_trees() -> int:
+    """Kill orphaned descendants of subprocesses that have already terminated.
+
+    Walks each recorded terminated-subprocess descendant snapshot and, for any
+    descendant PID that is still alive, is still the SAME process (its start
+    time matches the snapshot within ``_START_TIME_TOLERANCE_SECONDS``, so a
+    recycled pid is never signalled) AND no longer has a live ancestor inside
+    our own server process, sends SIGTERM (then SIGKILL on stragglers).
+
+    This is process hygiene only — it operates exclusively on the recorded
+    descendants of subprocesses that have already exited, so it can never kill
+    a live session. Returns the number of orphans reaped.
+
+    The registry and pool are read on the event loop; the psutil work (process
+    table reads plus up to 2 s of ``wait_procs``) runs in a worker thread so it
+    never stalls other sessions.
+
+    Safe no-op if psutil is unavailable or there is nothing to reap.
+    """
+    if not _terminated_trees:
+        return 0
+    # Every recorded tree is consumed by this pass, reaped or not.
+    trees = list(_terminated_trees.items())
+    _terminated_trees.clear()
+    live_subprocess_pids = _live_subprocess_pids()
+
+    reaped = await asyncio.to_thread(_reap_trees, trees, live_subprocess_pids)
     if reaped:
         logger.warning(
             f"[Pool] Reaped {reaped} orphaned descendant process(es) of "
@@ -1073,10 +1119,9 @@ class SessionPool:
             # sub-agent. Evicting any of these would disconnect the pooled
             # adapter out from under live work: a streaming turn, a backgrounded
             # sub-agent whose parent turn already returned (parked), or — the
-            # idle-reader case — the CLI-wake grace window, where the reader
-            # legitimately holds the client with zero running background work
-            # while it waits for the CLI's delayed wake turn (evicting mid-wait
-            # kills the wake). Snapshot the items so a mutation from
+            # drain-reader case — a wedged client the reader keeps until its
+            # background work resolves, then evicts itself while settling the
+            # draining turn. Snapshot the items so a mutation from
             # concurrently-scheduled code (remove/remove_broken/evict_dead run
             # WITHOUT this lock) can never raise "dictionary changed size during
             # iteration".
@@ -1255,11 +1300,13 @@ class SessionPool:
             return None
         state.is_connected = False
         pid = subprocess_pid(state)
-        # Snapshot while the parent is still alive — orphans are undiscoverable
-        # after it exits.
-        descendants = snapshot_descendants(pid)
 
         async def _teardown() -> None:
+            # Snapshot while the parent is still alive (the disconnect below is
+            # what ends it) — orphans are undiscoverable after it exits.
+            # psutil's recursive children() scans the whole process table, so
+            # it runs off the loop.
+            descendants = await asyncio.to_thread(snapshot_descendants, pid)
             try:
                 await graceful_disconnect(state.adapter, session_id)
             finally:
@@ -1358,9 +1405,9 @@ class SessionPool:
     def _is_busy(self, session_id: str, state: SessionState) -> bool:
         """True when live work forbids evicting this session.
 
-        Streaming turns, the between-turns idle reader (which holds the client
-        through the CLI-wake grace window while looking idle to
-        ``is_streaming``), in-flight background sub-agents / backgrounded
+        Streaming turns, the drain reader (which holds a wedged client until
+        its background work resolves while looking idle to ``is_streaming``,
+        then evicts it itself), in-flight background sub-agents / backgrounded
         shells, an enqueued-but-unstarted wake, and a turn blocked on a user
         question all mean "disconnecting would kill running work". This guard is
         checked BEFORE any deadline arithmetic and is never overridden by the

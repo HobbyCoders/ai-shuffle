@@ -322,12 +322,14 @@ async def settle_killed_worker(worker_session_id: str, reason: str) -> None:
 def _purge_park_gate_residue(parent_session_id: str, record: WorkerRecord) -> None:
     """Drop this worker's ids from the CUMULATIVE park-gate launch sets.
 
-    THE trap that makes a naive teardown silently do nothing: the park gate in
-    ``SessionRuntime._finalize`` reads the background-launch set
-    (``task_registry.get_background_launches``), which is NEVER reset per turn
-    and is cleared only by ``task_registry.clear_session``. A teardown that
-    merely flips running tasks terminal leaves that set populated, so the turn
-    can park anyway — and so can every turn after it.
+    The park gate in ``SessionRuntime._finalize`` reads
+    ``task_registry.has_unresolved_background_launches``: a launch id stops
+    counting once a registry record with that ``tool_use_id`` is non-running,
+    so the teardown's ``complete_task`` resolves the launch id its record carries.
+    The launch set itself is cleared only by ``task_registry.clear_session``,
+    so any of this worker's ids that never got a terminal record would keep the
+    gate armed and buy a spurious park (which the turn-start self-heal later
+    settles). Discarding them here removes that residue.
 
     Strictly surgical: only THIS worker's ids are discarded, so an ordinary
     CLI-native subagent's launch id — whose parking is a deliberate feature —
