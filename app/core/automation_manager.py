@@ -584,6 +584,16 @@ class AutomationManager:
 
         # Concurrency check — only one run at a time per automation
         async with self._lock:
+            # Shutdown has begun: the scheduler kick is already suppressed,
+            # so a run minted now would wait out its timeout (or be cancelled
+            # mid-wait, leaving its row ``running``) while its queued turn ran
+            # unwatched on the next boot. A webhook or connector event that
+            # lands in that window starts nothing.
+            from app.core import startup
+
+            if self._shutting_down or getattr(startup, "is_shutting_down", False):
+                logger.info(f"Automation {automation_id}: shutting down — run not started")
+                return
             if automation_id in self._running:
                 logger.warning(f"Automation {automation_id} already running — skipping")
                 return

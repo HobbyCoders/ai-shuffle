@@ -352,6 +352,10 @@ async def conversation(
             profile_id=profile_id,
             project_id=project_id,
             overrides=overrides,
+            # The runtime runs a queued turn as the key on its payload (as the
+            # socket and resume paths do); without it the key's turn ran with
+            # the owner's credentials, tools and notes.
+            payload={"api_user_id": api_user["id"]} if api_user.get("id") else None,
         )
 
         # Block until the whole queue drains — a hand-off (failover retry,
