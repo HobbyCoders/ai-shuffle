@@ -55,10 +55,13 @@ services:
     pids_limit: 8192
 
     # Optional: lets the code-mode sandbox around agents' Python code start. The
-    # trade: Docker's default seccomp and AppArmor filters are off for the whole
-    # container. See "The code-mode sandbox" in the install guide.
+    # trade: Docker's default seccomp and AppArmor filters and its /proc masking
+    # are off for the whole container. See "The code-mode sandbox" in the
+    # install guide.
     # security_opt:
     #   - seccomp=unconfined
+    #   # Lets the sandbox mount its own /proc:
+    #   - systempaths=unconfined
     #   # Only on hosts that use AppArmor, such as Ubuntu and Debian:
     #   - apparmor=unconfined
 
@@ -295,7 +298,7 @@ Agents on the Fluid harness (every model except the Claude Code CLI, outside cha
 
 On Linux, AI Shuffle can run that process inside bubblewrap: no network, none of the host's files except the Python runtime, a private `/tmp` and its own process list. The image includes bubblewrap, but Docker's default security profile does not let the container create the user namespaces it needs. The kernel then runs without the sandbox, and the log says why once: `code-mode OS sandbox unavailable, kernel child runs without it`.
 
-To use the sandbox, allow the container to create user namespaces, then run `docker compose up -d`:
+To use the sandbox, allow the container to create user namespaces and to mount its own `/proc`, then run `docker compose up -d`:
 
 ```yaml
 services:
@@ -303,11 +306,13 @@ services:
     # (keep the lines already there)
     security_opt:
       - seccomp=unconfined
+      # Lets the sandbox mount its own /proc:
+      - systempaths=unconfined
       # Only on hosts that use AppArmor, such as Ubuntu and Debian:
       - apparmor=unconfined
 ```
 
-These lines turn off Docker's default seccomp and AppArmor filters for the whole container, so weigh that against what the sandbox adds. A custom seccomp profile that allows `unshare`, `clone` with namespace flags and `mount` works as well. The host must also allow unprivileged user namespaces; Ubuntu 24.04 and later restrict them through AppArmor.
+These lines turn off Docker's default seccomp and AppArmor filters for the whole container, so weigh that against what the sandbox adds. `systempaths=unconfined` also removes Docker's masking of the container's `/proc` (it normally hides entries such as `/proc/kcore` and makes `/proc/sys` read-only). The sandbox needs it because the kernel refuses a fresh `/proc` mount while those masks are in place; without it the log line ends with `Can't mount proc on /newroot/proc` and names the option. A custom seccomp profile that allows `unshare`, `clone` with namespace flags and `mount` can replace `seccomp=unconfined`, but not `systempaths=unconfined`. The host must also allow unprivileged user namespaces; Ubuntu 24.04 and later restrict them through AppArmor.
 
 `CODE_MODE_OS_SANDBOX` chooses how the sandbox is used. Set it under `environment:` in `compose.yaml` (a line in `.env` alone does not reach the container):
 

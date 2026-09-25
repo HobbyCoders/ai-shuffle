@@ -36,10 +36,13 @@ services:
     pids_limit: 8192
 
     # Optional: lets the code-mode sandbox around agents' Python code start. The
-    # trade: Docker's default seccomp and AppArmor filters are off for the whole
-    # container. See "The code-mode sandbox" in the install guide.
+    # trade: Docker's default seccomp and AppArmor filters and its /proc masking
+    # are off for the whole container. See "The code-mode sandbox" in the
+    # install guide.
     # security_opt:
     #   - seccomp=unconfined
+    #   # Lets the sandbox mount its own /proc:
+    #   - systempaths=unconfined
     #   # Only on hosts that use AppArmor, such as Ubuntu and Debian:
     #   - apparmor=unconfined
 

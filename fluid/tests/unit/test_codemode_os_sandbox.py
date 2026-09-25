@@ -294,6 +294,203 @@ def test_death_note_maps_bwrap_signal_exit_codes() -> None:
     assert "status 137" in k._death_note(_Proc())
 
 
+# ─── bwrap failures: the /proc mount hint, runtime refusals ─────────────────
+
+_ENOSPC = (
+    "bwrap: Creating new namespace failed: nesting depth or "
+    "/proc/sys/user/max_*_namespaces exceeded (ENOSPC)"
+)
+_PROC_REFUSED = "bwrap: Can't mount proc on /newroot/proc: Operation not permitted"
+
+
+def _fake_bwrap(tmp_path: Path, monkeypatch, *, selftest_ok: bool, message: str) -> Path:
+    """A ``bwrap`` first on PATH. ``--help`` advertises ``--disable-userns``;
+    the self-test's probe (the only call with ``-c``) prints ``ok`` when
+    ``selftest_ok``; every other call prints ``message`` and exits 1, which is
+    what bwrap does when it refuses to set the sandbox up. Each call is logged.
+    """
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    log = tmp_path / "bwrap.log"
+    probe = 'echo ok; exit 0' if selftest_ok else f'echo "{message}" >&2; exit 1'
+    script = bindir / "bwrap"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "--help" ]; then echo "  --disable-userns"; exit 0; fi\n'
+        'for a in "$@"; do if [ "$a" = "-c" ]; then\n'
+        f'  echo probe >> "{log}"; {probe}\n'
+        "fi; done\n"
+        f'echo spawn >> "{log}"\n'
+        f'echo "{message}" >&2\n'
+        "exit 1\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(os_sandbox.sys, "platform", "linux")
+    return log
+
+
+def _calls(log: Path) -> list[str]:
+    return log.read_text().split() if log.exists() else []
+
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="shell-script fake bwrap")
+
+
+@posix_only
+def test_proc_mount_refusal_names_the_missing_docker_option(tmp_path, monkeypatch) -> None:
+    """R10-7: Docker's masked /proc paths make bwrap's fresh procfs mount fail
+    even with seccomp and AppArmor unconfined; the reason must say which
+    option is still missing."""
+    _fake_bwrap(tmp_path, monkeypatch, selftest_ok=False, message=_PROC_REFUSED)
+    result = os_sandbox.self_test(sys.executable)
+    assert not result.ok
+    assert "Can't mount proc" in result.reason
+    assert "systempaths=unconfined" in result.reason
+    with pytest.raises(os_sandbox.OsSandboxUnavailable) as err:
+        os_sandbox.plan_spawn(
+            "required", python=sys.executable, runner=sk._RUNNER, base_env={},
+        )
+    assert "systempaths=unconfined" in str(err.value)
+
+
+def test_other_selftest_failures_get_no_proc_hint() -> None:
+    assert os_sandbox.explain("bwrap: No permissions to create new namespace") == (
+        "bwrap: No permissions to create new namespace"
+    )
+
+
+def test_failed_selftest_is_retried_after_its_ttl(monkeypatch) -> None:
+    """A failure is not cached for the life of the process: a host fixed
+    while AI Shuffle runs is noticed on a later spawn."""
+    results = iter([
+        os_sandbox.SelfTest(False, "bwrap: No permissions to create new namespace"),
+        os_sandbox.SelfTest(True),
+    ])
+    monkeypatch.setattr(os_sandbox, "_supports_disable_userns", lambda b: False)
+    monkeypatch.setattr(os_sandbox, "_probe_once", lambda b, p, d: next(results))
+    clock = [1000.0]
+    monkeypatch.setattr(os_sandbox.time, "monotonic", lambda: clock[0])
+    assert not os_sandbox.self_test(sys.executable, "/fake/bwrap").ok
+    clock[0] += os_sandbox._FAILURE_TTL - 1
+    assert not os_sandbox.self_test(sys.executable, "/fake/bwrap").ok  # cached
+    clock[0] += 2
+    assert os_sandbox.self_test(sys.executable, "/fake/bwrap").ok  # probed again
+
+
+@posix_only
+async def test_auto_falls_back_when_bwrap_refuses_a_spawn_after_a_passing_selftest(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="fluid.codemode.os_sandbox")
+    log = _fake_bwrap(tmp_path, monkeypatch, selftest_ok=True, message=_ENOSPC)
+    k = SubprocessKernel(KernelConfig(os_sandbox="auto"))
+    await k.start()
+    try:
+        assert not k.sandboxed and "ENOSPC" in k.sandbox_note
+        r = await k.exec("40 + 2", timeout=10, on_host_call=_no_tools)
+        assert r.error is None and r.value_repr == "42"
+        assert _calls(log) == ["probe", "spawn"]
+        # The passing self-test was dropped: the next spawn probes again
+        # (lazily, not per cell) and, bwrap still refusing, falls back again.
+        await k._restart()
+        assert not k.sandboxed and _calls(log) == ["probe", "spawn", "probe", "spawn"]
+        r = await k.exec("1 + 1", timeout=10, on_host_call=_no_tools)
+        assert r.error is None and r.value_repr == "2"
+    finally:
+        await k.stop()
+    lines = [x for x in caplog.records if "OS sandbox unavailable" in x.getMessage()]
+    assert len(lines) == 1 and "ENOSPC" in lines[0].getMessage()
+
+
+@posix_only
+async def test_required_fails_the_cell_with_bwraps_reason_when_a_spawn_is_refused(
+    tmp_path, monkeypatch,
+) -> None:
+    _fake_bwrap(tmp_path, monkeypatch, selftest_ok=True, message=_ENOSPC)
+    k = SubprocessKernel(KernelConfig(os_sandbox="required"))
+    await k.start()  # does not raise: the refusal belongs to the cell
+    try:
+        assert k._proc is None and "ENOSPC" in k.refusal
+        r = await k.exec("1 + 1", timeout=10, on_host_call=_no_tools)
+        assert r.error is not None
+        assert "code_mode_os_sandbox=required" in r.error and "ENOSPC" in r.error
+    finally:
+        await k.stop()
+
+
+@posix_only
+async def test_sandboxed_child_dying_for_its_own_reason_is_not_a_bwrap_refusal(
+    tmp_path, monkeypatch,
+) -> None:
+    _fake_bwrap(tmp_path, monkeypatch, selftest_ok=True, message="Fatal Python error: init")
+    k = SubprocessKernel(KernelConfig(os_sandbox="auto"))
+    with pytest.raises(RuntimeError) as err:
+        await k.start()
+    assert "Fatal Python error" in str(err.value)  # the child's stderr, not a bare EOF
+    await k.stop()
+
+
+# ─── R10-8: a sandbox refusal is never a skill verdict ──────────────────────
+
+_ADDER = (
+    '"""Add two numbers."""\n'
+    "def add(a, b):\n"
+    "    return a + b\n"
+    "def _selftest():\n"
+    "    assert add(2, 3) == 5\n"
+)
+
+
+async def test_required_without_sandbox_does_not_mark_skills_broken(tmp_path, monkeypatch) -> None:
+    from fluid.codemode.skills import SkillStore
+    from fluid.codemode.verify import verify_store
+
+    monkeypatch.setattr(os_sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(os_sandbox, "self_test", _fail)
+    store = SkillStore(tmp_path / "skills")
+    store.save("adder", _ADDER)
+    with pytest.raises(os_sandbox.OsSandboxUnavailable):
+        await verify_store(store, config=KernelConfig(os_sandbox="required"))
+    skill = store.get("adder")
+    assert skill is not None and skill.broken is None
+    assert store.needs_verification("adder")  # still owed a real verdict
+
+    # The host is fixed (or the operator picks another mode): the skill is
+    # verified on the next pass and becomes mountable, with no source edit.
+    assert await verify_store(store, config=KernelConfig(os_sandbox="off")) == {"adder": None}
+    assert not store.needs_verification("adder")
+    assert store.get("adder").broken is None
+
+
+def test_a_recorded_sandbox_refusal_is_ignored_and_reverified(tmp_path) -> None:
+    """Stores poisoned before the fix recover: the refusal is not treated as
+    the skill's failure, the skill is verified again, and a refusal handed to
+    ``mark_verified`` is never recorded."""
+    from fluid.codemode.skills import SkillStore
+
+    store = SkillStore(tmp_path / "skills")
+    store.save("adder", _ADDER)
+    refusal = (
+        "code_mode_os_sandbox=required, but the bubblewrap sandbox is "
+        "unavailable on this host (bwrap: No permissions); the code-mode "
+        "kernel was not started."
+    )
+    meta = store._load_meta()
+    meta.setdefault("skills", {}).setdefault("adder", {})
+    meta["skills"]["adder"].update(
+        verified_mtime=store._mtime_ns("adder"), broken=refusal,
+    )
+    store._save_meta(meta)
+    assert store.get("adder").broken is None
+    assert store.needs_verification("adder")
+
+    store.mark_verified("adder")
+    assert not store.needs_verification("adder")
+    store.mark_verified("adder", refusal)  # not a verdict: ignored
+    assert store._load_meta()["skills"]["adder"].get("broken") is None
+
+
 # ─── integration: the real kernel under bwrap ────────────────────────────────
 
 
@@ -556,3 +753,44 @@ async def test_sandboxed_child_env_is_minimal(monkeypatch) -> None:
         assert r.value_repr == "['LANG', 'PATH', 'PWD', 'TMPDIR']"
     finally:
         await k.stop()
+
+
+_MASKED_PROC_PROBE = r"""
+import sys
+sys.path.insert(0, sys.argv[1])
+from fluid.codemode import os_sandbox
+result = os_sandbox.self_test(sys.executable)
+print("RESULT", result.ok, result.reason)
+"""
+
+
+def _in_masked_proc_container(mask: bool):
+    """Run the real self-test in a new user+mount+pid namespace with a fresh
+    /proc, the way a container sees it, optionally with a path of that /proc
+    over-mounted like Docker's masked paths (``/proc/kcore`` -> /dev/null)."""
+    import subprocess
+
+    fluid_root = str(Path(os_sandbox.__file__).resolve().parents[2])
+    masking = "mount --bind /dev/null /proc/kcore && " if mask else ""
+    out = subprocess.run(
+        ["unshare", "-Urmpf", "--mount-proc", "sh", "-c",
+         f'{masking}exec "$0" -I -c "$1" "$2"',
+         sys.executable, _MASKED_PROC_PROBE, fluid_root],
+        capture_output=True, text=True, timeout=60,
+    )
+    line = next((ln for ln in out.stdout.splitlines() if ln.startswith("RESULT ")), None)
+    if line is None:
+        pytest.skip(f"cannot simulate a container here: {out.stderr.strip()[-200:]}")
+    return line
+
+
+@needs_bwrap
+@pytest.mark.skipif(shutil.which("unshare") is None, reason="unshare is not on PATH")
+def test_real_bwrap_under_dockers_masked_proc_names_systempaths() -> None:
+    """R10-7, against the real bwrap: a fresh /proc passes, and one path of
+    /proc masked (what Docker does even with seccomp and AppArmor
+    unconfined) fails the self-test with the option that lifts it."""
+    assert _in_masked_proc_container(mask=False).startswith("RESULT True")
+    masked = _in_masked_proc_container(mask=True)
+    assert masked.startswith("RESULT False"), masked
+    assert "Can't mount proc" in masked and "systempaths=unconfined" in masked

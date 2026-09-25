@@ -16,7 +16,10 @@ Verification runs at two moments:
   ones are excluded from the kernel mount and flagged in ``list_tools``.
 
 Verdicts are cached in the store's meta by file mtime, so an unchanged skill
-is verified once, not per session.
+is verified once, not per session. A kernel that cannot run at all
+(``code_mode_os_sandbox=required`` on a host without the sandbox) is a host
+condition, not a verdict: nothing is recorded, and the skills stay stale until
+a pass whose kernel starts.
 
 A mount pays at most ``MOUNT_VERIFY_BUDGET`` seconds of verification: skills
 not reached inside it stay unverified (and unmounted) until the next mount,
@@ -29,6 +32,7 @@ from __future__ import annotations
 import time
 
 from fluid.codemode.kernel import HostReply
+from fluid.codemode.os_sandbox import OsSandboxUnavailable
 from fluid.codemode.skills import SkillStore
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 
@@ -70,6 +74,11 @@ async def verify_sources(
     With a ``budget`` (seconds for the whole call) each skill gets the
     smaller of ``timeout`` and what is left, and skills the budget never
     reaches are absent from the result rather than failed.
+
+    Raises :class:`OsSandboxUnavailable` when the kernel cannot start (the
+    ``required`` sandbox is unavailable): no skill was run, so none has a
+    verdict. A kernel that goes down that way mid-pass ends the pass; the
+    skill it was on and the rest are left out, as if the budget ran out.
     """
     targets = list(sources) if names is None else [n for n in names if n in sources]
     if not targets:
@@ -77,6 +86,8 @@ async def verify_sources(
     deadline = None if budget is None else time.monotonic() + budget
     kernel = SubprocessKernel(config or KernelConfig())
     await kernel.start()
+    if kernel.refusal:
+        raise OsSandboxUnavailable(kernel.refusal)
     results: dict[str, str | None] = {}
     try:
         await kernel.set_vfs({}, sources)
@@ -94,6 +105,8 @@ async def verify_sources(
                 "    _st()\n"
             )
             result = await kernel.exec(code, timeout=slice_timeout, on_host_call=_no_tools)
+            if kernel.refusal:
+                break  # the host lost the sandbox; not this skill's fault
             results[name] = _summarize(result.error)
     finally:
         await kernel.stop()

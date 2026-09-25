@@ -46,8 +46,13 @@ Operator setting: ``code_mode_os_sandbox`` (env ``CODE_MODE_OS_SANDBOX``)
 ``off``
     Never use the sandbox (the pre-sandbox behaviour).
 
-The self-test runs once per host process (per bwrap/python pair) and is
-cached. It fails, and ``auto`` falls back, when: ``bwrap`` is not installed;
+The self-test runs once per host process (per bwrap/python pair) and a pass is
+cached; a failure is cached for ``_FAILURE_TTL`` seconds only, so a host fixed
+while the process runs is noticed without a restart. A spawn that bwrap itself
+refuses after a passing self-test (its ``bwrap:`` message and exit status 1
+before the child starts, e.g. user-namespace exhaustion) drops the cached pass;
+``auto`` logs it and starts that kernel unsandboxed, ``required`` refuses with
+bwrap's reason. The self-test fails, and ``auto`` falls back, when: ``bwrap`` is not installed;
 unprivileged user namespaces are disabled (``kernel.unprivileged_userns_clone
 =0``, ``user.max_user_namespaces=0``); AppArmor restricts them (Ubuntu 24.04+
 ``kernel.apparmor_restrict_unprivileged_userns=1`` without a bwrap profile);
@@ -58,8 +63,12 @@ Docker: the image installs ``bubblewrap``, but the container must also be
 allowed to create user namespaces — for example
 ``--security-opt seccomp=unconfined --security-opt apparmor=unconfined``, or a
 custom seccomp profile permitting ``unshare``/``clone`` with namespace flags
-and ``mount`` — and the host must have unprivileged user namespaces enabled.
-Otherwise ``auto`` falls back (with the log line) and ``required`` refuses.
+and ``mount`` — and to mount a fresh procfs, which the kernel refuses while
+Docker's masked and read-only ``/proc`` paths are mounted over the container's
+own ``/proc`` (``bwrap: Can't mount proc on /newroot/proc: Operation not
+permitted``): ``--security-opt systempaths=unconfined`` removes them. The host
+must have unprivileged user namespaces enabled. Otherwise ``auto`` falls back
+(with the log line) and ``required`` refuses.
 
 Stdlib-only; imported host-side by ``subprocess_kernel``.
 """
@@ -72,6 +81,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
@@ -96,6 +106,22 @@ _NETWORK_FILES = (
 )
 
 _SELFTEST_TIMEOUT = 15.0
+# Seconds a failed self-test is trusted before the next spawn probes again.
+_FAILURE_TTL = 60.0
+
+# bwrap prefixes every message of its own with this; a sandboxed child that
+# exits 1 with it before the runner starts was refused by bwrap, not the cell.
+BWRAP_ERROR_PREFIX = "bwrap:"
+
+# bwrap's error when the fresh procfs mount is refused. Under Docker that is
+# the container's masked/read-only /proc paths (``mount_too_revealing``); the
+# seccomp/AppArmor options alone do not lift it.
+_PROC_MOUNT_ERROR = "Can't mount proc"
+PROC_MOUNT_HINT = (
+    "the container's masked /proc paths block a fresh /proc mount; under "
+    "Docker also add --security-opt systempaths=unconfined (compose: "
+    "security_opt: - systempaths=unconfined)"
+)
 
 # Run inside the sandbox by the self-test. It must print ``ok`` and exit 0; it
 # fails loudly if a socket can reach off-box, a host file outside the binds is
@@ -125,8 +151,17 @@ print("ok")
 """
 
 
+# Every ``required`` refusal starts with this; the skill store recognises it
+# so a refusal is never recorded as a skill's verification failure.
+REQUIRED_REFUSAL_MARK = "code_mode_os_sandbox=required, but"
+
+
 class OsSandboxUnavailable(RuntimeError):
-    """``required`` mode and the sandbox cannot be used on this host."""
+    """``required`` mode and the sandbox cannot be used on this host.
+
+    An infrastructure condition, never a verdict on the code the kernel was
+    about to run.
+    """
 
 
 def normalize_mode(value: object) -> str:
@@ -273,7 +308,8 @@ class SelfTest:
     disable_userns: bool = True
 
 
-_cache: dict[tuple[str, str], SelfTest] = {}
+# (bwrap, python) -> (result, monotonic time it was taken)
+_cache: dict[tuple[str, str], tuple[SelfTest, float]] = {}
 _cache_lock = threading.Lock()
 
 
@@ -331,11 +367,23 @@ def _probe_once(bwrap: str, python: str, disable_userns: bool) -> SelfTest:
         return SelfTest(True, "", disable_userns)
     detail = (out.stderr or out.stdout).strip().splitlines()
     tail = " | ".join(line.strip() for line in detail[-3:]) or f"exit status {out.returncode}"
-    return SelfTest(False, tail, disable_userns)
+    return SelfTest(False, explain(tail), disable_userns)
+
+
+def explain(reason: str) -> str:
+    """``reason`` plus the missing container option when bwrap names one."""
+    if _PROC_MOUNT_ERROR in reason and PROC_MOUNT_HINT not in reason:
+        return f"{reason} ({PROC_MOUNT_HINT})"
+    return reason
 
 
 def self_test(python: str, bwrap: str | None = None) -> SelfTest:
-    """Whether the sandbox works here, cached for the life of the process."""
+    """Whether the sandbox works here.
+
+    A pass is cached for the life of the process (until :func:`invalidate`);
+    a failure for ``_FAILURE_TTL`` seconds, since its cause (namespace
+    exhaustion, a timeout under load, a host setting) can go away.
+    """
     bwrap = bwrap or find_bwrap()
     if not bwrap:
         return SelfTest(False, "bwrap (bubblewrap) is not installed or not on PATH")
@@ -343,7 +391,9 @@ def self_test(python: str, bwrap: str | None = None) -> SelfTest:
     with _cache_lock:
         cached = _cache.get(key)
         if cached is not None:
-            return cached
+            result, taken = cached
+            if result.ok or time.monotonic() - taken < _FAILURE_TTL:
+                return result
         if any(_too_broad(r) for r in python_roots(python)):
             result = SelfTest(False, "the Python installation prefix is / or a home directory; binding it would expose the host")
         else:
@@ -355,8 +405,17 @@ def self_test(python: str, bwrap: str | None = None) -> SelfTest:
                 retry = _probe_once(bwrap, python, False)
                 if retry.ok:
                     result = retry
-        _cache[key] = result
+        _cache[key] = (result, time.monotonic())
         return result
+
+
+def invalidate(python: str, bwrap: str | None = None) -> None:
+    """Drop the cached self-test for this pair; the next spawn probes again."""
+    bwrap = bwrap or find_bwrap()
+    if not bwrap:
+        return
+    with _cache_lock:
+        _cache.pop((bwrap, os.path.realpath(python)), None)
 
 
 def reset_cache() -> None:
@@ -389,6 +448,47 @@ def _warn_once(reason: str) -> None:
     )
 
 
+def _required_refusal(reason: str) -> OsSandboxUnavailable:
+    return OsSandboxUnavailable(
+        f"{REQUIRED_REFUSAL_MARK} the bubblewrap sandbox is "
+        f"unavailable on this host ({reason}); the code-mode "
+        "kernel was not started. Install bubblewrap and allow "
+        "unprivileged user namespaces, or set code_mode_os_sandbox "
+        "to auto/off."
+    )
+
+
+def is_bwrap_refusal(returncode: int | None, stderr: str) -> bool:
+    """Whether a sandboxed child that died before its first frame was refused
+    by bwrap itself (exit status 1 and bwrap's own message prefix)."""
+    if returncode != 1:
+        return False
+    first = next((ln.strip() for ln in stderr.splitlines() if ln.strip()), "")
+    return first.startswith(BWRAP_ERROR_PREFIX)
+
+
+def plan_after_refusal(
+    mode: str,
+    *,
+    python: str,
+    runner: str,
+    base_env: Mapping[str, str],
+    reason: str,
+) -> SpawnPlan:
+    """The plain plan to use after bwrap refused a spawn the self-test passed.
+
+    The cached self-test is dropped either way, so the next spawn probes
+    again. ``auto`` logs the reason once and returns the unsandboxed plan;
+    ``required`` raises :class:`OsSandboxUnavailable` with it.
+    """
+    invalidate(python)
+    reason = explain(reason)
+    if normalize_mode(mode) == "required":
+        raise _required_refusal(reason)
+    _warn_once(reason)
+    return SpawnPlan([python, "-I", "-S", runner], dict(base_env), False, reason)
+
+
 def plan_spawn(
     mode: str,
     *,
@@ -411,7 +511,7 @@ def plan_spawn(
     if mode == "off" or sys.platform != "linux":
         if mode == "required":
             raise OsSandboxUnavailable(
-                "code_mode_os_sandbox=required, but the bubblewrap sandbox is "
+                f"{REQUIRED_REFUSAL_MARK} the bubblewrap sandbox is "
                 "Linux-only; the code-mode kernel was not started"
             )
         return SpawnPlan(plain, dict(base_env), False, "disabled")
@@ -420,13 +520,7 @@ def plan_spawn(
     result = (tester or self_test)(python)
     if not result.ok:
         if mode == "required":
-            raise OsSandboxUnavailable(
-                "code_mode_os_sandbox=required, but the bubblewrap sandbox is "
-                f"unavailable on this host ({result.reason}); the code-mode "
-                "kernel was not started. Install bubblewrap and allow "
-                "unprivileged user namespaces, or set code_mode_os_sandbox "
-                "to auto/off."
-            )
+            raise _required_refusal(result.reason)
         _warn_once(result.reason)
         return SpawnPlan(plain, dict(base_env), False, result.reason)
     runner_dir = os.path.dirname(os.path.abspath(runner))
