@@ -260,6 +260,14 @@ class HostBridge:
                         ),
                     )
 
+        # The call is allowed, whatever decided it; observers hear of it
+        # before it runs, as on the JSON path.
+        if self._hooks is not None:
+            await self._hooks.tool_allowed({
+                "session_id": self._ctx.session_id, "name": tool_name,
+                "input": tool_input, "tool_use_id": tool_use_id,
+            })
+
         outcome = await self._registry.dispatch(
             tool_name, tool_input, self._ctx, raw_shell_output=True,
         )

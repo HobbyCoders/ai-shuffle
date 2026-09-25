@@ -4497,6 +4497,15 @@ class NativeLoop(BackgroundLifecycleMixin):
                     input=input,
                 )
 
+        # Every allow path (a hook's allow, a rule or mode, a remembered
+        # allow_always, a prompt answer) arrives here: observers hear of it
+        # before the tool runs.
+        if self.hooks is not None:
+            await self.hooks.tool_allowed({
+                "session_id": sid, "name": name, "input": input,
+                "tool_use_id": tool_use_id,
+            })
+
         # run_python is engine-driven: it opens the kernel; the kernel's in-sandbox
         # tool calls are gated by HostBridge (see CodeModeSession.run_python),
         # which runs its own MRTR round-trip through this loop's

@@ -2158,11 +2158,10 @@ async def _stream_to_websocket_impl(
                 # enforce the granted state themselves, so we never prompt per click.
                 if tool_name.startswith("mcp__computer-use__"):
                     if tool_name == "mcp__computer-use__request_access":
-                        from app.mcp.computer_use import access as _cu_access
+                        # An allow here is recorded for the tool when fluid's
+                        # gate lets the call through (HarnessAdapter.
+                        # _on_tool_allowed), not here, so it counts once.
                         if _perm_mode == "bypassPermissions":
-                            # The tool spends this record; a call nobody
-                            # allowed finds none and is refused.
-                            _cu_access.approve_request(_sid)
                             return PermissionResultAllow()
                         apps = tool_input.get("apps") or []
                         reason = tool_input.get("reason") or ""
@@ -2187,7 +2186,6 @@ async def _stream_to_websocket_impl(
                             return PermissionResultDeny(message="Computer-use access deferred by user")
                         if getattr(result, "behavior", None) == "deny":
                             return result
-                        _cu_access.approve_request(_sid)
                         return PermissionResultAllow()
                     # All other computer-use actions: access is gated by request_access.
                     return PermissionResultAllow()

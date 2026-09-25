@@ -470,8 +470,9 @@ def create_computer_use_server(
     )
     async def request_access(args: dict) -> dict:
         # The runtime's allow decision is a server-side record, not an
-        # assumption: the permission callback (or the headless auto-approver)
-        # records one per allowed call; bypass mode is itself the decision.
+        # assumption: fluid's gate reports each allowed call (prompt, hook,
+        # rule or mode) and the adapter records one per call; bypass mode is
+        # itself the decision.
         approved = access.consume_request_approval(session_id) or _bypass_mode()
         if is_stopped(session_id):
             return _err("Computer-use was stopped. Start a new turn to request access again.")

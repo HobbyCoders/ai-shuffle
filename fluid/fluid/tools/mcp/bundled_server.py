@@ -238,6 +238,14 @@ async def _gate_call(
             deny_message = non_interactive_denial(name)
         if verdict == "deny":
             return ToolOutcome(text=deny_message or "permission denied", is_error=True)
+    if hooks is not None:
+        # The CLI only calls a tool it allowed (its own rules, hooks and
+        # prompts) and this gate let it through: observers hear of it
+        # before it runs, as on the native loop.
+        await hooks.tool_allowed({
+            "session_id": ctx.session_id, "name": name, "input": args,
+            "tool_use_id": None,
+        })
     outcome = await registry.dispatch(name, args, ctx)
     if hooks is not None:
         decision = await hooks.emit(

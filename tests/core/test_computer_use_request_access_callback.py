@@ -1,10 +1,11 @@
-"""The WS permission callback records its request_access allow decision.
+"""The WS permission callback decides request_access but records nothing.
 
 ``mcp__computer-use__request_access`` grants only on a server-side record of
-an allow decision (see ``app.mcp.computer_use.access``). The callback is where
-the prompt is answered, so both of its allow legs — the prompt approved, and
-bypass mode — must leave that record, keyed by the same app session id the
-computer-use server is built with; a denial must not.
+an allow decision (see ``app.mcp.computer_use.access``). That record is made
+once, when fluid's gate lets the allowed call through (HarnessAdapter
+``_on_tool_allowed``), whatever allowed it. The callback answers the prompt —
+approved, denied, or bypass mode without a prompt — and must not record one
+itself, or an allowed call would leave a second, unspent approval behind.
 """
 
 from contextlib import ExitStack
@@ -45,27 +46,28 @@ def _clean():
     access.revoke(SID)
 
 
-@pytest.mark.parametrize("answer,recorded", [
+@pytest.mark.parametrize("answer,allowed", [
     (PermissionResultAllow(), True),
     (PermissionResultDeny(message="no"), False),
 ])
-async def test_prompt_answer_decides_the_record(tmp_path, answer, recorded):
+async def test_prompt_answer_decides_without_recording(tmp_path, answer, allowed):
     callback = await _callback(tmp_path, "default")
     with patch("app.core.provider_agent_approvals.route_permission",
                new=AsyncMock(return_value=answer)):
-        await callback(TOOL, {"apps": ["Notepad"], "reason": "r"},
-                       SimpleNamespace(tool_use_id="t", agent_id=None))
-    assert access.consume_request_approval(SID) is recorded
+        result = await callback(TOOL, {"apps": ["Notepad"], "reason": "r"},
+                                SimpleNamespace(tool_use_id="t", agent_id=None))
+    assert (type(result).__name__ == "PermissionResultAllow") is allowed
+    assert not access.consume_request_approval(SID)
 
 
-async def test_bypass_mode_records_without_prompting(tmp_path):
+async def test_bypass_mode_allows_without_prompting_or_recording(tmp_path):
     callback = await _callback(tmp_path, "bypassPermissions")
     prompt = AsyncMock(side_effect=AssertionError("bypass must not prompt"))
     with patch("app.core.provider_agent_approvals.route_permission", new=prompt):
         result = await callback(TOOL, {"apps": ["Notepad"]},
                                 SimpleNamespace(tool_use_id="t", agent_id=None))
     assert type(result).__name__ == "PermissionResultAllow"
-    assert access.consume_request_approval(SID)
+    assert not access.consume_request_approval(SID)
 
 
 async def test_other_computer_use_actions_record_nothing(tmp_path):

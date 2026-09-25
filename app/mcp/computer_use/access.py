@@ -4,8 +4,10 @@ Mirrors the official computer-use ``request_access`` model: the agent must be
 granted access (the user approves which apps + extra capabilities) before it can
 control the screen. The actual approval prompt is driven by permission mode in
 the query callback (see query_engine ``can_use_tool_callback``); this module
-records each allow decision for request_access (``approve_request``, spent by
-the tool) and what was granted, keyed by session, so the tools can enforce it.
+records each allow decision for request_access (``approve_request``, called
+when fluid's gate lets the call through — HarnessAdapter ``_on_tool_allowed`` —
+and spent by the tool) and what was granted, keyed by session, so the tools
+can enforce it.
 
 Approval policy by permission mode (decided in the callback, not here):
 - bypassPermissions -> implicit access, no request needed

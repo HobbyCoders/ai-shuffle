@@ -291,6 +291,11 @@ class HarnessAdapter(ProviderAdapter):
         # registered on it keeps observing across the reconnects that rebuild
         # the engine.
         self._hooks: HookBus = HookBus()
+        # Every call a fluid gate lets through, whatever allowed it (a prompt
+        # answer, a hook's allow, a rule, a mode, a remembered allow), is
+        # reported here before it runs; computer-use request_access records
+        # its one-shot approval from it (_on_tool_allowed).
+        self._hooks.on_tool_allowed(self._on_tool_allowed)
         # The app's Agent SDK hooks (``options.hooks``: DB hooks, plugin
         # hooks.json scripts, the Stop handler) on their own bus, rebuilt at
         # every connect. One dispatcher per event on ``self._hooks`` runs it
@@ -1816,10 +1821,6 @@ class HarnessAdapter(ProviderAdapter):
                 "[HarnessAdapter] denying %s: no interactive approver on this path",
                 ev.name,
             )
-        elif self._permission_tool_name(ev.name) == "mcp__computer-use__request_access":
-            # The tool refuses a call no decision was recorded for.
-            from app.mcp.computer_use import access
-            access.approve_request(self._resolve_app_session_id())
         try:
             await self.respond_to_permission(
                 ev.tool_use_id, allow, message=None if allow else _NO_APPROVER_DENIAL,
@@ -1829,6 +1830,22 @@ class HarnessAdapter(ProviderAdapter):
                 "[HarnessAdapter] failed to submit permission decision for %s",
                 ev.tool_use_id, exc_info=True,
             )
+
+    async def _on_tool_allowed(self, payload: Dict[str, Any]) -> None:
+        """Record the one-shot approval computer-use request_access spends.
+
+        Fluid reports every call its gates let through just before dispatch,
+        so this is the one place an allow is recorded, whichever path decided
+        it; the permission callback records nothing itself, so no allow is
+        counted twice. A denied or undecided call never reaches here.
+        """
+        name = self._permission_tool_name(str(payload.get("name") or ""))
+        if name != "mcp__computer-use__request_access":
+            return
+        from app.mcp.computer_use import access
+
+        # The fallback leg of the id lookup is a blocking DB read.
+        access.approve_request(await asyncio.to_thread(self._resolve_app_session_id))
 
     def _permission_tool_name(self, name: str) -> str:
         """Resolve a bundled CLI alias only through this engine's registry.
