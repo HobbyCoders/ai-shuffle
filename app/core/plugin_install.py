@@ -6,6 +6,8 @@ Provides standalone functions that operate on a PluginService instance.
 
 import json
 import logging
+import os
+import re
 import shutil
 import stat
 import subprocess
@@ -22,6 +24,44 @@ from app.core.plugin_models import (
 logger = logging.getLogger(__name__)
 
 
+def _safe_path_component(value: Any, what: str) -> str:
+    """Return ``value`` if it is safe as ONE path segment, else raise ValueError.
+
+    Plugin names and versions come from marketplace.json / plugin.json, which a
+    third-party repo controls, and are joined onto cache and project paths that
+    are then deleted and written. A separator or a ``.``/``..`` segment would
+    point those operations outside the plugin directory.
+    """
+    if not isinstance(value, str) or value in ("", ".", "..") or any(
+        c in value for c in ("/", "\\", "\0")
+    ):
+        raise ValueError(f"Invalid plugin {what}: {str(value)[:100]!r}")
+    return value
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """True iff ``path`` resolves to ``root`` or somewhere beneath it."""
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _prune_escaping_symlinks(root: Path) -> None:
+    """Delete symlinks under ``root`` whose target resolves outside ``root``.
+
+    A cloned repo may carry links such as ``skills/x/SKILL.md -> ~/.ssh/id_rsa``;
+    left in place, skill discovery and the plugin APIs would read the target.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            entry = Path(dirpath) / name
+            if entry.is_symlink() and not _is_within(entry, root):
+                logger.warning("Removing plugin symlink that points outside the plugin: %s", entry)
+                entry.unlink()
+
+
 def _find_plugin_in_manifest(svc, marketplace_id: str, plugin_name: str) -> Optional[Dict[str, Any]]:
     """Find a plugin entry in a marketplace's marketplace.json."""
     marketplaces = svc._read_json_file(svc.MARKETPLACES_FILE, {})
@@ -34,8 +74,9 @@ def _find_plugin_in_manifest(svc, marketplace_id: str, plugin_name: str) -> Opti
     if not manifest:
         return None
 
-    for entry in manifest.get("plugins", []):
-        if entry.get("name") == plugin_name:
+    plugins = manifest.get("plugins") if isinstance(manifest, dict) else None
+    for entry in plugins if isinstance(plugins, list) else []:
+        if isinstance(entry, dict) and entry.get("name") == plugin_name:
             return entry
     return None
 
@@ -65,11 +106,13 @@ def _clone_plugin_source(svc, source: Dict[str, Any], dest: Path) -> None:
 
     if not clone_url:
         raise ValueError("Plugin source URL is empty")
+    _check_clone_url(clone_url)
 
     cmd = ["git", "clone", "--depth", "1"]
     if ref:
         cmd.extend(["--branch", ref])
-    cmd.extend([clone_url, str(dest)])
+    # "--" so a URL can never be read as a git option (e.g. --upload-pack=...).
+    cmd.extend(["--", clone_url, str(dest)])
 
     result = subprocess.run(
         cmd,
@@ -79,6 +122,52 @@ def _clone_plugin_source(svc, source: Dict[str, Any], dest: Path) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to clone plugin: {result.stderr.strip()}")
+    _checkout_pinned_sha(dest, source.get("sha"))
+    _prune_escaping_symlinks(dest)
+
+
+# Transports a marketplace entry may clone from. Anything else (file://, a bare
+# local path, ext::, an option-looking string) is refused: the URL comes from a
+# third-party marketplace.json.
+_ALLOWED_CLONE_URL_PREFIXES = ("https://", "http://", "ssh://", "git@")
+
+
+def _check_clone_url(url: Any) -> None:
+    if not isinstance(url, str) or not url.startswith(_ALLOWED_CLONE_URL_PREFIXES):
+        raise ValueError(f"Unsupported plugin source URL: {str(url)[:100]!r}")
+
+
+def _checkout_pinned_sha(repo_dir: Path, sha: Any) -> None:
+    """Make ``repo_dir`` hold the commit a marketplace entry pins, or raise.
+
+    ``git clone --depth 1`` fetches the tip of the branch, which has usually
+    moved past the entry's ``sha``. Fetch and check out the pinned commit, then
+    verify HEAD, so the installed files are the ones the marketplace pinned.
+    """
+    if not sha:
+        return
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{7,64}", sha):
+        raise ValueError(f"Invalid pinned plugin sha: {str(sha)[:100]!r}")
+    sha = sha.lower()
+
+    def _head() -> str:
+        r = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return r.stdout.strip().lower() if r.returncode == 0 else ""
+
+    if _head().startswith(sha):
+        return
+    for cmd in (
+        ["git", "-C", str(repo_dir), "fetch", "--depth", "1", "origin", sha],
+        ["git", "-C", str(repo_dir), "checkout", "--detach", "FETCH_HEAD"],
+    ):
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            break
+    if not _head().startswith(sha):
+        raise RuntimeError(f"Plugin source does not match its pinned sha {sha[:12]}")
 
 
 def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> None:
@@ -104,6 +193,7 @@ def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> None:
         url = f"https://github.com/{url}.git"
     elif not url.endswith(".git"):
         url = f"{url}.git"
+    _check_clone_url(url)
 
     import tempfile
     tmp_dir = Path(tempfile.mkdtemp(prefix="plugin-clone-"))
@@ -112,7 +202,7 @@ def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> None:
         cmd = ["git", "clone", "--depth", "1", "--filter=blob:none"]
         if ref:
             cmd.extend(["--branch", ref])
-        cmd.extend([url, str(tmp_dir)])
+        cmd.extend(["--", url, str(tmp_dir)])
 
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=120
@@ -121,10 +211,11 @@ def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> None:
             raise RuntimeError(
                 f"Failed to clone git-subdir repo: {result.stderr.strip()}"
             )
+        _checkout_pinned_sha(tmp_dir, source.get("sha"))
 
-        # Extract the target subdirectory
+        # Extract the target subdirectory (never one outside the clone)
         extracted = tmp_dir / subdir_path.strip("/")
-        if not extracted.exists() or not extracted.is_dir():
+        if not extracted.is_dir() or not _is_within(extracted, tmp_dir):
             raise ValueError(
                 f"Subdirectory '{subdir_path}' not found in cloned repo"
             )
@@ -132,7 +223,7 @@ def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> None:
         # Copy subdirectory to destination
         if dest.exists():
             shutil.rmtree(dest)
-        shutil.copytree(extracted, dest)
+        _copy_tree_resolving_symlinks(extracted, dest, root=tmp_dir)
 
     finally:
         # Clean up the full clone
@@ -151,7 +242,9 @@ def _resolve_plugin_source(svc, source, mp_path: Path, plugin_root: Optional[str
             resolved = mp_path / plugin_root / source.lstrip("./").lstrip(".\\")
         else:
             resolved = mp_path / source.lstrip("./").lstrip(".\\")
-        if resolved.exists() and resolved.is_dir():
+        # The entry and pluginRoot come from marketplace.json: never resolve to
+        # a directory outside the marketplace repo ("./a/../../x", "../..").
+        if resolved.exists() and resolved.is_dir() and _is_within(resolved, mp_path):
             return resolved
     return None
 
@@ -276,7 +369,9 @@ def discover_implicit_components(svc, root: Path) -> Dict[str, Any]:
     }
 
 
-def _copy_tree_resolving_symlinks(src: Path, dst: Path) -> None:
+def _copy_tree_resolving_symlinks(
+    src: Path, dst: Path, root: Optional[Path] = None, _active: Optional[set] = None
+) -> None:
     """Copy `src` into `dst`, materializing symlinks as real files.
 
     Unlike `shutil.copytree(..., symlinks=False, ignore_dangling_symlinks=True)`,
@@ -285,16 +380,33 @@ def _copy_tree_resolving_symlinks(src: Path, dst: Path) -> None:
     raw link target against the current working directory and so wrongly drops valid
     relative symlinks (e.g. remotion's `.claude/skills/x -> ../../.agents/skills/x`).
     Genuinely-broken links are skipped.
+
+    `root` bounds what a symlink may pull in (default: `src`): a link resolving
+    outside it (e.g. `-> ~/.ssh`) is skipped, and a directory link back to one
+    of its own ancestors is skipped instead of recursing forever.
     """
-    dst.mkdir(parents=True, exist_ok=True)
-    for entry in src.iterdir():
-        target = dst / entry.name
-        if entry.is_symlink() and not entry.exists():
-            continue  # genuinely dangling link -- skip
-        if entry.is_dir():  # follows symlinks to directories
-            _copy_tree_resolving_symlinks(entry, target)
-        else:
-            shutil.copy2(entry, target)  # follows symlinks to real files
+    root = root or src
+    active = set() if _active is None else _active
+    real_src = src.resolve()
+    active.add(real_src)
+    try:
+        dst.mkdir(parents=True, exist_ok=True)
+        for entry in src.iterdir():
+            target = dst / entry.name
+            if entry.is_symlink():
+                if not entry.exists():
+                    continue  # genuinely dangling link -- skip
+                if not _is_within(entry, root):
+                    logger.warning("Skipping plugin symlink that points outside the plugin: %s", entry)
+                    continue
+                if entry.is_dir() and entry.resolve() in active:
+                    continue  # link to an ancestor -- would recurse forever
+            if entry.is_dir():  # follows symlinks to directories
+                _copy_tree_resolving_symlinks(entry, target, root, active)
+            else:
+                shutil.copy2(entry, target)  # follows symlinks to real files
+    finally:
+        active.discard(real_src)
 
 
 def _install_implicit_plugin(
@@ -320,7 +432,7 @@ def _install_implicit_plugin(
     for component in IMPLICIT_COMPONENTS:
         src = implicit.get(f"{component}_dir")
         if src:
-            _copy_tree_resolving_symlinks(src, cache_path / component)
+            _copy_tree_resolving_symlinks(src, cache_path / component, root=mp_path)
 
     # Ensure scripts have execute permissions (mirror install_plugin).
     for script in cache_path.rglob("*.sh"):
@@ -372,6 +484,8 @@ def install_plugin(svc, plugin_id: str, scope: str = "user") -> PluginInfo:
         raise ValueError(f"Invalid plugin ID format: {plugin_id}")
 
     plugin_name, marketplace_id = parts
+    _safe_path_component(plugin_name, "name")
+    _safe_path_component(marketplace_id, "marketplace")
 
     # Find the plugin in marketplace
     marketplaces = svc._read_json_file(svc.MARKETPLACES_FILE, {})
@@ -420,27 +534,40 @@ def install_plugin(svc, plugin_id: str, scope: str = "user") -> PluginInfo:
                 version = resolved_version
 
         # Create cache directory and copy plugin
+        _safe_path_component(version, "version")
         cache_path = svc.CACHE_DIR / marketplace_id / plugin_name / version
         cache_path.parent.mkdir(parents=True, exist_ok=True)
 
         if cache_path.exists():
             _force_rmtree(cache_path)
-        shutil.copytree(local_dir, cache_path)
+        _copy_tree_resolving_symlinks(local_dir, cache_path, root=mp_path)
 
     elif isinstance(source, dict):
         # External source - clone from remote
+        _safe_path_component(version, "version")
         cache_path = svc.CACHE_DIR / marketplace_id / plugin_name / version
         cache_path.parent.mkdir(parents=True, exist_ok=True)
 
         if cache_path.exists():
             _force_rmtree(cache_path)
 
-        svc._clone_plugin_source(source, cache_path)
+        try:
+            svc._clone_plugin_source(source, cache_path)
+        except Exception:
+            # Leave no half-fetched (or unverified) files in the cache.
+            if cache_path.exists():
+                _force_rmtree(cache_path)
+            raise
 
         # After cloning, read the plugin's own manifest version -- it's the
         # source of truth (matching Claude Code behaviour).
         cloned_manifest_version = svc._get_plugin_manifest_version(cache_path)
         if cloned_manifest_version and cloned_manifest_version != version:
+            try:
+                _safe_path_component(cloned_manifest_version, "version")
+            except ValueError:
+                _force_rmtree(cache_path)
+                raise
             # Re-cache under the correct manifest version
             new_cache_path = svc.CACHE_DIR / marketplace_id / plugin_name / cloned_manifest_version
             if new_cache_path != cache_path:
@@ -549,9 +676,16 @@ def uninstall_plugin(svc, plugin_id: str) -> bool:
     else:
         installations = installation_data if installation_data else []
 
-    # Remove from filesystem
+    # Remove from filesystem -- only ever inside the plugin cache. A record with
+    # no installPath would otherwise be Path("") == the working directory.
     for install in installations:
-        install_path = Path(install.get("installPath", ""))
+        raw_path = install.get("installPath") if isinstance(install, dict) else None
+        if not raw_path:
+            continue
+        install_path = Path(raw_path)
+        if not _is_within(install_path, svc.CACHE_DIR) or _is_within(svc.CACHE_DIR, install_path):
+            logger.warning("Not deleting plugin files outside the plugin cache: %s", install_path)
+            continue
         if install_path.exists():
             shutil.rmtree(install_path, ignore_errors=True)
 
@@ -592,6 +726,7 @@ def install_plugin_to_project(svc, plugin_id: str, scope: PluginScope = PluginSc
         raise ValueError(f"Invalid plugin ID format: {plugin_id}")
 
     plugin_name, marketplace_id = parts
+    _safe_path_component(plugin_name, "name")
 
     # Find the plugin in marketplace
     marketplaces = svc._read_json_file(svc.MARKETPLACES_FILE, {})
@@ -627,7 +762,7 @@ def install_plugin_to_project(svc, plugin_id: str, scope: PluginScope = PluginSc
         shutil.rmtree(target_path)
 
     if local_dir:
-        shutil.copytree(local_dir, target_path)
+        _copy_tree_resolving_symlinks(local_dir, target_path, root=mp_path)
     elif isinstance(source, dict):
         svc._clone_plugin_source(source, target_path)
     else:
@@ -689,9 +824,11 @@ def uninstall_project_plugin(svc, plugin_id: str) -> bool:
 
     plugin_name, scope_marker = parts
 
-    # Validate plugin_name to prevent path traversal
-    if '/' in plugin_name or '\\' in plugin_name or '..' in plugin_name:
+    # Validate plugin_name to prevent path traversal ("" or "." would name the
+    # whole scope directory).
+    if '..' in plugin_name:
         raise ValueError(f"Invalid plugin name: {plugin_name}")
+    _safe_path_component(plugin_name, "name")
 
     # Determine scope from marker
     if scope_marker == "project-local":

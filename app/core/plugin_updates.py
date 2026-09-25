@@ -5,6 +5,7 @@ Provides standalone functions that operate on a PluginService instance.
 """
 
 import logging
+import re
 import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
@@ -17,6 +18,30 @@ from app.core.plugin_models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# At least one dot, so an all-digit short git hash is never read as a release.
+_RELEASE_VERSION = re.compile(r"v?(\d+(?:\.\d+){1,3})")
+
+
+def _is_update(installed: str, available: str) -> bool:
+    """Whether ``available`` should be offered over ``installed``.
+
+    Plain release versions ("1.2.3", "v2.0") are compared numerically, so a
+    marketplace that lists an older or equal release never "updates" (i.e.
+    downgrades) an install. Anything else (hashes, pre-release tags) cannot be
+    ordered, so any difference counts, as before.
+    """
+    if installed == available:
+        return False
+    a = _RELEASE_VERSION.fullmatch(str(available or ""))
+    i = _RELEASE_VERSION.fullmatch(str(installed or ""))
+    if a and i:
+        def key(m):
+            parts = [int(x) for x in m.group(1).split(".")]
+            return parts + [0] * (4 - len(parts))
+        return key(a) > key(i)
+    return True
 
 
 # ─── Auto-update defaults ─────────────────────────────────────────────────
@@ -210,7 +235,7 @@ def check_for_updates(svc) -> List[PluginUpdateInfo]:
             if not version_from_manifest and installed_version in ("unknown", "1.0.0"):
                 continue
 
-            if installed_version != available_version:
+            if _is_update(installed_version, available_version):
                 updates.append(PluginUpdateInfo(
                     plugin_id=plugin_id,
                     name=plugin_name,
@@ -231,7 +256,7 @@ def check_for_updates(svc) -> List[PluginUpdateInfo]:
 
                 if entry_version:
                     # Explicit version in marketplace entry -- compare directly
-                    if entry_version != installed_version:
+                    if _is_update(installed_version, entry_version):
                         updates.append(PluginUpdateInfo(
                             plugin_id=plugin_id,
                             name=plugin_name,

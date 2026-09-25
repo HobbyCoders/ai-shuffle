@@ -151,6 +151,15 @@ def remove_marketplace(svc, marketplace_id: str) -> bool:
         del installed["plugins"][pid]
     svc._write_json_file(svc.INSTALLED_FILE, installed)
 
+    # Remove those plugins' cached files too (only a direct child of the cache).
+    cache_dir = svc.CACHE_DIR / marketplace_id
+    if (
+        marketplace_id not in ("", ".", "..")
+        and "/" not in marketplace_id and "\\" not in marketplace_id
+        and cache_dir.is_dir() and not cache_dir.is_symlink()
+    ):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
     # Remove from enabled plugins in settings
     settings = svc._read_json_file(svc.SETTINGS_FILE, {})
     enabled = settings.get("enabledPlugins", {})

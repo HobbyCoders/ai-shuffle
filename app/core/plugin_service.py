@@ -217,10 +217,14 @@ class PluginService:
         if not manifest_path.exists():
             return None
         try:
-            return json.loads(manifest_path.read_text(encoding='utf-8'))
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
         except (IOError, json.JSONDecodeError, UnicodeDecodeError):
             logger.warning(f"Failed to parse marketplace.json at {manifest_path}")
             return None
+        if not isinstance(manifest, dict):
+            logger.warning(f"marketplace.json at {manifest_path} is not an object")
+            return None
+        return manifest
 
     def _resolve_plugin_source(self, source, mp_path: Path, plugin_root: Optional[str] = None) -> Optional[Path]:
         """
@@ -357,14 +361,24 @@ class PluginService:
 
             plugin_root = manifest.get("metadata", {}).get("pluginRoot") if isinstance(manifest.get("metadata"), dict) else None
 
-            for entry in manifest.get("plugins", []):
+            entries = manifest.get("plugins")
+            for entry in entries if isinstance(entries, list) else []:
+                # One malformed entry must not take down the whole listing.
+                if not isinstance(entry, dict):
+                    continue
                 plugin_name = entry.get("name")
-                if not plugin_name:
+                if not plugin_name or not isinstance(plugin_name, str):
+                    continue
+                try:
+                    _inst_mod._safe_path_component(plugin_name, "name")
+                except ValueError:
+                    logger.warning(f"Skipping plugin with unsafe name in {mp.id}: {plugin_name[:100]!r}")
                     continue
 
                 plugin_id = f"{plugin_name}@{mp.id}"
                 source = entry.get("source", "")
-                description = entry.get("description", "")[:200]
+                description = entry.get("description")
+                description = description[:200] if isinstance(description, str) else ""
 
                 # Try to resolve to a local directory for component detection
                 local_dir = self._resolve_plugin_source(source, mp_path, plugin_root)
