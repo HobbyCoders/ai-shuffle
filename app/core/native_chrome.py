@@ -19,6 +19,11 @@ Knobs:
 
 If the CDP port is already answered by something else, we do NOT spawn (an
 external browser owns the port); its detail is surfaced via ``get_detail()``.
+
+The browser is started behind the egress proxy (``app.core.browser_egress``):
+``node egress-launch.js --watch-stdin -- <chrome> <flags>``. Closing the
+launcher's stdin stops the browser, which also works on Windows, where a
+terminate cannot be forwarded. Without the launcher the browser is not started.
 """
 
 from __future__ import annotations
@@ -231,6 +236,20 @@ def _launch_args(port: int) -> List[str]:
     ]
 
 
+def _egress_command(exe: str, args: List[str]) -> List[str]:
+    """``exe args`` wrapped in the egress-proxy launcher (raises if unavailable)."""
+    from app.core.browser_egress import launch_command
+
+    return launch_command(exe, args)
+
+
+def _egress_env() -> dict:
+    """Process env plus the app's base SSRF policy for the proxy."""
+    from app.core.browser_egress import egress_env
+
+    return {**os.environ, **egress_env()}
+
+
 async def _supervise(exe: str, port: int) -> None:
     """Background loop: (re)launch the browser; give up after crash-looping."""
     global _proc, _last_detail
@@ -241,10 +260,11 @@ async def _supervise(exe: str, port: int) -> None:
     while not _stopping:
         try:
             _proc = await asyncio.create_subprocess_exec(
-                exe,
-                *_launch_args(port),
+                *_egress_command(exe, _launch_args(port)),
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                env=_egress_env(),
             )
         except Exception as e:
             _last_detail = f"failed to launch native chrome: {e}"
@@ -325,6 +345,14 @@ async def ensure_started() -> None:
         return
 
     try:
+        _egress_command(exe, [])
+    except Exception as e:
+        # Fail closed: never run the browser without its egress proxy.
+        _last_detail = f"browser not started: {e}"
+        logger.warning("native chrome supervisor: %s", _last_detail)
+        return
+
+    try:
         _profile_dir().mkdir(parents=True, exist_ok=True)
     except Exception as e:
         _last_detail = f"could not create chrome profile dir: {e}"
@@ -353,6 +381,20 @@ async def stop() -> None:
 
     proc = _proc
     _proc = None
+    if proc is not None and proc.returncode is None:
+        # End of stdin tells the egress launcher to stop the browser. On
+        # Windows terminate() would kill only the launcher, so give it a moment.
+        stdin = getattr(proc, "stdin", None)
+        if stdin is not None:
+            try:
+                stdin.close()
+            except Exception:
+                pass
+            if sys.platform == "win32":
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except (asyncio.TimeoutError, Exception):
+                    pass
     if proc is not None and proc.returncode is None:
         try:
             proc.terminate()

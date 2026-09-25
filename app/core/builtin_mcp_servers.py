@@ -41,8 +41,11 @@ blocked; private LAN and carrier-grade NAT addresses are refused unless listed i
 BROWSER_SSRF_ALLOW; this app enables loopback by default in every runtime
 (BROWSER_SSRF_ALLOW_LOOPBACK=false disables it), and the worker's own ports and
 the DevTools port stay closed on every internal
-address (BROWSER_SSRF_DENY_PORTS). BROWSER_SSRF_BLOCK/ALLOW configure the policy. Request interception is not a complete network sandbox: WebSocket coverage
-and independent Chromium DNS resolution remain limitations. Separate session pages
+address (BROWSER_SSRF_DENY_PORTS). BROWSER_SSRF_BLOCK/ALLOW configure the policy. The supervised Chromium is
+launched behind browser-mcp's egress proxy (app.core.browser_egress,
+docker/start-chrome.sh), which sees every connection including WebSockets,
+resolves each host once and connects only to the checked address; it enforces
+the app's base policy, so a session-only allow entry does not widen it. Separate session pages
 also share the persistent context's cookies; page ownership is not profile isolation.
 """
 

@@ -84,6 +84,8 @@ export function loopbackGuidance(
   return reason ? `${action} ${cause} (Policy detail: ${reason})` : `${action} ${cause}`;
 }
 
-/** Chromium net errors that mean "nothing answered", i.e. worth one retry. */
+/** Chromium net errors that mean "nothing answered", i.e. worth one retry.
+ * Behind the egress proxy an https/ws target that does not answer is
+ * ERR_TUNNEL_CONNECTION_FAILED and a plain-http one ERR_EMPTY_RESPONSE. */
 export const RETRYABLE_NET_ERRORS =
-  /ERR_CONNECTION_REFUSED|ERR_CONNECTION_RESET|ERR_ADDRESS_UNREACHABLE|ERR_EMPTY_RESPONSE|ERR_CONNECTION_TIMED_OUT|ERR_NAME_NOT_RESOLVED|ERR_BLOCKED_BY_CLIENT|ERR_ABORTED|ERR_FAILED/;
+  /ERR_CONNECTION_REFUSED|ERR_CONNECTION_RESET|ERR_ADDRESS_UNREACHABLE|ERR_EMPTY_RESPONSE|ERR_CONNECTION_TIMED_OUT|ERR_NAME_NOT_RESOLVED|ERR_BLOCKED_BY_CLIENT|ERR_TUNNEL_CONNECTION_FAILED|ERR_ABORTED|ERR_FAILED/;

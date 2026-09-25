@@ -211,6 +211,8 @@ async def test_concurrent_demand_starts_only_one_supervisor(monkeypatch, tmp_pat
     monkeypatch.setattr(nc, "_last_detail", None)
     monkeypatch.setattr(nc, "resolve_chrome_executable", lambda: "fixture-chrome")
     monkeypatch.setattr(nc, "_profile_dir", lambda: tmp_path)
+    monkeypatch.setattr(nc, "_egress_command", lambda exe, args: [exe, *args])
+    monkeypatch.setattr(nc, "_egress_env", lambda: {})
 
     async def probe(port):
         await asyncio.sleep(0)

@@ -33,7 +33,7 @@ export const BROWSER_RESTARTING = "browser_restarting";
 
 /** Schemes we classify. Everything else (file:, data:, about:, blob:) is passed
  * through untouched — they have no network host to guard. WebSocket upgrades are
- * not covered by CDP request interception (a documented gap). */
+ * not seen by CDP request interception; the egress proxy (egress.ts) covers them. */
 const GUARDED_SCHEMES = new Set(["http", "https", "ws", "wss"]);
 
 /** How long a DNS result / negative result is cached. */
@@ -82,13 +82,13 @@ export interface PausedRequest {
  *
  * Fails CLOSED: a guard error blocks the request it was classifying.
  *
- * RESIDUAL TOCTOU / DNS-REBINDING GAP (accepted, see plan open-question #3):
- * Chromium performs its OWN name resolution for the actual socket. Our lookup
- * and Chromium's are two separate resolutions, so a hostile resolver could hand
- * us a public IP and Chromium a private one between the two. A robust fix needs
- * an egress proxy that resolves once and connects to the address it checked;
- * this guard closes the common cases (IP literals, redirects to
- * metadata/loopback, stable rebinds). WebSockets are not intercepted.
+ * NOT THE WHOLE BOUNDARY: this guard never sees WebSocket handshakes, and its
+ * DNS lookup is separate from the one that opens the socket, so a hostile
+ * resolver could answer public here and private there. The supervised browser
+ * is therefore launched behind the egress proxy (egress.ts, egress-launch.ts),
+ * which receives every connection, resolves once and connects only to the
+ * address it checked. This guard remains for per-session policy, redirect-hop
+ * reasons the agent can read, and browsers launched without the proxy.
  */
 export class SsrfGuard {
   private readonly dnsCache = new Map<string, { addrs: string[]; expires: number }>();
@@ -242,8 +242,8 @@ export class SsrfGuard {
 
     const addrs = await this.resolve(host);
     // Unresolvable host: let the request fail naturally in Chromium rather than
-    // manufacturing a block (nothing to protect — the connection cannot form,
-    // unless Chromium's own resolver disagrees: the rebinding gap above).
+    // manufacturing a block. The egress proxy resolves for real and refuses a
+    // name it cannot resolve, so a disagreeing resolver gains nothing.
     if (addrs.length === 0) return { blocked: false };
     for (const addr of addrs) {
       const v = classifyIp(addr, this.policy, port);
