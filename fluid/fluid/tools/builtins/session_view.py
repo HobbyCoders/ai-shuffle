@@ -80,6 +80,19 @@ SPEC = ToolSpec(
 )
 
 
+def _accepts_viewer(slice_fn: Any) -> bool:
+    """True when the host's backend scopes windows to the calling session.
+
+    A multi-user host declares ``viewer_session_id`` on ``session_slice`` and
+    hides sessions the caller may not read; the stock single-user backends
+    take no such argument and are called exactly as before.
+    """
+    try:
+        return "viewer_session_id" in inspect.signature(slice_fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     slice_fn = (ctx.extra or {}).get("session_view")
     if slice_fn is None:
@@ -94,7 +107,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     raw_offset = input.get("offset")
     start = int(raw_offset) if raw_offset is not None else -count
 
-    window = slice_fn(session_id, start=start, count=count)
+    scope = (
+        {"viewer_session_id": ctx.session_id}
+        if _accepts_viewer(slice_fn) else {}
+    )
+    window = slice_fn(session_id, start=start, count=count, **scope)
     if inspect.isawaitable(window):
         window = await window
     if window is None:

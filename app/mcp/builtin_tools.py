@@ -1261,8 +1261,10 @@ def create_builtin_tools_server(
             target the wakeup prompt back at the correct session).
         profile_id: Profile to use when firing scheduled/wake prompts.
         project_id: Project context for worktree and cron tools.
-        is_admin: Whether the caller has admin permissions (gated for
-            destructive operations like CronDelete).
+        is_admin: Whether the caller is the owner (``False`` for an API
+            key's session). The automation tools (Cron*, RemoteTrigger) and
+            the install-wide logs (GetAppErrors, GetAppLogs) have no
+            per-key ownership, so they refuse non-owner sessions.
         model: The current turn's effective model, persisted by ScheduleWakeup
             so the wake replays it instead of running on the profile default.
         provider_id: The current turn's effective model-provider row. ``None``
@@ -1673,6 +1675,8 @@ def create_builtin_tools_server(
         },
     )
     async def cron_create(args: dict) -> dict:
+        if not is_admin:
+            return _err("CronCreate requires an owner session.")
         if not profile_id:
             return _err("CronCreate requires a profile context.")
         name = (args.get("name") or "").strip()
@@ -1720,6 +1724,8 @@ def create_builtin_tools_server(
         {"type": "object", "properties": {}},
     )
     async def cron_list(args: dict) -> dict:
+        if not is_admin:
+            return _err("CronList requires an owner session.")
         try:
             from app.db import automations as auto_db
             rows = await asyncio.to_thread(auto_db.get_all_automations)
@@ -1795,6 +1801,8 @@ def create_builtin_tools_server(
         },
     )
     async def remote_trigger(args: dict) -> dict:
+        if not is_admin:
+            return _err("RemoteTrigger requires an owner session.")
         aid = (args.get("automation_id") or "").strip()
         if not aid:
             return _err("automation_id is required.")
@@ -2290,6 +2298,8 @@ def create_builtin_tools_server(
         },
     )
     async def get_app_errors(args: dict) -> dict:
+        if not is_admin:
+            return _err("GetAppErrors requires an owner session.")
         try:
             from app.db import error_logs
 
@@ -2412,6 +2422,8 @@ def create_builtin_tools_server(
         },
     )
     async def get_app_logs(args: dict) -> dict:
+        if not is_admin:
+            return _err("GetAppLogs requires an owner session.")
         try:
             from app.api.logs import ring_handler
 

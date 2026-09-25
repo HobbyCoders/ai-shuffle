@@ -2322,6 +2322,13 @@ def _run_column_migrations(cursor):
     if table_exists(cursor, "note_attachments") and not column_exists(cursor, "note_attachments", "blob_hash"):
         cursor.execute("ALTER TABLE note_attachments ADD COLUMN blob_hash TEXT")
         migrations_applied.append("note_attachments.blob_hash")
+    # notes.api_user_id: the API key that wrote the note. NULL (every existing
+    # row) is the owner's; an API key reads and changes only its own notes.
+    # Local-only: the network registry does not sync it, so a mirrored note is
+    # the owner's on every peer.
+    if table_exists(cursor, "notes") and not column_exists(cursor, "notes", "api_user_id"):
+        cursor.execute("ALTER TABLE notes ADD COLUMN api_user_id TEXT")
+        migrations_applied.append("notes.api_user_id")
 
     migrations_applied.extend(_retire_claude_accounts(cursor))
 

@@ -28,6 +28,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from psycopg2.extras import Json
 
+from app.core import api_user_scope
 from app.db.async_database import run_sync
 from app.db.base import get_db
 
@@ -379,6 +380,11 @@ def _search_sync(
                 terms,
             )
 
+    # An API key's session recalls only its own sessions; the owner, all.
+    api_user_id = api_user_scope.viewer_api_user_id(exclude_session_id)
+    if api_user_id:
+        visible = api_user_scope.visible_store_ids(acc, api_user_id)
+        acc = {sid: slot for sid, slot in acc.items() if sid in visible}
     hits = [
         SessionSearchHit(
             session_id=sid,
@@ -575,6 +581,7 @@ def _recent_sync(
     limit: int, exclude_session_id: Optional[str], project_id: Optional[str]
 ) -> List[SessionSummary]:
     limit = max(1, min(int(limit), _RECENT_LIMIT_CAP))
+    api_user_id = api_user_scope.viewer_api_user_id(exclude_session_id)
     with get_db() as conn:
         cur = conn.cursor()
         sql = (
@@ -587,6 +594,10 @@ def _recent_sync(
         if project_id is not None:
             sql += " AND project_id = %s"
             params.append(project_id)
+        if api_user_id:
+            # (Workers are hidden, so the column alone is the key's listing.)
+            sql += " AND api_user_id = %s"
+            params.append(api_user_id)
         if exclude_session_id:
             sql += " AND sdk_session_id != %s"
             params.append(exclude_session_id)
@@ -608,7 +619,14 @@ def _recent_sync(
     return out
 
 
-def _slice_sync(session_id: str, start: int, count: int) -> Optional[SessionSlice]:
+def _slice_sync(
+    session_id: str, start: int, count: int, viewer_session_id: Optional[str] = None,
+) -> Optional[SessionSlice]:
+    api_user_id = api_user_scope.viewer_api_user_id(viewer_session_id)
+    if api_user_id and session_id not in api_user_scope.visible_store_ids(
+        [session_id], api_user_id
+    ):
+        return None  # another principal's session reads as unknown
     with get_db() as conn:
         cur = conn.cursor()
         messages = _fluid_recall_rows(cur, session_id)
@@ -873,7 +891,13 @@ class PgFluidStore:
         *,
         start: int = -10,
         count: int = 10,
+        viewer_session_id: Optional[str] = None,
     ) -> Optional[SessionSlice]:
         """SessionView's backend — a message window from whichever transcript
-        store the session wrote (fluid node path, else Claude transcript)."""
-        return await run_sync(_slice_sync, session_id, int(start), int(count))
+        store the session wrote (fluid node path, else Claude transcript).
+
+        ``viewer_session_id`` is the calling session: an API key's session
+        may open only its own sessions (the owner's opens any)."""
+        return await run_sync(
+            _slice_sync, session_id, int(start), int(count), viewer_session_id
+        )

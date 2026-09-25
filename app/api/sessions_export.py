@@ -15,7 +15,9 @@ from app.db.async_database import run_sync
 from app.api.auth import require_admin, require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
 from app.api.sessions_helpers import (
+    api_user_may_use_profile,
     require_session,
+    resolve_api_user_profile,
     SessionImportResponse,
     ImportJSONLRequest,
     ImportJSONLResponse,
@@ -466,11 +468,28 @@ async def import_session(
     # The agent the export names, else this install's first one. The app seeds
     # no agents, so "none configured" is a real state and has to be refused
     # here — sessions.profile_id has a FK to agents.
-    profile_id = await _resolve_import_profile_id(session_data.get('profile_id'))
-
-    # Get API user if applicable
+    # Get API user if applicable. A key imports only into its own scope: a
+    # named agent outside its assigned set is refused (403), and a
+    # project-limited key files the session under its project — another
+    # project named by the export is refused.
     api_user = get_api_user_from_request(request)
     api_user_id = api_user['id'] if api_user else None
+    profile_id = await _resolve_import_profile_id(
+        resolve_api_user_profile(api_user, session_data.get('profile_id'))
+    )
+    if not api_user_may_use_profile(api_user, profile_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"This API key is not allowed to use agent '{profile_id}'.",
+        )
+    project_id = session_data.get('project_id') or None
+    if api_user and api_user.get('project_id'):
+        if project_id and project_id != api_user['project_id']:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this project",
+            )
+        project_id = api_user['project_id']
 
     # Create session in database
     title = session_data.get('title') or 'Imported Session'
@@ -481,7 +500,7 @@ async def import_session(
         database.create_session,
         session_id=new_session_id,
         profile_id=profile_id,
-        project_id=session_data.get('project_id'),
+        project_id=project_id,
         title=title,
         api_user_id=api_user_id
     )
@@ -506,8 +525,8 @@ async def import_session(
 
         # Determine project directory - use /workspace by default
         working_dir = "/workspace"
-        if session_data.get('project_id'):
-            project = await run_sync(database.get_project, session_data['project_id'])
+        if project_id:
+            project = await run_sync(database.get_project, project_id)
             if project:
                 working_dir = get_project_working_dir(project)
 

@@ -1466,6 +1466,10 @@ def _failure_summary(
     return f"{prefix}: {text}"
 
 
+class _WorkerRefused(Exception):
+    """An admission refusal from the dispatch prologue (not a DB failure)."""
+
+
 def _provider_display_name(provider_id: Optional[str]) -> str:
     """A provider row's display NAME for user-facing summaries.
 
@@ -1681,7 +1685,7 @@ async def dispatch_worker(
             ),
         )
 
-    from app.core import provider_agent_supervisor, turn_manager
+    from app.core import api_user_scope, provider_agent_supervisor, turn_manager
     from app.core.provider_agent_feed import WorkerFeed, emit_shielded
     from app.core.task_registry import task_registry
     from app.db import database
@@ -1707,7 +1711,8 @@ async def dispatch_worker(
 
     def _prepare_worker_blocking() -> Tuple[
         Optional[SessionRow], Optional[str], Optional[str], Optional[str],
-        Optional[str], str, Optional[BaseException],
+        Optional[str], str, Optional[BaseException], Optional[str],
+        Optional[str],
     ]:
         """The dispatch prologue's DB work, in ONE thread hop.
 
@@ -1730,6 +1735,10 @@ async def dispatch_worker(
             parent_row = None
 
         project_id = (parent_row or {}).get("project_id")
+        # The worker runs as whoever owns its caller: an API key's worker is
+        # that key's session (its tool surface, credentials and memory), held
+        # to the key's assigned agents — never an owner turn.
+        api_user_id = api_user_scope.session_api_user_id(parent_row)
         # Task snapshots this before admission, including a deliberate None.
         # Direct callers retain the same inheritance without consulting globals.
         selected_effort = (
@@ -1750,10 +1759,18 @@ async def dispatch_worker(
         provider_tag = _provider_display_name(provider_id)
 
         create_error: Optional[BaseException] = None
+        refusal = api_user_scope.worker_refusal(api_user_id, profile_id)
+        if refusal:
+            return (
+                parent_row, project_id, worktree_id, worktree_branch,
+                worktree_path, provider_tag, _WorkerRefused(refusal),
+                selected_effort, api_user_id,
+            )
         try:
             database.create_session(
                 session_id=worker_session_id,
                 profile_id=profile_id,
+                api_user_id=api_user_id,
                 project_id=project_id,
                 project_v2_id=project_v2_id,
                 target_instance_id=target_instance_id,
@@ -1783,6 +1800,7 @@ async def dispatch_worker(
         return (
             parent_row, project_id, worktree_id, worktree_branch,
             worktree_path, provider_tag, create_error, selected_effort,
+            api_user_id,
         )
 
     (
@@ -1794,7 +1812,10 @@ async def dispatch_worker(
         provider_tag,
         create_error,
         selected_effort,
+        api_user_id,
     ) = await run_sync(_prepare_worker_blocking)
+    if isinstance(create_error, _WorkerRefused):
+        return WorkerOutcome(ok=False, session_id="", error=str(create_error))
     if create_error is not None:
         return WorkerOutcome(
             ok=False,
@@ -2000,6 +2021,9 @@ async def dispatch_worker(
             project_id=project_id,
             worktree_id=worktree_id,
             overrides=overrides,
+            # SessionRuntime reads the turn's principal from its payload; with
+            # none it runs an owner turn (is_admin tools, owner credentials).
+            payload={"api_user_id": api_user_id} if api_user_id else None,
         )
 
         # Tail the worker's durable log from here on — its rows only start

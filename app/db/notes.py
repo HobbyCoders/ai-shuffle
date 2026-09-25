@@ -24,6 +24,7 @@ class NoteRow(TypedDict):
     file_path: Optional[str]
     created_at: str
     updated_at: str
+    api_user_id: Optional[str]
 
 
 class NoteAutocomplete(TypedDict):
@@ -72,11 +73,14 @@ def get_all_notes(
     search: Optional[str] = None,
     tag: Optional[str] = None,
     limit: int = 100,
-    offset: int = 0
+    offset: int = 0,
+    api_user_id: Optional[str] = None,
 ) -> List[NoteRow]:
     """
     Get all notes with optional search and tag filtering.
     Notes are ordered by pinned status (pinned first) then by updated_at descending.
+    ``api_user_id`` limits the list to that API key's own notes (``None`` =
+    the owner, who sees every note).
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -84,6 +88,10 @@ def get_all_notes(
         # Build query with filters
         query = "SELECT * FROM notes WHERE 1=1"
         params: List[Any] = []
+
+        if api_user_id:
+            query += " AND api_user_id = %s"
+            params.append(api_user_id)
 
         if search:
             query += " AND (title ILIKE %s OR content ILIKE %s)"
@@ -114,15 +122,16 @@ def create_note(
     content: str = "",
     tags: Optional[List[str]] = None,
     is_pinned: bool = False,
-    file_path: Optional[str] = None
+    file_path: Optional[str] = None,
+    api_user_id: Optional[str] = None,
 ) -> NoteRow:
-    """Create a new note"""
+    """Create a new note (``api_user_id``: the API key writing it; ``None`` = owner)"""
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO notes (id, title, content, tags, is_pinned, file_path, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            """INSERT INTO notes (id, title, content, tags, is_pinned, file_path, created_at, updated_at, api_user_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 note_id,
                 title,
@@ -131,7 +140,8 @@ def create_note(
                 is_pinned,
                 file_path,
                 now,
-                now
+                now,
+                api_user_id,
             )
         )
     return get_note(note_id)
@@ -192,15 +202,18 @@ def delete_note(note_id: str) -> bool:
         return cursor.rowcount > 0
 
 
-def get_all_note_tags() -> List[NoteTagCount]:
+def get_all_note_tags(api_user_id: Optional[str] = None) -> List[NoteTagCount]:
     """
     Get all unique tags used in notes with their counts.
-    Returns list of {name: str, count: int}.
+    Returns list of {name: str, count: int}. ``api_user_id`` counts only that
+    API key's notes (``None`` = the owner: every note).
     """
     with get_db() as conn:
         cursor = conn.cursor()
-        # Get all notes
-        cursor.execute("SELECT tags FROM notes")
+        if api_user_id:
+            cursor.execute("SELECT tags FROM notes WHERE api_user_id = %s", (api_user_id,))
+        else:
+            cursor.execute("SELECT tags FROM notes")
         rows = cursor.fetchall()
 
         # Count tags
@@ -219,11 +232,13 @@ def get_all_note_tags() -> List[NoteTagCount]:
 
 def get_notes_autocomplete(
     search: Optional[str] = None,
-    limit: int = 20
+    limit: int = 20,
+    api_user_id: Optional[str] = None,
 ) -> List[NoteAutocomplete]:
     """
     Get notes for autocomplete in chat.
-    Returns simplified note info with preview.
+    Returns simplified note info with preview. ``api_user_id`` limits it to
+    that API key's own notes (``None`` = the owner: every note).
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -236,6 +251,10 @@ def get_notes_autocomplete(
             "FROM notes WHERE 1=1"
         )
         params: List[Any] = []
+
+        if api_user_id:
+            query += " AND api_user_id = %s"
+            params.append(api_user_id)
 
         if search:
             query += " AND (title ILIKE %s ESCAPE '\\' OR content ILIKE %s ESCAPE '\\')"

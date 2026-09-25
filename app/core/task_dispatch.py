@@ -1446,6 +1446,18 @@ async def dispatch_task_tool(
             }
         result_agent = target.id
 
+    # An API key's session may only start workers on the key's own agents;
+    # dispatch_worker re-checks, this answers before any card is drawn.
+    from app.core import api_user_scope
+
+    scope_error = await asyncio.to_thread(
+        lambda: api_user_scope.worker_refusal(
+            api_user_scope.session_api_user_id(caller_row), str(profile_id)
+        )
+    )
+    if scope_error:
+        return {"ok": False, "error": scope_error}
+
     mode, ignored_mode = _effective_task_mode(
         requested_mode,
         _default_task_mode(declared_tools, str(result_agent)),

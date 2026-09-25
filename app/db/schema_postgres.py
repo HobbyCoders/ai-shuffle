@@ -565,7 +565,8 @@ def create_postgres_schema(cursor) -> None:
             is_pinned BOOLEAN DEFAULT FALSE,
             file_path TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            api_user_id TEXT
         )
     """)
 

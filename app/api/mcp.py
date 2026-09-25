@@ -13,7 +13,7 @@ from typing import List, Optional, Dict, Literal
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
-from app.api.auth import require_auth, require_admin
+from app.api.auth import get_api_user_from_request, require_auth, require_admin
 from app.api.common import validate_project_access, get_project_path_from_dict, api_error_handler
 from app.core.mcp_service import (
     get_mcp_service,
@@ -131,6 +131,42 @@ def _server_to_response(server: McpServerConfig) -> McpServerResponse:
     )
 
 
+_SECRET_MASK = "********"
+
+
+def _is_owner(request: Request) -> bool:
+    """False for an API key or a non-owner paired device.
+
+    Every ``require_auth`` branch stamps ``request.state.is_admin``; only a
+    caller it marked as a non-owner (or an API user) loses the secrets.
+    """
+    if get_api_user_from_request(request) is not None:
+        return False
+    return getattr(request.state, "is_admin", True) is not False
+
+
+def _redacted(response: McpServerResponse) -> McpServerResponse:
+    """A server as a non-owner may see it: env and header VALUES masked (the
+    names stay, so the UI can still say what a server needs) and URL-embedded
+    credentials scrubbed."""
+    from app.core.scrub import scrub_url_credentials
+
+    return response.model_copy(update={
+        "env": {k: _SECRET_MASK for k in response.env} if response.env else response.env,
+        "headers": (
+            {k: _SECRET_MASK for k in response.headers}
+            if response.headers else response.headers
+        ),
+        "url": scrub_url_credentials(response.url) if response.url else response.url,
+    })
+
+
+def _server_view(server: McpServerConfig, request: Request) -> McpServerResponse:
+    """``_server_to_response`` for a read route: secrets only for the owner."""
+    response = _server_to_response(server)
+    return response if _is_owner(request) else _redacted(response)
+
+
 def _create_errors(service, config: McpServerConfig) -> List[str]:
     """Validation errors for a new server: the service rules plus the name length."""
     errors = list(service.validate_server_config(config))
@@ -183,12 +219,16 @@ def _parse_scope(scope_str: str) -> McpScope:
 # ============================================================================
 
 @router.get("/mcp/servers", response_model=List[McpServerResponse])
-async def list_global_mcp_servers(token: str = Depends(require_auth)):
-    """List all globally available MCP servers including builtins"""
+async def list_global_mcp_servers(request: Request, token: str = Depends(require_auth)):
+    """List all globally available MCP servers including builtins.
+
+    Readable by API keys (the web UI's search lists them); secret values are
+    the owner's only.
+    """
     async with api_error_handler("list MCP servers"):
         service = get_mcp_service()
         servers = service.get_all_servers_with_builtins()
-        return [_server_to_response(s) for s in servers]
+        return [_server_view(s, request) for s in servers]
 
 
 @router.post("/mcp/servers", response_model=McpServerResponse, status_code=status.HTTP_201_CREATED)
@@ -346,13 +386,10 @@ async def list_project_mcp_servers(
         service = get_mcp_service(project_path)
         all_servers = service.get_all_servers()
 
-        response = McpServersResponse(
-            builtin=[_server_to_response(s) for s in all_servers.get("builtin", [])],
-            user=[_server_to_response(s) for s in all_servers.get("user", [])],
-            installed=[_server_to_response(s) for s in all_servers.get("installed", [])],
-            local=[_server_to_response(s) for s in all_servers.get("local", [])],
-            project=[_server_to_response(s) for s in all_servers.get("project", [])],
-        )
+        response = McpServersResponse(**{
+            group: [_server_view(s, http_request) for s in all_servers.get(group, [])]
+            for group in ("builtin", "user", "installed", "local", "project")
+        })
         response.total_count = (
             len(response.builtin) + len(response.user) + len(response.installed)
             + len(response.local) + len(response.project)

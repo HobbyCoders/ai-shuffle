@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from app.api.auth import require_auth
+from app.api.auth import require_admin
 from app.core.team_registry import team_registry
 from app.db import database
 
@@ -44,15 +44,12 @@ class TeamPublic(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _verify_session_access(session_id: str, token: str) -> None:
-    """Ensure the authenticated caller owns (or has access to) the session."""
+    """404 for an unknown session. Both routes are owner-only
+    (``require_admin``): the team registry records no per-key ownership, so
+    an API key never reaches another principal's teammates through them."""
     session = database.get_session(session_id)
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-    # Auth check mirrors the lightweight policy used elsewhere in the app:
-    # if a user is scoped to a session it must match. Multi-user access
-    # control lives in the session table itself — we defer to its existence
-    # rather than re-implementing ownership here.
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +57,7 @@ def _verify_session_access(session_id: str, token: str) -> None:
 # ---------------------------------------------------------------------------
 
 @router.get("/{session_id}", response_model=List[TeamPublic])
-async def list_teams(session_id: str, token: str = Depends(require_auth)) -> List[TeamPublic]:
+async def list_teams(session_id: str, token: str = Depends(require_admin)) -> List[TeamPublic]:
     """List all teams currently tracked for a parent session."""
     _verify_session_access(session_id, token)
     teams = await team_registry.list_teams(session_id)
@@ -72,7 +69,7 @@ async def kill_teammate(
     session_id: str,
     team_name: str,
     teammate_name: str,
-    token: str = Depends(require_auth),
+    token: str = Depends(require_admin),
 ) -> Dict[str, Any]:
     """SIGTERM a teammate subprocess and mark it killed.
 

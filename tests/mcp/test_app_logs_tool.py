@@ -30,7 +30,7 @@ def _handlers(session_id="session-logs"):
         return real_create(name=name, version=version, tools=tools)
 
     with patch.object(sdk, "create_tool_server", side_effect=_spy):
-        builtin_tools.create_builtin_tools_server(session_id=session_id)
+        builtin_tools.create_builtin_tools_server(session_id=session_id, is_admin=True)
 
     return {tool.name: tool for tool in captured["tools"]}
 

@@ -578,6 +578,16 @@ def create_session(
     now = datetime.now(timezone.utc).isoformat()
     target_instance_id = (target_instance_id or "").strip() or None
     project_v2_id = (project_v2_id or "").strip() or None
+    project_id = project_id or None
+    if api_user_id and project_id is None and project_v2_id is None:
+        # A project-limited API key never owns a projectless session (its cwd
+        # would be the workspace root holding every project): file it under
+        # the key's project, exactly as the REST create routes do. Every
+        # create path — chat WebSocket, REST, workers — goes through here.
+        from app.db.api_users import get_api_user
+        _api_user = get_api_user(api_user_id)
+        if _api_user and _api_user.get("project_id"):
+            project_id = _api_user["project_id"]
     instance_id = target_instance_id or settings.effective_instance_id
     # Per-session provider binding: resolve the profile's
     # configured provider ONCE, at creation, and stamp it into
