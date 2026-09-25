@@ -122,7 +122,6 @@ from app.core.provider.events import (
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.journal import ToolJournal
 from fluid.codemode.session import CodeModeSession
-from fluid.codemode.skills import SkillStore, project_key_for
 from fluid.codemode.subprocess_kernel import KernelConfig
 from fluid.context.compaction import CompactionConfig
 from fluid.engine.native import NativeLoop
@@ -149,7 +148,7 @@ from fluid.providers.openai_responses.client import (
 )
 from fluid.providers.openrouter.client import OpenRouterClient
 from fluid.providers._retry import RetryPolicy
-from fluid.store.base import MemoryStore
+from fluid.store.base import MemoryStore  # noqa: F401 — re-exported for tests/conftest.py
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
 if TYPE_CHECKING:  # pragma: no cover — annotation-only; the DB import below is
@@ -212,6 +211,14 @@ class HarnessAdapter(ProviderAdapter):
         self._registry: Optional[ToolRegistry] = None
         self._connected: bool = False
         self._options: Optional[SessionOptions] = None
+        # The SDK-shaped options this adapter was connected with. The session
+        # pool keeps the same object as ``SessionState.connect_options``, and a
+        # reused client's turn compares its permission mode against it to
+        # decide whether to call ``set_permission_mode``. So every applied mode
+        # change is written back here: left at the connect-time value, a switch
+        # Ask -> Bypass -> Ask would compare the final Ask against the original
+        # Ask, skip the call, and leave the engine in Bypass.
+        self._sdk_options: Optional[Any] = None
         self._sdk_session_id: Optional[str] = None
         # Fluid turn source for the next send_query/send_resume; see
         # set_turn_source. Reset to "user" after each submit.
@@ -1075,6 +1082,7 @@ class HarnessAdapter(ProviderAdapter):
         # _bridge_permission). Without it, the delegated leg answers prompts
         # from the permission mode (_answer_without_approver).
         self._can_use_tool = getattr(sdk_options, "can_use_tool", None)
+        self._sdk_options = sdk_options
         await self.connect(opts)
         await self.prepare_background_completions(
             getattr(sdk_options, "aih_background_task_completions", None)
@@ -1830,10 +1838,13 @@ class HarnessAdapter(ProviderAdapter):
         return self._can_use_tool is not None
 
     async def _answer_without_approver(self, ev: PermissionRequestEvent) -> None:
-        """Decide a delegated prompt from the session's permission mode: Ask
-        denies with the reason, the modes that approve on their own allow."""
-        mode = (self._options.permission_mode if self._options else None) or "default"
-        allow = mode not in ("default", "plan")
+        """Decide a delegated prompt from the session's permission mode, by the
+        rule a watched session follows (``mode_approves_without_prompt``): Ask
+        denies with the reason, and so does every mode short of Bypass for the
+        computer-use access request; everything else is allowed."""
+        allow = mode_approves_without_prompt(
+            self.permission_mode, self._permission_tool_name(ev.name),
+        )
         if not allow:
             logger.info(
                 "[HarnessAdapter] denying %s: no interactive approver on this path",
@@ -2072,6 +2083,7 @@ class HarnessAdapter(ProviderAdapter):
             self._engine.model = model
 
     async def set_permission_mode(self, mode: str) -> None:
+        requested = mode
         mode = effective_permission_mode(mode, delegated=self._is_delegated)
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
@@ -2085,6 +2097,17 @@ class HarnessAdapter(ProviderAdapter):
                 perms.approval_policy = policy
         if self._options is not None:
             self._options.permission_mode = mode
+        if self._sdk_options is not None:
+            # The mode as the caller asked for it (before ``auto`` -> Ask on a
+            # native leg), since that is what its next turn compares against.
+            # See ``_sdk_options`` in ``__init__``.
+            try:
+                self._sdk_options.permission_mode = requested
+            except Exception:  # noqa: BLE001 — a frozen options object
+                logger.warning(
+                    "[HarnessAdapter] could not record permission mode %s on the "
+                    "connect options", requested, exc_info=True,
+                )
 
     async def get_context_usage(self) -> Optional[Dict[str, Any]]:
         """Context-window usage by category, or None when unavailable.
