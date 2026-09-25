@@ -2,7 +2,10 @@
 Project Agent Service - Manages file-based agents in project directories.
 
 This service discovers, creates, updates, and deletes agent .md files
-in a project's .claude/agents/ directory.
+in a project's .fluid/agents/ directory, where Fluid's agent discovery
+(``fluid.context.agents.discover_agents``) finds them for both the native and
+the delegated leg. Fluid never reads ``.claude/agents``; legacy definitions
+there are migrated by the settings import (Claude project agents).
 
 Agent files use YAML frontmatter for metadata:
 ---
@@ -67,7 +70,7 @@ class ProjectAgentService:
     """
     Service for managing file-based agents in project directories.
 
-    Agents are stored as .md files in <project>/.claude/agents/ with
+    Agents are stored as .md files in <project>/.fluid/agents/ with
     YAML frontmatter for metadata and markdown content for the system prompt.
     """
 
@@ -79,7 +82,7 @@ class ProjectAgentService:
             project_path: Path to the project directory
         """
         self.project_path = project_path
-        self.agents_dir = project_path / ".claude" / "agents"
+        self.agents_dir = project_path / ".fluid" / "agents"
 
     def _ensure_agents_dir(self) -> Path:
         """Ensure the agents directory exists"""
@@ -196,7 +199,7 @@ class ProjectAgentService:
 
     def get_agents(self) -> List[ProjectAgent]:
         """
-        Discover all agents in the project's .claude/agents/ directory.
+        Discover all agents in the project's .fluid/agents/ directory.
 
         Returns:
             List of ProjectAgent objects
@@ -460,19 +463,18 @@ class ProjectAgentService:
 
 class UserAgentService(ProjectAgentService):
     """
-    Discovers user-global file-based agents in ~/.claude/agents/.
+    Discovers user-global file-based agents in ~/.fluid/agents/.
 
-    These agents are auto-loaded by the Claude Agent SDK at runtime whenever a
-    profile's ``setting_sources`` includes ``"user"`` (the default), but they
-    were never surfaced in the app's autocomplete. This service exposes them
-    for discovery, reusing all of ``ProjectAgentService``'s parsing/CRUD logic
-    but rooted at the user-global Claude config dir instead of a project's
-    ``.claude`` directory.
+    Fluid loads these at runtime whenever a profile's ``setting_sources``
+    includes ``"user"`` (the default). This service exposes them for
+    discovery, reusing all of ``ProjectAgentService``'s parsing/CRUD logic but
+    rooted at the user-global Fluid dir instead of a project's ``.fluid``
+    directory.
     """
 
     def __init__(self, claude_dir: Path):
         # Intentionally bypass ProjectAgentService.__init__ (which appends
-        # ".claude/agents"); user-global agents live directly under
+        # ".fluid/agents"); user-global agents live directly under
         # <claude_dir>/agents.
         self.project_path = claude_dir
         self.agents_dir = claude_dir / "agents"
@@ -504,10 +506,10 @@ def get_project_agent_service(project_path: Path) -> ProjectAgentService:
 
 def get_user_agent_service() -> UserAgentService:
     """
-    Get the cached user-global agent service that scans ~/.claude/agents/.
+    Get the cached user-global agent service that scans ~/.fluid/agents/.
 
     The directory is resolved per deployment mode (Docker uses the appuser
-    home), so this mirrors what the SDK loads via ``setting_sources: ["user"]``.
+    home), so this mirrors what Fluid loads via ``setting_sources: ["user"]``.
     """
     global _user_agent_service
 

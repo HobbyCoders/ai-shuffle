@@ -1,7 +1,7 @@
 """
 Project agents API routes - manages file-based agents in project directories.
 
-Agents are stored as .md files in <project>/.claude/agents/ with YAML frontmatter.
+Agents are stored as .md files in <project>/.fluid/agents/ with YAML frontmatter.
 """
 
 from typing import List, Optional
@@ -107,7 +107,7 @@ async def list_project_agents(
     token: str = Depends(require_auth)
 ):
     """
-    List all agents in the project's .claude/agents/ directory.
+    List all agents in the project's .fluid/agents/ directory.
 
     Returns agent metadata without full prompt content.
     """
@@ -153,7 +153,7 @@ async def create_project_agent(
     token: str = Depends(require_auth)
 ):
     """
-    Create a new agent in the project's .claude/agents/ directory.
+    Create a new agent in the project's .fluid/agents/ directory.
 
     Creates a .md file with YAML frontmatter for metadata.
     """
