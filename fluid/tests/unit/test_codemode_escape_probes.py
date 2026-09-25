@@ -369,6 +369,80 @@ async def test_core_denials_still_block_direct_escapes(tmp_path) -> None:
         await k.stop()
 
 
+# ─── R11-1: a denied C callable as a thread's direct target ──────────────────
+#
+# ``_thread.start_new_thread(os.system, ...)`` runs ``os.system`` on a thread
+# with no Python frame at all. The hook used to return (allow) when it found no
+# caller frame, before looking at the armed latch or the thread. The cell
+# captures the thread's unraisable error through ``sys.unraisablehook``.
+
+_THREAD_PRELUDE = (
+    "import json, time\n"
+    f"imp = {_REAL_IMPORT}\n"
+    "th = imp('_thread'); osm = imp('os'); sysm = imp('sys')\n"
+    "box = []\n"
+    "sysm.unraisablehook = lambda u: box.append(repr(u.exc_value))\n"
+)
+
+
+@pytest.mark.parametrize("target", ["system", "open"])
+async def test_r11_1_denied_builtin_as_thread_target_is_blocked(tmp_path, target) -> None:
+    marker = tmp_path / "direct"
+    call = (
+        f"th.start_new_thread(osm.system, ('touch {marker}',))\n"
+        if target == "system"
+        else f"th.start_new_thread(imp('_io').open, ('{marker}', 'w'))\n"
+    )
+    k = SubprocessKernel(KernelConfig(os_sandbox="off"))
+    await k.start()
+    try:
+        r = await k.exec(
+            _THREAD_PRELUDE + call
+            + "for _ in range(40):\n"
+            "    if box: break\n"
+            "    time.sleep(0.05)\n"
+            "box",
+            timeout=8, on_host_call=_no_tools,
+        )
+        assert r.error is None, r.error
+        assert "is blocked in the code-mode kernel" in r.value_repr, r.value_repr
+        assert not marker.exists(), "denied builtin ran as a thread target"
+        alive = await k.exec("1 + 1", timeout=5, on_host_call=_no_tools)
+        assert alive.error is None and alive.value_repr == "2"
+    finally:
+        await k.stop()
+
+
+async def test_r11_1_python_thread_target_calling_denied_builtin_is_blocked(tmp_path) -> None:
+    marker = tmp_path / "pythread"
+    k = SubprocessKernel(KernelConfig(os_sandbox="off"))
+    await k.start()
+    try:
+        r = await k.exec(
+            _THREAD_PRELUDE
+            + "done = []\n"
+            "def worker():\n"
+            "    try:\n"
+            f"        osm.system('touch {marker}')\n"
+            "    except BaseException as e:\n"
+            "        box.append(repr(e))\n"
+            "    done.append(1)\n"
+            "th.start_new_thread(worker, ())\n"
+            "for _ in range(40):\n"
+            "    if done: break\n"
+            "    time.sleep(0.05)\n"
+            "box",
+            timeout=8, on_host_call=_no_tools,
+        )
+        assert r.error is None, r.error
+        assert "os.system is blocked" in r.value_repr, r.value_repr
+        assert not marker.exists()
+        alive = await k.exec("1 + 1", timeout=5, on_host_call=_no_tools)
+        assert alive.error is None and alive.value_repr == "2"
+    finally:
+        await k.stop()
+
+
 # ─── legitimate cells must keep working under the hardened guard ──────────────
 
 
@@ -459,3 +533,81 @@ async def test_legit_checkpoint_restore_roundtrips_data() -> None:
         assert r2.error is None and r2.value_repr == "([1, 2, 3], 45)"
     finally:
         await k.stop()
+
+
+# ─── R11-2: save_skill never blesses a skill whose self-test did not run ─────
+
+_BROKEN_SELFTEST = (
+    '"""Add one, with a self-test that fails."""\n'
+    "def adder(x):\n"
+    "    return x + 1\n"
+    "def _selftest():\n"
+    "    assert adder(1) == 999\n"
+)
+_GOOD_SELFTEST = (
+    '"""Add one."""\n'
+    "def adder(x):\n"
+    "    return x + 1\n"
+    "def _selftest():\n"
+    "    assert adder(1) == 2\n"
+)
+
+
+@pytest.mark.parametrize("how", ["sandbox_refused", "kernel_lost_mid_pass"])
+@pytest.mark.parametrize(
+    "source, mounts",
+    [(_BROKEN_SELFTEST, False), (_GOOD_SELFTEST, True)],
+    ids=["failing_selftest", "passing_selftest"],
+)
+async def test_r11_2_skill_saved_without_sandbox_is_verified_on_next_mount(
+    tmp_path, monkeypatch, how, source, mounts,
+) -> None:
+    from fluid.codemode import os_sandbox
+    from fluid.codemode import session as session_mod
+    from fluid.codemode.session import CodeModeSession, register_code_mode_tools
+    from fluid.codemode.skills import SkillStore
+    from fluid.tools.registry import ToolRegistry
+
+    if how == "sandbox_refused":
+        # ``required`` on a host whose bubblewrap self-test fails: the real
+        # verification kernel refuses to start and verify_sources raises.
+        monkeypatch.setattr(os_sandbox.sys, "platform", "linux")
+        monkeypatch.setattr(
+            os_sandbox, "self_test",
+            lambda _python: os_sandbox.SelfTest(False, "bwrap: No permissions"),
+        )
+    else:
+        # The sandbox went away after the kernel started: the pass ends
+        # before the skill ran and its name is absent from the verdicts.
+        async def _no_verdict(*_a, **_k):
+            return {}
+
+        monkeypatch.setattr(session_mod, "verify_sources", _no_verdict)
+
+    store = SkillStore(tmp_path / "skills")
+    registry = ToolRegistry()
+    session = CodeModeSession(
+        registry, skills=store, config=KernelConfig(os_sandbox="required"),
+    )
+    register_code_mode_tools(registry, session)
+    try:
+        out = await registry.dispatch("save_skill", {"name": "adder", "source": source})
+        assert not out.is_error, out.text
+        assert "NOT verified" in out.text and "saved and verified" not in out.text
+        assert store.get("adder") is not None
+        assert store.needs_verification("adder"), "recorded verified without a self-test"
+
+        # The host is fixed: the next mount runs the self-test for real.
+        monkeypatch.undo()
+        monkeypatch.setenv("CODE_MODE_OS_SANDBOX", "off")
+        session._config = KernelConfig(os_sandbox="off")
+        mounted = await session._mountable_skills()
+        assert ("adder" in mounted) is mounts
+        assert not store.needs_verification("adder")
+        skill = store.get("adder")
+        if mounts:
+            assert skill.broken is None
+        else:
+            assert skill.broken is not None and "AssertionError" in skill.broken
+    finally:
+        await session.aclose()

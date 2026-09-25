@@ -34,7 +34,10 @@ closes leaves no such gap. The runner performs no denied operation of its own
 after boot (pipe reads and writes raise no audit event; imports fall under the
 import carve-out below), so it needs no exit. Before the process is armed —
 boot, and a fresh kernel's first ``set_vfs`` — the hook falls back to frame
-attribution (cell frame, skill frame, or a non-main thread).
+attribution (cell frame, skill frame, or a non-main thread). An event raised
+with no Python frame at all (a C callable started as a thread's target) gets
+no pass for that: it is decided by the latch and the thread rule like any
+other (R11-1).
 
 Arming is **not** a trusted/allow region: nothing re-permits a denied event.
 The runner's own plumbing (the framing-pipe writes, the host-call RPC) performs
@@ -160,6 +163,22 @@ def _advice(event):
     )
 
 
+def _caller_frame():
+    """The Python frame that called the C function raising the event, or None.
+
+    Frame 0 is the hook itself (the caller of this helper is the hook, so the
+    caller's caller is depth 2). A C callable started as a new thread's target
+    (``_thread.start_new_thread(os.system, ...)``) raises its event with no
+    Python frame on that thread at all; that is not a reason to allow it
+    (R11-1). ``None`` falls through to the armed latch and the non-main-thread
+    rule of :meth:`AuditGuard.from_cell`, and no import carve-out applies to it.
+    """
+    try:
+        return sys._getframe(2)
+    except ValueError:
+        return None
+
+
 class AuditGuard:
     """Pure decision object for the deny rules.
 
@@ -263,10 +282,7 @@ class AuditGuard:
         try:
             # Frame 1 is the Python caller of the C function that raised the
             # event; the hook's own frame is 0.
-            try:
-                frame = sys._getframe(1)
-            except ValueError:  # pragma: no cover - no caller frame
-                return
+            frame = _caller_frame()
             if not self.from_cell(frame):
                 return
             if self.import_exempt(event, args, frame):
@@ -336,10 +352,7 @@ def install(*, allow_fs=False, allow_network=False):
             return
         state["busy"] = True
         try:
-            try:
-                frame = sys._getframe(1)
-            except ValueError:  # pragma: no cover - no caller frame
-                return
+            frame = _caller_frame()
             if not state["armed"] and not guard.from_cell(frame):
                 return
             if guard.import_exempt(event, args, frame):

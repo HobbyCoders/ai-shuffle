@@ -855,15 +855,37 @@ def register_code_mode_tools(
             verdicts = await verify_sources(
                 {**store.sources(), name: source}, [name], config=session._config
             )
-            verdict = verdicts.get(name)
-        except Exception:
-            verdict = None  # verification infrastructure failure ≠ bad skill
+        except Exception as exc:
+            # Verification infrastructure failure (e.g. the ``required``
+            # sandbox is unavailable) is not a bad skill, but it is not a
+            # passing self-test either (R11-2). Save it unverified: the store
+            # sees it as stale, the mount withholds it, and the first mount
+            # whose kernel starts runs its self-test and records the verdict.
+            verdicts = None
+            infra = f"{type(exc).__name__}: {exc}"
+        else:
+            infra = None
+            if name not in verdicts:
+                # The kernel went down (sandbox lost) before reaching it.
+                verdicts = None
+                infra = "the verification kernel stopped before the skill ran"
+        verdict = None if verdicts is None else verdicts[name]
         if verdict is not None:
             return ToolOutcome(
                 text=f"skill {name!r} rejected — verification failed: {verdict}",
                 is_error=True,
             )
         skill = store.save(name, source)
+        if verdicts is None:
+            return ToolOutcome(
+                text=(
+                    f"skill {skill.name!r} saved but NOT verified — its "
+                    f"self-test could not run ({infra}). It stays out of "
+                    "the kernel until a later run_python mount verifies it; "
+                    "a failing self-test then keeps it out until its source "
+                    "changes."
+                )
+            )
         store.mark_verified(name)
         return ToolOutcome(
             text=(
