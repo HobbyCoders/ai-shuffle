@@ -15,7 +15,7 @@
  */
 
 import { compilePolicy, describePolicy } from "./ssrf.js";
-import { launchBehindProxy } from "./egress.js";
+import { launchBehindProxy, policyLabel } from "./egress.js";
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   const launched = await launchBehindProxy(command, { policy: compilePolicy(process.env) });
   const { child, proxy } = launched;
   process.stderr.write(
-    `[browser-egress] proxy 127.0.0.1:${proxy.port} for pid ${child.pid ?? "?"}; policy: ${describePolicy(proxy.policy)}\n`,
+    `[browser-egress] proxy 127.0.0.1:${proxy.port} for pid ${child.pid ?? "?"}; ${policyLabel(process.env)}: ${describePolicy(proxy.policy)}\n`,
   );
 
   const stop = (signal: NodeJS.Signals) => {

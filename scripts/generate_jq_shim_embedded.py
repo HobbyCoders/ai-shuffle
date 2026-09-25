@@ -83,6 +83,14 @@ sh.write_text(head + "exec 3<<'PYTHON_JQ_SHIM_EOF'\n" + python.rstrip("\n") + "\
 
 bat = PKG / "bin/jq.bat"
 # python -x skips the first line, so the batch launcher must be line 1 and
-# everything after it must be valid Python.
-bat.write_text('@python -x "%~f0" %* & goto :eof\n' + python)
+# everything after it must be valid Python. It runs JQ_SHIM_PYTHON when set
+# (hook_service exports sys.executable: bare python on Windows is often the
+# Store stub), else python: for /f skips the leading "|" of an empty variable.
+# %* stays outside any parenthesised block, where an unquoted ")" in a jq
+# argument would end the block.
+BAT_LAUNCHER = (
+    '@for /f "tokens=1 delims=|" %%P in ("%JQ_SHIM_PYTHON%|python") '
+    'do @"%%~P" -x "%~f0" %* & goto :eof\n'
+)
+bat.write_text(BAT_LAUNCHER + python)
 print("ok", len(python.splitlines()), "lines")

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  EGRESS_REFUSED_NET_ERRORS,
   RETRYABLE_NET_ERRORS,
+  egressRefusal,
   isLoopbackHost,
   isLoopbackUrl,
   loopbackGuidance,
@@ -75,12 +77,18 @@ describe("loopbackGuidance", () => {
 describe("browser_navigate loopback retry", () => {
   const REFUSED = "page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:5179/";
 
-  function navSession(accept: (url: string) => boolean, visited: string[]): Session {
+  function navSession(
+    accept: (url: string) => boolean,
+    visited: string[],
+    failure = REFUSED,
+    responseHeaders: Record<string, string> = {},
+  ): Session {
     const page = {
       url: () => visited[visited.length - 1] ?? "about:blank",
       goto: async (url: string) => {
-        if (!accept(url)) throw new Error(REFUSED);
+        if (!accept(url)) throw new Error(failure);
         visited.push(url);
+        return { headers: () => responseHeaders };
       },
       title: async () => "Dev server",
       locator: () => ({ first: () => ({ isVisible: async () => true }) }),
@@ -150,5 +158,40 @@ describe("browser_navigate loopback retry", () => {
   it("recognises the net errors worth one retry", () => {
     expect(RETRYABLE_NET_ERRORS.test(REFUSED)).toBe(true);
     expect(RETRYABLE_NET_ERRORS.test("net::ERR_CERT_AUTHORITY_INVALID")).toBe(false);
+    // The egress proxy's refusal is policy, not "nothing answered".
+    expect(RETRYABLE_NET_ERRORS.test(TUNNEL_REFUSED)).toBe(false);
+    expect(EGRESS_REFUSED_NET_ERRORS.test(TUNNEL_REFUSED)).toBe(true);
+  });
+
+  const TUNNEL_REFUSED = "page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://localhost:5179/";
+
+  it("reports an egress-proxy refusal of an https URL without retrying", async () => {
+    process.env.BROWSER_LOOPBACK_HOST = "172.17.0.5";
+    const attempts: string[] = [];
+    try {
+      const session = navSession((url) => (attempts.push(url), false), [], TUNNEL_REFUSED);
+      await expect(runNavigate(session, { url: "https://localhost:5179" })).rejects.toThrow(
+        /^blocked by the browser's egress proxy: https:\/\/localhost:5179 /,
+      );
+      expect(attempts).toEqual(["https://localhost:5179"]);
+    } finally {
+      delete process.env.BROWSER_LOOPBACK_HOST;
+    }
+  });
+
+  it("reports the proxy's marked 403 page for plain http as a refusal", async () => {
+    await expect(
+      runNavigate(navSession(() => true, [], REFUSED, { "x-browser-egress": "blocked" }), {
+        url: "http://127.0.0.1:5173/",
+      }),
+    ).rejects.toThrow(/^blocked by the browser's egress proxy: http:\/\/127\.0\.0\.1:5173\//);
+  });
+
+  it("says a loopback refusal may be the fallback policy", () => {
+    const message = egressRefusal("http://127.0.0.1:5173/", "IPv4 loopback: blocked");
+    expect(message).toContain("not a server that is down");
+    expect(message).toContain("public addresses only");
+    expect(message).toContain("Policy detail: IPv4 loopback: blocked");
+    expect(egressRefusal("https://example.com/")).not.toContain("public addresses only");
   });
 });

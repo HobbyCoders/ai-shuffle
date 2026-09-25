@@ -85,7 +85,35 @@ export function loopbackGuidance(
 }
 
 /** Chromium net errors that mean "nothing answered", i.e. worth one retry.
- * Behind the egress proxy an https/ws target that does not answer is
- * ERR_TUNNEL_CONNECTION_FAILED and a plain-http one ERR_EMPTY_RESPONSE. */
+ * Behind the egress proxy a target that does not answer (or a name that does
+ * not resolve) is ERR_EMPTY_RESPONSE for https, ws and plain http alike: the
+ * proxy closes the connection unanswered. */
 export const RETRYABLE_NET_ERRORS =
-  /ERR_CONNECTION_REFUSED|ERR_CONNECTION_RESET|ERR_ADDRESS_UNREACHABLE|ERR_EMPTY_RESPONSE|ERR_CONNECTION_TIMED_OUT|ERR_NAME_NOT_RESOLVED|ERR_BLOCKED_BY_CLIENT|ERR_TUNNEL_CONNECTION_FAILED|ERR_ABORTED|ERR_FAILED/;
+  /ERR_CONNECTION_REFUSED|ERR_CONNECTION_RESET|ERR_ADDRESS_UNREACHABLE|ERR_EMPTY_RESPONSE|ERR_CONNECTION_TIMED_OUT|ERR_NAME_NOT_RESOLVED|ERR_BLOCKED_BY_CLIENT|ERR_ABORTED|ERR_FAILED/;
+
+/** Chromium's report of a CONNECT the egress proxy refused (its marked 403).
+ * Policy, not an absent server: never retried. */
+export const EGRESS_REFUSED_NET_ERRORS = /ERR_TUNNEL_CONNECTION_FAILED/;
+
+/** The egress proxy's marker header on a refusal (see egress.ts), lower-cased. */
+export const EGRESS_REFUSAL_HEADER = "x-browser-egress";
+
+/**
+ * What to tell a model whose navigation the browser's egress proxy refused.
+ * The server may be up; retrying or rewriting the URL will not get past the
+ * proxy. For loopback it also names the likely cause when loopback normally
+ * works: the launcher could not load the app's policy and fell back to public
+ * addresses only (its log says so).
+ */
+export function egressRefusal(url: string, reason?: string): string {
+  const fallback = isLoopbackUrl(url)
+    ? " If this browser normally reaches loopback, its egress proxy is running the fallback " +
+      "policy (public addresses only); the browser launcher's log names the reason."
+    : "";
+  const detail = reason ? ` (Policy detail: ${reason})` : "";
+  return (
+    `blocked by the browser's egress proxy: ${url} is outside the addresses this browser may ` +
+    "reach, so the request never left the browser. This is policy, not a server that is down; " +
+    `retrying or rewriting the URL will not help.${fallback}${detail}`
+  );
+}

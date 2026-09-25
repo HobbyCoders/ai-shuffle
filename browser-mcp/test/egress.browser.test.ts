@@ -18,7 +18,7 @@ import { chromium, type Browser, type Page } from "playwright-core";
 
 import { launchBehindProxy, type EgressResolver, type LaunchedBrowser } from "../src/egress.js";
 import { compilePolicy } from "../src/ssrf.js";
-import { RETRYABLE_NET_ERRORS } from "../src/loopback.js";
+import { EGRESS_REFUSED_NET_ERRORS, RETRYABLE_NET_ERRORS } from "../src/loopback.js";
 
 function findBrowser(): string | null {
   if (process.platform === "win32") {
@@ -227,6 +227,37 @@ describe.skipIf(!browserPath)("egress proxy with a real Chromium", () => {
     } finally {
       await scratch.close();
     }
+  });
+
+  it("tells a policy refusal apart from a target that does not answer", async () => {
+    const closed = await freePort();
+    // A page per navigation: an error page commits late and would race the next goto.
+    const visit = async <T>(url: string, read: (p: Promise<Awaited<ReturnType<Page["goto"]>>>) => Promise<T>) => {
+      const scratch = await page.context().newPage();
+      try {
+        return await read(scratch.goto(url));
+      } finally {
+        await scratch.close();
+      }
+    };
+    const failure = (url: string) =>
+      visit(url, (nav) =>
+        nav.then(
+          () => "loaded",
+          (err: Error) => err.message,
+        ),
+      );
+    // https goes through CONNECT: refused by policy vs. allowed but closed.
+    const refused = await failure(`https://127.0.0.2:${port}/`);
+    expect(refused).toMatch(EGRESS_REFUSED_NET_ERRORS);
+    expect(refused).not.toMatch(RETRYABLE_NET_ERRORS);
+    const down = await failure(`https://127.0.0.1:${closed}/`);
+    expect(down).toMatch(RETRYABLE_NET_ERRORS);
+    expect(down).not.toMatch(EGRESS_REFUSED_NET_ERRORS);
+    // Plain http: the proxy's 403 page carries the marker header.
+    const marker = await visit(`http://127.0.0.2:${port}/`, async (nav) => (await nav)?.headers()["x-browser-egress"]);
+    expect(marker).toBe("blocked");
+    expect(internal.connections).toBe(0);
   });
 
   it("refuses a WebSocket to a blocked loopback port, from the page and from a worker", async () => {

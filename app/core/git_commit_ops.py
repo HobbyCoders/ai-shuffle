@@ -12,15 +12,43 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _is_link_like(path: str) -> bool:
+    """True for a symlink or a Windows junction: removed as a link, never followed."""
+    isjunction = getattr(os.path, "isjunction", None)
+    return os.path.islink(path) or bool(isjunction and isjunction(path))
+
+
+def _remove_link(path: str) -> None:
+    """Remove the link *path* itself (a directory junction needs rmdir)."""
+    try:
+        os.unlink(path)
+    except OSError:
+        os.rmdir(path)
+
+
+def _is_ntfs_dotgit(name: str) -> bool:
+    """Whether NTFS reads path component *name* as ``.git``.
+
+    Mirrors git's ``is_ntfs_dotgit``: case-insensitive, trailing dots and spaces
+    ignored, an alternate data stream suffix (``.git::$INDEX_ALLOCATION``)
+    ignored, and the 8.3 short name ``GIT~1``.
+    """
+    base = name.split(":", 1)[0].rstrip(" .").lower()
+    return base in (".git", "git~1")
+
+
 def _untracked_discard_target(
     working_dir: str, real_working_dir: str, rel_path: str
 ) -> Optional[str]:
     """Return the path to delete when discarding untracked *rel_path*, or None.
 
-    Only the final component is left unresolved, so an untracked symlink is
-    removed itself rather than the directory it points at. The target must sit
-    strictly inside the checkout and outside its ``.git`` metadata: discarding
-    ``.`` or ``.git`` would otherwise delete the whole checkout or its history.
+    Only the final component is left unresolved, so an untracked symlink or
+    junction is removed itself rather than the directory it points at. The
+    target must sit strictly inside the checkout and outside its ``.git``
+    metadata: discarding ``.`` or ``.git`` would otherwise delete the whole
+    checkout or its history. The ``.git`` check applies to the spelling (every
+    NTFS alias git itself refuses) and to the resolved identity, since
+    ``realpath`` expands an 8.3 short name that ``relpath`` leaves as written.
     """
     lexical = os.path.normpath(os.path.join(working_dir, rel_path))
     target = os.path.join(
@@ -29,8 +57,19 @@ def _untracked_discard_target(
     if not target.startswith(real_working_dir + os.sep):
         return None
     first = os.path.relpath(target, real_working_dir).split(os.sep)[0]
-    if first.lower() == ".git":
+    if _is_ntfs_dotgit(first):
         return None
+    if not _is_link_like(target):
+        real = os.path.realpath(target)
+        if not real.startswith(real_working_dir + os.sep):
+            return None
+        if _is_ntfs_dotgit(os.path.relpath(real, real_working_dir).split(os.sep)[0]):
+            return None
+        try:
+            if os.path.samefile(target, os.path.join(real_working_dir, ".git")):
+                return None
+        except OSError:
+            pass
     return target
 
 
@@ -181,8 +220,8 @@ class GitCommitMixin:
                     failed.append(f)
                     continue
                 try:
-                    if os.path.islink(full_path):
-                        os.remove(full_path)
+                    if _is_link_like(full_path):
+                        _remove_link(full_path)
                     elif os.path.isdir(full_path):
                         import shutil
                         shutil.rmtree(full_path)

@@ -212,18 +212,45 @@ function splice(a: Duplex, b: Duplex): void {
   b.pipe(a);
 }
 
-function refuseSocket(socket: Duplex, status: number, text: string): void {
+/**
+ * Header on every policy refusal (the CONNECT 403 and the plain-HTTP 403 page),
+ * so browser-mcp can say "blocked by the browser's egress proxy" instead of
+ * treating the refusal as a server that did not answer. Chromium reports a
+ * refused CONNECT as ERR_TUNNEL_CONNECTION_FAILED; a target that is allowed but
+ * does not answer (or a name that does not resolve) gets no response at all,
+ * which Chromium reports as ERR_EMPTY_RESPONSE, so the two never share a code.
+ */
+export const EGRESS_REFUSAL_HEADER = "X-Browser-Egress";
+export const EGRESS_REFUSAL_VALUE = "blocked";
+
+/**
+ * Label for the launcher's policy line. start-chrome.sh sets
+ * BROWSER_EGRESS_POLICY_SOURCE=fallback when the app's policy could not be
+ * computed and only public addresses are allowed; the log must say so.
+ */
+export function policyLabel(env: NodeJS.ProcessEnv): string {
+  return env.BROWSER_EGRESS_POLICY_SOURCE === "fallback"
+    ? "policy (FALLBACK: app policy unavailable, public addresses only)"
+    : "policy";
+}
+
+function refuseSocket(socket: Duplex, status: number, text: string, blocked = false): void {
   if (socket.destroyed) return;
-  socket.end(`HTTP/1.1 ${status} ${text}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
+  const marker = blocked ? `${EGRESS_REFUSAL_HEADER}: ${EGRESS_REFUSAL_VALUE}\r\n` : "";
+  socket.end(`HTTP/1.1 ${status} ${text}\r\n${marker}Content-Length: 0\r\nConnection: close\r\n\r\n`);
   setTimeout(() => socket.destroy(), 1000).unref();
 }
 
-function plain(res: ServerResponse, status: number, body: string): void {
+function plain(res: ServerResponse, status: number, body: string, blocked = false): void {
   if (res.headersSent) {
     res.destroy();
     return;
   }
-  res.writeHead(status, { "content-type": "text/plain; charset=utf-8", connection: "close" });
+  res.writeHead(status, {
+    "content-type": "text/plain; charset=utf-8",
+    connection: "close",
+    ...(blocked ? { [EGRESS_REFUSAL_HEADER]: EGRESS_REFUSAL_VALUE } : {}),
+  });
   res.end(body);
 }
 
@@ -277,15 +304,22 @@ export async function startEgressProxy(opts: EgressProxyOptions): Promise<Egress
       return;
     }
     const decision = await decide(target.host, target.port, "CONNECT");
+    // As for plain HTTP below: a name that does not resolve or a port nobody
+    // answers closes the tunnel unanswered (a network error the navigate tool
+    // retries); only a policy refusal answers, with the marked 403.
+    if (!decision.allowed && decision.unresolved) {
+      client.destroy();
+      return;
+    }
     if (!decision.allowed) {
-      refuseSocket(client, 403, "Forbidden");
+      refuseSocket(client, 403, "Forbidden", true);
       return;
     }
     let upstream: Socket;
     try {
       upstream = await connectPinned(decision.addresses, target.port, timeoutMs);
     } catch {
-      refuseSocket(client, 502, "Bad Gateway");
+      client.destroy();
       return;
     }
     track(upstream);
@@ -319,7 +353,7 @@ export async function startEgressProxy(opts: EgressProxyOptions): Promise<Egress
       return;
     }
     if (!decision.allowed) {
-      plain(res, 403, BLOCKED_BODY);
+      plain(res, 403, BLOCKED_BODY, true);
       return;
     }
     let upstream: Socket;

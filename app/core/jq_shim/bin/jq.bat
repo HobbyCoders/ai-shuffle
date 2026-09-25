@@ -1,4 +1,4 @@
-@python -x "%~f0" %* & goto :eof
+@for /f "tokens=1 delims=|" %%P in ("%JQ_SHIM_PYTHON%|python") do @"%%~P" -x "%~f0" %* & goto :eof
 #!/usr/bin/env python3
 """
 Self-contained Python jq shim - CLI compatible with jq.

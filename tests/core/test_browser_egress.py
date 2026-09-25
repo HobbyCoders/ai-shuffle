@@ -163,7 +163,9 @@ def test_start_chrome_execs_chrome_through_the_egress_launcher(tmp_path, policy_
         f'printf "%s\\n" "$@" > "{record}"\n'
         f'echo "ALLOW=${{BROWSER_SSRF_ALLOW-unset}}" >> "{record}"\n'
         f'echo "DENY=${{BROWSER_SSRF_DENY_PORTS-unset}}" >> "{record}"\n'
+        f'echo "SOURCE=${{BROWSER_EGRESS_POLICY_SOURCE-unset}}" >> "{record}"\n'
     )
+    attempts = tmp_path / "policy-attempts"
     app_root = tmp_path / "app"
     module = app_root / "app" / "core"
     module.mkdir(parents=True)
@@ -173,7 +175,12 @@ def test_start_chrome_execs_chrome_through_the_egress_launcher(tmp_path, policy_
         "print('noise line')\nprint('BROWSER_SSRF_ALLOW=127.0.0.0/8')\n"
         "print('BROWSER_SSRF_DENY_PORTS=8000,8001')\nprint('LD_PRELOAD=/evil.so')\n"
         if policy_ok
-        else "raise SystemExit(1)\n"
+        else (
+            "import sys\n"
+            f"open({str(attempts)!r}, 'a').write('x')\n"
+            "sys.stderr.write('policy boom: settings unavailable\\n')\n"
+            "raise SystemExit(1)\n"
+        )
     )
     (bindir / "python").write_text(f'#!/bin/bash\nexec "{sys.executable}" "$@"\n')
     for stub in bindir.iterdir():
@@ -190,8 +197,8 @@ def test_start_chrome_execs_chrome_through_the_egress_launcher(tmp_path, policy_
         "AIS_APP_ROOT": str(app_root),
         "BROWSER_SSRF_ALLOW": "10.0.0.0/8",
     }
-    subprocess.run(["bash", str(START_CHROME)], env=env, check=True, timeout=30,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    result = subprocess.run(["bash", str(START_CHROME)], env=env, check=True, timeout=30,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     lines = record.read_text().splitlines()
     assert lines[:3] == [str(entry), "--", "/fixture/chrome"]
     assert "--remote-debugging-port=9221" in lines
@@ -200,8 +207,15 @@ def test_start_chrome_execs_chrome_through_the_egress_launcher(tmp_path, policy_
         assert "ALLOW=127.0.0.0/8" in lines
         assert "DENY=8000,8001" in lines
         assert not any("LD_PRELOAD" in line or "evil" in line for line in lines)
+        assert "SOURCE=app" in lines
     else:
         assert "ALLOW=unset" in lines
+        # The launcher labels its policy line as the fallback, the reason the
+        # policy command failed reaches the log, and it was retried once.
+        assert "SOURCE=fallback" in lines
+        assert "policy boom: settings unavailable" in result.stderr
+        assert "public addresses only" in result.stderr
+        assert attempts.read_text() == "xx"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX-only: runs a bash script")

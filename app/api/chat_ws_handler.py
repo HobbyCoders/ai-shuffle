@@ -950,9 +950,12 @@ class ChatWebSocketHandler:
         the REST session routes apply (its agent check is what keeps a key's
         turn out of a session whose agent it may not use). A missing or
         unknown id gets the same :data:`SESSION_ACCESS_DENIED` as another
-        principal's session, so the answer never tells whether that session
-        exists. Only for the key's OWN session outside its agents is the agent
-        named, which reveals nothing.
+        principal's session, so this socket's answer never tells whether that
+        session exists. That holds for the WebSocket only: the REST session
+        routes (``require_session``) and the voice routes still answer 404 for
+        an unknown id and 403 for another principal's session. Only for the
+        key's OWN session outside its agents is the agent named, which reveals
+        nothing.
         """
         if not self.api_user_id:
             return None
@@ -1722,6 +1725,8 @@ class ChatWebSocketHandler:
             # Another principal's session is answered exactly like an unknown
             # id (the REST 404 artifact access gives a foreign session), so
             # load_session cannot be used to probe which session ids exist.
+            # This covers the socket only; REST require_session and the voice
+            # routes still distinguish 404 (unknown) from 403 (foreign).
             await self.send_json({"type": "session_not_found", "session_id": requested_id})
             return
         if refusal is not None:

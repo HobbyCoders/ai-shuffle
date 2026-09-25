@@ -152,18 +152,35 @@ if [ ! -f "$EGRESS_ENTRY" ]; then
 fi
 # The proxy enforces the app's base browser policy (loopback default, the
 # worker's deny ports), computed by the app itself so the two cannot drift. If
-# that fails, fall back to the strict default: public addresses only.
+# that fails twice, fall back to the strict default: public addresses only.
+# The command's stderr goes to this script's stderr (chrome.log), so the reason
+# is on record, and BROWSER_EGRESS_POLICY_SOURCE makes the launcher label its
+# policy line as the fallback. In the fallback Chromium refuses loopback too,
+# so a preview the agent starts is reported as "blocked by the browser's egress
+# proxy", not as a server that is down.
 APP_ROOT="${AIS_APP_ROOT:-/app}"
-if EGRESS_POLICY="$(cd "$APP_ROOT" && python -m app.core.browser_egress 2>/dev/null)"; then
+EGRESS_POLICY=""
+EGRESS_POLICY_OK=0
+for attempt in 1 2; do
+    if EGRESS_POLICY="$(cd "$APP_ROOT" && python -m app.core.browser_egress)"; then
+        EGRESS_POLICY_OK=1
+        break
+    fi
+    echo "start-chrome: browser egress policy command failed (attempt $attempt of 2)" >&2
+    if [ "$attempt" -lt 2 ]; then sleep 1; fi
+done
+if [ "$EGRESS_POLICY_OK" = 1 ]; then
     while IFS='=' read -r key value; do
         case "$key" in
             BROWSER_SSRF_ALLOW|BROWSER_SSRF_BLOCK|BROWSER_SSRF_DENY_PORTS|CHROME_CDP_PORT)
                 export "$key=$value" ;;
         esac
     done <<< "$EGRESS_POLICY"
+    export BROWSER_EGRESS_POLICY_SOURCE=app
 else
-    echo "start-chrome: could not compute the browser egress policy; allowing public addresses only" >&2
+    echo "start-chrome: could not compute the browser egress policy; FALLBACK: allowing public addresses only (loopback and private addresses are refused)" >&2
     unset BROWSER_SSRF_ALLOW
+    export BROWSER_EGRESS_POLICY_SOURCE=fallback
 fi
 exec node "$EGRESS_ENTRY" -- "$CHROME_BIN" \
     --ozone-platform=headless \

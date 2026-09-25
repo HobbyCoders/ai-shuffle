@@ -283,25 +283,43 @@ def _fallback_anchor_by_content(
             # an earlier "Done." on the latest one, so the rows in between
             # survived the rewind. Counting from the end keeps older DB rows
             # the transcript no longer has from shifting the pick.
-            later_matches = sum(
-                1
-                for e in entries[target_idx + 1:]
-                if e.get("type") == "assistant"
-                and (e.get("message") or {}).get("role") == "assistant"
-                and not e.get("isMeta")
-                and not e.get("isSidechain")
-                and _texts_match(
-                    jsonl_rewind_service._extract_message_text(e), target_text
+            #
+            # Counting from the end needs every later transcript match to have
+            # a DB row. Modern chat turns write no assistant rows, so a session
+            # spanning that cutover holds fewer matches in the DB than in the
+            # transcript; the walk would then pass the target's own row and
+            # anchor on an older identical reply, deleting turns the rewind
+            # keeps. Refuse (no DB sync) when the DB has fewer matching rows.
+            def _matches(e: Dict[str, Any]) -> bool:
+                return (
+                    e.get("type") == "assistant"
+                    and (e.get("message") or {}).get("role") == "assistant"
+                    and not e.get("isMeta")
+                    and not e.get("isSidechain")
+                    and _texts_match(
+                        jsonl_rewind_service._extract_message_text(e), target_text
+                    )
                 )
+
+            later_matches = sum(1 for e in entries[target_idx + 1:] if _matches(e))
+            # The target itself counts once, whatever its flags.
+            transcript_matches = later_matches + 1 + sum(
+                1 for e in entries[:target_idx] if _matches(e)
             )
-            for r in reversed(db_rows):
-                if r.get("role") != "assistant":
-                    continue
-                if _texts_match(r.get("content") or "", target_text):
-                    if later_matches == 0:
-                        return r["id"]
-                    later_matches -= 1
-            return None
+            db_matches = [
+                r for r in db_rows
+                if r.get("role") == "assistant"
+                and _texts_match(r.get("content") or "", target_text)
+            ]
+            if len(db_matches) < transcript_matches:
+                logger.warning(
+                    "Fallback anchor for session %s target %s: the DB has %d "
+                    "matching assistant rows, the transcript %d. Refusing to "
+                    "delete.",
+                    session_id, target_uuid, len(db_matches), transcript_matches,
+                )
+                return None
+            return db_matches[-(later_matches + 1)]["id"]
 
         return None
     except Exception as e:

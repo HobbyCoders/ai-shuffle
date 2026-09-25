@@ -125,6 +125,26 @@ def test_staged_rename_reports_usable_paths(svc, repo, backend):
         assert " -> " not in path
 
 
+def test_worktree_rename_of_intent_to_add_file(svc, repo, backend):
+    """``git add -N`` after a rename gives porcelain ``" R new\\0old\\0"``: the
+    source is a separate -z entry for a worktree rename too, and must never be
+    parsed as a status line (``MM.txt`` would read as a phantom ``MM`` entry)."""
+    commit_file(repo, "MM.txt", "x\n", "add MM.txt")
+    os.rename(repo / "MM.txt", repo / "new file.txt")
+    git(repo, "add", "-N", "new file.txt")
+
+    status = _fresh(svc, repo)
+
+    # Both backends: the new path and the vanished source are worktree changes.
+    assert sorted(status["modified"]) == ["MM.txt", "new file.txt"]
+    assert status["untracked"] == status["conflicts"] == []
+    if backend == "cli":
+        assert _staged(status) == set()
+    else:
+        # libgit2 reports an intent-to-add entry as an index addition.
+        assert _staged(status) == {("new file.txt", "A")}
+
+
 def test_cli_status_reports_copies_with_the_copy_destination(svc, repo, backend):
     if backend != "cli":
         pytest.skip("libgit2 status has no copy detection")

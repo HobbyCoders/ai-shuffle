@@ -8,7 +8,10 @@ import type { Session } from "../session.js";
 import { runWait } from "./wait.js";
 import { contentWarning, jsonResult, type McpToolResult } from "./result.js";
 import {
+  EGRESS_REFUSAL_HEADER,
+  EGRESS_REFUSED_NET_ERRORS,
   RETRYABLE_NET_ERRORS,
+  egressRefusal,
   isLoopbackUrl,
   loopbackGuidance,
   loopbackHost,
@@ -56,8 +59,11 @@ export const AUTH_WALL_NOTE =
  */
 function navigationFailure(session: Session, requested: string, err: unknown): Error {
   const message = err instanceof Error ? err.message : String(err);
-  if (!RETRYABLE_NET_ERRORS.test(message)) return err instanceof Error ? err : new Error(message);
   const host = hostOf(requested);
+  if (EGRESS_REFUSED_NET_ERRORS.test(message)) {
+    return new Error(egressRefusal(requested, host ? session.ssrfBlockReason(host) : undefined));
+  }
+  if (!RETRYABLE_NET_ERRORS.test(message)) return err instanceof Error ? err : new Error(message);
   const reason = host ? session.ssrfBlockReason(host) : undefined;
   if (isLoopbackUrl(requested)) {
     return new Error(loopbackGuidance(requested, loopbackHost(), reason));
@@ -115,8 +121,9 @@ export async function runNavigate(
       : page.goForward({ waitUntil: "domcontentloaded" }));
   } else {
     const requested = normalizeUrl(input.url);
+    let response: Awaited<ReturnType<typeof page.goto>> | undefined;
     try {
-      await page.goto(requested, { waitUntil: "domcontentloaded" });
+      response = await page.goto(requested, { waitUntil: "domcontentloaded" });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const alternative = rewriteLoopback(requested, loopbackHost());
@@ -132,6 +139,12 @@ export async function runNavigate(
       } else {
         throw navigationFailure(session, requested, err);
       }
+    }
+    // A plain-http refusal is the proxy's own 403 page, a "successful"
+    // navigation; its marker header says it is policy, not the site.
+    if (response?.headers()[EGRESS_REFUSAL_HEADER] === "blocked") {
+      const host = hostOf(requested);
+      throw new Error(egressRefusal(requested, host ? session.ssrfBlockReason(host) : undefined));
     }
   }
 

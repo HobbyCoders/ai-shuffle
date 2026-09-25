@@ -206,6 +206,61 @@ def test_discard_guard_bites_when_disabled(svc, repo, tmp_path, monkeypatch):
         _assert_discard_cannot_escape(svc, repo, tmp_path)
 
 
+@pytest.mark.parametrize(
+    "alias",
+    ["GIT~1", "git~1/config", ".git::$INDEX_ALLOCATION", ".git:x/config", ".git.", ".GIT . ."],
+)
+def test_discard_target_refuses_ntfs_spellings_of_git_dir(tmp_path, alias):
+    """NTFS reads each of these as .git (8.3 short name, alternate data stream,
+    trailing dots and spaces); git's is_ntfs_dotgit refuses the same set."""
+    root = str(tmp_path)
+    assert git_commit_ops._untracked_discard_target(root, root, alias) is None
+
+
+def test_discard_refuses_an_alias_that_resolves_to_the_git_dir(svc, repo, monkeypatch):
+    """The .git guard compares resolved identity, not spelling: an untracked
+    entry whose real path is the repository's .git (as GetFinalPathNameByHandle
+    expands an NTFS short name) is never deleted."""
+    alias = repo / "ALIAS"
+    write(alias / "HEAD", "keep\n")
+    real = os.path.realpath
+
+    def ntfs_realpath(path, *args, **kwargs):
+        if os.path.normpath(os.fspath(path)) == str(alias):
+            return str(repo / ".git")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os.path, "realpath", ntfs_realpath)
+    ok, failed = svc.discard_changes(str(repo), ["ALIAS"], {"ALIAS": "untracked"})
+
+    assert (ok, failed) == (False, ["ALIAS"])
+    assert (alias / "HEAD").read_text() == "keep\n"
+
+
+def test_discard_removes_an_untracked_junction_as_a_link(svc, repo, monkeypatch):
+    """A Windows junction is not islink(); it is removed like a link rather than
+    handed to rmtree (which refuses junctions on Python 3.12+)."""
+    import shutil
+
+    junction = repo / "junc"
+    junction.mkdir()
+    rmtree_calls = []
+
+    def refusing_rmtree(path, *args, **kwargs):
+        rmtree_calls.append(path)
+        raise OSError("Cannot call rmtree on a symbolic link")
+
+    monkeypatch.setattr(
+        os.path, "isjunction", lambda p: os.fspath(p) == str(junction), raising=False
+    )
+    monkeypatch.setattr(shutil, "rmtree", refusing_rmtree)
+    ok, failed = svc.discard_changes(str(repo), ["junc"], {"junc": "untracked"})
+
+    assert (ok, failed) == (True, [])
+    assert rmtree_calls == []
+    assert not os.path.lexists(junction)
+
+
 def test_discard_autodetects_statuses(svc, repo):
     write(repo / "a.txt", "modified\n")
     write(repo / "loose.txt", "l\n")

@@ -578,9 +578,11 @@ class GitService(
                     index_status = line[0]
                     worktree_status = line[1]
                     filename = line[3:]
-                    if index_status in ("R", "C"):
-                        # -z emits the rename/copy source as the next entry.
-                        next(entries, None)
+                    source = None
+                    if index_status in ("R", "C") or worktree_status in ("R", "C"):
+                        # -z emits the rename/copy source as the next entry,
+                        # for a worktree rename (intent-to-add) as well.
+                        source = next(entries, None)
 
                     # Check for conflicts (both sides modified)
                     if (
@@ -596,10 +598,13 @@ class GitService(
                             "file": filename,
                             "status": index_status
                         })
-                    # Worktree changes (not staged): an unstaged deletion or
-                    # type change is a modification too, as in git_native.
-                    if worktree_status in ("M", "D", "T"):
+                    # Worktree changes (not staged): an unstaged deletion,
+                    # type change or rename is a modification too, as in
+                    # git_native; a renamed file's source is gone from disk.
+                    if worktree_status in ("M", "D", "T", "R"):
                         status["modified"].append(filename)
+                        if worktree_status == "R" and source:
+                            status["modified"].append(source)
                     elif worktree_status == "?":
                         status["untracked"].append(filename)
 

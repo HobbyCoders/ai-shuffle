@@ -250,6 +250,61 @@ def _egress_env() -> dict:
     return {**os.environ, **egress_env()}
 
 
+# Seconds between relaunches, and a run shorter than this counts as a rapid
+# exit whose launcher output is surfaced in the detail.
+_RELAUNCH_BACKOFF_S = 1.0
+_RAPID_EXIT_S = 10.0
+_LAUNCHER_LOG_MAX_BYTES = 1024 * 1024
+_TAIL_LINES = 5
+
+
+def _launcher_log_path(port: int) -> Path:
+    """Where the egress launcher's stderr goes (``<data_dir>/logs/<instance>``).
+
+    The launcher reports its own failures (``[browser-egress] could not
+    start: ...``, the policy line) only on stderr.
+    """
+    try:
+        from app.core.file_logging import get_log_dir
+
+        log_dir = get_log_dir()
+    except Exception:
+        log_dir = _profile_dir().parent / "logs"
+    return log_dir / f"chrome-launcher-{port}.log"
+
+
+def _open_launcher_log(port: int):
+    """Open the launcher log for appending (reset past 1 MiB), or None."""
+    try:
+        path = _launcher_log_path(port)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "ab"
+        try:
+            if path.stat().st_size > _LAUNCHER_LOG_MAX_BYTES:
+                mode = "wb"
+        except OSError:
+            pass
+        return open(path, mode)
+    except Exception as e:
+        logger.debug("native chrome supervisor: no launcher log: %s", e)
+        return None
+
+
+def _launcher_log_tail(log, start: int) -> str:
+    """The last non-empty lines the launcher wrote since offset *start*."""
+    if log is None:
+        return ""
+    try:
+        log.flush()
+        with open(log.name, "rb") as f:
+            f.seek(start)
+            text = f.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return " | ".join(lines[-_TAIL_LINES:])[-500:]
+
+
 async def _supervise(exe: str, port: int) -> None:
     """Background loop: (re)launch the browser; give up after crash-looping."""
     global _proc, _last_detail
@@ -258,15 +313,20 @@ async def _supervise(exe: str, port: int) -> None:
     loop = asyncio.get_event_loop()
 
     while not _stopping:
+        log = _open_launcher_log(port)
+        log_start = log.tell() if log is not None else 0
+        started = loop.time()
         try:
             _proc = await asyncio.create_subprocess_exec(
                 *_egress_command(exe, _launch_args(port)),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=log if log is not None else asyncio.subprocess.DEVNULL,
                 env=_egress_env(),
             )
         except Exception as e:
+            if log is not None:
+                log.close()
             _last_detail = f"failed to launch native chrome: {e}"
             logger.warning("native chrome supervisor: launch failed: %s", e)
             return
@@ -282,22 +342,35 @@ async def _supervise(exe: str, port: int) -> None:
         try:
             returncode = await _proc.wait()
         except asyncio.CancelledError:
+            if log is not None:
+                log.close()
             raise
 
+        tail = ""
+        now = loop.time()
+        if now - started < _RAPID_EXIT_S:
+            tail = _launcher_log_tail(log, log_start)
+        if log is not None:
+            log.close()
+
         logger.info(
-            "native chrome supervisor: process exited (returncode=%s)", returncode
+            "native chrome supervisor: process exited (returncode=%s)%s",
+            returncode,
+            f": {tail}" if tail else "",
         )
 
         if _stopping:
             break
 
-        now = loop.time()
+        if tail:
+            _last_detail = f"browser launcher exited ({returncode}): {tail}"
         exits.append(now)
         # Keep only exits within the trailing 60s window.
         exits = [t for t in exits if now - t <= 60]
         if len(exits) >= 5:
             _last_detail = (
                 f"Chrome crash-looped (5 exits in 60s): {returncode}"
+                + (f"; last output: {tail}" if tail else "")
             )
             logger.warning(
                 "native chrome supervisor: %s — giving up", _last_detail
@@ -305,7 +378,7 @@ async def _supervise(exe: str, port: int) -> None:
             return
 
         # Brief backoff before relaunch.
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(_RELAUNCH_BACKOFF_S)
 
 
 async def ensure_started() -> None:

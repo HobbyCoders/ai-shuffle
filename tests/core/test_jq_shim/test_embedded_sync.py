@@ -60,8 +60,38 @@ def test_embedded_copies_are_identical():
 def test_bat_launcher_line():
     """Line 1 must be the cmd launcher (python -x skips it); the rest must be Python."""
     first, rest = (SHIM_DIR / "bin" / "jq.bat").read_text().split("\n", 1)
-    assert first.startswith("@") and 'python -x "%~f0" %*' in first
+    assert first.startswith("@") and ' -x "%~f0" %* & goto :eof' in first
     compile(rest, "jq.bat", "exec")
+
+
+def test_bat_launcher_honours_jq_shim_python():
+    """hook_service exports JQ_SHIM_PYTHON because bare ``python`` on Windows is
+    often the Microsoft Store stub; the .bat must prefer it, as the bash shim
+    does, and fall back to ``python`` when it is unset.
+
+    The launcher is ``for /f "tokens=1 delims=|" %%P in ("%JQ_SHIM_PYTHON%|python")``:
+    cmd skips leading delimiters, so the first token is the variable when set
+    and ``python`` when it expands to nothing. It stays on one line (python -x
+    skips only line 1), and ``%*`` is never inside a parenthesised block, where
+    an unquoted ``)`` in a jq argument would end the block early.
+    """
+    import re
+
+    first = (SHIM_DIR / "bin" / "jq.bat").read_text().split("\n", 1)[0]
+    m = re.fullmatch(
+        r'@for /f "tokens=1 delims=\|" %%P in \("(%JQ_SHIM_PYTHON%)\|python"\) '
+        r'do @"%%~P" -x "%~f0" %\* & goto :eof',
+        first,
+    )
+    assert m, first
+
+    def first_token(value):  # cmd's for /f tokenising of the in(...) string
+        return next(t for t in f"{value}|python".split("|") if t)
+
+    assert first_token("") == "python"
+    assert first_token(r"C:\Program Files (x86)\Python\python.exe") == (
+        r"C:\Program Files (x86)\Python\python.exe"
+    )
 
 
 @pytest.mark.parametrize("name", ["jq", "jq.bat"])

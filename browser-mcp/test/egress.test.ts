@@ -16,6 +16,7 @@ import {
   decideEgress,
   launchBehindProxy,
   parseAuthority,
+  policyLabel,
   startEgressProxy,
   stripProxyArgs,
   type EgressProxy,
@@ -151,8 +152,11 @@ function startTarget(host: string, port = 0): Promise<Target> {
   });
 }
 
-/** Send a CONNECT; resolve with the status code and the open socket. */
-function tunnel(proxyPort: number, authority: string): Promise<{ status: number; socket: Socket }> {
+/**
+ * Send a CONNECT; resolve with the status code, the response head and the open
+ * socket. A proxy that closes without answering resolves with status 0.
+ */
+function tunnel(proxyPort: number, authority: string): Promise<{ status: number; head: string; socket: Socket }> {
   return new Promise((resolve, reject) => {
     const socket = connect(proxyPort, "127.0.0.1", () => {
       socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
@@ -163,9 +167,10 @@ function tunnel(proxyPort: number, authority: string): Promise<{ status: number;
       const end = buf.indexOf("\r\n\r\n");
       if (end === -1) return;
       socket.off("data", onData);
-      resolve({ status: Number(buf.split(" ")[1]), socket });
+      resolve({ status: Number(buf.split(" ")[1]), head: buf.slice(0, end), socket });
     };
     socket.on("data", onData);
+    socket.on("close", () => resolve({ status: 0, head: buf, socket }));
     socket.on("error", reject);
   });
 }
@@ -175,13 +180,13 @@ function viaProxy(
   proxyPort: number,
   url: string,
   headers: Record<string, string> = {},
-): Promise<{ status: number; body: string }> {
+): Promise<{ status: number; body: string; headers: IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const req = request({ host: "127.0.0.1", port: proxyPort, method: "GET", path: url, headers }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (c) => (body += c));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }));
     });
     req.on("error", reject);
     req.end();
@@ -279,7 +284,7 @@ describe("egress proxy", () => {
       "proxy-authorization": "Basic c2VjcmV0",
       "x-kept": "yes",
     });
-    expect(res).toEqual({ status: 200, body: "from 127.0.0.1" });
+    expect({ status: res.status, body: res.body }).toEqual({ status: 200, body: "from 127.0.0.1" });
     expect(t.hits).toHaveLength(1);
     expect(t.hits[0].url).toBe("/p?q=1");
     expect(t.hits[0].headers.host).toBe(`app.test:${t.port}`);
@@ -325,10 +330,39 @@ describe("egress proxy", () => {
     const proxy = await proxyWith(ONLY_ONE, async () => {
       throw new Error("SERVFAIL");
     });
+    // An unresolvable name is a network error (closed, no tunnel), like the
+    // absolute-form path: only a policy refusal answers with 403.
     const r = await tunnel(proxy.port, `anything.test:${t.port}`);
-    expect(r.status).toBe(403);
+    expect(r.status).toBe(0);
     r.socket.destroy();
     expect(t.connections).toBe(0);
+  });
+
+  it("marks policy refusals so they are never mistaken for a server that is down", async () => {
+    const internal = await target("127.0.0.2");
+    const closed = await target("127.0.0.1");
+    const closedPort = closed.port;
+    await new Promise<void>((r) => closed.server.close(() => r()));
+    const proxy = await proxyWith(ONLY_ONE, table({}));
+
+    // Refused by policy: 403 plus the marker (Chromium: ERR_TUNNEL_CONNECTION_FAILED).
+    const refused = await tunnel(proxy.port, `127.0.0.2:${internal.port}`);
+    expect(refused.status).toBe(403);
+    expect(refused.head).toMatch(/^X-Browser-Egress: blocked$/im);
+    refused.socket.destroy();
+    const page = await viaProxy(proxy.port, `http://127.0.0.2:${internal.port}/`);
+    expect(page.status).toBe(403);
+    expect(page.headers["x-browser-egress"]).toBe("blocked");
+
+    // Allowed but nobody answers, or the name does not resolve: the tunnel is
+    // closed without a response (Chromium: ERR_EMPTY_RESPONSE, retryable).
+    const down = await tunnel(proxy.port, `127.0.0.1:${closedPort}`);
+    expect(down.status).toBe(0);
+    down.socket.destroy();
+    const unknown = await tunnel(proxy.port, `nowhere.test:443`);
+    expect(unknown.status).toBe(0);
+    unknown.socket.destroy();
+    expect(internal.connections).toBe(0);
   });
 
   it("turns an unresolvable name or a closed port into a network error, not a page", async () => {
@@ -354,6 +388,14 @@ describe("egress proxy", () => {
     expect(r.status).toBe(200);
     r.socket.destroy();
     expect((await viaProxy(proxy.port, `http://[::1]:${t.port}/v6`)).body).toBe("from ::1");
+  });
+});
+
+describe("launcher policy line", () => {
+  it("labels the start-chrome fallback policy", () => {
+    expect(policyLabel(env({ BROWSER_EGRESS_POLICY_SOURCE: "fallback" }))).toMatch(/FALLBACK.*public addresses only/);
+    expect(policyLabel(env({ BROWSER_EGRESS_POLICY_SOURCE: "app" }))).toBe("policy");
+    expect(policyLabel(env({}))).toBe("policy");
   });
 });
 
