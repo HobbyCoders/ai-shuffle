@@ -7,6 +7,7 @@ import uuid
 
 from app.core import checkout_transfer, project_resolver, checkout_manager
 from app.core.config import settings
+from app.core.worktree_manager import WorktreeError
 from app.db import database, runs, checkouts
 from app.db.base import get_db
 from app.db.async_database import run_sync
@@ -221,7 +222,10 @@ async def receive(session):
                 project_resolver._local_checkout, project["id"], settings.effective_instance_id,
             )
             base = checkout_manager._resolve_checkout_path(base_row["path"])
-            dest = checkout_manager._branch_checkout_path(base, state["branch"])
+            try:
+                dest = checkout_manager._branch_checkout_path(base, state["branch"])
+            except WorktreeError as e:
+                raise ValueError(str(e)) from e
             cwd = await run_sync(checkout_transfer.import_checkout, base, dest, state)
         else:
             if state is not None:

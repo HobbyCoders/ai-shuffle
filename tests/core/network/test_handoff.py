@@ -122,6 +122,27 @@ async def test_changed_source_aborts_commit_and_keeps_owner(pair,monkeypatch):
             assert cur.fetchone()["state"] == "released"
 
 
+@pytest.mark.asyncio
+async def test_fluid_symlink_outside_target_checkout_refuses_and_keeps_owner(pair, monkeypatch):
+    a,b,source,target=pair
+    outside = target.parent / "outside-fluid"
+    outside.mkdir()
+    (target / ".fluid").symlink_to(outside, target_is_directory=True)
+    phases=[]
+    async def call(device,action,body,**kwargs):
+        phases.append(body["phase"])
+        with a.active():
+            return await control.handle(action,body,from_device=b.device_id)
+    monkeypatch.setattr(control,"call",call)
+    with b.active():
+        # A ValueError, so the resume endpoint answers 409 rather than 500.
+        with pytest.raises(ValueError,match="outside the project checkout"):
+            await handoff.receive(database.get_session("handoff-test"))
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+    assert phases == ["begin","cancel"]
+    assert list(outside.iterdir()) == []
+
+
 def test_live_source_run_blocks_snapshot(pair):
     a,b,source,target=pair
     with a.active():

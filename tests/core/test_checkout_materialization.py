@@ -916,6 +916,59 @@ def test_branch_checkout_path_collision_guard_for_reserved_name(project, base_ch
     assert p.name == f"{checkout_manager._BASE_DIR_NAME}-branch"
 
 
+def _commit_fluid_symlink(repo: Path, target: Path) -> None:
+    """Commit a ``.fluid`` symlink in *repo* that points at *target* (outside it)."""
+    target.mkdir(parents=True, exist_ok=True)
+    (repo / ".fluid").symlink_to(target, target_is_directory=True)
+    _git(repo, "add", ".fluid")
+    _git(repo, "commit", "-m", "add .fluid link")
+
+
+def test_branch_checkout_path_refuses_fluid_symlink_outside_base(tmp_path):
+    from app.core.worktree_manager import WorktreeError
+    repo = _make_base_repo(tmp_path)
+    outside = tmp_path / "outside"
+    _commit_fluid_symlink(repo, outside)
+
+    with pytest.raises(WorktreeError, match="outside the project checkout"):
+        checkout_manager._branch_checkout_path(str(repo), "feature-x")
+    assert list(outside.iterdir()) == []
+
+
+def test_ensure_checkout_refuses_fluid_symlink_outside_base(
+    project, base_checkout, tmp_path, workspace_root
+):
+    outside = tmp_path / "outside"
+    _commit_fluid_symlink(base_checkout, outside)
+
+    path = checkout_manager.ensure_checkout(
+        project, branch="feature-x", runner_id=RUNNER, create_new_branch=True
+    )
+
+    assert path is None
+    assert list(outside.iterdir()) == []  # git never materialized anything there
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch="feature-x") is None
+
+
+@pytest.mark.parametrize("branch", ["", ".", ".."])
+def test_branch_checkout_path_refuses_degenerate_branch_names(tmp_path, branch):
+    from app.core.worktree_manager import WorktreeError
+    repo = _make_base_repo(tmp_path)
+    with pytest.raises(WorktreeError, match="Invalid branch name"):
+        checkout_manager._branch_checkout_path(str(repo), branch)
+
+
+@pytest.mark.parametrize("branch", [".", ".."])
+def test_ensure_checkout_refuses_degenerate_branch_names(
+    project, base_checkout, workspace_root, branch
+):
+    path = checkout_manager.ensure_checkout(
+        project, branch=branch, runner_id=RUNNER, create_new_branch=True
+    )
+    assert path is None
+    assert not (base_checkout / ".fluid").exists()
+
+
 # ---------------------------------------------------------------------------
 # _resolve_checkout_path: workspace-relative legacy paths (#654) are resolved
 # against the runner's workspace_dir at READ time; absolute paths pass through.

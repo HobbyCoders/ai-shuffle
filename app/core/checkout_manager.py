@@ -125,14 +125,22 @@ def _branch_checkout_path(base_dir: str, branch: str) -> Path:
     the project's own clone so per-branch checkouts travel with the project dir.
     Uses ``pathlib`` joins (never string concat with separators) so it is correct
     on Windows and POSIX alike.
+
+    Raises ``WorktreeError`` when the branch sanitizes to ``""``, ``"."`` or
+    ``".."``, or when the path resolves outside the base checkout (e.g. a
+    committed ``.fluid`` symlink) — the same rule ``worktree_manager`` applies.
     """
     sanitized = worktree_manager._sanitize_branch_name(branch)
+    if sanitized in ("", ".", ".."):
+        raise WorktreeError(f"Invalid branch name for a checkout: '{branch}'")
     if sanitized == _BASE_DIR_NAME:
         # Collision guard: the base checkout reserves
         # ``__base__``. A logical branch whose name sanitizes to that exact literal
         # is renamed so it can never resolve onto — and overwrite — the base dir.
         sanitized = f"{sanitized}-branch"
-    return Path(base_dir) / _WORKTREES_DIRNAME / "worktrees" / sanitized
+    path = Path(base_dir) / _WORKTREES_DIRNAME / "worktrees" / sanitized
+    worktree_manager._require_inside_checkout(base_dir, path)
+    return path
 
 
 def _is_empty_cleanup_remnant(path: str, row: Optional[Dict[str, Any]]) -> bool:
@@ -546,7 +554,11 @@ def _ensure_branch_checkout(
         # Row exists but its dir is gone → fall through and re-materialize below
         # (at the same deterministic path, so the upsert reuses the same row).
 
-    dest = _branch_checkout_path(base_path, branch)
+    try:
+        dest = _branch_checkout_path(base_path, branch)
+    except WorktreeError as e:
+        logger.warning("checkout_manager: refusing checkout for branch %r: %s", branch, e)
+        return None
     dest_str = str(dest)
 
     # Adopt an already-materialized dir at the deterministic path (idempotent).
