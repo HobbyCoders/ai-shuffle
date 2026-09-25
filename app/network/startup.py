@@ -173,7 +173,13 @@ async def _reconcile_owned_connectors() -> None:
     from app.core.connectors.manager import connector_manager
     from app.network import ownership
     if not ownership.can_execute_local():
-        await connector_manager.stop_all()
+        # Stop the running connectors but keep the lifecycle relay:
+        # ``start_all`` does not restart it when execution is re-admitted.
+        for connector_id, _instance in list(connector_manager.get_running_connectors()):
+            try:
+                await connector_manager.stop_connector(connector_id)
+            except Exception:  # noqa: BLE001 - one failure must not keep the rest connected
+                logger.warning("Stopping fenced connector %s failed", connector_id, exc_info=True)
     else:
         await connector_manager.start_all()
 
