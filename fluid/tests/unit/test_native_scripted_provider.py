@@ -37,11 +37,12 @@ from fluid.events import (
 )
 from fluid.events.model import CacheMissAlert, Interrupted, ProviderRetry, TurnStarted
 from fluid.events.ops import Interrupt
-from fluid.messages import ToolResultBlock, ToolUseBlock
+from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.permissions.engine import PermissionEngine
 from fluid.providers import _chat_completions
 from fluid.providers._retry import RetryPolicy
 from fluid.providers.anthropic.client import AnthropicClient
+from fluid.providers.base import ProviderRequest
 from fluid.providers.local.client import LocalClient
 from fluid.providers.openai_responses.client import OpenAIResponsesClient
 from fluid.providers.openrouter.client import OpenRouterClient
@@ -1210,6 +1211,94 @@ async def test_a_provider_that_never_answers_is_not_reported_as_an_interrupted_r
 
 def test_the_first_byte_timeout_defaults_to_sixty_seconds():
     assert AnthropicClient(api_key="k")._first_byte_timeout == 60.0
+    assert OpenRouterClient(api_key="k")._first_byte_timeout == 60.0
+    assert OpenAIResponsesClient(api_key="k")._first_byte_timeout == 60.0
+    # A local server may hold its headers while it loads a model.
+    assert LocalClient(base_url="http://127.0.0.1:1")._first_byte_timeout is None
+
+
+def _hold_headers(server: Any, seconds: float) -> None:
+    """The next request gets its scripted reply, but no response headers for
+    ``seconds`` (released early when the server closes)."""
+    original = server._next_reply
+    held = [1]
+
+    def delayed() -> Any:
+        reply = original()
+        if held[0]:
+            held[0] -= 1
+            server._stopping.wait(seconds)
+        return reply
+
+    server._next_reply = delayed
+
+
+@pytest.mark.parametrize("kind", ["openrouter", "responses"])
+async def test_headers_that_never_arrive_hit_the_first_byte_timeout_and_are_retried(
+    server, kind
+):
+    """Regression: only the Anthropic client had a first-byte bound, so a
+    chat/completions or Responses server that accepted the connection and
+    said nothing held the turn for the whole 600 s read timeout. Before the
+    headers nothing was accepted, so the call is re-sent like any pre-content
+    transport failure."""
+    _hold_headers(server, 30)
+    server.script(text_reply(kind, "never sent"), text_reply(kind, "second attempt"))
+    run = Harness(server, kind, client_kwargs={"first_byte_timeout": 0.3})
+    started = time.monotonic()
+    try:
+        events = await run.turn()
+        stored = await run.stored()
+    finally:
+        await run.aclose()
+
+    assert time.monotonic() - started < 10
+    assert isinstance(_terminal(events), TurnComplete)
+    assert len(server.requests) == 2
+    assert stored[-1].text() == "second attempt"
+
+
+@pytest.mark.parametrize("kind", ["openrouter", "responses"])
+async def test_a_silent_stream_after_its_headers_is_reported_as_truncated(server, kind):
+    """After a 200 the provider accepted (and may bill) the call: the client
+    does not re-send it but reports the empty stream it got."""
+    server.script([Sleep(30)], text_reply(kind, "never requested"))
+    client = _client(kind, server.url, first_byte_timeout=0.3)
+    request = ProviderRequest(
+        model=MODELS[kind], messages=[Message(role="user", content=[Text("hi")])]
+    )
+    started = time.monotonic()
+    chunks = [chunk async for chunk in client.stream(request)]
+
+    assert time.monotonic() - started < 10
+    [error] = [c for c in chunks if c.kind == "error"]
+    assert "terminal usage chunk" in error.payload["message"]
+    assert "truncated response" in error.payload["message"]
+    assert "no data within 0.3s first-byte timeout" in error.payload["message"]
+    assert error.payload["retriable"] is False
+    assert "transport_failure" not in error.payload
+    assert not any(c.kind in ("message_start", "text_delta") for c in chunks)
+    assert len(server.requests) == 1
+
+
+@pytest.mark.parametrize("kind", ["openrouter", "responses"])
+async def test_a_silent_stream_after_its_headers_is_retried_by_the_engine_as_empty(
+    server, kind
+):
+    server.script([Sleep(30)], text_reply(kind, "second attempt"))
+    run = Harness(server, kind, client_kwargs={"first_byte_timeout": 0.3})
+    started = time.monotonic()
+    try:
+        events = await run.turn()
+        stored = await run.stored()
+    finally:
+        await run.aclose()
+
+    assert time.monotonic() - started < 10
+    assert [r.reason for r in _of(events, ProviderRetry)] == ["empty response from provider"]
+    assert isinstance(_terminal(events), TurnComplete)
+    assert len(server.requests) == 2
+    assert stored[-1].text() == "second attempt"
 
 
 # ─── replies without usage ──────────────────────────────────────────────────
@@ -1459,15 +1548,20 @@ async def test_a_true_rate_limit_is_still_retried_and_reported_as_429(server, ki
 # ─── first-byte timeout is a provider setting ───────────────────────────────
 
 
+@pytest.mark.parametrize("kind", ["anthropic", "openrouter", "openai_responses", "local"])
 @pytest.mark.parametrize("value,expected", [(None, 60.0), (5, 5.0), (0, None)])
-def test_the_first_byte_timeout_comes_from_the_provider_config(value, expected):
+def test_the_first_byte_timeout_comes_from_the_provider_config(kind, value, expected):
     """Regression (R10-15): the 60 s budget was fixed; a slow gateway that
     sends its first byte only after the upstream's first token could not
-    raise it."""
+    raise it. It was also read for the Anthropic kind only."""
     from fluid.config.loader import _build_provider_client
     from fluid.config.model import HarnessConfig
 
-    block: dict[str, Any] = {"kind": "anthropic", "api_key_env": "UNSET_TEST_KEY"}
+    block: dict[str, Any] = {"kind": kind, "api_key_env": "UNSET_TEST_KEY"}
+    if kind == "local":
+        block["base_url"] = "http://127.0.0.1:1"
+        if value is None:
+            expected = None  # off unless configured
     if value is not None:
         block["first_byte_timeout"] = value
     config = HarnessConfig.from_dict({"providers": {"slow": block}})

@@ -441,7 +441,7 @@ class Settings(BaseSettings):
     provider_read_timeout: float = 600.0
     # Wall clock for one whole model call; 0 disables it.
     provider_stream_deadline: float = 900.0
-    # Wait for a call's first byte (Anthropic dialect only); 0 disables it. Retried only
+    # Wait for a call's first byte (every native client: Anthropic, OpenRouter/OpenAI-format chat, Responses); 0 disables it. Retried only
     # when even the response headers never came; after a 200 the call is not re-sent.
     provider_first_byte_timeout: float = 60.0
 

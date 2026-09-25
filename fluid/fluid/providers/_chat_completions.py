@@ -11,6 +11,7 @@ provider's ``serialize.py``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -41,13 +42,16 @@ from fluid.providers._retry import (
 )
 from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
+    DEFAULT_FIRST_BYTE_TIMEOUT_S,
     DEFAULT_STREAM_DEADLINE_S,
     StreamDiagnostics,
     StreamDeadlineExceeded,
     deadline_error_payload,
+    first_byte_note,
     is_closed_client_error,
     billing_summary,
     is_usable_client,
+    open_stream,
     provider_error_summary,
     refusal_payload,
 )
@@ -508,7 +512,9 @@ class ChatCompletionsNormalizer:
 # A dead upstream replica can answer 200 and then emit nothing but SSE keepalive
 # comments (": OPENROUTER PROCESSING") indefinitely. Deadline the FIRST data
 # event so the engine's empty-completion retry gets a chance to route around it
-# instead of the caller staring at dead air.
+# instead of the caller staring at dead air. It applies after the headers
+# whatever ``first_byte_timeout`` says; the first-byte budget (headers plus the
+# first data event) can only shorten that wait, never lengthen it.
 FIRST_DATA_TIMEOUT = 30.0
 
 
@@ -522,6 +528,7 @@ async def stream_chat_completions(
     retry: RetryPolicy,
     track_provider_requests: bool = False,
     stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
+    first_byte_timeout: float | None = DEFAULT_FIRST_BYTE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
     """POST ``body`` to ``url`` and normalize the SSE response into StreamChunks.
 
@@ -531,6 +538,13 @@ async def stream_chat_completions(
     has been closed by its owner — a client is created and closed per call.
     ``stream_deadline`` bounds one whole call in wall-clock seconds, above the
     per-read ``timeout``; None disables it.
+
+    ``first_byte_timeout`` bounds the wait for the response headers plus the
+    first data event (None or 0 disables it), as on the Anthropic client:
+    headers that never arrive raise ``FirstByteTimeout``, a pre-content
+    transport failure retried on ``retry.transport_retries``; a 200 followed
+    by silence is reported as a truncated stream (the engine's empty-completion
+    retry decides whether to re-send).
     """
     injected = http_client
     owned: httpx.AsyncClient | None = None
@@ -579,9 +593,13 @@ async def stream_chat_completions(
             )
             try:
                 trace_request("chat_completions", body)
-                async with client.stream(
-                    "POST", url, json=body, headers=request_headers
-                ) as resp:
+                sent_at = time.monotonic()
+                async with contextlib.AsyncExitStack() as scope:
+                    resp = await open_stream(
+                        scope, client, "POST", url,
+                        first_byte_timeout=first_byte_timeout,
+                        json=body, headers=request_headers,
+                    )
                     diagnostics.received_headers(resp)
                     attempt_meta = {
                         "attempt": attempt + 1,
@@ -637,6 +655,18 @@ async def stream_chat_completions(
                     events = sse_events(_lines()).__aiter__()
                     starved = False
                     awaiting_first = True
+                    # The first-data wait: the fixed watchdog, cut to what the
+                    # headers left of the first-byte budget (never less than
+                    # a sliver, so a slow header does not fail the read).
+                    first_data_wait = FIRST_DATA_TIMEOUT
+                    first_byte_bound = False
+                    if first_byte_timeout and first_byte_timeout > 0:
+                        left = max(
+                            first_byte_timeout - (time.monotonic() - sent_at), 0.05
+                        )
+                        if left < first_data_wait:
+                            first_data_wait = left
+                            first_byte_bound = True
                     # message_start is held until the first chunk after it,
                     # so an error the provider sends in place of content can
                     # be retried without the engine having seen a message
@@ -653,7 +683,7 @@ async def stream_chat_completions(
                         # it touches. sse_events drops comment lines, so a
                         # keepalive heartbeat satisfies neither.
                         budget: float | None = (
-                            FIRST_DATA_TIMEOUT if awaiting_first else None
+                            first_data_wait if awaiting_first else None
                         )
                         # Which clock owns the budget decides how a timeout is
                         # reported. Comparing the wall clock afterwards is not
@@ -765,7 +795,9 @@ async def stream_chat_completions(
                             "stream ended before the provider sent "
                             "a terminal usage chunk (empty or truncated response)"
                         )
-                        if starved:
+                        if starved and first_byte_bound:
+                            message += first_byte_note(float(first_byte_timeout or 0))
+                        elif starved:
                             message += f" (no data within {FIRST_DATA_TIMEOUT:g}s)"
                         truncated: dict[str, Any] = {
                             "message": message,

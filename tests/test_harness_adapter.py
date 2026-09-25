@@ -7609,3 +7609,43 @@ async def test_build_provider_client_default_timeouts_match_fluid(monkeypatch):
     assert client._timeout == 600.0
     assert client._stream_deadline == DEFAULT_STREAM_DEADLINE_S
     assert client._first_byte_timeout == DEFAULT_FIRST_BYTE_TIMEOUT_S
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,base_url",
+    [
+        ("openrouter", None),
+        ("openrouter", "https://api.x.ai"),
+        ("openai_responses", None),
+        ("openai_responses", "https://api.openai.example"),
+    ],
+)
+async def test_build_provider_client_first_byte_timeout_reaches_chat_and_responses(
+    monkeypatch, kind, base_url
+):
+    """Regression: PROVIDER_FIRST_BYTE_TIMEOUT reached the Anthropic client only,
+    so a silent OpenRouter / OpenAI-format / Responses server held a turn for
+    the whole read timeout. 0 disables it there too."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.provider.fluid_credentials import ProviderCredentials
+
+    async def fake_resolve(_kind, _provider_id):
+        return ProviderCredentials(api_key="sk-test", base_url=base_url)
+
+    monkeypatch.setattr(ha, "resolve_provider_credentials", fake_resolve)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    for configured, expected in ((12.5, 12.5), (0.0, None)):
+        _patch_provider_timeouts(monkeypatch, 90.0, 300.0, configured)
+        for options in (
+            SessionOptions(model="m", extra={"provider_id": "prov-1"}),
+            SessionOptions(model="m"),
+        ):
+            client, http_client = await ha._build_provider_client(kind, options)
+            try:
+                assert client._first_byte_timeout == expected
+            finally:
+                if http_client is not None:
+                    await http_client.aclose()

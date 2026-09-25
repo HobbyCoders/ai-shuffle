@@ -5378,10 +5378,11 @@ def _provider_read_timeout() -> float:
 def _provider_timeout_kwargs(kind: str) -> Dict[str, Any]:
     """Timeout keyword arguments for the fluid client of ``kind``.
 
-    ``timeout`` (per read) and ``stream_deadline`` (whole call) go to every
-    client; ``first_byte_timeout`` only to the Anthropic client, the one fluid
-    client that takes it. A deadline or first-byte value of 0 (or below)
-    becomes ``None``, which fluid reads as "disabled". Env:
+    ``timeout`` (per read), ``stream_deadline`` (whole call) and
+    ``first_byte_timeout`` (headers plus first event) go to every client kind
+    the app builds (Anthropic, OpenRouter/OpenAI-format chat, Responses), so
+    the result does not depend on ``kind``. A deadline or first-byte value of
+    0 (or below) becomes ``None``, which fluid reads as "disabled". Env:
     PROVIDER_READ_TIMEOUT, PROVIDER_STREAM_DEADLINE, PROVIDER_FIRST_BYTE_TIMEOUT.
     """
     from app.core.config import settings
@@ -5390,13 +5391,11 @@ def _provider_timeout_kwargs(kind: str) -> Dict[str, Any]:
         seconds = float(getattr(settings, name, default) or 0)
         return seconds if seconds > 0 else None
 
-    kwargs: Dict[str, Any] = {
+    return {
         "timeout": _provider_read_timeout(),
         "stream_deadline": _optional("provider_stream_deadline", 900.0),
+        "first_byte_timeout": _optional("provider_first_byte_timeout", 60.0),
     }
-    if kind == "anthropic":
-        kwargs["first_byte_timeout"] = _optional("provider_first_byte_timeout", 60.0)
-    return kwargs
 
 
 def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> httpx.AsyncClient:
@@ -5479,8 +5478,8 @@ async def _build_provider_client(
     creds = None
     if provider_id:
         creds = await resolve_provider_credentials(kind, str(provider_id))
-    # Read timeout, whole-call deadline and (Anthropic) first-byte bound from
-    # PROVIDER_* settings; provider rows carry no timeout override.
+    # Read timeout, whole-call deadline and first-byte bound from PROVIDER_*
+    # settings; provider rows carry no timeout override.
     timeouts = _provider_timeout_kwargs(kind)
 
     if kind == "openai_responses":

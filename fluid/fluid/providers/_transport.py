@@ -131,7 +131,10 @@ class FirstByteTimeout(httpx.ReadTimeout):
     A ``ReadTimeout`` so every client's transport handler treats it as one: a
     failure before any content. It is retried on the transport budget only
     while the response headers have not arrived; after a 200 the provider has
-    accepted (and may bill) the call, so the Anthropic client reports it.
+    accepted (and may bill) the call, so it is not re-sent by the client: the
+    Anthropic client reports it as a transport failure, the chat/completions
+    and Responses clients as a truncated stream (see first_byte_note), which
+    the engine's empty-completion retry handles like any other empty 200.
     """
 
     def __init__(self, budget: float) -> None:
@@ -139,6 +142,12 @@ class FirstByteTimeout(httpx.ReadTimeout):
             f"provider sent no response within {budget:g}s (first-byte timeout)"
         )
         self.budget = budget
+
+
+def first_byte_note(budget: float) -> str:
+    """Suffix for a truncated-stream error ended by the first-byte timeout
+    after the response headers arrived."""
+    return f" (no data within {budget:g}s first-byte timeout)"
 
 
 async def open_stream(

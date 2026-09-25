@@ -15,7 +15,11 @@ import httpx
 
 from fluid.providers._chat_completions import stream_chat_completions
 from fluid.providers._retry import RetryPolicy
-from fluid.providers._transport import DEFAULT_STREAM_DEADLINE_S, is_usable_client
+from fluid.providers._transport import (
+    DEFAULT_FIRST_BYTE_TIMEOUT_S,
+    DEFAULT_STREAM_DEADLINE_S,
+    is_usable_client,
+)
 from fluid.providers._retry import is_retriable_status
 from fluid.providers.base import ErrorClass, ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers.openrouter.serialize import build_request_body
@@ -53,6 +57,7 @@ class OpenRouterClient:
         base_url: str = API_URL,
         timeout: float = 600.0,
         stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
+        first_byte_timeout: float | None = DEFAULT_FIRST_BYTE_TIMEOUT_S,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
         pricing: dict[str, dict[str, float]] | None = None,
@@ -64,6 +69,12 @@ class OpenRouterClient:
         self._timeout = timeout
         # Wall clock for one whole model call, above the per-read ``timeout``.
         self._stream_deadline = stream_deadline
+        # Wall clock for the headers plus the first data event; None or 0
+        # disables it. Headers that never came are a pre-content transport
+        # failure (retried only on the transport budget, 0 by default here);
+        # a 200 followed by silence is a truncated stream. See
+        # fluid.providers._chat_completions.stream_chat_completions.
+        self._first_byte_timeout = first_byte_timeout
         self._http = http_client
         # A refused request (429, 5xx, or an error chunk sent in place of
         # content) started no generation, so it retries with backoff. A
@@ -138,5 +149,6 @@ class OpenRouterClient:
             retry=self._retry,
             track_provider_requests=True,
             stream_deadline=self._stream_deadline,
+            first_byte_timeout=self._first_byte_timeout,
         ):
             yield chunk

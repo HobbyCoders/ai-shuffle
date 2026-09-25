@@ -646,6 +646,10 @@ def _build_provider_client(config: HarnessConfig, provider_name: str):
         if pc.stream_deadline is not None
         else {}
     )
+    # Same convention for the first-byte bound: 0 disables, absent keeps the
+    # client's default (60 s; off for the "local" kind). Every kind takes it.
+    if pc.first_byte_timeout is not None:
+        deadline["first_byte_timeout"] = pc.first_byte_timeout or None
 
     if pc.kind == "anthropic":
         from fluid.providers.anthropic.client import AnthropicClient
@@ -653,9 +657,6 @@ def _build_provider_client(config: HarnessConfig, provider_name: str):
         kwargs: dict[str, Any] = {"api_key": api_key, **deadline}
         if pc.base_url:
             kwargs["base_url"] = pc.base_url
-        if pc.first_byte_timeout is not None:
-            # Same convention as the deadline: 0 disables, absent keeps 60 s.
-            kwargs["first_byte_timeout"] = pc.first_byte_timeout or None
         client: Any = AnthropicClient(**kwargs)
     elif pc.kind == "openai_responses":
         from fluid.providers.openai_responses.client import OpenAIResponsesClient

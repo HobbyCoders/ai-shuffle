@@ -97,11 +97,13 @@ class ProviderConfig:
     # (fluid.providers._transport.DEFAULT_STREAM_DEADLINE_S); 0 disables it.
     stream_deadline: float | None = None
     # Seconds a call may wait for its first byte (the response headers, then
-    # the first SSE event) before it is abandoned and retried like a read
-    # timeout. Absent → the client's default
+    # the first SSE event) before it is abandoned: retried like a read
+    # timeout when the headers never came, a truncated stream after them
+    # (the Anthropic kind reports that as a transport failure). Absent → the client's default
     # (fluid.providers._transport.DEFAULT_FIRST_BYTE_TIMEOUT_S, 60 s); 0
-    # disables it. Honoured by the "anthropic" kind; raise it for a gateway
-    # that sends nothing until the upstream's first token.
+    # disables it. Honoured by every native kind ("local" defaults to off: a
+    # local server may hold its headers while it loads a model); raise it for
+    # a gateway that sends nothing until the upstream's first token.
     first_byte_timeout: float | None = None
     # Standing server-specific request-body knobs, merged into every request
     # (llama.cpp cache_prompt/samplers, Ollama options, …). Currently honoured
