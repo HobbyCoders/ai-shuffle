@@ -7,6 +7,7 @@ layer, network ownership, the turn queue and the automation/webhook sinks are
 replaced per test, so nothing here touches a real connector platform.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -254,17 +255,67 @@ class TestStartConnector:
         assert await mgr.start_connector("c1") is True
         assert mgr.get_running_instance("c1").config == {"token": "abc"}
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "bug: start_connector on an already-running connector overwrites the registry entry "
-        "without disconnecting the old instance, leaving an orphaned live client that "
-        "double-handles inbound messages (e.g. POST /activate twice)"
-    ))
     async def test_starting_twice_does_not_orphan_the_live_instance(self, mgr, db, not_enrolled, fake_registry):
         db.get_connector.return_value = connector_row()
         assert await mgr.start_connector("c1") is True
         first = mgr.get_running_instance("c1")
         await mgr.start_connector("c1")
         assert mgr.get_running_instance("c1") is first or first.disconnect.await_count == 1
+
+    async def test_second_start_of_a_live_connector_is_a_noop(self, mgr, db, not_enrolled, fake_registry):
+        """POST /activate twice (or toggleConnector active=true) must not build
+        a second client: two live clients would each hand every inbound message
+        to the manager, running every turn twice."""
+        db.get_connector.return_value = connector_row()
+        assert await mgr.start_connector("c1") is True
+        first = mgr.get_running_instance("c1")
+        for status in (ConnectorStatus.CONNECTED, ConnectorStatus.CONNECTING):
+            first._status = status
+            assert await mgr.start_connector("c1") is True
+        assert FakeConnector.instances == [first]
+        assert mgr.get_running_instance("c1") is first
+        first.disconnect.assert_not_awaited()
+        assert statuses(db) == ["connecting"]
+
+    @pytest.mark.parametrize("dead", [ConnectorStatus.ERROR, ConnectorStatus.DISCONNECTED])
+    async def test_dead_registered_instance_is_disconnected_and_replaced(
+        self, mgr, db, not_enrolled, fake_registry, dead,
+    ):
+        db.get_connector.return_value = connector_row()
+        assert await mgr.start_connector("c1") is True
+        first = mgr.get_running_instance("c1")
+        first._status = dead
+        assert await mgr.start_connector("c1") is True
+        second = mgr.get_running_instance("c1")
+        assert second is not first and FakeConnector.instances == [first, second]
+        first.disconnect.assert_awaited_once()
+        second.disconnect.assert_not_awaited()
+
+    async def test_concurrent_starts_leave_one_live_client(self, mgr, db, not_enrolled, fake_registry, monkeypatch):
+        """Two starts racing past the registry check both connect; whichever
+        registers second must disconnect the one it displaces."""
+        db.get_connector.return_value = connector_row()
+        both_connecting = asyncio.Event()
+        entered = []
+
+        async def slow_connect(self):
+            entered.append(self)
+            if len(entered) == 2:
+                both_connecting.set()
+            await both_connecting.wait()
+            self._status = ConnectorStatus.CONNECTED
+            return True
+
+        monkeypatch.setattr(FakeConnector, "connect", slow_connect)
+        results = await asyncio.wait_for(
+            asyncio.gather(mgr.start_connector("c1"), mgr.start_connector("c1")), timeout=10,
+        )
+        assert results == [True, True]
+        live = mgr.get_running_instance("c1")
+        assert len(FakeConnector.instances) == 2 and live in FakeConnector.instances
+        (orphan,) = [i for i in FakeConnector.instances if i is not live]
+        orphan.disconnect.assert_awaited_once()
+        live.disconnect.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

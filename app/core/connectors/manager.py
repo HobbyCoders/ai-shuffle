@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.connectors.base import (
     BaseConnector,
+    ConnectorStatus,
     IncomingMessage,
     OutgoingMessage,
 )
@@ -140,7 +141,27 @@ class ConnectorManager:
         logger.info("All connectors shut down")
 
     async def start_connector(self, connector_id: str) -> bool:
-        """Instantiate, connect, and register a single connector."""
+        """Instantiate, connect, and register a single connector.
+
+        Idempotent for a live client: starting a connector that is already
+        connected (or connecting) returns ``True`` without building a second
+        client, so a repeated POST /activate or MCP ``toggleConnector`` cannot
+        leave two clients each handling every inbound message. A registered
+        client that has errored or disconnected is torn down and replaced.
+        Config changes go through ``restart_connector``, which stops first.
+        """
+        async with self._lock:
+            existing = self._connectors.get(connector_id)
+            if existing is not None and existing.status in (
+                ConnectorStatus.CONNECTED, ConnectorStatus.CONNECTING,
+            ):
+                logger.info(f"Connector already running: {connector_id}")
+                return True
+            if existing is not None:
+                del self._connectors[connector_id]
+        if existing is not None:
+            await self._disconnect_quietly(connector_id, existing)
+
         def _prepare_blocking() -> Optional[Dict[str, Any]]:
             """Row read, config decrypt and impl-class lookup in ONE hop.
 
@@ -236,7 +257,12 @@ class ConnectorManager:
 
         if success:
             async with self._lock:
+                displaced = self._connectors.get(connector_id)
                 self._connectors[connector_id] = instance
+            # A concurrent start that registered while this one was connecting
+            # would otherwise stay live, unreferenced, and double-handle input.
+            if displaced is not None and displaced is not instance:
+                await self._disconnect_quietly(connector_id, displaced)
             # Keep status as "connecting" — the connector's on_ready callback
             # will update to "connected" once the gateway handshake completes.
             # If login fails, _run_client will update to "error".
@@ -249,16 +275,20 @@ class ConnectorManager:
             )
             return False
 
+    @staticmethod
+    async def _disconnect_quietly(connector_id: str, instance: BaseConnector) -> None:
+        try:
+            await instance.disconnect()
+        except Exception as e:
+            logger.error(f"Error disconnecting connector {connector_id}: {e}")
+
     async def stop_connector(self, connector_id: str) -> None:
         """Disconnect and unregister a running connector."""
         async with self._lock:
             instance = self._connectors.pop(connector_id, None)
 
         if instance:
-            try:
-                await instance.disconnect()
-            except Exception as e:
-                logger.error(f"Error disconnecting connector {connector_id}: {e}")
+            await self._disconnect_quietly(connector_id, instance)
 
         # Single write after the disconnect await — one hop, nothing to batch.
         await run_sync(database.update_connector_status, connector_id, "disconnected")
@@ -639,7 +669,6 @@ class ConnectorManager:
             # subsequent turns the connector session already carries the link,
             # so this is a no-op.
             ai_session_id = session.get("session_id") if session else None
-            link_written = False
             if not ai_session_id and session and session.get("id"):
                 minted_id = str(uuid.uuid4())
                 title = (message.text or "")[:50].strip()
@@ -675,7 +704,6 @@ class ConnectorManager:
                 try:
                     await run_sync(_mint_blocking)
                     ai_session_id = minted_id
-                    link_written = True
                     # Mirror execute_query's sidebar broadcast for new sessions so
                     # connector-started conversations appear without a refresh.
                     try:
@@ -796,21 +824,6 @@ class ConnectorManager:
                         f"Connector turn failed for session {ai_session_id}: "
                         f"{outcome['error']}"
                     )
-
-            # The AI session id is known up front now, so the link is already
-            # written for sessions minted above. This only repairs legacy rows
-            # whose link points somewhere else (or nowhere).
-            if (
-                not link_written
-                and session
-                and session.get("id")
-                and session.get("session_id") != ai_session_id
-            ):
-                # Isolated repair write between two awaits — one hop.
-                await run_sync(
-                    database.update_connector_session_ai_session,
-                    session.get("id"), ai_session_id,
-                )
 
             # Send response back through the connector
             sent = False
