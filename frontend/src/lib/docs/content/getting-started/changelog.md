@@ -96,8 +96,9 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Passwords that contain `@`, and `ssh://user:password@` addresses, are now fully removed from clone addresses in logs and messages.
 - Forwarded addresses written with a port or in brackets, and IPv4 addresses written as IPv6, are matched against `TRUSTED_PROXIES` and counted per visitor.
 - Plugin names in a repository's own settings can no longer point outside the plugin folders.
-- Code mode no longer treats a Python cell as safe while the kernel runs without the sandbox, as it does with the stock compose file. Note: in Ask mode, each cell then asks first. With the sandbox active, cells run without a prompt; its self-test now runs when the app starts, so a host where it works never asks.
+- Code mode no longer treats a Python cell as safe while the kernel runs without the sandbox, as it does with the stock compose file. Note: in Ask mode, each cell then asks first. With the sandbox active, cells run without a prompt once its self-test has passed. The self-test now runs when the app starts; a cell sent while it is still running asks first.
 - On Linux, the app now hides its own process memory and start-up settings from the programs agents start, which run as the same user. Note: this also blocks core dumps and debuggers on the app process; `ALLOW_PROCESS_INTROSPECTION=true` allows them again (see [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox-optional)).
+- In Docker, the database and the built-in browser no longer start with the app's secrets (such as `SECRET_KEY`, the owner password and provider keys) in their environment, where other programs running as the same user could read them.
 - A team name written by an agent can no longer make the app read files outside the teams folder or signal an unrelated process.
 - Unpairing a device or signing it out closes its open connections at once; before, they stayed open until it next used a session. A device whose session token was replaced loses them within about 30 seconds. An outage of the connection service never drops a live connection.
 
@@ -167,6 +168,9 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Plugin details show the Hooks badge for plugins that contribute hooks, and plugin errors show the real reason.
 - The chat connection survives a malformed message instead of closing.
 - Large file uploads in the built-in browser get more time instead of failing after 30 seconds.
+- Built-in browser: reading a page's response gives up after 5 seconds instead of holding the browser forever on a stream, a long value typed into a field is typed in full instead of stopping part way, and a redirect to a blocked address names that address.
+- The Ask prompt for a Python cell is titled "Run Python code", says it appears because the kernel runs without the sandbox, and shows the cell's first 20 lines as a code block instead of escaped text. Every other prompt keeps showing the command, file or address it asks about.
+- After you switch project, a slower answer for the project you left no longer replaces the hooks, MCP servers, agents, memory files or GitHub details of the one you are on, and its failure no longer shows as an error there. These panels show the server's reason when a load fails.
 - Usage panel: OpenRouter shows the current period's percentage and reset time (a key with 20% used showed 100%), and Codex keeps its windows and plan when a reply carries only credit figures.
 - Usage panel: one unreadable provider no longer blanks every provider, readings restored in the browser and carried over from an older reading go stale on schedule, and very small percentages no longer round to "0% left" or "100% left".
 - Usage panel: reset times are read as UTC, an open panel refreshes when a turn ends, every device shows the latest reading, and the usage tool agrees with the panel on how fresh each window is.
@@ -210,6 +214,8 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - **Quit** from the tray stops the worker cleanly and forces it after 60 seconds; closing the window offers **Quit Anyway** if stopping fails again.
 - The unused `aishuffle://` link handler is removed, so web pages can no longer launch the app.
 - The desktop app reports update status to the web interface every 30 seconds, and at once when the phase changes (checking, available, downloading, ready), with less load on the worker. Download percentages in the web interface move in 30-second steps. One missed report no longer makes the update button say the updater is unavailable.
+- **Restart and update** from the bell asks first while sessions are running, and says so when it cannot tell.
+- A worker health reply cut off partway no longer leaves the app on "starting" and makes **Quit** hang, and an old worker exiting late no longer marks the new one failed. Opening the app from the dock or tray during the first-launch notice no longer starts the worker before you accept it, and two quick opens no longer create two windows.
 
 ### Android app
 
@@ -236,6 +242,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - An approved automation run waiting at shutdown is re-queued on the next start and runs once. Runs of disabled or deleted automations are skipped, approvals older than 24 hours expire, and events that arrive during shutdown no longer create runs. Once shutdown has begun, no approved or scheduled run starts by any path, and a run cancelled after its session was created removes that empty session again.
 - A catalog refresh started while another one runs waits for it, and a refresh gives up after two minutes instead of hanging.
 - Error reports the app sends to the server are size-capped.
+- A permission check no longer waits for the code-mode sandbox self-test to finish.
 
 ### Removed
 
@@ -259,7 +266,11 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - An Edit with empty old text is refused unless the file is empty; before, it inserted the new text between every character.
 - One malformed MCP server address no longer breaks the whole settings import preview.
 - Session import: a file over 50 MB gets a "too large" error, and a malformed export (not a JSON object, a message that is not an object, a title that is not text, counters that are not numbers) is refused before anything is saved instead of failing with a server error or leaving an empty session behind. An export naming a project this install does not have is imported without a project, and re-importing the app's own export keeps its whole transcript.
+- Session import also checks every message's fields before saving anything, and a transcript that cannot be written returns an error and removes the new session instead of leaving it half imported.
 - In Docker, the folder browser, project paths, the default working folder for commands and sessions, the built-in browser, history, plugin paths and settings import all use the workspace chosen during setup. Before, some used the start-up folder, so paths inside the chosen workspace were refused or resolved elsewhere, and settings import skipped projects there as "outside workspace".
+- Changing the workspace in **Settings** applies at once; before, some paths kept using the old folder until a restart.
+- An MCP or plugin settings file that exists but cannot be read (damaged, or caught while another program was writing it) is no longer replaced by an empty one on the next change. The change is refused with an error naming the file, which is left as it was. Plugin auto-update settings are the exception and are replaced.
+- The hooks card, the project agents, hooks and memory tabs and the build page no longer leave an uncaught error behind when a load fails; the tab shows the error, and the build page's badges stay hidden.
 - Clearing the sign-in-again flag of a ChatGPT or Grok provider no longer changes how it signs in; a provider without that sign-in returns 404.
 - MCP servers, plugins and the project MCP tab show a failed load or action instead of failing silently, and a failed plugin details load stays on the list. Changing project closes an MCP editor still open on the previous project's server, and removing a global MCP server from a project asks first.
 - Uninstalling a plugin asks first, and the API user list stays usable while it shows an error.

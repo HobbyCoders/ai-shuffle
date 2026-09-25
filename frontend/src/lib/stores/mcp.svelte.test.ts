@@ -32,8 +32,9 @@ function response(parts: Partial<McpServersResponse> = {}): McpServersResponse {
 
 function deferred<T>() {
 	let resolve!: (v: T) => void;
-	const promise = new Promise<T>((res) => { resolve = res; });
-	return { promise, resolve };
+	let reject!: (e: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
 }
 
 beforeEach(() => {
@@ -86,6 +87,38 @@ describe('mcp store — project servers', () => {
 		await first;
 		expect(mcp.current.currentProjectId).toBe('NEW');
 		expect(mcp.current.projectServers.project.map((s) => s.name)).toEqual(['new']);
+	});
+
+	it('a failure for a project already left sets no error and leaves the newer load in charge (R14-3)', async () => {
+		const old = deferred<McpServersResponse>();
+		const cur = deferred<McpServersResponse>();
+		api.getProjectMcpServers.mockReturnValueOnce(old.promise).mockReturnValueOnce(cur.promise);
+		const first = mcp.loadProjectServers('OLD');
+		const second = mcp.loadProjectServers('NEW');
+		old.reject({ status: 500, detail: 'OLD exploded' });
+		await first;
+		expect(mcpError.current).toBeNull();
+		expect(mcpLoading.current).toBe(true);
+		cur.resolve(response({ project: [server('new', 'project')] }));
+		await second;
+		expect(mcpError.current).toBeNull();
+		expect(mcpLoading.current).toBe(false);
+		expect(mcp.current.projectServers.project.map((s) => s.name)).toEqual(['new']);
+	});
+
+	it("a stale success does not clear the newer load's loading flag", async () => {
+		const old = deferred<McpServersResponse>();
+		const cur = deferred<McpServersResponse>();
+		api.getProjectMcpServers.mockReturnValueOnce(old.promise).mockReturnValueOnce(cur.promise);
+		const first = mcp.loadProjectServers('OLD');
+		const second = mcp.loadProjectServers('NEW');
+		old.resolve(response());
+		await first;
+		expect(mcpLoading.current).toBe(true);
+		cur.reject({ status: 500, detail: 'NEW failed' });
+		await expect(second).rejects.toEqual({ status: 500, detail: 'NEW failed' });
+		expect(mcpError.current).toBe('NEW failed');
+		expect(mcpLoading.current).toBe(false);
 	});
 
 	it('adds and updates within the given scope only', async () => {

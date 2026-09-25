@@ -172,13 +172,17 @@ export const mcp = {
 	 * Load all MCP servers for a project
 	 */
 	async loadProjectServers(projectId: string): Promise<void> {
+		// Not withLoading: a load for a project already left must write
+		// nothing, neither its lists nor its error nor the loading flag (the
+		// newer load still owns that).
 		const seq = ++_projectLoadSeq;
-		_update((state) => ({ ...state, currentProjectId: projectId }));
-		return withLoading(_update, async () => {
+		_update((state) => ({ ...state, loading: true, error: null, currentProjectId: projectId }));
+		try {
 			const response = await mcpApi.getProjectMcpServers(projectId);
 			if (seq !== _projectLoadSeq) return;
 			_update((state) => ({
 				...state,
+				loading: false,
 				projectServers: {
 					user: response.user,
 					installed: response.installed || [],
@@ -186,7 +190,12 @@ export const mcp = {
 					project: response.project
 				}
 			}));
-		}, (e) => extractError(e, 'Failed to load project MCP servers'));
+		} catch (e) {
+			if (seq !== _projectLoadSeq) return;
+			const error = extractError(e, 'Failed to load project MCP servers');
+			_update((state) => ({ ...state, error, loading: false }));
+			throw e;
+		}
 	},
 
 	/**

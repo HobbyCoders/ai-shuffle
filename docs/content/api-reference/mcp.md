@@ -8,6 +8,8 @@ order: 10
 
 Endpoints for managing Model Context Protocol (MCP) servers — extending your agents with external tools.
 
+**Unreadable settings file:** every route that changes a server (add, update, remove or toggle, global or project) first reads the file it writes back: `~/.claude.json`, `~/.claude/settings.json`, or the project's `.claude/.mcp.json` or `.mcp.json`. When that file exists but cannot be read as a JSON object (corrupt, or caught while another program was writing it), the route answers `409` with the file's path in `detail` and leaves the file unchanged, instead of replacing it with an empty one. Fix or restore the file, then try again. The list routes read such a file as empty.
+
 ## Global MCP Servers
 
 ### GET /api/v1/mcp/servers

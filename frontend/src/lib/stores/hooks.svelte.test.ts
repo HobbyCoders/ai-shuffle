@@ -40,8 +40,9 @@ function pluginHook(plugin_id: string): PluginHookInfo {
 
 function deferred<T>() {
 	let resolve!: (v: T) => void;
-	const promise = new Promise<T>((res) => { resolve = res; });
-	return { promise, resolve };
+	let reject!: (e: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
 }
 
 beforeEach(() => {
@@ -81,6 +82,44 @@ describe('hooks store — loading', () => {
 		slow.resolve([hook('old', { project_id: 'OLD' })]);
 		await first;
 		expect(hooks.current.currentProjectId).toBe('NEW');
+		expect(hooks.current.hooks.map((h) => h.id)).toEqual(['new']);
+	});
+
+	it('a failure for a project already left sets no error and leaves the newer load in charge (R14-3)', async () => {
+		const old = deferred<Hook[]>();
+		const cur = deferred<Hook[]>();
+		api.getProjectHooks.mockReturnValueOnce(old.promise).mockReturnValueOnce(cur.promise);
+		api.getPluginHooks.mockResolvedValue([]);
+		api.getProjectPluginHooks.mockResolvedValue([]);
+		const first = hooks.loadAll('OLD');
+		const second = hooks.loadAll('NEW');
+		old.reject({ status: 500, detail: 'OLD exploded' });
+		await first;
+		expect(hooksError.current).toBeNull();
+		expect(hooks.current.loading).toBe(true);
+		cur.resolve([hook('new', { project_id: 'NEW' })]);
+		await second;
+		expect(hooksError.current).toBeNull();
+		expect(hooks.current.loading).toBe(false);
+		expect(hooks.current.hooks.map((h) => h.id)).toEqual(['new']);
+	});
+
+	it("a stale app-hooks success does not clear a newer project load's loading flag", async () => {
+		const app = deferred<Hook[]>();
+		const cur = deferred<Hook[]>();
+		api.getAppHooks.mockReturnValueOnce(app.promise);
+		api.getProjectHooks.mockReturnValueOnce(cur.promise);
+		api.getPluginHooks.mockResolvedValue([]);
+		api.getProjectPluginHooks.mockResolvedValue([]);
+		const first = hooks.loadAppHooks();
+		const second = hooks.loadAll('NEW');
+		app.resolve([hook('app')]);
+		await first;
+		expect(hooks.current.loading).toBe(true);
+		expect(hooks.current.hooks).toEqual([]);
+		cur.resolve([hook('new', { project_id: 'NEW' })]);
+		await second;
+		expect(hooks.current.loading).toBe(false);
 		expect(hooks.current.hooks.map((h) => h.id)).toEqual(['new']);
 	});
 

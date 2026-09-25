@@ -59,7 +59,12 @@ _served_roots_cache = None
 
 
 def reset_served_roots_cache() -> None:
-    """Drop the cached served-roots set (used by tests)."""
+    """Drop the cached served-roots set.
+
+    Called when the workspace changes (relative project paths resolve against
+    it) and by tests. A ``_registered_serve_roots`` scan already running in a
+    worker thread can still store the roots it read, for at most the TTL.
+    """
     global _served_roots_cache
     _served_roots_cache = None
 

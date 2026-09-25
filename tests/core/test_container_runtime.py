@@ -340,6 +340,8 @@ def test_postgres_server_gets_only_its_own_environment(settings_factory, monkeyp
     supervisor holds, readable by same-uid processes in /proc/<pid>/environ."""
     _secret_environment(monkeypatch)
     monkeypatch.setenv("UNRELATED_APP_SETTING", "not-for-postgres")
+    # R14-2: an unpacked PostgreSQL finds libpq through the operator's library path.
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/pg/lib")
     db = runtime.Database(settings_factory())
     db.pg.mkdir(parents=True)
     monkeypatch.setattr(db, "command", lambda *a, **k: "postgres (PostgreSQL) 16.4")
@@ -359,6 +361,7 @@ def test_postgres_server_gets_only_its_own_environment(settings_factory, monkeyp
     # The maintenance clients get the same base plus their own PG* settings.
     client = runtime.client_env("postgresql://u:pw@127.0.0.1:5432/db")
     assert _leaked(client) == [] and client["PGPASSWORD"] == "pw"
+    assert env["LD_LIBRARY_PATH"] == client["LD_LIBRARY_PATH"] == "/opt/pg/lib"
 
 
 def test_chrome_gets_no_secrets_or_lifecycle_token(settings_factory, tmp_path, monkeypatch):

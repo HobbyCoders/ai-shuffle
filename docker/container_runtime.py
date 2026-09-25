@@ -167,13 +167,18 @@ def stop_group(process, timeout):
 # Everything else stays out: the supervisor carries the app's secrets
 # (SECRET_KEY, OWNER_PASSWORD, provider keys, ...), and a same-uid process can
 # read an exec'd child's start-up environment through /proc/<pid>/environ.
-_POSTGRES_ENV_NAMES = frozenset({"PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR"})
+# LD_LIBRARY_PATH is the operator's own setting, not a secret: a PostgreSQL
+# whose libraries are not on the default search path (an unpacked or
+# relocated install, as the local boot smoke tests use) cannot start without it.
+_POSTGRES_ENV_NAMES = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "LD_LIBRARY_PATH",
+})
 
 
 def postgres_base_env(environ=None):
     """The allow-listed part of ``environ`` (default os.environ) for PostgreSQL:
-    path, home, user, locale and time zone. No PG* is inherited either; the
-    callers set the ones they mean."""
+    path, library path, home, user, locale and time zone. No PG* is inherited
+    either; the callers set the ones they mean."""
     source = os.environ if environ is None else environ
     return {k: v for k, v in source.items() if k in _POSTGRES_ENV_NAMES or k.startswith("LC_")}
 

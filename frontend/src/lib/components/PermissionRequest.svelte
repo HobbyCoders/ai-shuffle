@@ -358,17 +358,20 @@
 	const hasEnrichmentDetails = $derived(
 		Boolean(request.decision_reason || request.blocked_path)
 	);
-	// A plain-text multi-line description (a Python cell's prompt, titled
-	// "Run Python code", carries the first lines of the code) reads as code: it
-	// is shown whole in a scrolling block that replaces both the one-line
-	// subhead and the JSON-escaped summary of the input.
-	const CODE_PROMPT_TITLE = 'Run Python code';
+	// A Python cell's prompt (the `run_python` tool, titled "Run Python code")
+	// carries the first lines of the code as its description. It is shown
+	// whole in a scrolling block that replaces both the one-line subhead and
+	// the JSON-escaped summary of the input. The block is keyed on the tool,
+	// never on the description's shape or the title alone: both are supplied
+	// by the caller, and other prompts carry multi-line descriptions too (a
+	// ProviderAgent worker's tag line, a computer-use reason), where the
+	// command line or path must stay visible.
+	const PYTHON_CELL_TOOL = /^(?:mcp__.+__)?run_python$/;
 	const codeDescription = $derived.by(() => {
+		if (!PYTHON_CELL_TOOL.test(request.tool_name ?? '')) return null;
 		// Keep the first line's indentation; drop blank edges only.
 		const text = (request.description ?? '').replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd();
-		if (!text.trim()) return null;
-		const isCode = text.includes('\n') || request.title?.trim() === CODE_PROMPT_TITLE;
-		return isCode ? text : null;
+		return text.trim() ? text : null;
 	});
 	const descriptionTruncatedView = $derived.by(() => {
 		if (codeDescription !== null) return null;
@@ -454,7 +457,7 @@
 		<!-- Slice D: SDK-provided description, rendered as supporting subhead. -->
 		{#if descriptionTruncatedView}
 			<p class="enrichment-description text-xs text-muted-foreground leading-relaxed mb-2">
-				{descriptionTruncatedView.visible}
+				<span class="enrichment-description-text">{descriptionTruncatedView.visible}</span>
 				{#if descriptionTruncatedView.needsTruncate}
 					<button
 						type="button"
@@ -774,7 +777,12 @@
 		line-height: 1.5;
 	}
 
-	/* Multi-line description (a Python cell's code): kept whole, line breaks
+	/* A multi-line description (a worker's tag line, a reason) keeps its breaks. */
+	.enrichment-description-text {
+		white-space: pre-line;
+	}
+
+	/* A Python cell's code: kept whole, line breaks
 	   and indentation intact, scrolling past a readable height. */
 	.permission-code {
 		margin: 0;

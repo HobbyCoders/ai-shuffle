@@ -66,6 +66,30 @@ const { subscribe, update: _update, notifySubscribers: _notifySubscribers, creat
 		(v) => { _state = v; }
 	);
 
+/**
+ * Run the load numbered `seq` and apply its result only while it is still the
+ * latest one. Not withLoading: a superseded load writes nothing, neither its
+ * lists nor its error nor the loading flag (the newer load still owns that).
+ */
+async function latestLoad<T>(
+	seq: number,
+	load: () => Promise<T>,
+	apply: (state: HooksState, data: T) => HooksState,
+	fallback: string
+): Promise<void> {
+	_update((state) => ({ ...state, loading: true, error: null }));
+	try {
+		const data = await load();
+		if (seq !== _loadSeq) return;
+		_update((state) => ({ ...apply(state, data), loading: false }));
+	} catch (e) {
+		if (seq !== _loadSeq) return;
+		const error = api.getErrorMessage(e, fallback);
+		_update((state) => ({ ...state, error, loading: false }));
+		throw e;
+	}
+}
+
 // ============================================================================
 // Exported Store
 // ============================================================================
@@ -85,15 +109,12 @@ export const hooks = {
 	 * Load app-level hooks only (no project context)
 	 */
 	async loadAppHooks(): Promise<void> {
-		const seq = ++_loadSeq;
-		return withLoading(_update, async () => {
-			const [appHooksData, pluginHooksData] = await Promise.all([
-				api.getAppHooks(),
-				api.getPluginHooks()
-			]);
-			if (seq !== _loadSeq) return;
-			_update((state) => ({ ...state, hooks: appHooksData, pluginHooks: pluginHooksData }));
-		}, errorText('Failed to load app hooks'));
+		return latestLoad(
+			++_loadSeq,
+			() => Promise.all([api.getAppHooks(), api.getPluginHooks()]),
+			(state, [appHooksData, pluginHooksData]) => ({ ...state, hooks: appHooksData, pluginHooks: pluginHooksData }),
+			'Failed to load app hooks'
+		);
 	},
 
 	/**
@@ -223,20 +244,22 @@ export const hooks = {
 	async loadAll(projectId: string): Promise<void> {
 		const seq = ++_loadSeq;
 		_update((state) => ({ ...state, currentProjectId: projectId }));
-		return withLoading(_update, async () => {
-			// Load project hooks (includes app hooks), global plugin hooks, and project plugin hooks
-			const [hooksData, globalPluginHooks, projectPluginHooks] = await Promise.all([
+		// Load project hooks (includes app hooks), global plugin hooks, and project plugin hooks
+		return latestLoad(
+			seq,
+			() => Promise.all([
 				api.getProjectHooks(projectId),
 				api.getPluginHooks(),
 				api.getProjectPluginHooks(projectId)
-			]);
-
+			]),
 			// Combine global and project plugin hooks
-			const pluginHooks = [...globalPluginHooks, ...projectPluginHooks];
-			if (seq !== _loadSeq) return;
-
-			_update((state) => ({ ...state, hooks: hooksData, pluginHooks }));
-		}, errorText('Failed to load hooks'));
+			(state, [hooksData, globalPluginHooks, projectPluginHooks]) => ({
+				...state,
+				hooks: hooksData,
+				pluginHooks: [...globalPluginHooks, ...projectPluginHooks]
+			}),
+			'Failed to load hooks'
+		);
 	},
 
 	// ========================================================================
