@@ -26,9 +26,7 @@ class WebSessionReservationTest {
         val bytes = Buffer(); reserve.body!!.writeTo(bytes); assertEquals("{}", bytes.readUtf8())
         val commit = ApiClient.webSessionRequest(server, ApiClient.SessionPurpose.WEB, token)
         assertEquals(token, commit.header(ApiClient.WEB_RESERVATION_HEADER))
-        val native = ApiClient.webSessionRequest(server, ApiClient.SessionPurpose.NATIVE)
-        assertNull(native.header(ApiClient.WEB_RESERVATION_HEADER))
-        assertThrows(IllegalArgumentException::class.java) { ApiClient.webSessionRequest(server, ApiClient.SessionPurpose.NATIVE, token) }
+        assertNull(ApiClient.webSessionRequest(server).header(ApiClient.WEB_RESERVATION_HEADER))
         assertThrows(IllegalArgumentException::class.java) { ApiClient.webReservationRequest(server.copy(baseUrl = "http://worker.example")) }
         assertThrows(IllegalArgumentException::class.java) { ApiClient.webReservationRequest(server.copy(baseUrl = "https://worker.example/elsewhere")) }
     }

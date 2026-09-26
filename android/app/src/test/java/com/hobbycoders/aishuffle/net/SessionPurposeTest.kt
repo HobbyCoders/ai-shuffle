@@ -7,7 +7,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SessionPurposeTest {
-    @Test fun webAndNativeVoiceMintIndependentSessionPurposes() {
+    @Test fun webSessionsDeclareTheirPurpose() {
         val server = Server.create("Fixture", "https://worker.example", "test-only")
         for (purpose in ApiClient.SessionPurpose.values()) {
             val request = ApiClient.webSessionRequest(server, purpose)
@@ -25,7 +25,7 @@ class SessionPurposeTest {
             val field = type.getDeclaredField("client\$delegate").apply { isAccessible = true }
             return (field.get(null) as Lazy<*>).value as okhttp3.OkHttpClient
         }
-        for (http in listOf(client(ApiClient::class.java), client(VoiceApi::class.java))) {
+        for (http in listOf(client(ApiClient::class.java))) {
             assertFalse(http.followRedirects)
             assertFalse(http.followSslRedirects)
             val redirected = java.util.concurrent.atomic.AtomicInteger()

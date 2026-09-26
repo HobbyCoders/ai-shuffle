@@ -18,7 +18,6 @@ internal fun Activity.protectSystemInsets() {
     if (Build.VERSION.SDK_INT < 35) return
     WindowCompat.setDecorFitsSystemWindows(window, false)
     // Enforced transparent bars no longer inherit the themed bar background.
-    // Explicit icon contrast also covers VoiceCallActivity's night theme.
     fun updateBarContrast() {
         val light = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK != Configuration.UI_MODE_NIGHT_YES
         WindowCompat.getInsetsController(window, window.decorView).apply {

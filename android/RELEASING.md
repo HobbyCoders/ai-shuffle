@@ -129,7 +129,7 @@ tunnel to workers). Independent security review: No.
 | Personal info > Email address | Yes, by the sign-in provider | No | Account management; not stored in the hub database. |
 | Device or other IDs | Yes | No | Account management and security: a random install ID and the device model name identify each trusted device. |
 | Messages / other user-generated content | Yes, optional | No | App functionality. Prompts, replies and files go to the user's own worker. Over remote access they pass through the Cloudflare tunnel on HobbyCoders' account in transit only; nothing is stored by HobbyCoders. Mark as processed ephemerally. |
-| Audio > Voice or sound recordings | Yes, optional | No, transfer is user-initiated | Voice chat streams microphone audio to the AI provider the user configured on their worker, using a short-lived session from that worker. |
+| Audio > Voice or sound recordings | Yes, optional | No, transfer is user-initiated | Voice chat in the chat page streams microphone audio to the user's own worker, which relays it to the AI provider the user configured there. |
 | Location > Approximate / Precise | Yes, optional | No | Only when the user turns on phone tools and approves an agent's request; sent to the user's own worker. |
 | App activity, web history, contacts, photos, files on the phone, financial or health data | No | No | |
 | Crash logs and diagnostics | No | No | The app has no analytics or crash-reporting SDK. |
@@ -139,8 +139,8 @@ Other App content declarations this app needs:
 - **Accessibility API:** the optional app-control service
   (`ShuffleAccessibilityService`) needs the Accessibility declaration and a
   short video of the consent flow.
-- **Foreground service (microphone):** voice chat, declared as
-  `FOREGROUND_SERVICE_MICROPHONE`.
+- **Foreground service:** none. Voice chat runs inside the chat page while
+  the app is open and declares no foreground service.
 - **Camera:** QR pairing only.
 - **Privacy policy URL:** `https://hobbycoders.com/privacy`.
 - **Target audience:** 18+; not designed for children.

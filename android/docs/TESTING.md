@@ -21,10 +21,10 @@ cleartext HTTP (`usesCleartextTraffic="false"`).
       code). Opening it loads the bundled UI already authenticated.
 - [ ] Send a message and get a normal response.
 - [ ] Add a second worker; both appear and open independently.
-- [ ] Start voice from a chat or the worker list; the microphone notification
-      stays while the app is backgrounded and hangup ends the call (see
-      [native-voice-lifecycle.md](native-voice-lifecycle.md)).
+- [ ] Start a voice call from the chat page's own voice button; the first call
+      asks for the microphone once, and hang-up from the page ends it (see
+      [VOICE_ASSISTANT.md](VOICE_ASSISTANT.md)).
 - [ ] Settings → offline demo opens without a worker.
 
 The app does not receive push notifications; it only calls worker APIs while
-it is open or while a voice call runs.
+it is open.

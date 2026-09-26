@@ -73,15 +73,15 @@ class DeviceKeyRenewalTest {
         }, { 0L })
         val web = async { manager.prepare(original) }
         started.await()
-        val native = async { manager.prepare(original) }
+        val second = async { manager.prepare(original) }
         gate.complete(Unit)
         val webServer = (web.await() as ApiResult.Success).data
-        val nativeServer = (native.await() as ApiResult.Success).data
+        val secondServer = (second.await() as ApiResult.Success).data
         assertEquals(2, calls)
         assertEquals(saved, webServer)
-        assertEquals(saved, nativeServer)
+        assertEquals(saved, secondServer)
         assertEquals("Bearer $replacement", ApiClient.webSessionRequest(webServer).header("Authorization"))
-        assertEquals("Bearer $replacement", ApiClient.webSessionRequest(nativeServer, ApiClient.SessionPurpose.NATIVE).header("Authorization"))
+        assertEquals("Bearer $replacement", ApiClient.webSessionRequest(secondServer).header("Authorization"))
     }
 
     @Test fun failedPersistenceNeverUsesReplacementAndRetryStartsFromSavedKey() = runBlocking {

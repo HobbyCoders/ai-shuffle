@@ -109,8 +109,4 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
     testImplementation("org.json:json:20240303")
-
-    // Voice assistant: WebRTC transport for the OpenAI Realtime call.
-    implementation("io.getstream:stream-webrtc-android:1.1.3")
-    // Voice is explicitly started in the foreground; no wake-word engine.
 }

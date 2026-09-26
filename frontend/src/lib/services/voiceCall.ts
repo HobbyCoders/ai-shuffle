@@ -37,7 +37,6 @@
 
 import { get, writable } from 'svelte/store';
 import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, getVoiceCallState, type VoiceOptions } from '$lib/api/voice';
-import { openNativeVoice } from './nativeVoice';
 import { usesAudioStream } from '$lib/constants/voice-engines';
 import type { VoiceAudioStream } from './voiceAudioStream';
 let audioStream: VoiceAudioStream | null = null;
@@ -662,17 +661,6 @@ export function toggleAgent(): void {
 // Lifecycle
 // ============================================================================
 
-async function handoffNativeVoice(owner: string, attempt: number): Promise<boolean> {
-	if (!(await openNativeVoice(owner))) return false;
-	if (attempt === generation) {
-		// The native foreground service owns capture and call controls. Preserve
-		// the resolved session/context without claiming a browser WebRTC call.
-		sessionId = null;
-		patch({ sessionId: owner, status: 'idle', error: null, notice: 'Voice opened in the Android app.' });
-	}
-	return true;
-}
-
 /**
  * Start a call on `sessionIdIn` using an already-minted credential (the one
  * `POST /voice/sessions` returned).
@@ -701,8 +689,6 @@ export async function startCall(
 	});
 
 	try {
-		if (!usesAudioStream(cred.model) && await handoffNativeVoice(sessionIdIn, myGeneration)) return;
-		if (myGeneration !== generation) return;
 		const acquired = await acquireMic();
 		if (myGeneration !== generation) {
 			acquired.getTracks().forEach(track => track.stop());
@@ -788,8 +774,6 @@ export async function startCallForSession(sessionIdIn: string): Promise<void> {
 	patch({ sessionId: sessionIdIn, status: 'connecting', error: null, notice: null });
 	let cred: Awaited<ReturnType<typeof mintVoiceSecret>>;
 	try {
-		if (await handoffNativeVoice(sessionIdIn, attempt)) return;
-		if (attempt !== generation) return;
 		cred = await mintVoiceSecret(sessionIdIn);
 		if (attempt !== generation) return;
 	} catch (e) {

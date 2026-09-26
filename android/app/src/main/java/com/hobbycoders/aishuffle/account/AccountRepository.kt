@@ -6,7 +6,6 @@ import android.webkit.CookieManager
 import android.webkit.WebStorage
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.model.Server
-import com.hobbycoders.aishuffle.voice.VoiceCallService
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import kotlin.coroutines.resume
@@ -18,8 +17,6 @@ class AccountRepository(private val context: Context) {
         store.clear()
         com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.stop()
         servers.removeAccountServers()
-        VoiceCallService.hangup(context)
-        context.stopService(Intent(context, VoiceCallService::class.java))
         context.sendBroadcast(Intent(ACTION_CLEARED).setPackage(context.packageName))
         WebStorage.getInstance().deleteAllData()
         suspendCancellableCoroutine<Unit> { c -> CookieManager.getInstance().removeAllCookies { CookieManager.getInstance().flush(); if (c.isActive) c.resume(Unit) } }

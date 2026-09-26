@@ -227,6 +227,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - **Settings → About** no longer crashes.
 - App and website text points to **Settings → Providers → Devices** and the **Sign in** button that exists.
 - Devices still registered by older Android builds with a UnifiedPush address are treated as unable to receive push, so notifications to them are no longer counted as delivered.
+- Voice calls in the Android app now use the voice built into the chat page, the same as the website. The app's own call screen, the mic button in the chat toolbar and the **Start voice chat** entry on a worker's menu are gone; start a call from the voice button in the chat instead.
 
 ### Remote access and accounts
 

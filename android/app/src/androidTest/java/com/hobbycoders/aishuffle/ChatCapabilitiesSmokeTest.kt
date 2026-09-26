@@ -126,8 +126,7 @@ class ChatCapabilitiesSmokeTest {
                     web(activity).evaluateJavascript("""
                         location.origin === '${MobileUi.ORIGIN}' &&
                         window.__SHUFFLE_MOBILE__?.token === 'fixture-cookie' &&
-                        typeof window.shuffleFileSave?.postMessage === 'function' &&
-                        typeof window.shuffleNativeVoice?.postMessage === 'function'
+                        typeof window.shuffleFileSave?.postMessage === 'function'
                     """.trimIndent()) { ready = it == "true" }
                 }
                 ready
@@ -379,68 +378,6 @@ class ChatCapabilitiesSmokeTest {
             }
         }
     }
-    @Test fun nativeVoiceHandoffPreservesSelectedChatAndRejectsReplay() {
-        fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null) }) { scenario, server ->
-            val launches = CopyOnWriteArrayList<Intent>()
-            val monitor = object : Instrumentation.ActivityMonitor() {
-                override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
-                    if (intent.component?.className != "com.hobbycoders.aishuffle.voice.VoiceCallActivity") return null
-                    launches.add(intent)
-                    return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
-                }
-            }
-            instrumentation.addMonitor(monitor)
-            try {
-                val request = """{"type":"start","id":"4165b4fc-c414-4e76-a39a-e173904831ca","sessionId":"chosen_chat-123"}"""
-                scenario.onActivity { web(it).evaluateJavascript("window.voiceReplies=[]; shuffleNativeVoice.addEventListener('message',e=>voiceReplies.push(JSON.parse(e.data))); shuffleNativeVoice.postMessage(${org.json.JSONObject.quote(request)});", null) }
-                waitFor("Native voice did not open") { launches.size == 1 }
-                assertEquals(server.id, launches.single().getStringExtra("server_id"))
-                assertEquals("chosen_chat-123", launches.single().getStringExtra("session_id"))
-                scenario.onActivity { web(it).evaluateJavascript("shuffleNativeVoice.postMessage(${org.json.JSONObject.quote(request)});", null) }
-                var replies = ""
-                waitFor("The handoff did not acknowledge then refuse the replay") {
-                    scenario.onActivity { web(it).evaluateJavascript("JSON.stringify(voiceReplies)") { raw -> replies = raw } }
-                    replies.contains("true") && replies.contains("false")
-                }
-                assertEquals(1, launches.size)
-            } finally { instrumentation.removeMonitor(monitor) }
-        }
-    }
-    @Test fun failedNativeVoiceLaunchHasOneFailureAndNeverAcknowledgesSuccess() {
-        fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null) }) { scenario, server ->
-            var originalPage = 0
-            val pageField = ChatActivity::class.java.getDeclaredField("document").apply { isAccessible = true }
-            scenario.onActivity { activity ->
-                originalPage = pageField.getInt(activity)
-                val view = web(activity)
-                val bridgeField = ChatActivity::class.java.getDeclaredField("nativeVoice").apply { isAccessible = true }
-                (bridgeField.get(activity) as com.hobbycoders.aishuffle.ui.NativeVoiceBridge).close()
-                // The page is the bundle, so the replacement bridge must be scoped to the bundle's origin as the real one is.
-                val fixtureBridge = com.hobbycoders.aishuffle.ui.NativeVoiceBridge(activity, view, MobileUi.ORIGIN, { true }) {
-                    throw IllegalStateException("Fixture activity launch refused")
-                }
-                bridgeField.set(activity, fixtureBridge)
-                fixtureBridge.install()
-                view.reload()
-            }
-            waitFor("Replacement voice bridge document did not load") {
-                var ready = false
-                scenario.onActivity { ready = pageField.getInt(it) > originalPage && web(it).progress == 100 && it.hasWindowFocus() }
-                ready
-            }
-            val request = """{"type":"start","id":"4165b4fc-c414-4e76-a39a-e173904831ca","sessionId":"chosen_chat-123"}"""
-            scenario.onActivity { web(it).evaluateJavascript("window.voiceReplies=[]; shuffleNativeVoice.addEventListener('message',e=>voiceReplies.push(JSON.parse(e.data))); shuffleNativeVoice.postMessage(${org.json.JSONObject.quote(request)});", null) }
-            var replies = ""
-            waitFor("Failed voice launch never replied") {
-                scenario.onActivity { web(it).evaluateJavascript("JSON.stringify(voiceReplies)") { raw -> replies = raw } }
-                replies.contains("false")
-            }
-            assertFalse(replies.contains("true"))
-            val decoded = org.json.JSONArray(org.json.JSONTokener(replies).nextValue() as String)
-            assertEquals(1, decoded.length())
-            assertEquals("Voice could not open. Try again.", decoded.getJSONObject(0).getString("error"))
-        }
-    }
     @Test fun interruptedInitialSessionLoadsAfterResumeWithoutRotatingReadyChat() {
         val firstStarted = java.util.concurrent.CountDownLatch(1)
         val releaseFirst = java.util.concurrent.CountDownLatch(1)
@@ -463,33 +400,6 @@ class ChatCapabilitiesSmokeTest {
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
             instrumentation.waitForIdleSync()
             assertEquals("Ready chat must keep its existing cookie on ordinary resume", 2, requests.get())
-        }
-    }
-    @Test fun nativeVoiceHandoffCannotReplaceAnActiveCallForAnotherChat() {
-        fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null) }) { scenario, server ->
-            val launches = CopyOnWriteArrayList<Intent>()
-            val monitor = object : Instrumentation.ActivityMonitor() {
-                override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
-                    if (intent.component?.className != "com.hobbycoders.aishuffle.voice.VoiceCallActivity") return null
-                    launches.add(intent); return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
-                }
-            }
-            instrumentation.addMonitor(monitor)
-            try {
-                scenario.onActivity {
-                    com.hobbycoders.aishuffle.voice.VoiceCallState.update { state -> state.copy(status = com.hobbycoders.aishuffle.voice.CallStatus.LIVE, serverId = server.id, sessionId = "another-chat") }
-                    web(it).evaluateJavascript("window.voiceReplies=[]; shuffleNativeVoice.addEventListener('message',e=>voiceReplies.push(JSON.parse(e.data))); shuffleNativeVoice.postMessage('{\"type\":\"start\",\"id\":\"4165b4fc-c414-4e76-a39a-e173904831ca\",\"sessionId\":\"chosen-chat\"}');", null)
-                }
-                var replies = ""
-                waitFor("Active-call handoff was not refused") {
-                    scenario.onActivity { web(it).evaluateJavascript("JSON.stringify(voiceReplies)") { raw -> replies = raw } }
-                    replies.contains("false")
-                }
-                assertTrue(replies.contains("End the current voice call")); assertTrue(launches.isEmpty())
-            } finally {
-                instrumentation.removeMonitor(monitor)
-                scenario.onActivity { com.hobbycoders.aishuffle.voice.VoiceCallState.reset() }
-            }
         }
     }
 }

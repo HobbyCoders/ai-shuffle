@@ -178,13 +178,13 @@ object ApiClient {
      * authenticate the WebView. Requires the aim_ key (and the CF Access service
      * token, if the server is behind Access).
      */
-    enum class SessionPurpose(val value: String) { WEB("web"), NATIVE("native") }
+    enum class SessionPurpose(val value: String) { WEB("web") }
 
     internal const val WEB_RESERVATION_HEADER = "X-Shuffle-Web-Session-Reservation"
     private val reservationFormat = Regex("wsm_[A-Za-z0-9_-]{43}")
 
     internal fun webSessionRequest(server: Server, purpose: SessionPurpose = SessionPurpose.WEB, reservation: String? = null): Request {
-        require(reservation == null || purpose == SessionPurpose.WEB && reservationFormat.matches(reservation))
+        require(reservation == null || reservationFormat.matches(reservation))
         return Request.Builder().url("${server.baseUrl}/api/v1/mobile/web-session")
             .header("Authorization", "Bearer ${server.apiKey}")
             .cfAccess(server.cfAccessClientId, server.cfAccessClientSecret)

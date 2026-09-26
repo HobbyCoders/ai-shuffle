@@ -2,17 +2,6 @@
 <resources>
     <string name="app_name">AI Shuffle</string>
     <string name="cf_access_reauth">Cloudflare Access blocked this session. Pair the server again with a valid service token.</string>
-    <string name="voice_status_connecting">Connecting voice chat…</string>
-    <string name="voice_status_live">Live · %1$s</string>
-    <string name="voice_status_live_generic">Voice chat is live</string>
-    <string name="voice_status_ended">Voice chat ended</string>
-    <string name="voice_status_error">Voice chat could not connect. Check your server and try again.</string>
-    <string name="voice_mute">Mute</string>
-    <string name="voice_unmute">Unmute</string>
-    <string name="voice_hang_up">End voice chat</string>
-    <string name="voice_call_notification_title">Voice chat is open</string>
-    <string name="voice_call_notification_text">Microphone active for your voice chat. End the chat to stop.</string>
-    <string name="voice_error_no_server">Choose a paired server, then start voice chat.</string>
     <string name="accessibility_label">AI Shuffle app control</string>
     <string name="accessibility_description">Optional app control for supported media and maps screens while Shuffle is open. Screen reading and actions need your approval. Password, payment, messaging and permission screens are excluded. Turn off access here at any time.</string>
 </resources>

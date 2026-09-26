@@ -6,8 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import com.hobbycoders.aishuffle.model.Server
-import com.hobbycoders.aishuffle.voice.VoiceCallService
-import com.hobbycoders.aishuffle.voice.VoiceCallState
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,11 +32,9 @@ object DeviceToolsRuntime {
         check(android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
         if (!authorizedTarget(activity, server)) { stop(); mutableAvailability.value = "authorization_revoked"; return }
         if (this.activity.get() === activity && this.server == server && polling?.isActive == true) return
-        val previous = this.server
         val store = com.hobbycoders.aishuffle.data.ServerStore.get(activity)
         if (store.selectedToolsServerId != null && store.selectedToolsServerId != server.id) ToolsPreferences(activity).setCrossAppEnabled(false)
         deactivate()
-        if (previous != null && previous != server && VoiceCallState.isActive && VoiceCallState.state.value.serverId != server.id) VoiceCallService.hangup(activity)
         context = activity.applicationContext
         com.hobbycoders.aishuffle.data.ServerStore.get(activity).selectedToolsServerId = server.id
         if (!registered) {
@@ -73,8 +69,6 @@ object DeviceToolsRuntime {
         activity.get()?.let { ToolApprovals.detach(it) }
         activity.clear()
         server = null
-        context?.let { if (VoiceCallState.isActive) VoiceCallService.hangup(it) }
-        VoiceCallState.reset()
         mutableAvailability.value = "signed_out"
     }
     internal fun preferencesChanged() {
