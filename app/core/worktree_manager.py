@@ -920,11 +920,16 @@ class WorktreeManager:
             except Exception:
                 logger.debug("worktree-cleanup task reap failed", exc_info=True)
             try:
+                from app.core import browser_runtime
                 from app.mcp.builtin_tools import stop_session_background_shells
+
+                # The app-owned browser MCP subprocess keeps the session cwd
+                # after the engine disconnects, which locks the folder too.
+                await browser_runtime.close_session(session_id)
                 await stop_session_background_shells(session_id, require_stopped=True)
             except Exception:
-                logger.warning("worktree-cleanup shell reap failed", exc_info=True)
-                raise WorktreeError("Session shells did not stop; retaining checkout")
+                logger.warning("worktree-cleanup browser or shell reap failed", exc_info=True)
+                raise WorktreeError("Session browser or shells did not stop; retaining checkout")
 
         if terminated:
             logger.info(

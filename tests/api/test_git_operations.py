@@ -264,49 +264,31 @@ class TestExecuteFinish:
         assert _step_status(op, "merge") == "done"
         assert _step_status(op, "cleanup") == "warning"
 
-    async def test_cleanup_guard_other_session_streaming(
-        self, mock_git_service, mock_github_service, mock_worktree_manager
+    @pytest.mark.parametrize("activity", ["turn", "background"])
+    @pytest.mark.parametrize("busy_session", ["other", "me"])
+    async def test_cleanup_stops_busy_worktree_sessions_then_removes(
+        self, mock_git_service, mock_github_service, mock_worktree_manager,
+        busy_session, activity,
     ):
-        mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
-        op = _finish_op(session_id="me")
-
-        mock_db = MagicMock()
-        mock_db.get_sessions_for_worktree.return_value = [{"id": "me"}, {"id": "other"}]
-
-        with patch.multiple(
-            gitops,
-            git_service=mock_git_service,
-            github_service=mock_github_service,
-            worktree_manager=mock_worktree_manager,
-        ), patch(
-            "app.core.streaming_status.has_active_run",
-            side_effect=lambda sid: sid == "other",
-        ), patch("app.db.database.get_sessions_for_worktree", mock_db.get_sessions_for_worktree):
-            await _execute_finish(
-                op, working_dir="/wd", worktree_id="wt-1", repo="o/r",
-                pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
-                merge_method="squash", cleanup=True, session_id="me",
-            )
-
-        assert op.status == "done"
-        assert _step_status(op, "cleanup") == "warning"
-        mock_worktree_manager.cleanup_worktree.assert_not_called()
-
-    async def test_cleanup_guard_worktree_other_session_background_work_only(
-        self, mock_git_service, mock_github_service, mock_worktree_manager
-    ):
-        """A PARKED sibling session (not streaming) with live background work
-        must still block worktree cleanup — the liveness guard counts
-        task_registry.has_active_background_work, not just the streaming read.
+        """The worktree is about to disappear, so a busy session in it (a
+        sibling, or the shipping session itself) is stopped, not left running
+        with its cwd deleted and not a reason to keep the worktree. A turn
+        shows up in the durable ``runs`` table; a parked session's background
+        work only in the task registry.
         """
         mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
         op = _finish_op(session_id="me")
+        busy = {busy_session}
+        stopped = []
+
+        async def stop(sid):
+            stopped.append(sid)
+            busy.discard(sid)
 
         mock_reg = MagicMock()
-        mock_reg.has_active_background_work.side_effect = lambda sid: sid == "other"
-        mock_db = MagicMock()
-        mock_db.get_sessions_for_worktree.return_value = [{"id": "me"}, {"id": "other"}]
-
+        mock_reg.has_active_background_work.side_effect = (
+            lambda sid: activity == "background" and sid in busy
+        )
         with patch.multiple(
             gitops,
             git_service=mock_git_service,
@@ -314,9 +296,11 @@ class TestExecuteFinish:
             worktree_manager=mock_worktree_manager,
         ), patch(
             "app.core.streaming_status.has_active_run",
-            return_value=False,  # nobody is streaming
-        ), patch("app.core.task_registry.task_registry", mock_reg), \
-             patch("app.db.database.get_sessions_for_worktree", mock_db.get_sessions_for_worktree):
+            side_effect=lambda sid: activity == "turn" and sid in busy,
+        ), patch("app.core.task_registry.task_registry", mock_reg), patch(
+            "app.db.database.get_sessions_for_worktree",
+            return_value=[{"id": "me"}, {"id": "other"}, {"id": "idle"}],
+        ), patch.object(gitops, "_stop_session_for_cleanup", side_effect=stop):
             await _execute_finish(
                 op, working_dir="/wd", worktree_id="wt-1", repo="o/r",
                 pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
@@ -325,47 +309,128 @@ class TestExecuteFinish:
             )
 
         assert op.status == "done"
-        assert _step_status(op, "cleanup") == "warning"
-        mock_worktree_manager.cleanup_worktree.assert_not_called()
+        assert stopped == [busy_session]  # the idle sessions are left alone
+        cleanup = next(s for s in op.steps if s["id"] == "cleanup")
+        assert cleanup["status"] == "done"
+        assert cleanup["detail"] == "Stopped 1 session, removed worktree"
+        assert op.result["worktree_deleted"] is True
+        mock_worktree_manager.cleanup_worktree.assert_awaited_once_with("wt-1", keep_branch=False)
 
-    async def test_cleanup_guard_other_session_active_run_only(
+    async def test_cleanup_with_idle_worktree_sessions_stops_nothing(
         self, mock_git_service, mock_github_service, mock_worktree_manager
     ):
-        """A sibling session with a lease-valid active run must block worktree
-        cleanup even with NO live background work: the durable ``runs`` table
-        is the single streaming truth (durable across restarts, shared across
-        installs), so the liveness guard must consult it — otherwise cleanup
-        would delete the worktree out from under a live turn.
-        """
-        mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
         op = _finish_op(session_id="me")
-
-        mock_reg = MagicMock()
-        mock_reg.has_active_background_work.return_value = False  # no bg work
-        mock_db = MagicMock()
-        mock_db.get_sessions_for_worktree.return_value = [{"id": "me"}, {"id": "other"}]
-
+        stop = AsyncMock()
         with patch.multiple(
             gitops,
             git_service=mock_git_service,
             github_service=mock_github_service,
             worktree_manager=mock_worktree_manager,
-        ), patch(
-            "app.core.streaming_status.has_active_run",
-            # Only "other" has a lease-valid active run.
-            side_effect=lambda sid: sid == "other",
-        ), patch("app.core.task_registry.task_registry", mock_reg), \
-             patch("app.db.database.get_sessions_for_worktree", mock_db.get_sessions_for_worktree):
-            await _execute_finish(
-                op, working_dir="/wd", worktree_id="wt-1", repo="o/r",
-                pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
-                merge_method="squash", cleanup=True, session_id="me",
-                status={"ahead": 0},
-            )
+        ), patch.object(gitops, "_session_is_busy", return_value=False), patch(
+            "app.db.database.get_sessions_for_worktree",
+            return_value=[{"id": "me"}, {"id": "other"}],
+        ), patch.object(gitops, "_stop_session_for_cleanup", stop):
+            await gitops._do_cleanup(op, "/wd", "wt-1", "feat/x", "main", "me")
 
-        assert op.status == "done"
+        stop.assert_not_awaited()
+        cleanup = next(s for s in op.steps if s["id"] == "cleanup")
+        assert (cleanup["status"], cleanup["detail"]) == ("done", "Removed worktree")
+        mock_worktree_manager.cleanup_worktree.assert_awaited_once()
+
+    @pytest.mark.parametrize("stop_raises", [False, True])
+    async def test_cleanup_keeps_worktree_when_a_session_does_not_stop(
+        self, mock_git_service, mock_worktree_manager, monkeypatch, stop_raises,
+    ):
+        """A session still busy at the deadline keeps its worktree, whether its
+        stop timed out or raised. The merge already landed, so this is a
+        warning, never an error.
+        """
+        monkeypatch.setattr(gitops, "_CLEANUP_STOP_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(gitops, "_CLEANUP_STOP_POLL_SECONDS", 0.01)
+        op = _finish_op(session_id="me")
+        stop = AsyncMock(side_effect=RuntimeError("wedged") if stop_raises else None)
+        with patch.multiple(
+            gitops, git_service=mock_git_service, worktree_manager=mock_worktree_manager,
+        ), patch.object(gitops, "_session_is_busy", side_effect=lambda sid: sid == "other"), patch(
+            "app.db.database.get_sessions_for_worktree",
+            return_value=[{"id": "me"}, {"id": "other"}],
+        ), patch.object(gitops, "_stop_session_for_cleanup", stop):
+            await gitops._do_cleanup(op, "/wd", "wt-1", "feat/x", "main", "me")
+
+        stop.assert_awaited_once_with("other")
+        cleanup = next(s for s in op.steps if s["id"] == "cleanup")
+        assert cleanup["status"] == "warning"
+        assert cleanup["detail"] == "Skipped: 1 session in this worktree did not stop in time"
+        assert "worktree_deleted" not in op.result
+        mock_worktree_manager.cleanup_worktree.assert_not_called()
+
+    async def test_cleanup_keeps_worktree_when_session_lookup_fails(
+        self, mock_git_service, mock_worktree_manager,
+    ):
+        op = _finish_op(session_id="me")
+        stop = AsyncMock()
+        with patch.multiple(
+            gitops, git_service=mock_git_service, worktree_manager=mock_worktree_manager,
+        ), patch(
+            "app.db.database.get_sessions_for_worktree", side_effect=RuntimeError("db down"),
+        ), patch.object(gitops, "_stop_session_for_cleanup", stop):
+            await gitops._do_cleanup(op, "/wd", "wt-1", "feat/x", "main", "me")
+
+        stop.assert_not_awaited()
         assert _step_status(op, "cleanup") == "warning"
         mock_worktree_manager.cleanup_worktree.assert_not_called()
+
+    async def test_stop_matches_the_stop_button(self, monkeypatch):
+        """Cleanup's stop is the UI Stop: the durable interrupt with background
+        teardown, then the user-stop sweep. Monitor shells go too, whatever
+        STOP_KEEPS_MONITOR_SHELLS says, because their cwd is being removed.
+        """
+        from app.core import query_session_lifecycle, turn_manager
+
+        calls = []
+
+        async def interrupt(sid, mode, stop_background=False, turn_id=None, **kw):
+            calls.append(("interrupt", sid, mode, stop_background))
+
+        async def stop_all(sid, **kw):
+            calls.append(("stop_all", sid, kw))
+            return []
+
+        monkeypatch.setattr(turn_manager, "interrupt_async", interrupt)
+        monkeypatch.setattr(query_session_lifecycle, "stop_all_background_tasks", stop_all)
+        await gitops._stop_session_for_cleanup("s1")
+        assert calls == [
+            ("interrupt", "s1", "stop", True),
+            ("stop_all", "s1", {"user_stop": True, "respect_shell_preference": False}),
+        ]
+
+    async def test_stop_waits_for_the_local_execution_to_settle(self, monkeypatch):
+        """The run lease is released in the execution's finally block, so the
+        busy re-check must come after the execution ends, not race it."""
+        import asyncio
+        from app.core import session_runtime
+
+        interrupted = asyncio.Event()
+        busy = {"s1"}
+
+        async def execution():
+            await interrupted.wait()
+            await asyncio.sleep(0.05)
+            busy.discard("s1")
+
+        task = asyncio.create_task(execution())
+
+        async def stop(sid):
+            interrupted.set()
+
+        monkeypatch.setattr(session_runtime, "active_executions", lambda: {task: "s1"})
+        monkeypatch.setattr(gitops, "_stop_session_for_cleanup", stop)
+        monkeypatch.setattr(gitops, "_session_is_busy", lambda sid: sid in busy)
+        # A poll would sleep far past the test; only the execution wait can pass.
+        monkeypatch.setattr(gitops, "_CLEANUP_STOP_POLL_SECONDS", 10)
+
+        assert await gitops._stop_sessions_for_cleanup(["s1"]) == []
+        assert task.done()
 
     async def test_cleanup_guard_project_mode_other_streaming_session(
         self, mock_git_service, mock_github_service, mock_worktree_manager
@@ -390,7 +455,8 @@ class TestExecuteFinish:
             "app.core.streaming_status.has_active_run",
             side_effect=lambda sid: sid == "other",
         ), patch("app.core.task_registry.task_registry", mock_reg), \
-             patch("app.db.database.get_sessions", mock_db.get_sessions):
+             patch("app.db.database.get_sessions", mock_db.get_sessions), \
+             patch.object(gitops, "_stop_session_for_cleanup", new_callable=AsyncMock) as stop:
             await _execute_finish(
                 op, working_dir="/wd", worktree_id=None, repo="o/r",
                 pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
@@ -400,6 +466,8 @@ class TestExecuteFinish:
 
         assert op.status == "done"
         assert _step_status(op, "cleanup") == "warning"
+        # The shared checkout's other sessions are unrelated work: never stopped.
+        stop.assert_not_awaited()
         # The dangerous ops must NOT have run.
         mock_git_service.checkout.assert_not_called()
         mock_git_service.delete_branch.assert_not_called()
@@ -477,26 +545,43 @@ class TestExecuteFinish:
 
         mock_git_service.remove_worktree.return_value = True
         op = _finish_op(project_id="p1", session_id="me")
+        # The requesting session is mid-turn; the sibling does ``activity``.
+        busy = {"me"} | ({"other"} if activity != "idle" else set())
+        stopped = []
+
+        async def stop(sid):
+            stopped.append(sid)
+            busy.discard(sid)
+
         with patch.multiple(
             gitops, git_service=mock_git_service,
             github_service=mock_github_service, worktree_manager=mock_worktree_manager,
         ), patch(
             "app.core.streaming_status.has_active_run",
-            side_effect=lambda sid: sid == "me" or activity == "turn",
+            side_effect=lambda sid: sid in busy and (sid == "me" or activity == "turn"),
         ), patch(
             "app.core.task_registry.task_registry.has_active_background_work",
-            return_value=activity == "background",
-        ), patch.object(gitops, "_release_session_cwd", new_callable=AsyncMock):
+            side_effect=lambda sid: sid in busy and activity == "background",
+        ), patch.object(gitops, "_stop_session_for_cleanup", side_effect=stop), \
+             patch.object(gitops, "_release_session_cwd", new_callable=AsyncMock):
             await _execute_finish(
                 op, working_dir=str(wt), worktree_id=None, repo="o/r",
                 pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
                 merge_method="squash", cleanup=True, session_id="me", status={"ahead": 0},
             )
 
-        blocked = sibling_branch == "feat/x" and activity != "idle"
+        # Only sessions in THIS checkout are stopped; a busy sibling on another
+        # branch or the main checkout keeps running and does not block.
+        sibling_here = sibling_branch == "feat/x" and activity != "idle"
+        assert sorted(stopped) == (["me", "other"] if sibling_here else ["me"])
         assert op.status == "done"
-        assert _step_status(op, "cleanup") == ("warning" if blocked else "done")
-        assert mock_git_service.remove_worktree.called is not blocked
+        cleanup = next(s for s in op.steps if s["id"] == "cleanup")
+        assert cleanup["status"] == "done"
+        assert cleanup["detail"] == (
+            "Stopped 2 sessions, removed worktree" if sibling_here
+            else "Stopped 1 session, removed worktree"
+        )
+        mock_git_service.remove_worktree.assert_called_once()
         mock_git_service.checkout.assert_not_called()
 
     @pytest.mark.parametrize("failure", ["query", "resolve", "missing"])

@@ -178,7 +178,14 @@
 		aria-checked={prefs.cleanupAfterMerge}
 		onclick={() => gitActionPreferences.setCleanupAfterMerge(!prefs.cleanupAfterMerge)}
 	>
-		<span class="opt-toggle-label">{isWorktreeMode ? 'Delete worktree after merge' : 'Delete branch after merge'}</span>
+		{#if isWorktreeMode}
+			<span class="opt-toggle-label">
+				Delete worktree after merge
+				<span class="opt-hint">Stops any session still running in it</span>
+			</span>
+		{:else}
+			<span class="opt-toggle-label">Delete branch after merge</span>
+		{/if}
 		<span class="opt-switch" class:on={prefs.cleanupAfterMerge}></span>
 	</button>
 {/snippet}

@@ -73,7 +73,7 @@ class FinishRequest(BaseModel):
         default=None, description="Worktree to operate in (defaults to the main project checkout)"
     )
     session_id: Optional[str] = Field(
-        default=None, description="Requesting session, excluded from the cleanup liveness guard"
+        default=None, description="Requesting session, excluded from the project-mode cleanup guard"
     )
 
 
@@ -88,7 +88,7 @@ class ShipRequest(BaseModel):
         default=None, description="Worktree to operate in (defaults to the main project checkout)"
     )
     session_id: Optional[str] = Field(
-        default=None, description="Requesting session, excluded from the cleanup liveness guard"
+        default=None, description="Requesting session, excluded from the project-mode cleanup guard"
     )
 
 
@@ -97,6 +97,11 @@ class ShipRequest(BaseModel):
 # =============================================================================
 
 _OP_TTL_SECONDS = 600.0  # 10 minutes
+
+# How long worktree cleanup waits for the sessions it stopped to go idle before
+# it gives up and keeps the checkout.
+_CLEANUP_STOP_TIMEOUT_SECONDS = 10.0
+_CLEANUP_STOP_POLL_SECONDS = 0.25
 
 STEP_PENDING = "pending"
 STEP_RUNNING = "running"
@@ -261,9 +266,11 @@ def _session_is_busy(session_id: Optional[str]) -> bool:
     return False
 
 
-def _worktree_has_other_active_session(worktree_id: str, exclude_session_id: Optional[str]) -> bool:
-    """True if a session other than *exclude_session_id* is bound to the
-    worktree and busy (streaming or running background work).
+def _worktree_busy_session_ids(worktree_id: str) -> Optional[List[str]]:
+    """Busy sessions bound to the worktree, the requesting one included.
+
+    ``None`` when the lookup failed: an unknown session set is not evidence
+    that removal is safe.
     """
     from app.db import database
 
@@ -271,13 +278,9 @@ def _worktree_has_other_active_session(worktree_id: str, exclude_session_id: Opt
         sessions = database.get_sessions_for_worktree(worktree_id)
     except Exception:
         logger.exception("Failed to look up sessions for worktree %s", worktree_id)
-        return False
+        return None
 
-    for s in sessions:
-        sid = s.get("id")
-        if sid and sid != exclude_session_id and _session_is_busy(sid):
-            return True
-    return False
+    return [s["id"] for s in sessions if s.get("id") and _session_is_busy(s["id"])]
 
 
 def _project_has_other_active_session(project_id: str, exclude_session_id: Optional[str]) -> bool:
@@ -304,19 +307,21 @@ def _project_has_other_active_session(project_id: str, exclude_session_id: Optio
     return False
 
 
-def _checkout_has_other_active_session(
-    project_id: str, working_dir: str, exclude_session_id: Optional[str]
-) -> bool:
-    """Protect the linked checkout, not unrelated branches of its project.
+def _checkout_busy_session_ids(project_id: str, working_dir: str) -> Optional[List[str]]:
+    """Busy sessions working in the linked checkout, the requesting one included.
 
-    Resolve each busy session using the same cwd authority as git actions.
-    Unknown cwd or lookup failure is not evidence that deletion is safe.
+    Resolve each busy session using the same cwd authority as git actions, so
+    unrelated branches of the project are left alone. ``None`` when the lookup
+    fails or a busy session's cwd is unknown: that is not evidence that
+    deletion is safe, and the session may be unrelated work that must not be
+    stopped.
     """
     from app.core.project_resolver import resolve_existing_cwd
     from app.db.checkouts import get_checkout_by_path
     from app.db.sessions import list_sessions_for_cleanup
     from app.db import database
 
+    busy: List[str] = []
     try:
         checkout = get_checkout_by_path(working_dir)
         sessions = list_sessions_for_cleanup(
@@ -325,7 +330,7 @@ def _checkout_has_other_active_session(
         target = Path(working_dir).resolve()
         for session in sessions:
             sid = session.get("id")
-            if not sid or sid == exclude_session_id or not _session_is_busy(sid):
+            if not sid or not _session_is_busy(sid):
                 continue
             if session.get("worktree_id"):
                 from app.core.project_utils import get_worktree_working_dir
@@ -334,12 +339,73 @@ def _checkout_has_other_active_session(
                 cwd = get_worktree_working_dir(worktree) if worktree else None
             else:
                 cwd = resolve_existing_cwd(session)
-            if not cwd or Path(cwd).resolve() == target:
-                return True
+            if not cwd:
+                return None
+            if Path(cwd).resolve() == target:
+                busy.append(sid)
     except Exception:
         logger.exception("Failed to check active sessions for checkout %s", working_dir)
-        return True
-    return False
+        return None
+    return busy
+
+
+async def _stop_session_for_cleanup(session_id: str) -> None:
+    """Stop *session_id* the way the Stop button does.
+
+    The same two calls as ``ChatWebSocketHandler.handle_stop``: the durable
+    running -> interrupting flip (which signals the live runtime), then the
+    user-stop sweep that latches the session, aborts queued turns and kills its
+    sub-agents, workers and Monitor shells. It runs even with no live turn, so a
+    parked session's background work stops too. Shells ignore
+    STOP_KEEPS_MONITOR_SHELLS here: their cwd is the checkout being removed.
+    """
+    from app.core import turn_manager
+    from app.core.query_session_lifecycle import stop_all_background_tasks
+
+    await turn_manager.interrupt_async(session_id, "stop", stop_background=True)
+    await stop_all_background_tasks(
+        session_id, user_stop=True, respect_shell_preference=False,
+    )
+
+
+async def _stop_sessions_for_cleanup(session_ids: List[str]) -> List[str]:
+    """Stop each session, then wait (bounded) for all of them to go idle.
+
+    Returns the sessions still busy at the deadline. Cleanup must not remove a
+    checkout while any of them is left, whether its stop raised or timed out.
+    """
+    if not session_ids:
+        return []
+    from app.core import session_runtime
+
+    for sid in session_ids:
+        try:
+            await _stop_session_for_cleanup(sid)
+        except Exception:
+            # The busy re-check below decides whether removal is still safe.
+            logger.warning("cleanup: stopping session %s failed", sid, exc_info=True)
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _CLEANUP_STOP_TIMEOUT_SECONDS
+    # A local execution releases its run lease in its finally block, so wait on
+    # the task itself. asyncio.wait never cancels it on timeout.
+    targets = set(session_ids)
+    executions = [
+        task for task, sid in session_runtime.active_executions().items()
+        if sid in targets and task is not asyncio.current_task()
+    ]
+    if executions:
+        await asyncio.wait(executions, timeout=_CLEANUP_STOP_TIMEOUT_SECONDS)
+    pending = list(session_ids)
+    while True:
+        pending = [sid for sid in pending if await asyncio.to_thread(_session_is_busy, sid)]
+        if not pending or loop.time() >= deadline:
+            return pending
+        await asyncio.sleep(_CLEANUP_STOP_POLL_SECONDS)
+
+
+def _count_sessions(n: int) -> str:
+    return f"{n} session" if n == 1 else f"{n} sessions"
 
 
 def _is_linked_worktree(path: str) -> bool:
@@ -466,7 +532,8 @@ async def _release_checkout_sessions(
                 session_ids.add(sid)
         if session_id:
             session_ids.add(session_id)
-        # Recheck before closing anything; do not interrupt another user's turn.
+        # Recheck before closing anything. The stop pass already ran, so a busy
+        # sibling here started new work since; do not pull the checkout from it.
         if any(sid != session_id and _session_is_busy(sid) for sid in session_ids):
             return False
         for sid in sorted(session_ids):
@@ -556,6 +623,11 @@ async def _do_cleanup(
 ) -> None:
     """Run the cleanup step. Failures degrade to a warning — the overall
     operation still succeeds because the merge already landed.
+
+    A worktree or linked checkout is about to disappear, so every session
+    running in it is stopped first, the requesting one included. The shared
+    main checkout is different: other project sessions there are unrelated
+    work, so project-mode cleanup is skipped while any of them is busy.
     """
     op.set_step("cleanup", STEP_RUNNING)
 
@@ -564,26 +636,34 @@ async def _do_cleanup(
     linked_worktree = not worktree_id and _is_linked_worktree(working_dir)
     # The guards query the DB off the event loop. A blocked cleanup does not
     # undo the successful merge.
-    if worktree_id:
-        if await asyncio.to_thread(
-            _worktree_has_other_active_session, worktree_id, session_id
-        ):
+    stopped = 0
+    if worktree_id or linked_worktree:
+        where = "worktree" if worktree_id else "checkout"
+        if worktree_id:
+            busy = await asyncio.to_thread(_worktree_busy_session_ids, worktree_id)
+        else:
+            busy = await asyncio.to_thread(
+                _checkout_busy_session_ids, op.project_id, working_dir
+            )
+        if busy is None:
             op.set_step(
                 "cleanup",
                 STEP_WARNING,
-                detail="Skipped: another session is active in this worktree",
+                detail=f"Skipped: could not tell which sessions are using this {where}",
             )
             return
-    elif linked_worktree:
-        if await asyncio.to_thread(
-            _checkout_has_other_active_session, op.project_id, working_dir, session_id
-        ):
+        still_busy = await _stop_sessions_for_cleanup(busy)
+        if still_busy:
             op.set_step(
                 "cleanup",
                 STEP_WARNING,
-                detail="Skipped: another session may be using this checkout",
+                detail=(
+                    f"Skipped: {_count_sessions(len(still_busy))} in this {where} "
+                    "did not stop in time"
+                ),
             )
             return
+        stopped = len(busy)
     else:
         if await asyncio.to_thread(
             _project_has_other_active_session, op.project_id, session_id
@@ -596,22 +676,24 @@ async def _do_cleanup(
             return
 
     try:
-        if worktree_id:
-            ok = await worktree_manager.cleanup_worktree(worktree_id, keep_branch=False)
+        if worktree_id or linked_worktree:
+            if worktree_id:
+                ok = await worktree_manager.cleanup_worktree(worktree_id, keep_branch=False)
+            else:
+                ok = await _cleanup_linked_worktree(
+                    op, working_dir, feature_branch, default_branch, session_id
+                )
             if ok:
-                op.set_step("cleanup", STEP_DONE)
+                detail = "Removed worktree"
+                if stopped:
+                    detail = f"Stopped {_count_sessions(stopped)}, removed worktree"
+                op.set_step("cleanup", STEP_DONE, detail=detail)
                 op.result["worktree_deleted"] = True
             else:
-                op.set_step("cleanup", STEP_WARNING, detail="Worktree cleanup failed")
-        elif linked_worktree:
-            ok = await _cleanup_linked_worktree(
-                op, working_dir, feature_branch, default_branch, session_id
-            )
-            if ok:
-                op.set_step("cleanup", STEP_DONE)
-                op.result["worktree_deleted"] = True
-            else:
-                op.set_step("cleanup", STEP_WARNING, detail="Worktree cleanup failed")
+                detail = "Worktree cleanup failed"
+                if stopped:
+                    detail += f" (stopped {_count_sessions(stopped)})"
+                op.set_step("cleanup", STEP_WARNING, detail=detail)
         else:
             # Project mode: return to the default branch, drop the feature
             # branch, and fast-forward the default branch.

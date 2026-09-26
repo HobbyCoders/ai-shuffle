@@ -232,6 +232,56 @@ async def test_cleanup_removes_worktree_and_branch(live_worktree):
     assert listed == {os.path.realpath(repo)}
 
 
+async def test_ship_cleanup_stops_sessions_and_removes_provisioned_worktree(
+    project, tmp_path, monkeypatch
+):
+    """Ship It cleanup, end to end on a real repo: the busy session in the
+    worktree is stopped, the folder, branch and git admin entry go, the linked
+    node_modules source survives, and the session stays reopenable."""
+    from unittest.mock import patch
+
+    import app.api.git_operations as gitops
+    from app.api.worktree_session_meta import enrich_session_worktree_meta
+    from app.core import checkout_manager
+
+    repo, record = project
+    write(repo / ".gitignore", "node_modules/\n")
+    commit_file(repo, "frontend/package.json", "{}", "frontend")
+    write(repo / "frontend" / "node_modules" / "pkg" / "index.js", "hello")
+    path = worktree_manager._get_worktree_path(str(repo), "feature/live")
+    git(repo, "worktree", "add", "-q", "-b", "feature/live", str(path))
+    assert "frontend" in checkout_manager.provision_node_modules(str(repo), str(path))["linked"]
+    _worktree_row(record, "feature/live", path, status=WorktreeStatus.ACTIVE)
+    database.create_session(
+        session_id="sib", profile_id="default", project_id="p1", worktree_id="wt-1",
+    )
+
+    busy = {"sib"}
+
+    async def stop(sid):
+        busy.discard(sid)
+
+    op = gitops.Operation(
+        project_id="p1", kind="ship", steps=[gitops._step("cleanup", "Clean up branch")],
+    )
+    with patch.object(gitops, "_session_is_busy", side_effect=lambda sid: sid in busy), \
+            patch.object(gitops, "_stop_session_for_cleanup", side_effect=stop):
+        await gitops._do_cleanup(op, str(path), "wt-1", "feature/live", "main", "me")
+
+    assert op.steps[0]["status"] == "done"
+    assert op.steps[0]["detail"] == "Stopped 1 session, removed worktree"
+    assert not path.exists()
+    assert (repo / "frontend" / "node_modules" / "pkg" / "index.js").read_text() == "hello"
+    assert git(repo, "branch", "--list", "feature/live") == ""
+    listed = {os.path.realpath(w["path"]) for w in worktree_manager.git_service.list_worktrees(str(repo))}
+    assert listed == {os.path.realpath(repo)}
+    assert database.get_worktree("wt-1")["status"] == WorktreeStatus.COMPLETED
+    session = database.get_session("sib")
+    assert session["worktree_id"] == "wt-1"
+    meta = enrich_session_worktree_meta(session, database.get_worktree("wt-1"))
+    assert meta["worktree_deleted"] is True
+
+
 async def test_cleanup_keeps_branch_by_default(live_worktree):
     repo, path = live_worktree
     assert await worktree_manager.cleanup_worktree("wt-1") is True
