@@ -22,6 +22,7 @@
 		type TopSession
 	} from '$lib/api/client';
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
+	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
 	import { Download, RefreshCw, Loader2, Zap, DollarSign, MessageSquare, Gauge, ChevronRight } from 'lucide-svelte';
 
 	interface Props {
@@ -145,6 +146,10 @@
 
 	// Derived stats
 	const totalTokens = $derived(summary ? summary.total_input_tokens + summary.total_output_tokens : 0);
+	// Any turn in range with harness-estimated token counts (the provider
+	// reported no usage, or the reply was interrupted) makes every aggregate
+	// tile partly an estimate; the tiles then carry the "est." marker.
+	const hasEstimates = $derived((summary?.estimated_query_count ?? 0) > 0);
 	const maxProfileCost = $derived(Math.max(...costBreakdown.map((d) => d.cost), 0.0001));
 	const maxTopCost = $derived(Math.max(...topSessions.map((s) => s.total_cost_usd), 0.0001));
 
@@ -202,13 +207,13 @@
 				<div class="bento">
 					<!-- Metric cards -->
 					<div class="bcard">
-						<div class="blabel" title="Estimated by this app from token counts and model prices. Provider-reported spend is in the usage popover."><DollarSign size={14} strokeWidth={2} /> Estimated spend</div>
+						<div class="blabel" title="Estimated by this app from token counts and model prices. Provider-reported spend is in the usage popover."><DollarSign size={14} strokeWidth={2} /> Estimated spend {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
 						<div class="bignum">{formatCost(summary?.total_cost ?? 0)}</div>
 						<div class="bsub">app estimate across {summary?.session_count ?? 0} sessions</div>
 					</div>
 
 					<div class="bcard">
-						<div class="blabel"><Zap size={14} strokeWidth={2} /> Tokens</div>
+						<div class="blabel"><Zap size={14} strokeWidth={2} /> Tokens {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
 						<div class="bignum">{formatTokens(totalTokens)}</div>
 						<div class="bsub">{formatTokens(summary?.total_input_tokens ?? 0)} in · {formatTokens(summary?.total_output_tokens ?? 0)} out</div>
 					</div>
@@ -220,7 +225,7 @@
 					</div>
 
 					<div class="bcard">
-						<div class="blabel"><Gauge size={14} strokeWidth={2} /> Avg / session</div>
+						<div class="blabel"><Gauge size={14} strokeWidth={2} /> Avg / session {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
 						<div class="bignum">{formatCost(summary?.average_cost_per_session ?? 0)}</div>
 						<div class="bsub">mean estimated spend per session</div>
 					</div>
@@ -236,7 +241,7 @@
 									<i
 										class:acc={i === peakTrendIndex}
 										style="height:{Math.max((d.cost / maxTrendCost) * 100, 3)}%"
-										title="{formatDisplayDate(d.date)}: {formatCost(d.cost)}"
+										title="{formatDisplayDate(d.date)}: {formatCost(d.cost)}{d.estimated ? ' (includes estimated token counts)' : ''}"
 									></i>
 								{/each}
 							</div>
@@ -252,7 +257,7 @@
 							<div class="brk">
 								{#each costBreakdown.slice(0, 5) as item}
 									<div class="brk-row">
-										<span class="brk-name">{item.name || 'Unknown'}</span>
+										<span class="brk-name">{item.name || 'Unknown'}{#if item.estimated} <UsageEstimatedBadge />{/if}</span>
 										<span class="brk-track"><span class="brk-fill" style="width:{(item.cost / maxProfileCost) * 100}%"></span></span>
 										<span class="brk-val">{formatCost(item.cost)}</span>
 									</div>
@@ -271,7 +276,7 @@
 								{#each topSessions.slice(0, 5) as s, i}
 									<button class="top-row" onclick={() => handleSessionClick(s.id)}>
 										<span class="top-rank">{i + 1}</span>
-										<span class="top-name">{s.title || 'Untitled'}</span>
+										<span class="top-name">{s.title || 'Untitled'}{#if s.usage_estimated} <UsageEstimatedBadge />{/if}</span>
 										<span class="top-track"><span class="top-fill" style="width:{(s.total_cost_usd / maxTopCost) * 100}%"></span></span>
 										<span class="top-val">{formatCost(s.total_cost_usd)}</span>
 										<ChevronRight size={14} strokeWidth={1.8} class="top-arrow" />

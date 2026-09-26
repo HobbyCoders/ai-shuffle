@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 89
+SCHEMA_VERSION = 90
 
 
 def create_postgres_schema(cursor) -> None:
@@ -380,7 +380,14 @@ def create_postgres_schema(cursor) -> None:
             cache_creation_tokens BIGINT DEFAULT 0,
             cost_usd DOUBLE PRECISION,
             duration_ms INTEGER,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            -- v90 (usage estimates): TRUE when any token count in this turn
+            -- was estimated by the harness (chars/4) because the provider
+            -- reported no usage or the reply was interrupted. The amounts
+            -- still count toward budgets; the flag only marks them as
+            -- estimates in the usage displays. Same guarded ADD COLUMN in
+            -- database._run_column_migrations for existing installs.
+            usage_estimated BOOLEAN DEFAULT FALSE
         )
     """)
 
@@ -522,20 +529,10 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
-    # 25. Webhooks for external integrations
+    # 25. (RETIRED) Standalone outbound webhooks — dropped by
+    # database._retire_webhooks_and_legacy_push (v90); fresh installs never
+    # create the table.
     # ------------------------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS webhooks (
-            id TEXT PRIMARY KEY,
-            url TEXT NOT NULL,
-            secret TEXT,
-            events JSONB NOT NULL DEFAULT '[]',
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            last_triggered_at TIMESTAMP WITH TIME ZONE,
-            failure_count INTEGER DEFAULT 0
-        )
-    """)
 
     # ------------------------------------------------------------------
     # 26. Audit log for security events
@@ -627,7 +624,6 @@ def create_postgres_schema(cursor) -> None:
             secret TEXT,
             enabled BOOLEAN DEFAULT TRUE,
             tool_matcher TEXT,
-            message_template TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             last_triggered_at TIMESTAMP WITH TIME ZONE,
@@ -748,7 +744,6 @@ def create_postgres_schema(cursor) -> None:
             platform TEXT NOT NULL,
             api_key_hash TEXT NOT NULL,
             fcm_token TEXT,
-            unifiedpush_endpoint TEXT,
             capabilities JSONB DEFAULT '{}',
             paired_client_id TEXT,
             api_key_expires_at TIMESTAMP WITH TIME ZONE,
@@ -1411,9 +1406,6 @@ def create_postgres_schema(cursor) -> None:
     # -- session_tags
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag_id)")
-
-    # -- webhooks
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(is_active)")
 
     # -- audit_log
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id)")

@@ -293,7 +293,26 @@ def _savepoint(cursor, name: str):
 #     ``usage_snapshots.account_id/account_email/account_name``. When the old
 #     sign-in left rows or pointers, the one-time CLI re-login notice is
 #     recorded first (``_retire_claude_accounts``).
-SCHEMA_VERSION = 89
+# 90 (2026-09-25): add usage_log.usage_estimated BOOLEAN DEFAULT FALSE — TRUE
+#     when any token count booked for that turn was estimated by the harness
+#     (chars/4, because the provider reported no usage or the reply was
+#     interrupted). Budgets and caps keep counting the estimated amounts; the
+#     flag only marks them as estimates in the usage panel and per-turn cost
+#     footers. Every pre-existing row reads FALSE. Additive, no index; lands
+#     via the always-run guarded ADD COLUMN in _run_column_migrations.
+#     Also retires message hooks (``hook_type = 'message'``), a type that was
+#     never delivered: their ``project_hooks`` rows are deleted, along with
+#     their sync envelopes, and ``project_hooks.message_template`` is dropped
+#     (``_retire_message_hooks``).
+#     Also retires storage no route reaches any more
+#     (``_retire_webhooks_and_legacy_push``): the standalone outbound
+#     ``webhooks`` table and its sync envelopes (the management API had no
+#     client), ``mobile_devices.unifiedpush_endpoint`` (the Android app has no
+#     UnifiedPush receiver; the FCM token of a row that carried an endpoint is
+#     cleared first, so such a row stays unable to receive push), and the
+#     ``rate_limits`` / ``request_log`` tables the removed rate-limit feature
+#     left behind.
+SCHEMA_VERSION = 90
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -770,6 +789,12 @@ def _run_column_migrations(cursor):
                 "ALTER TABLE usage_log ADD COLUMN cache_creation_tokens BIGINT DEFAULT 0"
             )
             migrations_applied.append("usage_log.cache_creation_tokens")
+        # (v90) usage estimates: turns whose token counts the harness guessed.
+        if not column_exists(cursor, "usage_log", "usage_estimated"):
+            cursor.execute(
+                "ALTER TABLE usage_log ADD COLUMN usage_estimated BOOLEAN DEFAULT FALSE"
+            )
+            migrations_applied.append("usage_log.usage_estimated")
 
     # Add action_steps column to automations for multi-step connector actions (v36)
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
@@ -797,11 +822,6 @@ def _run_column_migrations(cursor):
             triggers_arr = json.dumps([{"type": t_type, "config": t_config_parsed}])
             cursor.execute("UPDATE automations SET triggers = %s WHERE id = %s", (triggers_arr, auto_id))
         migrations_applied.append("automations.triggers_backfill")
-
-    # Add message_template column to project_hooks (v38)
-    if table_exists(cursor, "project_hooks") and not column_exists(cursor, "project_hooks", "message_template"):
-        cursor.execute("ALTER TABLE project_hooks ADD COLUMN message_template TEXT")
-        migrations_applied.append("project_hooks.message_template")
 
     # Make project_hooks.project_id nullable (v38)
     if table_exists(cursor, "project_hooks") and column_is_not_null(cursor, "project_hooks", "project_id"):
@@ -871,14 +891,10 @@ def _run_column_migrations(cursor):
             "ON session_messages(session_id, jsonl_uuid)"
         )
 
-    # Mobile companion app (UnifiedPush): per-device push endpoint URL so a
-    # self-hosted server can deliver notifications to the user's own push
-    # distributor (e.g. ntfy) without a shared Firebase project. Idempotent
-    # column add for databases created before the column existed.
+    # Mobile companion app: columns added after the table was first created.
+    # (The v88-era ``unifiedpush_endpoint`` column is dropped by
+    # ``_retire_webhooks_and_legacy_push`` below.)
     if table_exists(cursor, "mobile_devices"):
-        if not column_exists(cursor, "mobile_devices", "unifiedpush_endpoint"):
-            cursor.execute("ALTER TABLE mobile_devices ADD COLUMN unifiedpush_endpoint TEXT")
-            migrations_applied.append("mobile_devices.unifiedpush_endpoint")
         for column, definition in (
             ("paired_client_id", "TEXT"),
             ("api_key_expires_at", "TIMESTAMP WITH TIME ZONE"),
@@ -2331,6 +2347,8 @@ def _run_column_migrations(cursor):
         migrations_applied.append("notes.api_user_id")
 
     migrations_applied.extend(_retire_claude_accounts(cursor))
+    migrations_applied.extend(_retire_message_hooks(cursor))
+    migrations_applied.extend(_retire_webhooks_and_legacy_push(cursor))
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -2497,6 +2515,144 @@ def _retire_claude_accounts(cursor) -> List[str]:
             if column_exists(cursor, "usage_snapshots", column):
                 cursor.execute(f"ALTER TABLE usage_snapshots DROP COLUMN {column}")
                 applied.append(f"usage_snapshots.drop_{column}")
+    return applied
+
+
+#: The retired hook type: it never had a delivery path into a session.
+RETIRED_HOOK_TYPE = "message"
+
+
+def _retire_message_hooks(cursor) -> List[str]:
+    """v90: remove message hooks and their column. Idempotent.
+
+    A ``message`` hook was meant to post a templated message into the chat,
+    but nothing ever delivered it; the type is gone from the API, the MCP
+    tools and the forms. Existing rows would only show as an unknown type and
+    fail every run, so they are deleted, with their ``project_hooks`` sync
+    envelopes (the collection stays; only these records leave it, so a peer
+    that has not upgraded keeps its own copy until its own migration runs).
+    Then ``project_hooks.message_template`` is dropped. Returns what was
+    applied.
+    """
+    applied: List[str] = []
+    if not table_exists(cursor, "project_hooks"):
+        return applied
+    cursor.execute("SELECT id FROM project_hooks WHERE hook_type = %s", (RETIRED_HOOK_TYPE,))
+    hook_ids = [row["id"] if isinstance(row, dict) else row[0] for row in cursor.fetchall()]
+    if hook_ids:
+        cursor.execute("DELETE FROM project_hooks WHERE hook_type = %s", (RETIRED_HOOK_TYPE,))
+        applied.append(f"project_hooks.message({len(hook_ids)} rows)")
+        marks = ", ".join(["%s"] * len(hook_ids))
+        for table in ("sync_ops", "sync_records", "sync_conflicts"):
+            if table_exists(cursor, table):
+                cursor.execute(
+                    f"DELETE FROM {table} WHERE collection = %s AND record_id IN ({marks})",
+                    ("project_hooks", *hook_ids),
+                )
+                if cursor.rowcount:
+                    applied.append(f"{table}.message_hooks({cursor.rowcount})")
+        if table_exists(cursor, "sync_pending"):
+            # Held out-of-order envelopes carry collection and record only
+            # inside the JSON.
+            cursor.execute("SELECT origin_device_id, incarnation, seq, envelope FROM sync_pending")
+            stale = []
+            wanted = set(hook_ids)
+            for row in cursor.fetchall():
+                try:
+                    envelope = _safe_json(row["envelope"])
+                except ValueError:
+                    continue
+                if (isinstance(envelope, dict) and envelope.get("collection") == "project_hooks"
+                        and envelope.get("record_id") in wanted):
+                    stale.append((row["origin_device_id"], row["incarnation"], row["seq"]))
+            for key in stale:
+                cursor.execute(
+                    "DELETE FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
+                    key,
+                )
+            if stale:
+                applied.append(f"sync_pending.message_hooks({len(stale)})")
+    if column_exists(cursor, "project_hooks", "message_template"):
+        cursor.execute("ALTER TABLE project_hooks DROP COLUMN message_template")
+        applied.append("project_hooks.drop_message_template")
+    return applied
+
+
+#: The retired standalone outbound-webhook table, also its network collection.
+RETIRED_WEBHOOKS_TABLE = "webhooks"
+#: Tables an older schema created for the removed rate-limit feature.
+RETIRED_RATE_LIMIT_TABLES = ("rate_limits", "request_log")
+
+
+def _purge_collection_envelopes(cursor, collection: str) -> List[str]:
+    """Delete every sync envelope of ``collection`` (a retired collection)."""
+    applied: List[str] = []
+    for table in ("sync_ops", "sync_records", "sync_conflicts"):
+        if table_exists(cursor, table):
+            cursor.execute(f"DELETE FROM {table} WHERE collection = %s", (collection,))
+            if cursor.rowcount:
+                applied.append(f"{table}.{collection}({cursor.rowcount})")
+    if table_exists(cursor, "sync_pending"):
+        # Held out-of-order envelopes carry the collection only inside the JSON.
+        cursor.execute("SELECT origin_device_id, incarnation, seq, envelope FROM sync_pending")
+        stale = []
+        for row in cursor.fetchall():
+            try:
+                envelope = _safe_json(row["envelope"])
+            except ValueError:
+                continue
+            if isinstance(envelope, dict) and envelope.get("collection") == collection:
+                stale.append((row["origin_device_id"], row["incarnation"], row["seq"]))
+        for key in stale:
+            cursor.execute(
+                "DELETE FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
+                key,
+            )
+        if stale:
+            applied.append(f"sync_pending.{collection}({len(stale)})")
+    return applied
+
+
+def _retire_webhooks_and_legacy_push(cursor) -> List[str]:
+    """v90: drop storage that no route reaches any more. Idempotent.
+
+    * ``webhooks``, the standalone outbound webhooks: their management API
+      had no client, so nobody could create or see one, and the connector
+      manager no longer fires them. The table goes with its sync envelopes
+      (the ``webhooks`` collection is no longer registered). Connector event
+      subscriptions and ``webhook`` hooks are separate and stay.
+    * ``mobile_devices.unifiedpush_endpoint``: the Android app dropped its
+      UnifiedPush receiver and the registration routes are gone. A row that
+      carried an endpoint was already treated as unable to receive push
+      (``device_receives_push``); its FCM token is cleared before the marker
+      column is dropped, so that stays true.
+    * ``rate_limits`` / ``request_log``: created by older releases for the
+      removed rate-limit feature and unused since.
+
+    Returns what was applied.
+    """
+    applied: List[str] = []
+    if (table_exists(cursor, "mobile_devices")
+            and column_exists(cursor, "mobile_devices", "unifiedpush_endpoint")):
+        cursor.execute(
+            "UPDATE mobile_devices SET fcm_token = NULL "
+            "WHERE unifiedpush_endpoint IS NOT NULL AND fcm_token IS NOT NULL"
+        )
+        if cursor.rowcount:
+            applied.append(f"mobile_devices.fcm_token_cleared({cursor.rowcount})")
+        cursor.execute("ALTER TABLE mobile_devices DROP COLUMN unifiedpush_endpoint")
+        applied.append("mobile_devices.drop_unifiedpush_endpoint")
+    if table_exists(cursor, RETIRED_WEBHOOKS_TABLE):
+        cursor.execute(f"SELECT COUNT(*) AS n FROM {RETIRED_WEBHOOKS_TABLE}")
+        row = cursor.fetchone()
+        rows = int((row["n"] if isinstance(row, dict) else row[0]) or 0)
+        cursor.execute(f"DROP TABLE IF EXISTS {RETIRED_WEBHOOKS_TABLE}")
+        applied.append(f"drop webhooks({rows} rows)")
+    applied.extend(_purge_collection_envelopes(cursor, RETIRED_WEBHOOKS_TABLE))
+    for table in RETIRED_RATE_LIMIT_TABLES:
+        if table_exists(cursor, table):
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
+            applied.append(f"drop {table}")
     return applied
 
 
@@ -3064,7 +3220,6 @@ from app.db.sessions import (  # noqa: F401
     get_session_messages,
     add_session_message,
     add_session_messages_batch,
-    upsert_team_member_message,
     delete_session_message,
     delete_orphan_user_turn,
     discard_orphan_first_turn,
@@ -3170,17 +3325,6 @@ from app.db.templates import (  # noqa: F401
     delete_template,
     get_template_categories,
     set_template_builtin,
-)
-
-from app.db.webhooks import (  # noqa: F401
-    get_all_webhooks,
-    get_active_webhooks,
-    get_webhook,
-    create_webhook,
-    update_webhook,
-    delete_webhook,
-    update_webhook_triggered,
-    get_webhooks_for_event,
 )
 
 from app.db.connectors import (  # noqa: F401
@@ -3292,9 +3436,6 @@ from app.db.mobile import (  # noqa: F401
     get_mobile_device,
     get_mobile_device_by_api_key_hash,
     get_all_mobile_devices,
-    update_mobile_device_capabilities,
-    update_mobile_device_fcm_token,
-    update_mobile_device_unifiedpush_endpoint,
     update_mobile_device_last_seen,
     delete_mobile_device,
     get_mobile_devices,

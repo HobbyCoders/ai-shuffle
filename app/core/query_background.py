@@ -540,6 +540,10 @@ async def _run_background_query_impl(
                     metadata["tokens_out"] = message.usage.get("output_tokens", 0)
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+                    # Any call this turn with harness-estimated token counts
+                    # (the adapter stamps the terminal usage); booked as a
+                    # flag on the ledger row, never subtracted.
+                    metadata["usage_estimated"] = bool(message.usage.get("usage_estimated"))
 
     except asyncio.CancelledError:
         interrupted = True

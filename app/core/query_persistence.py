@@ -357,6 +357,7 @@ async def _turn_end_booking(
             "model_calls": metadata.get("num_turns") or 0,
             "turn_increment": 0 if interrupted or metadata.get("error")
             or metadata.get("is_error") else 1,
+            "usage_estimated": bool(metadata.get("usage_estimated")),
         }
     turn_id = settlement_turn_id(settlement_key)
     if turn_id is None:
@@ -381,6 +382,7 @@ async def _turn_end_booking(
         "cost_usd": totals["cost_usd"],
         "model_calls": totals["model_calls"],
         "turn_increment": 0,
+        "usage_estimated": totals["usage_estimated"],
     }
 
 
@@ -429,8 +431,11 @@ def _partial_usage_from_events(session_id: str, turn_id: Optional[str]) -> dict:
     count — a partial flush is best-effort evidence recovery, not a second
     accounting system.
 
-    ``cost_usd`` rides the per-call record too (fluid folds an estimate in when
-    the provider reports none), so the spend lands with the tokens.
+    ``cost_usd`` rides the per-call record too (fluid folds a table price in
+    when the provider reports none), so the spend lands with the tokens. A
+    record whose token counts the harness guessed carries ``usage_estimated``
+    (or fluid's per-field ``*_tokens_estimated`` flags); one such record marks
+    the whole booking as an estimate.
     """
     from app.core.turn_outcome import load_session_events
 
@@ -442,6 +447,7 @@ def _partial_usage_from_events(session_id: str, turn_id: Optional[str]) -> dict:
         "cost_usd": 0.0,
         "model_calls": 0,
         "model": None,
+        "usage_estimated": False,
     }
     seen_indices: Set[Any] = set()
     unindexed = 0
@@ -473,6 +479,12 @@ def _partial_usage_from_events(session_id: str, turn_id: Optional[str]) -> dict:
             totals["cost_usd"] += float(cost)
         if usage.get("model"):
             totals["model"] = usage["model"]
+        if (
+            usage.get("usage_estimated")
+            or usage.get("input_tokens_estimated")
+            or usage.get("output_tokens_estimated")
+        ):
+            totals["usage_estimated"] = True
 
     totals["model_calls"] = len(seen_indices) or unindexed
     totals["unindexed_records"] = unindexed
@@ -554,6 +566,7 @@ async def settle_killed_session(
                     cost_usd=totals["cost_usd"],
                     model_calls=totals["model_calls"],
                     turn_increment=0,
+                    usage_estimated=totals["usage_estimated"],
                 )
             except Exception:
                 logger.warning(

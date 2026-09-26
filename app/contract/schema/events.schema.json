@@ -2725,6 +2725,7 @@
         },
         "usage": {
           "additionalProperties": true,
+          "description": "The turn's usage summary (tokens_in, tokens_out, cache_read_tokens, cache_creation_tokens, total_cost_usd, duration_ms, num_turns). usage_estimated: true when any token count in this turn was estimated by the harness because the provider reported no usage or the reply was interrupted; absent otherwise.",
           "title": "Usage",
           "type": "object"
         }
@@ -3234,6 +3235,7 @@
         },
         "usage": {
           "additionalProperties": true,
+          "description": "One model call's usage record (input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, cost_usd, model_call_index). usage_estimated: true when a token count in this record was estimated by the harness (input_tokens_estimated / output_tokens_estimated name the guessed fields); absent otherwise.",
           "title": "Usage",
           "type": "object"
         }

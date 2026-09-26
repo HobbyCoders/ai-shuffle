@@ -41,6 +41,10 @@ It depends on the model you pick and how much the agent reads. A rough way to es
 
 Start with a low monthly spend limit in the Anthropic Console, run your normal workload for a few days, and look at the Console's usage page. Then set the limit you are comfortable with. AI Shuffle cannot see or change your Console bill.
 
+## When usage numbers are estimates
+
+The Stats page and the cost shown under each reply are added up by AI Shuffle from the token counts your provider reports for each turn. When a provider reports no counts for a call (some local and OpenAI-compatible servers do not), or when you stop a reply before its counts arrive, AI Shuffle counts the text itself at about four characters per token. Such turns are marked: **≈** next to the cost under the reply, and **est.** on the Stats tiles and rows that include them, with the reason on hover. Estimated amounts still count toward budgets and limits; only their precision is in question. Claude Code sessions always report their own counts and are never estimated. Local models never get a dollar price, even when a local model's name matches a hosted one; their cost is shown as 0.
+
 ## When to use an API key
 
 Use an API key for anything that runs when you are not watching:

@@ -1305,7 +1305,33 @@ async def test_a_silent_stream_after_its_headers_is_retried_by_the_engine_as_emp
 
 
 async def test_a_reply_without_usage_is_booked_at_an_estimated_cost(server):
-    """Regression: a reply with no usage chunk booked 0 tokens and no cost."""
+    """Regression: a reply with no usage chunk booked 0 tokens and no cost.
+
+    A hosted chat-completions server: the guessed token counts are priced
+    from the host's table and the price is flagged as table-sourced."""
+    server.script(Chat.text("An answer long enough to estimate.", usage=False))
+    rates = ModelPrice(input=3.0, output=15.0, source="test")
+    run = Harness(server, "openrouter", pricing=lambda model: rates)
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    [usage] = _of(events, Usage)
+    assert usage.output_tokens > 0 and usage.input_tokens > 0
+    assert usage.raw["output_tokens_estimated"] and usage.raw["input_tokens_estimated"]
+    assert usage.raw["cost_from_table"] is True
+    done = _terminal(events)
+    assert done.cost_usd and done.cost_usd > 0
+    # An estimate is not a measurement: the context gauge keeps its own.
+    assert run.loop._last_call_usage.get(run.loop.session_id) is None
+
+
+async def test_a_local_reply_without_usage_is_estimated_but_never_priced(server):
+    """The same reply from the local dialect: the token counts are still
+    estimated and flagged, but no price table applies, not even the host's
+    resolver, which would otherwise bill a local model whose name matches a
+    hosted one. Local inference costs 0, and that 0 is not an estimate."""
     server.script(Chat.text("An answer long enough to estimate.", usage=False))
     rates = ModelPrice(input=3.0, output=15.0, source="test")
     run = Harness(server, "local", pricing=lambda model: rates)
@@ -1317,11 +1343,10 @@ async def test_a_reply_without_usage_is_booked_at_an_estimated_cost(server):
     [usage] = _of(events, Usage)
     assert usage.output_tokens > 0 and usage.input_tokens > 0
     assert usage.raw["output_tokens_estimated"] and usage.raw["input_tokens_estimated"]
-    assert usage.raw["cost_estimated"] is True
+    assert usage.raw["cost_usd"] == 0
+    assert "cost_from_table" not in usage.raw
     done = _terminal(events)
-    assert done.cost_usd and done.cost_usd > 0
-    # An estimate is not a measurement: the context gauge keeps its own.
-    assert run.loop._last_call_usage.get(run.loop.session_id) is None
+    assert done.cost_usd == 0
 
 
 async def test_an_empty_reply_without_usage_is_still_retried_as_empty(server):

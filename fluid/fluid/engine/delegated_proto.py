@@ -221,8 +221,10 @@ def per_call_usage(
     ``model_call_index`` (hosts count and dedupe calls by it), the
     provider-reported ``cache_read_report`` and a ``cost_usd``. The CLI
     prices only the whole turn, so a call's cost is estimated from the
-    pricing table, flagged ``cost_estimated``, unless the caller has the
-    CLI's own figure. A model nobody can price leaves the cost out.
+    pricing table, flagged ``cost_from_table`` (the dollars came from a
+    price list, not the provider's bill; the token counts themselves are
+    the CLI's own), unless the caller has the CLI's own figure. A model
+    nobody can price leaves the cost out.
     """
     from fluid.context.cache_probe import cache_read_report
     from fluid.providers.pricing import estimate_cost
@@ -241,7 +243,7 @@ def per_call_usage(
         cost = estimate_cost(model, usage)
         if cost is not None:
             raw["cost_usd"] = cost
-            raw["cost_estimated"] = True
+            raw["cost_from_table"] = True
     return raw
 
 

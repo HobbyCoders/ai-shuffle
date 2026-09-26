@@ -50,6 +50,9 @@ class SessionUsageEntry(TypedDict):
     tokens_out: int
     model: Optional[str]
     turn_index: int
+    #: True when any token count booked for this turn was estimated by the
+    #: harness (the provider reported no usage, or the reply was interrupted).
+    usage_estimated: bool
 
 
 class UsageStats(TypedDict):
@@ -59,6 +62,8 @@ class UsageStats(TypedDict):
     total_tokens_in: int
     total_tokens_out: int
     total_cost_usd: float
+    #: Turns whose token counts were estimated (see ``usage_estimated``).
+    estimated_queries: int
 
 
 class AnalyticsUsageStats(TypedDict):
@@ -68,6 +73,8 @@ class AnalyticsUsageStats(TypedDict):
     total_cost_usd: float
     query_count: int
     session_count: int
+    #: How many of ``query_count`` booked estimated token counts.
+    estimated_query_count: int
 
 
 class CostBreakdownEntry(TypedDict):
@@ -78,6 +85,7 @@ class CostBreakdownEntry(TypedDict):
     total_tokens_out: int
     total_cost_usd: float
     query_count: int
+    estimated_query_count: int
 
 
 class UsageTrendEntry(TypedDict):
@@ -87,6 +95,7 @@ class UsageTrendEntry(TypedDict):
     tokens_out: int
     cost_usd: float
     query_count: int
+    estimated_query_count: int
 
 
 class TopSessionEntry(TypedDict):
@@ -99,11 +108,18 @@ class TopSessionEntry(TypedDict):
     total_tokens_in: int
     total_tokens_out: int
     created_at: str
+    #: True when any of the session's booked turns has estimated token counts.
+    usage_estimated: bool
 
 
 # ============================================================================
 # Usage Log Operations
 # ============================================================================
+
+#: ``COUNT`` of the rows whose ``usage_estimated`` flag is set, in a form both
+#: PostgreSQL (BOOLEAN) and the SQLite test shim (0/1) evaluate the same way.
+#: ``.format(col="ul.usage_estimated")`` names the column.
+_ESTIMATED_COUNT_SQL = "COALESCE(SUM(CASE WHEN {col} THEN 1 ELSE 0 END), 0)"
 
 def log_usage(
     session_id: Optional[str],
@@ -115,41 +131,52 @@ def log_usage(
     duration_ms: int,
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
+    usage_estimated: bool = False,
 ):
     """Log usage for tracking.
 
     ``tokens_in`` is FRESH input only (usage is normalized Anthropic-style, so
     cache reads are excluded from it). A turn's true prompt size is
     ``tokens_in + cache_read_tokens + cache_creation_tokens``.
+
+    ``usage_estimated`` marks a turn whose token counts the harness guessed
+    (the provider reported no usage, or the reply was interrupted). The
+    amounts are booked all the same; the flag only labels them.
     """
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO usage_log (session_id, profile_id, model, tokens_in, tokens_out,
                                       cache_read_tokens, cache_creation_tokens,
-                                      cost_usd, duration_ms)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                                      cost_usd, duration_ms, usage_estimated)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (session_id, profile_id, model, tokens_in, tokens_out,
              cache_read_tokens or 0, cache_creation_tokens or 0,
-             cost_usd, duration_ms)
+             cost_usd, duration_ms, bool(usage_estimated))
         )
 
     # Update in-memory usage cache (avoids DB re-read on next load)
     if session_id:
         from app.core.cost_utils import append_usage_entry
-        append_usage_entry(session_id, cost_usd, duration_ms, tokens_in, tokens_out, model)
+        append_usage_entry(session_id, cost_usd, duration_ms, tokens_in, tokens_out, model,
+                           usage_estimated=bool(usage_estimated))
 
 
 def settle_turn_usage(
     session_id: str, settlement_key: str, *, profile_id=None, model=None,
     tokens_in=0, tokens_out=0, cache_read_tokens=0, cache_creation_tokens=0,
     cost_usd=0, duration_ms=0, model_calls=0, turn_increment=0,
+    usage_estimated=False,
 ) -> bool:
     """Claim an execution attempt and book its ledger/counters in one commit.
 
     The key is captured by the producer, never inferred from token equality or
     whichever turn happens to be live during finalization. A unique INSERT waits
     for competing transactions in PostgreSQL; a rollback releases the claim too.
+
+    ``usage_estimated`` rides the ledger row only: the session counters and
+    every budget add the estimated amounts like any other (owner decision);
+    the flag marks the turn as an estimate in the usage displays.
     """
     from app.db.sessions import update_session
 
@@ -160,11 +187,12 @@ def settle_turn_usage(
         cursor.execute(
             "INSERT INTO usage_log (settlement_key, session_id, profile_id, model, "
             "tokens_in, tokens_out, cache_read_tokens, cache_creation_tokens, "
-            "cost_usd, duration_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "cost_usd, duration_ms, usage_estimated) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT (settlement_key) DO NOTHING RETURNING id",
             (settlement_key, session_id, profile_id, model, tokens_in or 0,
              tokens_out or 0, cache_read_tokens or 0, cache_creation_tokens or 0,
-             cost_usd or 0, duration_ms or 0),
+             cost_usd or 0, duration_ms or 0, bool(usage_estimated)),
         )
         if cursor.fetchone() is None:
             return False
@@ -201,7 +229,7 @@ def get_all_session_usage(session_id: str) -> List[SessionUsageEntry]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT cost_usd, duration_ms, tokens_in, tokens_out, model
+            SELECT cost_usd, duration_ms, tokens_in, tokens_out, model, usage_estimated
             FROM usage_log
             WHERE session_id = %s
             ORDER BY id ASC
@@ -220,7 +248,8 @@ def get_all_session_usage(session_id: str) -> List[SessionUsageEntry]:
                 "tokens_in": row["tokens_in"],
                 "tokens_out": row["tokens_out"],
                 "model": row["model"],
-                "turn_index": turn_index
+                "turn_index": turn_index,
+                "usage_estimated": bool(row["usage_estimated"]),
             })
         return result
 
@@ -229,12 +258,13 @@ def get_usage_stats() -> UsageStats:
     """Get aggregate usage statistics"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 COUNT(*) as total_queries,
                 COALESCE(SUM(tokens_in), 0) as total_tokens_in,
                 COALESCE(SUM(tokens_out), 0) as total_tokens_out,
-                COALESCE(SUM(cost_usd), 0) as total_cost_usd
+                COALESCE(SUM(cost_usd), 0) as total_cost_usd,
+                {_ESTIMATED_COUNT_SQL.format(col="usage_estimated")} as estimated_queries
             FROM usage_log
         """)
         row = cursor.fetchone()
@@ -247,7 +277,8 @@ def get_usage_stats() -> UsageStats:
             "total_queries": row["total_queries"],
             "total_tokens_in": row["total_tokens_in"],
             "total_tokens_out": row["total_tokens_out"],
-            "total_cost_usd": row["total_cost_usd"]
+            "total_cost_usd": row["total_cost_usd"],
+            "estimated_queries": int(row["estimated_queries"] or 0),
         }
 
 
@@ -297,7 +328,8 @@ def get_analytics_usage_stats(
                 COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
                 COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
                 COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
-                COUNT(*) as query_count
+                COUNT(*) as query_count,
+                {_ESTIMATED_COUNT_SQL.format(col="ul.usage_estimated")} as estimated_query_count
             FROM usage_log ul
             LEFT JOIN sessions s ON ul.session_id = s.id
             WHERE 1=1 {date_filter} {user_filter}
@@ -318,7 +350,8 @@ def get_analytics_usage_stats(
             "total_tokens_out": usage_row["total_tokens_out"],
             "total_cost_usd": round(usage_row["total_cost_usd"], 6),
             "query_count": usage_row["query_count"],
-            "session_count": session_row["session_count"]
+            "session_count": session_row["session_count"],
+            "estimated_query_count": int(usage_row["estimated_query_count"] or 0),
         }
 
 
@@ -373,7 +406,8 @@ def get_analytics_cost_breakdown(
                     COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
                     COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
                     COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
-                    COUNT(*) as query_count
+                    COUNT(*) as query_count,
+                    {_ESTIMATED_COUNT_SQL.format(col="ul.usage_estimated")} as estimated_query_count
                 FROM usage_log ul
                 LEFT JOIN agents p ON ul.profile_id = p.id
                 LEFT JOIN sessions s ON ul.session_id = s.id
@@ -394,7 +428,8 @@ def get_analytics_cost_breakdown(
                     COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
                     COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
                     COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
-                    COUNT(*) as query_count
+                    COUNT(*) as query_count,
+                    {_ESTIMATED_COUNT_SQL.format(col="ul.usage_estimated")} as estimated_query_count
                 FROM usage_log ul
                 LEFT JOIN sessions s ON ul.session_id = s.id
                 LEFT JOIN api_users au ON s.api_user_id = au.id
@@ -412,7 +447,8 @@ def get_analytics_cost_breakdown(
                     COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
                     COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
                     COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
-                    COUNT(*) as query_count
+                    COUNT(*) as query_count,
+                    {_ESTIMATED_COUNT_SQL.format(col="ul.usage_estimated")} as estimated_query_count
                 FROM usage_log ul
                 LEFT JOIN sessions s ON ul.session_id = s.id
                 WHERE 1=1 {date_filter} {user_filter}
@@ -432,7 +468,8 @@ def get_analytics_cost_breakdown(
                 "total_tokens_in": row["total_tokens_in"],
                 "total_tokens_out": row["total_tokens_out"],
                 "total_cost_usd": round(row["total_cost_usd"], 6),
-                "query_count": row["query_count"]
+                "query_count": row["query_count"],
+                "estimated_query_count": int(row["estimated_query_count"] or 0),
             })
         return result
 
@@ -490,7 +527,8 @@ def get_analytics_usage_trends(
                 COALESCE(SUM(u.tokens_in), 0) as tokens_in,
                 COALESCE(SUM(u.tokens_out), 0) as tokens_out,
                 COALESCE(SUM(u.cost_usd), 0) as cost_usd,
-                COUNT(*) as query_count
+                COUNT(*) as query_count,
+                {_ESTIMATED_COUNT_SQL.format(col="u.usage_estimated")} as estimated_query_count
             FROM usage_log u
             LEFT JOIN sessions s ON u.session_id = s.id
             WHERE 1=1 {date_filter} {user_filter}
@@ -506,7 +544,8 @@ def get_analytics_usage_trends(
                 "tokens_in": row["tokens_in"],
                 "tokens_out": row["tokens_out"],
                 "cost_usd": round(row["cost_usd"], 6),
-                "query_count": row["query_count"]
+                "query_count": row["query_count"],
+                "estimated_query_count": int(row["estimated_query_count"] or 0),
             })
         return result
 
@@ -566,7 +605,12 @@ def get_analytics_top_sessions(
                     + COALESCE(s.total_cache_creation_tokens, 0)
                     AS total_tokens_in,
                 s.total_tokens_out,
-                s.created_at
+                s.created_at,
+                -- Any booked turn with guessed token counts marks the session.
+                EXISTS (
+                    SELECT 1 FROM usage_log ul
+                    WHERE ul.session_id = s.id AND ul.usage_estimated
+                ) AS usage_estimated
             FROM sessions s
             LEFT JOIN agents p ON s.profile_id = p.id
             WHERE s.total_cost_usd > 0 {date_filter} {user_filter}
@@ -585,6 +629,7 @@ def get_analytics_top_sessions(
                 "total_cost_usd": round(row["total_cost_usd"], 6) if row["total_cost_usd"] else 0,
                 "total_tokens_in": row["total_tokens_in"] or 0,
                 "total_tokens_out": row["total_tokens_out"] or 0,
-                "created_at": _to_iso(row["created_at"])
+                "created_at": _to_iso(row["created_at"]),
+                "usage_estimated": bool(row["usage_estimated"]),
             })
         return result

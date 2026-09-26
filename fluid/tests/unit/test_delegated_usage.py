@@ -41,7 +41,7 @@ def test_each_call_carries_index_cache_report_and_cost() -> None:
     # The CLI prices only the turn, so the call is estimated from the table,
     # priced by the model the CLI reported for the message.
     assert usages[0].raw["cost_usd"] == pytest.approx(estimate_cost(MODEL, first))
-    assert usages[0].raw["cost_estimated"] is True
+    assert usages[0].raw["cost_from_table"] is True
     # The CLI's own fields survive untouched.
     assert usages[1].raw["input_tokens"] == 50
     assert mapper.model_calls == 2

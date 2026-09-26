@@ -14,6 +14,7 @@
 	import { Typewriter } from '$lib/utils/typewriter';
 	import MessageActions from './MessageActions.svelte';
 	import HtmlPreviews from './HtmlPreviews.svelte';
+	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
 	import { formatMessageTime } from '$lib/utils/message-time';
 
 	interface Props {
@@ -510,6 +511,12 @@
 		{#if metadata && !streaming}
 			<div class="ameta">
 				{#if timestamp}<span>{formatMessageTime(timestamp)}</span>{/if}
+				{#if metadata.usage_estimated}
+					<!-- The turn's token counts (and so its cost) were estimated by
+					     the harness: the provider reported no usage, or the reply
+					     was stopped before it arrived. -->
+					<UsageEstimatedBadge />
+				{/if}
 				{#if metadata.total_cost_usd}
 					<span>{formatCost(metadata.total_cost_usd as number)}</span>
 				{:else if metadata.cost_usd}

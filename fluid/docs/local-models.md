@@ -113,7 +113,18 @@ cache_prompt = true     # llama-server: reuse the KV cache across turns
 temperature = 0.7
 ```
 
-Usage accounting degrades gracefully — for a reply from a server that doesn't
-report token counts, the counts are estimated from the text and flagged
-(`input_tokens_estimated` / `output_tokens_estimated` in the usage event's
-`raw`), and there is never a cost figure for local inference.
+Usage accounting degrades gracefully. When a reply carries no token counts
+(a server that ignores `stream_options.include_usage`) or ends before its
+usage chunk (the user pressed Stop), the counts are estimated from the text
+at roughly four characters per token, and each guessed count is flagged in
+the usage event's `raw`: `input_tokens_estimated` for the prompt,
+`output_tokens_estimated` for the reply. A reply the server did count is
+reported as counted, with neither flag.
+
+The price is never estimated. Local inference is booked at `cost_usd = 0`
+on every call, whatever the model is called: the cross-provider price table
+and the host's pricing resolver are not consulted for the `local` dialect,
+so a local `glm-4.5-air` or `qwen3` is not billed at the hosted rate just
+because a hosted row matches its name. (Hosted dialects that report no cost
+are priced from that table and flagged `cost_from_table`; the flag is about
+the dollars, not the token counts.)

@@ -636,6 +636,9 @@ class StatsResponse(BaseModel):
     total_cost_usd: float
     total_tokens_in: int
     total_tokens_out: int
+    # Turns whose token counts the harness estimated (provider reported no
+    # usage, or the reply was interrupted). Included in every total above.
+    estimated_queries: int = 0
 
 
 # ============================================================================
@@ -719,6 +722,10 @@ class UsageStats(BaseModel):
     total_cost_usd: float = 0.0
     session_count: int = 0
     query_count: int = 0
+    # How many of ``query_count`` booked harness-estimated token counts. Their
+    # amounts are inside the totals; a non-zero value means the totals are
+    # partly estimates and the panel shows the "estimated" marker.
+    estimated_query_count: int = 0
 
 
 class CostBreakdownItem(BaseModel):
@@ -729,6 +736,7 @@ class CostBreakdownItem(BaseModel):
     total_tokens_in: int = 0
     total_tokens_out: int = 0
     query_count: int = 0
+    estimated_query_count: int = 0
 
 
 class CostBreakdownResponse(BaseModel):
@@ -747,6 +755,7 @@ class UsageTrend(BaseModel):
     tokens_out: int = 0
     cost_usd: float = 0.0
     query_count: int = 0
+    estimated_query_count: int = 0
 
 
 class UsageTrendsResponse(BaseModel):
@@ -767,6 +776,8 @@ class TopSession(BaseModel):
     total_tokens_in: int = 0
     total_tokens_out: int = 0
     created_at: Optional[str] = None
+    # True when any booked turn of the session has estimated token counts.
+    usage_estimated: bool = False
 
 
 class AnalyticsSummaryResponse(BaseModel):
@@ -813,47 +824,6 @@ class Template(TemplateBase):
     is_builtin: bool = False
     created_at: datetime
     updated_at: datetime
-
-
-# ============================================================================
-# Webhook Models
-# ============================================================================
-
-class WebhookBase(BaseModel):
-    """Base webhook fields"""
-    url: str = Field(..., min_length=1)
-    events: List[str] = Field(default_factory=list)
-    secret: Optional[str] = None
-
-
-class WebhookCreate(WebhookBase):
-    """Webhook creation request"""
-    pass
-
-
-class WebhookUpdate(BaseModel):
-    """Webhook update request - all fields optional"""
-    url: Optional[str] = Field(None, min_length=1)
-    events: Optional[List[str]] = None
-    secret: Optional[str] = None
-    is_active: Optional[bool] = None
-
-
-class Webhook(WebhookBase):
-    """Full webhook response"""
-    id: str
-    is_active: bool = True
-    created_at: datetime
-    last_triggered_at: Optional[datetime] = None
-    failure_count: int = 0
-
-
-class WebhookTestResponse(BaseModel):
-    """Response from testing a webhook"""
-    success: bool
-    status_code: Optional[int] = None
-    response_time_ms: Optional[int] = None
-    error: Optional[str] = None
 
 
 # ============================================================================
@@ -1062,24 +1032,18 @@ VALID_HOOK_EVENTS = [
     "Notification",
 ]
 
-# Message hooks are never delivered (hook_executor.execute_message_hook), so
-# new ones are refused; existing rows stay readable so they can be deleted.
-MESSAGE_HOOKS_NOT_CREATABLE = "Message hooks are not supported; use a webhook or bash hook"
-
 
 class HookBase(BaseModel):
     """Base hook fields"""
     name: str = Field(..., min_length=1, max_length=100)
     event: str = Field(..., description="Hook event type")
-    hook_type: str = Field(..., pattern=r'^(bash|webhook|message)$', description="Type: 'bash', 'webhook', or 'message'")
+    hook_type: str = Field(..., pattern=r'^(bash|webhook)$', description="Type: 'bash' or 'webhook'")
     # For bash hooks
     command: Optional[str] = Field(None, description="Shell command to execute")
     timeout: int = Field(default=30000, ge=1000, le=300000, description="Timeout in ms (1-300 seconds)")
     # For webhook hooks
     url: Optional[str] = Field(None, description="Webhook URL to POST to")
     secret: Optional[str] = Field(None, description="HMAC secret for webhook signing")
-    # For message hooks
-    message_template: Optional[str] = Field(None, description="Prompt template sent as a message in the active chat")
     # Common
     enabled: bool = True
     tool_matcher: Optional[str] = Field(None, description="Tool name pattern for PreToolUse/PostToolUse (e.g., 'Bash|Edit')")
@@ -1094,12 +1058,11 @@ class HookUpdate(BaseModel):
     """Hook update request - all fields optional"""
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     event: Optional[str] = None
-    hook_type: Optional[str] = Field(None, pattern=r'^(bash|webhook|message)$')
+    hook_type: Optional[str] = Field(None, pattern=r'^(bash|webhook)$')
     command: Optional[str] = None
     timeout: Optional[int] = Field(None, ge=1000, le=300000)
     url: Optional[str] = None
     secret: Optional[str] = None
-    message_template: Optional[str] = None
     enabled: Optional[bool] = None
     tool_matcher: Optional[str] = None
 
@@ -1166,12 +1129,6 @@ class MobileDeviceRegisterResponse(BaseModel):
     scopes: List[str] = Field(default_factory=list)
 
 
-class MobileDeviceCapabilitiesRequest(BaseModel):
-    """Request to update device capabilities"""
-    device_id: str
-    capabilities: DeviceCapabilities
-
-
 class MobileDevice(BaseModel):
     """Full mobile device response"""
     id: str
@@ -1185,23 +1142,6 @@ class MobileDevice(BaseModel):
     revoked_at: Optional[datetime] = None
     created_at: datetime
     last_seen: Optional[datetime] = None
-
-
-class PushTokenRequest(BaseModel):
-    """Request to register FCM push token"""
-    device_id: str
-    fcm_token: str = Field(..., min_length=1)
-
-
-class UnifiedPushEndpointRequest(BaseModel):
-    """Request to register/update a device's UnifiedPush endpoint URL.
-
-    The app gets this URL from its UnifiedPush distributor (e.g. ntfy) and
-    registers it so a self-hosted server can deliver notifications without a
-    shared Firebase project.
-    """
-    device_id: str
-    endpoint: str = Field(..., min_length=1)
 
 
 # ============================================================================

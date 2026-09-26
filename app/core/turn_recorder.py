@@ -928,7 +928,7 @@ class TurnRecorder:
                 for k in (
                     "tokens_in", "tokens_out", "cache_creation_tokens",
                     "cache_read_tokens", "total_cost_usd", "duration_ms",
-                    "num_turns",
+                    "num_turns", "usage_estimated",
                 )
                 if k in metadata
             }

@@ -20,7 +20,7 @@ _SESSION_COLUMNS = (
     "total_cache_creation_tokens",
     "total_model_calls",
 )
-_USAGE_LOG_COLUMNS = ("cache_read_tokens", "cache_creation_tokens")
+_USAGE_LOG_COLUMNS = ("cache_read_tokens", "cache_creation_tokens", "usage_estimated")
 
 
 @pytest.fixture
@@ -76,6 +76,22 @@ def test_existing_rows_default_to_zero(test_db):
         assert row["total_cache_read_tokens"] == 0
         assert row["total_cache_creation_tokens"] == 0
         assert row["total_model_calls"] == 0
+
+
+def test_pre_migration_usage_rows_read_as_not_estimated(test_db):
+    """(v90) a ledger row booked before the flag existed is a measured turn."""
+    from tests.pg_shim import route_db_to
+
+    with route_db_to(test_db) as shim:
+        shim.cursor().execute(
+            "INSERT INTO usage_log (session_id, tokens_in, tokens_out) VALUES (%s, %s, %s)",
+            ("sess-old", 15, 3),
+        )
+        database._run_column_migrations(shim.cursor())
+
+        cur = shim.cursor()
+        cur.execute("SELECT usage_estimated FROM usage_log WHERE session_id = %s", ("sess-old",))
+        assert not cur.fetchone()["usage_estimated"]
 
 
 def test_rerun_is_a_no_op(test_db):

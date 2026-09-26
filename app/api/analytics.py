@@ -118,7 +118,8 @@ async def get_analytics_summary(
         total_tokens_out=usage_data["total_tokens_out"],
         total_cost_usd=usage_data["total_cost_usd"],
         session_count=usage_data["session_count"],
-        query_count=usage_data["query_count"]
+        query_count=usage_data["query_count"],
+        estimated_query_count=usage_data.get("estimated_query_count", 0),
     )
 
     # Get top profiles (limit to 5 for summary)
@@ -129,7 +130,8 @@ async def get_analytics_summary(
             total_cost_usd=item["total_cost_usd"],
             total_tokens_in=item["total_tokens_in"],
             total_tokens_out=item["total_tokens_out"],
-            query_count=item["query_count"]
+            query_count=item["query_count"],
+            estimated_query_count=item.get("estimated_query_count", 0),
         )
         for item in profile_breakdown[:5]
     ]
@@ -141,7 +143,8 @@ async def get_analytics_summary(
             tokens_in=item["tokens_in"],
             tokens_out=item["tokens_out"],
             cost_usd=item["cost_usd"],
-            query_count=item["query_count"]
+            query_count=item["query_count"],
+            estimated_query_count=item.get("estimated_query_count", 0),
         )
         for item in trend_data
     ]
@@ -205,7 +208,8 @@ async def get_cost_breakdown(
             total_cost_usd=item["total_cost_usd"],
             total_tokens_in=item["total_tokens_in"],
             total_tokens_out=item["total_tokens_out"],
-            query_count=item["query_count"]
+            query_count=item["query_count"],
+            estimated_query_count=item.get("estimated_query_count", 0),
         )
         for item in breakdown_data
     ]
@@ -270,7 +274,8 @@ async def get_usage_trends(
             tokens_in=item["tokens_in"],
             tokens_out=item["tokens_out"],
             cost_usd=item["cost_usd"],
-            query_count=item["query_count"]
+            query_count=item["query_count"],
+            estimated_query_count=item.get("estimated_query_count", 0),
         )
         for item in trend_data
     ]
@@ -327,7 +332,8 @@ async def get_top_sessions(
             total_cost_usd=item["total_cost_usd"],
             total_tokens_in=item["total_tokens_in"],
             total_tokens_out=item["total_tokens_out"],
-            created_at=item["created_at"]
+            created_at=item["created_at"],
+            usage_estimated=bool(item.get("usage_estimated", False)),
         )
         for item in sessions_data
     ]
