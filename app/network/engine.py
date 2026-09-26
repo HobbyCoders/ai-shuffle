@@ -1594,22 +1594,37 @@ def join_response(*, device_id: str, encryption_public: bytes, certificate: Mapp
     }
 
 
+# Managed-connection states in which the account has assigned this worker its
+# https tunnel address: the account link exists, even while the connector is
+# (re)starting. ``disconnected`` (signed out), ``waiting`` (claim pending),
+# ``limited`` (tunnel refused) and ``locked``/``unavailable`` advertise none.
+_TUNNEL_STATES = frozenset({"connected", "connecting", "reconnecting"})
+
+
 def _own_endpoints() -> List[str]:
-    endpoints = []
-    try:
-        from app.core.cluster import advertise_url
-        url, _ = advertise_url()
-        if url:
-            endpoints.append(url)
-    except Exception:  # noqa: BLE001
-        pass
-    # Docker's guessed LAN address can be private to its bridge. Advertise the
-    # verified managed route too; peers still authenticate the device identity.
+    """The addresses this worker tells peers to dial, tunnel first.
+
+    Peers dial the https tunnel alone whenever it is listed
+    (``endpoints.dial_endpoints``), so it is advertised for as long as the
+    account link exists, not only while the connector is up: a worker whose
+    tunnel is momentarily down reads as offline to its peers rather than
+    being reached over plain http. The LAN address follows for workers that
+    have no account link. Docker's guessed LAN address can also be private to
+    its bridge; peers authenticate the device identity at either address.
+    """
+    endpoints: List[str] = []
     try:
         from app.core import managed_connection
         connection = managed_connection.status()
         url = connection.get("url")
-        if connection.get("status") == "connected" and url and url not in endpoints:
+        if connection.get("status") in _TUNNEL_STATES and url:
+            endpoints.append(url)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.core.cluster import advertise_url
+        url, _ = advertise_url()
+        if url and url not in endpoints:
             endpoints.append(url)
     except Exception:  # noqa: BLE001
         pass

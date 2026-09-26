@@ -22,6 +22,10 @@ Adding a phone or browser works the same way: *Add device* > *Phone or browser* 
 
 Existing managed embedded installations join a network of one on upgrade. External or shared-database installations are not converted automatically; keep those deployments and their backups.
 
+## How workers reach each other
+
+Workers talk to each other directly, and one rule decides which address they use. A worker signed in to your Shuffle account has an encrypted tunnel address, and every other worker reaches it only through that tunnel, never over its plain `http://` local address, even if it was added with an invite code and even when both sit on the same network (the small extra latency is the price of one consistent rule). Plain local addresses are used only between workers that have no account link, which is why invite codes are meant for your home network or a VPN such as Tailscale; a plain `http://` invite to a public address is refused. A worker whose tunnel does not answer shows as offline (its sessions offer **Fork here**) rather than being contacted in the clear. If you sign in after pairing by code, the other workers switch to the tunnel on their own within a few seconds; nothing needs to be paired again.
+
 ## What syncs
 
 Shared across the network: preferences and UI state, system settings that are not bound to a host, provider keys and accounts, agents, templates, tags, permission rules, hooks, MCP definitions, webhooks, project identities, notes and attachments, plugin state, memory facts and skills, automation and connector definitions, the session catalog and transcripts.

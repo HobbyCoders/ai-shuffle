@@ -82,9 +82,8 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
         member = await run_sync(store.get_member, device_id)
         if member is None:
             raise RunnerUnreachable("Unknown device")
-        presence = engine.presence_of(device_id) or {}
-        endpoints = list(presence.get("endpoints") or member.get("endpoints") or [])
-        link = transport.PeerLink(device_id, endpoints)
+        from app.network.endpoints import peer_endpoints
+        link = transport.PeerLink(device_id, peer_endpoints(member, engine.presence_of(device_id)))
         transport._links[device_id] = link
     if not link.endpoints:
         raise RunnerUnreachable("The owning worker has no reachable address")

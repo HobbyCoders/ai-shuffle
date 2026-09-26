@@ -191,7 +191,7 @@ def _member_view(row: dict, ctx) -> dict:
         "device_id": row["device_id"], "name": row["name"], "kind": row["kind"], "platform": row.get("platform") or presence.get("platform"),
         "status": row["status"], "generation": row["generation"], "is_self": is_self,
         "fingerprint": _fingerprint(row), "added_by": row.get("added_by"), "created_at": row.get("created_at"),
-        "last_seen": row.get("last_seen"), "endpoints": presence.get("endpoints") or row.get("endpoints") or [],
+        "last_seen": row.get("last_seen"), "endpoints": endpoints_mod.peer_endpoints(row, presence),
         "capabilities": presence.get("capabilities") or row.get("capabilities") or {},
         "version": presence.get("version") or row.get("version"),
         "online": is_self or row["device_id"] in online,

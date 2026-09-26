@@ -181,8 +181,11 @@ async def test_sync_pass_backs_off_unreachable_peers_and_holds_the_outbox(worker
             async with httpx.AsyncClient() as client:
                 assert await transport.sync_pass(client) == {}
             assert link.failures == 1
-            # The peer becomes reachable: the stream is compared, the outbox opens.
-            link.endpoints, link.backoff_until = [net.url("a")], 0.0
+            # The peer becomes reachable at an address it is now known at (the
+            # dial list is rebuilt from the stored row on every pass): the
+            # stream is compared, the outbox opens.
+            store.touch_member(a.device_id, endpoints=[net.url("a")])
+            link.backoff_until = 0.0
             async with httpx.AsyncClient() as client:
                 results = await transport.sync_pass(client)
             assert results[a.device_id]["received"] == 0

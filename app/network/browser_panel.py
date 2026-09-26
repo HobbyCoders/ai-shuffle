@@ -38,12 +38,9 @@ async def peer_link(device_id: str):
         raise HTTPException(503, UNAVAILABLE)
     link = transport._links.get(device_id)
     if link is None:
+        from app.network.endpoints import peer_endpoints
         row = await run_sync(store.get_member, device_id)
-        presence = engine.presence_of(device_id) or {}
-        link = transport.PeerLink(
-            device_id,
-            list(presence.get("endpoints") or (row or {}).get("endpoints") or []),
-        )
+        link = transport.PeerLink(device_id, peer_endpoints(row, engine.presence_of(device_id)))
         transport._links[device_id] = link
     if not link.endpoints:
         raise HTTPException(503, UNAVAILABLE)

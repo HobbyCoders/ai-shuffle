@@ -21,6 +21,7 @@ it('defaults to a worker invite on an enrolled worker and embeds the reachable a
 	const worker = await screen.findByRole('tab', { name: 'Worker' });
 	expect(worker.getAttribute('aria-selected')).toBe('true');
 	expect(api.get).toHaveBeenCalledExactlyOnceWith('/pairing/endpoints');
+	expect(screen.getByText(/for a worker on your home network or a VPN/).textContent).toContain('always talk over the encrypted tunnel');
 	await fireEvent.click(screen.getByRole('button', { name: 'Create worker invite' }));
 	expect(api.post).toHaveBeenCalledWith('/pairing/grants', { purpose: 'network:join', endpoint_url: endpoint.url, device_label: null });
 	expect(await screen.findByText('Worker invite')).toBeTruthy();

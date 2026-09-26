@@ -102,8 +102,14 @@ async def test_account_preferences_reach_fresh_worker_without_controller(workers
         assert (await api.get_preference(request, "composer.fastMode")).value == ""
 
 
-@pytest.mark.parametrize("state", ["disconnected", "connecting", "reconnecting", "connected"])
-def test_presence_advertises_only_verified_cloud_route(workers, monkeypatch, state):
+@pytest.mark.parametrize("state", ["disconnected", "waiting", "limited", "locked", "unavailable",
+                                   "connecting", "reconnecting", "connected"])
+def test_presence_advertises_the_tunnel_first_while_the_account_link_exists(workers, monkeypatch, state):
+    """The tunnel is listed, first, for as long as the account has assigned it,
+    including while the connector restarts: peers dial only the tunnel once
+    they see it, so a momentarily down tunnel reads as offline rather than
+    letting peer traffic drop back to plain http. Signed out, refused or
+    unassigned states advertise the LAN address alone."""
     from app.core import cluster, managed_connection
     a, b = workers("docker"), workers("desktop")
     lan, cloud = "http://172.17.0.11:8000", "https://worker.example.com"
@@ -113,7 +119,7 @@ def test_presence_advertises_only_verified_cloud_route(workers, monkeypatch, sta
         engine.create_network("Home")
         engine.publish_presence(version="test")
         endpoints = engine.presence_of(a.device_id)["endpoints"]
-        assert endpoints == ([lan, cloud] if state == "connected" else [lan])
+        assert endpoints == ([cloud, lan] if state in ("connected", "connecting", "reconnecting") else [lan])
     join(a, b)
     with b.active():
         assert engine.presence_of(a.device_id)["endpoints"] == endpoints

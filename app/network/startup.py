@@ -230,6 +230,28 @@ async def _reconcile_owned_connectors() -> None:
             await _stop_running_connectors(connector_manager)
 
 
+def _adopt_presence_endpoints(device_ids) -> None:
+    """A peer's presence record is its latest word on its own addresses.
+
+    Keep the member row in step with it, so an address the peer withdrew (its
+    tunnel, after signing out of the account) stops being dialed even when
+    the record reached us through another worker. Peers dial the tunnel
+    alone while it is listed, so a stale listing would keep them offline.
+    """
+    from app.db import network as store
+    from app.network import engine
+    from app.network.endpoints import validate_endpoints
+    ctx = engine.context()
+    if ctx is None:
+        return
+    for device_id in set(device_ids):
+        if device_id == ctx.device_id or store.get_member(device_id) is None:
+            continue
+        endpoints = validate_endpoints((engine.presence_of(device_id) or {}).get("endpoints"))
+        if endpoints:
+            store.touch_member(device_id, endpoints=endpoints)
+
+
 def _on_applied(touched) -> None:
     """Remote records landed: tell connected UIs so they refresh, and materialize side effects."""
     from app.core.global_events import global_events
@@ -252,6 +274,12 @@ def _on_applied(touched) -> None:
             plugins_sync.apply_desired(plugin_ids)
         except Exception:  # noqa: BLE001
             logger.warning("Applying plugin state failed", exc_info=True)
+    presence_ids = [r for c, r, _ in touched if c == "presence"]
+    if presence_ids:
+        try:
+            _adopt_presence_endpoints(presence_ids)
+        except Exception:  # noqa: BLE001
+            logger.warning("Applying peer addresses failed", exc_info=True)
     for collection, record_id, _op in touched:
         coll = policy.COLLECTIONS.get(collection)
         if collection == "user_preferences":

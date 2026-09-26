@@ -38,6 +38,7 @@ from app.db import network as store
 from app.db.async_database import run_sync
 from app.db import pairing as pairing_db
 from app.network import crypto, engine, identity as identity_mod, membership
+from app.network.endpoints import dial_endpoints, is_secure_endpoint, plain_http_is_local, validate_endpoints
 
 logger = logging.getLogger(__name__)
 
@@ -253,11 +254,15 @@ async def start_enrollment(*, endpoint_url: str, code: str, inviter_fingerprint:
     endpoint = pairing_core.sanitize_endpoint_url(endpoint_url)
     if not endpoint:
         raise EnrollmentError("An endpoint is required")
-    if endpoint.startswith("http://"):
+    if not plain_http_is_local(endpoint):
         # The one-time code travels in this request. Plain http is acceptable
-        # only where the path is a local one (the LAN, the same machine).
-        if pairing_core.classify_endpoint(endpoint).get("kind") not in ("loopback", "lan", "tailscale"):
-            raise EnrollmentError("Use an https:// invite for a worker outside your local network")
+        # only where the path is a local one: the same machine, the home LAN
+        # or a VPN such as Tailscale. A worker elsewhere is reached over its
+        # account tunnel: sign both workers in to the same Shuffle account.
+        raise EnrollmentError(
+            "Invite codes work over plain http only on your home network or a VPN; "
+            "for a worker elsewhere, sign both workers in to the same Shuffle account "
+            "or use an https:// address")
     inviter_fingerprint = (inviter_fingerprint or "").strip() or None
     if inviter_fingerprint and len(_normalize_fp(inviter_fingerprint)) < 32:
         raise EnrollmentError("The inviter's fingerprint is incomplete")
@@ -393,10 +398,21 @@ def complete_enrollment(response: Dict[str, Any], *, client, endpoint: str, devi
         return
     issuer = response.get("issuer") or {}
     issuer_id = issuer.get("device_id")
-    endpoints = [endpoint] + [e for e in (issuer.get("endpoints") or []) if e != endpoint]
+    endpoints = validate_endpoints([endpoint] + list(issuer.get("endpoints") or []))
     if issuer_id:
         store.touch_member(issuer_id, endpoints=endpoints)
-    _copy_snapshot_sync(ctx, issuer_id, endpoints)
+    # The snapshot is peer traffic: an inviter that advertises its account
+    # tunnel is copied from over the tunnel, even though the invite itself
+    # was accepted at its LAN address.
+    dialed = dial_endpoints(endpoints)
+    try:
+        _copy_snapshot_sync(ctx, issuer_id, dialed)
+    except EnrollmentError as exc:
+        if dialed != endpoints and all(is_secure_endpoint(base) for base in dialed):
+            raise EnrollmentError(
+                f"{exc} (the inviter is signed in to a Shuffle account, so its settings are copied over its "
+                f"encrypted tunnel {', '.join(dialed)}; its plain LAN address is not used)") from exc
+        raise
     engine.finish_bootstrap()
     if join_id:
         store.update_join(join_id, status="complete", response=None, error=None)
