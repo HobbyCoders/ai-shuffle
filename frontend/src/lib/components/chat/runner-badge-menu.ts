@@ -41,9 +41,11 @@ export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMe
 		{
 			id: 'continue-here',
 			label: 'Continue here',
-			action: { kind: 'adopt' },
-			disabled: false,
-			title: 'Resume this session on this runner'
+			action: input.hasProject ? { kind: 'adopt' } : null,
+			disabled: !input.hasProject,
+			title: input.hasProject
+				? 'Commit and push on the owning worker, then fetch the branch and sync context here'
+				: 'Continue here requires a Git project with an origin remote'
 		}
 	];
 	const peers = peerRunners(input.installs).filter((i) => i.id !== input.ownerId);

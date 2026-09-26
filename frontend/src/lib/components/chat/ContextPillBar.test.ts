@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { writable } from 'svelte/store';
 import ContextPillBar from './ContextPillBar.svelte';
+import { adoptSession } from '$lib/api/sessions';
 
 const { session, execution, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
 	session: { store: null as any },
@@ -46,6 +47,7 @@ vi.mock('$lib/api/sessions', () => ({ adoptSession: vi.fn(), moveSession: vi.fn(
 
 afterEach(() => {
 	cleanup();
+	vi.mocked(adoptSession).mockClear();
 	execution.mockClear();
 	appSessions.store?.set([]);
 	listInstallsMock.mockReset();
@@ -97,6 +99,32 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		await fireEvent.click(runner!);
 		await waitFor(() => expect(container.querySelector('.runner-item')?.textContent).toContain('Continue here'));
 	});
+	it.each(['cancel', 'confirm', 'navigate'])('requires confirmation before Git publication: %s', async (action) => {
+		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner',
+			device_name: 'Other worker', device_online: true, is_remote: true, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [] });
+		getClusterGitStateMock.mockResolvedValue(null);
+		const view = render(ContextPillBar, { sheetMode });
+		await fireEvent.click(view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!);
+		await fireEvent.click(await view.findByRole('menuitem', { name: 'Continue here' }));
+		expect(view.getByRole('dialog')).toBeTruthy();
+		expect(view.getByText(/commit and push are not undone/)).toBeTruthy();
+		expect(adoptSession).not.toHaveBeenCalled();
+		if (action === 'cancel') {
+			await fireEvent.click(view.getAllByRole('button', { name: 'Cancel' }).at(-1)!);
+		} else {
+			if (action === 'navigate') {
+				session.store.set({ ...base, sessionId: 'different' });
+				await tick();
+			}
+			await fireEvent.click(view.getByRole('button', { name: 'Commit, push and continue' }));
+		}
+		if (action === 'confirm') expect(adoptSession).toHaveBeenCalledExactlyOnceWith('remote');
+		else expect(adoptSession).not.toHaveBeenCalled();
+		expect(view.queryByRole('dialog')).toBeNull();
+	});
+
 	it('stays checked from auto naming through completed setup', async () => {
 		session.store.set({ ...base, isCreatingWorktree: true });
 		const { container } = render(ContextPillBar, { sheetMode });

@@ -2152,46 +2152,30 @@ class TestAdoptSession:
             "online": False,
         }
 
-        with patch("app.network.engine.context", return_value=None):
+        sample_session["project_v2_id"] = "pv2-project"
+        with patch("app.network.engine.context", return_value=None), patch(
+            "app.core.project_resolver.has_local_base_checkout", return_value=True
+        ):
             response = client.post("/api/v1/sessions/test-session-id/adopt")
 
         assert response.status_code == 409
         assert "owning worker must be online" in response.json()["detail"]
         mock_database.adopt_session.assert_not_called()
 
-    def test_adopt_foreign_online_but_idle_session_succeeds(self, client, mock_database, sample_session):
-        """An idle session can move after its online owner transfers state."""
-        from app.core.config import settings
-
+    @pytest.mark.parametrize("body", [{}, {"follow": True}])
+    def test_adopt_projectless_session_is_rejected(self, client, mock_database, sample_session, body):
+        """Neither pin nor follow may move a project-less session."""
         sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = None
+        sample_session["project_v2_id"] = None
         mock_database.get_session.return_value = sample_session
-        mock_database.get_install.return_value = {
-            "device_name": "Studio Mac",
-            "online": True,
-        }
-        adopted_row = {**sample_session, "instance_id": settings.effective_instance_id}
-        mock_database.adopt_session.return_value = adopted_row
-
-        # No active run; the source completes the online handoff before adoption.
-        async def transfer(session):
-            mock_database.adopt_session.assert_not_called()
-            return "/local/resumed"
-
-        with patch(
-            "app.core.streaming_status.has_active_run",
-            return_value=False,
-        ), patch("app.network.handoff.receive", side_effect=transfer) as receive:
-            response = client.post("/api/v1/sessions/test-session-id/adopt")
-        receive.assert_awaited_once_with(sample_session)
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["adopted"] is True
-        assert data["status"] == "adopted"
-        assert data["instance_id"] == settings.effective_instance_id
-        mock_database.adopt_session.assert_called_once_with(
-            "test-session-id", settings.effective_instance_id
-        )
+        with patch("app.network.handoff.receive") as receive:
+            response = client.post("/api/v1/sessions/test-session-id/adopt", json=body)
+        assert response.status_code == 409
+        assert "only available for Git" in response.json()["detail"]
+        receive.assert_not_called()
+        mock_database.adopt_session.assert_not_called()
+        mock_database.unpin_session.assert_not_called()
 
     def test_adopt_foreign_streaming_session_conflicts(self, client, mock_database, sample_session):
         """Refuse to adopt while the session is actively streaming on its owner."""

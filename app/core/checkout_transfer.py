@@ -1,141 +1,157 @@
-"""Bounded Git snapshots for an explicit, online worker handoff.
+"""Resume a Git branch through its configured origin, never a file bundle.
 
-Snapshot commits use a private index and temporary ref. The owner's branch,
-index and working files are never changed. Ignored files are not transferred.
+The owner commits non-ignored work and pushes without force. The receiver uses
+its own origin credentials and only fast-forwards clean local checkouts.
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import os
 from pathlib import Path
-import shutil
+import re
 import subprocess
-import tempfile
-import uuid
-
-MAX_BUNDLE = 128 * 1024 * 1024
+from urllib.parse import urlsplit
 
 
-def git(cwd, *args, env=None):
-    result = subprocess.run(
-        ["git", "-c", "core.hooksPath=", "-c", "core.fsmonitor=false", *args],
-        cwd=cwd, env=env, capture_output=True, timeout=120,
-    )
+def git(cwd, *args):
+    try:
+        result = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, timeout=120,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git timed out during resume. Check the remote and retry; ownership has not moved.") from exc
     if result.returncode:
-        raise ValueError("Git could not prepare the worker handoff: " + result.stderr.decode("utf-8", "replace")[:500])
+        # Remote URLs and credential-helper output can contain secrets.
+        raise ValueError(f"Git {args[0]} failed during resume. Check Git credentials, hooks and branch conflicts on that worker; ownership has not moved.")
     return result.stdout
 
 
-def _trees(cwd, scratch):
-    env = dict(os.environ, GIT_INDEX_FILE=str(Path(scratch) / "index"))
-    index = git(cwd, "rev-parse", "--git-path", "index").decode().strip()
-    index = Path(index) if Path(index).is_absolute() else Path(cwd) / index
-    if index.exists():
-        shutil.copyfile(index, env["GIT_INDEX_FILE"])
+def _remote_key(url):
+    """Compare SSH/HTTPS repository identities without sending credentials."""
+    url = url.strip().rstrip("/")
+    if "://" in url and not url.startswith("file://"):
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+        if port and port != {"ssh": 22, "https": 443, "http": 80, "git": 9418}.get(parsed.scheme):
+            host += ":" + str(port)
+        path = parsed.path.strip("/")
+        identity = host + "/" + (path.lower() if host == "github.com" else path)
+    elif re.match(r"^(?:[^/@:]+@)?[^/:]+:", url) and not re.match(r"^[A-Za-z]:[\\/]", url):
+        host, path = url.split(":", 1)
+        host = host.rsplit("@", 1)[-1].lower()
+        path = path.strip("/")
+        identity = host + "/" + (path.lower() if host == "github.com" else path)
     else:
-        git(cwd, "read-tree", "HEAD", env=env)
-    entries = git(cwd, "ls-files", "--stage", env=env)
-    if any(line.startswith(b"160000 ") for line in entries.splitlines()):
-        raise ValueError("Resume cannot transfer submodule work; finish it on the owning worker first.")
-    if any(line.startswith(b"S ") or line[:1].islower()
-           for line in git(cwd, "ls-files", "-v", env=env).splitlines()):
-        raise ValueError("Resume cannot transfer sparse or assume-unchanged files.")
-    for name in git(cwd, "ls-files", "--others", "--exclude-standard", "-z", env=env).decode().split("\0"):
-        if name and (Path(name).name == ".env" or Path(name).suffix.lower() in (".pem", ".key")):
-            raise ValueError("Untracked credential files must be ignored or moved before resuming elsewhere.")
-    index_tree = git(cwd, "write-tree", env=env).decode().strip()
-    git(cwd, "add", "-A", "--", ".", env=env)
-    work_tree = git(cwd, "write-tree", env=env).decode().strip()
-    head = git(cwd, "rev-parse", "HEAD").decode().strip()
-    return head, index_tree, work_tree
+        identity = url
+    identity = identity.removesuffix(".git")
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def remote_identity(cwd):
+    if git(cwd, "rev-parse", "--is-inside-work-tree").strip() != b"true":
+        raise ValueError("Resume here requires a Git repository with an origin remote.")
+    fetch = git(cwd, "remote", "get-url", "--all", "origin").decode().splitlines()
+    push = git(cwd, "remote", "get-url", "--push", "--all", "origin").decode().splitlines()
+    if len(fetch) != 1 or len(push) != 1 or _remote_key(fetch[0]) != _remote_key(push[0]):
+        raise ValueError("Resume here requires one matching fetch/push origin repository.")
+    return _remote_key(fetch[0])
+
+
+def _branch(cwd, branch):
+    git(cwd, "check-ref-format", "refs/heads/" + branch)
+    if git(cwd, "symbolic-ref", "--short", "HEAD").decode().strip() != branch:
+        raise ValueError("The worker checkout is on a different branch.")
+
+
+def _status(cwd):
+    return git(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 
 
 def fingerprint(cwd):
-    with tempfile.TemporaryDirectory(prefix="shuffle-handoff-") as scratch:
-        return ":".join(_trees(cwd, scratch))
+    """Only a clean checkout can finish a handoff."""
+    if _status(cwd):
+        raise ValueError("The owning worker's files changed during resume; ownership was not moved.")
+    return git(cwd, "rev-parse", "HEAD").decode().strip()
 
 
-def export_checkout(cwd, branch):
-    git(cwd, "check-ref-format", "refs/heads/" + branch)
-    actual = git(cwd, "symbolic-ref", "--short", "HEAD").decode().strip()
-    if actual != branch:
-        raise ValueError("The owning worker's checkout is on a different branch.")
-    ref = "refs/shuffle-handoff/" + uuid.uuid4().hex
-    with tempfile.TemporaryDirectory(prefix="shuffle-handoff-") as scratch:
-        head, index_tree, work_tree = _trees(cwd, scratch)
-        args = ("-c", "user.name=AI Shuffle", "-c", "user.email=handoff@localhost", "commit-tree")
-        staged = git(cwd, *args, index_tree, "-p", head, "-m", "Handoff index").decode().strip()
-        snapshot = git(cwd, *args, work_tree, "-p", staged, "-m", "Handoff worktree").decode().strip()
-        git(cwd, "update-ref", ref, snapshot)
-        try:
-            bundle = Path(scratch) / "state.bundle"
-            git(cwd, "bundle", "create", str(bundle), ref)
-            if bundle.stat().st_size > MAX_BUNDLE:
-                raise ValueError("This checkout exceeds the 128 MiB resume transfer limit.")
-            data = bundle.read_bytes()
-        finally:
-            git(cwd, "update-ref", "-d", ref)
-        signature = ":".join((head, index_tree, work_tree))
-        if fingerprint(cwd) != signature:
-            raise ValueError("Files changed while preparing resume. Try again when the worker is idle.")
-        return dict(branch=branch, head=head, index_tree=index_tree, snapshot=snapshot,
-                    fingerprint=signature, bundle=base64.b64encode(data).decode(),
-                    sha256=hashlib.sha256(data).hexdigest())
+def _preflight(cwd):
+    # Do not commit half-completed Git operations or silently omit nested work.
+    for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"):
+        path = Path(git(cwd, "rev-parse", "--git-path", marker).decode().strip())
+        if (path if path.is_absolute() else Path(cwd) / path).exists():
+            raise ValueError("Finish the in-progress Git operation before resuming elsewhere.")
+    if git(cwd, "ls-files", "--unmerged"):
+        raise ValueError("Resolve Git conflicts before resuming elsewhere.")
+    entries = git(cwd, "ls-files", "--stage")
+    if any(line.startswith(b"160000 ") for line in entries.splitlines()):
+        raise ValueError("Resume does not support repositories with submodules.")
+    if any(line.startswith(b"S ") or line[:1].islower() for line in git(cwd, "ls-files", "-v").splitlines()):
+        raise ValueError("Resume cannot commit sparse or assume-unchanged files.")
+    for name in git(cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z").decode().split("\0"):
+        if name and (Path(name).name == ".env" or Path(name).suffix.lower() in (".pem", ".key")):
+            raise ValueError("Credential files must be removed from tracking and ignored before resuming elsewhere.")
+
+
+def export_checkout(cwd, branch, expected_remote=None):
+    """Commit and push the owner branch; return identifiers, never file bytes."""
+    _branch(cwd, branch)
+    remote = remote_identity(cwd)
+    if expected_remote is not None and remote != expected_remote:
+        raise ValueError("The workers' origin remotes refer to different repositories.")
+    _preflight(cwd)
+    if _status(cwd):
+        git(cwd, "add", "-A", "--", ".")
+        _preflight(cwd)
+        git(cwd, "commit", "-m", "Save work before resuming on another worker")
+    head = fingerprint(cwd)
+    # Push this exact commit, not a moving HEAD, and never force-update a branch.
+    git(cwd, "push", "origin", head + ":refs/heads/" + branch)
+    published = git(cwd, "ls-remote", "--exit-code", "origin", "refs/heads/" + branch).decode().split()
+    if not published or published[0] != head or fingerprint(cwd) != head:
+        raise ValueError("The branch changed during resume. Retry when both workers are idle.")
+    return dict(protocol="git-origin-v1", branch=branch, head=head, fingerprint=head, remote=remote)
 
 
 def import_checkout(base, destination, state):
-    """Create a fresh checkout, refusing existing paths or divergent local refs."""
-    branch = state["branch"]
+    """Fetch using local configuration; preserve dirty or divergent branches."""
+    if state.get("protocol") != "git-origin-v1":
+        raise ValueError("Update both workers to use Git-based resume.")
+    branch, head = state["branch"], state["head"]
     git(base, "check-ref-format", "refs/heads/" + branch)
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+        raise ValueError("Invalid resume commit.")
+    if remote_identity(base) != state["remote"]:
+        raise ValueError("The workers' origin remotes refer to different repositories.")
+    git(base, "fetch", "--no-tags", "origin", "refs/heads/" + branch + ":refs/remotes/origin/" + branch)
+    if git(base, "rev-parse", "FETCH_HEAD").decode().strip() != head:
+        raise ValueError("The remote branch changed during resume. Retry from the owning worker.")
+    # Reuse a registered branch checkout, including the project's base checkout.
     dest = Path(destination)
+    for entry in git(base, "worktree", "list", "--porcelain").decode().split("\n\n"):
+        lines = entry.splitlines()
+        if "branch refs/heads/" + branch in lines:
+            dest = Path(next(line.removeprefix("worktree ") for line in lines if line.startswith("worktree ")))
+            break
     if dest.exists() or dest.is_symlink():
-        # A retry after a lost acknowledgment can reuse its exact prepared
-        # checkout, but cannot reset or overwrite even one local modification.
-        known_paths = [line.removeprefix("worktree ") for line in
-                       git(base, "worktree", "list", "--porcelain").decode().splitlines()
-                       if line.startswith("worktree ")]
-        known = any(Path(path).resolve() == dest.resolve() for path in known_paths)
-        if (known and not dest.is_symlink()
-                and git(dest, "symbolic-ref", "--short", "HEAD").decode().strip() == branch
-                and fingerprint(dest) == state["fingerprint"]):
-            return str(dest)
-        raise ValueError("A local checkout already exists for this branch. Preserve or move it before resuming here.")
-    # A ref already checked out elsewhere must never be repointed under that tree.
-    listing = git(base, "worktree", "list", "--porcelain").decode()
-    if "branch refs/heads/" + branch in listing.splitlines():
-        raise ValueError("This branch is already checked out locally; its files were not changed.")
-    encoded = state.get("bundle", "")
-    if len(encoded) > (MAX_BUNDLE * 4 // 3 + 4):
-        raise ValueError("Resume bundle exceeds the transfer limit.")
-    data = base64.b64decode(encoded, validate=True)
-    if hashlib.sha256(data).hexdigest() != state["sha256"]:
-        raise ValueError("Resume bundle checksum mismatch.")
-    ref = "refs/shuffle-handoff/" + uuid.uuid4().hex
-    with tempfile.TemporaryDirectory(prefix="shuffle-handoff-") as scratch:
-        bundle = Path(scratch) / "state.bundle"
-        bundle.write_bytes(data)
-        git(base, "bundle", "verify", str(bundle))
-        heads = git(base, "bundle", "list-heads", str(bundle)).decode().splitlines()
-        if len(heads) != 1 or heads[0].split()[0] != state["snapshot"]:
-            raise ValueError("Resume bundle has an unexpected head.")
-        git(base, "fetch", "--no-tags", str(bundle), heads[0].split()[1] + ":" + ref)
-    try:
-        if git(base, "rev-parse", ref + "^^").decode().strip() != state["head"]:
-            raise ValueError("Resume bundle has an unexpected history.")
-        if git(base, "rev-parse", ref + "^{tree}").decode().strip() != state["fingerprint"].split(":")[2]:
-            raise ValueError("Resume bundle has an unexpected working tree.")
-        if git(base, "rev-parse", ref + "^^{tree}").decode().strip() != state["index_tree"]:
-            raise ValueError("Resume bundle has an unexpected index.")
+        known = [line.removeprefix("worktree ") for line in git(base, "worktree", "list", "--porcelain").decode().splitlines() if line.startswith("worktree ")]
+        if not any(Path(p).resolve() == dest.resolve() for p in known) or dest.is_symlink():
+            raise ValueError("A local checkout already exists at the destination; its files were not changed.")
+        _branch(dest, branch)
+        if _status(dest):
+            raise ValueError("The receiving checkout has local changes. Commit or move them before resuming here.")
+        _preflight(dest)
+        git(dest, "merge", "--ff-only", "--no-overwrite-ignore", head)
+    else:
         old = git(base, "for-each-ref", "--format=%(objectname)", "refs/heads/" + branch).decode().strip()
         if old:
-            # Only a fast-forward can replace an un-checked-out local branch.
-            git(base, "merge-base", "--is-ancestor", old, state["head"])
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        git(base, "worktree", "add", "--detach", str(dest), ref)
-        git(base, "update-ref", "refs/heads/" + branch, state["head"], old or "0" * 40)
-        git(dest, "symbolic-ref", "HEAD", "refs/heads/" + branch)
-        git(dest, "read-tree", state["index_tree"])
-        return str(dest)
-    finally:
-        git(base, "update-ref", "-d", ref)
+            git(base, "merge-base", "--is-ancestor", old, head)
+            git(base, "update-ref", "refs/heads/" + branch, head, old)
+            git(base, "worktree", "add", str(dest), branch)
+        else:
+            git(base, "worktree", "add", "-b", branch, str(dest), head)
+    if fingerprint(dest) != head:
+        raise ValueError("The receiving checkout changed during resume; ownership was not moved.")
+    git(dest, "branch", "--set-upstream-to=origin/" + branch, branch)
+    return str(dest)

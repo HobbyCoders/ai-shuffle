@@ -28,6 +28,7 @@
 	import BranchSelector from './BranchSelector.svelte';
 	import ExecutionModeBar from '$lib/components/layout/ExecutionModeBar.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { computeContextBadge, shouldShowBranchPill, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { gitStateQuery, runnerBadgeMenuItems } from './runner-badge-menu';
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
@@ -145,6 +146,7 @@
 	let runnerEligibility = $state<EligibilityMap>(null);
 	let runnerMenuLoading = $state(false);
 	let runnerActionPending = $state(false);
+	let pendingResume = $state<{ item: RunnerBadgeMenuItem; sessionId: string } | null>(null);
 
 	const runnerMenu = $derived(
 		runnerBadgeMenuItems({
@@ -191,10 +193,15 @@
 		void loadRunnerMenu();
 	}
 
-	async function runMenuAction(item: RunnerBadgeMenuItem) {
+	async function runMenuAction(item: RunnerBadgeMenuItem, confirmed = false) {
 		if (!item.action || item.disabled || runnerActionPending) return;
 		const sessionId = $activeSession.sessionId;
 		if (!sessionId) return;
+		if (item.action.kind === 'adopt' && !confirmed) {
+			pendingResume = { item, sessionId };
+			closeDropdown('runner');
+			return;
+		}
 		runnerActionPending = true;
 		try {
 			if (item.action.kind === 'adopt') {
@@ -216,6 +223,14 @@
 		}
 	}
 
+	function confirmResume() {
+		const pending = pendingResume;
+		pendingResume = null;
+		if (pending && pending.sessionId === $activeSession.sessionId) {
+			void runMenuAction(pending.item, true);
+		}
+	}
+
 	function handleRunnerClickOutside(e: MouseEvent) {
 		if (showRunnerMenu && runnerMenuRef && !runnerMenuRef.contains(e.target as Node)) {
 			closeDropdown('runner');
@@ -233,6 +248,15 @@
 </script>
 
 <svelte:window onclick={handleRunnerClickOutside} onkeydown={handleRunnerKeydown} />
+
+<ConfirmDialog
+	open={!!pendingResume}
+	title="Commit, push and continue here?"
+	message="The owning worker will commit all non-ignored changes and push this branch to origin. This worker will fetch the branch and sync the conversation and context. Ignored files stay on the original worker. If a later step fails, the commit and push are not undone."
+	confirmLabel="Commit, push and continue"
+	onConfirm={confirmResume}
+	onCancel={() => (pendingResume = null)}
+/>
 
 {#snippet repoChip()}
 	{#if projectName}

@@ -47,7 +47,7 @@ async def test_receive_transfers_unpushed_dirty_branch_and_native_history(pair, 
     (source / "file.txt").write_text("local staged change")
     git(source,"add",".")
     (source / "new.txt").write_text("untracked work")
-    before = checkout_transfer.fingerprint(source)
+    before = git(source, "rev-parse", "HEAD").decode().strip()
     from app.db import session_events
     with a.active():
         session_events.append_events("handoff-test", [{"type": "message.user", "payload": {"content": "unsynced final event"}}])
@@ -65,7 +65,9 @@ async def test_receive_transfers_unpushed_dirty_branch_and_native_history(pair, 
     with b.active():
         session=database.get_session("handoff-test")
         cwd=await handoff.receive(session)
-        assert checkout_transfer.fingerprint(cwd) == before
+        assert checkout_transfer.fingerprint(cwd) == checkout_transfer.fingerprint(source)
+        assert checkout_transfer.fingerprint(cwd) != before
+        assert (source / "new.txt").read_text() == "untracked work"
         row=database.get_session("handoff-test")
         assert row["owner_device_id"] == b.device_id
         assert row["sdk_session_id"].startswith("ses_") and row["sdk_session_id"] != "ses_source"
@@ -78,7 +80,7 @@ async def test_receive_transfers_unpushed_dirty_branch_and_native_history(pair, 
         assert session_events.get_max_seq("handoff-test") == 1
     with a.active():
         assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
-        assert checkout_transfer.fingerprint(source) == before
+        assert checkout_transfer.fingerprint(source) != before
     assert phases == ["begin","commit"]
     with a.active():
         assert handoff.finish("handoff-test", b.device_id, commits[0]) == {"committed": True}
@@ -127,7 +129,12 @@ async def test_fluid_symlink_outside_target_checkout_refuses_and_keeps_owner(pai
     a,b,source,target=pair
     outside = target.parent / "outside-fluid"
     outside.mkdir()
-    (target / ".fluid").symlink_to(outside, target_is_directory=True)
+    try:
+        (target / ".fluid").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
     phases=[]
     async def call(device,action,body,**kwargs):
         phases.append(body["phase"])
@@ -149,11 +156,11 @@ def test_live_source_run_blocks_snapshot(pair):
         run=runs.claim_run("handoff-test",settings.effective_instance_id,300)
         assert run
         with pytest.raises(ValueError,match="busy"):
-            handoff.begin("handoff-test",b.device_id)
+            handoff.begin("handoff-test", b.device_id, checkout_transfer.remote_identity(target))
         assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
 
 @pytest.mark.asyncio
-async def test_projectless_session_transfers_history_without_checkout(pair, monkeypatch):
+async def test_projectless_session_is_rejected_without_transferring(pair, monkeypatch):
     a,b,source,target=pair
     for worker in (a,b):
         with worker.active(), get_db() as conn:
@@ -163,8 +170,105 @@ async def test_projectless_session_transfers_history_without_checkout(pair, monk
             return await control.handle(action,body,from_device=b.device_id)
     monkeypatch.setattr(control,"call",call)
     with b.active():
-        cwd=await handoff.receive(database.get_session("handoff-test"))
-        assert cwd == str(settings.effective_workspace_dir)
-        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
-        assert database.get_session_messages("handoff-test")[0]["content"] == "Keep this conversation"
+        with pytest.raises(ValueError, match="only available for Git"):
+            await handoff.receive(database.get_session("handoff-test"))
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+
+@pytest.mark.asyncio
+async def test_push_failure_releases_reservation_without_moving_owner(pair, monkeypatch):
+    a, b, source, target = pair
+    original_git = checkout_transfer.git
+    def fail_push(cwd, *args):
+        if args[0] == "push":
+            raise ValueError("Git push failed during resume")
+        return original_git(cwd, *args)
+    monkeypatch.setattr(checkout_transfer, "git", fail_push)
+    async def call(device, action, body, **kwargs):
+        with a.active():
+            return await control.handle(action, body, from_device=b.device_id)
+    monkeypatch.setattr(control, "call", call)
+    (source / "new.txt").write_text("saved despite push failure")
+    with b.active():
+        with pytest.raises(ValueError, match="push failed"):
+            await handoff.receive(database.get_session("handoff-test"))
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+    with a.active(), get_db() as conn:
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+        cur = conn.cursor()
+        cur.execute("SELECT state FROM runs WHERE session_id=%s", ("handoff-test",))
+        assert cur.fetchone()["state"] == "released"
+    assert not git(source, "status", "--porcelain")
+
+
+@pytest.mark.asyncio
+async def test_missing_origin_refuses_before_contacting_owner(pair, monkeypatch):
+    a, b, source, target = pair
+    git(target, "remote", "remove", "origin")
+    from unittest.mock import AsyncMock
+    call = AsyncMock()
+    monkeypatch.setattr(control, "call", call)
+    with b.active():
+        with pytest.raises(ValueError):
+            await handoff.receive(database.get_session("handoff-test"))
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+    call.assert_not_called()
+
+
+def test_legacy_receiver_cannot_trigger_publication(pair):
+    a, b, source, target = pair
+    before = git(source, "rev-parse", "HEAD")
+    with a.active():
+        with pytest.raises(ValueError, match="Update both"):
+            handoff.begin("handoff-test", b.device_id)
+    assert git(source, "rev-parse", "HEAD") == before
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reuse_base", [False, True])
+async def test_base_session_without_branch_metadata_resolves_after_resume(pair, monkeypatch, reuse_base):
+    from app.core import project_resolver
+    a, b, source, target = pair
+    if reuse_base:
+        git(source, "checkout", "main")
+        (source / "file.txt").write_text("new base checkout work")
+    # The shared fixture registers this path as a branch checkout. A base
+    # session instead has a branch-NULL checkout row at that path.
+    with a.active():
+        project_id = database.get_session("handoff-test")["project_v2_id"]
+        checkouts.upsert_checkout(project_id, settings.effective_instance_id, str(source), branch="")
+    for worker in (a, b):
+        with worker.active(), get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET branch=NULL WHERE id=%s", ("handoff-test",))
+    async def call(device, action, body, **kwargs):
+        with a.active():
+            return await control.handle(action, body, from_device=b.device_id)
+    monkeypatch.setattr(control, "call", call)
+    with b.active():
+        cwd = await handoff.receive(database.get_session("handoff-test"))
+        assert checkout_transfer.fingerprint(cwd) == checkout_transfer.fingerprint(source)
+        row = database.get_session("handoff-test")
+        assert row["branch"] == (None if reuse_base else "feature/only-on-worker")
+        assert project_resolver.has_local_base_checkout(row)
+        assert project_resolver.resolve_existing_cwd(row) == cwd
+        if reuse_base:
+            assert cwd == str(target)
+            assert row["worktree_branch"] is None
+    with a.active():
+        assert database.get_session("handoff-test")["branch"] == (None if reuse_base else "feature/only-on-worker")
+
+
+@pytest.mark.asyncio
+async def test_source_branch_switch_at_same_commit_refuses_ownership(pair, monkeypatch):
+    a, b, source, target = pair
+    async def call(device, action, body, **kwargs):
+        with a.active():
+            if body["phase"] == "commit":
+                git(source, "checkout", "-b", "different-branch")
+            return await control.handle(action, body, from_device=b.device_id)
+    monkeypatch.setattr(control, "call", call)
+    with b.active():
+        with pytest.raises(ValueError, match="different branch"):
+            await handoff.receive(database.get_session("handoff-test"))
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+    with a.active():
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
 

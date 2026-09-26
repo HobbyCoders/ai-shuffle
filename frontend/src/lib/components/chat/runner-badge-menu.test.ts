@@ -1,7 +1,7 @@
 /**
  * Tests for the context-bar runner badge menu.
  *
- * Continue here is always offered; Unpin is not. Other runners
+ * Continue here requires a project; Unpin is not offered. Other runners
  * are listed, offline greyed, ineligible blocked when the session has a
  * project. git-state is fetched by project_id, else project_v2_id.
  */
@@ -52,6 +52,14 @@ describe('runnerBadgeMenuItems', () => {
 		expect(items.map((i) => i.id)).toContain('continue-here');
 		expect(items.map((i) => i.id)).not.toContain('unpin');
 		expect(items.find((i) => i.id === 'continue-here')!.action).toEqual({ kind: 'adopt' });
+	});
+
+	it('disables Continue here for projectless sessions and explains Git publication', () => {
+		const noProject = runnerBadgeMenuItems(input({ hasProject: false }))[0];
+		expect(noProject.disabled).toBe(true);
+		expect(noProject.action).toBeNull();
+		expect(noProject.title).toContain('Git project');
+		expect(runnerBadgeMenuItems(input())[0].title).toContain('Commit and push');
 	});
 
 	it('lists other runners for /move and skips self and the current owner', () => {

@@ -139,11 +139,13 @@ async def _parse_adopt_request(request: Request) -> AdoptRequest:
 async def _prepare_local_checkout(session: dict, session_id: str, me: str) -> bool:
     """Prepare the canonical local checkout before transferring ownership.
 
-    Project-less sessions transfer history only. Failures leave ownership unchanged.
+    Only Git projects with an origin remote can move. Failures leave ownership unchanged.
     """
     from app.core import project_resolver
     from app.network import handoff, control
     has_project = bool(session.get("project_v2_id") or session.get("project_id"))
+    if not has_project:
+        raise HTTPException(status_code=409, detail="Resume here is only available for Git projects with an origin remote.")
 
     try:
         has_base = not has_project or await run_sync(
@@ -234,7 +236,7 @@ async def adopt_session_endpoint(
         )
 
     if body.follow:
-        if (session.get("project_v2_id") or session.get("project_id")) and owner != me:
+        if owner and owner != me:
             await _prepare_local_checkout(session, session_id, me)
         updated = await run_sync(database.unpin_session, session_id, me)
         if not updated:
