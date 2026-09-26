@@ -148,12 +148,13 @@
 	let runnerActionPending = $state(false);
 	let pendingResume = $state<{ item: RunnerBadgeMenuItem; sessionId: string } | null>(null);
 
+	const sessionHasProject = $derived(!!(sessionRow?.project_id || sessionRow?.project_v2_id));
 	const runnerMenu = $derived(
 		runnerBadgeMenuItems({
 			ownerId: sessionRow?.instance_id ?? null,
 			installs: runnerInstalls,
 			eligibility: runnerEligibility,
-			hasProject: !!(sessionRow?.project_id || sessionRow?.project_v2_id),
+			hasProject: sessionHasProject,
 			isWorktree: isWorktreeSession
 		})
 	);
@@ -197,7 +198,8 @@
 		if (!item.action || item.disabled || runnerActionPending) return;
 		const sessionId = $activeSession.sessionId;
 		if (!sessionId) return;
-		if (item.action.kind === 'adopt' && !confirmed) {
+		// Only Git projects commit and push on the way; plain chats move history alone.
+		if (item.action.kind === 'adopt' && sessionHasProject && !confirmed) {
 			pendingResume = { item, sessionId };
 			closeDropdown('runner');
 			return;

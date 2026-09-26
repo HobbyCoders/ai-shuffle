@@ -2163,19 +2163,22 @@ class TestAdoptSession:
         mock_database.adopt_session.assert_not_called()
 
     @pytest.mark.parametrize("body", [{}, {"follow": True}])
-    def test_adopt_projectless_session_is_rejected(self, client, mock_database, sample_session, body):
-        """Neither pin nor follow may move a project-less session."""
+    def test_adopt_projectless_session_transfers_history(self, client, mock_database, sample_session, body):
+        """Pin and follow move a project-less session by history alone."""
+        from app.core.config import settings
         sample_session["instance_id"] = "other-install-xyz"
         sample_session["project_id"] = None
         sample_session["project_v2_id"] = None
         mock_database.get_session.return_value = sample_session
-        with patch("app.network.handoff.receive") as receive:
+        mock_database.adopt_session.return_value = {**sample_session, "instance_id": settings.effective_instance_id}
+        mock_database.unpin_session.return_value = {**sample_session, "instance_id": settings.effective_instance_id}
+        with patch("app.network.handoff.receive", new=AsyncMock(return_value="/workspace")) as receive, patch(
+            "app.core.project_resolver.has_local_base_checkout"
+        ) as base:
             response = client.post("/api/v1/sessions/test-session-id/adopt", json=body)
-        assert response.status_code == 409
-        assert "only available for Git" in response.json()["detail"]
-        receive.assert_not_called()
-        mock_database.adopt_session.assert_not_called()
-        mock_database.unpin_session.assert_not_called()
+        assert response.status_code == 200, response.text
+        receive.assert_awaited_once()
+        base.assert_not_called()
 
     def test_adopt_foreign_streaming_session_conflicts(self, client, mock_database, sample_session):
         """Refuse to adopt while the session is actively streaming on its owner."""

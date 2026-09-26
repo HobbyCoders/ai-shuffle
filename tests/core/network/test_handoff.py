@@ -160,7 +160,7 @@ def test_live_source_run_blocks_snapshot(pair):
         assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
 
 @pytest.mark.asyncio
-async def test_projectless_session_is_rejected_without_transferring(pair, monkeypatch):
+async def test_projectless_session_transfers_history_only(pair, monkeypatch):
     a,b,source,target=pair
     for worker in (a,b):
         with worker.active(), get_db() as conn:
@@ -169,10 +169,14 @@ async def test_projectless_session_is_rejected_without_transferring(pair, monkey
         with a.active():
             return await control.handle(action,body,from_device=b.device_id)
     monkeypatch.setattr(control,"call",call)
+    monkeypatch.setattr(checkout_transfer, "export_checkout",
+                        lambda *a, **k: pytest.fail("plain chat must not export a checkout"))
     with b.active():
-        with pytest.raises(ValueError, match="only available for Git"):
-            await handoff.receive(database.get_session("handoff-test"))
-        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+        cwd = await handoff.receive(database.get_session("handoff-test"))
+        assert cwd == str(settings.effective_workspace_dir)
+        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
+    with a.active():
+        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
 
 @pytest.mark.asyncio
 async def test_push_failure_releases_reservation_without_moving_owner(pair, monkeypatch):

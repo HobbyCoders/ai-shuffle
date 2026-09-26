@@ -54,11 +54,11 @@ describe('runnerBadgeMenuItems', () => {
 		expect(items.find((i) => i.id === 'continue-here')!.action).toEqual({ kind: 'adopt' });
 	});
 
-	it('disables Continue here for projectless sessions and explains Git publication', () => {
+	it('offers history-only Continue here for projectless sessions and explains Git publication', () => {
 		const noProject = runnerBadgeMenuItems(input({ hasProject: false }))[0];
-		expect(noProject.disabled).toBe(true);
-		expect(noProject.action).toBeNull();
-		expect(noProject.title).toContain('Git project');
+		expect(noProject.disabled).toBe(false);
+		expect(noProject.action).toEqual({ kind: 'adopt' });
+		expect(noProject.title).toContain('history');
 		expect(runnerBadgeMenuItems(input())[0].title).toContain('Commit and push');
 	});
 

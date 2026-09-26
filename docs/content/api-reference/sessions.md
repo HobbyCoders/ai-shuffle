@@ -484,13 +484,13 @@ When several devices share one account, each session runs on one device at a tim
 
 Run the session on this device from now on (**Continue here** in the device menu). The body is optional.
 
-Cross-worker resume requires a Git project with a single `origin` remote pointing to the same repository on both workers. GitHub and other Git hosts are supported. Both workers must be online, and the receiving worker must already have a clone of the project.
+Plain chat sessions with no project move by conversation history alone. For a session in a project, cross-worker resume requires a Git project with a single `origin` remote pointing to the same repository on both workers. GitHub and other Git hosts are supported. Both workers must be online, and the receiving worker must already have a clone of the project.
 
 After confirmation, the owning worker commits all non-ignored changes (including new files and deletions) and pushes the session branch without force. The receiving worker fetches that branch, creates a worktree or fast-forwards an existing clean branch checkout, then copies the conversation and native session context. Only after these steps succeed does ownership move. Ignored files, dependencies and local credentials are not copied.
 
 There is no AI Shuffle file-bundle or total-context size cap for this handoff. Repository data travels through Git rather than the worker-to-worker response; Git-host limits and network timeouts still apply. Both workers need a version that supports Git-based resume.
 
-Returns `409` for project-less sessions, missing or mismatched remotes, an offline or busy owner, rejected pushes, dirty or divergent receiving checkouts, and unsupported Git states (conflicts, an unfinished operation, submodules, sparse or assume-unchanged files). Unignored `.env`, `.pem` and `.key` files also block automatic publication. Ownership stays on the original worker if a step fails. A commit or push that already succeeded is **not undone**; resolve the reported problem and retry.
+Returns `409` for missing or mismatched remotes, an offline or busy owner, rejected pushes, dirty or divergent receiving checkouts, and unsupported Git states (conflicts, an unfinished operation, submodules, sparse or assume-unchanged files). Unignored `.env`, `.pem` and `.key` files also block automatic publication. Ownership stays on the original worker if a step fails. A commit or push that already succeeded is **not undone**; resolve the reported problem and retry.
 
 **Auth:** Required
 

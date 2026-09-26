@@ -125,6 +125,19 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect(view.queryByRole('dialog')).toBeNull();
 	});
 
+	it('moves a plain chat without the Git publication dialog', async () => {
+		session.store.set({ ...base, sessionId: 'remote' });
+		appSessions.store.set([{ id: 'remote', instance_id: 'owner',
+			device_name: 'Other worker', device_online: true, is_remote: true, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [] });
+		getClusterGitStateMock.mockResolvedValue(null);
+		const view = render(ContextPillBar, { sheetMode });
+		await fireEvent.click(view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!);
+		await fireEvent.click(await view.findByRole('menuitem', { name: 'Continue here' }));
+		expect(view.queryByRole('dialog')).toBeNull();
+		await waitFor(() => expect(adoptSession).toHaveBeenCalledExactlyOnceWith('remote'));
+	});
+
 	it('stays checked from auto naming through completed setup', async () => {
 		session.store.set({ ...base, isCreatingWorktree: true });
 		const { container } = render(ContextPillBar, { sheetMode });

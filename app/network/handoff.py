@@ -67,24 +67,25 @@ def begin(sid, target, remote=None):
     session = database.get_session(sid)
     project = project_resolver.resolve_project_v2(session)
     branch = project_resolver._effective_branch(session)
-    if not project:
-        raise ValueError("Resume here is only available for Git projects with an origin remote.")
-    if not remote:
-        raise ValueError("Update both workers to use Git-based resume.")
-    cwd = project_resolver.resolve_existing_cwd(session)
-    if not cwd:
-        raise ValueError("The owning worker has no existing branch checkout to transfer.")
-    if not branch:
-        branch = checkout_transfer.git(cwd, "symbolic-ref", "--short", "HEAD").decode().strip()
+    # Project-less (plain chat) sessions move their history only.
+    cwd = None
+    if project:
+        if not remote:
+            raise ValueError("Update both workers to use Git-based resume.")
+        cwd = project_resolver.resolve_existing_cwd(session)
+        if not cwd:
+            raise ValueError("The owning worker has no existing branch checkout to transfer.")
+        if not branch:
+            branch = checkout_transfer.git(cwd, "symbolic-ref", "--short", "HEAD").decode().strip()
     with get_db() as conn:
         _idle(conn.cursor(), sid)
     run = runs.claim_run(sid, "handoff:" + target, TTL)
     if not run:
         raise ValueError("The owning worker is busy. Wait for its turn to finish before resuming here.")
     try:
-        state = checkout_transfer.export_checkout(cwd, branch, remote)
+        state = checkout_transfer.export_checkout(cwd, branch, remote) if project else None
         data = dict(checkout=state, history=_history(session), sdk_session_id=session.get("sdk_session_id"),
-                    project_id=project["id"], token=run["id"])
+                    project_id=project["id"] if project else None, token=run["id"])
         raw = json.dumps(data, default=str).encode()
         ctx = engine.require_context()
         return {"payload": crypto.encrypt_payload(ctx.network_key, raw, _aad(sid, target)), "key_version": ctx.key_version}
@@ -121,8 +122,8 @@ def finish(sid, target, payload):
         checkout_transfer._branch(cwd, payload["branch"])
     elif payload.get("fingerprint") is not None:
         raise ValueError("The owning worker's project changed during resume.")
-    session_branch = payload.get("session_branch", payload["branch"])
-    if session_branch not in (None, payload["branch"]):
+    session_branch = payload.get("session_branch", payload.get("branch"))
+    if session_branch not in (None, payload.get("branch")):
         raise ValueError("The receiving worker selected a different session branch.")
     with get_db() as conn:
         cur = conn.cursor()
@@ -193,7 +194,7 @@ def install_history(sid, data, cwd):
     return sdk
 
 
-def _accept_owner(sid, device_id, branch):
+def _accept_owner(sid, device_id, branch=None):
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("UPDATE sessions SET owner_device_id=%s, branch=%s WHERE id=%s", (device_id, branch, sid))
@@ -202,7 +203,10 @@ def _accept_owner(sid, device_id, branch):
 
 
 async def receive(session):
-    """Publish the owner branch, fetch locally, then sync context and ownership."""
+    """Publish the owner branch, fetch locally, then sync context and ownership.
+
+    Project-less sessions skip the Git steps and transfer history only.
+    """
     sid = session["id"]
     owner = control.owner_of(session)
     ctx = engine.context()
@@ -213,13 +217,13 @@ async def receive(session):
     if ctx is None:
         raise ValueError("The owning worker must be online on this network to resume here.")
     project = await run_sync(project_resolver.resolve_project_v2, session)
-    if not project:
-        raise ValueError("Resume here is only available for Git projects with an origin remote.")
-    if not await run_sync(project_resolver.has_local_base_checkout, session):
-        raise ValueError("Clone this project on this worker before resuming here.")
-    base_row = await run_sync(project_resolver._local_checkout, project["id"], settings.effective_instance_id)
-    base = checkout_manager._resolve_checkout_path(base_row["path"])
-    remote = await run_sync(checkout_transfer.remote_identity, base)
+    base = remote = None
+    if project:
+        if not await run_sync(project_resolver.has_local_base_checkout, session):
+            raise ValueError("Clone this project on this worker before resuming here.")
+        base_row = await run_sync(project_resolver._local_checkout, project["id"], settings.effective_instance_id)
+        base = checkout_manager._resolve_checkout_path(base_row["path"])
+        remote = await run_sync(checkout_transfer.remote_identity, base)
     reply = await control.call(owner, "handoff", {"session_id": sid, "phase": "begin", "remote": remote}, timeout=600)
     blob = reply.get("payload", "")
     raw = crypto.decrypt_payload(ctx.keyring[int(reply["key_version"])], blob, _aad(sid, ctx.device_id))
@@ -228,8 +232,23 @@ async def receive(session):
     committed = False
     try:
         state = data["checkout"]
-        if data["project_id"] != project["id"]:
+        if data["project_id"] != (project["id"] if project else None):
             raise ValueError("The owning worker's project changed; refresh before resuming.")
+        if not project:
+            # Plain chat: no checkout to move, only the conversation history.
+            if state is not None:
+                raise ValueError("Unexpected checkout for a project-less session.")
+            cwd = str(settings.effective_workspace_dir)
+            await run_sync(install_history, sid, data, cwd)
+            result = await control.call(owner, "handoff", {"session_id": sid,
+                "phase": "commit", "token": token,
+                "fingerprint": None, "branch": None, "session_branch": None,
+            }, timeout=180)
+            if not result.get("committed"):
+                raise ValueError("The owning worker did not confirm the transfer.")
+            committed = True
+            await run_sync(_accept_owner, sid, ctx.device_id, None)
+            return cwd
         expected_branch = project_resolver._effective_branch(session)
         if not state or (expected_branch and state["branch"] != expected_branch):
             raise ValueError("The owning worker's branch changed; refresh before resuming.")
