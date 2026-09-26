@@ -384,16 +384,16 @@ def test_imported_native_context_is_not_cleared(client, mock_database, prepared_
 
 
 @pytest.mark.parametrize("follow", [False, True])
-def test_projectless_transfer_skips_checkout(client, mock_database, prepared_checkout, follow):
+def test_projectless_transfer_is_refused(client, mock_database, prepared_checkout, follow):
     session = {**_v2_session(), "project_id": None, "project_v2_id": None}
     mock_database.get_session.return_value = session
-    updated = {**session, "instance_id": settings.effective_instance_id}
-    mock_database.adopt_session.return_value = updated
-    mock_database.unpin_session.return_value = updated
     with patch("app.core.project_resolver.has_local_base_checkout") as base:
         response = client.post(
             "/api/v1/sessions/test-session-id/adopt", json={"follow": follow}
         )
-    assert response.status_code == 200
+    assert response.status_code == 409
+    assert "only available for Git projects" in response.json()["detail"]
     base.assert_not_called()
     prepared_checkout.assert_not_called()
+    mock_database.adopt_session.assert_not_called()
+    mock_database.unpin_session.assert_not_called()

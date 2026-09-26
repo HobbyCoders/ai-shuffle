@@ -10,6 +10,13 @@
 	type Receipt = { results: { device_name: string; accepted: boolean; reason: string }[] };
 	const tooltipId = $props.id();
 	const completionKey = 'application-update-completed';
+	// Poll quickly only while something is moving: a request just sent, a
+	// download, or an install being verified. Otherwise the button only has to
+	// notice a new update, and a hidden window does not poll at all.
+	const FAST_POLL_MS = 2000;
+	const IDLE_POLL_MS = 60_000;
+	// The desktop updater picks a request up on its next 30 s report.
+	const REQUEST_WATCH_MS = 45_000;
 	let snapshot = $state<Snapshot | null>(null);
 	let pending = $state(false);
 	let installRequested = $state(false);
@@ -23,6 +30,8 @@
 	let reading = false;
 	let finishTimer: ReturnType<typeof setTimeout> | undefined;
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
+	let pollTimer: ReturnType<typeof setTimeout> | undefined;
+	let watchUntil = 0;
 	const operation = $derived(snapshot?.operation);
 	const waiting = $derived(operation?.phase === 'waiting' || installRequested);
 	const celebrating = $derived(celebration !== 'none');
@@ -63,30 +72,41 @@
 		finishTimer = setTimeout(() => { celebration = 'leaving'; }, 1850);
 		hideTimer = setTimeout(() => { celebration = 'none'; tipOpen = false; }, 2150);
 	}
+	function schedule() {
+		clearTimeout(pollTimer); pollTimer = undefined;
+		if (!active || document.hidden) return;
+		const moving = pending || waiting || downloading || Date.now() < watchUntil;
+		pollTimer = setTimeout(refresh, moving ? FAST_POLL_MS : IDLE_POLL_MS);
+	}
 	async function refresh() {
-		if (auth.current.status?.preview_access) { snapshot = null; return; }
 		if (reading) return;
+		if (auth.current.status?.preview_access) { snapshot = null; schedule(); return; }
 		reading = true;
 		try {
 			const next = await api.get<Snapshot>('/settings/application-updates/workers');
 			if (active) applySnapshot(next);
 		} catch { /* Keep waiting through the worker's restart; never offer a stale install. */ }
-		finally { reading = false; }
+		finally { reading = false; schedule(); }
+	}
+	function visibilityChanged() {
+		if (document.hidden) { clearTimeout(pollTimer); pollTimer = undefined; } else void refresh();
 	}
 	onMount(() => {
 		active = true;
 		try { acknowledged = localStorage.getItem(completionKey) || ''; } catch { /* Storage may be unavailable. */ }
 		void refresh();
-		const timer = setInterval(refresh, 2000);
 		window.addEventListener('application-update-policy', refresh);
+		document.addEventListener('visibilitychange', visibilityChanged);
 		return () => {
-			active = false; clearInterval(timer); clearTimeout(finishTimer); clearTimeout(hideTimer);
+			active = false; clearTimeout(pollTimer); clearTimeout(finishTimer); clearTimeout(hideTimer);
 			window.removeEventListener('application-update-policy', refresh);
+			document.removeEventListener('visibilitychange', visibilityChanged);
 		};
 	});
 	async function activate() {
 		if (busy || !snapshot?.allow_updates) return;
 		const requestedAction = ready ? 'install' : available ? 'download' : 'check';
+		watchUntil = Date.now() + REQUEST_WATCH_MS;
 		pending = true; installRequested = requestedAction === 'install'; requestError = ''; receipt = '';
 		try {
 			const result = await api.post<Receipt>('/settings/application-updates', { action: requestedAction });

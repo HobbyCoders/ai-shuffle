@@ -154,3 +154,42 @@ it('shows no notes section when the offered update has none', async()=>{
  await fireEvent.mouseEnter(button);
  expect((await screen.findByRole('tooltip')).querySelector('.release-notes')).toBeNull();
 });
+
+it('polls once a minute while nothing is moving, and every 2 s while an install is verified', async()=>{
+ vi.useFakeTimers();
+ try {
+  api.get.mockResolvedValue(settled);render(DesktopUpdateButton);await vi.advanceTimersByTimeAsync(0);
+  expect(api.get).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(10_000);expect(api.get).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(50_000);expect(api.get).toHaveBeenCalledTimes(2);
+  api.get.mockResolvedValue({...state,operation});
+  await vi.advanceTimersByTimeAsync(60_000);expect(api.get).toHaveBeenCalledTimes(3);
+  await vi.advanceTimersByTimeAsync(4000);expect(api.get).toHaveBeenCalledTimes(5);
+ } finally { cleanup();vi.useRealTimers(); }
+});
+
+it('polls quickly after a click until the requested work shows up', async()=>{
+ vi.useFakeTimers();
+ try {
+  render(DesktopUpdateButton);await vi.advanceTimersByTimeAsync(0);
+  await fireEvent.click(screen.getByRole('button',{name:'Download update'}));await vi.advanceTimersByTimeAsync(0);
+  const afterClick=api.get.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(10_000);expect(api.get.mock.calls.length).toBeGreaterThanOrEqual(afterClick+4);
+  await vi.advanceTimersByTimeAsync(60_000);const settledCount=api.get.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(30_000);expect(api.get.mock.calls.length).toBe(settledCount);
+ } finally { cleanup();vi.useRealTimers(); }
+});
+
+it('stops polling while the window is hidden and refreshes when it returns', async()=>{
+ vi.useFakeTimers();
+ let hidden=false;
+ const spy=vi.spyOn(document,'hidden','get').mockImplementation(()=>hidden);
+ try {
+  api.get.mockResolvedValue({...state,operation});render(DesktopUpdateButton);await vi.advanceTimersByTimeAsync(0);
+  hidden=true;document.dispatchEvent(new Event('visibilitychange'));
+  const before=api.get.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(120_000);expect(api.get.mock.calls.length).toBe(before);
+  hidden=false;document.dispatchEvent(new Event('visibilitychange'));await vi.advanceTimersByTimeAsync(0);
+  expect(api.get.mock.calls.length).toBe(before+1);
+ } finally { spy.mockRestore();cleanup();vi.useRealTimers(); }
+});
