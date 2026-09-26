@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { FileText } from 'lucide-svelte';
+	import type { CodeSandboxStatus } from '$lib/api/client';
+	import CodeSandboxRow from './CodeSandboxRow.svelte';
 
 	interface Props {
 		// Security Instructions
@@ -14,6 +16,8 @@
 		securityInstructionsError: string;
 		onSaveSecurityInstructions: () => void;
 		onRevertSecurityInstructions: () => void;
+		// Code-mode sandbox state from GET /deployment; null while loading.
+		codeSandbox: CodeSandboxStatus | null;
 	}
 
 	let {
@@ -27,12 +31,16 @@
 		securityInstructionsError,
 		onSaveSecurityInstructions,
 		onRevertSecurityInstructions,
+		codeSandbox,
 	}: Props = $props();
 </script>
 
-<!-- System prompt -->
 <!-- API users now live in the API tab; Devices lives in the
-     Connections tab. This tab is the global system prompt only. -->
+     Connections tab. This tab is the global system prompt and the
+     code-mode sandbox state. -->
+<CodeSandboxRow status={codeSandbox} />
+
+<!-- System prompt -->
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><FileText />System prompt</h3>

@@ -83,6 +83,15 @@ services:
     # /dev/shm.
     shm_size: '1gb'
 
+    # The code-mode sandbox (bubblewrap) around agents' Python code needs user
+    # namespaces and a fresh /proc mount, which Docker's default seccomp and
+    # AppArmor profiles and its /proc masking refuse. Same lines as the buyer
+    # compose file (docs/install/compose/compose.yaml); remove them to opt out.
+    security_opt:
+      - seccomp=unconfined
+      - systempaths=unconfined
+      - apparmor=unconfined
+
     # Port mapping. The browser's CDP port stays loopback-only inside the
     # container (the browser-mcp server attaches to it in-process) — it is never
     # published to the network, so only the app port is mapped.

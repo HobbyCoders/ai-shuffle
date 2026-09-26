@@ -54,16 +54,16 @@ services:
     # A burst of short-lived agent processes must not exhaust the process table.
     pids_limit: 8192
 
-    # Optional: lets the code-mode sandbox around agents' Python code start. The
-    # trade: Docker's default seccomp and AppArmor filters and its /proc masking
-    # are off for the whole container. See "The code-mode sandbox" in the
-    # install guide.
-    # security_opt:
-    #   - seccomp=unconfined
-    #   # Lets the sandbox mount its own /proc:
-    #   - systempaths=unconfined
-    #   # Only on hosts that use AppArmor, such as Ubuntu and Debian:
-    #   - apparmor=unconfined
+    # The code-mode sandbox around agents' Python code, on by default. These
+    # relax Docker's default seccomp and AppArmor filters and its /proc masking
+    # for the whole container; remove them to opt out. See "The code-mode
+    # sandbox" in the install guide.
+    security_opt:
+      - seccomp=unconfined
+      # Lets the sandbox mount its own /proc:
+      - systempaths=unconfined
+      # Docker ignores this on hosts without AppArmor:
+      - apparmor=unconfined
 
     environment:
       PUID: ${PUID:-1000}
@@ -292,35 +292,34 @@ To change this, add a line under `environment:` in `compose.yaml` (a line in `.e
 - `BROWSER_SSRF_ALLOW_LOOPBACK: "false"`: refuse `localhost` as well. Use it when people you do not trust can prompt agents on this install. It has no effect when `BROWSER_SSRF_ALLOW` is set.
 - `BROWSER_SSRF_BLOCK`: ranges to refuse even if `BROWSER_SSRF_ALLOW` lists them.
 
-## The code-mode sandbox (optional)
+## The code-mode sandbox
 
 Agents on the Fluid harness (every model except the Claude Code CLI, outside chat sessions) run their work as Python code in a separate process, the code-mode kernel. The tools that code calls still run in AI Shuffle with their usual permissions; the sandbox limits the Python code itself.
 
-On Linux, AI Shuffle can run that process inside bubblewrap: no network, none of the host's files except the Python runtime, a private `/tmp` and its own process list. The image includes bubblewrap, but Docker's default security profile does not let the container create the user namespaces it needs. The kernel then runs without the sandbox, and the log says why once: `code-mode OS sandbox unavailable, kernel child runs without it`.
-
-To use the sandbox, allow the container to create user namespaces and to mount its own `/proc`, then run `docker compose up -d`:
+On Linux, AI Shuffle runs that process inside bubblewrap: no network, none of the host's files except the Python runtime, a private `/tmp` and its own process list. The image includes bubblewrap, and the `compose.yaml` above turns the sandbox on: its `security_opt` lines let the container create the user namespaces the sandbox needs and mount its own `/proc`, which Docker's default profile refuses.
 
 ```yaml
-services:
-  ai-shuffle:
-    # (keep the lines already there)
     security_opt:
       - seccomp=unconfined
       # Lets the sandbox mount its own /proc:
       - systempaths=unconfined
-      # Only on hosts that use AppArmor, such as Ubuntu and Debian:
+      # Docker ignores this on hosts without AppArmor:
       - apparmor=unconfined
 ```
 
-These lines turn off Docker's default seccomp and AppArmor filters for the whole container, so weigh that against what the sandbox adds. `systempaths=unconfined` also removes Docker's masking of the container's `/proc` (it normally hides entries such as `/proc/kcore` and makes `/proc/sys` read-only). The sandbox needs it because the kernel refuses a fresh `/proc` mount while those masks are in place; without it the log line ends with `Can't mount proc on /newroot/proc` and names the option. A custom seccomp profile that allows `unshare`, `clone` with namespace flags and `mount` can replace `seccomp=unconfined`, but not `systempaths=unconfined`. The host must also allow unprivileged user namespaces; Ubuntu 24.04 and later restrict them through AppArmor.
+What these relax, for the whole container: `seccomp=unconfined` turns off Docker's default system-call filter, which blocks `unshare`, `clone` with namespace flags and `mount`. `apparmor=unconfined` turns off Docker's default AppArmor profile on hosts that have AppArmor, such as Ubuntu and Debian, and does nothing elsewhere. `systempaths=unconfined` removes Docker's masking of the container's `/proc` (it normally hides entries such as `/proc/kcore` and makes `/proc/sys` read-only), because the kernel refuses a fresh `/proc` mount while those masks are in place. AI Shuffle is a one-person install, so a sandbox around the code an agent wrote is worth more than these defaults; if that is not your situation, weigh it. A custom seccomp profile that allows `unshare`, `clone` with namespace flags and `mount` can replace `seccomp=unconfined`, but not `systempaths=unconfined`.
 
-`CODE_MODE_OS_SANDBOX` chooses how the sandbox is used. Set it under `environment:` in `compose.yaml` (a line in `.env` alone does not reach the container):
+To opt out, remove the `security_opt` lines, or set `CODE_MODE_OS_SANDBOX: "off"` under `environment:` (a line in `.env` alone does not reach the container), then run `docker compose up -d`. The kernel then runs without the sandbox, and the log says so once: `code-mode OS sandbox unavailable, kernel child runs without it`.
+
+**Ubuntu 24.04 and later**: the host itself restricts unprivileged user namespaces through AppArmor (`kernel.apparmor_restrict_unprivileged_userns=1`), and that reaches into containers too. The sandbox then fails its self-test with `No permissions to create a new namespace` even with the lines above. Allow it on the host with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (put the same line in a file under `/etc/sysctl.d/` to keep it across reboots), or accept running without the sandbox.
+
+`CODE_MODE_OS_SANDBOX` chooses how the sandbox is used:
 
 - `auto` (the default): use the sandbox when its self-test (run in the background when AI Shuffle starts) passes, otherwise run without it after the one log line above.
 - `required`: never run code without the sandbox. When it is unavailable, every Python cell fails with the reason.
 - `off`: never use it.
 
-With the sandbox active, Python cells run without a prompt in Ask mode. While the kernel runs without it, Ask mode asks before each cell.
+**Settings → System** shows whether the sandbox is active and, when it is not, the reason the self-test recorded. With the sandbox active, Python cells run without a prompt in Ask mode. While the kernel runs without it, Ask mode asks before each cell.
 
 The kernel's own checks inside the process stay on in every mode, as a second layer; the sandbox is the boundary that holds.
 

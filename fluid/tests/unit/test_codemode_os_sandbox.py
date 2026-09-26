@@ -802,3 +802,26 @@ def test_real_bwrap_under_dockers_masked_proc_names_systempaths() -> None:
     masked = _in_masked_proc_container(mask=True)
     assert masked.startswith("RESULT False"), masked
     assert "Can't mount proc" in masked and "systempaths=unconfined" in masked
+
+
+def test_cached_self_test_reads_the_cache_and_never_probes(monkeypatch) -> None:
+    # The host app's Settings badge reads this on every request.
+    monkeypatch.setattr(os_sandbox, "find_bwrap", lambda: None)
+    missing = os_sandbox.cached_self_test(sys.executable)
+    assert missing is not None and not missing.ok and "not installed" in missing.reason
+
+    def boom(*args, **kwargs):
+        raise AssertionError("cached_self_test must not probe")
+
+    monkeypatch.setattr(os_sandbox, "_probe_once", boom)
+    assert os_sandbox.cached_self_test(sys.executable, "/fake/bwrap") is None
+
+    monkeypatch.setattr(
+        os_sandbox, "_probe_once",
+        lambda bwrap, python, disable_userns: os_sandbox.SelfTest(False, "No permissions", disable_userns),
+    )
+    monkeypatch.setattr(os_sandbox, "_supports_disable_userns", lambda b: False)
+    os_sandbox.self_test(sys.executable, "/fake/bwrap")
+    cached = os_sandbox.cached_self_test(sys.executable, "/fake/bwrap")
+    assert cached is not None and not cached.ok and cached.reason == "No permissions"
+    assert os_sandbox.cached_self_test(sys.executable, "/fake/bwrap") is cached  # no re-probe

@@ -440,6 +440,16 @@ export interface WorkspaceValidation {
 	writable: boolean;
 }
 
+/** `code_sandbox` in GET /api/v1/deployment: whether agents' Python cells run
+ * inside the bubblewrap sandbox (app/api/system.py code_sandbox_status). */
+export interface CodeSandboxStatus {
+	mode: 'auto' | 'required' | 'off';
+	state: 'active' | 'checking' | 'unavailable' | 'off';
+	active: boolean;
+	/** Why the sandbox is not active: the self-test's own message, or the setting that turned it off. */
+	reason: string;
+}
+
 // ============================================================================
 // Agent Export/Import API Types and Functions
 // ============================================================================
@@ -595,52 +605,6 @@ export async function getSubagentsForAutocomplete(
 	params.set('limit', limit.toString());
 
 	return api.get<AutocompleteSubagent[]>(`/agents/${profileId}/subagents/all?${params.toString()}`);
-}
-
-// ============================================================================
-// Agent Teams API Types and Functions
-// ============================================================================
-
-export interface Teammate {
-	team_name: string;
-	teammate_name: string;
-	teammate_session_id?: string;
-	pid?: number;
-	status: 'running' | 'completed' | 'error' | 'killed';
-	usage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number };
-}
-
-export interface Team {
-	team_name: string;
-	parent_session_id: string;
-	teammates: Teammate[];
-}
-
-/**
- * List all agent teams (and their teammates) for a parent session.
- */
-export async function listTeams(sessionId: string): Promise<Team[]> {
-	const r = await fetch(`${apiBase()}/teams/${sessionId}`, withAuth({ }));
-	// The status rides on the error so the status bar can tell a refusal
-	// (a key's view of a session it does not own) from a transient failure.
-	if (!r.ok) throw Object.assign(new Error(`listTeams: ${r.status}`), { status: r.status });
-	return r.json();
-}
-
-/**
- * Kill a running teammate subprocess by its team/name pair.
- */
-export async function killTeammate(
-	sessionId: string,
-	teamName: string,
-	teammateName: string
-): Promise<{ success: boolean; pid?: number }> {
-	const r = await fetch(
-		`${apiBase()}/teams/${sessionId}/${encodeURIComponent(teamName)}/members/${encodeURIComponent(teammateName)}/kill`,
-		withAuth({ method: 'POST' })
-	);
-	if (!r.ok) throw Object.assign(new Error(`killTeammate: ${r.status}`), { status: r.status });
-	return r.json();
 }
 
 // ============================================================================

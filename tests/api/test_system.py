@@ -304,6 +304,84 @@ class TestDeploymentInfoFunction:
             assert result["platform"] == "windows"
 
 
+class TestCodeSandboxStatus:
+    """The Settings badge: the cached code-mode sandbox self-test, never a probe."""
+
+    @staticmethod
+    def _settings(monkeypatch, **overrides):
+        from types import SimpleNamespace
+        fields = {
+            "fluid_code_mode": True, "code_mode_os_sandbox": "auto",
+            "get_deployment_info": lambda: {"platform": "linux"}, **overrides,
+        }
+        fake = SimpleNamespace(**fields)
+        monkeypatch.setattr("app.api.system.settings", fake)
+        monkeypatch.setattr("app.api.system.sys.platform", "linux")
+        return fake
+
+    @staticmethod
+    def _cached(monkeypatch, result):
+        from fluid.codemode import os_sandbox
+        monkeypatch.setattr(os_sandbox, "cached_self_test", lambda python, bwrap=None: result)
+
+    def test_active_when_the_cached_selftest_passed(self, monkeypatch):
+        from app.api.system import code_sandbox_status
+        from fluid.codemode import os_sandbox
+        self._settings(monkeypatch)
+        self._cached(monkeypatch, os_sandbox.SelfTest(True, ""))
+        assert code_sandbox_status() == {"mode": "auto", "active": True, "state": "active", "reason": ""}
+
+    def test_unavailable_carries_the_selftests_reason(self, monkeypatch):
+        from app.api.system import code_sandbox_status
+        from fluid.codemode import os_sandbox
+        self._settings(monkeypatch, code_mode_os_sandbox="required")
+        reason = "bwrap: No permissions to create a new namespace"
+        self._cached(monkeypatch, os_sandbox.SelfTest(False, reason))
+        assert code_sandbox_status() == {
+            "mode": "required", "active": False, "state": "unavailable", "reason": reason,
+        }
+
+    def test_checking_until_the_prewarm_has_finished(self, monkeypatch):
+        from app.api.system import code_sandbox_status
+        self._settings(monkeypatch)
+        self._cached(monkeypatch, None)
+        status = code_sandbox_status()
+        assert status["state"] == "checking" and not status["active"] and status["reason"]
+
+    def test_off_never_reads_the_cache(self, monkeypatch):
+        from app.api.system import code_sandbox_status
+        from fluid.codemode import os_sandbox
+
+        def boom(*args, **kwargs):
+            raise AssertionError("off must not consult the self-test")
+
+        monkeypatch.setattr(os_sandbox, "cached_self_test", boom)
+        self._settings(monkeypatch, code_mode_os_sandbox="off")
+        assert code_sandbox_status() == {
+            "mode": "off", "active": False, "state": "off", "reason": "CODE_MODE_OS_SANDBOX is off",
+        }
+        self._settings(monkeypatch, fluid_code_mode=False)
+        status = code_sandbox_status()
+        assert status["state"] == "off" and "code mode is off" in status["reason"]
+
+    def test_linux_only(self, monkeypatch):
+        from app.api.system import code_sandbox_status
+        self._settings(monkeypatch)
+        monkeypatch.setattr("app.api.system.sys.platform", "darwin")
+        status = code_sandbox_status()
+        assert status["state"] == "unavailable" and "Linux-only" in status["reason"]
+
+    @pytest.mark.asyncio
+    async def test_deployment_endpoint_carries_the_status(self, monkeypatch):
+        from app.api.system import get_deployment_info
+        from fluid.codemode import os_sandbox
+        self._settings(monkeypatch)
+        self._cached(monkeypatch, os_sandbox.SelfTest(True, ""))
+        result = await get_deployment_info(token="test-token")
+        assert result["platform"] == "linux"
+        assert result["code_sandbox"]["state"] == "active" and result["code_sandbox"]["active"] is True
+
+
 # =============================================================================
 # Workspace Config GET Function Tests
 # =============================================================================

@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List
@@ -202,14 +203,49 @@ async def get_stats(token: str = Depends(require_auth)):
     return stats
 
 
+def code_sandbox_status() -> dict:
+    """Whether agents' Python cells run inside the bubblewrap sandbox right now.
+
+    Reads only the self-test result the startup pre-warm cached
+    (``fluid.codemode.os_sandbox``, ``app.core.startup.prewarm_code_mode_sandbox``);
+    it never probes, so a settings request stays cheap. ``state`` is ``active``,
+    ``unavailable`` (``reason`` is the self-test's own message), ``checking``
+    (the pre-warm has not finished) or ``off`` (code mode or the sandbox
+    setting turned off). Settings shows it: without the sandbox, Ask mode
+    prompts before each Python cell (``run_python`` is rated ``write``).
+    """
+    from fluid.codemode import os_sandbox
+
+    mode = os_sandbox.normalize_mode(settings.code_mode_os_sandbox)
+    body = {"mode": mode, "active": False, "state": "off", "reason": ""}
+    if not settings.fluid_code_mode:
+        body["reason"] = "code mode is off (FLUID_CODE_MODE)"
+    elif mode == "off":
+        body["reason"] = "CODE_MODE_OS_SANDBOX is off"
+    elif sys.platform != "linux":
+        body.update(state="unavailable", reason="the bubblewrap sandbox is Linux-only")
+    else:
+        result = os_sandbox.cached_self_test(sys.executable)
+        if result is None:
+            body.update(state="checking", reason="the self-test has not finished yet")
+        elif result.ok:
+            body.update(state="active", active=True)
+        else:
+            body.update(state="unavailable", reason=result.reason)
+    return body
+
+
 @router.get("/api/v1/deployment")
 async def get_deployment_info(token: str = Depends(require_auth)):
     """
     Get deployment configuration and platform information.
 
     Useful for debugging and understanding the current deployment mode.
+    ``code_sandbox`` (see :func:`code_sandbox_status`) feeds the Settings badge.
     """
-    return settings.get_deployment_info()
+    info = dict(settings.get_deployment_info())
+    info["code_sandbox"] = code_sandbox_status()
+    return info
 
 
 @router.get("/api/v1/diagnostics")

@@ -424,6 +424,23 @@ def invalidate(python: str, bwrap: str | None = None) -> None:
         _cache.pop((bwrap, os.path.realpath(python)), None)
 
 
+def cached_self_test(python: str, bwrap: str | None = None) -> SelfTest | None:
+    """The last self-test result for this bwrap/python pair, from cache only.
+
+    None when no self-test has run yet for the pair (or it is still running).
+    A failure is returned even after ``_FAILURE_TTL`` has passed: it is still
+    the last reason this host gave, which is what a status display wants.
+    Never probes and never waits on ``_cache_lock`` (see :func:`is_active`).
+    Without ``bwrap`` on ``PATH`` it returns the same failure :func:`self_test`
+    would, since that result is never cached.
+    """
+    bwrap = bwrap or find_bwrap()
+    if not bwrap:
+        return SelfTest(False, "bwrap (bubblewrap) is not installed or not on PATH")
+    cached = _cache.get((bwrap, os.path.realpath(python)))
+    return cached[0] if cached is not None else None
+
+
 def is_active(mode: str, python: str, *, allow_fs: bool = False) -> bool:
     """Whether a kernel spawned now would run under the sandbox, from cache only.
 

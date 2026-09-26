@@ -16,7 +16,7 @@
 	import './settings/settings-layout.css';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { api } from '$lib/api/client';
-	import type { WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
+	import type { CodeSandboxStatus, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import {
 		getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig
 	} from '$lib/api/auth';
@@ -96,6 +96,8 @@
 	let securityInstructionsError = $state('');
 	// Pending "revert security instructions" awaiting confirmation (replaces native confirm()).
 	let pendingRevertSecurity = $state(false);
+	// Code-mode sandbox state (admin only; the System tab shows it).
+	let codeSandbox: CodeSandboxStatus | null = $state(null);
 
 	// Load data on mount — use onMount for one-time setup to avoid
 	// subscription accumulation from $effect re-runs.
@@ -131,8 +133,18 @@
 	async function loadAllData() {
 		await Promise.all([
 			loadWorkspaceConfig(),
-			loadSecurityInstructions()
+			loadSecurityInstructions(),
+			loadCodeSandbox()
 		]);
+	}
+
+	async function loadCodeSandbox() {
+		try {
+			const info = await api.get<{ code_sandbox?: CodeSandboxStatus }>('/deployment');
+			codeSandbox = info?.code_sandbox ?? null;
+		} catch (e) {
+			console.error('Failed to load the code sandbox state:', e);
+		}
 	}
 
 	async function loadWorkspaceConfig(quiet = false) {
@@ -357,6 +369,7 @@
 							{securityInstructionsError}
 							onSaveSecurityInstructions={saveSecurityInstructions}
 							onRevertSecurityInstructions={revertSecurityInstructions}
+							{codeSandbox}
 						/>
 					</div>
 				{/if}
