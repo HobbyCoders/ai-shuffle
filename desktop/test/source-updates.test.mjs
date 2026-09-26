@@ -58,6 +58,38 @@ test('build failures preserve the active revision; failed first boots block unsa
  u=f.create();await u.load();await u.select();u=f.create();await u.load();await assert.rejects(u.select(),/No healthy/);await assert.rejects(u.download(),/failed to start/);
  await f.release(C);await u.download();await u.select();await u.healthy();assert.equal(u.version,C);
 });
+test('a first boot quit before its stack started is retried on the next launch, not blocked',async t=>{
+ const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
+ await f.release(B);await u.download();
+ u=f.create();await u.load();assert.equal((await u.select()).revision,B);
+ // The launched build attaches to its own first boot, then quits at the disclosure.
+ const launched=f.create();await launched.attach(B);await launched.deferBoot();
+ u=f.create();await u.load();assert.equal(u.blocked,false);assert.equal((await u.select()).revision,B);await u.healthy();assert.equal(u.version,B);
+ // Once healthy there is no first boot left to defer.
+ await u.deferBoot();u=f.create();await u.load();assert.equal((await u.select()).revision,B);
+});
+test('a first boot that crashes before its database starts goes back to the previous version with the update still offered',async t=>{
+ const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
+ await f.release(B);await u.download();
+ u=f.create();await u.load();await u.select();
+ // The launched build attached, then crashed before it started the database.
+ await f.create().attach(B);
+ u=f.create();await u.load();assert.equal(u.blocked,false);assert.equal(u.pendingVersion,B);
+ assert.equal((await u.select()).revision,A,'the previous version runs, not the unstarted update');
+ assert.equal((await u.check()).kind,'ready','the update is offered again');
+ // Restarting into it and crashing after the database started blocks as before.
+ await u.prepareInstall();u=f.create();await u.load();await u.select();
+ const launched=f.create();await launched.attach(B);await launched.databaseStarting();
+ u=f.create();await u.load();assert.equal(u.blocked,true);await assert.rejects(u.select(),/No healthy/);
+});
+test('a blocked launch can run the newest failed build again, never an older one',async t=>{
+ const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
+ await f.release(B);await u.download();u=f.create();await u.load();await u.select();
+ u=f.create();await u.load();assert.equal(u.blocked,true);
+ assert.equal(await u.retryFailed(),true);assert.equal(u.blocked,false);
+ assert.equal((await u.select()).revision,B);await u.healthy();assert.equal(u.version,B);
+ assert.equal(await u.retryFailed(),false,'nothing is blocked any more');
+});
 test('signature, checksum, traversal and Windows alias failures are rejected before builds',async t=>{
  const f=await fixture(t);const r=await f.release(A);const u=f.create();await u.load();
  const envelope=JSON.parse(r.signed);envelope.signature=Buffer.alloc(64).toString('base64');f.signed=JSON.stringify(envelope);await assert.rejects(u.download(),/signature/);f.signed=r.signed;

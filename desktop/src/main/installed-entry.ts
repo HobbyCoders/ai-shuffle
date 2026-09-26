@@ -1,4 +1,4 @@
-import { app } from 'electron';
+import { app, dialog } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { SourceUpdates } from './source-updates';
@@ -27,6 +27,7 @@ export async function startInstalled(): Promise<void> {
   // newer than every build that may have migrated this database. Otherwise a
   // blocked first boot must fail closed, never downgrade to bundled code.
   if (updates.hasSourceState) {
+    if (updates.blocked && !await retryBlocked(updates)) { app.quit(); return; }
     const selected = await updates.select();
     app.releaseSingleInstanceLock();
     // Launch the GUI executable directly; no console shell is needed.
@@ -36,4 +37,22 @@ export async function startInstalled(): Promise<void> {
   }
   installed = { updates, executable: process.execPath };
   require('./index');
+}
+
+/**
+ * A failed first boot blocks every build. Offer to run that build again rather
+ * than only an error: nothing can check for updates while the app cannot open.
+ * False when the user quits; a build that cannot run again is left to select().
+ */
+async function retryBlocked(updates: SourceUpdates): Promise<boolean> {
+  await app.whenReady();
+  const { response } = await dialog.showMessageBox({
+    type: 'warning', title: 'AI Shuffle', message: 'The last update did not finish starting',
+    detail: 'AI Shuffle will not go back to an older version, because the update may already have changed your data. ' +
+      'Try the update again, or quit and install the latest AI Shuffle installer. Your files and data have been kept.',
+    buttons: ['Try Again', 'Quit'], defaultId: 0, cancelId: 1, noLink: true,
+  });
+  if (response !== 0) return false;
+  await updates.retryFailed();
+  return true;
 }

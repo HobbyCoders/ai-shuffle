@@ -108,6 +108,8 @@ async function main(): Promise<void> {
 	let initialized = false;
 	let initializing = false;
 	let initialization: Promise<void> | null = null;
+	/** Set once this launch starts the database; a first boot quit before then cannot have migrated it. */
+	let stackStarted = false;
 	async function initializeRuntime(): Promise<void> {
 		const repoDir = path.resolve(__dirname, '..', '..', '..');
 		const selected = managed?.application;
@@ -179,7 +181,7 @@ async function main(): Promise<void> {
 
 	/** Bundled PostgreSQL first when it is wanted, then the worker. */
 	const startStack = async (): Promise<void> => {
-		if (quitting || applicationFailed || initializing) return;
+		if (quitting || applicationFailed || initializing || !accepted) return;
 		if (!initialized) {
 			initializing = true;
 			try { initialization = initializeRuntime(); await initialization; }
@@ -189,6 +191,16 @@ async function main(): Promise<void> {
 		}
 		if (quitting || !supervisor) return;
 		if (!postgres) {
+			window.send('desktop:worker-state', desktopState());
+			return;
+		}
+		stackStarted = true;
+		// From here a first boot may migrate the database, so a crash must block it.
+		// Unrecorded, a crash would look harmless to the launcher: do not start.
+		try { await applications?.databaseStarting(); }
+		catch (error) {
+			runtimeError = `Could not record the application start: ${error instanceof Error ? error.message : String(error)}`;
+			supervisor = null;
 			window.send('desktop:worker-state', desktopState());
 			return;
 		}
@@ -258,7 +270,7 @@ async function main(): Promise<void> {
 
 	let quitting = false;
 	let applicationFailed = false;
-	/** Set once the agent-access disclosure is accepted; no window or worker before that. */
+	/** Set once the agent-access disclosure is accepted; no database or worker before that. */
 	let accepted = false;
 	// A worker that has just answered /health/ready can still refuse its first
 	// page load for a moment; retry briefly before showing the failure.
@@ -388,6 +400,11 @@ async function main(): Promise<void> {
 	// Set once a quit kills the worker; a graceful stop still settling in the
 	// background must not reopen the app's state after that.
 	let forcedQuit = false;
+	// A first boot that never reached the database is retried on the next launch, not marked failed.
+	const deferBoot = async (): Promise<void> => {
+		if (stackStarted || !applications) return;
+		await applications.deferBoot().catch(error => console.error('Could not record the unstarted application', error));
+	};
 	const quitGuard = new QuitGuard({
 		activeSessionCount: () => supervisor?.activeSessionCount() ?? Promise.resolve(0),
 		confirm: (activeCount) => showCloseDialog(window.browserWindow, activeCount),
@@ -401,6 +418,7 @@ async function main(): Promise<void> {
 				if (postgres) await postgres.stop();
 				if (supervisor && !supervisor.state.external) await supervisor.clearConnectionFile();
 				updater.stop();
+				await deferBoot();
 			} catch (error) {
 				if (!forcedQuit) quitting = false;
 				throw error;
@@ -414,6 +432,7 @@ async function main(): Promise<void> {
 			if (supervisor && !supervisor.state.external) await supervisor.stop({ force: true });
 			if (postgres) await postgres.stop();
 			if (supervisor && !supervisor.state.external) await supervisor.clearConnectionFile();
+			await deferBoot();
 		},
 		quit: () => app.quit(),
 		failed: (_error, offerForce) =>
@@ -458,6 +477,14 @@ async function main(): Promise<void> {
 			cancelId: firstRun ? 1 : 0,
 			noLink: true
 		};
+		if (firstRun) {
+			// Older installed launchers start this process with SW_HIDE, which Windows
+			// applies to the first window shown. A parentless dialog would be that
+			// window and stay invisible, so show the main window (which retries a
+			// suppressed show) first and let it own the dialog. Nothing starts yet.
+			await window.showPage('status');
+			window.focus();
+		}
 		const parent = window.browserWindow;
 		const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
 		return response === 0 ? 'continue' : 'quit';
@@ -467,6 +494,8 @@ async function main(): Promise<void> {
 		if (!accepted) return;
 		if (window.browserWindow) {
 			window.focus();
+			// The first-run disclosure showed this window before anything started.
+			if (!initialized) void startStack();
 			return;
 		}
 		if (devUrl) {

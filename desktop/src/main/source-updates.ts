@@ -69,7 +69,12 @@ export interface SourceApplication {
   node: string;
   electron: string;
 }
-interface SourceState { active?: string; previous?: string; pending?: string; staged?: string; booting?: string; blocked?: boolean; failed?: string[] }
+/**
+ * waiting: the booting revision's own process is running but has not started
+ * the database yet. A crash while it is set cannot have migrated anything.
+ * Only builds that write it are ever treated that way; older ones never set it.
+ */
+interface SourceState { active?: string; previous?: string; pending?: string; staged?: string; booting?: string; waiting?: string; blocked?: boolean; failed?: string[] }
 export type SourceProgress = (percent: number | null, message: string) => void;
 /** The signed release name and notes shown beside the update button. */
 export interface ReleaseInfo { release?: string; notes?: string }
@@ -193,14 +198,17 @@ export class SourceUpdates {
     try {
       this.state = JSON.parse(await fs.readFile(path.join(this.options.root, 'state.json'), 'utf8'));
       if (!this.state || typeof this.state !== 'object' || Array.isArray(this.state)) throw new Error('Invalid source update state');
-      for (const field of ['active', 'previous', 'pending', 'staged', 'booting'] as const) {
+      for (const field of ['active', 'previous', 'pending', 'staged', 'booting', 'waiting'] as const) {
         if (this.state[field] !== undefined && (typeof this.state[field] !== 'string' || !REVISION.test(this.state[field]!))) throw new Error('Invalid installed revision');
       }
       if (this.state.failed !== undefined && (!Array.isArray(this.state.failed) || this.state.failed.some(v => typeof v !== 'string' || !REVISION.test(v)))) throw new Error('Invalid failed revisions');
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     // A crashed first boot may already have migrated the database. Never roll
     // application code back automatically over that possibly changed database.
-    if (this.state.booting) await this.failed();
+    // One that crashed before it started the database changed nothing: the
+    // previous version runs again and the update stays ready to retry.
+    if (this.state.booting && this.state.waiting === this.state.booting) await this.unstarted();
+    else if (this.state.booting) await this.failed();
     // The worker mirrors the synced policy for offline launcher selection.
     if (this.state.pending && !await this.updatesAllowed()) {
       delete this.state.pending;
@@ -397,9 +405,9 @@ export class SourceUpdates {
   }
   async select(): Promise<SourceApplication> {
     const revision = this.state.pending ?? this.state.active;
-    if (!revision || (this.state.blocked && !this.state.pending)) throw new Error('No healthy source build is available. Check for updates. Previous files and data have been retained.');
+    if (!revision || (this.state.blocked && !this.state.pending)) throw new Error('No healthy source build is available. Install the latest AI Shuffle installer to recover. Previous files and data have been retained.');
     const application = await this.application(revision);
-    if (this.state.pending) { this.state.booting = revision; await this.save(); }
+    if (this.state.pending) { this.state.booting = revision; delete this.state.waiting; await this.save(); }
     this.running = revision; return application;
   }
   /** Attach from the newly launched Electron process without interpreting its own first boot as a crash. */
@@ -407,11 +415,17 @@ export class SourceUpdates {
     this.state = JSON.parse(await fs.readFile(path.join(this.options.root, 'state.json'), 'utf8'));
     if (![this.state.active, this.state.booting].includes(revision)) throw new Error('Unexpected desktop launch revision');
     await this.application(revision); this.running = revision;
+    if (this.state.booting === revision) { this.state.waiting = revision; await this.save(); }
+  }
+  /** Called just before this launch starts the database: from here a crashed first boot must block. */
+  async databaseStarting(): Promise<void> {
+    if (!this.state.waiting) return;
+    delete this.state.waiting; await this.save();
   }
   async healthy(): Promise<void> {
     if (!this.state.booting || this.state.booting !== this.running) return;
     this.state.previous = this.state.active; this.state.active = this.running;
-    delete this.state.pending; delete this.state.booting; delete this.state.blocked; await this.save();
+    delete this.state.pending; delete this.state.booting; delete this.state.waiting; delete this.state.blocked; await this.save();
     const node = (await this.application(this.running)).node;
     await fs.writeFile(path.join(this.options.root, 'node-path.txt.tmp'), node);
     await fs.rename(path.join(this.options.root, 'node-path.txt.tmp'), path.join(this.options.root, 'node-path.txt'));
@@ -422,9 +436,44 @@ export class SourceUpdates {
       if (entry.isDirectory() && !entry.isSymbolicLink() && REVISION.test(entry.name) && !keep.has(entry.name)) await removeSourceDirectory(this.directory(entry.name));
     }
   }
+  /**
+   * A quit before this first boot started the database (the first-run
+   * disclosure was declined or never answered) cannot have migrated anything:
+   * the next launch tries the same build again instead of blocking it.
+   */
+  async deferBoot(): Promise<void> {
+    if (!this.running || this.state.booting !== this.running) return;
+    delete this.state.booting; delete this.state.waiting; await this.save();
+  }
+  /** A first boot that crashed before its database started: back to the previous version, with the update offered again. */
+  private async unstarted(): Promise<void> {
+    this.state.staged = this.state.booting;
+    delete this.state.booting; delete this.state.waiting; delete this.state.pending; await this.save();
+  }
   async failed(): Promise<void> {
     if (!this.state.booting) return;
     this.state.failed = [...new Set([...(this.state.failed ?? []), this.state.booting])];
-    delete this.state.booting; delete this.state.pending; this.state.blocked = true; await this.save();
+    delete this.state.booting; delete this.state.waiting; delete this.state.pending; this.state.blocked = true; await this.save();
+  }
+  /**
+   * Blocked by a failed first boot: run the newest failed build again. It is
+   * the newest code that may have changed the database, so this is never a
+   * rollback. False when no failed build is left to run.
+   */
+  async retryFailed(): Promise<boolean> {
+    if (!this.blocked) return false;
+    let newest: { revision: string; sequence: number } | null = null;
+    for (const revision of this.state.failed ?? []) {
+      try {
+        const { sequence } = verifySourceManifest(await fs.readFile(path.join(this.directory(revision), 'release.json'), 'utf8'), this.options.publicKey);
+        await this.application(revision);
+        if (!newest || sequence > newest.sequence) newest = { revision, sequence };
+      } catch { /* Missing or unreadable files: that build cannot run again. */ }
+    }
+    if (!newest) return false;
+    this.state.failed = this.state.failed!.filter(value => value !== newest.revision);
+    if (!this.state.failed.length) delete this.state.failed;
+    delete this.state.blocked; this.state.pending = newest.revision; await this.save();
+    return true;
   }
 }

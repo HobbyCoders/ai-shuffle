@@ -23,6 +23,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		getPath: () => path.join(desktopDir, 'no-user-data'),
 		getVersion: () => '0.0.0-test',
 		setAppUserModelId() {}, setName() {}, setPath() {},
+		commandLine: { getSwitchValue: () => '' },
 		requestSingleInstanceLock: () => true,
 		on: (name, fn) => appEvents.on(name, fn),
 		whenReady: async () => {},
@@ -42,7 +43,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		get currentWorkerUrl() { return this.page === null ? this.workerUrl : null; }
 		async showPage(mode) { this.browserWindow = {}; this.page = mode; pages.push(mode); }
 		async loadWorker(url) { this.browserWindow = {}; this.page = null; this.workerUrl = url; pages.push(url); }
-		focus() {}
+		focus() { if (this.browserWindow) this.browserWindow.shown = true; }
 		onLoadFailed() {}
 		send(channel, payload) { this.sent.push([channel, payload]); }
 		openExternal() {}
@@ -79,7 +80,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		tail() { return []; }
 	}
 	class FakeUpdater {
-		setPolicy() {} setBridge() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} onConfirmInstall() {} start() {} stop() {}
+		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} onConfirmInstall() {} start() {} stop() {}
 		async check() {}
 	}
 	let updater;
@@ -119,7 +120,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 function electronFake(app, errors, messageBox) {
 	return {
 		app,
-		dialog: { showErrorBox: (title, message) => errors.push([title, message]), showMessageBox: (...args) => messageBox(args.at(-1)) },
+		dialog: { showErrorBox: (title, message) => errors.push([title, message]), showMessageBox: (...args) => messageBox(args.at(-1), args.length > 1 ? args[0] : null) },
 		safeStorage: { isEncryptionAvailable: () => false },
 		session: { fromPartition: () => ({ setUserAgent() {}, getUserAgent: () => 'test' }) },
 		shell: { showItemInFolder() {}, openPath: async () => '' }
@@ -317,4 +318,49 @@ test('nothing opens and no worker starts before the agent-access disclosure is a
 	for (let i = 0; i < 20 && !(main.worker && main.worker.state.phase === 'ready'); i++) await tick();
 	await tick();
 	assert.deepEqual(main.pages, ['status', URL_READY]);
+});
+
+test('the first-run disclosure is owned by a shown main window, and nothing starts until it is accepted', async () => {
+	let answer;
+	const asked = [];
+	const main = await launch({
+		acknowledge: async (_store, ask) => (await ask()) === 'continue',
+		messageBox: (options, parent) => { asked.push({ options, parent, shown: parent?.shown === true }); return new Promise((resolve) => { answer = resolve; }); }
+	});
+	// Windows applies an older launcher's SW_HIDE to the first window shown; a parentless dialog would stay invisible.
+	assert.equal(asked.length, 1);
+	assert.notEqual(asked[0].parent, null, 'the dialog has the main window as its owner');
+	assert.equal(asked[0].shown, true, 'the main window was shown before the dialog');
+	assert.deepEqual(main.pages, ['status']);
+	// The tray's Open brings the window, and so the dialog, forward without starting anything.
+	main.tray.show();
+	for (let i = 0; i < 10; i++) await tick();
+	assert.equal(main.worker, undefined);
+	answer({ response: 0 });
+	for (let i = 0; i < 20 && !(main.worker && main.worker.state.phase === 'ready'); i++) await tick();
+	await tick();
+	assert.equal(main.worker.state.phase, 'ready');
+	assert.deepEqual(main.pages, ['status', URL_READY]);
+});
+
+test('quitting a first boot before its database started lets the next launch retry it; after that it does not', async () => {
+	const applications = () => ({ options: { root: '/isolated/source' }, deferred: 0, async deferBoot() { this.deferred++; }, async databaseStarting() { this.starting = (this.starting ?? 0) + 1; }, async healthy() {}, async failed() {} });
+	const executable = '/Programs/AI Shuffle/AI Shuffle.exe';
+	// The tray's Quit while the first-run disclosure is still waiting.
+	const waiting = applications();
+	const early = await launch({ installed: { executable, updates: waiting }, acknowledge: () => new Promise(() => {}) });
+	early.tray.forceQuit();
+	for (let i = 0; i < 20 && early.app.quits === 0; i++) await tick();
+	assert.equal(early.app.quits, 1);
+	assert.equal(waiting.deferred, 1);
+	// Once the stack started, a quit leaves the first boot to the launcher's crash check.
+	const started = applications();
+	const late = await launch({ installed: { executable, updates: started } });
+	assert.equal(late.worker.state.phase, 'ready');
+	late.tray.forceQuit();
+	for (let i = 0; i < 20 && late.app.quits === 0; i++) await tick();
+	assert.equal(late.app.quits, 1);
+	assert.equal(started.deferred, 0);
+	assert.equal(started.starting, 1, 'the launcher is told before the database starts');
+	assert.equal(waiting.starting, undefined);
 });
