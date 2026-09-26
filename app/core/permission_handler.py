@@ -895,6 +895,22 @@ class PermissionHandler:
             answered_by_device=answered_by_device,
         )
 
+    def saved_rule(
+        self,
+        session_id: Optional[str],
+        profile_id: Optional[str],
+        tool_name: str,
+        tool_input: Dict[str, Any],
+    ) -> Optional[PermissionRule]:
+        """The saved rule (session-level first, then the agent's) that decides
+        this call, or None. Blocking (a DB read for the agent's rules).
+
+        The approver consults it before a permission MODE approves a call on
+        its own: a remembered Deny beats Accept Edits (and the CLI's Auto) the
+        way Claude Code's deny rules beat its modes. Bypass never asks.
+        """
+        return self._check_rules(session_id or "", profile_id or "", tool_name, tool_input)
+
     def _check_rules(
         self,
         session_id: str,

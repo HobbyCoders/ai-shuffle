@@ -2,8 +2,9 @@
 
 Without bubblewrap (the stock Docker compose) the code-mode kernel's only
 boundary is the in-process guard, so ``run_python`` is a write-class tool: an
-Ask session (``default``) prompts for it; Accept Edits and Bypass approve it
-exactly as before. Behind the sandbox it stays ``safe`` and nothing prompts.
+Ask session (``default``) prompts for it, and so does Accept Edits (a kernel is
+not a file edit); Bypass approves it. Behind the sandbox it stays ``safe`` and
+nothing prompts.
 The delegated leg's grant list (safe-rated in-proc tools only) never carries it.
 """
 
@@ -44,7 +45,7 @@ def _decision(mode: str, spec) -> str:
     "active,mode,expected",
     [
         (False, "default", "prompt"),
-        (False, "acceptEdits", "allow"),
+        (False, "acceptEdits", "prompt"),
         (False, "bypassPermissions", "allow"),
         (True, "default", "allow"),
         (True, "acceptEdits", "allow"),

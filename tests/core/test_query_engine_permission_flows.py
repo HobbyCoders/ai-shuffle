@@ -220,32 +220,43 @@ async def test_context_enrichment_reaches_the_prompt(tmp_path):
 # ─── the permission-mode chain ──────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("overrides,session_row,config,prompts", [
+# The call is a file edit wherever Accept Edits is in the chain (the one class
+# of tool it approves; any other tool would prompt under it exactly as under
+# Ask and could not tell the two apart) and WebFetch elsewhere (on every lane's
+# surface, including chat).
+_EDIT = ("Write", {"file_path": "/tmp/x.txt", "content": "x"})
+_FETCH = ("WebFetch", {"url": "https://example.com"})
+
+
+@pytest.mark.parametrize("overrides,session_row,config,call,prompts", [
     # Override wins over the session binding and the agent config.
     ({"permission_mode": "default"}, {"permission_mode": "bypassPermissions"},
-     {"permission_mode": "acceptEdits"}, True),
-    ({"permission_mode": "acceptEdits"}, {"permission_mode": "default"}, {}, False),
+     {"permission_mode": "acceptEdits"}, _EDIT, True),
+    ({"permission_mode": "acceptEdits"}, {"permission_mode": "default"}, {}, _EDIT, False),
     # No override: the session's binding wins over the agent config.
-    (None, {"permission_mode": "bypassPermissions"}, {"permission_mode": "default"}, False),
-    (None, {"permission_mode": "default"}, {"permission_mode": "bypassPermissions"}, True),
+    (None, {"permission_mode": "bypassPermissions"}, {"permission_mode": "default"}, _FETCH, False),
+    (None, {"permission_mode": "default"}, {"permission_mode": "bypassPermissions"}, _FETCH, True),
     # No override and no binding: the agent config.
-    (None, {}, {"permission_mode": "acceptEdits"}, False),
+    (None, {}, {"permission_mode": "acceptEdits"}, _EDIT, False),
     # Nothing anywhere: default.
-    (None, None, {}, True),
+    (None, None, {}, _FETCH, True),
     # The retired "plan" mode normalizes to default.
-    ({"permission_mode": "plan"}, None, {}, True),
+    ({"permission_mode": "plan"}, None, {}, _FETCH, True),
     # A chat session is pinned to default whatever the chain produced.
-    (None, {"mode": "chat", "permission_mode": "bypassPermissions"}, {}, True),
+    (None, {"mode": "chat", "permission_mode": "bypassPermissions"}, {}, _FETCH, True),
+], ids=[
+    "override-default", "override-acceptEdits", "binding-bypass", "binding-default",
+    "config-acceptEdits", "nothing", "plan", "chat-pinned",
 ])
 async def test_permission_mode_chain_decides_whether_a_tool_prompts(
-    tmp_path, overrides, session_row, config, prompts,
+    tmp_path, overrides, session_row, config, call, prompts,
 ):
-    tool = "WebFetch"  # on every lane's surface, including chat
+    tool, tool_input = call
     cb, broadcast, bounds = await _callback(
         tmp_path, overrides=overrides, session_row=session_row, profile_config=config,
     )
     with patch.object(qe, "sync_engine", new=bounds.sync_engine):
-        call = asyncio.create_task(cb(tool, {"url": "https://example.com"}, _ctx()))
+        call = asyncio.create_task(cb(tool, tool_input, _ctx()))
         if prompts:
             prompt = await _next_prompt(broadcast)
             await permission_handler.respond(prompt["request_id"], SID, "deny")

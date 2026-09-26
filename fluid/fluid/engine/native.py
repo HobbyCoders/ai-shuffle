@@ -171,6 +171,11 @@ from fluid.context.environment import environment_note
 from fluid.providers.pricing import PricingResolver
 from fluid.tools import read_window
 from fluid.providers.pricing import estimate_cost as estimate_cost_from_table
+
+#: ``LocalClient.name``: the one dialect whose tokens are never priced (see
+#: ``NativeLoop._fold_call_usage``). A string rather than an import so the
+#: engine does not load the local provider package to know its name.
+LOCAL_PROVIDER_NAME = "local"
 from fluid.providers.windows import context_window_for
 from fluid.store.base import (
     RECONSTRUCTIBLE_EVENTS,
@@ -1563,15 +1568,21 @@ class NativeLoop(BackgroundLifecycleMixin):
             self.model = op.model
         elif isinstance(op, SetPermissionMode):
             # Accept fluid's native policies directly, plus the Claude-Code-style
-            # mode names clients (the CLI, embedding apps) already speak.
+            # mode names clients (the CLI, embedding apps) already speak. A
+            # mode is a policy plus the rules it implies: ``acceptEdits`` is
+            # ``on_write`` with allow rules for the edit-class tools, so a
+            # file edit runs and everything else asks as ``default`` does.
+            # The rules of the mode being left are lifted at the same time.
+            from fluid.permissions.modes import MODE_POLICY, mode_rules
+
             mode = op.mode
-            policy = mode if mode in ("never_ask", "on_write", "always_ask") else {
-                "bypassPermissions": "never_ask",
-                "acceptEdits": "on_write",
-                "default": "on_write",
-            }.get(mode, "on_write")
+            policy = (
+                mode if mode in ("never_ask", "on_write", "always_ask")
+                else MODE_POLICY.get(mode, "on_write")
+            )
             if self.permissions is not None:
                 self.permissions.approval_policy = policy
+                self.permissions.set_mode_rules(mode_rules(mode))
         elif isinstance(op, Handoff):
             await self._do_handoff(op)
         elif isinstance(op, Fork):
@@ -4978,8 +4989,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         ))
 
     def _fold_call_usage(self, totals: dict[str, Any], usage: dict[str, Any]) -> None:
-        """Fold one model call's usage into the turn totals, filling in an
-        estimated cost when the provider reported none.
+        """Fold one model call's usage into the turn totals, filling in a
+        table price when the provider reported no cost.
 
         Three tiers, first answer wins: the provider's own ``estimate_cost``
         (Anthropic and the OpenAI dialect ship sourced tables; OpenRouter
@@ -4989,23 +5000,37 @@ class NativeLoop(BackgroundLifecycleMixin):
         recording no spend at all. A model nobody can price leaves ``cost_usd``
         absent, so the field stays "unknown" rather than becoming a wrong
         number; every call here is guarded, and a missing price never raises.
+
+        A cost this method fills in is flagged ``cost_from_table``: the
+        dollars came from a price list, not from the provider's bill. That
+        flag says nothing about the token counts; those carry their own
+        ``input_tokens_estimated`` / ``output_tokens_estimated`` flags when
+        they were guessed from text (see ``_estimate_partial_usage``).
+
+        The local dialect (llama.cpp, Ollama, LM Studio, vLLM: ``kind =
+        "local"``) is never priced: its tokens cost nothing, and the table
+        would otherwise bill a local ``glm-4.5-air`` at the hosted rate just
+        because the names match. Its cost is a plain ``0.0``, unflagged.
         """
         if "cost_usd" not in usage:
-            cost: float | None = None
-            est = getattr(self.provider, "estimate_cost", None)
-            if est is not None:
-                try:
-                    cost = est(self.model, usage)
-                except Exception:  # noqa: BLE001 — accounting is never fatal
-                    log.debug("provider cost estimate failed", exc_info=True)
-                    cost = None
-            if cost is None:
-                cost = estimate_cost_from_table(
-                    self.model, usage, resolver=self._pricing_resolver
-                )
-            if cost is not None:
-                usage["cost_usd"] = cost
-                usage["cost_estimated"] = True
+            if getattr(self.provider, "name", None) == LOCAL_PROVIDER_NAME:
+                usage["cost_usd"] = 0.0
+            else:
+                cost: float | None = None
+                est = getattr(self.provider, "estimate_cost", None)
+                if est is not None:
+                    try:
+                        cost = est(self.model, usage)
+                    except Exception:  # noqa: BLE001 — accounting is never fatal
+                        log.debug("provider cost estimate failed", exc_info=True)
+                        cost = None
+                if cost is None:
+                    cost = estimate_cost_from_table(
+                        self.model, usage, resolver=self._pricing_resolver
+                    )
+                if cost is not None:
+                    usage["cost_usd"] = cost
+                    usage["cost_from_table"] = True
         self._accumulate_usage(totals, usage)
 
     @staticmethod

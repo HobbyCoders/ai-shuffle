@@ -39,14 +39,16 @@ further line of defence:
 * native leg — a ``Read``-scoped fluid rule pair (deny, then allow the uploads
   glob; ``harness_adapter._chat_mode_rules``) remains as defense in depth.
 
-Import-light on purpose (only ``app.core.tool_access``); ``chat_uploads_dir``
-imports settings lazily to avoid a cycle.
+Import-light on purpose (``app.core.tool_access`` and fluid's permission-mode
+table); ``chat_uploads_dir`` imports settings lazily to avoid a cycle.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Tuple
+
+from fluid.permissions.modes import ACCEPT_EDITS_TOOLS as _FLUID_ACCEPT_EDITS_TOOLS
 
 from app.core.tool_access import DENY_ALL, ToolAccess, intersect_tool_surfaces
 
@@ -169,6 +171,15 @@ def permission_mode_for_session_mode(permission_mode: Any, mode: Any) -> Any:
 # access request (see ``app.mcp.computer_use.access``).
 COMPUTER_USE_REQUEST_ACCESS = "mcp__computer-use__request_access"
 
+# The tools Accept Edits approves on its own, on every leg: fluid's
+# ``ACCEPT_EDITS_TOOLS`` (Edit, Write, MultiEdit, NotebookEdit — the file-edit
+# tools, which is what the mode means in Claude Code). The app adds no name of
+# its own: none of its in-proc MCP tools (``mcp__builtins__*``, chat-access,
+# computer-use) edits a workspace file, and code mode's ``run_python`` is a
+# kernel, not an edit, so it asks like ``Bash`` does. Re-exported here so the
+# approver, the no-approver paths and the tests read the one table.
+ACCEPT_EDITS_TOOLS: frozenset[str] = _FLUID_ACCEPT_EDITS_TOOLS
+
 
 def effective_permission_mode(permission_mode: Any, *, delegated: bool) -> Any:
     """The permission mode a session actually runs in on its leg.
@@ -189,16 +200,22 @@ def mode_approves_without_prompt(permission_mode: Any, tool_name: str) -> bool:
     """Whether a session in ``permission_mode`` approves ``tool_name`` on its own.
 
     The rule for a call the runtime asked about: Ask (``default``, the retired
-    ``plan``, or no mode) puts it to a person; Bypass approves everything; every
-    other mode approves everything except the computer-use access request.
-    Both the interactive approver and the native leg's no-approver path
-    (``HarnessAdapter.receive_events``) decide through this, so a run with
-    nobody watching allows exactly what a watched one would.
+    ``plan``, or no mode) puts it to a person; Bypass approves everything;
+    Accept Edits approves the edit-class tools (:data:`ACCEPT_EDITS_TOOLS`) and
+    puts everything else — a shell command, a Python cell, a web fetch, screen
+    control — to a person exactly as Ask does; the delegated CLI's classifier
+    mode ``auto`` approves everything except the computer-use access request.
+    The interactive approver and both no-approver paths
+    (``HarnessAdapter.receive_events`` / ``_answer_without_approver``) decide
+    through this, so a run with nobody watching allows exactly what a watched
+    one would.
     """
     if permission_mode == "bypassPermissions":
         return True
     if permission_mode in (None, "", "default", "plan"):
         return False
+    if permission_mode == "acceptEdits":
+        return tool_name in ACCEPT_EDITS_TOOLS
     return tool_name != COMPUTER_USE_REQUEST_ACCESS
 
 

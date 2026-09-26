@@ -5,8 +5,9 @@ sends a ``can_use_tool`` request for every call its mode does not approve, and
 blocks until it is answered. Only the WebSocket path wires ``can_use_tool``;
 the REST/background paths (``stream_query``, ``start_background_query``,
 ``execute_query``, account failover) do not. On those paths the adapter
-answers from the session's permission mode: Ask denies with the reason, the
-modes that approve on their own allow.
+answers from the session's permission mode: Ask denies with the reason, and so
+does Accept Edits for anything the CLI asks about (the CLI runs file edits
+itself under that mode; the fake asks about a Bash call); Bypass allows.
 
 Hermetic: drives fluid's fake ``claude`` (scenario ``b``: one tool call that
 asks ``can_use_tool``) through the real HarnessAdapter.
@@ -119,7 +120,7 @@ async def _headless_turn_text(monkeypatch, tmp_path, mode: str) -> str:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode, reply", [
     ("default", "Understood, skipping that."),
-    ("acceptEdits", "It is sunny in Paris."),
+    ("acceptEdits", "Understood, skipping that."),
     ("bypassPermissions", "It is sunny in Paris."),
 ])
 async def test_the_session_mode_decides_a_prompt_with_no_approver(monkeypatch, tmp_path, mode, reply):

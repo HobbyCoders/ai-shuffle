@@ -228,8 +228,9 @@ curl http://localhost:8000/api/v1/streaming/active \
 
 ### Tool Permissions
 - `POST /api/v1/query`, `/query/stream`, `/conversation/stream` and `/conversation/start` have nobody to answer a permission prompt, so the permission mode decides alone
-- On the built-in Claude models (the Claude Code CLI), `default` denies a tool call that would prompt at once and the agent is told why; `bypassPermissions` allows it; `auto` and `acceptEdits` allow it except the screen-control (computer use) access request, which they deny
-- On other providers, `acceptEdits` and `bypassPermissions` run the tool (`acceptEdits` still prompts for the screen-control access request, which is denied when nobody answers); under `default` a call that would prompt waits and is denied after 15 minutes. A session that still has `auto` runs as `default` there
+- `acceptEdits` approves only file edits (Edit, Write, MultiEdit, NotebookEdit); every other tool call is treated as under `default`
+- On the built-in Claude models (the Claude Code CLI), `default` and `acceptEdits` deny a tool call the CLI asks about at once and the agent is told why (under `acceptEdits` the CLI runs file edits itself); `bypassPermissions` allows it; `auto` allows it except the screen-control (computer use) access request, which it denies
+- On other providers, `bypassPermissions` runs the tool and `acceptEdits` runs a file edit; a call that would prompt (every write-class call under `default`, everything but a file edit under `acceptEdits`, and the screen-control access request short of `bypassPermissions`) waits and is denied after 15 minutes. A session that still has `auto` runs as `default` there
 - `POST /api/v1/conversation` runs like a session in the app: its prompts appear in the app and are denied if nobody answers within 5 minutes
 
 ### Cost Tracking

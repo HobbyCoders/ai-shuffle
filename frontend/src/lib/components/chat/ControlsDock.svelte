@@ -378,7 +378,7 @@
 	const permissionModes = $derived([
 		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
 		...(autoPermission ? [{ value: 'auto', label: 'Auto', description: 'Claude Code evaluates tool calls automatically' }] : []),
-		{ value: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve edits' },
+		{ value: 'acceptEdits', label: 'Accept Edits', description: 'File edits run without asking; every other tool asks' },
 		{ value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' }
 	]);
 

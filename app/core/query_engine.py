@@ -56,7 +56,7 @@ from app.core.session_pool import (
 from app.core.session_title import derive_session_title
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
-from app.core.permission_handler import permission_handler, _DeferSentinel
+from app.core.permission_handler import PermissionDecision, permission_handler, _DeferSentinel
 from app.core.user_question_handler import user_question_handler
 
 from app.core.task_registry import task_registry
@@ -766,6 +766,10 @@ async def execute_query(
                     metadata["tokens_out"] = message.usage.get("output_tokens", 0)
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+                    # Any call this turn with harness-estimated token counts
+                    # (the adapter stamps the terminal usage); booked as a
+                    # flag on the ledger row, never subtracted.
+                    metadata["usage_estimated"] = bool(message.usage.get("usage_estimated"))
 
     except (Exception, BaseExceptionGroup) as e:
         # Unwrap ExceptionGroup from an anyio.TaskGroup (Python 3.11+)
@@ -1468,6 +1472,10 @@ async def stream_query(
                     metadata["tokens_out"] = message.usage.get("output_tokens", 0)
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+                    # Any call this turn with harness-estimated token counts
+                    # (the adapter stamps the terminal usage); booked as a
+                    # flag on the ledger row, never subtracted.
+                    metadata["usage_estimated"] = bool(message.usage.get("usage_estimated"))
 
     except asyncio.CancelledError:
         interrupted = True
@@ -2240,7 +2248,10 @@ async def _stream_to_websocket_impl(
 
                 # Every other tool: Ask routes it through the permission
                 # handler; the modes that approve on their own allow it (the
-                # same rule a native run with no approver applies).
+                # same rule a native run with no approver applies) — unless a
+                # remembered Deny rule names it. Saved deny rules beat every
+                # mode short of Bypass, as Claude Code's deny rules beat its
+                # modes; Ask already applies them inside request_permission.
                 if not mode_approves_without_prompt(_perm_mode, tool_name):
                     request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
                     logger.debug(f"[WS] Permission request for {tool_name}: {request_id}")
@@ -2274,6 +2285,13 @@ async def _stream_to_websocket_impl(
                             return PermissionResultDeny(message="Tool deferred by user")
                     return result
                 else:
+                    if _perm_mode != "bypassPermissions":
+                        rule = await asyncio.to_thread(
+                            permission_handler.saved_rule, _sid, _profile_id, tool_name, tool_input,
+                        )
+                        if rule is not None and rule.decision == PermissionDecision.DENY:
+                            logger.debug(f"[WS] {tool_name} denied by saved rule under {_perm_mode}")
+                            return PermissionResultDeny(message="Denied by saved rule")
                     return PermissionResultAllow()
 
         # Set the callback on the already-built options (avoid redundant rebuild)
@@ -3563,6 +3581,10 @@ async def _stream_to_websocket_impl(
                     metadata["tokens_out"] = message.usage.get("output_tokens", 0)
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+                    # Any call this turn with harness-estimated token counts
+                    # (the adapter stamps the terminal usage); booked as a
+                    # flag on the ledger row, never subtracted.
+                    metadata["usage_estimated"] = bool(message.usage.get("usage_estimated"))
 
             else:
                 logger.warning(f"[WS] Unhandled message type: {type(message).__name__}")

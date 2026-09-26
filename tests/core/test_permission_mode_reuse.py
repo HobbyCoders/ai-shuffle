@@ -19,14 +19,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fluid.events import model as lm
+from fluid.events.ops import RespondPermission, SetPermissionMode
+from fluid.permissions.engine import PermissionEngine
 
 import app.core.query_engine as qe
 from app.core.provider.harness_adapter import _PERMISSION_POLICY, HarnessAdapter
 from app.core.provider.types import PermissionRequestEvent, SessionOptions
 from app.core.session_modes import COMPUTER_USE_REQUEST_ACCESS
 from app.core.session_pool import SessionState
-from fluid.events import model as lm
-from fluid.events.ops import RespondPermission, SetPermissionMode
 from tests.core.engine_harness import StubPool, collect
 from tests.core.test_busy_write_guard_engine import _chat_patches
 
@@ -35,11 +36,11 @@ APP_SID = "sess-mode-reuse"
 
 
 class _NativeEngine:
-    """NativeLoop's shape for a mode change: ``SetPermissionMode`` is not a
-    submit op there, the adapter sets ``permissions.approval_policy``."""
+    """An engine without the ``SetPermissionMode`` op: the adapter falls back
+    to setting the real ``PermissionEngine``'s policy and mode rules itself."""
 
     def __init__(self):
-        self.permissions = SimpleNamespace(approval_policy=None)
+        self.permissions = PermissionEngine("on_write")
         self.ops: list = []
         self._events: list = []
 
@@ -207,7 +208,8 @@ async def test_a_switch_the_engine_refuses_is_not_recorded_and_is_retried():
 
     engine.refuse = False
     await _turns(state, ["bypassPermissions"])
-    assert [op.mode for op in engine.ops if isinstance(op, SetPermissionMode)] == ["bypassPermissions"]
+    # The native engine is sent the policy, never the mode name.
+    assert [op.mode for op in engine.ops if isinstance(op, SetPermissionMode)] == ["never_ask"]
     assert state.connect_options.permission_mode == "bypassPermissions"
 
 
@@ -252,7 +254,8 @@ async def _decision(adapter, name):
     ("default", "Bash", False),
     ("plan", "Bash", False),
     (None, "Bash", False),
-    ("acceptEdits", "Bash", True),
+    ("acceptEdits", "Write", True),
+    ("acceptEdits", "Bash", False),
     ("auto", "Bash", True),
     ("bypassPermissions", "Bash", True),
     ("default", COMPUTER_USE_REQUEST_ACCESS, False),

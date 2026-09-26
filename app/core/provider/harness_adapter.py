@@ -15,7 +15,9 @@ Both legs:
   * fluid session id = ``session_id or resume_session_id``. The delegated
     ``--resume`` handle is the stored ``cli_session_id`` (``_resolve_cli_session_id``).
   * ``permission_mode`` sets the PermissionEngine policy (native turns ``auto``
-    into ``default``); ``effort`` (``_valid_effort``), ``setting_sources`` and ``hooks``
+    into ``default``; ``acceptEdits`` lets the app's approver allow only the edit
+    tools, after the user's saved rules); ``effort`` (``_valid_effort``),
+    ``setting_sources`` and ``hooks``
     (one shared ``HookBus``, ``sdk_hook_bridge``) reach both engines.
   * in-proc ``type="sdk"`` MCP servers are bridged onto the ToolRegistry
     (``fluid_tool_bridge``). The prompt carries the merged agents index
@@ -139,6 +141,7 @@ from fluid.events.ops import (
     UserTurn,
 )
 from fluid.permissions.engine import PermissionEngine
+from fluid.permissions.modes import MODE_POLICY
 from fluid.permissions.rules import Rule
 from fluid.providers.anthropic.client import AnthropicClient
 from fluid.providers.openai_responses.client import (
@@ -194,12 +197,15 @@ def fluid_turn_source(app_source: Optional[str]) -> str:
     return _FLUID_TURN_SOURCES.get(str(app_source or ""), "user")
 
 
-# app permission_mode → fluid PermissionEngine approval policy
-_PERMISSION_POLICY = {
-    "bypassPermissions": "never_ask",
-    "acceptEdits": "on_write",
-    "default": "on_write",
-}
+# app permission_mode → fluid PermissionEngine approval policy: fluid's own
+# mode table, policy only. The app's native leg deliberately does NOT install
+# fluid's ``acceptEdits`` edit-tool allow rules (``fluid.permissions.modes``):
+# the engine keeps asking for every write-class call and the app's approver
+# decides each one with the mode (``mode_approves_without_prompt``) AFTER the
+# user's saved rules, so a remembered Deny on Write still wins under Accept
+# Edits and a rule saved mid-session applies to the next call. That is why
+# ``set_permission_mode`` sends the engine the POLICY name on this leg.
+_PERMISSION_POLICY = MODE_POLICY
 
 
 def _prompt_enrichment(tool_name: str, ev: PermissionRequestEvent) -> Dict[str, str]:
@@ -219,6 +225,23 @@ def _prompt_enrichment(tool_name: str, ev: PermissionRequestEvent) -> Dict[str, 
     except Exception:  # noqa: BLE001 — a prettier prompt is never worth a denial
         logger.debug("run_python prompt enrichment failed", exc_info=True)
         return {}
+
+
+def _usage_has_estimate(usage: Dict[str, Any]) -> bool:
+    """True when fluid flagged a token count in this usage record as a guess.
+
+    ``input_tokens_estimated`` / ``output_tokens_estimated`` come from the
+    native engine's ``_estimate_partial_usage`` (chars/4 over the request and
+    the streamed reply, used when the provider sent no usage or the reply was
+    interrupted). ``usage_estimated`` is the adapter's own summary key, kept
+    so a record that already carries it stays flagged when re-read. The
+    Claude CLI leg never estimates, so its records never match.
+    """
+    return bool(
+        usage.get("usage_estimated")
+        or usage.get("input_tokens_estimated")
+        or usage.get("output_tokens_estimated")
+    )
 
 
 class HarnessAdapter(ProviderAdapter):
@@ -303,6 +326,12 @@ class HarnessAdapter(ProviderAdapter):
         # Interrupted roll the turn up), so an errored turn billed the session
         # $0 no matter how many calls it had already paid for.
         self._turn_usage_totals: Dict[str, float] = {}
+        # True once any call this turn carried a token count fluid estimated
+        # (``input_tokens_estimated`` / ``output_tokens_estimated`` in
+        # ``Usage.raw``: the provider reported no usage, or the reply was
+        # interrupted). Stamped on the turn's terminal usage as
+        # ``usage_estimated`` so the booking can mark the row.
+        self._turn_usage_estimated: bool = False
         self._turn_model_calls: int = 0
         # Prompt-cache misses on this adapter's engine, counted by class (see
         # app.core.provider.cache_miss_classes). get_context_usage() reports
@@ -1599,6 +1628,7 @@ class HarnessAdapter(ProviderAdapter):
         self._turn_floor = floor
         # New turn → new usage roll-up (see _turn_usage_totals).
         self._turn_usage_totals = {}
+        self._turn_usage_estimated = False
         self._turn_model_calls = 0
         self._turn_call_indices = set()
 
@@ -1906,9 +1936,38 @@ class HarnessAdapter(ProviderAdapter):
             )
 
     async def _allow_without_approver(self, ev: PermissionRequestEvent) -> None:
-        """Approve a native prompt the session's mode approves on its own."""
+        """Approve a native prompt the session's mode approves on its own —
+        unless a saved Deny rule names the call. The same order the watched
+        approver keeps: saved rules first, then the mode (Bypass never gets
+        here). Session rules are keyed by the app session id, the agent's by
+        ``extra["profile_id"]``; an adapter without either sees no rules."""
+        allow = True
+        message: Optional[str] = None
+        if self.permission_mode != "bypassPermissions":
+            from app.core.permission_handler import (
+                PermissionDecision,
+                permission_handler,
+            )
+
+            def _saved_denial() -> bool:
+                extra = (self._options.extra or {}) if self._options is not None else {}
+                rule = permission_handler.saved_rule(
+                    self._resolve_app_session_id(), extra.get("profile_id"),
+                    self._permission_tool_name(ev.name), ev.input or {},
+                )
+                return rule is not None and rule.decision == PermissionDecision.DENY
+
+            try:
+                if await asyncio.to_thread(_saved_denial):
+                    allow, message = False, "Denied by saved rule"
+            except Exception:  # noqa: BLE001 — a rule lookup failure must not turn into an allow-by-accident
+                logger.warning(
+                    "[HarnessAdapter] saved-rule lookup failed for %s — asking the engine "
+                    "to hold the call", ev.name, exc_info=True,
+                )
+                return
         try:
-            await self.respond_to_permission(ev.tool_use_id, True)
+            await self.respond_to_permission(ev.tool_use_id, allow, message=message)
         except Exception:
             logger.warning(
                 "[HarnessAdapter] failed to submit permission decision for %s",
@@ -2152,11 +2211,16 @@ class HarnessAdapter(ProviderAdapter):
         mode = effective_permission_mode(mode, delegated=self._is_delegated)
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
+        # The CLI speaks mode names. fluid's NativeLoop gets the policy: given
+        # the mode name it would install the ``acceptEdits`` edit-tool allow
+        # rules itself, ahead of the app's saved Deny rules (``_PERMISSION_POLICY``).
+        policy = _PERMISSION_POLICY.get(mode, "on_write")
         try:
-            await self._engine.submit(SetPermissionMode(mode=mode))
+            await self._engine.submit(
+                SetPermissionMode(mode=mode if self._is_delegated else policy)
+            )
         except NotImplementedError:
-            # NativeLoop: adjust the permission engine in place.
-            policy = _PERMISSION_POLICY.get(mode, "on_write")
+            # An engine without the op: adjust the permission engine in place.
             perms = getattr(self._engine, "permissions", None)
             if perms is not None:
                 perms.approval_policy = policy
@@ -2615,6 +2679,11 @@ class HarnessAdapter(ProviderAdapter):
             if context_usage:
                 usage["context_usage"] = context_usage
             self._record_cache_miss(usage)
+            # One key for "a count in this record was guessed", so the durable
+            # ``turn.usage`` row and the recovery paths need not know fluid's
+            # per-field flags.
+            if _usage_has_estimate(usage):
+                usage["usage_estimated"] = True
             # Roll this call into the turn total so an ErrorEvent terminal (which
             # fluid emits with no usage and no cost at all) can still bill what
             # the turn actually spent. Cheap: one dict walk per model call.
@@ -2815,7 +2884,7 @@ class HarnessAdapter(ProviderAdapter):
                     # leg on subscription auth); the sessions row and the
                     # response model both require a float, so coerce here.
                     total_cost_usd=event.cost_usd if event.cost_usd is not None else 0.0,
-                    usage=dict(event.usage),
+                    usage=self._stamp_usage_estimated(dict(event.usage)),
                     uuid=self._uuid(event),
                     terminal_reason=terminal_reason,
                 )
@@ -2852,7 +2921,9 @@ class HarnessAdapter(ProviderAdapter):
                     session_id=getattr(event, "session_id", "") or "",
                     result=event.message,
                     total_cost_usd=cost if cost is not None else 0.0,
-                    usage=dict(getattr(event, "usage", None) or {}),
+                    usage=self._stamp_usage_estimated(
+                        dict(getattr(event, "usage", None) or {})
+                    ),
                     uuid=self._uuid(event),
                     terminal_reason="aborted_streaming",
                 )
@@ -2902,7 +2973,7 @@ class HarnessAdapter(ProviderAdapter):
                     result=message,
                     errors=[message],
                     total_cost_usd=float(cost) if cost is not None else 0.0,
-                    usage=usage,
+                    usage=self._stamp_usage_estimated(usage),
                     uuid=self._uuid(event),
                     api_error_status=status,
                 )
@@ -2945,6 +3016,8 @@ class HarnessAdapter(ProviderAdapter):
             if index is not None:
                 self._turn_call_indices.add(index)
             self._turn_model_calls += 1
+            if _usage_has_estimate(usage):
+                self._turn_usage_estimated = True
             for key in self._ROLLUP_USAGE_KEYS:
                 value = usage.get(key)
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -2957,7 +3030,22 @@ class HarnessAdapter(ProviderAdapter):
 
     def _turn_usage_snapshot(self) -> Dict[str, Any]:
         """This turn's accumulated usage so far (a copy; zero keys dropped)."""
-        return {k: v for k, v in self._turn_usage_totals.items() if v}
+        snapshot: Dict[str, Any] = {k: v for k, v in self._turn_usage_totals.items() if v}
+        if self._turn_usage_estimated:
+            snapshot["usage_estimated"] = True
+        return snapshot
+
+    def _stamp_usage_estimated(self, usage: Dict[str, Any]) -> Dict[str, Any]:
+        """Mark a turn's terminal usage when any of its calls guessed a count.
+
+        fluid sums only numbers into the turn total, so the per-call estimate
+        flags never reach ``TurnComplete.usage``; the adapter's own roll-up
+        remembers them. The key is absent, never False, so a turn whose
+        counts are all the provider's own looks exactly as before.
+        """
+        if self._turn_usage_estimated or _usage_has_estimate(usage):
+            usage["usage_estimated"] = True
+        return usage
 
     # ─── Internal builders ────────────────────────────────────────────
 
@@ -3418,6 +3506,12 @@ class HarnessAdapter(ProviderAdapter):
         return registry
 
     def _build_permissions(self, options: SessionOptions):
+        """The native leg's PermissionEngine for ``options.permission_mode``.
+
+        Policy plus the chat-lane rules, and no mode rules: under Accept Edits
+        the engine still asks for a file edit and the app's approver allows it
+        unless a saved Deny rule names it (see ``_PERMISSION_POLICY``).
+        """
         mode = options.permission_mode or "default"
         policy = _PERMISSION_POLICY.get(mode, "on_write")
         return PermissionEngine(

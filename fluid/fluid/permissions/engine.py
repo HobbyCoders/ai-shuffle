@@ -89,6 +89,25 @@ class PermissionEngine:
         # Session-scoped "allow always" responses (see allow_always()).
         # tool name → labels allowed (None = every call to the tool).
         self._always_allowed: dict[str, set[str] | None] = {}
+        # The rules the current permission mode installed (see set_mode_rules()),
+        # kept by identity so a mode switch lifts exactly these and no
+        # configured rule that happens to look the same.
+        self._mode_rules: list[Rule] = []
+
+    def set_mode_rules(self, rules: list[Rule]) -> None:
+        """Replace the rules a permission mode contributes.
+
+        ``acceptEdits`` is ``on_write`` plus allow rules for the edit-class
+        tools (``fluid.permissions.modes``); every other mode contributes
+        none. The previous mode's rules are removed by identity, and the new
+        ones go to the FRONT of the list: evaluation is last-match-wins, so
+        every configured rule (a settings ``deny``, a config.toml rule, a
+        sensitive-file ask) keeps outranking what the mode allows.
+        """
+        previous = {id(rule) for rule in self._mode_rules}
+        kept = [rule for rule in self.rules if id(rule) not in previous]
+        self._mode_rules = list(rules)
+        self.rules = [*self._mode_rules, *kept]
 
     def evaluate(self, spec: ToolSpec, input: dict[str, Any]) -> str:
         """Return ``allow`` | ``deny`` | ``ask`` for one tool call."""
