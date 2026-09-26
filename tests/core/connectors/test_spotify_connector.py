@@ -349,10 +349,6 @@ class TestHelpers:
         res = await make_spotify(api)._play_track_by_query("zzz")
         assert res == {"success": False, "error": "No tracks found for: zzz"}
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "bug: search queries are interpolated into the URL unencoded, so '&' splits the "
-        "query and '#' truncates it (and drops type/limit) — Spotify then returns 400"
-    ))
     async def test_search_query_is_url_encoded(self):
         api = FakeSpotify()
         await make_spotify(api)._search_tracks_api("Simon & Garfunkel #1", limit=5)

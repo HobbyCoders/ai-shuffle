@@ -278,20 +278,12 @@ class TestCommands:
         conn = make_hue(Bridge())
         assert await say(conn, "make me a sandwich") is False
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "bug: _find_light returns the first partial name match, so 'lamp' resolves to "
-        "'Floor Lamp' even though a light named exactly 'Lamp' exists"
-    ))
     async def test_exact_light_name_beats_partial_match(self):
         bridge = Bridge()
         conn = make_hue(bridge)
         await say(conn, "turn off lamp")
         assert bridge.puts() == [("/lights/2/state", {"on": False})]
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "bug: the Hue v1 API reports a rejected write as HTTP 200 with an error list; "
-        "_cmd_set_brightness checks only the status code and reports success"
-    ))
     async def test_bridge_error_list_on_write_is_not_reported_as_success(self):
         bridge = Bridge({("PUT", "/lights/3/state"): (200, [{"error": {
             "type": 201, "address": "/lights/3/state/bri",
@@ -385,10 +377,6 @@ class TestPolling:
         update.assert_not_called()
         assert conn.status != ConnectorStatus.ERROR
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "bug: after 5 failed polls the status is set to ERROR and never restored, even "
-        "when later polls succeed (same pattern in homeassistant/spotify/gmail pollers)"
-    ))
     async def test_recovery_after_error_restores_connected(self, monkeypatch):
         from app.db import database
 

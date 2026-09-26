@@ -22,6 +22,7 @@ from app.core.connectors.base import (
     chunk_text,
 )
 from app.core.connectors import signal_actions
+from app.core.detached_tasks import spawn_detached
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +284,7 @@ class SignalConnector(BaseConnector):
 
         # Legacy permission-prompt approvals.
         for request_id, session_id in list(self._permission_sessions.items()):
-            asyncio.create_task(
+            spawn_detached(
                 self._on_permission_response(request_id, session_id, approve)
             )
             del self._permission_sessions[request_id]

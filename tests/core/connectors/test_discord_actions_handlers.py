@@ -515,10 +515,6 @@ class TestChannels:
         assert "Invalid channel id" in (await run(conn, "delete_channel", {"channel_id": "abc"}))["error"]
         assert "not found" in (await run(conn, "delete_channel", {"channel_id": "1"}))["error"]
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "bug: delete_channel compares the raw channel_id string to bound_chat_id before "
-        "int() normalisation, so ' <id>' or '0<id>' deletes the bound channel"
-    ))
     @pytest.mark.parametrize("raw", [f" {BOUND}", f"0{BOUND}"])
     async def test_delete_channel_refuses_bound_channel_in_any_spelling(self, conn, bound, raw):
         res = await run(conn, "delete_channel", {"channel_id": raw})

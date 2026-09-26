@@ -276,10 +276,6 @@ class TestSendMessage:
         assert mime["To"] == "bob@example.com" and mime["Subject"] == "Re:"
         assert mime["In-Reply-To"] is None
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "bug: when the original can't be fetched, reply mode sends threadId=platform_chat_id "
-        "even when that is an email address (new-message mode guards this); Gmail rejects it"
-    ))
     async def test_reply_fallback_does_not_use_email_as_thread_id(self):
         svc = FakeGmail()
         conn = make_gmail(svc)
@@ -331,10 +327,6 @@ class TestSendMessage:
         svc.fail["send"] = TimeoutError("The read operation timed out")
         assert await send(make_gmail(svc), "hi", chat="erin@example.com") is False
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "bug: the To/Subject parser uses re.DOTALL with greedy (.*), so a body with a "
-        "blank line is folded into the Subject and the send fails"
-    ))
     async def test_multi_paragraph_body(self):
         svc = FakeGmail()
         text = "To: carol@example.com\nSubject: Update\n\nFirst paragraph.\n\nSecond paragraph."

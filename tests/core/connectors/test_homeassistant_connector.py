@@ -252,10 +252,6 @@ class TestCommands:
         assert await say(conn, "set kitchen to 999") is True
         assert replies(conn) == ["Entity not found: attic", "Failed (400): bad brightness"]
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "bug: send_message lower-cases the whole command before parsing, so values are "
-        "lower-cased too; input_select options are case-sensitive in Home Assistant"
-    ))
     async def test_set_preserves_value_case(self):
         api = FakeHA()
         conn = make_ha(api)
@@ -263,10 +259,6 @@ class TestCommands:
         assert api.posts() == [("/api/services/input_select/select_option",
                                 {"entity_id": "input_select.house_mode", "option": "Away"})]
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "bug: _cmd_set falls back to homeassistant.turn_on for domains outside its "
-        "service map, so 'set <switch> to off' turns the switch ON"
-    ))
     async def test_set_off_on_unmapped_domain_does_not_turn_on(self):
         api = FakeHA()
         conn = make_ha(api)

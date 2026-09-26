@@ -24,6 +24,7 @@ from app.core.connectors.base import (
     TriggerDef,
     chunk_text,
 )
+from app.core.detached_tasks import spawn_detached
 
 logger = logging.getLogger(__name__)
 
@@ -459,13 +460,13 @@ class BlueBubblesConnector(BaseConnector):
 
         for request_id, session_id in list(self._permission_sessions.items()):
             if text_lower in ("approve", "yes", "allow", "y"):
-                asyncio.create_task(
+                spawn_detached(
                     self._on_permission_response(request_id, session_id, True)
                 )
                 del self._permission_sessions[request_id]
                 return True
             elif text_lower in ("deny", "no", "reject", "n"):
-                asyncio.create_task(
+                spawn_detached(
                     self._on_permission_response(request_id, session_id, False)
                 )
                 del self._permission_sessions[request_id]
