@@ -20,6 +20,7 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(updates, "_desktop_request", None)
     monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: [])
     fleet._receipts.clear()
+    fleet._peer_status.clear()
     rows = [{"device_id": "self", "device_name": "Local", "is_self": True, "online": True},
             {"device_id": "peer", "device_name": "Peer", "is_self": False, "online": True},
             {"device_id": "offline", "device_name": "Offline", "is_self": False, "online": False}]
@@ -127,6 +128,100 @@ def test_all_snapshot_handles_partial_failures_without_aborting(setup):
     assert "private endpoint" not in str(result)
 
 A, B = "a" * 40, "b" * 40
+
+
+def peer_calls(remote):
+    return [c for c in remote.await_args_list if c.args[2] == {"operation": "status"}]
+
+
+async def settle(device_id):
+    # The background read may already be done by the time the snapshot returns.
+    task = fleet._peer_status[device_id]["task"]
+    if task is not None:
+        await task
+
+
+def test_idle_snapshot_reuses_a_peer_reading_then_refreshes_behind_the_reply(setup):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    remote.return_value = {"supported": True, "phase": "idle", "running_version": A}
+    async def scenario():
+        await fleet.snapshot()
+        second = await fleet.snapshot()
+        assert len(peer_calls(remote)) == 1
+        assert second["workers"][1]["phase"] == "idle"
+        # Past the TTL the poll still answers from the last reading at once.
+        fleet._peer_status["peer"]["at"] -= fleet.PEER_STATUS_TTL + 1
+        remote.return_value = {"supported": True, "phase": "available", "version": B[:12], "running_version": A}
+        stale = await fleet.snapshot()
+        assert stale["workers"][1]["phase"] == "idle"
+        await settle("peer")
+        fresh = await fleet.snapshot()
+        assert fresh["workers"][1]["phase"] == "available"
+        assert len(peer_calls(remote)) == 2
+    asyncio.run(scenario())
+
+
+def test_busy_peer_is_reread_sooner(setup):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    remote.return_value = {"supported": True, "phase": "downloading", "percent": 10}
+    async def scenario():
+        await fleet.snapshot()
+        fleet._peer_status["peer"]["at"] -= fleet.PEER_STATUS_BUSY_TTL + 1
+        await fleet.snapshot()
+        await settle("peer")
+        assert len(peer_calls(remote)) == 2
+    asyncio.run(scenario())
+
+
+def test_concurrent_snapshots_share_one_peer_read(setup):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    release = asyncio.Event()
+    async def slow(*_args, **_kwargs):
+        await release.wait()
+        return {"supported": True, "phase": "idle"}
+    remote.side_effect = slow
+    async def scenario():
+        pending = [asyncio.ensure_future(fleet.snapshot()) for _ in range(3)]
+        await asyncio.sleep(0.05)
+        release.set()
+        results = await asyncio.gather(*pending)
+        assert all(r["workers"][1]["phase"] == "idle" for r in results)
+    asyncio.run(scenario())
+    assert remote.await_count == 1
+
+
+def test_completed_install_stops_reading_its_cohort(setup):
+    # The reported loop: a finished all-worker install kept the peer polled every 2 s.
+    values, remote = setup
+    remote.return_value = {"supported": True, "version": B[:12], "running_version": A}
+    fleet.progress.begin("done", [{"device_id": "peer", "device_name": "Peer"},
+                                  {"device_id": "self", "device_name": "Local"}])
+    fleet.progress.record("done", "peer", result={"accepted": False, "reason": "A newer runtime release is required"})
+    fleet.progress.record("done", "self", result={"accepted": True, "version": B[:12]})
+    updates.desktop_exchange({"phase": "idle", "running_version": B})
+    assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "complete"
+    remote.reset_mock()
+    for _ in range(3):
+        state = asyncio.run(fleet.snapshot())
+        assert state["operation"]["phase"] == "complete"
+        assert [w["device_id"] for w in state["workers"]] == ["self"]
+    remote.assert_not_called()
+
+
+def test_an_action_discards_cached_peer_readings(setup):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    remote.return_value = {"supported": True, "phase": "available", "version": B[:12]}
+    async def scenario():
+        await fleet.snapshot()
+        await fleet.dispatch("download")
+        remote.return_value = {"supported": True, "phase": "downloading", "percent": 5}
+        state = await fleet.snapshot()
+        assert state["workers"][1]["phase"] == "downloading"
+    asyncio.run(scenario())
 
 
 def test_install_survives_restart_and_waits_for_every_included_worker(setup, monkeypatch):

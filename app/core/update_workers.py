@@ -15,6 +15,14 @@ from app.network import control, engine, membership, runners
 
 _receipts = OrderedDict()
 _dispatch_lock = asyncio.Lock()
+# Peer status is a network round trip (often through the peer's tunnel), and the
+# sidebar polls the snapshot. While no install is being verified, a reading is
+# reused for PEER_STATUS_TTL seconds and then refreshed in the background, so a
+# slow peer never holds up the poll. A peer that is checking or downloading is
+# re-read sooner. Concurrent snapshots share one in-flight read per peer.
+PEER_STATUS_TTL = 30
+PEER_STATUS_BUSY_TTL = 3
+_peer_status = {}
 
 
 def local_action(action, request_id):
@@ -88,20 +96,56 @@ async def _remote(row, body):
                 "supported": False, "phase": "unsupported"}
 
 
+def _peer_entry(device_id):
+    return _peer_status.setdefault(device_id, {"at": 0.0, "value": None, "task": None})
+
+
+async def _read_peer(device_id, entry):
+    try:
+        value = await _remote({"device_id": device_id}, {"operation": "status"})
+        entry.update(at=time.monotonic(), value=value)
+        return value
+    finally:
+        entry["task"] = None
+
+
+async def _peer_status_for(device_id, *, fresh):
+    """A peer's status: awaited when ``fresh``, else cached and refreshed behind the reply."""
+    entry = _peer_entry(device_id)
+    value = entry["value"]
+    if not fresh and value is not None:
+        ttl = PEER_STATUS_BUSY_TTL if value.get("phase") in ("checking", "downloading") else PEER_STATUS_TTL
+        if time.monotonic() - entry["at"] < ttl:
+            return value
+    if entry["task"] is None:
+        entry["task"] = asyncio.ensure_future(_read_peer(device_id, entry))
+    if fresh or value is None:
+        return await asyncio.shield(entry["task"])
+    return value
+
+
+def _verifying(operation):
+    # An install being verified needs live readings; a timed-out one is settled.
+    return (operation is not None and operation["phase"] != "complete"
+            and time.time() - operation["started_at"] < progress.STARTUP_TIMEOUT)
+
+
 async def snapshot():
     local = await run_sync(updates.status)
     listing = await run_sync(runners.directory)
     rows = [{"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker", "is_self": True,
              "online": True, **local}]
     operation = await run_sync(progress.load)
-    tracked = {row["device_id"] for row in operation["workers"]} if operation else set()
+    # A completed install is terminal (progress.observe returns it as saved), so
+    # its cohort no longer needs reading.
+    tracked = ({row["device_id"] for row in operation["workers"]}
+               if operation and operation["phase"] != "complete" else set())
+    fresh = _verifying(operation)
     if local["update_all_workers"] or tracked:
-        semaphore = asyncio.Semaphore(8)
         async def read(row):
             if not row["online"]:
                 return {**row, "supported": False, "phase": "unsupported", "reason": "Offline; not queued"}
-            async with semaphore:
-                return {**row, **await _remote(row, {"operation": "status"})}
+            return {**row, **await _peer_status_for(row["device_id"], fresh=fresh)}
         rows.extend(await asyncio.gather(*(read(row) for row in listing["runners"]
                                           if not row["is_self"] and (local["update_all_workers"] or row["device_id"] in tracked))))
     # Only return display fields, never peer endpoints/certificates.
@@ -113,7 +157,11 @@ async def snapshot():
 
 async def dispatch(action):
     async with _dispatch_lock:
-        return await _dispatch(action)
+        try:
+            return await _dispatch(action)
+        finally:
+            # An action changes peer phases: the next snapshot must read them anew.
+            _peer_status.clear()
 
 
 async def _dispatch(action):
