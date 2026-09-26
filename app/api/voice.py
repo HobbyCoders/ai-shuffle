@@ -40,6 +40,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.api.auth import get_api_user_from_request, require_auth
+from app.api.sessions_helpers import check_session_access_for_api_user
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.voice_models import (
@@ -644,26 +645,49 @@ def _reject_when_capped(session_id: str) -> None:
     )
 
 
-async def _require_voice_session(
-    session_id: str, *, api_user: Optional[Dict[str, Any]]
-) -> Dict[str, Any]:
+async def _load_voice_session(session_id: str) -> Dict[str, Any]:
     """The session row, or a 404 when it is missing or is not a voice session.
 
     A chat session is 404 rather than 400 on purpose: the voice call surface
-    simply does not exist for it (modes never mix).
+    simply does not exist for it (ruling VM7 — modes never mix in V1).
 
-    ``api_user`` is the calling API key (``None`` for the owner, who is
-    unrestricted). A key may act only on a voice session it owns and has in
-    its project and agent scope — the same rule, and the same ``403``, as
-    ``/api/v1/sessions/{id}`` (:func:`check_session_access_for_api_user`).
-    Required keyword so no route can forget to pass its caller.
+    Existence only. Every HTTP route goes through :func:`_require_voice_session`
+    so the caller's access is checked as well; the audio WebSocket, which has
+    no ``Request``, applies :func:`_check_voice_session_access` itself.
     """
-    from app.api.sessions_helpers import check_session_access_for_api_user
-
     row = await run_sync(database.get_session, session_id)
     if not row or row.get("mode") != "voice":
         raise HTTPException(status_code=404, detail="Voice session not found.")
+    return row
+
+
+def _check_voice_session_access(
+    api_user: Optional[Dict[str, Any]], row: Dict[str, Any],
+) -> None:
+    """403 unless the caller may operate this voice session.
+
+    The install owner/admin and paired devices carry no API-user identity and
+    keep full access. An API key must OWN the session (``api_user_id``), not
+    merely be allowed into its project: the call surface mints realtime
+    credentials, attaches and hangs up the live call, and for an admin-owned
+    row hands the voice agent app-configuration tools, so project-level access
+    is not enough. :func:`check_session_access_for_api_user` is that rule: it
+    refuses a key that does not own the row (a worker row belongs to whoever
+    owns the session that spawned it) and one whose project or agent scope
+    excludes it — the same 403 as ``/api/v1/sessions/{id}``.
+    """
     check_session_access_for_api_user(api_user, row)
+
+
+async def _require_voice_session(request: Request, session_id: str) -> Dict[str, Any]:
+    """The voice session row the caller may operate.
+
+    404 when the session is missing or is not a voice session — checked first,
+    so a chat session never turns into a 403 — then 403 when it belongs to
+    someone else (see :func:`_check_voice_session_access`).
+    """
+    row = await _load_voice_session(session_id)
+    _check_voice_session_access(get_api_user_from_request(request), row)
     return row
 
 
@@ -692,7 +716,6 @@ async def create_voice_session(
     # Voice uses the same origin authorization as normal branch sessions.
     # Prefer the legacy id when both forms are supplied by the compose store,
     # then verify that it resolves to the supplied V2 project.
-    from app.api.auth import get_api_user_from_request
     from app.api.common import require_origin_access
     from app.api.sessions_helpers import resolve_api_user_profile
 
@@ -702,6 +725,11 @@ async def create_voice_session(
     api_user_id = (api_user or {}).get("id")
     # An API user's assigned agents bound the profile (omitted → its only one).
     requested_profile_id = resolve_api_user_profile(api_user, request.profile_id)
+
+    # The creating API key owns the row on EVERY path. The call surface,
+    # ``/context`` and the audio socket all check ``api_user_id``, so a voice
+    # session created without it would lock its own creator out.
+    api_user_id = (get_api_user_from_request(http_request) or {}).get("id")
 
     execution_mode = (request.execution_mode or "").strip().lower() or None
     if execution_mode not in (None, "local", "worktree"):
@@ -915,7 +943,7 @@ async def mint_voice_session_secret(
     """
     voice_settings = await _require_voice_enabled()
     api_user = get_api_user_from_request(http_request)
-    session_row = await _require_voice_session(session_id, api_user=api_user)
+    session_row = await _require_voice_session(http_request, session_id)
     _reject_when_capped(session_id)
 
     config = session_config(session_row, voice_settings)
@@ -1015,7 +1043,7 @@ async def attach_voice_call(
 
     voice_settings = await _require_voice_enabled()
     api_user = get_api_user_from_request(http_request)
-    session_row = await _require_voice_session(session_id, api_user=api_user)
+    session_row = await _require_voice_session(http_request, session_id)
     _reject_when_capped(session_id)
 
     call_id = (request.call_id or "").strip()
@@ -1155,9 +1183,7 @@ async def hangup_voice_call(
     """
     from app.core import voice_bridge
 
-    await _require_voice_session(
-        session_id, api_user=get_api_user_from_request(http_request)
-    )
+    await _require_voice_session(http_request, session_id)
     _forget_client_secret(session_id)
     from app.core import voice_stream
     stream_stopped = await voice_stream.stop(session_id)
@@ -1197,9 +1223,7 @@ async def get_voice_call_state(
     """
     from app.core import voice_bridge
 
-    await _require_voice_session(
-        session_id, api_user=get_api_user_from_request(http_request)
-    )
+    await _require_voice_session(http_request, session_id)
     from app.core import voice_stream
     return VoiceStateResponse(**(voice_stream.state(session_id) or voice_bridge.registry.state(session_id)))
 
@@ -1210,9 +1234,7 @@ async def get_voice_session_config(
     token: str = Depends(require_auth),
 ):
     from app.api.settings import get_voice_settings
-    row = await _require_voice_session(
-        session_id, api_user=get_api_user_from_request(http_request)
-    )
+    row = await _require_voice_session(http_request, session_id)
     return session_config(row, await run_sync(get_voice_settings))
 
 
@@ -1228,7 +1250,8 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
         return
     try:
         settings = await _require_voice_enabled()
-        row = await _require_voice_session(session_id, api_user=api_user)
+        row = await _load_voice_session(session_id)
+        _check_voice_session_access(api_user, row)
         _reject_when_capped(session_id)
         config = session_config(row, settings)
         if transport_for(config["model"]) != "stream":
