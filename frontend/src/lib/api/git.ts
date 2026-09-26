@@ -375,6 +375,10 @@ export interface Worktree {
     session_count?: number;  // Number of sessions that have used this worktree
     // Git status (dirty state)
     git_status?: WorktreeGitStatus;
+    // When git_status was last read; idle worktrees keep their last known status
+    status_checked_at?: string | null;
+    // Why the last status read failed (e.g. a corrupt index); retried on a back-off
+    status_error?: string | null;
 }
 
 // ============================================================================
@@ -504,10 +508,13 @@ export interface WorktreeListResponse {
 }
 
 /**
- * Get all worktrees for a project
+ * Get all worktrees for a project. `focusWorktreeId` names the worktree the
+ * user has open so the server keeps its status fresh (other idle worktrees
+ * serve their last known status).
  */
-export async function getWorktrees(projectId: string): Promise<Worktree[]> {
-    const response = await api.get<WorktreeListResponse>(`${BASE}/${projectId}/git/worktrees`);
+export async function getWorktrees(projectId: string, focusWorktreeId?: string | null): Promise<Worktree[]> {
+    const qs = focusWorktreeId ? `?focus_worktree_id=${encodeURIComponent(focusWorktreeId)}` : '';
+    const response = await api.get<WorktreeListResponse>(`${BASE}/${projectId}/git/worktrees${qs}`);
     return response.worktrees;
 }
 

@@ -53,6 +53,22 @@ else:
 # ---------------------------------------------------------------------------
 _fsmonitor_configured: set = set()
 
+# ---------------------------------------------------------------------------
+# Last get_status failure per working dir
+# ---------------------------------------------------------------------------
+# A broken checkout (e.g. a zeroed index) fails the same way on every poll.
+# Log the first failure (or a new message) at ERROR and repeats at DEBUG, and
+# let callers ask whether the dict they got back is the partial fallback.
+_status_errors: Dict[str, str] = {}
+
+
+def get_status_error(working_dir: str) -> Optional[str]:
+    """The error from the last failed get_status of *working_dir*, if any.
+
+    Cleared by the next successful read of the same path.
+    """
+    return _status_errors.get(working_dir)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -532,8 +548,16 @@ class GitNativeReader:
             )
 
         except Exception as exc:
-            logger.error("Error getting git status via pygit2: %s", exc)
+            message = str(exc)
+            if _status_errors.get(working_dir) == message:
+                logger.debug("Error getting git status via pygit2 for %s (repeat): %s", working_dir, exc)
+            else:
+                logger.error("Error getting git status via pygit2 for %s: %s", working_dir, exc)
+            _status_errors[working_dir] = message
+            return status
 
+        if _status_errors.pop(working_dir, None) is not None:
+            logger.info("git status via pygit2 recovered for %s", working_dir)
         return status
 
     # ------------------------------------------------------------------
