@@ -69,11 +69,15 @@ def _app_turn(db, sid, turn_id, start, *, record_calls=True, calls=len(CALLS)):
          _iso(start - timedelta(seconds=1)), _iso(start + timedelta(minutes=10))),
     )
     if record_calls:
+        # Continue the session's own seq counter so turns never collide.
+        base = db.execute(
+            "SELECT MAX(seq) FROM session_events WHERE session_id=?", (sid,),
+        ).fetchone()[0] or 0
         for index in range(1, calls + 1):
             db.execute(
                 "INSERT INTO session_events (id, session_id, seq, turn_id, event_type, "
                 "payload) VALUES (?,?,?,?,?,?)",
-                (f"{turn_id}-{index}", sid, 1000 + index + hash(turn_id) % 1000,
+                (f"{turn_id}-{index}", sid, base + index,
                  turn_id, "turn.usage",
                  json.dumps({"usage": {"model_call_index": index}})),
             )

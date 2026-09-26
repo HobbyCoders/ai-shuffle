@@ -110,31 +110,46 @@ class Network:
 # Ownership transfer and conflicting claims
 # ---------------------------------------------------------------------------
 
+REMOTE = "https://example.test/repo.git"
+COMMIT = {"branch": "main", "fingerprint": "fp"}
+
+
+def _stub_git_checkout(monkeypatch):
+    """Resume needs a Git project; these tests only exercise the lease and owner."""
+    monkeypatch.setattr(handoff.project_resolver, "resolve_project_v2", lambda session: {"id": "proj"})
+    monkeypatch.setattr(handoff.project_resolver, "_effective_branch", lambda session: "main")
+    monkeypatch.setattr(handoff.project_resolver, "resolve_existing_cwd", lambda session: "/checkout")
+    monkeypatch.setattr(handoff.checkout_transfer, "export_checkout", lambda cwd, branch, remote: {"branch": branch})
+    monkeypatch.setattr(handoff.checkout_transfer, "fingerprint", lambda cwd: "fp")
+    monkeypatch.setattr(handoff.checkout_transfer, "_branch", lambda cwd, branch: None)
+
+
 async def _two_claims_one_lease(workers, monkeypatch):
     a, b, c = _network(workers, "a", "b", "c")
     submitted = _turn_sink(monkeypatch)
+    _stub_git_checkout(monkeypatch)
     _session(a, "moving", title="Moves to B")
     converge([a, b, c])
 
     # B and C both try to take the session from its owner A. The first
     # reservation holds the session; the second is refused while it lives.
     with a.active():
-        reserved = handoff.begin("moving", b.device_id)
+        reserved = handoff.begin("moving", b.device_id, REMOTE)
         with pytest.raises(ValueError, match="busy"):
-            handoff.begin("moving", c.device_id)
+            handoff.begin("moving", c.device_id, REMOTE)
     with b.active():
         key = engine.context().keyring[reserved["key_version"]]
         token = json.loads(crypto.decrypt_payload(key, reserved["payload"], handoff._aad("moving", b.device_id)))["token"]
     with a.active():
         # C cannot commit B's reservation: the lease names its holder.
         with pytest.raises(ValueError, match="reservation expired"):
-            handoff.finish("moving", c.device_id, {"phase": "commit", "token": token})
+            handoff.finish("moving", c.device_id, {"phase": "commit", "token": token, **COMMIT})
         assert database.get_session("moving")["owner_device_id"] == a.device_id
-        assert handoff.finish("moving", b.device_id, {"phase": "commit", "token": token}) == {"committed": True}
+        assert handoff.finish("moving", b.device_id, {"phase": "commit", "token": token, **COMMIT}) == {"committed": True}
         # A retried commit is idempotent, not a second transfer.
-        assert handoff.finish("moving", b.device_id, {"phase": "commit", "token": token}) == {"committed": True}
+        assert handoff.finish("moving", b.device_id, {"phase": "commit", "token": token, **COMMIT}) == {"committed": True}
     with b.active():
-        handoff._accept_owner("moving", b.device_id)
+        handoff._accept_owner("moving", b.device_id, COMMIT["branch"])
     converge([a, b, c])
 
     # Every worker agrees on the new owner.
@@ -145,7 +160,7 @@ async def _two_claims_one_lease(workers, monkeypatch):
     # The former owner refuses both a late claim and a forwarded turn.
     with a.active():
         with pytest.raises(PermissionError, match="does not own"):
-            handoff.begin("moving", c.device_id)
+            handoff.begin("moving", c.device_id, REMOTE)
         assert [r["state"] for r in a.sql("SELECT state FROM runs WHERE session_id = 'moving'")] == ["transferred"]
         assert runs.get_active_run("moving") is None
     for loser in (a, c):
